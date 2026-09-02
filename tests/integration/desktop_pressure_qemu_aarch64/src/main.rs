@@ -17,25 +17,30 @@
 //!
 //! 1. **The application launched** — an `APP_LOADED` record naming the
 //!    terminal's bundle in the system application store.
-//! 2. **Every window opened** — [`WINDOWS_OPENED`] create replies served on
-//!    the reserved window endpoint. A create is recognised by its reply's
-//!    wire length, which is unique among that endpoint's replies; nothing
-//!    about a reply's ordinal is read, because the rendezvous is shared.
-//! 3. **The machine really was under pressure** — the system pressure gauge's
+//! 2. **The machine really was under pressure** — the system pressure gauge's
 //!    published band left normal at least once. Read through the kernel's own
 //!    diagnostics registry, so the test observes the production gauge rather
 //!    than steering it: there is no test hook in the pressure path, and a run
 //!    that never left normal cannot pass.
+//! 3. **The desktop kept serving windows there** — a create reply served on
+//!    the reserved window endpoint *after* the band moved. A create is
+//!    recognised by its reply's wire length, which is unique among that
+//!    endpoint's replies; nothing about a reply's ordinal is read, because the
+//!    rendezvous is shared.
 //!
 //! # What the host attests
 //!
 //! The pixels. The runner dumps the display on the first revealed desktop
-//! frame and again once the whole screenful of windows bar one is on screen
-//! (`WINDOWS_SHOWN_AT_DUMP`, which the guest outlives), and requires the icon
-//! bar to carry the same artwork in both frames. A desktop that answered
-//! pressure by dropping its decoded icons draws built-in glyphs in their place,
-//! so the two frames diverge and the assertion fails — which is the defect this
-//! vertical exists to keep fixed.
+//! frame and again the moment the guest reports the band leaving normal
+//! (`PRESSURE_LEFT_NORMAL_MARKER`), and requires the icon bar to carry the
+//! same artwork in both frames. A desktop that answered pressure by dropping
+//! its decoded icons draws built-in glyphs in their place, so the two frames
+//! diverge and the assertion fails — which is the defect this vertical exists
+//! to keep fixed.
+//!
+//! The guest outlives that readback because a pending screendump holds every
+//! later pointer step: the click that opens the window completing witness 3 is
+//! the first one the runner releases once the frame has parsed.
 //!
 //! A panic before every witness is in parks the CPU, the guest falls silent,
 //! and the runner reports a timeout — loud failure, never a false pass.
@@ -58,7 +63,8 @@ mod kernel {
     use tairix_log::{Event, EventId, Level, Sink};
     use tairix_reclaim::PressureBand;
     use tairix_test_desktop_pressure_qemu_aarch64::{
-        BAR_APP_NAME, PRESSURE_DEEPENED_EVENT, PRESSURE_DEEPENED_MARKER, WINDOWS_OPENED,
+        BAR_APP_NAME, PRESSURE_DEEPENED_EVENT, PRESSURE_DEEPENED_MARKER,
+        PRESSURE_LEFT_NORMAL_EVENT, PRESSURE_LEFT_NORMAL_MARKER, WINDOWS_AFTER_PRESSURE,
     };
     use tairix_util::fmt::format_hex_u64;
 
@@ -91,6 +97,10 @@ mod kernel {
         windows_opened: AtomicU32,
         /// The system pressure gauge has published a band above normal.
         left_normal_band: AtomicBool,
+        /// [`Self::windows_opened`] as it stood when the band left normal, so
+        /// the third witness is a window served *after* that moment.
+        /// `u32::MAX` until it does, which no create count can exceed.
+        windows_at_left_normal: AtomicU32,
         /// The published band has reached severe or critical, where the
         /// desktop legitimately gives its decoded artwork up.
         deepened_past_moderate: AtomicBool,
@@ -103,6 +113,7 @@ mod kernel {
                 app_launched: AtomicBool::new(false),
                 windows_opened: AtomicU32::new(0),
                 left_normal_band: AtomicBool::new(false),
+                windows_at_left_normal: AtomicU32::new(u32::MAX),
                 deepened_past_moderate: AtomicBool::new(false),
             }
         }
@@ -161,10 +172,25 @@ mod kernel {
         /// reading of its own: taking a reading here would make the observer
         /// spend the frame-allocator lock inside an audit callback, and the
         /// band is refreshed by whoever actually spends the memory.
+        ///
+        /// The create count is snapshotted as the band moves, and the caller
+        /// counts a create *before* peeking here, so a window served by the
+        /// very event that moved the band is inside the snapshot rather than
+        /// satisfying the "after" witness itself. That is what keeps the guest
+        /// alive until the host has read the frame back.
         fn note_pressure(&self) {
             let band = MEM_STATS.published_band();
-            if band != PressureBand::Normal {
-                self.left_normal_band.store(true, Ordering::Release);
+            if band != PressureBand::Normal && !self.left_normal_band.swap(true, Ordering::AcqRel) {
+                self.windows_at_left_normal.store(
+                    self.windows_opened.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                SerialSink::new().write_event(&Event {
+                    level: Level::Info,
+                    id: EventId(PRESSURE_LEFT_NORMAL_EVENT),
+                    message: PRESSURE_LEFT_NORMAL_MARKER,
+                    fields: &[],
+                });
             }
             if !matches!(
                 band,
@@ -184,10 +210,27 @@ mod kernel {
         }
 
         /// Whether every witness is in.
+        ///
+        /// The third asks for **two** windows after the band moved, not one,
+        /// because one scripted click can already be in flight when it does:
+        /// the click that opens the next window is gated on the *previous*
+        /// one reaching the screen, so if the band moves just after that
+        /// record is written the click is already away and its window is
+        /// served regardless. The click after *that* one waits on a record
+        /// written long after the marker, and the host latches every marker
+        /// from one shared transcript — so it cannot release that click
+        /// without having already seen the marker and held it for the frame.
+        /// One window can therefore slip past the marker and a second cannot,
+        /// which is what keeps the guest alive until the host has read the
+        /// frame back.
         fn passed(&self) -> bool {
             self.app_launched.load(Ordering::Acquire)
                 && self.left_normal_band.load(Ordering::Acquire)
-                && self.windows_opened.load(Ordering::Acquire) >= WINDOWS_OPENED
+                && self.windows_opened.load(Ordering::Acquire)
+                    >= self
+                        .windows_at_left_normal
+                        .load(Ordering::Acquire)
+                        .saturating_add(WINDOWS_AFTER_PRESSURE)
         }
     }
 
@@ -197,12 +240,15 @@ mod kernel {
             // records the full boot → unlock → desktop → windows timeline and
             // the host can gate its injection on it.
             SerialSink::new().write_event(event);
-            self.note_pressure();
+            // The event's own subject is counted before the incidental
+            // pressure peek, so a create and the band moving on the same
+            // event leave that create inside the snapshot.
             if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
                 self.note_call_replied(event);
             } else if event.id.0 == tairix_appload::events::APP_LOADED.0 {
                 self.note_bundle_loaded(event);
             }
+            self.note_pressure();
             if self.passed() {
                 qemu_exit::exit_success();
             }

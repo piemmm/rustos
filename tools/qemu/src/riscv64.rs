@@ -281,6 +281,7 @@ mod tests {
             input_typing: Vec::new(),
             input_mouse: false,
             pointer_script: Vec::new(),
+            bounded_pointer_script: false,
             serial_input: Vec::new(),
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),

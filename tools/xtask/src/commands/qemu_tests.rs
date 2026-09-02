@@ -117,6 +117,13 @@ struct QemuTest {
     /// time — the same definition the guest renders with — never
     /// hand-copied literals (`plans/APPWIN.md` AW3).
     pointer_script: Option<PointerScriptBuilder>,
+    /// When `true`, the pointer script is an upper *bound* on a repeated
+    /// gesture rather than an exchange to exhaust, so a tail the run never
+    /// reaches is not a failure
+    /// ([`Spec::with_bounded_pointer_script`](tairix_qemu::Spec::with_bounded_pointer_script)).
+    /// Only for a script that repeats until the guest reports a *state*,
+    /// where the repetition count is not knowable when the script is built.
+    bounded_pointer_script: bool,
     /// Ordered serial-input script: for each `(marker, delay, line)` step,
     /// pipe QEMU's stdin, wait `delay` after `marker` appears past the previous
     /// match, then type `line` one paced byte at a time. The run fails if the
@@ -1037,6 +1044,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // ramzip b3 (`plans/SWAPSWAPSWAP.md`, `plans/SWAPSWAPSWAP.md`):
@@ -1061,6 +1069,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // ramzip b3 aarch64 (`plans/SWAPSWAPSWAP.md`,
@@ -1089,6 +1098,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // ramzip b3 riscv64 (`plans/SWAPSWAPSWAP.md`,
@@ -1118,6 +1128,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3a (b) deliverable: AP bring-up + scheduler stress on real
@@ -1141,6 +1152,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3a (c7-bin) deliverable: boot the production
@@ -1172,6 +1184,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/OPEN-DEFECTS.md` D55 deliverable: boot the production
@@ -1207,6 +1220,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 2.7 follow-up (f6) deliverable: boot the production
@@ -1239,6 +1253,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the per-native-
@@ -1273,6 +1288,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -1308,6 +1324,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC2 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -1344,6 +1361,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -1381,6 +1399,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // x86_64 `syscall` register-preservation regression vertical
@@ -1413,6 +1432,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -1450,6 +1470,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -1488,6 +1509,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC3 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -1529,6 +1551,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the riscv64
@@ -1565,6 +1588,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the aarch64
@@ -1602,6 +1626,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // CCOMPAT stage CC5 deliverable (`plans/CCOMPAT.md`): the x86_64
@@ -1642,6 +1667,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4 deliverable: boot the production kernel pipeline, instantiate
@@ -1665,6 +1691,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4 first-driver vertical: boot the production kernel
@@ -1704,6 +1731,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4.D Item 2-tail.2 QEMU validation: boot the production
@@ -1736,6 +1764,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4.D Item 4: `tairix-test-virtio-blk-pci-x86-64` performs a
@@ -1770,6 +1799,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 5 end-to-end FAT32 vertical:
@@ -1797,6 +1827,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 5 end-to-end arxfs vertical:
@@ -1825,6 +1856,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4.D Item 4: `tairix-test-kernel-arch-boot-riscv64` boots
@@ -1851,6 +1883,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E:
@@ -1894,6 +1927,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E (aarch64 sibling of the riscv64
@@ -1935,6 +1969,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-SUPERVISOR.md` §9 Stage E (x86_64 sibling of the riscv64 /
@@ -1974,6 +2009,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage RV-P3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-riscv64`
@@ -2009,6 +2045,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3c: `tairix-test-timer-preempt-qemu-riscv64` is the riscv64
@@ -2039,6 +2076,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3c: `tairix-test-ipi-smp-qemu-riscv64` is the riscv64
@@ -2070,6 +2108,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the aarch64 multi-core SMP
@@ -2100,6 +2139,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3c: `tairix-test-sched-drive-qemu-riscv64` is the riscv64
@@ -2137,6 +2177,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W7 (`plans/WIRING.md` §3): the aarch64 "arch
@@ -2177,6 +2218,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the `kernel/core` kthread
@@ -2211,6 +2253,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the riscv64 sibling of the
@@ -2244,6 +2287,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP1 (`plans/SPAWN.md` §1): the x86_64 sibling of the
@@ -2277,6 +2321,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W6 (`plans/WIRING.md` §3): the cross-CPU TLB-shootdown
@@ -2303,6 +2348,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W6: the aarch64 cross-CPU TLB-shootdown vertical. The
@@ -2328,6 +2374,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
@@ -2355,6 +2402,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3c: `tairix-test-memory-isolation-qemu-riscv64` is the riscv64
@@ -2386,6 +2434,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
@@ -2421,6 +2470,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `tests/SECURITY.md` §5 / `PLAN.md` Stage 7 item E — the per-port
@@ -2451,6 +2501,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     QemuTest {
@@ -2469,6 +2520,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The x86_64 member boots the **production** `tairix-kernel` pipeline
@@ -2490,6 +2542,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
@@ -2530,6 +2583,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4.D Item 4: `tairix-test-virtio-blk-mmio-riscv64` is the
@@ -2560,6 +2614,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class):
@@ -2591,6 +2646,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 4 first-driver vertical (display class, x86_64 sibling of the
@@ -2623,6 +2679,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage P6c-2 (`plans/PI.md`): `tairix-test-kernel-arch-boot-aarch64`
@@ -2663,6 +2720,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage P6c-3 (`plans/PI.md`): `tairix-test-spawn-init-qemu-aarch64`
@@ -2697,6 +2755,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP3b (`plans/SPAWN.md`) + `plans/PI.md` P11:
@@ -2753,6 +2812,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, "root\n"),
@@ -2812,6 +2872,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP2c (`plans/SPAWN.md` §1): the aarch64 EL0↔EL0 timeshare
@@ -2846,6 +2907,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1 (`plans/PI.md`): the aarch64 involuntary-preemption
@@ -2885,6 +2947,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Regression vertical for the interrupt-return-to-EL0 need-resched fix: prove
@@ -2923,6 +2986,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Deterministic regression for the syscall-return continuation boundary:
@@ -2948,6 +3012,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1b (`plans/PI.md`): the riscv64 involuntary-preemption
@@ -2990,6 +3055,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage D2b-2b-A P-1c (`plans/PI.md`): the x86_64 involuntary-preemption
@@ -3037,6 +3103,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PLAN.md P-5 (2026-06-23 amendment): the aarch64
@@ -3078,6 +3145,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // plans/WATCHDOG.md B3 (plans/OPEN-DEFECTS.md D13): the aarch64
@@ -3119,6 +3187,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PLAN.md Stage 4.HW: the aarch64 driver-spawn handshake vertical — the
@@ -3160,6 +3229,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // plans/USB.md U1: the aarch64 driver-*unload* vertical — the symmetric
@@ -3195,6 +3265,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the aarch64 `mem_map`/
@@ -3231,6 +3302,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // M1 file-mapping remainder (`docs/src/architecture/memory.md` §7o): the
@@ -3269,6 +3341,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The riscv64 twin of the file-map vertical above: the same four-role
@@ -3292,6 +3365,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The SP11c demand-grown user-stack vertical
@@ -3332,6 +3406,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The STRESSTEST ST2 memory-pinning plus one-vCPU IPC control: end-to-end
@@ -3369,6 +3444,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     QemuTest {
@@ -3387,6 +3463,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The USERS U4 service-ceiling vertical: the end-to-end proof that a
@@ -3424,6 +3501,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The FIX-IO IO2 block-transport fault vertical: the live-kernel proof
@@ -3462,6 +3540,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The riscv64 twin of the stack-grow vertical above: the same
@@ -3485,6 +3564,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The x86_64 twin of the stack-grow verticals above (SP11e): the same
@@ -3512,6 +3592,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The THREADS `T3b-u` lightweight-thread vertical (aarch64): prove threads
@@ -3546,6 +3627,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The riscv64 twin of the threads vertical above: the same six-role fixture
@@ -3568,6 +3650,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The x86_64 twin of the threads verticals above: the same six-role fixture
@@ -3591,6 +3674,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The S8b parser-sandbox vertical (`docs/src/security/sandbox.md`;
@@ -3628,6 +3712,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage 5d-0-ii (b′)-2 (`plans/PI.md`): the aarch64 `mmio_map` vertical —
@@ -3669,6 +3754,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the riscv64 `mem_map`/
@@ -3708,6 +3794,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The riscv64 trap-entry thread-pointer discipline
@@ -3742,6 +3829,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage RV-X1 (`plans/PI.md` §X tail): the riscv64 single-resumable-
@@ -3782,6 +3870,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage RV-X2 (`plans/PI.md` §X tail): the riscv64 two-task EL0
@@ -3823,6 +3912,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // The `plans/OPEN-DEFECTS.md` D37 regression witness: two U-mode tasks fill
@@ -3851,6 +3941,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage RV-X3 (`plans/PI.md` §X tail): the riscv64 runtime-`spawn`
@@ -3891,6 +3982,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP5b-2 (`plans/SPAWN.md` §1): the x86_64 `mem_map`/
@@ -3932,6 +4024,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
@@ -3968,6 +4061,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
@@ -4005,6 +4099,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage X1 (`plans/PI.md` §X): the x86_64 single-resumable-user-kthread
@@ -4045,6 +4140,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage X2 (`plans/PI.md` §X): the x86_64 two-task EL0 timeshare — the
@@ -4091,6 +4187,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage X3a (`plans/PI.md` §X): the x86_64 PID 1 (`init`) ring-3
@@ -4129,6 +4226,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage X3b + X4 follow-on (`plans/PI.md` §X): the x86_64 runtime
@@ -4184,6 +4282,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[("Username:", Duration::ZERO, OVERLONG_USERNAME)],
     },
     // PI Stage P6e-3b prerequisite (`plans/PI.md`): the aarch64 heap-allocator
@@ -4221,6 +4320,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP6b (`plans/SPAWN.md` §1): the aarch64 `wait` vertical —
@@ -4257,6 +4357,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // SPAWN Stage SP7b (`plans/SPAWN.md` §1): the aarch64 `signal` vertical —
@@ -4305,6 +4406,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage X4 (`plans/PI.md`): the x86_64 `wait` vertical — the cross-port
@@ -4345,6 +4447,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage RV-X4 (`plans/PI.md` §X tail): the riscv64 `wait` vertical —
@@ -4384,6 +4487,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // PI Stage P2 (`plans/PI.md`): `tairix-test-uart-console-qemu-aarch64`
@@ -4418,6 +4522,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage W11 (`plans/WIRING.md` §3):
@@ -4450,6 +4555,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` P11 (root-volume read path at boot):
@@ -4481,6 +4587,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the users-database
@@ -4517,6 +4624,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 (root-mount->login): the
@@ -4554,6 +4662,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/ARCHSUPPORT.md` A2: the x86_64 sibling of the root-mount->login
@@ -4594,6 +4703,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` P11 Chunk B-2 INCREMENT (2): the
@@ -4657,6 +4767,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
     },
     // `plans/NEW-SUPERVISOR.md` §7: the pre-boot **Supervisor** ESC vertical.
@@ -4710,6 +4821,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_SCRIPT,
     },
     // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
@@ -4745,6 +4857,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
     },
     // `plans/NEW-SUPERVISOR.md` §7 (item 1): the pre-boot **Supervisor**
@@ -4777,6 +4890,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: SUPERVISOR_MOUNT_SCRIPT,
     },
     // `plans/OPEN-DEFECTS.md` D7 + D8: the x86_64 disk-completion-interrupt
@@ -4824,6 +4938,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
     },
     // `plans/NEW-SUPERVISOR.md` §7 / `plans/ARCHSUPPORT.md`: the x86_64 sibling
@@ -4863,6 +4978,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: SUPERVISOR_ESC_SCRIPT,
     },
     // `plans/CAPABILITY_USE.md` CU3: the session-ceiling acceptance vertical.
@@ -4915,6 +5031,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
@@ -5003,6 +5120,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5084,6 +5202,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5136,6 +5255,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5183,6 +5303,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5236,6 +5357,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5290,6 +5412,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5345,6 +5468,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5413,6 +5537,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5481,6 +5606,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D3: the live DHCPv4 vertical.
@@ -5527,6 +5653,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/TIMESYNC.md` TS-2: the live clock-establishment vertical.
@@ -5578,6 +5705,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5637,6 +5765,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical.
@@ -5679,6 +5808,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical's riscv64 half.
@@ -5705,6 +5835,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/TIMESYNC.md` TS-3: the live clock-chip vertical's x86_64 half.
@@ -5731,6 +5862,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-SERVICEMANAGER.md` SVC-8 / `plans/TIMESYNC.md` TS-5: the live
@@ -5772,6 +5904,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             // The full-screen login view paints `Username:` once and the
@@ -5823,6 +5956,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -5886,6 +6020,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the x86_64 static-addressing
@@ -5931,6 +6066,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D3: the x86_64 live DHCPv4 vertical — the virtio-**PCI**
@@ -5977,6 +6113,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the x86_64 bond-failover
@@ -6017,6 +6154,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b: the riscv64 static-addressing
@@ -6063,6 +6201,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D3: the riscv64 live DHCPv4 vertical — the
@@ -6124,6 +6263,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D4c: the live DHCPv6 vertical, one per Tier-1 arch — the
@@ -6172,6 +6312,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D4c: the x86_64 DHCPv6 vertical — the virtio-**PCI**
@@ -6193,6 +6334,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/DHCP.md` D4c: the riscv64 DHCPv6 vertical — the virtio-**MMIO**
@@ -6214,6 +6356,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N9b-3-2-β-2-ii-b-bond: the riscv64 bond-failover
@@ -6255,6 +6398,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/SPAWN.md` SP10b: the pipeline/redirection acceptance vertical.
@@ -6302,6 +6446,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -6378,6 +6523,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -6429,6 +6575,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[
             ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
@@ -6604,6 +6751,7 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(autoload_desktop_pointer_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-TASKBAR.md`: the desktop **icon-bar** vertical. A
@@ -6688,6 +6836,7 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(appbar_pointer_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-MENUS.md` D17: the desktop **menu chain** vertical — the
@@ -6752,6 +6901,7 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(menu_pointer_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Elevated Date & Time launch: right-click the taskbar clock, choose
@@ -6788,28 +6938,32 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[],
         pointer_script: Some(datetime_elevate_pointer_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/SMARTRAM.md` + `plans/ICONS.md`: the desktop keeps drawing its
     // real icon artwork while the machine is genuinely short of memory.
     //
-    // Opening windows is how a user spends memory, so the script opens a
-    // screenful of terminal windows — one per primary click on the
-    // application's own icon-bar slot, each click gated on the session's
-    // witness that the previous window reached the screen. On this board's
-    // default RAM that takes free memory below the mild watermark, and the
-    // guest refuses to pass unless the published band really left normal, so
-    // the run can never report a pass without having tested the state it is
-    // named for.
+    // Opening windows is how a user spends memory, so the script opens
+    // terminal windows — one per primary click on the application's own
+    // icon-bar slot, each click gated on the session's witness that the
+    // previous window reached the screen — until the published band leaves
+    // normal. The guest refuses to pass unless it really did, so the run can
+    // never report a pass without having tested the state it is named for.
     //
-    // The two dumps are the bare revealed desktop and the frame just before
-    // the last window opens (`WINDOWS_SHOWN_AT_DUMP` — the guest's own witness
-    // is a create reply, which precedes the frame). The assertion reads the
-    // *file manager's* slot across them:
-    // the script never touches that slot, so a picture that changes between
-    // the frames changed because of what the desktop did to its own caches
-    // under pressure — a desktop that dropped its decoded icons draws
-    // built-in glyphs instead.
+    // The clicks are *bounded*, not counted (`WINDOW_CLICK_BOUND`): the target
+    // is a fraction of free memory, so a fixed spend either never reaches it
+    // or runs the machine out, and thirty-two windows sat on that boundary.
+    //
+    // The two dumps are the bare revealed desktop and the frame the guest's
+    // `PRESSURE_LEFT_NORMAL_MARKER` announces. The assertion reads the *file
+    // manager's* slot across them: the script never touches that slot, so a
+    // picture that changes between the frames changed because of what the
+    // desktop did to its own caches under pressure — a desktop that dropped
+    // its decoded icons draws built-in glyphs instead. Photographing at the
+    // marker is what keeps the frame in the bands that artwork is promised
+    // through, so the bound is asserted on every run rather than scoped out of
+    // the deep ones a fixed count used to reach.
     //
     // Single CPU and the same 300-second *inactivity* budget as its siblings:
     // the longest the guest may fall silent, never a runtime deadline, so
@@ -6843,13 +6997,18 @@ static TESTS: &[QemuTest] = &[
                 assert: assert_icons_drawn_dark_screendump,
             },
             ScreendumpPlan {
-                marker: APPBAR_WINDOW_SHOWN_MARKER,
-                occurrences: tairix_test_desktop_pressure_qemu_aarch64::WINDOWS_SHOWN_AT_DUMP,
+                marker: tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_LEFT_NORMAL_MARKER,
+                occurrences: 1,
                 suffix: DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
                 assert: assert_bar_artwork_survived_screendump,
             },
         ],
         pointer_script: Some(desktop_pressure_pointer_script),
+        // The clicks repeat until the guest reports the band leaving normal,
+        // so the tail past that point is slack the run never reaches. What
+        // attests the gesture is the guest's own witnesses and the two
+        // screendumps, neither reachable without it.
+        bounded_pointer_script: true,
         serial: &[],
     },
     // `plans/FIX-DESKTOP-SPEEDUP.md` A.4: the desktop **hover** vertical — the
@@ -6903,6 +7062,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[],
         pointer_script: Some(desktop_hover_pointer_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
@@ -6947,6 +7107,7 @@ static TESTS: &[QemuTest] = &[
         ],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
@@ -6995,6 +7156,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/ARCHSUPPORT.md` A4: the x86_64 driver-loading-by-discovery
@@ -7042,6 +7204,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
@@ -7090,6 +7253,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N4e-riscv64: the riscv64 **two-process** live-boot
@@ -7137,6 +7301,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NETWORK.md` N4e / `plans/ARCHSUPPORT.md` A4: the x86_64
@@ -7179,6 +7344,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 display vertical —
@@ -7212,6 +7378,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3b: `tairix-test-timer-preempt-qemu-aarch64` is the aarch64
@@ -7238,6 +7405,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage 3b: `tairix-test-memory-isolation-qemu-aarch64` is the
@@ -7268,6 +7436,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G1):
@@ -7302,6 +7471,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G2):
@@ -7338,6 +7508,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/FIX-KHEAP.md` slab tier: `tairix-test-kslab-qemu-aarch64` proves
@@ -7370,6 +7541,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
@@ -7409,6 +7581,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING Stage W3-B (`plans/WIRING.md` §3): the aarch64 device-IRQ
@@ -7443,6 +7616,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // P11 Chunk B-2 INCREMENT (1) (`plans/PI.md`): the aarch64 device-SPI
@@ -7483,6 +7657,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // Stage W11-B (`plans/WIRING.md` §3): the aarch64 input vertical —
@@ -7518,6 +7693,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
     // `plans/NEW-FILEMANAGER.md` FM9-c: the aarch64 virtio-input
@@ -7555,6 +7731,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: Some(pointer_button_script),
+        bounded_pointer_script: false,
         serial: &[],
     },
     // WIRING (`plans/WIRING.md` §1/§3): the riscv64 input vertical —
@@ -7591,6 +7768,7 @@ static TESTS: &[QemuTest] = &[
         typed_keys: &[],
         screendumps: &[],
         pointer_script: None,
+        bounded_pointer_script: false,
         serial: &[],
     },
 ];
@@ -9235,8 +9413,8 @@ fn assert_two_windows_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
 }
 
 /// The desktop-under-pressure vertical's screendump names: the frame taken
-/// before the script has spent any memory, and the frame taken once every
-/// window is open and the machine has left the normal pressure band.
+/// before the script has spent any memory, and the frame taken the moment the
+/// machine leaves the normal pressure band.
 const DESKTOP_PRESSURE_ICONS_DRAWN_DUMP: &str = "icons-drawn";
 const DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP: &str = "under-pressure";
 
@@ -9259,9 +9437,10 @@ const DESKTOP_PRESSURE_UNTOUCHED_SLOT: usize = 0;
 /// it gave up the decoded artwork and fell back to a built-in glyph.
 ///
 /// It is the right bound for the bands `plans/ICONS.md` promises the artwork
-/// through — mild and moderate leave the cache alone — and it is asserted only
-/// for a run that stayed within them
-/// ([`PRESSURE_DEEPENED_MARKER`](tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER)).
+/// through — mild and moderate leave the cache alone — and the frame it judges
+/// is taken in them by construction: the run stops at the first reading above
+/// normal, which a 2.6 MiB window cannot carry past mild. So it is asserted on
+/// every run, never scoped out of one that went deeper.
 const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
 
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
@@ -9276,61 +9455,11 @@ fn assert_icons_drawn_dark_screendump(t: &QemuTest, path: &Path) -> Result<(), S
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
 
-/// Whether the run that produced `path` reported its published pressure band
-/// deepening past moderate.
-///
-/// Read from the persisted transcript, which the runner writes before it judges
-/// a pass's dumps. A missing transcript is not treated as "stayed shallow": the
-/// strict assertion would then be applied to a run whose bands are unknown, so
-/// an unreadable log fails closed.
-fn pressure_deepened_past_moderate(t: &QemuTest, path: &Path) -> Result<bool, String> {
-    let log = sibling_serial_log(t, path)?;
-    let text = std::fs::read_to_string(&log).map_err(|e| {
-        format!(
-            "test --qemu ({}): read the transcript {} to scope the artwork assertion: {e}",
-            t.package,
-            log.display(),
-        )
-    })?;
-    Ok(text.contains(tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER))
-}
-
-/// The `serial.log` sidecar beside the screendump `path`.
-fn sibling_serial_log(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
-    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-        format!(
-            "test --qemu ({}): screendump {} has no readable file name",
-            t.package,
-            path.display(),
-        )
-    })?;
-    let stem = name
-        .split_once(&format!(".{DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP}."))
-        .map(|(head, _)| head)
-        .ok_or_else(|| {
-            format!(
-                "test --qemu ({}): screendump {} is not the under-pressure frame, so its transcript cannot be named",
-                t.package,
-                path.display(),
-            )
-        })?;
-    Ok(path.with_file_name(format!("{stem}.serial.log")))
-}
-
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
-/// **second** dump, taken once every window is open and the guest has
-/// witnessed the machine leave the normal pressure band: the icon bar still
-/// draws exactly the artwork it drew before.
+/// **second** dump, taken the moment the guest witnesses the machine leave the
+/// normal pressure band: the icon bar still draws exactly the artwork it drew
+/// before.
 fn assert_bar_artwork_survived_screendump(t: &QemuTest, path: &Path) -> Result<(), String> {
-    // At severe and critical pressure the desktop gives the decoded artwork up
-    // and the built-in glyph is the honest answer (`plans/ICONS.md`), so the
-    // slot legitimately differs and there is nothing here to assert. The band
-    // is not steerable, and how deep a run goes turns on how much retained
-    // content it accumulated — which is why asserting across every band failed
-    // a busy host and held an idle one.
-    if pressure_deepened_past_moderate(t, path)? {
-        return Ok(());
-    }
     let theme = tairix_theme::Theme::dark();
     let image = read_screendump(t, path)?;
     let drawn = read_screendump(
@@ -10139,7 +10268,7 @@ fn appbar_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 /// from the bar while the script waits keeps every click a click on the slot.
 fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
-    use tairix_test_desktop_pressure_qemu_aarch64::WINDOWS_OPENED;
+    use tairix_test_desktop_pressure_qemu_aarch64::WINDOW_CLICK_BOUND;
 
     let BarLaunch {
         library_button,
@@ -10159,8 +10288,10 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     pen.click(ready, 1, MouseButton::Primary, library_button);
     pen.click(ready, 1, MouseButton::Primary, entry_row);
     // The launch opened the first window, so each remaining one is a click on
-    // the slot once its predecessor is on screen.
-    for opened in 1..WINDOWS_OPENED {
+    // the slot once its predecessor is on screen. The guest exits as soon as
+    // the band has moved and one further window is served, so the tail of this
+    // chain is slack the run never reaches.
+    for opened in 1..WINDOW_CLICK_BOUND {
         pen.click(
             APPBAR_WINDOW_SHOWN_MARKER,
             opened,
@@ -11162,6 +11293,28 @@ const MEMTEST_TAKEOVER_RUNTIME_CEILING: Duration = Duration::from_mins(15);
 /// enough to bind (a unix socket's `sun_path` is 104 bytes on macOS and the
 /// temp directory alone can take half of that) and unique per wire per
 /// process, so concurrent runs stay on private wires. The returned guards must
+/// Attach the pointer sibling after the keyboard — the interactive session's
+/// two-identical-virtio-input-nodes topology — and let the runner drive `t`'s
+/// computed script step by step, each once its own marker appears.
+///
+/// Each driver instance arms and prints the readiness marker once, so the key
+/// injection waits for both markers: injecting on the first (possibly the
+/// mouse's) would race the keyboard's own arming and lose the press. Kept out
+/// of [`finish_run`] so that function stays within the line budget.
+fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
+    let Some(build_script) = t.pointer_script else {
+        return Ok(spec);
+    };
+    for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
+        spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
+    }
+    spec = spec.with_keyboard_ready_occurrences(2);
+    if t.bounded_pointer_script {
+        spec = spec.with_bounded_pointer_script();
+    }
+    Ok(spec)
+}
+
 /// outlive the run: dropping one removes its socket file. Kept out of
 /// [`finish_run`] so that function stays within the line budget.
 fn attach_net_peer(
@@ -11338,19 +11491,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
         screendump_paths.push((path, plan.assert));
     }
 
-    // Attach the pointer sibling after the keyboard — the interactive
-    // session's two-identical-virtio-input-nodes topology — and let the
-    // runner drive the computed script step by step, each once its own
-    // marker appears. Each driver instance arms and prints the readiness
-    // marker once, so the key injection waits for both markers: injecting
-    // on the first (possibly the mouse's) would race the keyboard's own
-    // arming and lose the press.
-    if let Some(build_script) = t.pointer_script {
-        for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
-            spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
-        }
-        spec = spec.with_keyboard_ready_occurrences(2);
-    }
+    spec = attach_pointer_script(t, spec)?;
 
     // Pipe QEMU's stdin for the interactive-session vertical and let the
     // runner replay the scripted exchange, each line typed once the guest
@@ -11485,9 +11626,8 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 mod tests {
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, login_type_plant, persist_serial,
-        pressure_deepened_past_moderate, qemu_host_budget_for, qemu_job_weight, sibling_serial_log,
-        sidecar_path, FsDisk, PrimePlan, QemuTest, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        desktop_hover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
+        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
         SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
         TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
@@ -11842,61 +11982,6 @@ mod tests {
         assert_eq!(SUPERVISOR_MOUNT_SCRIPT[1].2, "mount\n");
         assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].0, prompt);
         assert_eq!(SUPERVISOR_MOUNT_SCRIPT[2].2, UNLOCK_PASSPHRASE_LINE);
-    }
-
-    /// The artwork assertion's band scoping resolves the transcript beside the
-    /// frame it is judging, and reads the marker out of it.
-    ///
-    /// The derivation is what decides whether a deep-pressure run is scoped
-    /// out, and it only ever runs on a busy host — so it is pinned here rather
-    /// than left to be exercised by the load that first needed it.
-    #[test]
-    fn the_artwork_assertion_scopes_itself_by_the_transcripts_band_marker() {
-        let pressure = TESTS
-            .iter()
-            .find(|t| t.package == "tairix-test-desktop-pressure-qemu-aarch64")
-            .expect("the pressure vertical is enrolled");
-        let dir = std::env::temp_dir().join("tairix-pressure-band-scope");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        let dump = dir.join(format!(
-            "{}.{DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP}.screendump.ppm",
-            pressure.binary
-        ));
-        let log = dir.join(format!("{}.serial.log", pressure.binary));
-        assert_eq!(
-            sibling_serial_log(pressure, &dump).expect("the transcript is named"),
-            log,
-            "the transcript is the frame's own sibling"
-        );
-
-        // A run that stayed within the bands the artwork is promised through.
-        std::fs::write(&log, "boot\ndesktop revealed\n").expect("write");
-        assert!(!pressure_deepened_past_moderate(pressure, &dump).expect("read"));
-
-        // A run that went deeper, where the glyph tier is the honest answer.
-        std::fs::write(
-            &log,
-            format!(
-                "boot\n{}\n",
-                tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_DEEPENED_MARKER
-            ),
-        )
-        .expect("write");
-        assert!(pressure_deepened_past_moderate(pressure, &dump).expect("read"));
-
-        // No transcript at all fails closed rather than reading as shallow,
-        // which would apply the strict bound to a run whose bands are unknown.
-        std::fs::remove_file(&log).expect("remove");
-        assert!(pressure_deepened_past_moderate(pressure, &dump).is_err());
-
-        // A frame that is not the under-pressure one cannot name a transcript.
-        let other = dir.join(format!(
-            "{}.{DESKTOP_PRESSURE_ICONS_DRAWN_DUMP}.screendump.ppm",
-            pressure.binary
-        ));
-        assert!(sibling_serial_log(pressure, &other).is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No two runs of the matrix may write to the same sidecar path, or the
@@ -12410,6 +12495,40 @@ mod tests {
     /// runtime ceiling whenever the monitor dialogue outlasted the load, since
     /// the controller had already exited and no further such line could
     /// appear. Wait on a prompt, a banner, or a program's own message instead.
+    /// The pressure vertical's under-pressure frame is gated on the band
+    /// leaving normal, and its clicks are a bound.
+    ///
+    /// A count would put the frame at whatever band that many windows
+    /// happened to reach — including the severe ones where dropping the
+    /// artwork is correct, which is how the assertion came to be skipped on
+    /// the runs worth judging. Pinned here because the alternative is
+    /// discovering it from a transcript months later.
+    #[test]
+    fn the_pressure_frame_is_gated_on_the_band_and_its_clicks_are_a_bound() {
+        let pressure = TESTS
+            .iter()
+            .find(|t| t.package == "tairix-test-desktop-pressure-qemu-aarch64")
+            .expect("the pressure vertical is enrolled");
+        let under_pressure = pressure
+            .screendumps
+            .iter()
+            .find(|plan| plan.suffix == DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP)
+            .expect("the under-pressure frame is planned");
+        assert_eq!(
+            under_pressure.marker,
+            tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_LEFT_NORMAL_MARKER,
+            "the frame is taken in the band the artwork assertion is about",
+        );
+        assert_eq!(
+            under_pressure.occurrences, 1,
+            "the first reading above normal"
+        );
+        assert!(
+            pressure.bounded_pointer_script,
+            "the clicks repeat until the band moves, so their tail is slack",
+        );
+    }
+
     #[test]
     fn no_serial_marker_waits_on_an_audit_record() {
         for t in TESTS {

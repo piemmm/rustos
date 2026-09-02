@@ -947,12 +947,12 @@ screenfuls against a budget of one) a frame falls from 5 552 560 to 4 664 760
 blurred pixels and 5 552 559 to 4 920 035 blends. The counters miss the larger
 saving: 23 window-sized captures a frame — allocation plus blit — stop being
 made for entries the budget was always going to turn away. On
-`tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU, ramfb, 32
-cascaded terminals under real memory pressure) the terminal defaulting to 80%
-opacity **and** a half-strength blur went from never finishing — cost per
-window climbing linearly, +0.22 s for window 2, +3.5 s for 16, +8.6 s for 26,
-killed at the ceiling with 26 of 32 on screen — to **133 s**, against 37 s for
-the same tree with the blur off. The blur therefore ships on
+`tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU, ramfb, cascaded
+terminals under real memory pressure) the terminal defaulting to 80% opacity
+**and** a half-strength blur went from never finishing — cost per window
+climbing linearly, +0.22 s for window 2, +3.5 s for 16, +8.6 s for 26, killed
+at the ceiling with 26 of the 32 that vertical then asked for on screen — to
+**133 s**, against 37 s for the same tree with the blur off. The blur therefore ships on
 (`plans/GUI-TERMINAL.md` §2).
 
 Verified by composing one scene both ways (`set_frost_skip`, beside

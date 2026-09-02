@@ -283,29 +283,30 @@ system shipped one picture for *all* applications. Now:
   directory, so a hostile `library-icon` cannot aim the desktop at a file
   elsewhere. It draws its class picture instead.
 
-## 9. The pressure vertical asserts over the bands it is sound for — **done**
+## 9. The pressure vertical photographs the band it asserts over — **done**
 
-`tairix-test-desktop-pressure-qemu-aarch64` required the icon bar's untouched
+`tairix-test-desktop-pressure-qemu-aarch64` requires the icon bar's untouched
 slot to be **byte-identical** between its two frames, reading any drift as "the
-desktop stopped drawing its decoded artwork". Its pressure witness, though, is
-only that the published band *left normal*, which admits severe and critical —
-and section 0's policy is that those bands **do** take the cache, with the
-glyph tier as the honest answer. So the assertion was a true statement about
-mild and moderate alone while the run it judged could be in any band, and it
-failed whenever the machine went deep: measured 22.6% slot drift under eight
-concurrent QEMU guests against 0% when the vertical ran alone.
+desktop stopped drawing its decoded artwork". Section 0's policy keeps the
+cache through mild and moderate and **does** take it at severe and critical,
+where the glyph tier is the honest answer — so the assertion is a true
+statement about the shallower bands alone.
 
-The band is not steerable (no test hook in the pressure path) and how deep a
-run goes turns on how much retained content it accumulated, so the guest now
-reports what it observed: one serial record
-(`PRESSURE_DEEPENED_MARKER`) the first time the published band passes moderate,
-written straight to the serial sink because it is emitted inside an audit
-callback and a log event there would re-enter the sink that called it. The
-host's artwork assertion reads the persisted transcript and applies the
-zero-drift bound only to a run that stayed within the promised bands; an
-unreadable transcript fails closed rather than counting as shallow. The gate
-that matters — moderate never takes the artwork — keeps its full strength, and
-a deep run no longer fails for behaving as this plan specifies.
+It used to be a fixed spend (thirty-two windows) at a relative target, which
+overshot: measured runs reached severe some seventeen seconds *before* the
+photograph, and the assertion was scoped out of exactly the runs whose pixels
+were interesting. Under eight concurrent QEMU guests it had measured 22.6% slot
+drift against 0% alone.
+
+The frame is now taken in the band it is judged against. The guest reports the
+moment the published band first *leaves* normal
+(`PRESSURE_LEFT_NORMAL_MARKER`, written straight to the serial sink because it
+is emitted inside an audit callback where a log event would re-enter the sink
+that called it), the host photographs there, and two further windows finish the
+run. A window costs some 2.6 MiB against watermarks a tenth of the board apart,
+so the first reading above normal is mild — and the zero-drift bound therefore
+applies on **every** run rather than being relaxed on the deep ones. There is
+no scope-out left to read a transcript for.
 
 ## 10. Open — two surfaces still rasterise their glyphs per frame
 

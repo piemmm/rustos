@@ -2280,16 +2280,26 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   reads that cannot be kept.
 - **Proved end to end on a real desktop.**
   `tests/integration/desktop_pressure_qemu_aarch64` boots the production
-  aarch64 graphical session on the `virt` board and opens a screenful of
-  terminal windows, one per primary click on the application's own icon-bar
-  slot. The guest passes only when all three of its witnesses are in: the
-  bundle loaded, every window created, and the machine's *published* pressure
-  band left normal — read through `MEM_STATS`, so the vertical observes the
-  production gauge rather than steering it, and a run that never left normal
-  cannot pass. The host then compares the icon bar's untouched application
-  slot against the frame taken before any of that memory was spent, and
-  requires the pixels to be identical: a desktop that answered pressure by
+  aarch64 graphical session on the `virt` board and opens terminal windows,
+  one per primary click on the application's own icon-bar slot, **until the
+  published pressure band leaves normal**. The guest passes only when all
+  three of its witnesses are in: the bundle loaded, that band really left
+  normal — read through `MEM_STATS`, so the vertical observes the production
+  gauge rather than steering it, and a run that never left normal cannot pass
+  — and the desktop served two further windows after it did. The host
+  photographs the screen at that moment and compares the icon bar's untouched
+  application slot against the frame taken before any of the memory was spent,
+  requiring the pixels to be identical: a desktop that answered pressure by
   dropping its decoded icons draws built-in glyphs there instead.
+
+  The band, not a window count, is what ends the run. The target is a
+  *fraction* of free memory, so a fixed spend either never reaches it or drives
+  the machine past it — thirty-two windows sat on that boundary, and the frame
+  landed in bands where dropping the artwork is the correct answer, so the
+  assertion had to be scoped out of the very runs worth judging. Stopping at
+  the first reading above normal keeps the frame in mild, where the artwork is
+  promised, and leaves some nine windows of headroom before an allocation
+  would be refused.
 
   There is exactly one constructor and it demands the real backing size,
   the real gauge, and the real audit sink; each consumer takes its cache

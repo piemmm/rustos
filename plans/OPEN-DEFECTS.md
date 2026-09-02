@@ -923,8 +923,9 @@ found two more read-only writes on the same path).
     `Surface::new(640, 350)`) returns `None`, `open_window` states "screen
     surface refused; no window opened" and the terminal carries on. Before
     this that same allocation aborted a process — which is the whole defect.
-    The vertical requires all 32 windows, so it is now red on the honest
-    answer rather than on a corpse; D80 is that question.
+    The vertical required all 32 windows, so it went red on the honest answer
+    rather than on a corpse; D80 has since removed that count, and the run
+    stops well before a refusal.
   - **What this does *not* cover, deliberately.** The allocations made
     fallible are the ones sized by *data* — image geometry, screen extent, a
     decoded payload — the megabyte-class requests a machine short of memory
@@ -945,39 +946,78 @@ found two more read-only writes on the same path).
     panic and a clean bind refusal were indistinguishable from the status; the
     runtime's code is now reserved and public, and the session's moved to
     `104`.
-- **D80 — the 32-window pressure soak is balanced on the edge of exhaustion,
-  so its premise is load-dependent (OPEN).** `desktop-pressure-qemu-aarch64`
-  asks one terminal process for 32 windows on the aarch64 virt board's default
-  RAM (`usable_bytes` 186,310,656 — about 177 MiB). Each window retains the
-  terminal's own `Screen` surface (896,000 bytes at the default 640×350 grid),
-  its shared frame region (that again, times `FRAME_COUNT`), and the session's
-  window content surface — and each is behind an `elsh` bundle load whose
-  measured cost climbs 0.24 s → 1.3 s → 2.3 s → 20.9 s → 16.1 s as the
-  machine tightens. Thirty-two of those plus thirty-two shells is the whole
-  board, so whether the last window fits is decided by what else happens to be
-  resident: the identical tree has both passed in 148 s and, on the gate run
-  that closed D77, been refused at window 32 and killed at the 600 s ceiling.
-  - **This is the load-dependence §7 forbids, not a flake to re-run.** A green
-    solo run is not evidence the premise holds, and neither the ceiling nor the
-    window count may be moved to make it pass.
-  - **Two structural resolutions, and they are different work.** Either the
-    per-window cost comes down until 32 windows genuinely fit with headroom —
-    the retained trio above is the budget, and D79's window-sized transient no
-    longer sits on top of it — or the vertical drives the pressure band by a
-    means that does not sit on the exhaustion boundary, while still asserting
-    what it exists to assert (the icon bar keeps its real artwork through mild
-    and moderate pressure). Choosing between them is a scope decision, not a
-    defect fix.
-  - **Its refusal is currently invisible, which is why this took a source
-    read to diagnose.** The terminal states "screen surface refused; no window
-    opened" on `stderr`, and a graphical app's stderr in a desktop session has
-    no reader — the same argument `lib/rt`'s panic reporting already makes for
-    a fatal exit (`PANIC_REPORTED`, "a graphical session whose console is the
-    very screen it is compositing over"). The charter's refusal clause asks for
-    the app's *own UI* when it is interactive and `stderr` otherwise, so
-    routing a non-fatal refusal to the system log as well is a policy question
-    to settle rather than assume.
-
+- **D80 — the pressure soak drove a fixed window count at a relative target,
+  so its premise was load-dependent and its assertion was skipped — FIXED.**
+  `desktop-pressure-qemu-aarch64` asked one terminal process for 32 windows on
+  the aarch64 virt board's default RAM (`usable_bytes` 186,310,656 — about
+  177 MiB). Each window retains the terminal's own `Screen` surface (896,000
+  bytes at the default 640×350 grid), its shared frame region (that again,
+  times `FRAME_COUNT`), and the session's window content surface, behind an
+  `elsh` bundle load each. The *target*, though, is relative — below a fifth of
+  free memory — so a fixed spend has three outcomes and only one of them is the
+  test: too few never leaves normal; too many is refused a surface, so a PASS
+  gated on the count never latches and the run burns to the 600 s ceiling; and
+  in between the run sails past moderate before the photograph, where
+  `plans/ICONS.md` **permits** the artwork to be dropped and the assertion was
+  scoped out. Only a ~34 MB span of post-boot free memory satisfied all of it,
+  and which side of it a boot landed on turned on how much reclaimable cache it
+  had accumulated.
+  - **The measured state was the third outcome: a vacuous pass.** On the tree
+    that closed D79 the band went severe at t=107 s and the frame was
+    photographed at window 31, t=124 s — so
+    `assert_bar_artwork_survived_screendump` returned `Ok` without comparing a
+    pixel. Both green runs measured did this. The vertical was testing "32
+    windows can be opened", not what it is named for.
+  - **Lowering the per-window cost could not have fixed it.** The span's width
+    is set by the watermark gap (mild at a fifth free, the allocator's reserve
+    at a sixty-fourth), not by what a window costs, so a cheaper window
+    *shifts* the span without widening it: halve the cost and the run needs
+    post-boot free memory of ~46–80 MB where the board boots with ~150 MB, and
+    32 cheaper windows would never leave normal at all. That resolution would
+    have broken the vertical, which is why the choice D80 recorded as a scope
+    decision was not one. Three copies of every window's picture remains worth
+    attacking on its own merits; it is not this defect.
+  - **Fixed by closing the loop on the band.** The clicks are now a *bound*
+    (`WINDOW_CLICK_BOUND`, 64 — slack is free, and only a bound too small can
+    fail a run) and the state ends it: the guest emits
+    `PRESSURE_LEFT_NORMAL_MARKER` when the published band first leaves normal,
+    the host photographs there, and two further windows complete the PASS. A
+    window costs some 2.6 MiB against watermarks a tenth of the board apart, so
+    the first reading above normal is mild — the run stops in the band the
+    assertion is *about*, with some nine windows of headroom before a refusal.
+    The `pressure_deepened_past_moderate` scope-out, its transcript helper and
+    its unit test are deleted: the zero-drift bound now applies on every run.
+  - **Two windows after the marker, not one, and why.** One scripted click can
+    already be in flight when the band moves, since each is gated on the
+    *previous* window reaching the screen. The click after that one waits on a
+    record written long after the marker, and the host latches every marker
+    from one shared transcript, so it cannot be released without the marker
+    having been seen and the frame held. One window can slip past the marker
+    and a second cannot, which is what keeps the guest alive across the
+    readback.
+  - **The harness learned to express a bounded gesture.**
+    `Spec::with_bounded_pointer_script` declares a script that repeats until
+    the guest reports a state, so an unsent tail is not a failure. It relaxes
+    only that: the script must still start, and the gesture stays attested by
+    the guest's witnesses and both screendumps, neither reachable without it.
+    Every other enrolment keeps the exhaustive default, and both semantics are
+    unit-tested.
+  - **Measured after the fix.** 65.8 s against 134–151 s before, band leaving
+    normal at t=50.8 s after ~19 windows, 22 creates against a bound of 64, no
+    deepened-past-moderate record, and both frames compared under the strict
+    bound.
+- **D80.1 — a refused window is invisible to the user (OPEN, and a policy
+  question).** The terminal states "screen surface refused; no window opened"
+  on `stderr`, and a graphical app's stderr in a desktop session has no reader
+  — the same argument `lib/rt`'s panic reporting already makes for a fatal exit
+  (`PANIC_REPORTED`, "a graphical session whose console is the very screen it
+  is compositing over"). The charter's refusal clause asks for the app's *own
+  UI* when it is interactive, and the terminal has no notice surface; adding
+  one is a desktop-UX decision for `plans/GUI-TERMINAL.md`, and routing the
+  refusal to the system log instead (the terminal would need `CAP_LOG_EMIT`,
+  which `files`, `fstree` and `switchboard` already declare) is the cheaper
+  half of it. D80's fix removed the *test's* dependence on this being visible;
+  it did not settle where the message should go.
 - **D79 — a decorated window's furniture was rendered through a transient the
   size of the whole window, to keep four thin strips — FIXED.**
   `WindowChrome::render` allocated an outer-sized `Surface` (975,840 bytes for

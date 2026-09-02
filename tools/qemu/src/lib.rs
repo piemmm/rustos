@@ -714,6 +714,10 @@ pub struct Spec {
     /// screendump has verified. Meaningful only with
     /// [`Spec::input_mouse`]; empty injects nothing.
     pub pointer_script: Vec<PointerStep>,
+    /// When `true`, the pointer script is an upper *bound* on the gesture
+    /// rather than an exchange to exhaust: an unsent tail is not a failure.
+    /// See [`Spec::with_bounded_pointer_script`].
+    bounded_pointer_script: bool,
     /// When non-empty, pipe QEMU's stdin and replay the steps in order:
     /// each waits for its readiness marker on the serial console (past
     /// the previous step's match) before writing its line. Empty leaves
@@ -804,6 +808,7 @@ impl Spec {
             input_typing: Vec::new(),
             input_mouse: false,
             pointer_script: Vec::new(),
+            bounded_pointer_script: false,
             serial_input: Vec::new(),
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
@@ -940,6 +945,7 @@ impl Spec {
             input_typing: Vec::new(),
             input_mouse: false,
             pointer_script: Vec::new(),
+            bounded_pointer_script: false,
             serial_input: Vec::new(),
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
@@ -970,6 +976,7 @@ impl Spec {
             input_typing: Vec::new(),
             input_mouse: false,
             pointer_script: Vec::new(),
+            bounded_pointer_script: false,
             serial_input: Vec::new(),
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
@@ -1161,6 +1168,33 @@ impl Spec {
             ready_occurrences: occurrences.max(1),
             action,
         });
+        self
+    }
+
+    /// Declare the pointer script an upper *bound* on the gesture rather
+    /// than an exchange to be exhausted: a tail of steps the run never
+    /// reaches is not a failure.
+    ///
+    /// The default is the opposite, and stays the default: a vertical whose
+    /// device-driven exchange never happened must not pass on the guest's own
+    /// exit status, so an unsent step normally fails the run. That is the
+    /// right rule for a *choreography* — type here, click there, expect this.
+    ///
+    /// It is the wrong rule for a script that repeats one gesture until the
+    /// guest reports a *state*, because the number of repetitions the state
+    /// needs is not knowable when the script is built. Pinning it to a count
+    /// is the load-dependence this flag exists to remove: too few never reach
+    /// the state, too many drive the machine past it. What attests the gesture
+    /// there is not the script's length but the guest's own witnesses and the
+    /// screendumps — both still required, and neither reachable without the
+    /// gesture — so exhausting the script adds nothing to what is already
+    /// proven.
+    ///
+    /// The script must still *start*: a run that sent no step at all fails as
+    /// before, so a bounded script cannot become a script that never fired.
+    #[must_use]
+    pub fn with_bounded_pointer_script(mut self) -> Self {
+        self.bounded_pointer_script = true;
         self
     }
 
@@ -2480,8 +2514,13 @@ impl InjectionState {
         self.dump_step >= spec.screendumps.len()
     }
 
-    /// `true` once every requested pointer step has been sent.
+    /// `true` once every requested pointer step has been sent — or, for a
+    /// bounded script ([`Spec::with_bounded_pointer_script`]), once it has
+    /// sent at least one.
     fn pointer_done(&self, spec: &Spec) -> bool {
+        if spec.bounded_pointer_script {
+            return spec.pointer_script.is_empty() || self.pointer_step > 0;
+        }
         self.pointer_step >= spec.pointer_script.len()
     }
 
@@ -2821,6 +2860,41 @@ pub fn workspace_relative(root: &Path, rel: impl AsRef<OsStr>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An ordinary pointer script must be exhausted, so a choreography that
+    /// stopped part-way cannot pass on the guest's exit status; a *bounded*
+    /// one may leave a tail unsent, but must still have started.
+    #[test]
+    fn a_bounded_pointer_script_may_leave_a_tail_unsent_but_must_start() {
+        let script = |bounded: bool| {
+            let spec = Spec::for_aarch64_kernel("/kernel")
+                .with_pointer_step("ready", 1, PointerAction::Move { dx: 1, dy: 1 })
+                .with_pointer_step("ready", 2, PointerAction::Move { dx: 2, dy: 2 });
+            if bounded {
+                spec.with_bounded_pointer_script()
+            } else {
+                spec
+            }
+        };
+        let at = |step: usize| InjectionState {
+            pointer_step: step,
+            ..InjectionState::new(&Spec::for_aarch64_kernel("/kernel"))
+        };
+
+        let exhaustive = script(false);
+        assert!(!at(0).pointer_done(&exhaustive), "no step sent");
+        assert!(!at(1).pointer_done(&exhaustive), "a step still unsent");
+        assert!(at(2).pointer_done(&exhaustive), "every step sent");
+
+        let bounded = script(true);
+        assert!(!at(0).pointer_done(&bounded), "a script that never fired");
+        assert!(at(1).pointer_done(&bounded), "the tail is slack");
+        assert!(at(2).pointer_done(&bounded));
+
+        // Nothing requested is nothing to leave unsent, either way.
+        let empty = Spec::for_aarch64_kernel("/kernel").with_bounded_pointer_script();
+        assert!(at(0).pointer_done(&empty));
+    }
 
     #[test]
     fn success_status_is_pass() {
@@ -3766,6 +3840,7 @@ mod tests {
             input_typing: Vec::new(),
             input_mouse: false,
             pointer_script: Vec::new(),
+            bounded_pointer_script: false,
             serial_input: Vec::new(),
             screendumps: Vec::new(),
             monitor_commands: Vec::new(),
