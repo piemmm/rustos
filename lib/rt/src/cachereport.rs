@@ -42,10 +42,11 @@
 //! reporter from its event loop, folding [`wait_deadline_ns`] into whatever
 //! timeout the loop's own wait-set park would otherwise use
 //! ([`fold_wait_deadline_ns`]) so a suppressed change is flushed without
-//! ever turning an indefinite park into a poll, and calling [`withdraw`] on
-//! the way out:
+//! ever turning an indefinite park into a poll, and holding a
+//! [`ReportGuard`] so the rows are withdrawn on every way out:
 //!
 //! ```ignore
+//! let _rows = tairix_rt::cachereport::ReportGuard;
 //! tairix_rt::cachereport::register(cache.ledger().expect("classified"));
 //! loop {
 //!     let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(own_timeout_ns);
@@ -53,7 +54,6 @@
 //!     // ... handle whatever the wait woke for ...
 //!     tairix_rt::cachereport::publish_if_due();
 //! }
-//! tairix_rt::cachereport::withdraw();
 //! ```
 
 use alloc::vec::Vec;
@@ -343,6 +343,21 @@ pub fn wait_deadline_ns() -> u64 {
 /// never keeps showing memory nobody holds anymore.
 pub fn withdraw() {
     withdraw_with(&REGISTRY, &mut RtSender);
+}
+
+/// Withdraws this process's reported rows when it drops, so every way out of
+/// a program — a clean return, a fail-loud exit, a panic unwind — takes the
+/// rows with it rather than only the paths a future edit remembers to spell.
+///
+/// Held for the scope in which the process's caches are registered. Every
+/// publisher uses this one guard rather than its own copy of the same three
+/// lines.
+pub struct ReportGuard;
+
+impl Drop for ReportGuard {
+    fn drop(&mut self) {
+        withdraw();
+    }
 }
 
 /// The shared logic behind [`fold_wait_deadline_ns`], against an injected

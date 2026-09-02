@@ -434,45 +434,79 @@ impl Chooser {
         damage.add(self.layout(style).preview_model());
     }
 
-    /// The first gallery thumbnail still to be rendered, or `None` when every
-    /// candidate is resolved (or the window is too small to show a tile).
+    /// The next gallery thumbnail to render — **on screen first** — or `None`
+    /// when nothing needs one (or the window is too small to show a tile).
+    ///
+    /// The order is what makes the chooser usable: the shipped masters are 4K
+    /// JPEGs, so rendering them in index order means the window shows
+    /// placeholders for every visible tile until candidates the user cannot see
+    /// have been read and decoded. The on-screen set is the gallery's own
+    /// [`visible_range`], the same geometry the painter lays the tiles out
+    /// with, so the scheduler and the painter can never disagree about what is
+    /// visible; off-screen candidates are served only once it is complete. A
+    /// category filter narrows both alike, so a candidate the rail is hiding is
+    /// never rendered ahead of one it is showing.
+    ///
+    /// [`visible_range`]: tairix_browse::layout::GridView::visible_range
     ///
     /// A thumbnail already held at a different square side is stale and is
     /// asked for again: the tile's side follows the desktop's UI scale, and a
     /// tile painter centres the artwork it is given rather than stretching
     /// it, so keeping pixels rendered for the old scale would draw the
-    /// picture at the wrong size. A refusal stays a refusal at every side,
+    /// picture at the wrong size. Visible-first therefore also bounds a
+    /// resize or a scale change to what is on screen, with the rest re-served
+    /// lazily as it is scrolled to. A refusal stays a refusal at every side,
     /// since a file the worker could not decode will not decode smaller.
     #[must_use]
     pub fn next_thumbnail(&self, style: Style<'_>) -> Option<ThumbnailRequest> {
-        let (width, height) = self.layout(style).tile_size();
+        let layout = self.layout(style);
+        let (width, height) = layout.tile_size();
         let side =
             IconTile::icon_side(Rect::new(0, 0, width, height), style.scale(), style.theme());
         if side == 0 {
             return None;
         }
-        self.candidates
-            .iter()
-            .enumerate()
-            .find_map(
-                |(index, candidate)| match (&candidate.thumbnail, &candidate.choice) {
-                    (Thumbnail::Pending, WallpaperChoice::Image(path)) => Some(ThumbnailRequest {
-                        index,
-                        path: path.clone(),
-                        side,
-                    }),
-                    (Thumbnail::Ready(held), WallpaperChoice::Image(path))
-                        if held.width() != side =>
-                    {
-                        Some(ThumbnailRequest {
-                            index,
-                            path: path.clone(),
-                            side,
-                        })
-                    }
-                    _ => None,
-                },
-            )
+        let on_screen = layout
+            .grid(self.visible.len())
+            .visible_range(self.scroll.model().offset());
+        self.visible
+            .get(on_screen.clone())
+            .into_iter()
+            .flatten()
+            .copied()
+            .find_map(|index| self.wanted_thumbnail(index, side))
+            .or_else(|| {
+                // The visible set is complete, so the rest of the gallery is
+                // filled in behind it — a scroll then finds its tiles already
+                // rendered rather than starting from placeholders.
+                self.visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(position, _)| !on_screen.contains(position))
+                    .find_map(|(_, index)| self.wanted_thumbnail(*index, side))
+            })
+    }
+
+    /// The request candidate `index` needs at `side`, or `None` when its
+    /// thumbnail is already that size, refused, or not a picture at all.
+    fn wanted_thumbnail(&self, index: usize, side: u32) -> Option<ThumbnailRequest> {
+        let candidate = self.candidates.get(index)?;
+        let WallpaperChoice::Image(path) = &candidate.choice else {
+            return None;
+        };
+        match &candidate.thumbnail {
+            Thumbnail::Pending => {}
+            Thumbnail::Ready(held) if held.width() != side => {}
+            // Already the right size, remembered as refused, or the
+            // backdrop entry, which decodes nothing. Listed rather than
+            // caught by a wildcard so a new state forces a decision here.
+            Thumbnail::Ready(_) | Thumbnail::Refused | Thumbnail::Backdrop => return None,
+        }
+        Some(ThumbnailRequest {
+            index,
+            path: path.clone(),
+            side,
+        })
     }
 
     /// Adopt `surface` as the thumbnail of the candidate at `index`.

@@ -25,8 +25,8 @@ use tairix_controls::{ChainModel, Fact, FactList, PointerState};
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_icon::{
-    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind,
-    IconSet, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
+    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkDesk, ArtworkResolver,
+    IconArtworkSource, IconKind, IconSet, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
@@ -48,7 +48,6 @@ use tairix_wm::{
     Surface, WindowActivationState, WindowChrome, WindowControlKind, WindowId,
 };
 
-use crate::artwork::ArtworkDesk;
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
 use crate::shell::SettleWork;
 use crate::{
@@ -209,6 +208,21 @@ fn with_artwork<T>(resolve: impl FnOnce(&mut dyn ArtworkResolver, &mut ArtworkCa
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
     resolve(&mut inline, &mut cache)
+}
+
+/// A deferring [`ArtworkResolver`] over a shared [`ArtworkDesk`], as the serve
+/// loop's own resolver is: it answers only what the desk has already been
+/// delivered and records everything else.
+struct Deferring(Rc<RefCell<ArtworkDesk>>);
+
+impl ArtworkResolver for Deferring {
+    fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
+        self.0.borrow_mut().collect(key, side)
+    }
+
+    fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
+        self.0.borrow_mut().want(key, side);
+    }
 }
 
 /// The processes the strip holds, in display order.
@@ -7785,21 +7799,6 @@ fn a_library_row_draws_its_own_applications_icon() {
 /// worker to do.
 #[test]
 fn the_launcher_has_its_icons_before_it_is_first_drawn() {
-    /// A resolver over the real desk: it answers only what the desk has
-    /// already been delivered and records everything else — exactly what the
-    /// serve loop's own resolver does.
-    struct Deferring(Rc<RefCell<ArtworkDesk>>);
-
-    impl ArtworkResolver for Deferring {
-        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
-            self.0.borrow_mut().collect(key, side)
-        }
-
-        fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
-            self.0.borrow_mut().want(key, side);
-        }
-    }
-
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let assets = shipped_app_bundle_master(
         MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
@@ -10435,12 +10434,12 @@ fn a_second_window_of_the_same_application_reuses_the_resolved_icon() {
 fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
     /// Refuses every decode until `landed` is set, exactly as the desk does
     /// while its worker is still reading and rasterising.
-    struct Deferring {
+    struct Gated {
         inner: InlineArtwork<ArtworkFileReader<MemoryAssets>, ArtworkSandbox<TaggedRasteriser>>,
         landed: Rc<Cell<bool>>,
     }
 
-    impl ArtworkResolver for Deferring {
+    impl ArtworkResolver for Gated {
         fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
             if self.landed.get() {
                 self.inner.resolve(key, side)
@@ -10452,7 +10451,7 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
 
     let landed = Rc::new(Cell::new(false));
     let mut shell = shell();
-    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring {
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Gated {
         inner: InlineArtwork::new(
             ArtworkFileReader(identity_bundle(
                 MemoryAssets::default(),
@@ -10503,19 +10502,6 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
 /// the frame it first appears in, rather than the shared application glyph.
 #[test]
 fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
-    /// A resolver over the real desk, as the serve loop's own is.
-    struct Deferring(Rc<RefCell<ArtworkDesk>>);
-
-    impl ArtworkResolver for Deferring {
-        fn resolve(&mut self, key: &tairix_icon::ArtworkKey, side: u32) -> Resolved {
-            self.0.borrow_mut().collect(key, side)
-        }
-
-        fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
-            self.0.borrow_mut().want(key, side);
-        }
-    }
-
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
     let mut comp = compositor();

@@ -1644,12 +1644,18 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   client's windows are torn down via `client_exited`, and app-ward events
   are validated against the live window before delivery.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
-  (`ipc_call`) and `EventSource` (parked endpoint wait) seams. The client
-  remembers each window's last presented frame index and extent, so
+  (`ipc_call`) and `EventSource` (the app's own event endpoint) seams. The
+  client remembers each window's last presented frame index and extent, so
   `WindowEvents::wait` answers a `RedrawRequested` by re-presenting that
   frame with full-window damage before returning the event to the app —
   no app has to implement the handshake, and an app that wants to render
-  genuinely fresh pixels still sees the event.
+  genuinely fresh pixels still sees the event. `EventSource` states the
+  drain (`try_next`, never waits) and the park (`park`) separately, with
+  `next` defaulted as drain-then-park; an app with work of its own —
+  decoding a folder's icon artwork, rendering a gallery of wallpapers —
+  drains with `WindowEvents::try_wait` so input is served ahead of that
+  work and the loop parks only when neither has anything left. Both paths
+  decode and answer the redraw through one definition.
 
 Every decode fails closed (`tairix_abi::window_ipc`, enrolled in the
 `fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`

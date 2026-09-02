@@ -813,18 +813,56 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 }
 
-/// The event-arrival seam: block — parked on the app's wait-set, never
-/// spinning — until the session delivers the next encoded event to the
-/// app's event endpoint.
+/// The event-arrival seam: the app's own event mailbox, split into the drain
+/// that never waits and the park that only waits.
+///
+/// A loop that has nothing else to do calls [`next`](EventSource::next) and is
+/// parked on its wait-set until the session delivers. A loop that interleaves
+/// input with work of its own — a thumbnail to render, an icon to decode —
+/// drains with [`try_next`](EventSource::try_next) so queued input is served
+/// before the next unit of that work, and parks only once both are exhausted.
+/// Both halves are the mailbox's, so the polled path and the parked one cannot
+/// drift apart.
 pub trait EventSource {
-    /// Fill `event` with the next delivered event frame, parking the
-    /// task until one arrives.
+    /// Fill `event` with a queued event frame if one is waiting, answering
+    /// `Ok(false)` immediately when the mailbox is empty.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the wait surfaces (the endpoint torn down, the
-    /// session gone); the app treats it as the channel ending.
-    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno>;
+    /// Any [`Errno`] the drain surfaces (the endpoint torn down, the session
+    /// gone); the app treats it as the channel ending.
+    fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno>;
+
+    /// Park the task until something the app waits on is ready — a delivered
+    /// event, or whatever else the implementation's wait-set carries.
+    ///
+    /// A wake is not a promise of an event: the caller drains again and parks
+    /// afresh if the mailbox is still empty.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the wait surfaces; the app treats it as the channel
+    /// ending.
+    fn park(&mut self) -> Result<(), Errno>;
+
+    /// Fill `event` with the next delivered event frame, parking the task
+    /// until one arrives.
+    ///
+    /// Defaulted as drain-then-park, so an implementation states its two
+    /// halves once and no app carries its own spelling of the loop between
+    /// them.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] either half surfaces.
+    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        loop {
+            if self.try_next(event)? {
+                return Ok(());
+            }
+            self.park()?;
+        }
+    }
 }
 
 /// The app's typed event wait over an [`EventSource`].
@@ -866,10 +904,43 @@ impl<S: EventSource> WindowEvents<S> {
     ) -> Result<WindowEvent, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         self.source.next(&mut frame)?;
-        let event = WindowEvent::from_bytes(&frame)?;
-        if let WindowEvent::RedrawRequested { window_id } = event {
-            let _ = client.answer_redraw(window_id);
-        }
-        Ok(event)
+        decode_delivered(client, &frame)
     }
+
+    /// The queued event if one is waiting, and `None` at once when the mailbox
+    /// is empty — decoded and redraw-answered exactly as [`wait`](Self::wait)
+    /// does.
+    ///
+    /// What a loop with work of its own drains with: input is served before
+    /// the next unit of that work, and the loop parks on [`wait`](Self::wait)
+    /// only once both are exhausted.
+    ///
+    /// # Errors
+    ///
+    /// A source failure, or the typed refusal of a malformed frame — refused,
+    /// never guessed at, exactly as in [`wait`](Self::wait).
+    pub fn try_wait<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+    ) -> Result<Option<WindowEvent>, Errno> {
+        let mut frame = [0u8; WindowEvent::WIRE_LEN];
+        if !self.source.try_next(&mut frame)? {
+            return Ok(None);
+        }
+        decode_delivered(client, &frame).map(Some)
+    }
+}
+
+/// Decode one delivered frame and answer a redraw request on the app's behalf.
+/// The one definition both the parked and the drained path use, so neither can
+/// answer a redraw the other would not.
+fn decode_delivered<T: WindowTransport>(
+    client: &mut WindowClient<T>,
+    frame: &[u8; WindowEvent::WIRE_LEN],
+) -> Result<WindowEvent, Errno> {
+    let event = WindowEvent::from_bytes(frame)?;
+    if let WindowEvent::RedrawRequested { window_id } = event {
+        let _ = client.answer_redraw(window_id);
+    }
+    Ok(event)
 }

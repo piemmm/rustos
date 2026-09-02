@@ -69,6 +69,16 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # listing with.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 
+[dev-dependencies]
+# The shared reclaimable-memory model: the icon pipeline's host tests build its
+# decode cache through the one shipping constructor, so they need the test
+# pressure gauge the real cache is governed by rather than a budget of their
+# own.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The audit sink that constructor takes. The pipeline's own behaviour is what
+# is under test, so the records are discarded.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
 # Everything else the freestanding `Run` binary links is pulled in for the
 # bare-metal targets it is actually built for; on the host those parts of the
 # binary are not compiled at all.

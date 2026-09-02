@@ -46,6 +46,7 @@
 extern crate alloc;
 
 pub mod artwork;
+pub mod desk;
 pub mod glyph;
 pub mod load;
 pub mod svg;
@@ -61,6 +62,7 @@ pub use artwork::{
     InlineArtwork, NoArtwork, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR, ICONS_DIR,
     MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
+pub use desk::{ArtworkDesk, ArtworkJob};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use svg::decode as decode_svg;

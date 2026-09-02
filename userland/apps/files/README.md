@@ -30,9 +30,9 @@ reach it.
 - the window channel's client half (`WindowClient` / `WindowEvents`) is
   `lib/window`;
 - the grid's icon **artwork** — the reclaim-governed decode cache, the
-  asset-path spelling, and the read/rasterise seams — is the shared
-  `lib/icon::artwork` layer, and the decode itself is the shared
-  `lib/sandbox` `imagerender` service;
+  asset-path spelling, the deferred-decode desk, and the read/rasterise
+  seams — is the shared `lib/icon` `artwork`/`desk` layer, and the decode
+  itself is the shared `lib/sandbox` `imagerender` service;
 - the runtime (`_start`, allocator, syscall wrappers, the shared
   `read_dir_all` listing call) is `lib/rt`.
 
@@ -218,7 +218,21 @@ the exact pixel length are validated before any surface is built from it.
 Only the tiles actually drawn are resolved, at the exact side each tile
 reserves, so a hundred-entry directory costs one read and one decode per
 *visible kind*; nothing pre-warms an icon for an entry scrolled out of
-view. The cache is built through the one shared
+view.
+
+The decode is also never **inside** the paint. A tile that misses records
+the decode on the shared deferred-decode desk
+(`tairix_icon::ArtworkDesk`, the same policy the desktop session's worker
+thread drives) and draws its built-in glyph; the event loop drains queued
+input, runs **one** recorded decode, and repaints when the desk runs dry
+— so a folder of picture-bearing bundles neither freezes the first frame
+nor stalls a scroll, and a key or a click waits at most one decode. The
+repaint is one whole-window pass per batch rather than one per icon,
+because a present is a round trip through the compositor and far dearer
+than the decode that produced a single tile. The whole model is
+`src/icons.rs`, host-tested there.
+
+The cache is built through the one shared
 `tairix_icon::artwork_cache` constructor with the app's real seat, frame
 size, live pressure gauge, and audit sink, so its budget is the shared
 desktop policy rather than numbers picked here. The app parks on a

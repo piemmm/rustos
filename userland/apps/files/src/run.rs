@@ -46,9 +46,11 @@
 //!   decoded by a capability-empty worker this binary re-enters itself as
 //!   — never in this process — and a missing, over-long, or disbelieved
 //!   asset falls back to the built-in glyph rather than a blank tile. The
-//!   same wait-set carries a memory-pressure member, so the retained
-//!   pixels are trimmed when the machine's band deepens and released when
-//!   the app ends.
+//!   decode happens between turns of the event loop, never inside a paint
+//!   ([`crate::icons`]), so a folder of picture-bearing bundles neither
+//!   freezes the first frame nor stalls a scroll. The same wait-set carries
+//!   a memory-pressure member, so the retained pixels are trimmed when the
+//!   machine's band changes and released when the app ends.
 //!
 //! Keyboard navigation drives the browser (`Down`/`Up` select, `Enter`
 //! activates the selection — it descends into a directory or launches a
@@ -84,6 +86,7 @@ extern crate alloc;
 pub mod appbar;
 pub mod command;
 pub mod gesture;
+pub mod icons;
 pub mod listing;
 pub mod location;
 pub mod operation;
@@ -140,10 +143,7 @@ mod program {
     use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_icon::{
-        artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
-        InlineArtwork, MAX_ARTWORK_BYTES,
-    };
+    use tairix_icon::{artwork_cache, ArtworkRasteriser, ArtworkReader, MAX_ARTWORK_BYTES};
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
@@ -448,7 +448,7 @@ mod program {
         win: &mut OpenWindow,
         client: &mut WindowClient<RtWindowTransport>,
         theme: &Theme,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         scale: Scale,
         repaint: Repaint,
         damage: &Region,
@@ -505,7 +505,7 @@ mod program {
         win: &mut OpenWindow,
         client: &mut WindowClient<RtWindowTransport>,
         theme: &Theme,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         scale: Scale,
     ) -> Result<(), Errno> {
         present_window(
@@ -632,7 +632,7 @@ mod program {
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         event_endpoint: u64,
         role: Role,
         event: &WindowEvent,
@@ -707,7 +707,7 @@ mod program {
         desktop: &mut Desktop,
         places: &mut Places,
         theme: &Theme,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         launcher: &RefCell<Launcher>,
         event_endpoint: u64,
         role: Role,
@@ -846,7 +846,7 @@ mod program {
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         event_endpoint: u64,
         location: Option<alloc::vec::Vec<String>>,
     ) {
@@ -1239,83 +1239,47 @@ mod program {
         }
     }
 
-    /// The grid's icon-artwork pipeline: the reclaim-governed decode cache and
-    /// the resolver it produces a tile's artwork through.
+    /// The grid's icon-artwork pipeline over this app's live seams.
     ///
-    /// The resolver is the inline one — the read and the sandbox round trip
-    /// happen on this app's own task. That is the right answer here and not the
-    /// desktop's: a file manager decides how much of its grid it presents, and
-    /// a worker thread and its stack per app window would cost more than the
-    /// pass it removes. The desktop session, which draws every application's
-    /// icon on behalf of every application, hands its decodes to a thread
-    /// instead (`plans/FIX-DESKTOP.md` DESK-8).
+    /// The policy — the reclaim-governed decode cache, the deferred-decode
+    /// desk a paint resolves through, and the one decode per loop turn the
+    /// pump runs — is the host-tested [`crate::icons::IconPipeline`]. This
+    /// names the reader and rasteriser it runs over.
+    type Icons = crate::icons::IconPipeline<VfsArtworkReader, SandboxRasteriser>;
+
+    /// Build the grid's pipeline for a window whose frame is `frame_bytes`
+    /// long, so the artwork it may retain scales with the surface it draws on.
     ///
     /// The cache is built through the one shared constructor with this app's
     /// real seat, frame size, pressure gauge, and audit sink, so it is
     /// classified and budgeted by the same desktop policy the session's caches
-    /// obey rather than by numbers picked here. It is trimmed when the machine
-    /// reports a deeper pressure band and torn down when the window closes, so
-    /// one user's decoded artwork never outlives their session in reusable
-    /// heap.
-    struct IconPipeline {
-        /// The retained decode outcomes, keyed by asset path and pixel side.
-        cache: ArtworkCache,
-        /// Where an asset's bytes are read and turned into pixels.
-        resolver: InlineArtwork<VfsArtworkReader, SandboxRasteriser>,
-    }
-
-    impl IconPipeline {
-        /// Build the pipeline for a window whose frame is `frame_bytes` long,
-        /// so the artwork it may retain scales with the surface it draws on.
-        fn new(frame_bytes: usize) -> Self {
-            // The reclaim bookkeeping's audit sink. The shared constructor
-            // takes a `'static` borrow, and the runtime sink is a unit value
-            // that owns nothing.
-            static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
-            let cache = artwork_cache(
-                "files.icon-artwork",
-                SEAT_PRIMARY,
-                frame_bytes,
-                tairix_rt::pressure::gauge(),
-                &LOG_SINK,
-            );
-            // Decoded artwork is memory only this process can see, so the app
-            // says what it holds; nothing outside it can sample the counters.
-            // A cache declared unclassifiable has no ledger and holds nothing,
-            // so there is simply nothing to report.
-            if let Some(ledger) = cache.ledger() {
-                tairix_rt::cachereport::register(ledger);
-            }
-            Self {
-                cache,
-                resolver: InlineArtwork::new(
-                    VfsArtworkReader,
-                    SandboxRasteriser {
-                        sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-                    },
-                ),
-            }
+    /// obey rather than by numbers picked here.
+    fn open_icons(frame_bytes: usize) -> Icons {
+        // The reclaim bookkeeping's audit sink. The shared constructor takes a
+        // `'static` borrow, and the runtime sink is a unit value that owns
+        // nothing.
+        static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+        let cache = artwork_cache(
+            "files.icon-artwork",
+            SEAT_PRIMARY,
+            frame_bytes,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+        );
+        // Decoded artwork is memory only this process can see, so the app says
+        // what it holds; nothing outside it can sample the counters. A cache
+        // declared unclassifiable has no ledger and holds nothing, so there is
+        // simply nothing to report.
+        if let Some(ledger) = cache.ledger() {
+            tairix_rt::cachereport::register(ledger);
         }
-
-        /// The lookup a render is handed: the cache bound to its resolver.
-        fn source(&mut self) -> IconArtworkSource<'_> {
-            IconArtworkSource::new(&mut self.cache, &mut self.resolver)
-        }
-    }
-
-    impl Drop for IconPipeline {
-        /// Release every retained decode, overwriting the artwork first, and
-        /// withdraw the row a cache monitor was showing for it.
-        ///
-        /// The window closing and every fail-loud exit alike end the
-        /// pipeline's scope, so the pixels are given back on *every* way out of
-        /// the app rather than on the ones a future edit remembers to spell —
-        /// and the monitor stops charging this app for memory it no longer
-        /// holds at the same moment, from the same one place.
-        fn drop(&mut self) {
-            self.cache.teardown();
-            tairix_rt::cachereport::withdraw();
-        }
+        Icons::new(
+            cache,
+            VfsArtworkReader,
+            SandboxRasteriser {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+            },
+        )
     }
 
     /// The production [`EventSource`]: drain the app's own event
@@ -1343,72 +1307,68 @@ mod program {
         launcher: &'a RefCell<Launcher>,
         /// The grid's artwork pipeline, trimmed on a [`PRESSURE_TOKEN`] wake,
         /// shared with the present path that draws through it.
-        icons: &'a RefCell<IconPipeline>,
+        icons: &'a RefCell<Icons>,
     }
 
     /// Whether a received mailbox frame is a genuine event from the desktop
     /// session: exactly one [`WindowEvent`] wide and from the kernel-attested
     /// `server` origin. A short frame or a foreign sender is dropped — the
     /// mailbox is open to any capable sender, so the attested origin is the
-    /// authentication (fail closed). The one definition the blocking
-    /// [`RtEventSource::next`] wait and the non-blocking
-    /// [`poll_operation_event`] share, so they can never diverge.
+    /// authentication (fail closed).
     fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
         len == WindowEvent::WIRE_LEN
             && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
     }
 
     impl EventSource for RtEventSource<'_> {
-        fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
                 match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) => {
-                        if accept_frame(len, &sender, self.server) {
-                            return Ok(());
-                        }
-                    }
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
-                        // Nothing queued: park until the session's next
-                        // delivery — or a launched bundle's exit — wakes the
-                        // wait-set, never a spin. A cache-report change the
-                        // rate limiter is holding back only ever *tightens*
-                        // the park to the moment it may be sent; with nothing
-                        // pending the park stays indefinite.
-                        let mut token = 0u64;
-                        let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
-                        let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
-                        if waited != 0 {
-                            if Errno::from_syscall(waited) != Errno::TimedOut {
-                                return Err(Errno::NotFound);
-                            }
-                            // No member woke, so `token` names the *previous*
-                            // wake's source and acting on it would reap or
-                            // trim for nothing. The held-back report is the
-                            // only bounded wait here: send it and park again.
-                            tairix_rt::cachereport::publish_if_due();
-                            continue;
-                        }
-                        // A child-exit wake reaps the exited bundle(s) in
-                        // place before re-parking, so a launched app is never
-                        // left a zombie and the ready child member cannot spin
-                        // the park (it is drained the instant it fires).
-                        if token == CHILD_TOKEN {
-                            self.launcher.borrow_mut().reap();
-                        } else if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
-                            // The machine's band moved: give back whatever the
-                            // new band says the decoded artwork may no longer
-                            // keep, here at the wake rather than at the next
-                            // user input. A band that did not really move costs
-                            // one read and no eviction work. The glyph cache
-                            // this window drew through gives back the same way.
-                            let _ = self.icons.borrow_mut().cache.trim();
-                            tairix_font::trim_glyph_cache();
-                        }
-                    }
+                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
+                    Ok(_) => {}
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
                     Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
+        }
+
+        fn park(&mut self) -> Result<(), Errno> {
+            // Park until the session's next delivery — or a launched bundle's
+            // exit — wakes the wait-set, never a spin. A cache-report change
+            // the rate limiter is holding back only ever *tightens* the park
+            // to the moment it may be sent; with nothing pending the park
+            // stays indefinite.
+            let mut token = 0u64;
+            let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
+            let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
+            if waited != 0 {
+                if Errno::from_syscall(waited) != Errno::TimedOut {
+                    return Err(Errno::NotFound);
+                }
+                // No member woke, so `token` names the *previous* wake's
+                // source and acting on it would reap or trim for nothing. The
+                // held-back report is the only bounded wait here.
+                tairix_rt::cachereport::publish_if_due();
+                return Ok(());
+            }
+            // A child-exit wake reaps the exited bundle(s) in place, so a
+            // launched app is never left a zombie and the ready child member
+            // cannot spin the park (it is drained the instant it fires).
+            if token == CHILD_TOKEN {
+                self.launcher.borrow_mut().reap();
+            } else if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+                // The machine's band moved: give back whatever the new band
+                // says the decoded artwork may no longer keep, here at the
+                // wake rather than at the next user input. A band that did not
+                // really move costs one read and no eviction work. The pixels
+                // the pump is holding are offered again, since the band that
+                // refused them has changed. The glyph cache this window drew
+                // through gives back the same way.
+                self.icons.borrow_mut().trim();
+                tairix_font::trim_glyph_cache();
+            }
+            Ok(())
         }
     }
 
@@ -1456,7 +1416,7 @@ mod program {
     /// `None` unless a confirmed delete or a paste is in progress. It owns the
     /// window while it runs — no navigation happens behind it — and the event
     /// loop advances it a bounded slice at a time ([`advance_operation`]),
-    /// repainting the progress panel and polling (non-blocking) for a mid-run
+    /// repainting the progress panel and draining (non-blocking) a mid-run
     /// cancel, so a large recursive removal or copy never freezes the window
     /// and never busy-spins. A latched cancel stops the job at the next step
     /// boundary — between nodes, or between copy chunks, never mid-node.
@@ -1624,7 +1584,7 @@ mod program {
         places: &Places,
         theme: &Theme,
         target: &mut FrameTarget<'_, T>,
-        icons: &RefCell<IconPipeline>,
+        icons: &RefCell<Icons>,
         scale: Scale,
     ) -> Result<(), Errno>
     where
@@ -2703,30 +2663,6 @@ mod program {
     fn report_trash_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
         let _ = writeln!(Stderr, "files: could not move {name} to Trash: {reason}");
-    }
-
-    /// Poll (non-blocking) the app's event mailbox for one genuine session
-    /// event while a long operation runs, without parking on the wait-set.
-    ///
-    /// Returns `Ok(Some(event))` for an accepted event, `Ok(None)` when the
-    /// mailbox is empty or the frame is dropped (foreign sender, short, or
-    /// malformed), and `Err` only when the channel itself fails. It shares
-    /// [`accept_frame`] with the blocking [`RtEventSource::next`], so the two
-    /// authenticate a sender identically.
-    fn poll_operation_event(endpoint: u64, server: ProcId) -> Result<Option<WindowEvent>, Errno> {
-        let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        let mut sender = [0u8; ORIGIN_WIRE_LEN];
-        match tairix_rt::ipc_recv(endpoint, &mut frame, &mut sender) {
-            Ok(len) => {
-                if accept_frame(len, &sender, server) {
-                    Ok(WindowEvent::from_bytes(&frame).ok())
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => Ok(None),
-            Err(err) => Err(Errno::from_syscall(err)),
-        }
     }
 
     /// Read the children of the directory at `path`: each child's leaf name
@@ -4798,20 +4734,23 @@ mod program {
         // all it has until the user asks for a window.
         declare_app_bar(&mut client, event_endpoint, start.role, &places);
 
-        // --- The grid's icon artwork: the reclaim-governed decode cache and
-        // the read/rasterise seams it resolves through, budgeted from one
-        // window's frame size and shared by every window this process opens —
-        // one decode serves them all. Shared, too, between the present path
-        // (which draws through it) and the parked event source (which trims it
-        // when the machine reports a deeper memory-pressure band); dropping it
+        // --- The grid's icon artwork: the decode cache, the desk a paint
+        // resolves through, and the read/rasterise seams the pump runs one
+        // decode at a time over — budgeted from one window's frame size and
+        // shared by every window this process opens, so one decode serves them
+        // all. Shared, too, between the present path (which draws through it),
+        // the parked event source (which trims it when the machine reports a
+        // different memory-pressure band), and the loop's pump; dropping it
         // releases the retained pixels.
+        // The cache-report rows go with this process on every way out.
         // `bind_event_mailbox` already primed the gauge with the band in
         // force now (`tairix_procinfo::pressure::watch`), so the cache never
         // runs on the fail-closed unknown state before the first draw.
+        let _cache_report = tairix_rt::cachereport::ReportGuard;
         let icons = {
             let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
             let nominal = mode_for(w, h);
-            RefCell::new(IconPipeline::new(
+            RefCell::new(open_icons(
                 (nominal.stride_bytes as usize) * (nominal.height_px as usize),
             ))
         };
@@ -4848,7 +4787,13 @@ mod program {
         // agree on the same in-flight set.
         let launcher = RefCell::new(Launcher::new());
 
-        // --- The event loop: park, apply, repaint. A dead channel ends
+        // Whether an icon decode has landed and is waiting to be drawn. The
+        // batch is drawn when the desk runs dry rather than after every icon,
+        // so a folder's tiles cost one frame instead of one each.
+        let mut artwork_landed = false;
+
+        // --- The event loop: serve input, run one icon decode, repaint, and
+        // park only when there is nothing of either left. A dead channel ends
         // the app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
             endpoint: event_endpoint,
@@ -4868,10 +4813,10 @@ mod program {
             tairix_rt::cachereport::publish_if_due();
             // A running long operation (a recursive delete, or a copy/move
             // paste) owns its own window: drive it a bounded slice at a time,
-            // repaint the progress, and poll (non-blocking) for a mid-run
+            // repaint the progress, and drain (non-blocking) a mid-run
             // cancel or a close — never parking while there is genuine work to
             // do, and returning to the parked wait the instant the operation
-            // finishes. Another window carries on: the polled event is routed
+            // finishes. Another window carries on: the drained event is routed
             // to whichever window it names, so only the operating window is
             // modal.
             if let Some(busy) = windows
@@ -4922,7 +4867,7 @@ mod program {
                 // operation's; one naming another window is that window's and
                 // is applied as usual, so a long walk in one window never
                 // freezes the rest.
-                match poll_operation_event(event_endpoint, server) {
+                match events.try_wait(&mut client) {
                     Ok(Some(event)) => {
                         // A desktop change during a long operation is
                         // adopted here too: this loop re-presents the
@@ -4980,19 +4925,66 @@ mod program {
                             return code;
                         }
                     }
-                    Ok(None) => {}
+                    // Nothing queued, or a malformed frame from the
+                    // authenticated session: refused, and the operation
+                    // carries on (never guessed at).
+                    Ok(None) | Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => {
+                    }
                     Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
                 }
                 continue;
             }
 
-            let event = match events.wait(&mut client) {
+            // Queued input first, then one recorded icon decode, and a park
+            // only when neither has anything left. Serving input ahead of the
+            // decode is what keeps a key or a click waiting at most one
+            // decode, rather than the whole grid's worth the paint used to
+            // perform inside itself.
+            let delivered = match events.try_wait(&mut client) {
+                Ok(Some(event)) => Ok(event),
+                Ok(None) => {
+                    let ran = {
+                        let mut pipeline = icons.borrow_mut();
+                        let ran = pipeline.pump();
+                        artwork_landed |= pipeline.take_landed();
+                        ran
+                    };
+                    if ran {
+                        continue;
+                    }
+                    // The desk is dry, so the batch that landed is drawn now:
+                    // one whole-window pass for the whole batch, not one per
+                    // icon, and the grid's tiles appear together — a present
+                    // is a round trip through the compositor, which is far
+                    // dearer than the decode that produced one tile.
+                    if core::mem::take(&mut artwork_landed) {
+                        for win in &mut windows {
+                            if present_whole(win, &mut client, theme, &icons, desktop.scale())
+                                .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        continue;
+                    }
+                    events.wait(&mut client)
+                }
+                Err(err) => Err(err),
+            };
+            let event = match delivered {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).
                 Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
+
+            // The app is acting on something that is not the pump's own
+            // repaint, so what the grid draws may have changed: a key, a
+            // click, a re-list. Open a fresh artwork round, which is what
+            // stops a decode the cache evicted from being answered "not yet"
+            // for ever.
+            icons.borrow_mut().begin_round();
 
             // The desktop belongs to the seat, not to one window, so a change
             // is adopted once and every window is repainted in it.

@@ -417,6 +417,205 @@ fn a_refused_thumbnail_stays_refused_at_every_side() {
         .is_none());
 }
 
+/// The on-screen candidates, by index, for the gallery as it currently sits.
+///
+/// Read from the grid the painter itself lays the tiles out with, so a test
+/// asserting "visible first" cannot drift from what is actually drawn.
+fn on_screen(chooser: &Chooser, style: Style<'_>) -> Vec<usize> {
+    let layout = chooser.layout(style);
+    let range = layout
+        .grid(chooser.visible().len())
+        .visible_range(chooser.scroll_offset());
+    chooser.visible()[range].to_vec()
+}
+
+/// Those of `indices` that need a rendered thumbnail. The "no wallpaper" entry
+/// paints from the backdrop colour and is never rendered, so counting it would
+/// make a test ask for one thumbnail more than the set holds.
+fn pictures_among(chooser: &Chooser, indices: &[usize]) -> Vec<usize> {
+    indices
+        .iter()
+        .copied()
+        .filter(|index| {
+            matches!(
+                chooser.candidates()[*index].choice,
+                WallpaperChoice::Image(_)
+            )
+        })
+        .collect()
+}
+
+/// The chooser froze until it had read and decoded **every** master, because
+/// the render order was the catalog's own and ignored both the scroll offset
+/// and the category filter. With 4K masters that is tens of megabytes before
+/// the first visible tile has a picture.
+///
+/// The scheduler must serve what is on screen first, and answer `None` for the
+/// visible set once it is complete rather than reaching past it.
+#[test]
+fn a_scrolled_gallery_renders_what_is_on_screen_before_anything_else() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+
+    // Scroll well past the first row, so index order and screen order differ.
+    for _ in 0..3 {
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+            style,
+            &mut damage::sink(),
+        );
+    }
+    assert!(chooser.scroll_offset() > 0, "the gallery scrolled");
+    let shown = on_screen(&chooser, style);
+    let wanted = pictures_among(&chooser, &shown);
+    assert!(!wanted.is_empty(), "the window shows tiles to render");
+    assert!(
+        wanted.iter().any(|index| *index > wanted.len()),
+        "the visible set must not be the catalog's leading run, or the \
+         regression would pass on index order alone"
+    );
+
+    // Every request until the visible set is complete names a visible tile.
+    let mut served = Vec::new();
+    while served.len() < wanted.len() {
+        let request = chooser
+            .next_thumbnail(style)
+            .expect("a visible tile still needs a thumbnail");
+        assert!(
+            shown.contains(&request.index),
+            "an off-screen candidate was rendered before the visible ones"
+        );
+        let pixels = Surface::new(request.side, request.side).expect("a test surface");
+        chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
+        served.push(request.index);
+    }
+    served.sort_unstable();
+    let mut expected = wanted.clone();
+    expected.sort_unstable();
+    assert_eq!(served, expected, "the visible set is served exactly once");
+
+    // Only now is the rest of the gallery filled in behind it.
+    let behind = chooser
+        .next_thumbnail(style)
+        .expect("the off-screen candidates are still wanted");
+    assert!(!shown.contains(&behind.index));
+}
+
+/// A category filter narrows the scheduler exactly as it narrows the painter:
+/// a candidate the rail is hiding is never rendered ahead of one it shows.
+#[test]
+fn a_filtered_gallery_never_renders_a_hidden_candidate_first() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = categorised_chooser();
+
+    // Rail entry 2 is `Nature`, whose images sit *after* `Space`'s in the
+    // catalog — so a scheduler walking index order would reach a hidden
+    // candidate first, and this assertion means something.
+    let nature = rail_rect(&chooser, 2, style);
+    assert_eq!(
+        click(&mut chooser, centre(nature), style),
+        ChooserAction::Changed
+    );
+    assert_eq!(chooser.active_category(), Some("Nature"));
+    let shown = chooser.visible().to_vec();
+    assert!(
+        shown.len() < chooser.candidates().len(),
+        "the filter is hiding candidates"
+    );
+    let wanted = pictures_among(&chooser, &shown);
+    assert!(!wanted.is_empty(), "the filter left pictures to render");
+    assert!(
+        wanted.iter().any(|index| *index > wanted.len()),
+        "the shown set must not be the catalog's leading run"
+    );
+
+    for _ in 0..wanted.len() {
+        let request = chooser
+            .next_thumbnail(style)
+            .expect("a shown tile still needs a thumbnail");
+        assert!(
+            shown.contains(&request.index),
+            "a hidden candidate was rendered before a shown one"
+        );
+        let pixels = Surface::new(request.side, request.side).expect("a test surface");
+        chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
+    }
+}
+
+/// A tile-side change — a window resize, or a change of UI scale — used to
+/// re-render **every** master from its 4K source, repeating the whole pass. It
+/// must re-render what is on screen and leave the rest to be served as it is
+/// scrolled to.
+///
+/// The stale state is spelled directly, as thumbnails held at a smaller side
+/// than the tile now wants: that is exactly what a scale change leaves behind,
+/// and it leaves the geometry alone so the visible set is the one the painter
+/// would use.
+#[test]
+fn a_tile_side_change_re_renders_the_visible_tiles_first() {
+    let registry = ThemeRegistry::with_builtins();
+    let style = style_for(registry.active());
+    let mut chooser = Chooser::new(catalog(24), &settings_without_a_wallpaper());
+    chooser.relayout(MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
+
+    // Fill the whole gallery at the side the tiles want, so nothing is
+    // outstanding.
+    while let Some(request) = chooser.next_thumbnail(style) {
+        let pixels = Surface::new(request.side, request.side).expect("a test surface");
+        chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
+    }
+
+    // Scroll off the first row, so index order and screen order differ.
+    for _ in 0..3 {
+        let _ = chooser.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 3 },
+            style,
+            &mut damage::sink(),
+        );
+    }
+    assert!(chooser.scroll_offset() > 0, "the gallery scrolled");
+
+    // Then make every held thumbnail the wrong side, installed by index rather
+    // than through the scheduler that is the thing under test.
+    let (width, height) = chooser.layout(style).tile_size();
+    let stale_side =
+        IconTile::icon_side(Rect::new(0, 0, width, height), style.scale(), style.theme()) / 2;
+    assert!(stale_side > 0, "a stale thumbnail still has pixels");
+    for index in chooser.visible().to_vec() {
+        if matches!(chooser.candidates()[index].thumbnail, Thumbnail::Ready(_)) {
+            let undersized = Surface::new(stale_side, stale_side).expect("a test surface");
+            chooser.set_thumbnail(index, undersized, style, &mut damage::sink());
+        }
+    }
+
+    let shown = on_screen(&chooser, style);
+    let wanted = pictures_among(&chooser, &shown);
+    assert!(!wanted.is_empty(), "the window shows tiles to re-render");
+    assert!(
+        shown.len() < chooser.visible().len(),
+        "the assertion is only meaningful while some tiles are off screen"
+    );
+    assert!(
+        wanted.iter().any(|index| *index > wanted.len()),
+        "the on-screen set must not be the catalog's leading run"
+    );
+
+    for _ in 0..wanted.len() {
+        let request = chooser
+            .next_thumbnail(style)
+            .expect("a visible tile is stale at the wanted side");
+        assert!(
+            shown.contains(&request.index),
+            "an off-screen tile was re-rendered before a visible one"
+        );
+        let pixels = Surface::new(request.side, request.side).expect("a test surface");
+        chooser.set_thumbnail(request.index, pixels, style, &mut damage::sink());
+    }
+}
+
 #[test]
 fn clicking_a_tile_selects_it_and_moves_the_keyboard_there_too() {
     let registry = ThemeRegistry::with_builtins();

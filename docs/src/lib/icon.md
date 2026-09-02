@@ -170,22 +170,41 @@ cache reports the refusal to the resolver that produced it
 (`ArtworkResolver::declined`) and a deferring resolver holds that key back until
 the band moves.
 
-## Which thread does the decode
+## Who does the decode, and when
 
-A read plus a sandbox round trip is far too much to spend inside a
-compositor's paint, so `ArtworkResolver` is the seam between *deciding what a
-draw needs* and *producing it*:
+A read plus a sandbox round trip is far too much to spend inside a paint that
+has to stay responsive, so `ArtworkResolver` is the seam between *deciding what
+a draw needs* and *producing it*:
 
 - `InlineArtwork::new(reader, rasteriser)` reads and decodes on the calling
-  thread. It is the whole of what a program without a worker thread needs, and
+  thread. It is the whole of what a program with nothing to defer to needs, and
   the path a process the kernel granted no thread falls back to.
-- A caller with a worker thread implements the trait over its own hand-off and
-  answers `Resolved::Pending` for a key it has just queued (the desktop
-  session's `ArtworkDesk` is the worked example). Nothing is retained, the draw
-  falls to the tier below — for the last tier, the built-in glyph — and the
-  same lookup serves the artwork once the pixels land.
-- Both produce the decode through `render_artwork`, so which thread ran it
-  cannot change what it produced.
+- `ArtworkDesk` is the deferring resolver: it answers `Resolved::Pending` for a
+  key it has just recorded, and `Resolved::Done` once a producer has delivered
+  it. Nothing is retained meanwhile, the draw falls to the tier below — for the
+  last tier, the built-in glyph — and the same lookup serves the artwork once
+  the pixels land.
+- Both produce the decode through `render_artwork`, so where it ran cannot
+  change what it produced.
+
+The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
+Two embedders drive it over the same rules: the desktop session parks a worker
+thread on it behind the runtime's futex mutex and is woken back through its
+wait-set, and the file manager pumps one job per turn of its own event loop
+(`plans/FIX-DESKTOP.md` DESK-8, `plans/NEW-FILEMANAGER.md`).
+
+### Rounds
+
+The decode cache is budgeted, so it can be asked to hold more than it will.
+Without a rule, a decode the cache declined to retain would be asked for again
+by the very repaint its landing drove, decoded again, and declined again — for
+ever. A **round** forecloses that: a key answered once is not decoded again
+until the embedder next acts (`ArtworkDesk::begin_round`, driven from any wake
+that is not the embedder's own landing repaint). Work in flight and answers not
+yet collected survive the boundary, so no decode is run twice for want of
+somewhere to keep it; a *declined* key survives it too, because a round
+boundary is not what makes a refused answer retainable —
+`ArtworkDesk::retry_declined` is, on the band's own wake.
 
 A pending tier **stops** the walk rather than falling through, because whether
 a later tier is reached at all depends on what this one turns out to be. A

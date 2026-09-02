@@ -124,7 +124,7 @@ mod program {
         load_pinboard as read_pinboard_store, maybe_send_seat_report, open_tray, parse,
         persist_pinboard, reap_launched, relay_power, resolve_window_identities,
         serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
-        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkDesk, ArtworkFileReader,
+        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkFileReader,
         ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
         DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
         ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
@@ -142,7 +142,7 @@ mod program {
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_icon::{ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
+    use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
@@ -1156,18 +1156,6 @@ mod program {
         named
     }
 
-    /// Withdraws this process's reported cache rows on every way out of
-    /// [`session`] once the desktop's caches are registered, so the
-    /// system's cache monitor never keeps showing memory the ended session
-    /// no longer holds.
-    struct CacheReportGuard;
-
-    impl Drop for CacheReportGuard {
-        fn drop(&mut self) {
-            tairix_rt::cachereport::withdraw();
-        }
-    }
-
     /// Stops the session's worker threads on every way out of [`session`], so
     /// none is left reading a directory or decoding a picture for a desktop that
     /// has ended.
@@ -1511,7 +1499,7 @@ mod program {
         // every way out — a bring-up refusal below or the serve loop's
         // fail-loud exit — has to take them back out of the monitor's
         // registry; a dropped guard does that once, unconditionally.
-        let _cache_report = CacheReportGuard;
+        let _cache_report = tairix_rt::cachereport::ReportGuard;
         // The decorated windows' furniture and the backdrop-blurred windows'
         // frosted backdrops are the output's own caches, so they are built
         // here from the same seat, output size, gauge, and sink and handed to

@@ -490,8 +490,32 @@ behind a resting tile, and `render`'s grid tile sets its kind from the registry
 seam: `render`'s trailing `&mut dyn tairix_icon::IconArtwork` is asked for each
 tile's kind at exactly the side `IconTile::icon_side` reserves, and the tile
 blits what it returns or draws the built-in glyph, so real icon artwork lands
-without a second draw path (the manager and the picker pass `NoArtwork` until
-their caches land).
+without a second draw path.
+
+**The decode is never inside the paint.** `crate::icons::IconPipeline` is the
+manager's resolution model: the shared reclaim-governed `ArtworkCache` bound to
+`tairix_icon::ArtworkDesk`, the same deferred-decode desk the desktop session
+uses (`plans/FIX-DESKTOP.md` DESK-8). A tile that misses records the decode and
+draws its built-in glyph; the event loop runs **one** recorded decode per turn
+(`IconPipeline::pump`) between servicing input, and repaints when the desk runs
+dry — one whole-window pass per batch, because a present is a compositor round
+trip and far dearer than the decode that produced one tile. A fresh round opens
+on every delivered event, which is what stops a decode the cache evicted from
+being answered "not yet" for ever, and a band change re-offers what the cache
+declined (`IconPipeline::trim`). `draw_grid` asks only for the tiles on screen,
+so the desk only ever holds the visible set and there is no second definition
+of "what is on screen". The manager is single-threaded by choice: one window's
+grid is a bounded set of tiles and its loop has nothing else to block on, so a
+thread and its stack would buy only what a turn of the loop already
+interleaves. Host-tested in `userland/apps/files/src/icons_tests.rs` (a paint
+performs no read and no sandbox round trip, the pump delivers what the paint
+recorded, a retained decode is never produced twice, every tier's refusal
+settles on the glyph, a declined decode is not re-asked until the band moves)
+— with the inline resolver's read-and-decode-in-the-paint cost pinned beside
+them so those assertions cannot go vacuous.
+
+The picker passes `NoArtwork`: it draws from built-in glyphs until it is given
+a cache of its own.
 
 Host-tested: `lib/icon` (the new glyphs draw, `index`↔`ICON_KINDS` round-trip,
 `for_asset` mappings, per-kind SVG load/fallback over the full set),

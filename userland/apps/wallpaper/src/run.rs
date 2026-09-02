@@ -154,41 +154,39 @@ mod program {
         server: ProcId,
     }
 
+    /// Whether a received mailbox frame is a genuine event from the desktop
+    /// session: exactly one [`WindowEvent`] wide and from the kernel-attested
+    /// `server` origin.
+    fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
+        len == WindowEvent::WIRE_LEN
+            && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
+    }
+
     impl EventSource for RtEventSource {
-        fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
                 match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) => {
-                        // A short frame or a foreign sender is dropped,
-                        // never delivered: the mailbox is open to any
-                        // capable sender, so the kernel-attested origin is
-                        // the authentication.
-                        if len != WindowEvent::WIRE_LEN {
-                            continue;
-                        }
-                        let Ok(origin) = Origin::from_bytes(&sender) else {
-                            continue;
-                        };
-                        if origin.proc_id() != self.server {
-                            continue;
-                        }
-                        return Ok(());
-                    }
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
-                        // Nothing queued: park until the session's next
-                        // delivery wakes the wait-set — never a spin.
-                        let mut token = 0u64;
-                        if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                            return Err(Errno::NotFound);
-                        }
-                        if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
-                            tairix_font::trim_glyph_cache();
-                        }
-                    }
+                    // A short frame or a foreign sender is dropped, never
+                    // delivered: the mailbox is open to any capable sender, so
+                    // the kernel-attested origin is the authentication.
+                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
+                    Ok(_) => {}
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
                     Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
+        }
+
+        fn park(&mut self) -> Result<(), Errno> {
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
+                return Err(Errno::NotFound);
+            }
+            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+                tairix_font::trim_glyph_cache();
+            }
+            Ok(())
         }
     }
 
@@ -789,35 +787,49 @@ mod program {
         // render and replaced by the seam if it ever fails.
         let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
 
-        // --- The event loop: fill in previews while there is work, else
-        // park, apply, repaint. A dead channel ends the app fail-loud; a
-        // clean close ends it at zero.
+        // --- The event loop: serve input, render one outstanding picture,
+        // repaint, and park only when there is nothing of either left. A dead
+        // channel ends the app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
             endpoint: event_endpoint,
             set,
             server,
         });
         loop {
-            // Outstanding preview work is done before parking, so the grid
-            // fills in as fast as the worker can render and the loop never
-            // waits on work it already holds.
+            // Queued input first, then one outstanding render, and a park only
+            // when neither has anything left. Serving input ahead of the
+            // render is what keeps the window live while a store of 4K masters
+            // fills in: a click or a key waits at most one picture, never the
+            // whole gallery's worth. Nothing here spins — an idle chooser with
+            // every visible tile rendered parks on its wait-set.
             let mut damage = tairix_controls::damage::sink();
-            if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage) {
-                // A delivered preview or thumbnail redraws exactly the box it
-                // fills, so the grid fills in one tile at a time rather than
-                // repainting the window once per artwork.
-                let Some(damage) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
-                    continue;
-                };
-                if surface
-                    .present(&mut chooser, theme, &desktop, damage)
-                    .is_err()
-                {
-                    return fail(EXIT_CHANNEL_LOST, "present refused");
+            let delivered = match events.try_wait(&mut surface.client) {
+                Ok(Some(event)) => Ok(event),
+                Ok(None) => {
+                    if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage)
+                    {
+                        // A delivered preview or thumbnail redraws exactly the
+                        // box it fills, so the gallery fills in one tile at a
+                        // time rather than repainting the window once per
+                        // picture.
+                        let Some(damage) =
+                            present_damage(&surface.mode, Repaint::Reported, &damage)
+                        else {
+                            continue;
+                        };
+                        if surface
+                            .present(&mut chooser, theme, &desktop, damage)
+                            .is_err()
+                        {
+                            return fail(EXIT_CHANNEL_LOST, "present refused");
+                        }
+                        continue;
+                    }
+                    events.wait(&mut surface.client)
                 }
-                continue;
-            }
-            let event = match events.wait(&mut surface.client) {
+                Err(err) => Err(err),
+            };
+            let event = match delivered {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).

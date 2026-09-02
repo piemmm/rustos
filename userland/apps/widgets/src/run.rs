@@ -143,27 +143,27 @@ mod program {
     }
 
     impl EventSource for RtEventSource {
-        fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
                 match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) => {
-                        if accept_frame(len, &sender, self.server) {
-                            return Ok(());
-                        }
-                    }
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
-                        let mut token = 0u64;
-                        if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                            return Err(Errno::NotFound);
-                        }
-                        if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
-                            tairix_font::trim_glyph_cache();
-                        }
-                    }
+                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
+                    Ok(_) => {}
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
                     Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
+        }
+
+        fn park(&mut self) -> Result<(), Errno> {
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
+                return Err(Errno::NotFound);
+            }
+            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+                tairix_font::trim_glyph_cache();
+            }
+            Ok(())
         }
     }
 

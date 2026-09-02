@@ -95,7 +95,7 @@ program-library row, and the shipped class masters behind the two launcher
 buttons (`AGENTS.md` §2.2).
 
 - `set_artwork_resolver(resolver)` installs the live one. On a running desktop
-  that is the icon-decoder thread over `ArtworkDesk` (`artwork.rs`), so a read
+  that is the icon-decoder thread over `tairix_icon::ArtworkDesk`, so a read
   and a sandbox round trip never happen inside a paint; where the kernel grants
   no thread it is `InlineArtwork` over the thin `ArtworkFileReader` /
   `ArtworkSandbox` wrappers, which adapt the session's own `SessionFileReader`

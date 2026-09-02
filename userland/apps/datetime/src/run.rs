@@ -152,41 +152,39 @@ mod program {
         server: ProcId,
     }
 
+    /// Whether a received mailbox frame is a genuine event from the desktop
+    /// session: exactly one [`WindowEvent`] wide and from the kernel-attested
+    /// `server` origin.
+    fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
+        len == WindowEvent::WIRE_LEN
+            && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
+    }
+
     impl EventSource for RtEventSource {
-        fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
                 match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) => {
-                        // A short frame or a foreign sender is dropped, never
-                        // delivered: the mailbox is open to any capable
-                        // sender, so the kernel-attested origin is the
-                        // authentication.
-                        if len != WindowEvent::WIRE_LEN {
-                            continue;
-                        }
-                        let Ok(origin) = Origin::from_bytes(&sender) else {
-                            continue;
-                        };
-                        if origin.proc_id() != self.server {
-                            continue;
-                        }
-                        return Ok(());
-                    }
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
-                        // Nothing queued: park until the session's next
-                        // delivery wakes the wait-set — never a spin.
-                        let mut token = 0u64;
-                        if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                            return Err(Errno::NotFound);
-                        }
-                        if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
-                            tairix_font::trim_glyph_cache();
-                        }
-                    }
+                    // A short frame or a foreign sender is dropped, never
+                    // delivered: the mailbox is open to any capable sender, so
+                    // the kernel-attested origin is the authentication.
+                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
+                    Ok(_) => {}
+                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
                     Err(err) => return Err(Errno::from_syscall(err)),
                 }
             }
+        }
+
+        fn park(&mut self) -> Result<(), Errno> {
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
+                return Err(Errno::NotFound);
+            }
+            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+                tairix_font::trim_glyph_cache();
+            }
+            Ok(())
         }
     }
 

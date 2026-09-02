@@ -83,17 +83,6 @@ mod program {
     /// classification/defect events — is written through.
     static LOG_SINK: LogSink = LogSink;
 
-    /// Withdraws this process's cache report on every way `main` returns
-    /// once the glyph cache is registered, so the desktop's cache monitor
-    /// never keeps a row for a service that already exited.
-    struct CacheReportGuard;
-
-    impl Drop for CacheReportGuard {
-        fn drop(&mut self) {
-            tairix_rt::cachereport::withdraw();
-        }
-    }
-
     /// Record a startup or runtime outcome. Recorded through the kernel audit
     /// log so an operator can see the font service's state before the
     /// desktop.
@@ -348,7 +337,7 @@ mod program {
         // so every return path — startup failure or the serve loop's own
         // fail-loud exit — must withdraw it; a dropped guard does that once,
         // unconditionally.
-        let _cache_report_guard = CacheReportGuard;
+        let _cache_report_guard = tairix_rt::cachereport::ReportGuard;
         let mut store = RealFontStore;
         let Ok(mut service) = discover(&mut store, cache, &LOG_SINK) else {
             record(

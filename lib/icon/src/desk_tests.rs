@@ -1,9 +1,9 @@
 //! Unit tests for the artwork desk's policy.
 //!
-//! Every rule the worker and the session depend on is exercised here with no
-//! thread and no lock: the ask/answer handshake, the deduplication that stops
-//! one asset being decoded twice, the hand-out order, the round rule that stops
-//! a landing chasing its own tail, and the teardown.
+//! Every rule an embedder depends on is exercised here with no thread and no
+//! lock: the ask/answer handshake, the deduplication that stops one asset
+//! being decoded twice, the hand-out order, the round rule that stops a
+//! landing chasing its own tail, and the teardown.
 
 use super::*;
 
@@ -78,7 +78,7 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
     assert!(desk.deliver(&running, Some(picture(8))));
-    assert!(desk.take_landed(), "a delivery owes the session a repaint");
+    assert!(desk.take_landed(), "a delivery owes the embedder a repaint");
     assert!(!desk.take_landed(), "the landing is reported once");
 
     match desk.collect(&asset("/a.png"), 8) {
@@ -335,7 +335,7 @@ fn teardown_releases_a_decode_it_is_still_holding() {
     );
 }
 
-/// An answer for a job the desk is no longer holding — the session tore down
+/// An answer for a job the desk is no longer holding — the embedder tore down
 /// between the hand-out and the delivery — is dropped, and owes no wake.
 #[test]
 fn an_answer_the_desk_is_not_holding_is_dropped() {
@@ -372,4 +372,49 @@ fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_none());
+}
+
+/// The desk's own [`ArtworkResolver`] impl is the deferring resolver a
+/// single-threaded embedder hands the cache: a miss records the decode and
+/// answers `Pending`, and the answer is served once a job has been delivered.
+#[test]
+fn the_desk_answers_as_a_deferring_resolver() {
+    let mut desk = ArtworkDesk::new();
+    let key = asset("/a.png");
+    assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
+
+    let running = desk.next_job().expect("the miss recorded a decode");
+    assert_eq!(running, job("/a.png", 16));
+    assert!(desk.deliver(&running, Some(picture(16))));
+    assert!(matches!(
+        ArtworkResolver::resolve(&mut desk, &key, 16),
+        Resolved::Done(Some(_))
+    ));
+}
+
+/// `prefetch` and `declined` reach the same policy the inherent
+/// [`ArtworkDesk::want`] / [`ArtworkDesk::decline`] do, so a cache driving the
+/// desk through the trait cannot get different behaviour from one driving it
+/// directly.
+#[test]
+fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
+    let mut desk = ArtworkDesk::new();
+    let key = asset("/a.png");
+    ArtworkResolver::prefetch(&mut desk, &key, 16);
+    assert!(desk.has_work(), "a prefetch records the decode");
+
+    let running = desk.next_job().expect("a job");
+    assert!(desk.deliver(&running, Some(picture(16))));
+    assert!(matches!(
+        ArtworkResolver::resolve(&mut desk, &key, 16),
+        Resolved::Done(Some(_))
+    ));
+
+    ArtworkResolver::declined(&mut desk, &key, 16);
+    desk.begin_round();
+    assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
+    assert!(
+        !desk.has_work(),
+        "a declined key must not be re-offered by a fresh round"
+    );
 }

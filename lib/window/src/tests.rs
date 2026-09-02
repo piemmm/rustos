@@ -436,15 +436,38 @@ impl WindowTransport for Rc<RefCell<Loopback>> {
 
 /// The client-side event source popping the recorded deliveries for one
 /// endpoint (the app's own event endpoint in production).
+///
+/// Nothing here can be woken, so the park stands in for one that never
+/// returns: it refuses, which is what lets a test assert that the drain was
+/// tried first and that a park happened at all.
 struct QueueSource {
     queue: VecDeque<[u8; WindowEvent::WIRE_LEN]>,
+    /// How many times the source has been parked.
+    parked: usize,
+}
+
+impl QueueSource {
+    /// A source over `frames`, in delivery order.
+    fn new(frames: impl IntoIterator<Item = [u8; WindowEvent::WIRE_LEN]>) -> Self {
+        Self {
+            queue: frames.into_iter().collect(),
+            parked: 0,
+        }
+    }
 }
 
 impl EventSource for QueueSource {
-    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
-        let frame = self.queue.pop_front().ok_or(Errno::WouldBlock)?;
+    fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        let Some(frame) = self.queue.pop_front() else {
+            return Ok(false);
+        };
         *event = frame;
-        Ok(())
+        Ok(true)
+    }
+
+    fn park(&mut self) -> Result<(), Errno> {
+        self.parked += 1;
+        Err(Errno::WouldBlock)
     }
 }
 
@@ -722,9 +745,7 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
         width_px: 1,
         height_px: 1,
     };
-    let mut queue = VecDeque::new();
-    queue.push_back(under.to_le_bytes());
-    let mut waiter = WindowEvents::new(QueueSource { queue });
+    let mut waiter = WindowEvents::new(QueueSource::new([under.to_le_bytes()]));
     assert_eq!(waiter.wait(&mut client), Ok(under));
 
     let inner = loopback.borrow();
@@ -1403,7 +1424,7 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
         .filter(|(endpoint, _)| *endpoint == EVENTS_A)
         .map(|(_, frame)| *frame)
         .collect();
-    let mut waiter = WindowEvents::new(QueueSource { queue });
+    let mut waiter = WindowEvents::new(QueueSource::new(queue));
     assert_eq!(
         waiter.wait(&mut client),
         Ok(WindowEvent::Focus {
@@ -1424,11 +1445,79 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     assert_eq!(waiter.wait(&mut client), Err(Errno::WouldBlock));
 }
 
-/// One queued redraw request for `window`, ready for the typed wait.
-fn redraw_queue(window: u64) -> VecDeque<[u8; WindowEvent::WIRE_LEN]> {
-    let mut queue = VecDeque::new();
-    queue.push_back(WindowEvent::RedrawRequested { window_id: window }.to_le_bytes());
-    queue
+/// The defaulted `next` drains before it parks: a loop that has queued input
+/// must never be made to wait for a wake that has already been consumed.
+///
+/// The park is what a loop interleaving decode work with input has to avoid
+/// entering while input is queued, so the ordering is asserted rather than
+/// assumed.
+#[test]
+fn the_parked_wait_drains_before_it_parks() {
+    let a = 11;
+    let queued = WindowEvent::CloseRequested { window_id: a };
+    let mut source = QueueSource::new([queued.to_le_bytes()]);
+
+    let mut frame = [0u8; WindowEvent::WIRE_LEN];
+    assert_eq!(source.next(&mut frame), Ok(()));
+    assert_eq!(WindowEvent::from_bytes(&frame), Ok(queued));
+    assert_eq!(source.parked, 0, "a queued event must not cost a park");
+
+    // Nothing left: the drain reports empty and the park is entered, which is
+    // how a genuinely idle loop stops running.
+    assert_eq!(source.next(&mut frame), Err(Errno::WouldBlock));
+    assert_eq!(source.parked, 1);
+}
+
+/// `try_wait` reports an empty mailbox as `None` without parking, and hands
+/// back exactly the events `wait` would.
+#[test]
+fn the_drained_wait_answers_without_parking() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    let queued = WindowEvent::Focus {
+        window_id: window,
+        focused: true,
+    };
+    let mut waiter = WindowEvents::new(QueueSource::new([queued.to_le_bytes()]));
+    assert_eq!(waiter.try_wait(&mut client), Ok(Some(queued)));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(None),
+        "an empty mailbox is answered at once, never parked on"
+    );
+}
+
+/// The drained path answers a redraw request on the app's behalf exactly as
+/// the parked one does, so a loop that interleaves work cannot leave a window
+/// blank where a parked loop would have re-presented it.
+#[test]
+fn the_drained_wait_answers_a_redraw_request_like_the_parked_one() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    client
+        .present(window, 1, full_damage())
+        .expect("the first present");
+    assert_eq!(loopback.borrow().host.presented.len(), 1);
+
+    let mut waiter = WindowEvents::new(redraw_source(window));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(WindowEvent::RedrawRequested { window_id: window }))
+    );
+    let inner = loopback.borrow();
+    assert_eq!(inner.host.presented.len(), 2);
+    let (id, _, seen) = inner.host.presented.last().expect("the re-present");
+    assert_eq!(*id, window);
+    assert_eq!(*seen, full_damage());
+}
+
+/// A source holding one queued redraw request for `window`, ready for the
+/// typed wait.
+fn redraw_source(window: u64) -> QueueSource {
+    QueueSource::new([WindowEvent::RedrawRequested { window_id: window }.to_le_bytes()])
 }
 
 #[test]
@@ -1439,9 +1528,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
 
     // A client that has never presented has no frame to re-send: the
     // request is a no-op, not an error.
-    let mut waiter = WindowEvents::new(QueueSource {
-        queue: redraw_queue(window),
-    });
+    let mut waiter = WindowEvents::new(redraw_source(window));
     assert_eq!(
         waiter.wait(&mut client),
         Ok(WindowEvent::RedrawRequested { window_id: window })
@@ -1461,9 +1548,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
     };
     client.present(window, 1, partial).expect("present");
     assert_eq!(loopback.borrow().host.presented.len(), 1);
-    let mut waiter = WindowEvents::new(QueueSource {
-        queue: redraw_queue(window),
-    });
+    let mut waiter = WindowEvents::new(redraw_source(window));
     assert_eq!(
         waiter.wait(&mut client),
         Ok(WindowEvent::RedrawRequested { window_id: window })

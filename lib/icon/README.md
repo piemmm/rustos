@@ -85,17 +85,30 @@ over a resolution-independent design grid, so the same glyph is
 - `ArtworkResolver` is the seam between deciding what a draw needs and
   producing it, because a read plus a sandbox round trip must never happen
   inside a paint. `InlineArtwork` reads and decodes on the calling thread; a
-  caller with a worker thread implements the trait over its own hand-off and
-  answers `Resolved::Pending` until the pixels land, so the draw takes the tier
-  below (ultimately the built-in glyph) and the same lookup serves the artwork
-  afterwards. Both go through `render_artwork`, so which thread ran the decode
-  cannot change what it produced. A caller that *stores* the picture rather
-  than drawing from the cache asks `owned_artwork` and gets an
+  caller that defers answers `Resolved::Pending` until the pixels land, so the
+  draw takes the tier below (ultimately the built-in glyph) and the same lookup
+  serves the artwork afterwards. Both go through `render_artwork`, so where the
+  decode ran cannot change what it produced. A caller that *stores* the picture
+  rather than drawing from the cache asks `owned_artwork` and gets an
   `ArtworkOutcome`, which tells `Pending` (ask again) from `Refused` (do not).
   `ArtworkCache::prefetch` is the other half: a caller that knows what it is
   about to draw starts the decode then, so the frame that needs it never waits
   — the difference between a launcher opening on its applications' own icons and
   opening on glyphs it replaces one round trip at a time.
+- `desk` — `ArtworkDesk`, the deferring `ArtworkResolver`: what has been asked
+  for, what a producer is running, what has come back, and what has already
+  been answered this round. It holds no lock, thread, or syscall, so its whole
+  policy is host-tested, and it lives here beside the contract it implements
+  because two processes drive it — the desktop session from a worker thread
+  behind the runtime's futex mutex (`plans/FIX-DESKTOP.md` DESK-8), the file
+  manager from its own event loop (`plans/NEW-FILEMANAGER.md`), and
+  `userland/apps/*` may not depend on `userland/gui/*` (`AGENTS.md` §17.4).
+  A **round** (`begin_round`) stops a landing chasing its own tail: the cache
+  is budgeted, so without the rule a decode it declined to retain would be
+  asked for again by the very repaint the landing drove, for ever. Work in
+  flight, answers not yet collected, and declined keys all survive a round
+  boundary; `retry_declined` is what re-offers a refused answer, on the
+  pressure band's own wake.
 
 ## Asset model
 

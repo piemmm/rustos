@@ -805,6 +805,20 @@ disbelieved asset degrades to a glyph and never to a blank tile (`AGENTS.md`
   hundred-entry directory costs one read and one decode per *visible kind* — not
   per entry — and scrolling decodes only the kinds that just came into view.
   Nothing pre-warms an icon for an entry that is scrolled out of sight.
+- **And nothing is decoded *inside* the paint.** A tile that misses records the
+  decode on the shared deferred-decode desk (`tairix_icon::ArtworkDesk` — the
+  same policy the desktop session's worker thread drives) and draws its
+  built-in glyph; the app's own event loop drains queued input, runs **one**
+  recorded decode, and repaints when the desk runs dry. So the first frame of a
+  folder of picture-bearing bundles does not block on a sandbox round trip per
+  tile, a scroll step does not block on the newly revealed row, and a key or a
+  click waits at most one decode. The repaint is one whole-window pass per
+  batch rather than one per icon, because a present is a round trip through the
+  compositor and dearer than the decode that produced a single tile. A fresh
+  round opens on every delivered event, which is what stops a decode the cache
+  evicted from being answered "not yet" for ever. The model is
+  `userland/apps/files/src/icons.rs`, host-tested there — including the
+  assertion that a paint performs no read and no sandbox call at all.
 - **The memory is governed and given back.** The cache is built through the one
   shared `tairix_icon::artwork_cache` constructor with the app's real seat,
   frame size, live pressure gauge, and audit sink, so it is classified and

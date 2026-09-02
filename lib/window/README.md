@@ -47,7 +47,15 @@ server and every app's client can never drift apart.
   `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the
   window down. `WindowEvents` wraps the injected `EventSource`
   seam — a **parked** wait on the app's own event endpoint, never a
-  poll — and decodes each delivered `WindowEvent` fail-closed.
+  poll — and decodes each delivered `WindowEvent` fail-closed. The seam
+  states its two halves separately (`try_next`, which drains without ever
+  waiting, and `park`, the app's own wait-set park), and `next` is
+  defaulted as drain-then-park over them — so an app that interleaves work
+  of its own drains with `WindowEvents::try_wait`, serves input ahead of
+  that work, and parks only when both are exhausted, without carrying its
+  own spelling of the loop. Both paths decode and answer a redraw request
+  through one definition, so the polled path cannot drift from the parked
+  one.
   `present_damage` decides *what* a round presents from the three cases
   every such app faces (`Repaint::Nothing` / `Reported` / `Whole`), and
   `damage_in` clips a reported client-space rectangle onto the window —

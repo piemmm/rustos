@@ -1,66 +1,42 @@
-//! The desktop's icon artwork, decoded off the session's event loop
-//! (`plans/FIX-DESKTOP.md` DESK-8).
+//! The deferred-decode desk: what a draw site has asked for, what a producer
+//! is running, and what has come back (`plans/FIX-DESKTOP.md` DESK-8).
 //!
-//! Resolving one icon costs a bounded VFS read plus a round trip to the parser
-//! sandbox that decodes it. Run on the session's own task — which is where the
-//! taskbar, the launcher popup, and the desktop's icon column all draw from —
-//! it stalls the compositor, the seat drain, and every application blocked in a
-//! window call for as long as the disk and the worker take. A launcher opening
-//! on thirty applications pays that thirty times before its first pixel. So the
-//! decode runs on a worker thread instead, the draw takes the built-in glyph
-//! for the frame it is not ready in, and the session learns the pixels landed
-//! through its existing wait-set.
+//! Resolving one icon costs a bounded read plus a round trip to the parser
+//! sandbox that decodes it. Performed inside a paint, that stalls whatever the
+//! paint is on — the desktop's compositor and seat drain, or a file manager's
+//! own input — for as long as the disk and the worker take, once per icon. So
+//! the decode is *recorded* here, the draw takes the built-in glyph for the
+//! frame it is not ready in, and the pixels are collected when they land.
 //!
-//! [`ArtworkDesk`] is that arrangement's whole policy, and it holds no lock, no
-//! thread, and no syscall: what has been asked for, what a worker is producing,
-//! what has come back, and the rule that stops a landing chasing its own tail.
-//! The `Run` binary wraps it in the runtime's futex mutex, parks a worker on a
-//! condition variable over it, and writes one byte to a pipe the wait-set
-//! watches.
+//! [`ArtworkDesk`] is the whole policy and holds no lock, thread, or syscall,
+//! so every rule below is a host test rather than an argument. Two embedders
+//! drive it differently over the same rules: the desktop session parks a
+//! worker thread on it behind the runtime's futex mutex, and the file manager
+//! pumps one job per turn of its own event loop.
 //!
-//! # Asking early
-//!
-//! A decode costs around a tenth of a second, so a surface that first asks for
-//! its icons *as it paints* shows built-in glyphs until they arrive — a
-//! launcher opening on twenty applications fills in a round trip per icon
-//! after the user is already looking at it. [`ArtworkDesk::want`] is the answer:
-//! the desktop knows the whole set the moment it has the catalog naming it,
-//! which is long before the surface drawing them is shown, so the wait happens
-//! then instead of in front of the user.
-//!
-//! # Rounds, and why they exist
+//! # Rounds
 //!
 //! The decode cache is budgeted, so it can be asked to hold more than it will.
-//! Without a rule, a decode the cache declines to retain would be asked for by
-//! the repaint the landing triggered, decoded again, declined again, and the
-//! desktop would repaint itself for ever over a cache it cannot fill.
+//! Without a rule, a decode the cache declined to retain would be asked for
+//! again by the very repaint its landing drove, decoded again, and declined
+//! again — for ever. A **round** forecloses that: a key answered once is not
+//! decoded again until the embedder next acts. The embedder opens a fresh one
+//! on any wake that is not its own landing repaint, which is exactly when what
+//! is on screen can have changed.
 //!
-//! A **round** forecloses that: a key answered once is not decoded again until
-//! the desktop next acts. Everything the paints of one round ask for is decoded
-//! at most once, whatever the cache then does with it, so the work a landing
-//! can create is finite and the loop always runs dry. The session opens a fresh
-//! round on any wake that is not a worker's nudge — real input, a window call,
-//! a re-list — which is exactly when the visible icons can have changed.
-//!
-//! Work in flight and work already done both survive a round boundary: the
-//! round governs *re-asking*, never the decode itself, so no answer is ever
-//! computed twice for want of somewhere to keep it.
-//!
-//! # Nothing here waits
-//!
-//! A decode is *recorded*; the answer is *collected*. Both are plain state
-//! transitions. The party that blocks is the worker, on its condition variable,
-//! and the party that parks is the session, on its wait-set — never this.
+//! Work in flight and answers not yet collected survive a round boundary, so
+//! no decode is ever run twice for want of somewhere to keep it.
 
 use alloc::collections::{BTreeMap, VecDeque};
 
-use tairix_icon::{ArtworkKey, Resolved};
 use tairix_raster::Surface;
 use tairix_reclaim::CachedBytes;
 
+use crate::artwork::{ArtworkKey, ArtworkResolver, Resolved};
+
 /// One decode: what to resolve, and the pixel side to resolve it at.
 ///
-/// The pair is the cache's own key, so a worker produces exactly the slot the
+/// The pair is the cache's own key, so a producer yields exactly the slot the
 /// draw site missed on — a scale change asks for a different side and is a
 /// different job, never a resized copy of this one.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -73,9 +49,9 @@ pub struct ArtworkJob {
 
 /// Where one job has got to.
 enum State {
-    /// Recorded, and no worker has taken it.
+    /// Recorded, and no producer has taken it.
     Wanted,
-    /// A worker is producing it.
+    /// A producer is running it.
     Running,
     /// Produced and waiting to be collected. `None` is a refusal — an absent,
     /// over-long, or undecodable asset — which the cache retains just as it
@@ -89,26 +65,21 @@ enum State {
     Declined,
 }
 
-/// The artwork arrangement's policy: what has been asked for, what is being
-/// produced, what has come back, and what has already been answered.
+/// What has been asked for, what is being produced, what has come back, and
+/// what has already been answered this round.
 ///
-/// Deliberately free of locks, threads, and syscalls, so every rule below is a
-/// host test rather than an argument. The embedder supplies the exclusion and
-/// the blocking.
-#[derive(Default)]
+/// The embedder supplies the exclusion and the blocking; nothing here waits.
 pub struct ArtworkDesk {
     /// Every job this round knows about, indexed for an O(log n) collect —
     /// a paint asks once per icon it draws, so the lookup is on the frame path.
     slots: BTreeMap<ArtworkJob, State>,
-    /// The order [`State::Wanted`] jobs are handed out in.
-    ///
-    /// The fairness discipline: first asked, first decoded, so the icons of the
-    /// surface that asked first are the ones that appear first and a busy
-    /// surface cannot indefinitely displace a quiet one's single icon.
+    /// The order [`State::Wanted`] jobs are handed out in: first asked, first
+    /// decoded, so a busy surface cannot indefinitely displace a quiet one's
+    /// single icon.
     queue: VecDeque<ArtworkJob>,
     /// Whether anything has been delivered since the embedder last asked.
     landed: bool,
-    /// Set once the embedder is tearing down, so a parked worker leaves
+    /// Set once the embedder is tearing down, so a parked producer leaves
     /// instead of looking for work and no further decode is recorded.
     stopping: bool,
 }
@@ -116,8 +87,13 @@ pub struct ArtworkDesk {
 impl ArtworkDesk {
     /// A desk with nothing asked for and nothing answered.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            slots: BTreeMap::new(),
+            queue: VecDeque::new(),
+            landed: false,
+            stopping: false,
+        }
     }
 
     /// Answer a draw site's miss on `key` at `side`, recording the decode if
@@ -128,9 +104,8 @@ impl ArtworkDesk {
     /// [`Resolved::Pending`]: the draw takes the tier below it, which for the
     /// last tier is the built-in glyph.
     ///
-    /// A desk that is stopping records nothing. There is no worker left to
-    /// answer it, and a session on its way out draws glyphs rather than
-    /// waiting on pixels nobody will produce.
+    /// A desk that is stopping records nothing: there is no producer left to
+    /// answer it.
     pub fn collect(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
         let job = ArtworkJob {
             key: key.clone(),
@@ -159,16 +134,12 @@ impl ArtworkDesk {
     /// Record `key` at `side` as wanted, without collecting anything.
     ///
     /// The prefetch half of [`collect`](Self::collect): a surface that knows
-    /// what it is *about* to draw asks for it now, so the decode is finished
-    /// before the frame that needs it. Without it a launcher opening on twenty
-    /// applications paints twenty built-in glyphs and replaces them a round trip
-    /// per icon later, which is the whole visible cost of moving the decode off
-    /// this task.
+    /// what it is *about* to draw asks now, so the decode finishes before the
+    /// frame that needs it rather than a round trip per icon after it.
     ///
-    /// A key this desk already knows — wanted, running, done, or answered this
-    /// round — is left exactly as it is, so a prefetch can never consume an
-    /// answer a draw is about to collect, nor re-queue one this round has
-    /// already given out.
+    /// A key this desk already knows is left exactly as it is, so a prefetch
+    /// can never consume an answer a draw is about to collect, nor re-queue
+    /// one this round has already given out.
     pub fn want(&mut self, key: &ArtworkKey, side: u32) {
         if self.stopping {
             return;
@@ -184,7 +155,7 @@ impl ArtworkDesk {
         self.queue.push_back(job);
     }
 
-    /// Whether any recorded decode is waiting for a worker to take it.
+    /// Whether any recorded decode is waiting for a producer to take it.
     #[must_use]
     pub fn has_work(&self) -> bool {
         !self.stopping && !self.queue.is_empty()
@@ -198,9 +169,9 @@ impl ArtworkDesk {
         // The queue is only the hand-out *order*; the slots are the authority
         // on whether a job is still wanted. Deciding that here rather than
         // scanning the queue whenever a slot changes keeps a paint from paying
-        // for the worker's bookkeeping, and taking the next entry rather than
-        // giving up means a job that somehow lost its slot costs one decode not
-        // started, never a worker that stops taking work.
+        // for the producer's bookkeeping, and taking the next entry rather
+        // than giving up means a job that somehow lost its slot costs one
+        // decode not started, never a producer that stops taking work.
         while let Some(job) = self.queue.pop_front() {
             if let Some(state @ State::Wanted) = self.slots.get_mut(&job) {
                 *state = State::Running;
@@ -214,8 +185,8 @@ impl ArtworkDesk {
     ///
     /// Answers `false` — and keeps nothing — when the desk is no longer
     /// holding that job as in flight: it stopped, or the key was answered from
-    /// an earlier decode. The caller uses that to decide whether a wake is owed
-    /// at all.
+    /// an earlier decode. The caller uses that to decide whether a wake is
+    /// owed at all.
     pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Surface>) -> bool {
         let Some(state) = self.slots.get_mut(job) else {
             return false;
@@ -231,7 +202,7 @@ impl ArtworkDesk {
     /// Whether anything has been delivered since this was last asked, clearing
     /// the record.
     ///
-    /// The session repaints on a `true`, so the surfaces that drew a glyph for
+    /// The embedder repaints on a `true`, so the surfaces that drew a glyph for
     /// want of pixels draw the pixels — and a wake that delivered nothing costs
     /// no frame.
     pub fn take_landed(&mut self) -> bool {
@@ -242,10 +213,9 @@ impl ArtworkDesk {
     /// stops offering it until the band that refused it moves.
     ///
     /// Without this the refusal is silent and self-renewing: the round the
-    /// landing triggered asks again, the answer is refused again, and the
-    /// desktop reads and decodes every icon it draws on every repaint —
-    /// spending the disk and the parser sandbox precisely when the machine is
-    /// short of the memory that would have held the answer.
+    /// landing triggered asks again, the answer is refused again, and every
+    /// icon on screen is read and decoded on every repaint — precisely when
+    /// the machine is short of the memory that would have held the answer.
     pub fn decline(&mut self, key: &ArtworkKey, side: u32) {
         let job = ArtworkJob {
             key: key.clone(),
@@ -275,7 +245,7 @@ impl ArtworkDesk {
             .retain(|_, state| !matches!(state, State::Answered));
     }
 
-    /// Stop handing out work, so a parked worker leaves its loop.
+    /// Stop handing out work, so a parked producer leaves its loop.
     ///
     /// Every decode still held is overwritten before it is dropped, on the same
     /// terms the artwork cache wipes its own: one user's rendered pixels do not
@@ -291,13 +261,41 @@ impl ArtworkDesk {
         self.queue.clear();
     }
 
-    /// Whether the embedder has asked workers to leave.
+    /// Whether the embedder has asked producers to leave.
     #[must_use]
     pub const fn stopping(&self) -> bool {
         self.stopping
     }
 }
 
+impl Default for ArtworkDesk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The desk *is* the deferring resolver: it answers what a producer has
+/// already delivered and records everything else.
+///
+/// An embedder that owns the desk outright — a single-threaded event loop that
+/// pumps one job per turn — hands the cache a plain `&mut` to it and needs no
+/// wrapper. One that shares the desk with a worker thread implements the trait
+/// over its own mutex instead, so the notify happens inside the same critical
+/// section as the state change.
+impl ArtworkResolver for ArtworkDesk {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        self.collect(key, side)
+    }
+
+    fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+        self.want(key, side);
+    }
+
+    fn declined(&mut self, key: &ArtworkKey, side: u32) {
+        self.decline(key, side);
+    }
+}
+
 #[cfg(test)]
-#[path = "artwork_tests.rs"]
+#[path = "desk_tests.rs"]
 mod tests;

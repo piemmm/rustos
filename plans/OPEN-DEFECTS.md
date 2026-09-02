@@ -857,7 +857,15 @@ three further ordering defects the work exposed); and ARXFS scrub's metadata
 copy-repair wrote to the device with no read-only guard, so a mount held
 read-only precisely because its medium must not be touched was written anyway
 (fixed — the copy-repair is one read-only-aware rule, and reading that code
-found two more read-only writes on the same path). D65 joined them and is now fixed: ARXFS's
+found two more read-only writes on the same path).
+- **D76 — three riscv64 QEMU verticals blow their absolute ceiling only under
+  the loaded matrix (OPEN).** `autoload-input`, `netstack-autoload` and
+  `netstack-dhcp` on riscv64 leave the guest alive and parked in WFI at the
+  *absolute* ceiling, with 17×–91× headroom on a lone run. Two sub-mechanisms:
+  the keyboard driver's load step never completes, and (for the netstack pair)
+  the guest provably finishes but the harness's host-side peer observer never
+  confirms. Diagnosed, not fixed; the fix is bounded guest concurrency or a
+  real completion signal, never a ceiling bump. Detail below. D65 joined them and is now fixed: ARXFS's
 B-tree insert recursed 8 KiB of stack per tree level, overflowing a release
 kernel's 32 KiB stack — measured at 48 KiB for one write to a fragmented file,
 and 34 KiB for one to a single-leaf tree, so it was reachable without any depth
@@ -4533,3 +4541,75 @@ one for a foundational primitive, and the one CFQ's own module docs cite as
 what CFQ avoids by keying a `BTreeSet`. It is bounded only by the queue
 capacity, so the cost grows with the runnable population exactly where it
 must not.
+
+---
+
+## D76 — three riscv64 QEMU verticals blow their absolute ceiling only under the loaded matrix (OPEN)
+
+**State:** open, diagnosed, not fixed. Surfaced by a whole-project
+`cargo xtask ci` run; the tree was fingerprinted identical either side of the
+run, and the change under test (`lib/icon`'s deferred-decode desk, `lib/window`'s
+`EventSource` split, the file manager's and the chooser's loops) is in none of
+the three verticals' dependency closures.
+
+**What fails.** In the concurrent QEMU matrix, at 8/8 in-flight weight
+alongside `desktop-pressure-qemu-aarch64`:
+
+| vertical | ceiling | loaded | silent at kill | solo |
+|---|---|---|---|---|
+| `autoload-input-qemu-riscv64` | 120 s | UNFINISHED | 42.5 s | 6.9 s |
+| `netstack-autoload-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | 9.6 s |
+| `netstack-dhcp-qemu-riscv64` | 720 s | UNFINISHED | 179.5 s | 7.9 s |
+
+All three are the *absolute* runtime ceiling, not the inactivity deadline, and
+all three leave the guest alive and parked in `wait_for_interrupt` with nothing
+runnable. Solo headroom is 17×, 50× and 91× respectively — so the loaded
+degradation exceeds 50×, far beyond the ~7× D22 measured under deliberate 2×
+host oversubscription (where every run still passed). Proportional starvation
+does not explain it; something stalls.
+
+**Two distinct sub-mechanisms, from the serial transcripts.**
+
+- *`autoload-input`*: `devmgr` scans the store and accepts the `virtio_kbd`
+  candidate (`id=7030`), but no `id=7001 driver loaded` follows and
+  `sc=irq_bind` never appears. The driver never armed, so the harness's
+  readiness-gated key injection (`AUTOLOAD_INPUT_KEY_MARKER`) correctly never
+  fired and the witness was unreachable. The load step itself is what did not
+  complete.
+- *`netstack-autoload` / `netstack-dhcp`*: the **guest succeeded**. The driver
+  loaded (`id=7001`), published its channel (`id=4180`), `netstack` bound the
+  interface (`id=16009`/`id=13010`), and five inbound echo requests were served
+  with replies queued (`id=16012`). The run ends on the host-side peer
+  observer's confirmation, which never arrived within the ceiling — so the
+  unmet completion signal is on the **harness** side, not in the guest.
+
+Both sub-mechanisms are accompanied by in-guest lockup-watchdog records of
+implausible magnitude on the single vCPU — `stalled_ms=224057`, `101047`,
+`42011` — i.e. hundreds of seconds of *guest-observed* stall, which the
+watchdog measures in guest time.
+
+**What is *not* the diagnosis.** "Machine load" is not an accepted cause
+(§7) and a green solo re-run is not a fix. The solo numbers above are
+diagnostic evidence that the failure is load-dependent, nothing more.
+
+**Where the fix has to come from** (§7 names the three shapes; the first two
+are the live candidates):
+
+- *Bounded concurrency.* `qemu_job_weight` charges every uniprocessor guest
+  two units regardless of target, but a riscv64 TCG guest is markedly heavier
+  per vCPU than an x86_64-on-x86_64 one, so the `logical_cpus / 3` budget
+  admits more real host demand than it accounts for. Weighting by target, or
+  lowering the budget, is a timing change `qemu_host_budget_for`'s own docs
+  require validating on the dedicated soak host — never from one green
+  developer run.
+- *A real completion signal.* For the netstack pair the guest is provably done
+  before the kill; the peer observer's confirmation path is what misses. That
+  is a `tools/qemu` / `netpeer` defect and is fixable without touching a
+  budget.
+- The absolute ceiling is deliberately **not** to be raised: that is the
+  mitigation D22 records as exactly what let its own defect hide.
+
+**Regression cover owed with the fix** (§7): the netstack half needs a test
+that the peer observer's confirmation survives a starved host; the autoload
+half needs the driver-load step to carry its own bounded, fail-closed budget
+so a load that never completes is reported rather than waited on.

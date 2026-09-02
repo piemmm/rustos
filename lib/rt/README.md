@@ -195,9 +195,11 @@ the program folds that into its wait timeout, so exactly one bounded wait
 is armed and only while something is genuinely pending. An idle process
 arms nothing and sends nothing: its last report is still true, because a
 process that is not running is not changing what it holds. There is no
-timer and no poll loop on the path. `cachereport::withdraw()` removes the
-process's rows as it tears its caches down, so a monitor never shows
-memory nobody holds.
+timer and no poll loop on the path. `cachereport::ReportGuard`, held for the
+scope in which the caches are registered, removes the process's rows on every
+way out — a clean return, a fail-loud exit, a panic unwind — so a monitor never
+shows memory nobody holds. Every publisher holds that one guard rather than its
+own copy of the same three lines.
 
 ## Targets
 

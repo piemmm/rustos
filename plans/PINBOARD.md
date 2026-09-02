@@ -391,6 +391,20 @@ square, so it answers *which* wallpaper it is; the preview panel is where
 the chosen fit is shown. A fit change therefore re-renders the preview
 alone, never the gallery.
 
+**Visible first, and the window never blocks.** `Chooser::next_thumbnail`
+returns the nearest wanted candidate **on screen**, taken from the gallery's
+own `GridView::visible_range` — the same geometry the painter lays the tiles
+out with, so the scheduler and the painter can never disagree about what is
+visible — and reaches past it only once the visible set is complete. The
+masters are 4K, so index order meant the window showed placeholders for every
+visible tile until candidates the user cannot see had been read and decoded;
+it also meant a tile-side change (a resize or a UI-scale change, which makes
+every held thumbnail stale) repeated the whole pass. Both are now bounded by
+what is on screen, with the rest filled in behind it. The serve loop drains
+queued input *before* each render (`WindowEvents::try_wait`) and parks on its
+wait-set once the gallery is full, so a click or a key waits at most one
+picture and an idle chooser spins on nothing.
+
 **The preview is a scale model of the real screen.** The chooser asks the
 session for the seat's desktop before it opens its window
 (`WindowRequest::QueryDesktop`, read-only and ungated — it describes the

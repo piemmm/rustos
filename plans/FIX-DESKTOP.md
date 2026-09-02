@@ -652,18 +652,23 @@ Each stage is independently reviewable and must leave the whole-project
   same `WorkerWake` pipe DESK-4 built.
 - **The seam is in `lib/icon`, not the session.** `ArtworkResolver` separates
   *deciding what a draw needs* from *producing it*: `InlineArtwork` reads and
-  decodes on the calling thread (what the file manager uses, and what a session
-  the kernel granted no thread falls back to), and a deferring implementation
-  answers `Resolved::Pending` until the pixels land. Both produce the decode
-  through the one `render_artwork`, so the thread cannot change the result. A
+  decodes on the calling thread (what a session the kernel granted no thread
+  falls back to), and `ArtworkDesk` answers `Resolved::Pending` until the
+  pixels land. Both produce the decode through the one `render_artwork`, so
+  where it ran cannot change the result. A
   pending tier **stops** the tier walk rather than falling through, because
   whether a later tier is reached depends on this one's answer — so a deferred
   request costs exactly the reads a synchronous walk would, spread over as many
   answers as it has tiers.
-- **The desk** is `ArtworkDesk` (`userland/gui/session/src/artwork.rs`), the
-  same shape DESK-4 established: host-tested policy with no lock, thread, or
+- **The desk** is `tairix_icon::ArtworkDesk` (`lib/icon/src/desk.rs`), the same
+  shape DESK-4 established: host-tested policy with no lock, thread, or
   syscall; the `Run` binary adds the futex mutex, the condition variable the
-  worker parks on, and the shared wake.
+  worker parks on, and the shared wake. It lives in `lib/icon` beside the
+  `ArtworkResolver` contract it implements — and *is* that resolver — because
+  the file manager pumps the same desk from its own event loop
+  (`plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
+  `userland/gui/*`. One policy, two drive mechanisms: a worker thread here, an
+  event-loop pump there.
 - **Rounds.** The decode cache is budgeted, so it can be asked to hold more than
   it will; without a rule a decode it declined to retain would be asked for
   again by the very repaint its landing drove, for ever. Within a round a key

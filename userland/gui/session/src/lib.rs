@@ -174,7 +174,6 @@
 extern crate alloc;
 
 pub mod apps;
-pub mod artwork;
 pub mod assets;
 pub mod cli;
 pub mod clock;
@@ -227,7 +226,6 @@ pub use apps::{
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, Declaration, IconRasteriser,
     APP_BAR_RELAYED, BUNDLE_RUN_SUFFIX, MAX_BAR_APPS,
 };
-pub use artwork::{ArtworkDesk, ArtworkJob};
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};

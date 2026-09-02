@@ -80,9 +80,18 @@ The host-tested engine plus the `Run` binary that composes it:
   current UI state means, rendered by that crate's own writer;
 - `src/run.rs` — the freestanding program: the sandbox-worker role, the
   store listing, the current-settings read, the window bring-up over
-  `lib/window`, the parked event wait, the preview renders, the apply call,
-  and the resize path. Every bring-up refusal exits fail-loud with a
-  reserved code and a stated reason on `stderr`.
+  `lib/window`, the event loop, the preview renders, the apply call, and
+  the resize path. Every bring-up refusal exits fail-loud with a reserved
+  code and a stated reason on `stderr`.
+
+The loop serves queued input *before* each render (`WindowEvents::try_wait`)
+and parks on its wait-set once nothing is outstanding, so the window is live
+from its first frame however large the store is: a click or a key waits at
+most one picture, never the gallery's worth. `Chooser::next_thumbnail` serves
+what is **on screen** first — read from the gallery's own
+`GridView::visible_range`, the same geometry the painter uses — and reaches
+past it only once the visible set is complete, so a scroll, a resize, or a
+UI-scale change costs what is visible rather than the whole 4K store.
 
 ## Capabilities
 
