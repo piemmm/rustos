@@ -17,6 +17,11 @@
 //! effect is a *description plus* an implementation rather than code inlined
 //! into the renderer.
 //!
+//! [`EffectKey`] is the other half of that: one ordered list of which effects
+//! exist, what each is called, and where its strength lives, so the settings
+//! sheet reads a row back through the same list it built it from and cannot
+//! map a slider onto the wrong field.
+//!
 //! # The effects
 //!
 //! * **Translucency** is not a pass. It is the alpha the default background
@@ -28,6 +33,8 @@
 //!   ([`Effects::blur_radius_px`]) and handed to the window channel.
 //! * **Scan lines** dim every other physical row, the flat part of a shadow
 //!   mask's look.
+//! * **Glow** spreads the light of brightly-driven pixels sideways into their
+//!   neighbourhood, the halation of a tube's faceplate glass.
 //! * **Fuzz** adds a per-pixel luminance jitter that moves each animation
 //!   step, the analogue noise floor of a composite signal.
 //! * **Phosphor** is a persistence trail: a decaying record of what was lit
@@ -37,6 +44,9 @@
 //!   the horizontal-oscillator instability of a tube that is not quite in
 //!   time.
 //!
+//! Glow and phosphor are the two halves of a tube's light and are independent:
+//! phosphor spreads light through *time*, glow spreads it through *space*.
+//!
 //! # Animation is a clock, not a spin
 //!
 //! Every animated pass is a pure function of a monotonically increasing
@@ -44,7 +54,9 @@
 //! so an animated terminal costs one timed wake per frame and an unanimated
 //! one parks indefinitely — the emulator never polls.
 
-use tairix_raster::{Pixel, Surface};
+use alloc::vec::Vec;
+
+use tairix_raster::{box_blur, Pixel, Surface};
 
 /// The full-scale strength of an effect, in permille — the value a slider at
 /// its maximum sets.
@@ -80,6 +92,34 @@ const MAX_PERSISTENCE: u32 = 820;
 /// The deepest a scan line dims the row it darkens, in permille, at full
 /// strength.
 const MAX_SCANLINE_DEPTH: u32 = 620;
+
+/// How far a glow reaches from the pixel emitting it, in physical pixels at
+/// the reference density.
+///
+/// Halation is a fixed distance through the faceplate glass, so the reach is a
+/// density-scaled constant rather than a second slider: the strength sets how
+/// *bright* the halo is, not how wide.
+const GLOW_REACH_PX: u32 = 5;
+
+/// How hard a pixel must be driven before it glows at all, on the same 8-bit
+/// scale as a colour channel.
+///
+/// Half scale: text of any colour clears it, an unlit or mid-grey background
+/// does not. Without a knee the whole screen would glow into itself and the
+/// effect would read as a flat wash rather than as light coming off the text.
+const GLOW_KNEE: u8 = 128;
+
+/// How much of the spread light is added back at full glow strength, in
+/// permille.
+///
+/// Capped for the reason [`MIN_OPACITY`] is: a slider must not be able to make
+/// text unreadable. A light scheme's background clears [`GLOW_KNEE`] on its
+/// own, so at full strength the whole field glows — at this cap dark glyphs
+/// still stand off a saturated background, and much above it they do not.
+const MAX_GLOW_INTENSITY: u32 = 600;
+
+// The knee is a floor to subtract from, so it has to leave something above it.
+const _: () = assert!(GLOW_KNEE < u8::MAX);
 
 /// A monotonic animation step.
 ///
@@ -121,6 +161,14 @@ pub enum Pass {
         /// How deeply the dimmed rows are darkened, in permille.
         depth: u32,
     },
+    /// Spread the light of brightly-driven pixels into their neighbourhood.
+    Glow {
+        /// How far the halo reaches, in physical pixels, falling off as a
+        /// tent across that reach.
+        reach_px: u32,
+        /// How much of the spread light is added back, in permille.
+        intensity: u32,
+    },
     /// Jitter each pixel's luminance.
     Fuzz {
         /// Peak jitter, as an 8-bit amplitude.
@@ -135,14 +183,14 @@ impl Pass {
     pub const fn is_animated(self) -> bool {
         match self {
             Self::Wobble { .. } | Self::Phosphor { .. } | Self::Fuzz { .. } => true,
-            Self::ScanLines { .. } => false,
+            Self::ScanLines { .. } | Self::Glow { .. } => false,
         }
     }
 }
 
 /// The most passes the pipeline can hold — one per [`Pass`] variant, since a
 /// pass appears at most once.
-pub const MAX_PASSES: usize = 4;
+pub const MAX_PASSES: usize = 5;
 
 /// The strengths every screen effect is set to, each in permille.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -154,6 +202,8 @@ pub struct Effects {
     pub blur: u16,
     /// How deeply alternate rows are dimmed.
     pub scanlines: u16,
+    /// How brightly lit pixels glow into their neighbourhood.
+    pub glow: u16,
     /// How much per-pixel luminance jitter is added.
     pub fuzz: u16,
     /// How long a lit pixel persists as an afterglow.
@@ -177,6 +227,7 @@ impl Default for Effects {
             opacity: 800,
             blur: 500,
             scanlines: 0,
+            glow: 0,
             fuzz: 0,
             phosphor: 0,
             wobble: 0,
@@ -238,6 +289,17 @@ impl Effects {
                 depth: scaled(self.scanlines, MAX_SCANLINE_DEPTH),
             });
         }
+        // The glow spreads the light the passes above decided on, so it runs
+        // after them and its halo reaches into the scan lines' dark rows, as a
+        // tube's does. Fuzz stays last so the noise floor reads as noise
+        // rather than being smeared into the halo.
+        if self.glow > 0 {
+            let reach = GLOW_REACH_PX.saturating_mul(scale_percent.max(1)) / 100;
+            push(Pass::Glow {
+                reach_px: reach.max(1),
+                intensity: scaled(self.glow, MAX_GLOW_INTENSITY),
+            });
+        }
         if self.fuzz > 0 {
             push(Pass::Fuzz {
                 amplitude: scaled(self.fuzz, MAX_FUZZ_AMPLITUDE),
@@ -257,14 +319,15 @@ impl Effects {
     /// Run the pipeline over `surface` at animation step `phase`, at
     /// `scale_percent` of the reference density.
     ///
-    /// `afterglow` carries the persistence state between frames; a caller
-    /// that has no phosphor pass may pass a fresh one, and one that does
-    /// keeps the same one alive across frames. The surface is left the same
-    /// size it arrived at, whatever the passes did.
+    /// `state` carries what the stateful passes remember between frames; a
+    /// caller keeps one alive across frames and
+    /// [`clear`](EffectState::clear)s it when the screen it describes stops
+    /// existing. The surface is left the same size it arrived at, whatever
+    /// the passes did.
     pub fn apply(
         self,
         surface: &mut Surface,
-        afterglow: &mut Afterglow,
+        state: &mut EffectState,
         phase: Phase,
         scale_percent: u32,
     ) {
@@ -272,11 +335,116 @@ impl Effects {
         for pass in passes.iter().take(len) {
             match *pass {
                 Pass::Wobble { amplitude_px } => wobble(surface, amplitude_px, phase),
-                Pass::Phosphor { persistence } => afterglow.apply(surface, persistence),
+                Pass::Phosphor { persistence } => state.persistence.apply(surface, persistence),
                 Pass::ScanLines { depth } => scan_lines(surface, depth),
+                Pass::Glow {
+                    reach_px,
+                    intensity,
+                } => state.halo.apply(surface, reach_px, intensity),
                 Pass::Fuzz { amplitude } => fuzz(surface, amplitude, phase),
             }
         }
+    }
+}
+
+/// Which screen effects exist, what each is called, and where its strength
+/// lives in [`Effects`].
+///
+/// The settings sheet builds a slider row per key and reads a row back
+/// through this same list, so a reordering cannot redirect a slider onto
+/// another effect's field.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EffectKey {
+    /// [`Effects::opacity`].
+    Opacity,
+    /// [`Effects::blur`].
+    Blur,
+    /// [`Effects::scanlines`].
+    ScanLines,
+    /// [`Effects::glow`].
+    Glow,
+    /// [`Effects::fuzz`].
+    Fuzz,
+    /// [`Effects::phosphor`].
+    Phosphor,
+    /// [`Effects::wobble`].
+    Wobble,
+}
+
+impl EffectKey {
+    /// Every effect, in the order the settings sheet lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Opacity,
+        Self::Blur,
+        Self::ScanLines,
+        Self::Glow,
+        Self::Fuzz,
+        Self::Phosphor,
+        Self::Wobble,
+    ];
+
+    /// How many effects there are.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// The human label the settings sheet shows.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Opacity => "Opacity",
+            Self::Blur => "Backdrop blur",
+            Self::ScanLines => "Scan lines",
+            Self::Glow => "Glow",
+            Self::Fuzz => "Fuzz",
+            Self::Phosphor => "Phosphor",
+            Self::Wobble => "Wobble",
+        }
+    }
+
+    /// The closed range this effect's slider spans.
+    ///
+    /// Opacity starts at [`MIN_OPACITY`] rather than zero because a fully
+    /// transparent screen is unreadable; mapping the slider onto that range
+    /// keeps the whole travel live instead of leaving its first third
+    /// snapping back.
+    #[must_use]
+    pub const fn bounds(self) -> (u16, u16) {
+        match self {
+            Self::Opacity => (MIN_OPACITY, FULL),
+            Self::Blur
+            | Self::ScanLines
+            | Self::Glow
+            | Self::Fuzz
+            | Self::Phosphor
+            | Self::Wobble => (0, FULL),
+        }
+    }
+
+    /// This effect's strength in `effects`.
+    #[must_use]
+    pub const fn of(self, effects: Effects) -> u16 {
+        match self {
+            Self::Opacity => effects.opacity,
+            Self::Blur => effects.blur,
+            Self::ScanLines => effects.scanlines,
+            Self::Glow => effects.glow,
+            Self::Fuzz => effects.fuzz,
+            Self::Phosphor => effects.phosphor,
+            Self::Wobble => effects.wobble,
+        }
+    }
+
+    /// Set this effect's strength in `effects`.
+    pub fn set(self, effects: &mut Effects, permille: u16) {
+        let field = match self {
+            Self::Opacity => &mut effects.opacity,
+            Self::Blur => &mut effects.blur,
+            Self::ScanLines => &mut effects.scanlines,
+            Self::Glow => &mut effects.glow,
+            Self::Fuzz => &mut effects.fuzz,
+            Self::Phosphor => &mut effects.phosphor,
+            Self::Wobble => &mut effects.wobble,
+        };
+        *field = permille;
     }
 }
 
@@ -287,35 +455,69 @@ fn scaled(strength: u16, full: u32) -> u32 {
     (strength.saturating_mul(full) + full_permille / 2) / full_permille
 }
 
+/// What the stateful passes remember between frames.
+///
+/// Two passes keep something — the phosphor's persistence trail and the
+/// glow's working buffers — and a caller has no business knowing which, so
+/// one object carries both and one [`clear`](Self::clear) forgets everything
+/// held under a screen that has stopped existing.
+#[derive(Clone, Debug, Default)]
+pub struct EffectState {
+    persistence: Persistence,
+    halo: Halo,
+}
+
+impl EffectState {
+    /// State remembering nothing.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget everything remembered and give the buffers back.
+    ///
+    /// Called when the screen's geometry or colours change underneath: a
+    /// trail of a screen that no longer exists is a ghost of the wrong
+    /// thing, and a terminal whose effects were switched off should not hold
+    /// screenfuls of pixels.
+    pub fn clear(&mut self) {
+        self.persistence.clear();
+        self.halo.clear();
+    }
+}
+
+/// Size `buffer` to `count` items of `fill`, discarding what it held.
+///
+/// Reports `false` when the process cannot afford the buffer, so a caller
+/// draws without its effect rather than aborting on an allocation.
+fn refit<T: Copy>(buffer: &mut Vec<T>, count: usize, fill: T) -> bool {
+    buffer.clear();
+    if buffer.try_reserve_exact(count).is_err() {
+        return false;
+    }
+    buffer.resize(count, fill);
+    true
+}
+
 /// The persistence state a phosphor pass carries between frames: how brightly
 /// each pixel was lit, decaying towards dark.
 ///
 /// The buffer is grown to fit the surface it is asked to work on and then
 /// reused, so an animated terminal allocates once rather than once a frame.
 #[derive(Clone, Debug, Default)]
-pub struct Afterglow {
+struct Persistence {
     /// Per-pixel remembered luminance, row-major, `width * height` long.
-    trail: alloc::vec::Vec<u8>,
+    trail: Vec<u8>,
     /// The surface width `trail` was sized for.
     width: u32,
     /// The surface height `trail` was sized for.
     height: u32,
 }
 
-impl Afterglow {
-    /// An empty trail, remembering nothing.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl Persistence {
     /// Forget everything remembered, so the next frame starts clean.
-    ///
-    /// Called when the screen's geometry or colours change under the trail:
-    /// an afterglow of a screen that no longer exists is a ghost of the wrong
-    /// thing.
-    pub fn clear(&mut self) {
-        self.trail.clear();
+    fn clear(&mut self) {
+        self.trail = Vec::new();
         self.width = 0;
         self.height = 0;
     }
@@ -334,13 +536,13 @@ impl Afterglow {
         let Some(needed) = (width as usize).checked_mul(height as usize) else {
             return;
         };
+        // A reshape that happens to preserve the area still describes a
+        // different screen, so the dimensions decide this, not the length.
         if self.width != width || self.height != height || self.trail.len() != needed {
-            self.trail.clear();
-            if self.trail.try_reserve_exact(needed).is_err() {
+            if !refit(&mut self.trail, needed, 0) {
                 self.clear();
                 return;
             }
-            self.trail.resize(needed, 0);
             self.width = width;
             self.height = height;
         }
@@ -356,11 +558,11 @@ impl Afterglow {
                 let lit = luminance(*pixel);
                 // What the tube still holds from before is added back, then
                 // this frame's own light is remembered in its place.
-                let glow = *slot;
-                if glow > 0 {
-                    *pixel = add_glow(*pixel, glow);
+                let trail = *slot;
+                if trail > 0 {
+                    *pixel = add_trail(*pixel, trail);
                 }
-                let decayed = u32::from(glow) * persistence / u32::from(FULL);
+                let decayed = u32::from(trail) * persistence / u32::from(FULL);
                 *slot = u8::try_from(decayed.max(u32::from(lit) * persistence / u32::from(FULL)))
                     .unwrap_or(u8::MAX);
             }
@@ -374,25 +576,165 @@ fn luminance(pixel: Pixel) -> u8 {
     u8::try_from(sum / 1000).unwrap_or(u8::MAX)
 }
 
-/// How much of a remembered glow is added back to each channel: a third,
-/// so a trail reads as a dimming ghost rather than a second copy of the text.
-const GLOW_SHARE: u32 = 3;
+/// How much of a remembered trail is added back to each channel: a third,
+/// so it reads as a dimming ghost rather than a second copy of the text.
+const TRAIL_SHARE: u32 = 3;
 
-/// Add `glow` back into `pixel`, saturating.
+/// Add `trail` back into `pixel`, saturating.
 ///
-/// The glow keeps the pixel's own hue rather than washing towards white,
+/// The trail keeps the pixel's own hue rather than washing towards white,
 /// which is what a single-phosphor tube actually does. Alpha rises with it:
 /// light the tube is emitting is not see-through, however translucent the
 /// background behind it is.
-fn add_glow(pixel: Pixel, glow: u8) -> Pixel {
+fn add_trail(pixel: Pixel, trail: u8) -> Pixel {
     let lift = |channel: u8| -> u8 {
-        u8::try_from(u32::from(channel) + u32::from(glow) / GLOW_SHARE).unwrap_or(u8::MAX)
+        u8::try_from(u32::from(channel) + u32::from(trail) / TRAIL_SHARE).unwrap_or(u8::MAX)
     };
     Pixel {
         r: lift(pixel.r),
         g: lift(pixel.g),
         b: lift(pixel.b),
         a: lift(pixel.a),
+    }
+}
+
+/// The buffers a glow pass works in: the highlights it extracts from the
+/// frame, and the intermediate the separable blur hands from its horizontal
+/// pass to its vertical one.
+///
+/// Both are grown to the surface and reused, so an animated terminal
+/// allocates once rather than once a frame. Neither carries meaning between
+/// frames — the glow is a function of the frame it is spread from — so a
+/// resize costs a resize and nothing else.
+#[derive(Clone, Debug, Default)]
+struct Halo {
+    /// The extracted highlight field, row-major, blurred in place.
+    highlights: Vec<Pixel>,
+    /// The blur's pass-to-pass intermediate.
+    aux: Vec<Pixel>,
+}
+
+impl Halo {
+    /// Give the buffers back.
+    fn clear(&mut self) {
+        self.highlights = Vec::new();
+        self.aux = Vec::new();
+    }
+
+    /// Size both buffers to `count` pixels, or report that the process cannot
+    /// afford them and hold neither.
+    fn fit(&mut self, count: usize) -> bool {
+        if self.highlights.len() == count && self.aux.len() == count {
+            return true;
+        }
+        if refit(&mut self.highlights, count, Pixel::TRANSPARENT)
+            && refit(&mut self.aux, count, Pixel::TRANSPARENT)
+        {
+            return true;
+        }
+        self.clear();
+        false
+    }
+
+    /// Spread the light of `surface`'s brightly-driven pixels `reach_px` into
+    /// their neighbourhood and add `intensity` permille of it back.
+    ///
+    /// A surface the buffers cannot be sized for simply draws with no glow —
+    /// never a panic, and never a partly-glowed frame.
+    fn apply(&mut self, surface: &mut Surface, reach_px: u32, intensity: u32) {
+        let (width, height) = (surface.width(), surface.height());
+        let (Ok(cols), Ok(rows)) = (usize::try_from(width), usize::try_from(height)) else {
+            return;
+        };
+        let Some(count) = cols.checked_mul(rows) else {
+            return;
+        };
+        if count == 0 || reach_px == 0 || intensity == 0 || !self.fit(count) {
+            return;
+        }
+        // A pass is a whole-frame post-process, and this one reads a
+        // neighbourhood rather than a pixel. A surface offering less than its
+        // whole extent would have it spreading light it may not read, so it
+        // declines before touching a thing.
+        for y in 0..height {
+            let Some((first, row)) = surface.row_span(y, 0, width) else {
+                return;
+            };
+            if first != 0 || row.len() != cols {
+                return;
+            }
+            let Some(slots) = self.row_mut(y, cols) else {
+                return;
+            };
+            for (slot, pixel) in slots.iter_mut().zip(row) {
+                *slot = highlight(*pixel);
+            }
+        }
+        // Two boxes rather than one: a single box average leaves a
+        // rectangular halo with a visible edge, where two sum to a tent that
+        // falls off smoothly over the same reach.
+        let near = usize::try_from(reach_px / 2).unwrap_or(0);
+        let far = usize::try_from(reach_px - reach_px / 2).unwrap_or(0);
+        box_blur(&mut self.highlights, cols, rows, near, &mut self.aux);
+        box_blur(&mut self.highlights, cols, rows, far, &mut self.aux);
+        let share =
+            u8::try_from(intensity.saturating_mul(255) / u32::from(FULL)).unwrap_or(u8::MAX);
+        for y in 0..height {
+            let Some(light) = self.row(y, cols) else {
+                return;
+            };
+            let Some((_, row)) = surface.row_span_mut(y, 0, width) else {
+                return;
+            };
+            for (pixel, light) in row.iter_mut().zip(light) {
+                *pixel = add_light(*pixel, light.scale_alpha(share));
+            }
+        }
+    }
+
+    /// Row `y` of the highlight field, `cols` wide.
+    fn row(&self, y: u32, cols: usize) -> Option<&[Pixel]> {
+        let base = usize::try_from(y).ok()?.checked_mul(cols)?;
+        self.highlights.get(base..)?.get(..cols)
+    }
+
+    /// Row `y` of the highlight field, `cols` wide, to write.
+    fn row_mut(&mut self, y: u32, cols: usize) -> Option<&mut [Pixel]> {
+        let base = usize::try_from(y).ok()?.checked_mul(cols)?;
+        self.highlights.get_mut(base..)?.get_mut(..cols)
+    }
+}
+
+/// The light `pixel` spreads into its neighbourhood: how far its
+/// hardest-driven channel clears [`GLOW_KNEE`], taken in the pixel's own
+/// colour.
+///
+/// The drive is the peak channel rather than a luma weighting, because a
+/// phosphor driven to full emits as much light whatever its colour — under
+/// luma's weights, saturated red would glow at half of saturated green and
+/// blue at a fifth of it.
+fn highlight(pixel: Pixel) -> Pixel {
+    let peak = pixel.r.max(pixel.g).max(pixel.b);
+    let Some(over) = peak.checked_sub(GLOW_KNEE) else {
+        return Pixel::TRANSPARENT;
+    };
+    let span = u32::from(u8::MAX - GLOW_KNEE);
+    let share = u8::try_from(u32::from(over) * u32::from(u8::MAX) / span).unwrap_or(u8::MAX);
+    pixel.scale_alpha(share)
+}
+
+/// Add `light` into `pixel`, saturating.
+///
+/// Alpha rises with the colour, as the phosphor trail's does: light the tube
+/// is emitting is not see-through, however translucent the background behind
+/// it is. Both operands are premultiplied, so adding them channel-wise keeps
+/// every channel inside the alpha it is premultiplied against.
+fn add_light(pixel: Pixel, light: Pixel) -> Pixel {
+    Pixel {
+        r: pixel.r.saturating_add(light.r),
+        g: pixel.g.saturating_add(light.g),
+        b: pixel.b.saturating_add(light.b),
+        a: pixel.a.saturating_add(light.a),
     }
 }
 
@@ -461,7 +803,7 @@ fn wobble(surface: &mut Surface, amplitude_px: u32, phase: Phase) {
         return;
     }
     let amplitude = i32::try_from(amplitude_px).unwrap_or(i32::MAX);
-    let mut scratch = alloc::vec::Vec::new();
+    let mut scratch = Vec::new();
     if scratch.try_reserve_exact(width as usize).is_err() {
         return;
     }

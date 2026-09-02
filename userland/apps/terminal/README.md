@@ -132,9 +132,16 @@ the same description with the software passes staying the conformance oracle.
 Translucency is not a pass: the default background is filled at the profile's
 alpha, so the compositor's own premultiplied blend does the work and a glyph
 stays opaque over it. Backdrop blur is the compositor's, since only it can see
-behind a window. Scan lines, fuzz, phosphor persistence, and wobble run over
-the finished frame in integer arithmetic, with the phosphor trail reusing one
-grown-once buffer rather than allocating per frame. Every animated pass is a
+behind a window. Scan lines, glow, fuzz, phosphor persistence, and wobble run
+over the finished frame in integer arithmetic, with one `EffectState` carrying
+what the stateful passes remember in grown-once buffers rather than allocating
+per frame. The glow is halation — the light of brightly-driven pixels spread
+into their neighbourhood — measured by peak channel rather than a luma
+weighting, so saturated red text glows as hard as green, and spread by the
+shared `tairix_raster::box_blur` run twice for a tent falloff. `EffectKey` is
+the one ordered list of which effects exist, what each is called, and where its
+strength lives, so the settings sheet cannot map a slider onto the wrong
+field. Every animated pass is a
 pure function of a monotonically increasing `Phase`, which the `Run` binary
 advances on a one-shot frame deadline — never a poll loop, and no wake at all
 when the effects are off.
@@ -249,7 +256,8 @@ legible against its own ground); the profile document (round-trip exactness
 and every documented refusal, with its line number); the layout rules (the
 headline 80×25-plus-furniture-fits-640×480 property, the step-down search, and
 the grid/pixel inverses); the effects (determinism, each pass's visible
-result, the phosphor trail, and degenerate surfaces); the menu (accelerators,
+result, the phosphor trail, the glow's knee, falloff, bounded reach and
+peak-channel drive, and degenerate surfaces); the menu (accelerators,
 row activation, dismissal, viewport clamping); and the settings sheet and
 colour wells (rendering at a tiny and a small-screen viewport, every control
 reaching its profile field, keyboard-only reachability, and clamping).

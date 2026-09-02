@@ -879,9 +879,15 @@ found two more read-only writes on the same path).
   - **The scope is the session's allocation discipline, not one call.**
     Userland's heap returns null on exhaustion as its contract requires, so
     *every* infallible `Vec`/`String`/`BTreeMap` growth on the session's
-    pressure path turns that null into a panic. Naming the offending site
-    needs the panic's byte figure from a failing run, and fixing it properly
-    means the paths that grow under pressure use fallible reservation.
+    pressure path turns that null into a panic, and fixing it properly means
+    the paths that grow under pressure use fallible reservation.
+  - **The byte figure the site hunt needs: 975,840.** A failing run reports
+    `memory allocation of 975840 bytes failed` from the session
+    (`comm=desktop`, task 17) at t=166.9 s with 31 windows up, immediately
+    before its `code=101` and the seat lease being reclaimed from the dead
+    owner. So the offending growth is one ~953 KiB request on the pressure
+    path rather than a slow leak, which is the discriminator for finding it:
+    look for a single allocation of that order, not an accumulation.
   - **Two things found while diagnosing it are fixed.** A userland panic's
     reason reached only `stderr`, so a service — or a graphical session whose
     console is the screen it composites over — died leaving nothing but an

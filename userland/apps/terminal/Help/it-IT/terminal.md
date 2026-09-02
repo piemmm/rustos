@@ -65,6 +65,7 @@ con cursori rosso, verde e blu per quello selezionato.
 | Opacità | Quanto è solido lo sfondo. Al di sotto del massimo, il desktop traspare dietro il testo, che rimane pienamente leggibile. |
 | Sfocatura sfondo | Quanto viene sfocato il desktop dietro una finestra trasparente. Non ha effetto su una finestra completamente opaca. |
 | Righe di scansione | Attenua le righe alternate, la parte piatta dell'aspetto di una maschera d'ombra. |
+| Alone | Diffonde la luce dei pixel luminosi nei dintorni, in modo che il testo porti l'alone morbido di un tubo spinto al massimo. |
 | Disturbo | Un rumore di fondo per pixel in movimento, come quello di un segnale analogico. |
 | Fosfori | Quanto a lungo persistono i pixel accesi, in modo che il testo che scorre velocemente lasci una scia. |
 | Oscillazione | Una lenta ondulazione orizzontale mobile, come quella di un tubo fuori tempo. |

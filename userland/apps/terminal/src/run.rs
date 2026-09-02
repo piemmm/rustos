@@ -88,7 +88,7 @@ mod program {
     use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_terminal::appbar::{self, BarCommand};
-    use tairix_terminal::effects::{Afterglow, Effects, Phase};
+    use tairix_terminal::effects::{EffectState, Effects, Phase};
     use tairix_terminal::layout::{
         fit_font_size, grid_dims, grid_size, snap_to_cells, window_size,
     };
@@ -620,8 +620,8 @@ mod program {
         scale: Scale,
         /// The animation step the effects are drawn at.
         phase: Phase,
-        /// The persistence state the phosphor effect carries between frames.
-        afterglow: Afterglow,
+        /// What the stateful passes carry between frames.
+        state: EffectState,
         /// Where the effect pipeline runs, so it never accumulates into the
         /// retained screen. Held only while an effect is in force.
         effected: Option<Surface>,
@@ -643,15 +643,15 @@ mod program {
                 effects: profile.effects,
                 scale: desktop.scale(),
                 phase: Phase::default(),
-                afterglow: Afterglow::new(),
+                state: EffectState::new(),
                 effected: None,
             }
         }
 
-        /// Adopt a changed profile or desktop, forgetting the afterglow so a
-        /// trail of the old screen cannot ghost over the new one, and the
-        /// effect buffer so a terminal whose effects were switched off stops
-        /// holding a screen's worth of pixels.
+        /// Adopt a changed profile or desktop, forgetting what the passes
+        /// remembered so a trail of the old screen cannot ghost over the new
+        /// one, and the effect buffer so a terminal whose effects were
+        /// switched off stops holding a screen's worth of pixels.
         fn refresh(&mut self, profile: &Profile, theme: &Theme, desktop: &Desktop) {
             let phase = self.phase;
             *self = Self::resolve(profile, theme, desktop);
@@ -1026,7 +1026,7 @@ mod program {
         effected.overwrite(0, 0, clean);
         look.effects.apply(
             &mut effected,
-            &mut look.afterglow,
+            &mut look.state,
             look.phase,
             look.scale.percent(),
         );
@@ -1251,11 +1251,11 @@ mod program {
                 }
                 PRESSURE_TOKEN if tairix_procinfo::pressure::refresh() => {
                     tairix_font::trim_glyph_cache();
-                    // The phosphor trail is a whole screen of per-pixel state
-                    // that only matters while that effect is on, so it gives
-                    // first under pressure; the next frame starts a new trail.
+                    // The passes' buffers are whole screens of per-pixel
+                    // state that only matter while an effect is on, so they
+                    // give first under pressure; the next frame starts clean.
                     for open in &mut windows {
-                        open.look.afterglow.clear();
+                        open.look.state.clear();
                     }
                 }
                 token => {
@@ -1565,9 +1565,9 @@ mod program {
                     let (cols, rows) = grid_dims(snapped_w, snapped_h, open.look.font);
                     let _ = open.terminal.resize(cols, rows);
                     let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
-                    // The afterglow is the shape of the old screen; a resized
-                    // one must not ghost it.
-                    open.look.afterglow.clear();
+                    // What the passes remember is the shape of the old
+                    // screen; a resized one must not ghost it.
+                    open.look.state.clear();
                     if open.present(client).is_err() {
                         return Applied::Lost("present refused");
                     }

@@ -64,6 +64,7 @@ selecionada.
 | Opacidade | O quão sólido é o fundo. Abaixo do total, o ambiente de trabalho transparece por trás do texto, que permanece totalmente legível. |
 | Desfocagem de fundo | O quanto o ambiente de trabalho por trás de uma janela transparente é desfocado. Não tem efeito numa janela totalmente opaca. |
 | Linhas de varrimento | Atenua as linhas alternadas, a parte plana do aspeto de uma máscara de sombra. |
+| Brilho | Espalha a luz dos píxeis brilhantes para o seu redor, de modo que o texto tenha o halo suave de um tubo muito excitado. |
 | Ruído | Um ruído de fundo por píxel em movimento, como o que tem um sinal analógico. |
 | Fósforo | Quanto tempo persistem os píxeis acesos, de modo que o texto que desliza rápido deixa um rasto. |
 | Oscilação | Uma lenta ondulação horizontal móvel, como a de um tubo fora de tempo. |

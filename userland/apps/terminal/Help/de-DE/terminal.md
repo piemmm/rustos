@@ -68,6 +68,7 @@ Schiebereglern für Rot, Grün und Blau für die jeweils ausgewählte Farbe.
 | Deckkraft | Wie massiv der Hintergrund ist. Unter der vollen Deckkraft scheint der Desktop hinter dem Text durch, der jedoch voll lesbar bleibt. |
 | Hintergrundunschärfe | Wie stark der Desktop hinter einem durchsichtigen Fenster weichgezeichnet wird. Hat keine Auswirkung auf ein vollständig deckendes Fenster. |
 | Scanlinien | Dimmt abwechselnde Zeilen, der flache Teil des Aussehens einer Lochmaske. |
+| Leuchten | Verteilt das Licht heller Pixel in deren Umgebung, sodass Text den weichen Lichthof einer stark ausgesteuerten Röhre trägt. |
 | Rauschen | Ein sich bewegender Grundrauschpegel pro Pixel, wie ihn ein Analogsignal hat. |
 | Phosphor | Wie lange leuchtende Pixel nachwirken, sodass schnell scrollender Text eine Spur hinterlässt. |
 | Wackeln | Ein langsames, wanderndes horizontales Zittern, wie es eine Röhre außerhalb der Zeit hat. |

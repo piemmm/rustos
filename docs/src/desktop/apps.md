@@ -1834,14 +1834,24 @@ software passes staying the conformance oracle. Translucency is not a pass at
 all: the default background is filled at the profile's alpha, so the
 compositor's own premultiplied blend shows the desktop through while a glyph
 stays opaque. Backdrop blur is the compositor's (`set_backdrop_blur`), since
-only it can see behind a window. Scan lines, fuzz, phosphor persistence, and
-wobble run over the finished frame. An animated effect is a pure function of a
+only it can see behind a window. Scan lines, glow, fuzz, phosphor persistence,
+and wobble run over the finished frame. **Glow** is halation, the spatial half
+of a tube's light to phosphor's temporal half: the light of brightly-driven
+pixels spread into their neighbourhood and added back, so bright text carries a
+soft halo. Its drive is a pixel's peak channel rather than a luma weighting —
+a phosphor driven to full emits as much light whatever its colour, and weighted
+red would carry no halo at all — and the spread is the desktop's one separable
+box blur (`tairix_raster::box_blur`) run twice, so the falloff is a tent rather
+than a box with a visible edge. A knee at half scale is what makes it read as
+light off the text rather than a flat wash, and its intensity is capped for the
+reason the opacity floor exists: a slider must not be able to make text
+unreadable. An animated effect is a pure function of a
 monotonically increasing `Phase` that the program advances on a one-shot frame
 deadline in its wait-set park — there is no poll loop, and a terminal with the
 effects off never wakes for them at all.
 
 A new terminal opens at **80% opacity with the backdrop blurred at half
-strength** (`Effects::default`), the four pass effects off. Translucency is
+strength** (`Effects::default`), the five pass effects off. Translucency is
 free — it is the alpha the background is filled at, so the compositor's own
 blend does the work — and the blur is what makes the window read as frosted
 glass rather than as a hole. A screenful of them is affordable because the
@@ -1850,8 +1860,9 @@ still contributes to the screen is the destination weight of everything over
 it, and four layers of 80% opacity take that below the last bit of an 8-bit
 channel (`docs/src/desktop/wm.md`, *A frost no output channel can record*).
 
-A pass is a *whole-frame* post-process by nature — wobble displaces rows and
-phosphor decays every pixel — so when one is in force the finished screen is
+A pass is a *whole-frame* post-process by nature — wobble displaces rows,
+phosphor decays every pixel, and the glow spreads light across them — so when
+one is in force the finished screen is
 copied into a reused buffer, the passes run there, and the whole window is
 presented. The retained screen itself stays clean, so the next frame's cell
 diff still describes the text rather than the effect's own churn, and an

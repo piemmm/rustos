@@ -46,7 +46,7 @@ use tairix_controls::{
     ScrollOrientation, ScrollRange, SelectorAction, Slider, SliderAction, Tab, Tabs, TabsAction,
 };
 
-use crate::effects::{FULL, MIN_OPACITY};
+use crate::effects::{EffectKey, FULL};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
 use crate::swatch::{SwatchAction, SwatchGrid};
@@ -57,37 +57,8 @@ const APPEARANCE_TAB: usize = 0;
 /// The tab that edits the screen effects.
 const EFFECTS_TAB: usize = 1;
 
-/// How many effect sliders the Effects tab lists, and the fixed order they
-/// index [`Settings::effect_sliders`] and a [`Profile`]'s effect fields in:
-/// Opacity, Blur, Scan lines, Fuzz, Phosphor, Wobble.
-const EFFECT_COUNT: usize = 6;
-
 /// The label a channel slider carries, in [`Settings::channel_sliders`] order.
 const CHANNEL_LABELS: [&str; 3] = ["Red", "Green", "Blue"];
-
-/// The label an effect slider carries, in [`Settings::effect_sliders`] order.
-const EFFECT_LABELS: [&str; EFFECT_COUNT] = [
-    "Opacity",
-    "Backdrop blur",
-    "Scan lines",
-    "Fuzz",
-    "Phosphor",
-    "Wobble",
-];
-
-/// The closed range each effect slider spans, in [`EFFECT_LABELS`] order.
-///
-/// Opacity starts at [`MIN_OPACITY`] rather than zero because a fully
-/// transparent screen is unreadable; mapping the slider onto that range keeps
-/// the whole travel live instead of leaving its first third snapping back.
-const EFFECT_BOUNDS: [(u16, u16); EFFECT_COUNT] = [
-    (MIN_OPACITY, FULL),
-    (0, FULL),
-    (0, FULL),
-    (0, FULL),
-    (0, FULL),
-    (0, FULL),
-];
 
 /// The logical width of a slider row's leading label column.
 const LABEL_WIDTH_PX: u32 = 150;
@@ -123,7 +94,7 @@ enum Focus {
     /// A colour channel of the selected swatch well: `0` red, `1` green,
     /// `2` blue.
     Channel(usize),
-    /// An effect slider, indexed as [`EFFECT_LABELS`].
+    /// An effect slider, indexed as [`EffectKey::ALL`].
     Effect(usize),
     /// The body scrollbar.
     Scroll,
@@ -164,7 +135,7 @@ pub struct Settings {
     text_size: Slider,
     swatches: SwatchGrid,
     channel_sliders: [Slider; 3],
-    effect_sliders: [Slider; EFFECT_COUNT],
+    effect_sliders: [Slider; EffectKey::COUNT],
     restore: Button,
     done: Button,
     scroll: ScrollBar,
@@ -198,14 +169,7 @@ impl Settings {
 
         let swatches = SwatchGrid::from_scheme(&profile.custom);
 
-        let effect_sliders = [
-            effect_slider(0, profile.effects.opacity),
-            effect_slider(1, profile.effects.blur),
-            effect_slider(2, profile.effects.scanlines),
-            effect_slider(3, profile.effects.fuzz),
-            effect_slider(4, profile.effects.phosphor),
-            effect_slider(5, profile.effects.wobble),
-        ];
+        let effect_sliders = EffectKey::ALL.map(|key| effect_slider(key, key.of(profile.effects)));
 
         let mut sheet = Self {
             profile,
@@ -486,27 +450,21 @@ fn permille_as_percent(permille: u16) -> u32 {
     (u32::from(permille) + 5) / 10
 }
 
-/// The closed range the effect at `index` spans.
-fn effect_bounds(index: usize) -> (u16, u16) {
-    EFFECT_BOUNDS.get(index).copied().unwrap_or((0, FULL))
-}
-
 /// An effect value mapped onto its slider's permille travel.
-fn effect_permille(index: usize, value: u16) -> u16 {
-    let (min, max) = effect_bounds(index);
+fn effect_permille(key: EffectKey, value: u16) -> u16 {
+    let (min, max) = key.bounds();
     permille_from_bounded(value, min, max)
 }
 
 /// The inverse of [`effect_permille`].
-fn effect_from_permille(index: usize, permille: u16) -> u16 {
-    let (min, max) = effect_bounds(index);
+fn effect_from_permille(key: EffectKey, permille: u16) -> u16 {
+    let (min, max) = key.bounds();
     bounded_from_permille(permille, min, max)
 }
 
-/// The slider for the effect at `index`, showing `value` on that effect's own
-/// travel.
-fn effect_slider(index: usize, value: u16) -> Slider {
-    Slider::new(effect_permille(index, value)).with_steps(10, 100)
+/// The slider for `key`, showing `value` on that effect's own travel.
+fn effect_slider(key: EffectKey, value: u16) -> Slider {
+    Slider::new(effect_permille(key, value)).with_steps(10, 100)
 }
 
 /// The surface rectangle of a logical `Rect`, or `None` if it lies off the
@@ -525,7 +483,7 @@ impl Settings {
     fn content_rows(&self) -> Vec<Focus> {
         let mut rows = Vec::new();
         if self.tabs.selected() == Some(EFFECTS_TAB) {
-            for index in 0..EFFECT_COUNT {
+            for index in 0..EffectKey::COUNT {
                 rows.push(Focus::Effect(index));
             }
         } else {
@@ -822,10 +780,11 @@ impl Settings {
                 let Some(slider) = self.effect_sliders.get(index) else {
                     return;
                 };
-                let Some(&label_text) = EFFECT_LABELS.get(index) else {
+                let Some(&key) = EffectKey::ALL.get(index) else {
                     return;
                 };
-                let percent = permille_as_percent(self.effect_value(index));
+                let label_text = key.label();
+                let percent = permille_as_percent(key.of(self.profile.effects));
                 let (label, control) = split_row(rect, scale);
                 draw_row_label(
                     surface,
@@ -1159,38 +1118,20 @@ impl Settings {
         }
     }
 
-    /// Commit an effect request at `index`, clamp, and reflect the clamped
-    /// value back onto its slider's own travel.
+    /// Commit an effect request from the slider at `index`, clamp, and
+    /// reflect the clamped value back onto that slider's own travel.
     fn set_effect_permille(&mut self, index: usize, permille: u16) {
-        let value = effect_from_permille(index, permille);
-        {
-            let field = match index {
-                0 => &mut self.profile.effects.opacity,
-                1 => &mut self.profile.effects.blur,
-                2 => &mut self.profile.effects.scanlines,
-                3 => &mut self.profile.effects.fuzz,
-                4 => &mut self.profile.effects.phosphor,
-                _ => &mut self.profile.effects.wobble,
-            };
-            *field = value;
-        }
+        let Some(&key) = EffectKey::ALL.get(index) else {
+            return;
+        };
+        key.set(
+            &mut self.profile.effects,
+            effect_from_permille(key, permille),
+        );
         self.profile.clamp();
-        let clamped = self.effect_value(index);
+        let clamped = key.of(self.profile.effects);
         if let Some(slider) = self.effect_sliders.get_mut(index) {
-            slider.set_value(effect_permille(index, clamped));
-        }
-    }
-
-    /// The profile's current value for the effect at `index`.
-    fn effect_value(&self, index: usize) -> u16 {
-        let effects = self.profile.effects;
-        match index {
-            0 => effects.opacity,
-            1 => effects.blur,
-            2 => effects.scanlines,
-            3 => effects.fuzz,
-            4 => effects.phosphor,
-            _ => effects.wobble,
+            slider.set_value(effect_permille(key, clamped));
         }
     }
 
@@ -1212,16 +1153,8 @@ impl Settings {
         self.swatches = SwatchGrid::from_scheme(&self.profile.custom);
         self.sync_channel_sliders();
         let effects = self.profile.effects;
-        let values = [
-            effects.opacity,
-            effects.blur,
-            effects.scanlines,
-            effects.fuzz,
-            effects.phosphor,
-            effects.wobble,
-        ];
-        for (index, (slider, value)) in self.effect_sliders.iter_mut().zip(values).enumerate() {
-            slider.set_value(effect_permille(index, value));
+        for (slider, key) in self.effect_sliders.iter_mut().zip(EffectKey::ALL) {
+            slider.set_value(effect_permille(key, key.of(effects)));
         }
     }
 }

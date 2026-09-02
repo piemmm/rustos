@@ -123,9 +123,41 @@ so a terminal with the effects off pays nothing.
 | Translucency | While the cells are painted | The default background is filled at `background_alpha`, so the compositor's own premultiplied blend does the work and a glyph stays opaque over it. Never below `MIN_OPACITY`. |
 | Backdrop blur | The compositor | Only the compositor can see behind a window, so the strength becomes a logical radius (`blur_radius_px`, capped at `MAX_BLUR_RADIUS_PX`) and is handed to the window channel's `set_backdrop_blur`. Zero when the window is opaque — a blur nobody can see is wasted work. |
 | Scan lines | `Pass::ScanLines` | Dims alternate physical rows. Static. |
+| Glow | `Pass::Glow` | Halation: the light of brightly-driven pixels spread into their neighbourhood and added back. Static. |
 | Fuzz | `Pass::Fuzz` | Per-pixel luminance jitter from a cheap reproducible mixer, moving each animation step. |
-| Phosphor | `Pass::Phosphor` | A decaying `Afterglow` of what was lit recently, added back in the pixel's own hue. |
+| Phosphor | `Pass::Phosphor` | A decaying `Persistence` trail of what was lit recently, added back in the pixel's own hue. |
 | Wobble | `Pass::Wobble` | Per-row horizontal displacement along a travelling integer sine. |
+
+**The glow is the spatial half of a tube's light, phosphor the temporal
+half.** It runs *after* wobble, phosphor, and the scan lines, because it
+spreads the light those settled on — so its halo reaches into the scan lines'
+dark rows as a real tube's does — and before fuzz, so the noise floor reads as
+noise rather than being smeared into the halo. Three decisions carry it:
+
+- **Drive is the peak channel, never a luma weighting.** A phosphor driven to
+  full emits as much light whatever its colour; weighted, saturated red would
+  not clear the knee at all where green sailed over it, and red text would
+  carry no halo.
+- **`GLOW_KNEE` (half scale) is what makes it light off the text** rather than
+  a flat wash: an unlit or mid-grey background emits nothing. The reach is a
+  density-scaled constant (`GLOW_REACH_PX`), because halation is a fixed
+  distance through the glass — the slider sets how bright the halo is, not how
+  wide.
+- **`MAX_GLOW_INTENSITY` is capped for the reason `MIN_OPACITY` is:** a slider
+  must not be able to make text unreadable. A light scheme's background clears
+  the knee on its own, so at full strength the whole field glows; the cap is
+  what keeps dark glyphs standing off it.
+
+The spread is the workspace's one separable box blur (`tairix_raster::box_blur`)
+run twice, at radii summing to the reach, so the falloff is a tent rather than
+a box with a visible edge — there is no second blur implementation. Both
+working buffers are grown once and reused.
+
+**The stateful passes share one `EffectState`.** Phosphor keeps a persistence
+trail and the glow keeps its working buffers; a caller has no business knowing
+which, so one object carries both and one `clear()` forgets everything held
+under a screen that has stopped existing — a resize, a profile change, or
+memory pressure, which is what releases the buffers.
 
 **The pipeline is a description, not a pile of flags.** `Pass` carries the
 *resolved physical* parameters, so a display that can composite hardware layers
@@ -215,7 +247,9 @@ plus the app-local colour-well grid, on its own popup surface.
   scheme's editor — a `SwatchGrid` of the twenty editable colours with
   red/green/blue sliders for the selected well.
 - **Effects**: one labelled slider per effect — opacity, backdrop blur, scan
-  lines, fuzz, phosphor, wobble.
+  lines, glow, fuzz, phosphor, wobble — built from and read back through the
+  one ordered `EffectKey::ALL` list, so a reordering cannot redirect a slider
+  onto another effect's field.
 - Footer: *Restore defaults* and *Done*.
 
 Every edit clamps through `Profile::clamp`, so the sheet can never produce an

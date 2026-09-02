@@ -12,13 +12,11 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use crate::effects::{Effects, FULL, MIN_OPACITY};
+use crate::effects::{EffectKey, Effects, FULL, MIN_OPACITY};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
 
-use super::{
-    footer_split, panel_bounds, split_row, Focus, Settings, SheetOutcome, EFFECTS_TAB, EFFECT_COUNT,
-};
+use super::{footer_split, panel_bounds, split_row, Focus, Settings, SheetOutcome, EFFECTS_TAB};
 
 const SCALE: Scale = Scale::ONE;
 
@@ -187,16 +185,9 @@ fn select_effects_tab(sheet: &mut Settings, viewport: Rect) {
     assert_eq!(sheet.tabs.selected(), Some(EFFECTS_TAB));
 }
 
-/// The six effect values in [`super::EFFECT_LABELS`] order.
-fn effect_values(effects: Effects) -> [u16; EFFECT_COUNT] {
-    [
-        effects.opacity,
-        effects.blur,
-        effects.scanlines,
-        effects.fuzz,
-        effects.phosphor,
-        effects.wobble,
-    ]
+/// Every effect value, in [`EffectKey::ALL`] order.
+fn effect_values(effects: Effects) -> [u16; EffectKey::COUNT] {
+    EffectKey::ALL.map(|key| key.of(effects))
 }
 
 // --- Rendering -------------------------------------------------------------
@@ -361,7 +352,7 @@ fn selecting_another_well_repoints_the_channel_sliders() {
 #[test]
 fn every_effect_slider_edits_only_its_own_profile_field() {
     let defaults = effect_values(Effects::default());
-    for index in 0..EFFECT_COUNT {
+    for index in 0..EffectKey::COUNT {
         let mut sheet = sheet();
         select_effects_tab(&mut sheet, CLIENT);
         let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
@@ -427,7 +418,7 @@ fn an_effect_slider_reaches_full_at_the_end_of_its_travel() {
 fn the_profile_stays_clamped_after_extreme_values() {
     let mut sheet = sheet();
     select_effects_tab(&mut sheet, CLIENT);
-    for index in 0..EFFECT_COUNT {
+    for index in 0..EffectKey::COUNT {
         let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
         press_at(&mut sheet, CLIENT, slider_point(row, 0));
         sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
@@ -673,7 +664,7 @@ fn switching_tabs_replaces_the_body_rows() {
     select_effects_tab(&mut sheet, CLIENT);
     let rows = sheet.content_rows();
     assert!(!rows.contains(&Focus::TextSize));
-    assert_eq!(rows.len(), EFFECT_COUNT);
+    assert_eq!(rows.len(), EffectKey::COUNT);
 }
 
 #[test]

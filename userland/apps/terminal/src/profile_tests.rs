@@ -58,6 +58,7 @@ fn edited_profile() -> Profile {
             opacity: MIN_OPACITY,
             blur: 250,
             scanlines: 125,
+            glow: 725,
             fuzz: 375,
             phosphor: 625,
             wobble: 875,
@@ -367,6 +368,7 @@ fn clamp_bounds_font_size_and_every_effect() {
             opacity: MIN_OPACITY - 1,
             blur: FULL + 1,
             scanlines: FULL + 1,
+            glow: FULL + 1,
             fuzz: FULL + 1,
             phosphor: FULL + 1,
             wobble: FULL + 1,
@@ -378,6 +380,7 @@ fn clamp_bounds_font_size_and_every_effect() {
     assert_eq!(profile.effects.opacity, MIN_OPACITY);
     assert_eq!(profile.effects.blur, FULL);
     assert_eq!(profile.effects.scanlines, FULL);
+    assert_eq!(profile.effects.glow, FULL);
     assert_eq!(profile.effects.fuzz, FULL);
     assert_eq!(profile.effects.phosphor, FULL);
     assert_eq!(profile.effects.wobble, FULL);

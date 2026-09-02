@@ -65,6 +65,7 @@ sélectionnée.
 | Opacité | La solidité de l'arrière-plan. En dessous du plein, le bureau transparaît derrière le texte, qui reste parfaitement lisible. |
 | Flou d'arrière-plan | Le degré de flou du bureau derrière une fenêtre transparente. N'a aucun effet sur une fenêtre totalement opaque. |
 | Lignes de balayage | Assombrit une ligne sur deux, l'aspect plat d'un masque d'ombre. |
+| Halo | Diffuse la lumière des pixels lumineux dans leur voisinage, de sorte que le texte porte le halo doux d'un tube poussé à fond. |
 | Bruit | Un bruit de fond par pixel en mouvement, comme celui d'un signal analogique. |
 | Phosphore | La durée de persistance des pixels allumés, de sorte que le texte qui défile rapidement laisse une traînée. |
 | Ondulation | Un lent vacillement horizontal mouvant, comme celui d'un tube déréglé. |

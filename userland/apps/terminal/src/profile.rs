@@ -81,6 +81,9 @@ pub enum ProfileKey {
     Blur,
     /// `effects.scanlines` — how deeply alternate rows are dimmed, in permille.
     ScanLines,
+    /// `effects.glow` — how brightly lit pixels glow into their
+    /// neighbourhood, in permille.
+    Glow,
     /// `effects.fuzz` — how much per-pixel jitter is added, in permille.
     Fuzz,
     /// `effects.phosphor` — how long a lit pixel persists, in permille.
@@ -101,12 +104,13 @@ pub enum ProfileKey {
 
 impl ProfileKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Scheme,
         Self::FontSize,
         Self::Opacity,
         Self::Blur,
         Self::ScanLines,
+        Self::Glow,
         Self::Fuzz,
         Self::Phosphor,
         Self::Wobble,
@@ -126,6 +130,7 @@ impl ProfileKey {
             Self::Opacity => "effects.opacity",
             Self::Blur => "effects.blur",
             Self::ScanLines => "effects.scanlines",
+            Self::Glow => "effects.glow",
             Self::Fuzz => "effects.fuzz",
             Self::Phosphor => "effects.phosphor",
             Self::Wobble => "effects.wobble",
@@ -178,6 +183,7 @@ impl Profile {
         self.effects.opacity = self.effects.opacity.clamp(MIN_OPACITY, FULL);
         self.effects.blur = self.effects.blur.min(FULL);
         self.effects.scanlines = self.effects.scanlines.min(FULL);
+        self.effects.glow = self.effects.glow.min(FULL);
         self.effects.fuzz = self.effects.fuzz.min(FULL);
         self.effects.phosphor = self.effects.phosphor.min(FULL);
         self.effects.wobble = self.effects.wobble.min(FULL);
@@ -317,6 +323,10 @@ fn set_field(profile: &mut Profile, key: ProfileKey, value: &str) -> bool {
             Some(permille) => profile.effects.scanlines = permille,
             None => return false,
         },
+        ProfileKey::Glow => match parse_bounded(value, 0, FULL) {
+            Some(permille) => profile.effects.glow = permille,
+            None => return false,
+        },
         ProfileKey::Fuzz => match parse_bounded(value, 0, FULL) {
             Some(permille) => profile.effects.fuzz = permille,
             None => return false,
@@ -361,6 +371,7 @@ fn field_value(profile: &Profile, key: ProfileKey) -> String {
         ProfileKey::Opacity => profile.effects.opacity.to_string(),
         ProfileKey::Blur => profile.effects.blur.to_string(),
         ProfileKey::ScanLines => profile.effects.scanlines.to_string(),
+        ProfileKey::Glow => profile.effects.glow.to_string(),
         ProfileKey::Fuzz => profile.effects.fuzz.to_string(),
         ProfileKey::Phosphor => profile.effects.phosphor.to_string(),
         ProfileKey::Wobble => profile.effects.wobble.to_string(),

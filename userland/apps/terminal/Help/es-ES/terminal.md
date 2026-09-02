@@ -65,6 +65,7 @@ azul para el que esté seleccionado.
 | Opacidad | Cómo de sólido es el fondo. Por debajo del total, el escritorio se ve detrás del texto, que sigue siendo totalmente legible. |
 | Desenfoque de fondo | Cuánto se desenfoca el escritorio detrás de una ventana transparente. No tiene efecto en una ventana totalmente opaca. |
 | Líneas de escaneo | Atenúa las filas alternas, la parte plana del aspecto de una máscara de sombra. |
+| Resplandor | Difunde la luz de los píxeles brillantes a su alrededor, de modo que el texto lleva el halo suave de un tubo muy excitado. |
 | Ruido | Un suelo de ruido por píxel en movimiento, como el que tiene una señal analógica. |
 | Fósforo | Cuánto tiempo persisten los píxeles encendidos, de modo que el texto que se desplaza rápido deja un rastro. |
 | Bamboleo | Un ligero vaivén horizontal errante, como el de un tubo fuera de tiempo. |

@@ -118,7 +118,7 @@ pub mod swatch;
 pub mod terminal;
 
 pub use appbar::BarCommand;
-pub use effects::{Afterglow, Effects, Phase};
+pub use effects::{EffectKey, EffectState, Effects, Phase};
 pub use grid::Grid;
 pub use layout::{COLS, ROWS};
 pub use menu::Command;

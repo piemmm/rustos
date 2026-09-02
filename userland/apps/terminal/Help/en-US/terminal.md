@@ -69,6 +69,7 @@ than showing through sharply.
 | Opacity | How solid the background is. Below full, the desktop shows through behind the text, which stays fully legible. |
 | Backdrop blur | How far the desktop behind a see-through window is blurred. Has no effect on a fully opaque window. |
 | Scan lines | Dims alternate rows, the flat part of a shadow mask's look. |
+| Glow | Spreads the light of brightly lit pixels into their surroundings, so text carries the soft halo a hard-driven tube has. |
 | Fuzz | A moving per-pixel noise floor, as an analogue signal has. |
 | Phosphor | How long lit pixels persist, so fast-scrolling text leaves a trail. |
 | Wobble | A slow travelling horizontal waver, as an out-of-time tube has. |

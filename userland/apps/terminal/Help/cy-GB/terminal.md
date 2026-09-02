@@ -63,6 +63,7 @@ coch, gwyrdd a glas ar gyfer pa un bynnag sydd wedi'i ddewis.
 | Didreiddedd | Pa mor solet yw'r cefndir. O dan y llawn, mae'r bwrdd gwaith yn dangos drwodd y tu ôl i'r testun, sy'n aros yn gwbl ddarllenadwy. |
 | Niwlio'r cefndir | Pa mor bell y mae'r bwrdd gwaith y tu ôl i ffenestr dryloyw yn cael ei niwlio. Nid yw'n cael unrhyw effaith ar ffenestr sy'n gwbl anhydraidd. |
 | Llinellau sganio | Pylu rhesi bob yn ail, rhan wastad edrychiad mwgwd cysgodol. |
+| Llewyrch | Taenu golau picseli llachar i'w cwmpas, fel bod testun yn cario'r eurgylch meddal sydd gan diwb a yrrir yn galed. |
 | Sŵn | Llawr sŵn symudol fesul picsel, fel y mae gan signal analog. |
 | Ffosffor | Pa mor hir y mae picsel wedi'u goleuo yn parhau, fel bod testun sy'n sgrolio'n gyflym yn gadael llwybr. |
 | Siglo | Siglo llorweddol araf sy'n teithio, fel y mae gan diwb sydd allan o amser. |
