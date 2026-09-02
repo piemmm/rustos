@@ -96,9 +96,9 @@ image.** A dev-profile timing is never quoted as evidence.
    difference*, never a silent tweak. Two have been made: B.5's per-pixel
    dither on a
    *blended* pixel, whose bound is stated there; a copied or opaque pixel is
-   still byte-identical. D.13's skipped frost is the second, and its bound is
-   the last bit of a channel — the tightest integer compositing admits through
-   translucency.
+   still byte-identical. D.13's rationed frosting is the second: a window the
+   budget cannot reach draws as the plain translucency it also is, byte for byte
+   what it draws with its blur turned off.
 3. **Tests assert work, not wall-clock (§7).** CI gates on deterministic
    counters — pixels blended, rects presented, controls repainted, IPC round
    trips, cache hits — which are load-independent. A wall-clock threshold in CI
@@ -658,7 +658,7 @@ of) in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
 `window_chrome_cache`. A frost is a *whole window's* rectangle, so unlike
 furniture a stack of overlapping ones can want several times that screenful;
 the ceiling is a bound on what the desktop may retain, not a claim that no more
-can be wanted, and D.13 is what a pass over that bound then does.
+can be wanted, and D.13 is how a frame chooses which of them to spend it on.
 
 - The rectangle recorded is the window's **whole** one, not the on-screen part:
   a window pushed off an edge is frosted from the row and column the screen
@@ -891,74 +891,68 @@ crossings used to mark a large translucent window in full and drop its frost.
 
 ---
 
-### D.13 A frost that cannot change an output pixel — **done**
-Stage D makes a frost cost what it *changes*; this asks whether it is **seen at
-all**. A blurred window used to be frosted over its whole rectangle each frame
-its frost was recomputed, however deeply it was buried, and ordinary occlusion
-cannot help: `Window::opaque_run` requires `alpha == 255` and a translucent
-terminal yields no opaque runs.
+### D.13 Frosting is rationed, front to back — **done**
+Stage D makes a frost cost what it *changes*; this bounds **how many** frosts a
+frame computes at all. A frost is a whole window's rectangle and stacked frosted
+windows all read the same pixels, so `n` of them want `n` screenfuls of
+retention against a budget of one. Ordinary occlusion cannot help:
+`Window::opaque_run` requires `alpha == 255` and a translucent terminal yields
+no opaque runs.
 
-**The bound.** Compositing is `over`, so what a frost still contributes is the
-destination weight of every layer laid over it — its own window first, then
-each one above. Each transmission is one rounded division by 255, so the
-largest per-channel difference a wrong backdrop survives as shrinks by
-`d -> ceil(d·(255−α)/255)`; from the widest 8-bit difference, four layers at
-80% opacity take it to **one**. That is the tightest integer compositing
-admits, because a translucent layer maps a difference of one to a difference of
-one — only an opaque layer reaches zero — so the skipped pixels are within the
-last bit of a channel rather than byte-identical. That is the deliberate limit
-of this item and the second rendering decision this plan records, after B.5's
-dither.
+**The defect.** Granting retention one window at a time — "does one more
+fit?" — answers *yes* for every window in such a stack, so each frame blurred
+one, evicted another, and re-blurred it the next. Cost climbed with the depth of
+the stack and the cache served nobody. Sixteen terminals opened on top of one
+another at the shipped translucent, blurred default is the shape that finds it,
+and it took the desktop to a crawl: one repainted cell cost several screenfuls
+of blur *and* of blending, because a frost that must be recomputed also promotes
+its whole window into the plan, so the plan became the union of all sixteen
+rectangles and every one of them was composed over it.
 
-What landed:
+**The bound.** `Compositor::grant_backdrops` spends the cache's live ceiling from
+the **front** of the stack, once per frame, before the frame takes its damage:
 
-- **A per-surface alpha floor** (`Surface::alpha_floor` /
-  `settle_alpha_floor`, `lib/raster`). Every write seam records the pixels it
-  hands out — all three of them, since `row_span_mut` and `row_bands_mut` are
-  the only ways a `Surface`'s pixels are reached — and settling reads them
-  back, lowering the bound to what they hold and retaking it from the whole
-  surface once as much area has been written as the surface holds. Typing
-  therefore stays O(damage). An unaccounted borrow reads as fully transparent,
-  so a write path that forgets to settle costs the skip and never a pixel.
-- **`Window::solid_core`**: the screen rectangle where the window draws its own
-  content at full corner coverage — the drawable client area inside the reach
-  of the shape its client is cut to, *not* the bounds, since the furniture band
-  and the arcs are other things — paired with the least alpha those pixels can
-  compose at. Floored, not rounded: the ordered dither's lowest bias floors the
-  opacity scale.
-- **`Compositor::unseen_core`**: the walk upward, intersecting each covering
-  window's solid core and taking the region in by the radius of every blur
-  above that still has a difference worth spreading — a blur carries what is
-  beneath it outward, where the walk has proved nothing.
-- **`FrostPlan::Unseen`**, fed to the existing `blur_backdrop(index, keep)`, so
-  only the border is blurred, the layers under the core are not composed, and
-  the frost is **not captured**.
-- **The skip is only taken for a frost the budget cannot keep**
-  (`ReclaimCache::admits`, weighed against what the pass has already promised).
-  Retaining beats any partial blur — one blur and then nothing, and a *moved*
-  occluder above then costs nothing at all — so a keepable frost is blurred
-  whole. This is what stops the skip regressing D.8's dragged occluder, which
-  it otherwise does: a punched core is refused the moment the window hiding it
-  moves, and every drag sample pays a full re-blur.
+- `ReclaimCache::holds(entries, payload)` weighs the whole set being chosen
+  against the live band's ceiling, rather than one entry against what is charged
+  (the old `admits`, now deleted — its only caller was this decision, and asking
+  it per window is what let the working set outrun the budget).
+- What the budget reaches is frosted, retained, and recorded on the window
+  (`Window::is_frosted`), so the plan and the composite read one answer.
+- What it does not reach composites as the **plain translucent window it also
+  is**: no blur, no retained backdrop, no segment split, the layers beneath
+  blended straight through. Both `compose_plan` and `recompose_rect` now key on
+  `Window::is_frosted` rather than on `Window::reads_backdrop`.
+- Gaining or losing a frost marks the window's own bounds, because the ration
+  turns on the live pressure band as well as on the scene and the window draws
+  differently either way. A refused window's retained entry is released in the
+  same pass, so the windows still frosted are weighed against a budget the
+  refused ones have given back.
 
-**Measured.** On the D.13 cascade shape as a host unit test (26 80%-opaque
-blurred terminals on eight positions over 1024×768, retained backdrops some 22
-screenfuls against a budget of one) a frame falls from 5 552 560 to 4 664 760
-blurred pixels and 5 552 559 to 4 920 035 blends. The counters miss the larger
-saving: 23 window-sized captures a frame — allocation plus blit — stop being
-made for entries the budget was always going to turn away. On
-`tairix-test-desktop-pressure-qemu-aarch64` (aarch64, 1 CPU, ramfb, cascaded
-terminals under real memory pressure) the terminal defaulting to 80% opacity
-**and** a half-strength blur went from never finishing — cost per window
-climbing linearly, +0.22 s for window 2, +3.5 s for 16, +8.6 s for 26, killed
-at the ceiling with 26 of the 32 that vertical then asked for on screen — to
-**133 s**, against 37 s for the same tree with the blur off. The blur therefore ships on
-(`plans/GUI-TERMINAL.md` §2).
+Depth is bounded by the one fact that matters — what can be retained — not by a
+window count a large screen would waste and a small one could not afford. Frosts
+that do not overlap all fit, since together they cover no more than the screen,
+so an ordinary desktop is never rationed. Because the frame never over-commits,
+nothing is admitted only to be evicted (asserted).
 
-Verified by composing one scene both ways (`set_frost_skip`, beside
-`set_opaque_runs` and `frost_reuse`) across content presents above and inside
-the frost, a moved occluder, a faded one, a closed one and a restack, requiring
-every scan-out byte to agree to within the one bit the walk allows.
+**The trade, stated.** A window buried under a pile of frosted ones reads as
+translucent rather than as frosted glass where it still shows. That is the third
+rendering decision this plan records, after B.5's dither and D.3's arithmetic,
+and it is bounded: nothing is drawn *wrong*, and a refused window's pixels are
+byte-identical to the same window with its blur turned off (asserted by composing
+one scene both ways).
+
+**Measured.** On the cascade as a host unit test (sixteen 80%-opaque blurred
+terminals on eight positions over 1024×768, retained backdrops wanting some
+thirteen screenfuls against a budget of one) the first frame blurs 640 680 px
+and frosts three of the sixteen within the ceiling. A terminal then repainting
+one cell of itself blurs **0** px and recomposes **1**, against the 4 664 760
+blurred px and 4 920 035 blends the same repaint cost over an ungoverned stack.
+
+**A buried frost is not computed in part; it is not computed at all.** Blurring
+only the strip of a buried window that still shows leaves that strip re-blurred
+every frame for ever — it is never retained, because an entry records a whole
+rectangle — and keeps the window in the plan, which is what made the blending
+dominate. Refusing the frost outright is what makes both zero.
 
 ## Stage E — One present per frame, and a frame deadline  **[done]**
 

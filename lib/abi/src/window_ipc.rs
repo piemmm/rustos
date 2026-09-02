@@ -1342,6 +1342,14 @@ pub enum WindowRequest {
     /// over sharp content. A radius of `0` disables the effect — the
     /// window's own opacity still applies, but nothing behind it is
     /// blurred first.
+    ///
+    /// The radius is a request the compositor honours as its own retention
+    /// budget allows: retaining one window's frosted backdrop costs that
+    /// window's pixels, and windows stacked on the same pixels each want
+    /// their own, so a window buried under a pile of frosted ones may be
+    /// composited with its opacity alone and no blur behind it. Nothing is
+    /// drawn wrong by that, and no error is reported for it — the effect is
+    /// the frosted *look*, never correctness.
     SetBackdropBlur {
         /// The window whose backdrop blur is being set.
         window_id: u64,

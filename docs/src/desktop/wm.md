@@ -351,11 +351,6 @@ This is what keeps a window one object while its client is behind:
   memory pressure, or whose app ignores the redraw request, reads as an empty
   window rather than a hole onto the desktop.
 
-Because the plate is opaque, the claim a decorated window makes on what lies
-behind it (`Window::solid_core`) reaches every drawable client column whether
-or not the client has presented that far, so the stack beneath a growing
-window is not needlessly re-blended.
-
 ## Backdrop blur
 
 A window may ask for the already-composited content *behind* its
@@ -808,67 +803,58 @@ How a retained backdrop is known to be still right:
   never looked up again, so setting its blur radius to zero releases its entry
   outright rather than leaving a screenful of dead pixels charged.
 
-### A frost no output channel can record
+### Frosting is rationed, front to back
 
-A frost is only worth computing if some pixel of the screen can still show it.
-Compositing is `over`, so what one contributes to the output is the destination
-weight of every layer laid over it — the window's own pixels first, then each
-one above. Each transmission is a rounded division by 255, so the largest
-per-channel difference a wrong backdrop can survive as shrinks by `d ->
-ceil(d * (255 - alpha) / 255)`; starting from the widest difference an 8-bit
-channel holds, four layers at 80% opacity take it to **one**. That is the
-tightest bound integer compositing admits — a translucent layer maps a
-difference of one to a difference of one, so only an opaque layer reaches zero
-— and it is the deliberate limit of this optimisation: the skipped pixels are
-not byte-identical, they are within the last bit of a channel.
+A frost is a *whole window's* rectangle, and stacked frosted windows all read
+the same pixels, so `n` of them want `n` screenfuls of retention against a
+budget of one. Asking "does one more fit?" of each in turn answers *yes* for
+every window in such a stack, so each frame blurred one, evicted another, and
+re-blurred it the next frame: cost climbed with the depth of the stack and the
+cache served nobody. Sixteen terminals opened on top of one another at the
+shipped translucent, blurred default is the shape that finds it, and it took the
+desktop to a crawl — one repainted cell costing several screenfuls of blur and
+of blending.
 
-The compositor therefore walks upward from each frosted window it must blur,
-carrying the rectangle over which the walk holds and taking it in as it goes:
+`Compositor::grant_backdrops` therefore spends the cache's live ceiling from the
+**front** of the stack and stops (`ReclaimCache::holds`, which weighs a whole
+set against the ceiling rather than one entry against what is charged):
 
-- **A window's alpha is only bounded over its own client pixels.** Every
-  surface carries an alpha *floor* (`Surface::alpha_floor`), a lower bound on
-  what any of its pixels holds, and `Window::solid_core` pairs it with the
-  screen rectangle where that pixel is what the window actually draws — the
-  drawable client area taken in by the reach of the shape its client is cut to,
-  never the bounds, since the furniture band and the corner arcs are other
-  things. The walk intersects those rectangles; a window whose bounds miss the
-  region neither hides it nor reads it and is passed over.
-- **A window that blurs also spreads.** Its own blur carries whatever is
-  beneath it up to its radius outward, so a difference left inside the region
-  would reappear that far outside it, where the walk has proved nothing. The
-  region is taken in by the radius of every blur above that still has a
-  difference worth spreading.
-- **The floor is maintained, not rescanned.** A partial write to a surface
-  lowers it to what that write laid down — under-stating it can only cost the
-  skip, never take one wrongly — and the exact figure is retaken from every
-  pixel once as much area has been rewritten as the surface holds. Typing in a
-  terminal therefore stays proportional to the cell it changed.
+- What the budget reaches is **frosted** — its backdrop retained, the window
+  composed over it — and is recorded on the window (`Window::is_frosted`), so
+  the plan and the composite read one answer.
+- What it does not reach composites as the **plain translucent window it also
+  is**: no blur, no retained backdrop, no segment split, and the layers beneath
+  it blended straight through. The frame it draws there is byte for byte what
+  the same window draws with its blur turned off, which the compositor's tests
+  assert rather than assume.
 
-What the frame does with the resulting rectangle is blur the border around it
-and leave it alone (`FrostPlan::Unseen`, through the same
-`blur_backdrop(index, keep)` a partially-reused frost takes), and compose no
-layer beneath it either.
+Depth is bounded by the one fact that matters — what can be retained — rather
+than by a window count that a large screen would waste and a small one could not
+afford. Frosts that do not overlap all fit, since together they cover no more
+than the screen, so an ordinary desktop is never rationed; only a pile of them
+on the same pixels is, which is exactly the pathology. Because the frame never
+over-commits the budget, nothing is admitted only to be evicted.
 
-**The skip is only taken for a frost the budget cannot keep.** Retaining beats
-any partial blur — one blur and then nothing, however deeply a window is
-buried, and a moved occluder above then costs nothing at all — so a frost the
-cache will admit is computed in full. Only where a whole pass's frosts together
-exceed the budget, so admitting one means pushing a live one out and every
-frame rebuilds all of them, is the unseen core left uncomputed. Such a frost is
-also **not captured**: an entry records a whole rectangle a later frame may copy
-back once the windows hiding it have moved away, and not taking the copy is
-most of what this saves — a capture is a window-sized allocation and blit, per
-window, per frame.
+Measured on that cascade as a host unit test — sixteen 80%-opaque blurred
+terminals on eight positions over a 1024×768 output, retained backdrops wanting
+some thirteen screenfuls against a budget of one — the first frame blurs 640 680
+pixels (four fifths of the screen) and three of the sixteen windows are frosted
+within the ceiling. A terminal then repainting one cell of itself blurs **0**
+pixels and recomposes **1**, where the same repaint over an ungoverned stack
+blurred some 4.7 M and blended some 4.9 M.
 
-Measured on the cascade `plans/FIX-DESKTOP-SPEEDUP.md` D.13 describes — 26
-80%-opaque blurred terminals on eight positions over a 1024×768 output, whose
-retained backdrops are some 22 screenfuls against a budget of one — a frame
-falls from 5 552 560 to 4 664 760 blurred pixels and 5 552 559 to 4 920 035
-blends, and stops making 23 window-sized captures a frame.
+What it costs is that a window buried under a pile of frosted ones reads as
+translucent rather than as frosted glass where it still shows. That is the
+deliberate trade, and it is bounded: nothing is ever drawn wrong, only less
+prettily than an unbounded machine would draw it.
 
-A frost is a *whole window's* rectangle, so unlike furniture a stack of
-overlapping ones can want several times the screenful the budget allows — which
-is the condition the section below keys on, not an accident of the ceiling.
+**A change of mind marks damage.** The ration turns on the cache's ceiling and
+the live pressure band as well as on the scene, so a window can start or stop
+frosting with nothing on screen having moved — and it draws differently either
+way. The grant runs before the frame takes its damage and marks the bounds of
+every window whose answer changed, releasing the retained entry of one that has
+stopped frosting at the same time, so the windows still frosted are weighed
+against a budget the refused ones have given back.
 
 The cache is read-only for the whole of a composite pass and written at the end
 of it: admitting a frost mid-pass could evict one the same pass had already

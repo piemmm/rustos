@@ -84,8 +84,10 @@ strength, and the four pass effects off. Translucency is free (it is the alpha
 the background is filled at, and it is not a pass), so the shipped look keeps
 the cell-diff present; the blur is what makes the window read as frosted glass
 rather than as a hole. A screenful of frosted terminals is affordable because
-the compositor no longer computes the frosts a stack of them buries
-(`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
+the compositor rations frosting: it frosts the stack from the front until the
+retention budget runs out, and a terminal buried beneath that draws as the
+plain translucency it also is (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). A window
+piled on by others therefore loses the frosted look, never its correctness.
 
 ---
 
@@ -121,7 +123,7 @@ so a terminal with the effects off pays nothing.
 | Effect | Where it happens | How |
 |---|---|---|
 | Translucency | While the cells are painted | The default background is filled at `background_alpha`, so the compositor's own premultiplied blend does the work and a glyph stays opaque over it. Never below `MIN_OPACITY`. |
-| Backdrop blur | The compositor | Only the compositor can see behind a window, so the strength becomes a logical radius (`blur_radius_px`, capped at `MAX_BLUR_RADIUS_PX`) and is handed to the window channel's `set_backdrop_blur`. Zero when the window is opaque — a blur nobody can see is wasted work. |
+| Backdrop blur | The compositor | Only the compositor can see behind a window, so the strength becomes a logical radius (`blur_radius_px`, capped at `MAX_BLUR_RADIUS_PX`) and is handed to the window channel's `set_backdrop_blur`. Zero when the window is opaque — a blur nobody can see is wasted work. The compositor rations how many stacked windows it frosts, so a deeply buried terminal shows the translucency without the frost. |
 | Scan lines | `Pass::ScanLines` | Dims alternate physical rows. Static. |
 | Glow | `Pass::Glow` | Halation: the light of brightly-driven pixels spread into their neighbourhood and added back. Static. |
 | Fuzz | `Pass::Fuzz` | Per-pixel luminance jitter from a cheap reproducible mixer, moving each animation step. |
@@ -293,10 +295,11 @@ compositor can do it.
 - The hardware layer path cannot express a backdrop blur, so a frame
   containing a blurred window falls back to the software composite rather than
   presenting a wrong frame.
-- A frost the layers over it hide is not computed at all
-  (`plans/FIX-DESKTOP-SPEEDUP.md` D.13), which is what lets the blur ship on by
-  default: a screenful of cascaded terminals under memory pressure went from
-  never finishing to **133 s**.
+- Frosting is rationed from the front of the stack, so a pile of blurred
+  terminals costs one screenful of frost rather than one per window
+  (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). That is what lets the blur ship on by
+  default: a cell repaint under sixteen cascaded terminals blurs nothing, where
+  it blurred some 4.7 M pixels.
 
 ---
 
