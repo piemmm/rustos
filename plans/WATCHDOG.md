@@ -302,9 +302,14 @@ acquiring call's **source `file:line`** (not a runtime address).
 
 Recording lives in `lib/sync`, behind its own `lock-diagnostics` feature that
 `kernel/core`'s `watchdog-diagnostics` turns on (so it tracks the same debug
-image, the one selection point). The spinning family is instrumented at one
-point: `SpinLock::{lock,try_lock}` (which `IrqSafeSpinLock` wraps, so both are
-covered) are `#[track_caller]` in a diagnostics build and report their
+image, the one selection point); the same switch turns on
+`tairix-kalloc/lock-diagnostics`, because the global kernel heap lock is an
+`IrqSafeSpinLock` over kalloc's installed mask hooks and is the one lock every
+subsystem descends into — a core wedged inside it would otherwise be reported
+against whatever outer lock it happened to hold. The spinning family is
+instrumented at one point: `SpinLock::{lock,try_lock}` (which
+`IrqSafeSpinLock` wraps, so both are covered) are `#[track_caller]` in a
+diagnostics build and report their
 lifecycle — `Acquiring`/`Acquired`/`TryAcquired`/`Released` with the caller's
 `Location` — to an installed thin-fn observer (`lockwatch::note`). A shippable
 build compiles the `track_caller` shim, the notes, and the module out entirely,
@@ -318,9 +323,15 @@ targets the IRQ-masking family that produces the *hard* lockup.
 (`install_lock_diagnostics`); the observer resolves the running core's dense id
 through a lock-free banked-register read (`smp::current_cpu_index`, so it never
 recurses into a lock) and records into a per-CPU bounded lock-site stack
-(`CpuState::{lock_sites,lock_depth,lock_top_acquiring}`, `LOCK_STACK_MAX = 8`):
+(`CpuState::{lock_sites,lock_depth,lock_acquiring}`, `LOCK_STACK_MAX = 8`):
 `Acquiring` pushes marked *acquiring*, `Acquired` promotes the top to *held*,
-`TryAcquired` pushes *held*, `Released` pops. Nesting deeper than the cap still
+`TryAcquired` pushes *held*, `Released` pops. `lock_acquiring` is one bit
+**per entry**, not a single top-of-stack flag: a core spinning for a lock with
+interrupts enabled takes and releases nested locks inside that spin (every
+interrupt handler does), and a shared flag reported the still-spinning outer
+entry as `held` from the first nested release onwards — turning a contended
+waiter into a phantom wedge and pointing a lockup investigation at the wrong
+core. Nesting deeper than the cap still
 balances on release (depth counts true nesting) and simply stops recording the
 excess (fail-safe — no growth, no fault). The buddy's report renders the
 innermost entry as `k_lock=<file>`, `k_lock_line=<n>`, and `k_lock_state`

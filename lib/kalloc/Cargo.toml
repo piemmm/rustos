@@ -17,6 +17,21 @@ publish.workspace = true
 # leaf over `core`.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
+# The one IRQ-masking spinlock. The heap lock must mask interrupts (an ISR
+# that allocates would otherwise self-deadlock on its own mainline's hold), and
+# that primitive already exists here rather than being hand-rolled a second
+# time. It also carries the lockup watchdog's lock-site instrumentation, so a
+# core wedged inside the global heap lock is named rather than reported against
+# whatever outer lock it happened to hold. `tairix-sync` has no dependencies of
+# its own and allocates nothing, so the allocator crate stays a leaf.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+
+[features]
+# Forwards the lock-site observation the lockup watchdog needs onto the heap
+# lock. Off by default, exactly as in `tairix-sync`: a shippable build compiles
+# the facility out and the heap lock stays a bare CAS.
+lock-diagnostics = ["tairix-sync/lock-diagnostics"]
+
 [lints]
 workspace = true
 

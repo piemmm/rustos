@@ -2423,7 +2423,12 @@ into one run of a kernel **remap window**.
 ## 7v. The kernel heap's two tiers (`lib/kalloc`, `framepages`)
 
 The kernel `#[global_allocator]` is one allocator with **two tiers behind one
-`GlobalAlloc`**, under one interrupt-safe lock (`lib/kalloc`).
+`GlobalAlloc`**, under one interrupt-safe lock (`lib/kalloc`). That lock is the
+shared `tairix_sync::IrqSafeSpinLock` over an `InterruptControl` bound to
+kalloc's installed mask hooks, not a spin gate of its own, so it appears on the
+lockup watchdog's per-CPU lock-site record like any other lock — it is the one
+lock every subsystem descends into, and a core wedged inside it must be named
+rather than attributed to whichever outer lock it was holding.
 
 - **Up to the page granule: a slab.** Per-size-class pages, the free list
   threaded through the free objects themselves, and each page's own

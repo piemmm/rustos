@@ -1704,11 +1704,26 @@ and fabricating an SMP-deadlock fix is a hack (§2.1).
 
 - `k_lock` stuck-lock record — a per-CPU lock-site stack (`lib/sync`
   `lock-diagnostics` feature → `kernel/core` observer →
-  `CpuState::{lock_sites,lock_depth,lock_top_acquiring}`, rendered
+  `CpuState::{lock_sites,lock_depth,lock_acquiring}`, rendered
   `k_lock=<file>:<line>` + `k_lock_state` on the `id=4085` detail).
   `SpinLock::{lock,try_lock}` (which `IrqSafeSpinLock` wraps) are
   `#[track_caller]` under the feature and report through the `lockwatch`
   seam; a shippable image compiles it all out (bare CAS).
+- **The global kernel heap lock is on that record.** It is an
+  `IrqSafeSpinLock` over kalloc's installed mask hooks
+  (`tairix-kalloc/lock-diagnostics`, turned on by the same
+  `watchdog-diagnostics` switch) rather than a second hand-rolled spin gate,
+  so it is named like any other lock. It is the one IRQ-masking lock every
+  subsystem descends into, and while it was uninstrumented a core wedged
+  *inside* it was reported against whichever outer lock it happened to hold
+  — the single most likely way for this defect to have hidden.
+- **`k_lock_state` is per entry, so it no longer mislabels a waiter as a
+  holder.** `lock_acquiring` carries one bit per stack entry; a single
+  top-of-stack flag was cleared by *any* nested lock release, so a core
+  spinning with interrupts enabled (every plain `SpinLock`) read as `held`
+  from its first interrupt onwards. **A `k_lock_state=held` in any report
+  captured before this fix may in truth have been `acquiring`** — i.e. the
+  named core may be the contended waiter, not the holder.
 - **Trustworthy pre-silence backtrace** — the aarch64 `k_bt` frame-pointer
   walk (`kernel/arch/aarch64` `capture_sample_backtrace`) now validates each
   caller: a return address is accepted only if it lands in kernel

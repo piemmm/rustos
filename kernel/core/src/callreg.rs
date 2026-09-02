@@ -230,12 +230,35 @@ fn revoke_grants_for(
 /// is needed: the poster is dead and the server parks only on *arrival* of
 /// requests, never their removal.
 pub fn cancel_posted_by(sender: u64, audit: &dyn Sink) {
-    // Snapshot under the registry lock, cancel outside it (each
-    // cancellation takes the endpoint's own interior lock, never this one).
-    let endpoints: Vec<Arc<CallEndpoint>> = CALL_ENDPOINTS.lock().values().cloned().collect();
-    for ep in endpoints {
+    // Walked one entry at a time rather than snapshotted: each step holds the
+    // registry lock only long enough to clone one `Arc` (an atomic bump, no
+    // allocation), so the heap's own global lock never nests inside the
+    // registry's critical section, and each cancellation — which takes the
+    // endpoint's interior lock — runs with the registry lock released.
+    //
+    // Ids strictly increase, so the walk terminates. An endpoint registered
+    // mid-walk under a lower id is skipped, which is correct: `sender` is
+    // dead and so cannot have posted to an endpoint that did not exist while
+    // it lived.
+    let mut after = None;
+    while let Some((id, ep)) = next_registered_after(after) {
         let _ = ep.cancel_posted_by(sender, audit);
+        after = Some(id);
     }
+}
+
+/// The bound endpoint with the smallest id above `after` (the smallest of
+/// all when `after` is [`None`]), cloned out under the registry lock.
+fn next_registered_after(after: Option<EndpointId>) -> Option<(EndpointId, Arc<CallEndpoint>)> {
+    let lower = match after {
+        Some(id) => core::ops::Bound::Excluded(id),
+        None => core::ops::Bound::Unbounded,
+    };
+    CALL_ENDPOINTS
+        .lock()
+        .range((lower, core::ops::Bound::Unbounded))
+        .next()
+        .map(|(id, ep)| (*id, Arc::clone(ep)))
 }
 
 /// `true` if `id` is currently bound. Diagnostic / test observer.

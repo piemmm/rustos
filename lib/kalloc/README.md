@@ -64,6 +64,13 @@ interrupts are ever enabled; the hosted test build and the interrupt-free
 `wasm32` port install nothing and the lock does not mask (that window is
 single-CPU with interrupts already masked, so no ISR can reenter).
 
+The lock is the shared `tairix_sync::IrqSafeSpinLock` over an
+`InterruptControl` bound to those hooks, not a second spinlock written here.
+That also puts the heap lock on the lockup watchdog's lock-site record
+(`plans/WATCHDOG.md`): it is the one lock every subsystem descends into, so a
+core wedged inside it must be named as such rather than reported against
+whichever outer lock it happened to be holding.
+
 The hooks mask the *calling* CPU, so they belong to the machine rather than
 to any one heap: they are crate-global, and one install covers every core
 and every `FreeListAllocator` the binary holds. Binding them per instance

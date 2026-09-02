@@ -92,6 +92,12 @@
 //! ([`install_irq_control`]); until then the context is single-CPU with
 //! interrupts already masked.
 //!
+//! The lock itself is the shared [`IrqSafeSpinLock`], driven by an
+//! [`InterruptControl`] over those hooks, so there is no second spinlock
+//! implementation here — and the lockup watchdog's lock-site diagnostics
+//! name this lock like any other rather than reporting a core wedged inside
+//! it against whatever outer lock it happened to hold.
+//!
 //! The hooks mask the *calling* CPU, so they describe the machine rather
 //! than any one heap: they are installed once per binary and every
 //! [`FreeListAllocator`] in it is interrupt-safe from that instant. Binding
@@ -101,11 +107,12 @@
 #![no_std]
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::PAGE_SIZE;
+use tairix_sync::irq::{InterruptControl, IrqState};
+use tairix_sync::IrqSafeSpinLock;
 
 /// Bytes of the bootstrap heap arena a freestanding bin reserves in `.bss`.
 ///
@@ -552,7 +559,8 @@ pub trait HeapSource: Sync {
     fn free_page(&self, page: NonNull<u8>);
 }
 
-/// The mutable allocator state guarded by [`FreeListAllocator::lock`].
+/// The mutable allocator state, reached only through the allocator's
+/// IRQ-masking lock.
 struct Inner {
     /// `true` once the bootstrap region's initial block has been planted.
     initialised: bool,
@@ -708,13 +716,11 @@ impl Inner {
 pub struct FreeListAllocator {
     heap_base: *mut u8,
     heap_len: usize,
-    lock: AtomicBool,
-    inner: UnsafeCell<Inner>,
+    inner: IrqSafeSpinLock<Inner, InstalledIrqControl>,
 }
 
-// SAFETY: every access to `inner` is serialised by the `lock` spin gate
-// (`alloc`/`dealloc`/`used`/`remaining` take it before touching the cell),
-// and the raw `heap_base` is only ever read, never aliased as a reference.
+// SAFETY: every access to `inner` goes through its IRQ-masking spinlock, and
+// the raw `heap_base` is only ever read, never aliased as a reference.
 unsafe impl Sync for FreeListAllocator {}
 // SAFETY: as for `Sync` — the type owns its arena and hands out disjoint
 // blocks, so moving it between threads aliases nothing.
@@ -767,6 +773,58 @@ pub fn install_irq_control(disable: fn() -> usize, restore: fn(usize)) {
     IRQ_DISABLE.store(disable as usize, Ordering::Release);
 }
 
+/// Interrupt state saved by the installed [`install_irq_control`] hook, or
+/// [`None`] when no hook is installed and the hold therefore does not mask.
+#[derive(Clone, Copy)]
+pub struct SavedIrqState(Option<usize>);
+
+impl IrqState for SavedIrqState {}
+
+/// [`InterruptControl`] over the runtime-installed hooks, so the heap lock is
+/// the shared IRQ-masking spinlock rather than a second hand-rolled one — and
+/// so the lockup watchdog can name it as the lock a wedged core is on.
+///
+/// The hooks are installed at runtime rather than chosen as a type parameter
+/// because the allocator is a `#[global_allocator]` static built in a `const`
+/// context, before the architecture is known to this crate.
+pub struct InstalledIrqControl;
+
+// SAFETY: `disable`/`restore` forward to the architecture pair the boot path
+// installed, which masks the calling CPU and returns/consumes its prior state
+// (`install_irq_control`'s contract). With no hook installed both are no-ops
+// over a `None` token, which is sound because that window is single-CPU with
+// interrupts already masked. The pair is reentrant because the architecture
+// primitives are.
+unsafe impl InterruptControl for InstalledIrqControl {
+    type State = SavedIrqState;
+
+    fn disable() -> Self::State {
+        let raw = IRQ_DISABLE.load(Ordering::Acquire);
+        if raw == 0 {
+            return SavedIrqState(None);
+        }
+        // SAFETY: a non-zero slot only ever holds a `fn() -> usize` pointer
+        // round-tripped through `install_irq_control`.
+        let disable = unsafe { core::mem::transmute::<usize, fn() -> usize>(raw) };
+        SavedIrqState(Some(disable()))
+    }
+
+    unsafe fn restore(state: Self::State) {
+        let Some(token) = state.0 else {
+            return;
+        };
+        let raw = IRQ_RESTORE.load(Ordering::Relaxed);
+        if raw == 0 {
+            return;
+        }
+        // SAFETY: `token` came from the installed `disable`, whose paired
+        // `restore` (published before it with Release/Acquire) is visible
+        // here; it is this CPU's saved state, restored exactly once.
+        let restore = unsafe { core::mem::transmute::<usize, fn(usize)>(raw) };
+        restore(token);
+    }
+}
+
 impl FreeListAllocator {
     /// Construct an allocator over an existing heap region.
     ///
@@ -781,8 +839,7 @@ impl FreeListAllocator {
         Self {
             heap_base,
             heap_len,
-            lock: AtomicBool::new(false),
-            inner: UnsafeCell::new(Inner::new()),
+            inner: IrqSafeSpinLock::new(Inner::new()),
         }
     }
 
@@ -813,43 +870,9 @@ impl FreeListAllocator {
     /// Private, and never called from inside `f`: the lock is not reentrant,
     /// which is an invariant of this module rather than a contract on any
     /// caller outside it, so this is safe to call.
+    #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     fn with_inner<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
-        // Mask interrupts on this CPU for the whole hold, *before* taking the
-        // lock (fail-safe: no hook installed means the context is already
-        // non-reentrant, so masking is unnecessary).
-        let disable = IRQ_DISABLE.load(Ordering::Acquire);
-        let irq_token = if disable == 0 {
-            None
-        } else {
-            // SAFETY: `irq_disable` only ever holds a `fn() -> usize` pointer
-            // round-tripped through `install_irq_control`.
-            let disable = unsafe { core::mem::transmute::<usize, fn() -> usize>(disable) };
-            Some(disable())
-        };
-        while self
-            .lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        // SAFETY: the lock is held, so this is the only live reference to
-        // `*inner`. `with_inner` is never re-entered.
-        let inner = unsafe { &mut *self.inner.get() };
-        let out = f(inner);
-        self.lock.store(false, Ordering::Release);
-        // Restore the prior interrupt state only *after* the lock is released,
-        // so the whole critical section ran with interrupts masked.
-        if let Some(token) = irq_token {
-            let restore = IRQ_RESTORE.load(Ordering::Relaxed);
-            // SAFETY: a non-zero `irq_token` was produced by the installed
-            // `disable`, whose paired `restore` (published before `disable`
-            // with Release/Acquire) is visible here; `token` is this CPU's
-            // saved state, restored exactly once.
-            let restore = unsafe { core::mem::transmute::<usize, fn(usize)>(restore) };
-            restore(token);
-        }
-        out
+        f(&mut self.inner.lock())
     }
 
     /// Plant the bootstrap region's single free block if not yet done.

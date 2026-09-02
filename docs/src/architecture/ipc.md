@@ -237,7 +237,17 @@ with `take_reply(claimant, ticket)`. The bind-/send-time capability split
 and size/closed-port checks mirror `Port` exactly; `create` takes its
 bounds as one `CallEndpointLimits` value (`max_request`, `max_reply`,
 `capacity`), where `capacity` is a fail-closed bound on the number of
-*outstanding* calls (`AGENTS.md` §24.4), not a scaling capacity.
+*outstanding* calls (`AGENTS.md` §24.4), not a scaling capacity. Because it
+reaches `create` straight from the endpoint-create syscall's argument, it is
+itself bounded by `IPC_CALL_CAPACITY_MAX`: an unbounded value would leave the
+endpoint with no memory bound at all.
+
+The three call states are held in flat, doubling collections bounded by that
+capacity, and lookup by ticket is a linear scan over them. No call operation
+allocates or frees a per-call node, and every removed payload is moved out and
+dropped *after* the endpoint lock is released, so the receive and reply paths
+never descend into the kernel heap's own global, IRQ-masking lock while
+holding this endpoint's lock.
 
 `CallEndpoint` is the request/reply *state machine* only and never
 blocks — the caller parking until its ticket is replied and the server

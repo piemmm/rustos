@@ -41,9 +41,10 @@
 
 extern crate alloc;
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
-use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
+use tairix_abi::ipc::{IPC_CALL_CAPACITY_MAX, IPC_MESSAGE_MAX_PAYLOAD_LEN};
 use tairix_abi::{Errno, Origin};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::SensitiveBuffer;
@@ -191,28 +192,60 @@ struct PendingCall {
     request: SensitiveBuffer,
 }
 
+/// One call received by the server and awaiting [`CallEndpoint::reply`].
+struct InServiceCall {
+    ticket: u64,
+    /// The posting caller's task id, so only that task may claim the reply.
+    sender: u64,
+    /// The caller's kernel-attested identity, handed to the server by
+    /// [`CallEndpoint::peer_origin`].
+    origin: Origin,
+    /// The poster's scheduler id, returned by [`CallEndpoint::reply`] so the
+    /// syscall layer wakes exactly the poster.
+    poster_sched: u64,
+    deadline: u64,
+}
+
+/// One replied call awaiting its poster's [`CallEndpoint::take_reply`].
+struct CompletedCall {
+    ticket: u64,
+    sender: u64,
+    reply: SensitiveBuffer,
+}
+
 /// The lock-guarded request/reply state machine of a [`CallEndpoint`].
+///
+/// All three collections are flat and grow by doubling, bounded by the
+/// endpoint's `capacity`: no operation allocates a per-call node, so the
+/// steady-state receive and reply paths take the endpoint lock without ever
+/// descending into the heap's own (global, IRQ-masking) lock. Lookup is a
+/// linear scan, which is why `capacity` is a small fixed ceiling
+/// ([`IPC_CALL_CAPACITY_MAX`]) rather than a scaling capacity.
 struct Inner {
     /// Next ticket value; monotonic for the life of the endpoint.
     next_ticket: u64,
     /// Posted, not yet received by the server (FIFO).
     pending: VecDeque<PendingCall>,
-    /// Received by the server, awaiting [`CallEndpoint::reply`]. Keyed by
-    /// ticket; the value is the posting caller's task id (so only that task
-    /// may later claim the reply), its kernel-attested [`Origin`] (which
-    /// [`CallEndpoint::peer_origin`] hands the server), and its scheduler
-    /// id (which [`CallEndpoint::reply`] returns so the syscall layer wakes
-    /// exactly the poster).
-    in_service: BTreeMap<u64, (u64, Origin, u64, u64)>,
-    /// Replied, awaiting [`CallEndpoint::take_reply`]. Keyed by ticket; the
-    /// value is the posting caller's task id and the reply bytes.
-    completed: BTreeMap<u64, (u64, SensitiveBuffer)>,
+    in_service: Vec<InServiceCall>,
+    completed: Vec<CompletedCall>,
 }
 
 impl Inner {
     /// Total outstanding tickets, bounding endpoint memory at post time.
     fn outstanding(&self) -> usize {
         self.pending.len() + self.in_service.len() + self.completed.len()
+    }
+
+    fn in_service_pos(&self, ticket: u64) -> Option<usize> {
+        self.in_service.iter().position(|c| c.ticket == ticket)
+    }
+
+    fn completed_pos(&self, ticket: u64) -> Option<usize> {
+        self.completed.iter().position(|c| c.ticket == ticket)
+    }
+
+    fn pending_pos(&self, ticket: u64) -> Option<usize> {
+        self.pending.iter().position(|c| c.ticket == ticket)
     }
 }
 
@@ -273,7 +306,8 @@ impl CallEndpoint {
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] if `max_request` or `max_reply` exceeds
-    ///   [`IPC_MESSAGE_MAX_PAYLOAD_LEN`], or `capacity == 0`.
+    ///   [`IPC_MESSAGE_MAX_PAYLOAD_LEN`], or `capacity` is `0` or above
+    ///   [`IPC_CALL_CAPACITY_MAX`].
     /// * [`Errno::PermissionDenied`] if `creator` lacks the bind authority
     ///   above.
     ///
@@ -384,6 +418,7 @@ impl CallEndpoint {
         if max_request > IPC_MESSAGE_MAX_PAYLOAD_LEN
             || max_reply > IPC_MESSAGE_MAX_PAYLOAD_LEN
             || capacity == 0
+            || capacity > IPC_CALL_CAPACITY_MAX
         {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::LengthOutOfRange);
@@ -437,8 +472,8 @@ impl CallEndpoint {
             inner: tairix_sync::SpinLock::new(Inner {
                 next_ticket: 0,
                 pending: VecDeque::new(),
-                in_service: BTreeMap::new(),
-                completed: BTreeMap::new(),
+                in_service: Vec::new(),
+                completed: Vec::new(),
             }),
         })
     }
@@ -544,14 +579,23 @@ impl CallEndpoint {
     /// [`AuditEvent::CallEndpointDestroyed`].
     pub fn destroy<S: Sink + ?Sized>(&self, audit: &S) {
         self.state.store(state::CLOSED, Ordering::Release);
-        let cancelled = {
+        // Taking the payload-bearing queues wholesale is a pointer swap, so
+        // the buffers wipe and free themselves as these locals drop *after*
+        // the lock is released — the heap's own lock never nests inside this
+        // endpoint's critical section. The endpoint is closed, so the emptied
+        // queues are never refilled.
+        let (cancelled, dead_requests, dead_replies) = {
             let mut g = self.inner.lock();
             let n = g.outstanding();
-            g.pending.clear();
             g.in_service.clear();
-            g.completed.clear();
-            n
+            (
+                n,
+                core::mem::take(&mut g.pending),
+                core::mem::take(&mut g.completed),
+            )
         };
+        drop(dead_requests);
+        drop(dead_replies);
         let mut id_buf = [0u8; 16];
         let mut n_buf = [0u8; 12];
         record(
@@ -584,14 +628,45 @@ impl CallEndpoint {
     /// single-URB transport against the replacement driver. Records one
     /// [`AuditEvent::CallPosterVanished`] when anything was cancelled.
     pub fn cancel_posted_by<S: Sink + ?Sized>(&self, sender: u64, audit: &S) -> usize {
+        // Scan before committing to anything: on a task exit most endpoints
+        // hold nothing of the dead sender's, and that case must neither
+        // allocate the scratch below nor free a payload. `sender` is dead, so
+        // no call of its can appear between this check and the pass proper.
+        if !self.holds_calls_from(sender) {
+            return 0;
+        }
+        // Scratch for the removed payloads, allocated *before* the lock as
+        // `post` allocates its request copy: they wipe themselves on drop,
+        // and dropping them outside the critical section keeps the heap's own
+        // lock out of it. Bounded by `capacity`, so no push reallocates.
+        let mut dead: Vec<SensitiveBuffer> = Vec::with_capacity(self.capacity);
         let cancelled = {
             let mut g = self.inner.lock();
             let before = g.outstanding();
-            g.pending.retain(|call| call.sender != sender);
-            g.in_service.retain(|_, (owner, _, _, _)| *owner != sender);
-            g.completed.retain(|_, (owner, _)| *owner != sender);
+            // One rotation of the queue: survivors go back in arrival order,
+            // so the server's FIFO is undisturbed, and the pass terminates on
+            // a fixed count rather than on a removal succeeding.
+            for _ in 0..g.pending.len() {
+                if let Some(call) = g.pending.pop_front() {
+                    if call.sender == sender {
+                        dead.push(call.request);
+                    } else {
+                        g.pending.push_back(call);
+                    }
+                }
+            }
+            g.in_service.retain(|call| call.sender != sender);
+            let mut i = 0;
+            while i < g.completed.len() {
+                if g.completed[i].sender == sender {
+                    dead.push(g.completed.swap_remove(i).reply);
+                } else {
+                    i += 1;
+                }
+            }
             before - g.outstanding()
         };
+        drop(dead);
         if cancelled > 0 {
             let mut id_buf = [0u8; 16];
             let mut sender_buf = [0u8; 16];
@@ -616,6 +691,14 @@ impl CallEndpoint {
             );
         }
         cancelled
+    }
+
+    /// Whether any call `sender` posted is still outstanding here.
+    fn holds_calls_from(&self, sender: u64) -> bool {
+        let g = self.inner.lock();
+        g.pending.iter().any(|c| c.sender == sender)
+            || g.in_service.iter().any(|c| c.sender == sender)
+            || g.completed.iter().any(|c| c.sender == sender)
     }
 
     /// Post `request` and obtain the [`CallTicket`] correlating its reply.
@@ -801,10 +884,13 @@ impl CallEndpoint {
         let Some(call) = g.pending.pop_front() else {
             return RecvCall::Empty;
         };
-        g.in_service.insert(
-            call.ticket,
-            (call.sender, call.origin, call.poster_sched, call.deadline),
-        );
+        g.in_service.push(InServiceCall {
+            ticket: call.ticket,
+            sender: call.sender,
+            origin: call.origin,
+            poster_sched: call.poster_sched,
+            deadline: call.deadline,
+        });
         RecvCall::Received(ReceivedCall {
             ticket: CallTicket(call.ticket),
             sender: call.sender,
@@ -825,11 +911,9 @@ impl CallEndpoint {
     /// endpoint before exposing it.
     #[must_use]
     pub fn peer_origin(&self, ticket: CallTicket) -> Option<Origin> {
-        self.inner
-            .lock()
-            .in_service
-            .get(&ticket.0)
-            .map(|(_, origin, _, _)| *origin)
+        let g = self.inner.lock();
+        g.in_service_pos(ticket.0)
+            .map(|pos| g.in_service[pos].origin)
     }
 
     /// Deliver `reply` for the in-service call identified by `ticket`.
@@ -904,8 +988,7 @@ impl CallEndpoint {
         };
 
         let mut g = self.inner.lock();
-        let Some((sender, _origin, poster_sched, _deadline)) = g.in_service.remove(&ticket.0)
-        else {
+        let Some(pos) = g.in_service_pos(ticket.0) else {
             drop(g);
             record(
                 audit,
@@ -914,7 +997,16 @@ impl CallEndpoint {
             );
             return Err(Errno::NotFound);
         };
-        g.completed.insert(ticket.0, (sender, reply));
+        let InServiceCall {
+            sender,
+            poster_sched,
+            ..
+        } = g.in_service.swap_remove(pos);
+        g.completed.push(CompletedCall {
+            ticket: ticket.0,
+            sender,
+            reply,
+        });
         drop(g);
         record(
             audit,
@@ -952,16 +1044,14 @@ impl CallEndpoint {
         audit: &S,
     ) -> ReplyOutcome {
         let mut g = self.inner.lock();
-        match g.completed.remove(&ticket.0) {
-            // A ready reply, but only its poster may claim it.
-            Some((sender, bytes)) if sender == claimant => return ReplyOutcome::Ready(bytes),
-            // Someone else's ticket: put the reply back untouched and deny
-            // without revealing that it exists.
-            Some(entry) => {
-                g.completed.insert(ticket.0, entry);
+        if let Some(pos) = g.completed_pos(ticket.0) {
+            // Only the ticket's own poster may claim its reply; anyone else
+            // is denied without revealing that it exists, and the entry is
+            // left untouched.
+            if g.completed[pos].sender != claimant {
                 return ReplyOutcome::Unknown;
             }
-            None => {}
+            return ReplyOutcome::Ready(g.completed.swap_remove(pos).reply);
         }
         if self.is_closed() {
             return ReplyOutcome::Cancelled;
@@ -971,9 +1061,9 @@ impl CallEndpoint {
         // decides between a timeout and a still-live wait.
         let deadline = g
             .in_service
-            .get(&ticket.0)
-            .filter(|(sender, _, _, _)| *sender == claimant)
-            .map(|(_, _, _, deadline)| *deadline)
+            .iter()
+            .find(|c| c.ticket == ticket.0 && c.sender == claimant)
+            .map(|c| c.deadline)
             .or_else(|| {
                 g.pending
                     .iter()
@@ -984,9 +1074,16 @@ impl CallEndpoint {
             Some(deadline) if deadline <= now => {
                 // Retire the timed-out ticket from wherever it sits so a late
                 // reply for it is refused fail-closed and the slot is freed.
-                g.in_service.remove(&ticket.0);
-                g.pending.retain(|c| c.ticket != ticket.0);
+                if let Some(pos) = g.in_service_pos(ticket.0) {
+                    g.in_service.swap_remove(pos);
+                }
+                // Moved out rather than dropped in place, so the payload
+                // wipes and frees itself outside the critical section.
+                let dead = g
+                    .pending_pos(ticket.0)
+                    .and_then(|pos| g.pending.remove(pos));
                 drop(g);
+                drop(dead);
                 // Recorded here rather than at each caller: an in-kernel
                 // caller never reaches the syscall dispatcher's audit, so
                 // this is the only trace that the server missed its budget.
@@ -1034,15 +1131,15 @@ impl CallEndpoint {
             return true;
         }
         let g = self.inner.lock();
-        if g.completed.values().any(|(sender, _)| *sender == claimant) {
+        if g.completed.iter().any(|c| c.sender == claimant) {
             return true;
         }
         g.pending
             .iter()
             .any(|c| c.sender == claimant && c.deadline <= now)
             || g.in_service
-                .values()
-                .any(|(sender, _, _, deadline)| *sender == claimant && *deadline <= now)
+                .iter()
+                .any(|c| c.sender == claimant && c.deadline <= now)
     }
 
     /// The nearest (soonest) per-ticket deadline across every outstanding
@@ -1058,9 +1155,9 @@ impl CallEndpoint {
                 nearest = nearest.min(c.deadline);
             }
         }
-        for (sender, _, _, deadline) in g.in_service.values() {
-            if *sender == claimant {
-                nearest = nearest.min(*deadline);
+        for c in &g.in_service {
+            if c.sender == claimant {
+                nearest = nearest.min(c.deadline);
             }
         }
         nearest
@@ -1075,23 +1172,33 @@ impl CallEndpoint {
     /// nothing and returns `false` (no existence oracle).
     #[must_use]
     pub fn cancel_one(&self, claimant: u64, ticket: CallTicket) -> bool {
-        let mut g = self.inner.lock();
-        let before = g.outstanding();
-        g.pending
-            .retain(|c| !(c.ticket == ticket.0 && c.sender == claimant));
-        if g.in_service
-            .get(&ticket.0)
-            .is_some_and(|(sender, _, _, _)| *sender == claimant)
-        {
-            g.in_service.remove(&ticket.0);
-        }
-        if g.completed
-            .get(&ticket.0)
-            .is_some_and(|(sender, _)| *sender == claimant)
-        {
-            g.completed.remove(&ticket.0);
-        }
-        before != g.outstanding()
+        // The withdrawn payloads are moved out and dropped after the guard,
+        // keeping the heap's lock out of this endpoint's critical section.
+        let (removed, dead_request, dead_reply) = {
+            let mut g = self.inner.lock();
+            let before = g.outstanding();
+            let dead_request = g
+                .pending
+                .iter()
+                .position(|c| c.ticket == ticket.0 && c.sender == claimant)
+                .and_then(|pos| g.pending.remove(pos));
+            if let Some(pos) = g
+                .in_service
+                .iter()
+                .position(|c| c.ticket == ticket.0 && c.sender == claimant)
+            {
+                g.in_service.swap_remove(pos);
+            }
+            let dead_reply = g
+                .completed
+                .iter()
+                .position(|c| c.ticket == ticket.0 && c.sender == claimant)
+                .map(|pos| g.completed.swap_remove(pos).reply);
+            (before != g.outstanding(), dead_request, dead_reply)
+        };
+        drop(dead_request);
+        drop(dead_reply);
+        removed
     }
 }
 
@@ -1182,6 +1289,48 @@ mod tests {
         assert!(sink
             .ids()
             .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+    }
+
+    /// `capacity` reaches `create` straight from the endpoint-create
+    /// syscall's argument, so it needs a fixed ceiling of its own: it *is*
+    /// the endpoint's outstanding-call memory bound, and an unbounded value
+    /// leaves that bound meaningless.
+    #[test]
+    fn create_rejects_capacity_above_the_ceiling() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let err = CallEndpoint::create(
+            EndpointId(1),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 8,
+                max_reply: 8,
+                capacity: IPC_CALL_CAPACITY_MAX + 1,
+            },
+            &sink,
+        )
+        .err()
+        .expect("capacity above the ceiling is refused");
+        assert_eq!(err, Errno::LengthOutOfRange);
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+        // The ceiling itself is accepted, so the bound is inclusive.
+        CallEndpoint::create(
+            EndpointId(1),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 8,
+                max_reply: 8,
+                capacity: IPC_CALL_CAPACITY_MAX,
+            },
+            &sink,
+        )
+        .expect("the ceiling is a legal capacity");
     }
 
     #[test]
@@ -1425,6 +1574,78 @@ mod tests {
             .ids()
             .contains(&AuditEvent::CallPostToClosedEndpoint.id().0));
         assert!(ep.is_closed());
+    }
+
+    /// Cancelling one sender's calls must leave the other sender's requests
+    /// in arrival order: the server drains strictly FIFO, so a scrub that
+    /// reordered survivors would silently serve requests out of sequence.
+    #[test]
+    fn cancelling_one_senders_calls_keeps_the_others_in_fifo_order() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0x5F),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 8,
+            },
+            &sink,
+        )
+        .expect("ok");
+        let keep = task_with(7, &[]);
+        let doomed = task_with(9, &[]);
+        // Interleaved so a reorder cannot pass by luck.
+        ep.post(&keep, POSTER_SCHED, b"k1", u64::MAX, &sink)
+            .expect("k1");
+        ep.post(&doomed, POSTER_SCHED, b"d1", u64::MAX, &sink)
+            .expect("d1");
+        ep.post(&keep, POSTER_SCHED, b"k2", u64::MAX, &sink)
+            .expect("k2");
+        ep.post(&doomed, POSTER_SCHED, b"d2", u64::MAX, &sink)
+            .expect("d2");
+        ep.post(&keep, POSTER_SCHED, b"k3", u64::MAX, &sink)
+            .expect("k3");
+
+        assert_eq!(ep.cancel_posted_by(9, &sink), 2);
+        assert_eq!(ep.outstanding(), 3);
+        for expected in [b"k1".as_slice(), b"k2".as_slice(), b"k3".as_slice()] {
+            let call = recv_one(&ep).expect("survivor still queued");
+            assert_eq!(call.sender, 7);
+            assert_eq!(call.request.as_bytes(), expected);
+        }
+        assert!(recv_one(&ep).is_none());
+    }
+
+    /// A sender absent from an endpoint that is *not* empty cancels nothing
+    /// and disturbs nothing — the case the empty-endpoint no-op above cannot
+    /// reach, and the one a task exit hits on almost every live endpoint.
+    #[test]
+    fn cancelling_a_sender_absent_from_a_non_empty_endpoint_is_a_no_op() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let ep = CallEndpoint::create(
+            EndpointId(0x60),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            CallEndpointLimits {
+                max_request: 64,
+                max_reply: 64,
+                capacity: 4,
+            },
+            &sink,
+        )
+        .expect("ok");
+        let keep = task_with(7, &[]);
+        ep.post(&keep, POSTER_SCHED, b"k", u64::MAX, &sink)
+            .expect("k");
+        assert_eq!(ep.cancel_posted_by(9, &sink), 0);
+        assert_eq!(ep.outstanding(), 1);
+        assert!(!sink.ids().contains(&AuditEvent::CallPosterVanished.id().0));
     }
 
     #[test]

@@ -493,38 +493,71 @@ fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize) {
         LockEvent::TryAcquired => lock_push(state, site_ptr, false),
         // Promote the innermost record from acquiring to held; its site was
         // pushed by the preceding `Acquiring` for the same lock.
-        LockEvent::Acquired => state.lock_top_acquiring.store(false, Ordering::Relaxed),
+        LockEvent::Acquired => lock_mark_held(state),
         LockEvent::Released => lock_pop(state),
     }
 }
 
-/// Push a lock record for `state`: store `site_ptr` at the current depth
-/// (when within [`cpu_state::LOCK_STACK_MAX`]) and mark whether the top is
-/// still acquiring. The depth is bumped last (release) so a reader that
-/// loads it (acquire) first sees the matching site. Depth counts true
-/// nesting (saturating) so [`lock_pop`] stays balanced even past the cap.
+/// Push a lock record for `state`: claim the slot at the current depth (when
+/// within [`cpu_state::LOCK_STACK_MAX`]), then fill in `site_ptr` and whether
+/// that entry is still acquiring. Depth counts true nesting (saturating) so
+/// [`lock_pop`] stays balanced even past the cap.
+///
+/// The slot is blanked *before* the depth bump and written *after* it, so an
+/// interrupt taken mid-push derives its own index from the already-bumped
+/// depth and cannot claim this slot from under us. The cost is that a remote
+/// sampler landing inside the window reads a blank top entry and omits
+/// `k_lock` for that sample — no record, rather than a stale one.
 #[cfg(feature = "watchdog-diagnostics")]
 fn lock_push(state: &CpuState, site_ptr: usize, acquiring: bool) {
     let depth = state.lock_depth.load(Ordering::Relaxed);
-    if depth < cpu_state::LOCK_STACK_MAX {
-        state.lock_sites[depth].store(site_ptr, Ordering::Relaxed);
+    let recordable = depth < cpu_state::LOCK_STACK_MAX;
+    if recordable {
+        state.lock_sites[depth].store(0, Ordering::Relaxed);
+        set_acquiring(state, depth, false);
     }
-    state.lock_top_acquiring.store(acquiring, Ordering::Relaxed);
     state
         .lock_depth
         .store(depth.saturating_add(1), Ordering::Release);
+    if recordable {
+        set_acquiring(state, depth, acquiring);
+        state.lock_sites[depth].store(site_ptr, Ordering::Release);
+    }
 }
 
-/// Pop the innermost lock record for `state`. The new top (if any) is a
-/// held lock by construction — a deeper lock is only taken from inside an
-/// already-held section — so the acquiring flag clears.
+/// Promote the innermost entry from acquiring to held.
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_mark_held(state: &CpuState) {
+    let depth = state.lock_depth.load(Ordering::Relaxed);
+    if let Some(top) = depth.checked_sub(1) {
+        if top < cpu_state::LOCK_STACK_MAX {
+            set_acquiring(state, top, false);
+        }
+    }
+}
+
+/// Set or clear entry `idx`'s acquiring bit. Only the owning CPU writes its
+/// own state, so a read-modify-write of the whole word is exclusive.
+#[cfg(feature = "watchdog-diagnostics")]
+fn set_acquiring(state: &CpuState, idx: usize, acquiring: bool) {
+    let bit = 1u32 << idx;
+    let bits = state.lock_acquiring.load(Ordering::Relaxed);
+    let next = if acquiring { bits | bit } else { bits & !bit };
+    state.lock_acquiring.store(next, Ordering::Relaxed);
+}
+
+/// Pop the innermost lock record for `state`, leaving every outer entry's
+/// own acquiring bit intact: an outer entry may still be spinning, and this
+/// pop is the release of a lock nested inside that spin.
 #[cfg(feature = "watchdog-diagnostics")]
 fn lock_pop(state: &CpuState) {
     let depth = state.lock_depth.load(Ordering::Relaxed);
-    if depth > 0 {
-        state.lock_depth.store(depth - 1, Ordering::Release);
+    if let Some(next) = depth.checked_sub(1) {
+        if next < cpu_state::LOCK_STACK_MAX {
+            set_acquiring(state, next, false);
+        }
+        state.lock_depth.store(next, Ordering::Release);
     }
-    state.lock_top_acquiring.store(false, Ordering::Relaxed);
 }
 
 /// Install the resolver that attributes a stuck controller line to the task
@@ -1461,11 +1494,11 @@ impl Diag {
 
     /// Read the innermost recorded lock site for `state` (the debug-only
     /// per-CPU lock-site stack), as `(site_ptr, acquiring)`. `(0, false)`
-    /// when the CPU holds no recorded lock. The depth is loaded first
-    /// (acquire) so the site read after it is the one the observer stored
-    /// before its release bump; an index past the recorded cap is clamped
-    /// to the deepest stored entry (a nesting that deep is pathological and
-    /// the outer entries still name a real held lock).
+    /// when the CPU holds no recorded lock, and also while a push is still
+    /// filling in the slot it has just claimed — the entry reads blank and is
+    /// omitted rather than reported stale. An index past the recorded cap is
+    /// clamped to the deepest stored entry (a nesting that deep is
+    /// pathological and the outer entries still name a real held lock).
     #[cfg(feature = "watchdog-diagnostics")]
     fn lock_snapshot(state: &CpuState) -> (usize, bool) {
         let depth = state.lock_depth.load(Ordering::Acquire);
@@ -1474,12 +1507,12 @@ impl Diag {
         }
         let top = depth - 1;
         let idx = top.min(cpu_state::LOCK_STACK_MAX - 1);
-        let site = state.lock_sites[idx].load(Ordering::Relaxed);
-        // The acquiring flag names the true top; if that top is past the
-        // recorded cap it was never stored, so the clamped entry we render
-        // is an outer *held* lock, not the (unknown) acquiring one.
-        let acquiring =
-            top < cpu_state::LOCK_STACK_MAX && state.lock_top_acquiring.load(Ordering::Relaxed);
+        let site = state.lock_sites[idx].load(Ordering::Acquire);
+        // Past the recorded cap the true top was never stored, so the clamped
+        // entry we render is an outer *held* lock, not the (unknown)
+        // acquiring one.
+        let acquiring = top < cpu_state::LOCK_STACK_MAX
+            && state.lock_acquiring.load(Ordering::Relaxed) & (1u32 << top) != 0;
         (site, acquiring)
     }
 
@@ -2066,7 +2099,7 @@ mod tests {
                 slot.store(0, Ordering::Relaxed);
             }
             state.lock_depth.store(0, Ordering::Relaxed);
-            state.lock_top_acquiring.store(false, Ordering::Relaxed);
+            state.lock_acquiring.store(0, Ordering::Relaxed);
             for slot in &state.lock_sites {
                 slot.store(0, Ordering::Relaxed);
             }
@@ -2881,7 +2914,7 @@ mod tests {
         // to held once the CAS wins.
         lock_push(state, OUTER, true);
         assert_eq!(Diag::lock_snapshot(state), (OUTER, true));
-        state.lock_top_acquiring.store(false, Ordering::Relaxed);
+        lock_mark_held(state);
         assert_eq!(Diag::lock_snapshot(state), (OUTER, false));
         // A nested (held) inner lock becomes the innermost record.
         lock_push(state, INNER, false);
@@ -2894,6 +2927,34 @@ mod tests {
         assert_eq!(Diag::lock_snapshot(state), (0, false));
         // A stray extra release underflows safely (fail-safe: no panic, no
         // wraparound into a bogus depth).
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (0, false));
+    }
+
+    /// A CPU spinning for a lock stays `acquiring` across a nested lock
+    /// taken and released *inside* that spin — what every interrupt handler
+    /// does, since a plain `SpinLock` spins with interrupts enabled.
+    ///
+    /// A single top-of-stack flag reported the still-spinning entry as
+    /// `held` from the nested release onwards, which reads as "wedged inside
+    /// the critical section" and points a lockup investigation at the wrong
+    /// CPU: the contended waiter looks like the holder.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn a_spinning_lock_stays_acquiring_across_a_nested_acquire_release() {
+        const CONTENDED: usize = 0x3000;
+        const NESTED: usize = 0x4000;
+        let state = reset(62);
+        lock_push(state, CONTENDED, true);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true));
+        // An interrupt taken mid-spin takes and releases its own lock.
+        lock_push(state, NESTED, true);
+        lock_mark_held(state);
+        lock_pop(state);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true));
+        // Only winning the CAS promotes the outer entry to held.
+        lock_mark_held(state);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false));
         lock_pop(state);
         assert_eq!(Diag::lock_snapshot(state), (0, false));
     }

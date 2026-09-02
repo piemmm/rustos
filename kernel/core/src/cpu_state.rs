@@ -110,6 +110,10 @@ pub(crate) const WD_BT_MAX: usize = 12;
 #[cfg(feature = "watchdog-diagnostics")]
 pub(crate) const LOCK_STACK_MAX: usize = 8;
 
+/// One `lock_acquiring` bit per recordable stack entry.
+#[cfg(feature = "watchdog-diagnostics")]
+const _: () = assert!(LOCK_STACK_MAX <= u32::BITS as usize);
+
 // SAFETY: `ProcessSpace` is `Sync` (it locks internally), and the kthread
 // publication protocol keeps the pointee alive for as long as the slot can be
 // observed — the running thread's control block holds an `Arc` clone. The
@@ -263,14 +267,18 @@ pub(crate) struct CpuState {
     /// sees a consistent (site, depth) pair.
     #[cfg(feature = "watchdog-diagnostics")]
     pub(crate) lock_depth: AtomicUsize,
-    /// Whether the innermost record is still *spinning to acquire* (`true`)
-    /// rather than *held* (`false`). Only the top entry can be acquiring —
-    /// a deeper lock is only taken from inside an already-held section — so
-    /// one flag suffices. Renders the `k_lock` state as `acquiring`
-    /// (contended/deadlocked on that lock) vs `held` (wedged inside its
-    /// critical section).
+    /// Per-entry *spinning to acquire* bits for [`Self::lock_sites`]: bit `i`
+    /// is set while entry `i` is still being acquired, cleared once it is
+    /// held. Renders the `k_lock` state as `acquiring` (contended/deadlocked
+    /// on that lock) vs `held` (wedged inside its critical section).
+    ///
+    /// One bit per entry rather than a single top-of-stack flag: a CPU
+    /// spinning for a lock with interrupts enabled can take and release a
+    /// nested lock inside that spin (any interrupt handler does), and a
+    /// shared flag would then report the still-spinning outer entry as
+    /// `held` — turning a contended lock into a phantom wedge.
     #[cfg(feature = "watchdog-diagnostics")]
-    pub(crate) lock_top_acquiring: AtomicBool,
+    pub(crate) lock_acquiring: AtomicU32,
 }
 
 impl CpuState {
@@ -308,7 +316,7 @@ impl CpuState {
             #[cfg(feature = "watchdog-diagnostics")]
             lock_depth: AtomicUsize::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
-            lock_top_acquiring: AtomicBool::new(false),
+            lock_acquiring: AtomicU32::new(0),
         }
     }
 }

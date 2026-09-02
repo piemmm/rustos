@@ -44,7 +44,15 @@ scheduler-mlfq = ["dep:tairix-kernel-sched-mlfq"]
 # core's report names the exact spinlock it is stuck on (`k_lock`), recorded
 # per CPU from the acquiring call's `#[track_caller]` source `file:line` — a
 # source string, never a runtime address. See `plans/WATCHDOG.md`.
-watchdog-diagnostics = ["tairix-sync/lock-diagnostics"]
+#
+# The global kernel heap lock is instrumented through the same switch: it is
+# the one IRQ-masking lock every subsystem descends into, so a core wedged
+# inside it would otherwise be reported against whatever outer lock it
+# happened to hold.
+watchdog-diagnostics = [
+    "tairix-sync/lock-diagnostics",
+    "tairix-kalloc/lock-diagnostics",
+]
 
 # `test-arch` exposes the host-only `TestArch` mock used by the
 # host-side init-order and panic-behaviour tests. It is intentionally
