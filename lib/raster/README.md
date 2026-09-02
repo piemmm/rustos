@@ -176,6 +176,11 @@ This crate owns:
   a panic branch through the inner loop is gone.
   `dither_tiles` is the same walk for the paints whose source is one colour
   rather than a second span (a translucent plate, a wash).
+- `blend_solid_span` — `blend_span` for a run whose source is one colour, over
+  that same tiled walk and the same per-pixel arithmetic. A window's backdrop
+  plate is laid beside its client's own run on the same row, so the two must
+  round identically at every column or the seam between them would show;
+  `color_tests` pins it against the paired blend over a repeated colour.
 - `Surface::blit` — composite one surface over another through `blend_span`,
   clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

@@ -7,7 +7,7 @@
 //! type without duplication. This module re-exports it so the
 //! rest of the compositor keeps referring to `crate::surface::Surface`.
 
-use tairix_raster::{blend_span, DitherRow};
+use tairix_raster::{blend_solid_span, blend_span, DitherRow};
 
 use crate::color::Pixel;
 
@@ -31,8 +31,66 @@ pub(crate) fn blend_run(
     factor: u8,
     dither: DitherRow,
 ) -> u64 {
-    let (Ok(dst_len), Ok(src_len)) = (i64::try_from(dst.len()), i64::try_from(src.len())) else {
+    let Some(Overlap {
+        dst,
+        taken,
+        column,
+        len,
+    }) = overlap(dst, dst_x, src_x, src.len())
+    else {
         return 0;
+    };
+    let Some(src) = src.get(taken..taken.saturating_add(len)) else {
+        return 0;
+    };
+    blend_span(dst, src, factor, dither, column);
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// Blend the single colour `src` over the `cols` columns beginning at screen
+/// column `src_x`, clipped to `dst`, which begins at screen column `dst_x`;
+/// report how many columns overlapped.
+///
+/// [`blend_run`] for a run that has a colour behind it rather than a slice:
+/// the backdrop plate a decorated window lays under its client wherever the
+/// client's own pixels do not reach.
+pub(crate) fn fill_run(
+    dst: &mut [Pixel],
+    dst_x: i32,
+    src: Pixel,
+    src_x: i32,
+    cols: usize,
+    factor: u8,
+    dither: DitherRow,
+) -> u64 {
+    let Some(Overlap {
+        dst, column, len, ..
+    }) = overlap(dst, dst_x, src_x, cols)
+    else {
+        return 0;
+    };
+    blend_solid_span(dst, src, factor, dither, column);
+    u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+/// The part of `dst` — beginning at screen column `dst_x` — that a run of
+/// `cols` columns beginning at screen column `src_x` reaches.
+struct Overlap<'a> {
+    /// The destination pixels the run covers.
+    dst: &'a mut [Pixel],
+    /// How far into the run the overlap starts.
+    taken: usize,
+    /// The screen column the overlap starts at.
+    column: u32,
+    /// How many columns overlap.
+    len: usize,
+}
+
+/// Clip a run of `cols` columns at screen column `src_x` to `dst`, which
+/// begins at screen column `dst_x`; `None` when they do not meet.
+fn overlap(dst: &mut [Pixel], dst_x: i32, src_x: i32, cols: usize) -> Option<Overlap<'_>> {
+    let (Ok(dst_len), Ok(src_len)) = (i64::try_from(dst.len()), i64::try_from(cols)) else {
+        return None;
     };
     let (dst_x, src_x) = (i64::from(dst_x), i64::from(src_x));
     let from = dst_x.max(src_x);
@@ -43,16 +101,15 @@ pub(crate) fn blend_run(
         usize::try_from(from - src_x),
         u32::try_from(from),
     ) else {
-        return 0;
+        return None;
     };
-    let (Some(dst), Some(src)) = (
-        dst.get_mut(into..into.saturating_add(len)),
-        src.get(taken..taken.saturating_add(len)),
-    ) else {
-        return 0;
-    };
-    blend_span(dst, src, factor, dither, column);
-    u64::try_from(len).unwrap_or(u64::MAX)
+    let dst = dst.get_mut(into..into.saturating_add(len))?;
+    Some(Overlap {
+        dst,
+        taken,
+        column,
+        len,
+    })
 }
 
 /// Row `y` of `surface` left to right, or an empty slice when the row is out

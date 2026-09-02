@@ -640,6 +640,24 @@ fn tray_signal_draws_shipped_artwork_in_place_of_its_glyph() {
     );
 }
 
+/// The capsule seats an icon exactly as the application slots beside it do.
+/// It was sized off the body font's glyph height instead, which on the icon
+/// bar drew the Switchboard a third of its neighbours' size and adrift in
+/// its own space.
+#[test]
+fn tray_signal_seats_its_icon_at_the_side_every_other_bar_icon_uses() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, SS, SS);
+    let capsule =
+        TraySignal::new(IconKind::Switchboard, "Switchboard").icon_side(bounds, Scale::ONE, &theme);
+    let slot = TaskbarItem::new(IconKind::Generic).icon_side(bounds, Scale::ONE, &theme);
+    assert_eq!(capsule, slot);
+    assert!(
+        capsule * 4 >= SS * 3,
+        "an icon fills most of its slot: {capsule} of {SS}"
+    );
+}
+
 /// An owner rasterises the artwork itself, so the side the capsule reports
 /// must be the side it draws: an exactly-sized square lands whole, centred,
 /// and inside the plate border.

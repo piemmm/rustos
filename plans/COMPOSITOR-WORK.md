@@ -87,7 +87,7 @@ to the outer frame.
 
 ## 2. Stages
 
-**Status:** Stages A–H are **done**. Server-side window decorations are live:
+**Status:** Stages A–I are **done**. Server-side window decorations are live:
 every served application window is decorated by the window manager, client-driven
 resizability is live (the file viewer opens resizable and re-lays-out on
 `Resized`), and the whole-project validation gate is green.
@@ -535,6 +535,36 @@ window manager and the shared furniture:
   definition, not a furniture-specific one. The frame reports its own damage,
   so a sample crossing the drag region still costs nothing.
 
+### Stage I — The client plate: a decorated window is never a hole — DONE
+
+A decorated window's client rectangle is **always fully covered**: the
+client's own pixels as far as they extend, and the frame's body colour
+(`Palette::surface`) everywhere else. The plate is resolved once per window
+with its band (`Window::refresh_band`) and laid a run at a time on the
+composite's fast path (`tairix_raster::blend_solid_span`), so it costs a fill
+rather than a per-column decision; an *undecorated* window is nothing but its
+client and has no plate, so a bare surface still shows the desktop where it
+has no pixels.
+
+Three ways the interior could disagree with the decoration are closed by that
+one invariant:
+
+- **A live resize-grab.** The frame reaches its new outer rectangle on the
+  sample the pointer moved; the client re-renders and presents a round trip
+  later. The strip between the two used to be the desktop showing through the
+  middle of a window — the frame visibly running ahead of its own interior.
+- **A client that presents short of its frame.** An app that rounds its own
+  size down — a terminal snapping to whole character cells — leaves a residue
+  up to one cell wide inside the reserved client area. That residue is plate,
+  so the content still meets the decoration with no gap.
+- **Released or unanswered pixels.** A window whose content went back under
+  memory pressure, or whose app ignores the redraw request, reads as an empty
+  window rather than a hole.
+
+Because the plate is opaque, `Window::solid_core` now claims every drawable
+client column whether or not the client has presented that far, so the stack
+beneath a growing window is not needlessly re-blended.
+
 ## 3. Definition of done
 
 - Files — and every other windowed app — is drawn with a title bar
@@ -549,5 +579,7 @@ window manager and the shared furniture:
   window path with no new privileged syscall and no ambient authority.
 - Dark + light themes, reduced-motion, and high-contrast are all covered;
   damage is confined to furniture on state changes.
+- A decorated window's client rectangle is always fully covered, so a live
+  resize never opens a gap between the interior and the decoration.
 - Headless build unaffected; §17.4 layering intact.
 - Docs updated and the whole-project gate green (§2.15, §7).

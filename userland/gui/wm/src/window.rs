@@ -9,10 +9,10 @@ use tairix_reclaim::CachedBytes;
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::WindowChrome;
-use crate::color::{div255, DitherRow, Pixel};
+use crate::color::{div255, Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
-use crate::surface::{self, blend_run, Surface};
+use crate::surface::{self, blend_run, fill_run, Surface};
 use crate::viewport::RootViewport;
 
 /// An opaque, compositor-minted window identifier.
@@ -75,6 +75,17 @@ pub struct Window {
     /// `band`: the shape the window is cut to, and the plate its client is
     /// clipped to. `None` for an undecorated window.
     rim: Option<FrameRim>,
+    /// The frame's body colour, resolved with `band`: what a decorated
+    /// window draws across its client rectangle beneath the client's own
+    /// pixels. `None` for an undecorated window, which is nothing but its
+    /// client and so has no body to show.
+    ///
+    /// It is what keeps the window one object while a resize-grab runs
+    /// ahead of the client: the frame reaches its new size on the sample
+    /// the pointer moved, and the client area it encloses is this plate
+    /// until the client's own pixels arrive — never a hole onto the
+    /// desktop, and never short of the decoration around it.
+    plate: Option<Pixel>,
     /// The owning application's identity artwork, rasterised at the title
     /// bar's slot side for the active scale. One small square per decorated
     /// window, re-derivable from the owner's bundle at any time, so it is
@@ -136,6 +147,7 @@ impl Window {
             frame: None,
             band: None,
             rim: None,
+            plate: None,
             identity_artwork: None,
             size_state: WindowSizeState::Restored,
             restore_outer: None,
@@ -435,31 +447,42 @@ impl Window {
     }
 
     /// The screen rectangle inside which every pixel this window composes is
-    /// one of its own content pixels at full corner coverage, paired with the
+    /// one of its own client pixels at full corner coverage, paired with the
     /// least alpha any of them can carry.
     ///
     /// This is what bounds how much of what lies *behind* the window can
     /// still reach the screen: over that rectangle the window transmits at
     /// most `1 - alpha` of it, so a stack of them multiplies out to a
     /// contribution an 8-bit channel may be unable to record at all. Outside
-    /// it the window may be drawing furniture, a corner arc, the gutter of a
-    /// root viewport, or nothing, so nothing is claimed there — which is why
-    /// the rectangle is the drawable client area taken in by the reach of the
-    /// shape its client is cut to, and not the window's bounds.
+    /// it the window may be drawing furniture, a corner arc, or nothing, so
+    /// nothing is claimed there — which is why the rectangle is the drawable
+    /// client area taken in by the reach of the shape its client is cut to,
+    /// and not the window's bounds.
     ///
-    /// A hidden window, or one whose pixels are released, claims nothing.
+    /// A decorated window draws its own plate under the whole client area, so
+    /// its claim reaches every drawable column whether or not the client has
+    /// presented that far; an undecorated one claims only the pixels it
+    /// actually holds. A hidden window, or an undecorated one whose pixels
+    /// are released, claims nothing.
     pub(crate) fn solid_core(&self) -> (Rect, u8) {
         if !self.visible {
             return (Rect::EMPTY, 0);
         }
-        let Some(content) = self.content.as_ref() else {
-            return (Rect::EMPTY, 0);
-        };
         let (extent_w, extent_h) = self.client_extent();
-        let (drawable_w, drawable_h) = (
-            extent_w.min(content.width()),
-            extent_h.min(content.height()),
-        );
+        // A plate covers the whole extent, so the claim is all of it at
+        // whichever of the two layers carries the least alpha.
+        let (drawable_w, drawable_h, floor) = match (self.plate, self.content.as_ref()) {
+            (Some(plate), Some(content)) => {
+                (extent_w, extent_h, content.alpha_floor().min(plate.a))
+            }
+            (Some(plate), None) => (extent_w, extent_h, plate.a),
+            (None, Some(content)) => (
+                extent_w.min(content.width()),
+                extent_h.min(content.height()),
+                content.alpha_floor(),
+            ),
+            (None, None) => return (Rect::EMPTY, 0),
+        };
         let (x0, y0, x1, y1) = match self.client_cut() {
             None => (0, 0, drawable_w, drawable_h),
             Some(cut) => {
@@ -491,7 +514,7 @@ impl Window {
             x1.saturating_sub(x0),
             y1.saturating_sub(y0),
         );
-        (core, veiled_by(self.opacity, content.alpha_floor()))
+        (core, veiled_by(self.opacity, floor))
     }
 
     /// The window's screen rectangle.
@@ -588,12 +611,17 @@ impl Window {
             None => (&[][..], 0),
         };
         let decoration = self.decoration_spans(ly, chrome);
-        if content.is_empty() && decoration[0].pixels.is_empty() && decoration[1].pixels.is_empty()
+        let backdrop = content_row.and(self.plate).filter(|_| client_cols > 0);
+        if content.is_empty()
+            && backdrop.is_none()
+            && decoration[0].pixels.is_empty()
+            && decoration[1].pixels.is_empty()
         {
             return None;
         }
         Some(WindowRow {
             content,
+            backdrop,
             decoration,
             client_x: self.origin.x.saturating_add_unsigned(inset_x),
             client_cols,
@@ -649,8 +677,10 @@ impl Window {
 
     /// The drawable client pixels of content row `sy`: the content surface
     /// row truncated where the furniture gutter clips it, and empty when
-    /// the gutter clips the whole row away — or when the content has been
-    /// released, which draws nothing and lets the desktop show through.
+    /// the gutter clips the whole row away, when the client has yet to
+    /// present a surface that tall, or when the content has been released.
+    /// A decorated window draws its own plate wherever this stops short; an
+    /// undecorated one draws nothing there.
     fn client_row(&self, sy: u32) -> &[Pixel] {
         let (cols, rows) = self.client_extent();
         if sy >= rows {
@@ -876,6 +906,12 @@ impl Window {
     pub(crate) fn refresh_band(&mut self, scale: Scale, theme: &Theme) {
         self.band = self.frame.as_ref().map(|f| f.insets(scale, theme));
         self.rim = self.frame.as_ref().map(|f| f.rim(scale, theme));
+        // The same body the frame fills inside its rim, so the client area
+        // and the decoration around it are one colour from one palette role.
+        self.plate = self
+            .frame
+            .as_ref()
+            .map(|_| Color::from(theme.palette().surface).premultiply());
     }
 
     /// Set the decorated window's activation, so the frame rim, title, and
@@ -1069,9 +1105,10 @@ impl Window {
     ///
     /// The client's own pixels are left alone: they are the client's to
     /// resize, and it does so by presenting at its new size once the resize
-    /// reaches it. Until then the window draws the pixels it has over as
-    /// much of the new client area as they cover, which is what makes a
-    /// live resize-grab track the pointer without the client in the loop.
+    /// reaches it. Until then the window draws the pixels it has and fills
+    /// the rest of the new client area with its own plate, which is what
+    /// makes a live resize-grab track the pointer, with no seam against the
+    /// decoration, without the client in the loop.
     pub(crate) fn resize_to_outer(&mut self, new_outer: Rect, scale: Scale, theme: &Theme) -> bool {
         let (band_w, band_h) = match self.band {
             Some(insets) => (
@@ -1284,8 +1321,12 @@ fn activation_for(current: WindowActivationState, active: bool) -> WindowActivat
 pub(crate) struct WindowRow<'a> {
     /// Drawable client pixels, the first at screen column `client_x`.
     /// Shorter than `client_cols` where the furniture gutter clips the
-    /// row's tail, and empty where it clips the whole row.
+    /// row's tail or the client has yet to present at the window's size,
+    /// and empty where nothing of it is drawable.
     content: &'a [Pixel],
+    /// The colour the client columns `content` does not reach take, or
+    /// `None` for a row with no client columns or an undecorated window.
+    backdrop: Option<Pixel>,
     /// Decoration pixels, from at most two furniture strips (a row is
     /// either in the top or bottom band — one strip, the other span empty —
     /// or crosses the client's own vertical range, where the left and right
@@ -1331,15 +1372,14 @@ impl WindowRow<'_> {
                 let coverage = self.cut.map_or(u8::MAX, |cut| cut.coverage(lx));
                 if coverage == u8::MAX {
                     return Some(
-                        self.content
-                            .get(lx as usize)?
+                        self.client_pixel(lx)?
                             .scale_alpha_biased(self.opacity, bias),
                     );
                 }
                 if let Some(pixel) = self.decoration_sample(x) {
                     return Some(pixel.scale_alpha_biased(self.opacity, bias));
                 }
-                let pixel = *self.content.get(lx as usize)?;
+                let pixel = self.client_pixel(lx)?;
                 return Some(pixel.scale_alpha_biased(combine(self.opacity, coverage), bias));
             }
         }
@@ -1347,6 +1387,15 @@ impl WindowRow<'_> {
             self.decoration_sample(x)?
                 .scale_alpha_biased(self.opacity, bias),
         )
+    }
+
+    /// This row's client pixel at client column `lx`: the client's own where
+    /// it has presented one, else the window's backdrop plate.
+    fn client_pixel(&self, lx: u32) -> Option<Pixel> {
+        self.content
+            .get(usize::try_from(lx).ok()?)
+            .copied()
+            .or(self.backdrop)
     }
 
     /// The decoration pixel at screen column `x`, from whichever of the row's
@@ -1392,18 +1441,31 @@ impl WindowRow<'_> {
             }
             return blended;
         }
-        let mut blended = blend_run(
-            dst,
-            first_x,
-            self.drawable(),
-            self.client_x,
-            self.opacity,
-            dither,
-        );
+        let drawn = self.drawable();
+        let mut blended = blend_run(dst, first_x, drawn, self.client_x, self.opacity, dither);
+        if let Some((backdrop, from, cols)) = self.backdrop_run(drawn.len()) {
+            blended += fill_run(dst, first_x, backdrop, from, cols, self.opacity, dither);
+        }
         for span in &self.decoration {
             blended += blend_run(dst, first_x, span.pixels, span.x, self.opacity, dither);
         }
         blended
+    }
+
+    /// The backdrop plate this row lays after `drawn` client pixels, as
+    /// `(colour, screen column it starts at, columns)` — `None` where the
+    /// client's own pixels already reach every column it owns, or the window
+    /// has no plate.
+    fn backdrop_run(&self, drawn: usize) -> Option<(Pixel, i32, usize)> {
+        let backdrop = self.backdrop?;
+        let cols = usize::try_from(self.client_cols)
+            .unwrap_or(usize::MAX)
+            .checked_sub(drawn)
+            .filter(|rest| *rest > 0)?;
+        let from = self
+            .client_x
+            .saturating_add_unsigned(u32::try_from(drawn).ok()?);
+        Some((backdrop, from, cols))
     }
 
     /// The client pixels this row actually draws: the content row, never

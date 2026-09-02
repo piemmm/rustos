@@ -316,7 +316,12 @@ same pair — one query and one parameter:
 - `icon_side(bounds, scale, theme, …) -> u32` reports the exact pixel side
   the control's icon slot will be drawn into, and `0` when the geometry leaves
   room for none. An owner asks its cache for artwork at precisely that size
-  rather than guessing one and rescaling at draw time.
+  rather than guessing one and rescaling at draw time. A control that gives
+  its whole face to an icon sizes it off the **plate** — the smaller plate
+  dimension, less its border and a twelfth of the plate on each side, so the
+  icon fills about 83% of it and stays clear of the frame. The clearance has
+  one definition, so no control can wear a picture out of scale with the
+  others beside it.
 - `render(…, artwork: Option<&Surface>)` blits that artwork centred in the
   slot when it is supplied and rasterises the control's built-in vector glyph
   when it is not, so a missing, refused, or undecodable asset always degrades

@@ -561,6 +561,31 @@ fn a_stronger_glow_adds_more_light() {
 }
 
 #[test]
+fn the_glow_adds_back_more_light_than_it_spread() {
+    // The intensity is a gain: at full strength the halo is brighter than the
+    // highlight field it came from. Scaling through an 8-bit alpha capped it
+    // at exactly the light spread, which is what left the effect looking
+    // washed out at 100%.
+    assert!(
+        MAX_GLOW_INTENSITY > u32::from(FULL),
+        "full strength must be a gain, not a fade"
+    );
+    let light = Pixel {
+        r: 40,
+        g: 60,
+        b: 80,
+        a: 80,
+    };
+    let lifted = super::gain(light, MAX_GLOW_INTENSITY);
+    assert!(lifted.b > light.b, "the halo is brighter than its source");
+    assert!(lifted.r <= lifted.a, "and stays premultiplied");
+    // Linear in the intensity, and saturating rather than wrapping.
+    assert_eq!(super::gain(light, u32::from(FULL)), light);
+    assert_eq!(super::gain(light, 2 * u32::from(FULL)).b, 160);
+    assert_eq!(super::gain(light, 100 * u32::from(FULL)).a, u8::MAX);
+}
+
+#[test]
 fn glow_reach_is_density_scaled_and_never_nothing() {
     let reach = |scale: u32| match glow_pass(FULL, scale) {
         Some(Pass::Glow { reach_px, .. }) => reach_px,

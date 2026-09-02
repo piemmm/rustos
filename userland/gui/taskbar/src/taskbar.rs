@@ -112,7 +112,7 @@ impl TaskbarConfig {
             edge: Edge::Bottom,
             screen_width,
             screen_height,
-            thickness: 40,
+            thickness: 48,
             launcher_extent: 48,
             app_extent: 48,
             icon_extent: 24,

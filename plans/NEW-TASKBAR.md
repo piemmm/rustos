@@ -161,6 +161,16 @@ and applied to the three sides facing the screen edge; the fourth side faces
 the work area and keeps the bar's thickness. A too-small screen clamps the
 margin and still lays out the bar.
 
+The house thickness is **48** logical pixels (`TaskbarConfig::bottom_bar`).
+Nothing sizes an icon from it: every slot spans the bar's content strip and
+each control sizes its own icon off the plate it is handed (`icon_side`), so a
+change to the thickness carries the icons with it and nothing needs
+re-tuning. The clearance that slot keeps is the shared one every icon plate on
+the desktop uses — a twelfth of the plate on each side, so an icon fills about
+83% of its slot — and the Switchboard capsule is on that same rule. It was the
+one control that sized its icon off the body font's glyph height instead,
+which drew the desktop's rightmost icon a third of its neighbours' size.
+
 The bar is drawn as the shared floating surface plate
 (`tairix_controls::paint_surface_plate`, the recipe every popup it opens also
 wears): a rim one `plate_border` thick in the palette's `rim` tone, then the

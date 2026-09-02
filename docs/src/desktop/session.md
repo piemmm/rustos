@@ -1131,8 +1131,8 @@ each window as awaited, then painted, then shown, and only the painted → shown
 step announces. A refused present leaves it awaited.
 
 Once, and once again after a release. Releasing a hidden window's content makes
-the record's claim false — the window composites transparent, so nothing of the
-application's is on screen — so `SessionWindows::content_released` puts it back
+the record's claim false — the window composites as an empty plate, so nothing
+of the application's is on screen — so `SessionWindows::content_released` puts it back
 to awaited and the frame that brings its re-attached pixels back announces it
 afresh. Without that, a window released and never re-presented (an application
 that ignores its redraw) would still read as shown.

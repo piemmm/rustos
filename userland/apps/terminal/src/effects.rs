@@ -112,11 +112,13 @@ const GLOW_KNEE: u8 = 128;
 /// How much of the spread light is added back at full glow strength, in
 /// permille.
 ///
-/// Capped for the reason [`MIN_OPACITY`] is: a slider must not be able to make
-/// text unreadable. A light scheme's background clears [`GLOW_KNEE`] on its
-/// own, so at full strength the whole field glows — at this cap dark glyphs
-/// still stand off a saturated background, and much above it they do not.
-const MAX_GLOW_INTENSITY: u32 = 600;
+/// Above unity, so at full strength a halo is brighter than the light it was
+/// spread from — which is what makes the effect read as a tube's bloom rather
+/// than a faint wash. Still capped, for the reason [`MIN_OPACITY`] is: a
+/// slider must not be able to make text unreadable, and a light scheme's
+/// background clears [`GLOW_KNEE`] on its own, so at full strength the whole
+/// field glows.
+const MAX_GLOW_INTENSITY: u32 = 1200;
 
 // The knee is a floor to subtract from, so it has to leave something above it.
 const _: () = assert!(GLOW_KNEE < u8::MAX);
@@ -677,8 +679,6 @@ impl Halo {
         let far = usize::try_from(reach_px - reach_px / 2).unwrap_or(0);
         box_blur(&mut self.highlights, cols, rows, near, &mut self.aux);
         box_blur(&mut self.highlights, cols, rows, far, &mut self.aux);
-        let share =
-            u8::try_from(intensity.saturating_mul(255) / u32::from(FULL)).unwrap_or(u8::MAX);
         for y in 0..height {
             let Some(light) = self.row(y, cols) else {
                 return;
@@ -687,7 +687,7 @@ impl Halo {
                 return;
             };
             for (pixel, light) in row.iter_mut().zip(light) {
-                *pixel = add_light(*pixel, light.scale_alpha(share));
+                *pixel = add_light(*pixel, gain(*light, intensity));
             }
         }
     }
@@ -721,6 +721,24 @@ fn highlight(pixel: Pixel) -> Pixel {
     let span = u32::from(u8::MAX - GLOW_KNEE);
     let share = u8::try_from(u32::from(over) * u32::from(u8::MAX) / span).unwrap_or(u8::MAX);
     pixel.scale_alpha(share)
+}
+
+/// `light` scaled by `permille`, saturating each channel.
+///
+/// A gain, not a fade: the glow adds back more light than it spread at any
+/// intensity above unity, so the multiply is taken wide and clamped. Scaling
+/// every channel by one factor and clamping them all at the same ceiling
+/// keeps the pixel premultiplied.
+fn gain(light: Pixel, permille: u32) -> Pixel {
+    let channel = |value: u8| {
+        u8::try_from(u32::from(value).saturating_mul(permille) / u32::from(FULL)).unwrap_or(u8::MAX)
+    };
+    Pixel {
+        r: channel(light.r),
+        g: channel(light.g),
+        b: channel(light.b),
+        a: channel(light.a),
+    }
 }
 
 /// Add `light` into `pixel`, saturating.

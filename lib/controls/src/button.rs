@@ -246,9 +246,12 @@ fn paint_signals(
 /// tuned for a line of type and would shrink the glyph to a few pixels).
 pub(crate) fn icon_content_side(w: u32, h: u32, border: u32) -> u32 {
     let plate = w.min(h);
-    // An eighth of the plate on each side keeps the glyph clear of the frame
-    // (about a 75% fill on the default 28px plate) while scaling with size.
-    let margin = border.saturating_add(plate / 8);
+    // A twelfth of the plate on each side keeps the glyph clear of the frame
+    // (about an 83% fill) while scaling with size. An eighth read as a slot
+    // of margin with an icon in it rather than an icon, most visibly on the
+    // desktop's icon bar, where the clearance is what stands between a row of
+    // icons and the bar's own edges.
+    let margin = border.saturating_add(plate / 12);
     plate.saturating_sub(margin.saturating_mul(2))
 }
 

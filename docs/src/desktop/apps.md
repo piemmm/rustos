@@ -1843,8 +1843,10 @@ a phosphor driven to full emits as much light whatever its colour, and weighted
 red would carry no halo at all — and the spread is the desktop's one separable
 box blur (`tairix_raster::box_blur`) run twice, so the falloff is a tent rather
 than a box with a visible edge. A knee at half scale is what makes it read as
-light off the text rather than a flat wash, and its intensity is capped for the
-reason the opacity floor exists: a slider must not be able to make text
+light off the text rather than a flat wash, and the intensity is a *gain*: at
+full strength the halo is brighter than the light it was spread from, which is
+what makes a lit glyph bloom rather than merely soften. It is still capped for
+the reason the opacity floor exists: a slider must not be able to make text
 unreadable. An animated effect is a pure function of a
 monotonically increasing `Phase` that the program advances on a one-shot frame
 deadline in its wait-set park — there is no poll loop, and a terminal with the

@@ -1179,13 +1179,14 @@ Tests:
 - The content ladder at every band, including the focused window never
   released and a session-painted window never released; the pixel bytes
   actually overwritten before the buffer is dropped; a released window
-  compositing transparent while the rest of the desktop is
+  compositing as its own empty plate while the rest of the desktop is
   pixel-identical, and still hit-testing, focusing, and resizing; a
   full-window present restoring pixel-identical content; exactly one
   redraw request queued per release and delivered to the owning app; the
   client library answering one by re-presenting its last frame, and a
   client that never presented ignoring it; and an app that ignores the
-  request leaving its window blank with the desktop composing on.
+  request leaving an empty plate inside its frame with the desktop
+  composing on.
 
 Docs:
 

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_rng::RandU64;
 
-use super::{blend_span, Pixel};
+use super::{blend_solid_span, blend_span, Pixel};
 use crate::dither::DitherRow;
 
 /// A deterministic stream of premultiplied pixels, so a failure is
@@ -154,6 +154,36 @@ fn the_shorter_of_the_two_runs_ends_the_walk() {
         before.get(3..),
         "no source, no write — a short run does not wrap or repeat"
     );
+}
+
+#[test]
+fn a_solid_run_is_the_same_run_with_that_colour_repeated() {
+    // The window backdrop is laid beside the client's own run on the same
+    // row, so the two must round identically at every column or the seam
+    // between them would show.
+    let mut rng = Pixels::new(0xB0DD_1E0F_0BEE_5111);
+    let dither = DitherRow::at(6);
+    for len in 0..=20usize {
+        for first_x in [0u32, 1, 7, 8, 33] {
+            let before = rng.run(len);
+            let src = rng.next();
+            let repeated: Vec<Pixel> = core::iter::repeat_n(src, len).collect();
+            let mut solid = before.clone();
+            let mut paired = before.clone();
+            blend_solid_span(&mut solid, src, 208, dither, first_x);
+            blend_span(&mut paired, &repeated, 208, dither, first_x);
+            assert_eq!(solid, paired, "length {len} from column {first_x}");
+        }
+    }
+}
+
+#[test]
+fn a_transparent_solid_leaves_the_run_exactly_as_it_was() {
+    let mut rng = Pixels::new(0x0FFF_0FFF_0FFF_0FFF);
+    let before = rng.run(12);
+    let mut after = before.clone();
+    blend_solid_span(&mut after, Pixel::TRANSPARENT, 255, DitherRow::at(2), 3);
+    assert_eq!(after, before);
 }
 
 #[test]

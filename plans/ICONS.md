@@ -144,6 +144,14 @@ the honest picture for them.
 
 A **raster** master is square, straight-alpha
 and at least `MIN_ARTWORK_SIDE` (256×256), so a slot only ever downscales it.
+It also carries **no transparent margin**: a master is trimmed to its artwork
+on import — rows and columns whose every pixel is below a perceptible alpha
+are padding, not drawing — and then padded back to a square only as far as the
+artwork's own aspect requires, centred. A slot reserves its own clearance
+(`icon_content_side`), so margin baked into the master is spent twice and the
+icon reads smaller than every other one beside it. The Switchboard master was
+the worked example: a fifth of its height was empty, which is what left the
+capsule's picture visibly short of its neighbours'.
 A **vector** master has no pixel side at all: the decoder requires its design
 box to be square and the desktop rasterises it at the side it is about to
 draw. Either form stays within `MAX_ARTWORK_BYTES` (256 KiB), and both are

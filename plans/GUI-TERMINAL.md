@@ -143,10 +143,15 @@ noise rather than being smeared into the halo. Three decisions carry it:
   density-scaled constant (`GLOW_REACH_PX`), because halation is a fixed
   distance through the glass — the slider sets how bright the halo is, not how
   wide.
-- **`MAX_GLOW_INTENSITY` is capped for the reason `MIN_OPACITY` is:** a slider
-  must not be able to make text unreadable. A light scheme's background clears
-  the knee on its own, so at full strength the whole field glows; the cap is
-  what keeps dark glyphs standing off it.
+- **`MAX_GLOW_INTENSITY` is a gain above unity, and still capped for the
+  reason `MIN_OPACITY` is:** at full strength the halo is brighter than the
+  light it was spread from, so a lit glyph blooms instead of merely softening
+  — the intensity is applied as a saturating per-channel multiply (`gain`),
+  because scaling through an 8-bit alpha would silently clamp every intensity
+  above unity at exactly the light spread. The cap remains because a slider
+  must not be able to make text unreadable: a light scheme's background
+  clears the knee on its own, so at full strength the whole field glows, and
+  the cap is what keeps dark glyphs standing off it.
 
 The spread is the workspace's one separable box blur (`tairix_raster::box_blur`)
 run twice, at radii summing to the reach, so the falloff is a tent rather than

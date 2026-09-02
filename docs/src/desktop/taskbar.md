@@ -47,6 +47,13 @@ runs horizontally (its long *main axis* is `x`), a left/right bar runs
 vertically (main axis `y`). Regions are laid out along the main axis and the
 code is otherwise orientation-agnostic.
 
+`TaskbarConfig::bottom_bar` is the house style: a **48** logical-pixel
+thickness, a 48 launcher, 48 application slots, 24 notification icons, an 80
+clock, and a 44 Switchboard capsule. Nothing sizes an icon from the thickness
+itself — every slot spans the bar's content strip and each control sizes its
+own icon off the plate it is given (`icon_side`), so a change to the thickness
+moves the icons with it and nothing needs re-tuning.
+
 `BarLayout::compute` insets the bar by the theme's `taskbar_margin` on the
 three sides facing a screen edge: left, right, and bottom for a bottom bar;
 top, bottom, and left for a left bar; and the corresponding sides for the

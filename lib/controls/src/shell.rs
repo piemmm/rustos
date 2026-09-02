@@ -1050,15 +1050,16 @@ impl TrayCapsule {
 
     /// The pixel side the capsule's icon paints at inside `bounds`, `0` when
     /// the bounds are off-surface or leave no room inside the plate border.
+    ///
+    /// Sized off the plate like every other icon seated on the bar. It was
+    /// once sized off the body font's glyph height, which left the capsule
+    /// wearing a picture a third of its neighbours' and adrift in its own
+    /// space — an icon is artwork filling a slot, not a character on a line.
     fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         let Some((_, _, w, h)) = surface_rect(bounds) else {
             return 0;
         };
-        let border = plate_border(theme, scale);
-        role_font(theme, scale, TextRole::Body)
-            .glyph_height()
-            .min(w.saturating_sub(border.saturating_mul(2)))
-            .min(h.saturating_sub(border.saturating_mul(2)))
+        icon_content_side(w, h, plate_border(theme, scale))
     }
 
     /// Paint the compact capsule into `surface` at `bounds`.

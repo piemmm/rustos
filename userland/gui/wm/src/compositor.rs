@@ -2242,10 +2242,16 @@ impl Compositor {
     }
 
     /// Resize the window named by `id` so its outer rectangle becomes
-    /// `new_outer` (its content surface reallocated to the implied client
-    /// size, existing pixels preserved, origin and decoration following).
-    /// Returns `false` for an unknown window or when the implied client size
-    /// is empty. The union of the old and new outer bounds is marked dirty.
+    /// `new_outer`: the client size becomes the implied one, and the origin
+    /// and decoration follow. Returns `false` for an unknown window or when
+    /// the implied client size is empty. The union of the old and new outer
+    /// bounds is marked dirty.
+    ///
+    /// The client's pixels are not reallocated — that is the client's own
+    /// next present. A decorated window fills whatever of the new client
+    /// area they do not cover with its plate, so an interactive resize
+    /// tracks the pointer as one solid window rather than opening a hole
+    /// inside its own frame.
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
@@ -2259,11 +2265,10 @@ impl Compositor {
         .unwrap_or(false)
     }
 
-    /// Reallocate the content surface of the window named by `id` to the new
-    /// client size `client_w` × `client_h`, keeping its origin, preserving the
-    /// existing pixels where they still fit, and repainting the decoration at
-    /// the new size. Returns `false` for an unknown window or an empty/failed
-    /// allocation (fail closed). The union of the old and new outer bounds is
+    /// Resize the window named by `id` to the new client size `client_w` ×
+    /// `client_h`, keeping its origin and repainting the decoration at the
+    /// new size. Returns `false` for an unknown window or an empty client
+    /// size (fail closed). The union of the old and new outer bounds is
     /// marked dirty.
     ///
     /// This is the window-channel `Resize` path: the app hands the session a

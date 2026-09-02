@@ -87,6 +87,13 @@ fn paint_marked_rects(surface: &mut Surface, rects: &[Rect], colour: Color) {
     }
 }
 
+/// The scan-out bytes a decorated window's own plate composites to — what
+/// its client area shows wherever the client's pixels do not reach.
+fn window_plate(comp: &Compositor) -> [u8; 4] {
+    let plate = comp.theme().palette().surface;
+    [plate.r, plate.g, plate.b, 255]
+}
+
 /// Read the RGBA scan-out bytes of frame pixel `(x, y)`.
 fn frame_pixel(comp: &Compositor, x: u32, y: u32) -> [u8; 4] {
     let info = comp.mode();
@@ -4309,6 +4316,122 @@ fn a_resize_grab_leaves_the_clients_own_pixels_alone() {
 }
 
 #[test]
+fn a_frame_grown_ahead_of_its_client_shows_its_plate_and_never_the_desktop() {
+    // The defect this pins: a resize-grab grows the frame on the sample the
+    // pointer moved, and the client's pixels only reach their new extent a
+    // round trip later. Left uncovered, the strip between the two was the
+    // desktop showing through the middle of a window — the frame tracking
+    // the pointer while its interior visibly lagged behind it.
+    let (mut c, id) = decorated_compositor();
+    present_full(&mut c, id, GREEN);
+    c.composite();
+    let before = c.window_client_rect(id).expect("client rect");
+
+    let outer = c.window(id).expect("window").bounds();
+    assert!(c.resize_window(
+        id,
+        Rect::new(
+            outer.left(),
+            outer.top(),
+            outer.width + 30,
+            outer.height + 20
+        ),
+    ));
+    c.composite();
+
+    // What the client had not reached yet is the window's own plate, meeting
+    // the decoration with no seam; what it had reached is still its pixels.
+    // Nothing in between is the desktop.
+    let plate = window_plate(&c);
+    let client = c.window_client_rect(id).expect("client rect");
+    for y in client.top()..client.bottom() {
+        for x in client.left()..client.right() {
+            if in_a_client_corner(&c, client, Point::new(x, y)) {
+                continue;
+            }
+            let inside_old = x < before.right() && y < before.bottom();
+            let want = if inside_old {
+                [GREEN.r, GREEN.g, GREEN.b, 255]
+            } else {
+                plate
+            };
+            assert_eq!(
+                frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
+                want,
+                "wrong client pixel at ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_client_presenting_short_of_its_frame_leaves_no_gap_at_the_decoration() {
+    // A client that rounds its own size down — a terminal snapping to whole
+    // cells — presents a surface narrower and shorter than the client area
+    // the frame reserves. The residue is the window's plate, so the content
+    // still meets the decoration; it is never a strip of desktop inside the
+    // frame.
+    let (mut c, id) = decorated_compositor();
+    let (client_w, client_h) = c.window(id).expect("window").client_size();
+    let (short_w, short_h) = (client_w - 5, client_h - 3);
+    assert!(c
+        .present_window_content(id, short_w, short_h, |surface| {
+            let (w, h) = (surface.width(), surface.height());
+            for y in 0..h {
+                for x in 0..w {
+                    surface.set(x, y, GREEN.premultiply());
+                }
+            }
+            ((), Rect::new(0, 0, w, h))
+        })
+        .is_some());
+    c.composite();
+
+    let client = c.window_client_rect(id).expect("client rect");
+    assert_eq!(
+        (client.width, client.height),
+        (client_w, client_h),
+        "a short present does not resize the frame around it"
+    );
+    let plate = window_plate(&c);
+    for y in client.top()..client.bottom() {
+        for x in client.left()..client.right() {
+            if in_a_client_corner(&c, client, Point::new(x, y)) {
+                continue;
+            }
+            let presented = x < client.left() + short_w.cast_signed()
+                && y < client.top() + short_h.cast_signed();
+            let want = if presented {
+                [GREEN.r, GREEN.g, GREEN.b, 255]
+            } else {
+                plate
+            };
+            assert_eq!(
+                frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
+                want,
+                "wrong client pixel at ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_undecorated_window_has_no_plate_and_draws_only_what_it_presented() {
+    // The plate is the frame's body. A bare surface — a popup, the taskbar —
+    // is nothing but its client, so a short present leaves the desktop
+    // showing rather than inventing a background nobody asked for.
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(8, 8), opaque(20, 20, GREEN));
+    assert!(c.resize_window_client(id, 30, 30));
+    c.composite();
+    assert_eq!(
+        frame_pixel(&c, 8 + 25, 8 + 25),
+        [BLUE.r, BLUE.g, BLUE.b, 255],
+        "an undecorated window draws nothing where it has no pixels"
+    );
+}
+
+#[test]
 fn a_present_at_a_new_size_re_establishes_the_buffer_and_repaints_the_client() {
     let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
     let id = c.add_window(Point::new(4, 4), opaque(8, 8, RED));
@@ -6503,11 +6626,12 @@ fn releasing_content_drops_the_retained_bytes_to_zero() {
 }
 
 #[test]
-fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical() {
+fn a_released_window_shows_its_own_plate_and_leaves_the_desktop_identical() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
-    // The desktop shows through where the pixels were; every other pixel
-    // on screen — background, furniture, the window beside it — is
-    // untouched.
+    // A window whose pixels went back is still a window, so its client area
+    // is the plate its frame encloses rather than a hole onto the desktop;
+    // every other pixel on screen — background, furniture, the window
+    // beside it — is untouched.
     let mut c = releasable_compositor(&PRESSURE, mode(200, 160), BLUE);
     let kept = app_window(&mut c, 10, 10, 40, "kept");
     present_full(&mut c, kept, GREEN);
@@ -6523,9 +6647,11 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
     c.composite();
     PRESSURE.report(PressureBand::Normal);
 
-    // The released window's client area is now the desktop background — except
-    // at the corners its own rim curves through, which are frame, not client.
+    // The released window's client area is now its own plate — except at the
+    // corners its own rim curves through, which are frame, not client. The
+    // desktop reaches none of it.
     let desktop = [BLUE.r, BLUE.g, BLUE.b, 255];
+    let plate = window_plate(&c);
     let mut corner_drawn = false;
     for y in client.top()..client.bottom() {
         for x in client.left()..client.right() {
@@ -6535,8 +6661,8 @@ fn a_released_window_composites_as_transparent_and_leaves_the_desktop_identical(
                 continue;
             }
             assert_eq!(
-                px, desktop,
-                "the released client area must show the desktop at ({x}, {y})"
+                px, plate,
+                "the released client area must show the window plate at ({x}, {y})"
             );
         }
     }
@@ -6810,8 +6936,8 @@ fn hiding_a_window_the_embedder_paints_itself_releases_nothing() {
 #[test]
 fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_desktop_runs_on() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
-    // The event is advisory: a client that never answers simply shows the
-    // desktop through its client area. Nothing panics, nothing spins, and
+    // The event is advisory: a client that never answers simply shows an
+    // empty plate inside its frame. Nothing panics, nothing spins, and
     // every other window keeps compositing.
     let mut c = releasable_compositor(&PRESSURE, mode(240, 200), BLUE);
     let answering = app_window(&mut c, 10, 10, 40, "answers");
@@ -6834,6 +6960,7 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
         c.composite();
     }
     let silent_client = c.window_client_rect(silent).expect("client rect");
+    let plate = window_plate(&c);
     for y in silent_client.top()..silent_client.bottom() {
         for x in silent_client.left()..silent_client.right() {
             if in_a_client_corner(&c, silent_client, Point::new(x, y)) {
@@ -6841,7 +6968,7 @@ fn an_app_that_ignores_the_redraw_request_leaves_its_window_blank_and_the_deskto
             }
             assert_eq!(
                 frame_pixel(&c, x.cast_unsigned(), y.cast_unsigned()),
-                [BLUE.r, BLUE.g, BLUE.b, 255],
+                plate,
                 "the silent window stays blank at ({x}, {y})"
             );
         }

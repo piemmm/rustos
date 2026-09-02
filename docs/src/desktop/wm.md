@@ -15,8 +15,9 @@ The compositor turns a stack of windows into one scan-out frame:
 1. Each window owns its content `Surface`: a dense, row-major buffer of
    **premultiplied-alpha** `Pixel`s. The buffer is *releasable* under
    memory pressure (see [Releasable window content](#releasable-window-content));
-   a window whose pixels have gone keeps every other property and
-   composites transparent until its app presents again.
+   a window whose pixels have gone keeps every other property and shows its
+   own plate (see [The client plate](#the-client-plate)) until its app
+   presents again.
 2. `Compositor::composite` walks the damaged screen regions and, for
    every dirty pixel, blends each covering window *over* the opaque
    background, bottom-to-top in z-order, using the Porter–Duff *over*
@@ -325,6 +326,36 @@ The title bar draws no ground of its own: the frame has already laid its plate
 under the whole window, rounded, so filling the band again would square off the
 very corners the rim curves around — in the colour that is already there.
 
+## The client plate
+
+**A decorated window's client rectangle is always fully covered.** The
+client's own pixels cover as much of it as they extend to; every remaining
+column and row is the frame's body colour (`Palette::surface`) — the same
+plate the frame lays inside its rim, resolved once per window with its band
+(`Window::refresh_band`) and laid a run at a time on the composite's fast path
+(`blend_solid_span`). An *undecorated* window is nothing but its client, so it
+has no plate and draws nothing where it has no pixels.
+
+This is what keeps a window one object while its client is behind:
+
+- **A live resize-grab.** The window manager reaches the new outer rectangle
+  on the sample the pointer moved; the client learns its new size, re-renders,
+  and presents a round trip later. Without a plate the strip between the two
+  was the desktop, showing through the middle of a window — the frame visibly
+  running ahead of its own interior.
+- **A client that presents short of its frame.** An app that rounds its own
+  size down — a terminal snapping to whole character cells — presents a
+  surface narrower and shorter than the reserved client area. The residue is
+  plate, so the content still meets the decoration with no gap.
+- **Released or unanswered pixels.** A window whose content went back under
+  memory pressure, or whose app ignores the redraw request, reads as an empty
+  window rather than a hole onto the desktop.
+
+Because the plate is opaque, the claim a decorated window makes on what lies
+behind it (`Window::solid_core`) reaches every drawable client column whether
+or not the client has presented that far, so the stack beneath a growing
+window is not needlessly re-blended.
+
 ## Backdrop blur
 
 A window may ask for the already-composited content *behind* its
@@ -593,10 +624,12 @@ new size on every one too, so its content is resized with the frame rather
 than stretched until the button comes up. Reshaping its buffer under it would
 refuse each present it makes in the meantime, which an app cannot tell from a
 dead session; instead the compositor simply draws the part of the buffer that
-lands inside the client area (`Window::row`), so an app a sample behind is a
-sample behind rather than a refused frame. A buffer established afresh
-carried nothing over, so the whole client area is marked dirty rather than
-the rectangle the conversion reported.
+lands inside the client area (`Window::row`) and fills the rest of that area
+with the window's own plate (see [The client plate](#the-client-plate)), so
+an app a sample behind is a sample behind rather than a refused frame — and
+never a gap between its content and the decoration around it. A buffer
+established afresh carried nothing over, so the whole client area is marked
+dirty rather than the rectangle the conversion reported.
 
 **The drag owns the geometry for its whole duration.** It recomputes the
 outer rectangle from the captured start and the live pointer on every sample,
@@ -1246,15 +1279,16 @@ memory model, two mechanisms suited to two different kinds of memory.
   client size (`Window::client_size`, retained independently of the
   buffer), origin, z-order, visibility, furniture, cursor, viewport, and
   size state, so a released window still hit-tests, still draws its title
-  bar and borders, still takes focus, and still resizes. It composites as
-  fully transparent — the desktop shows through — and everything else on
-  screen is unchanged.
+  bar and borders, still takes focus, and still resizes. Its client area
+  composites as its own plate (see [The client plate](#the-client-plate)),
+  and everything else on screen is unchanged.
 - **Releasing wipes.** The buffer holds user data, so
   `Window::release_content` overwrites every pixel before dropping the
   allocation rather than trusting the allocator to have cleared it.
 - **The redraw handshake.** A present carries only a *damage rectangle*,
-  so a re-established surface starts transparent and is correct only once
-  a full-window present arrives. Every release therefore queues a
+  so a re-established surface starts transparent — the plate showing
+  through it on a decorated window — and is correct only once a
+  full-window present arrives. Every release therefore queues a
   `WindowEvent::RedrawRequested` for that window, drained by the embedder
   through `Compositor::pending_redraws`. The compositor never reaches for
   the window protocol itself — the wm crate has no dependency on the
@@ -1262,8 +1296,8 @@ memory model, two mechanisms suited to two different kinds of memory.
   no content is made visible again. `lib/window` answers the event on the
   app's behalf by re-presenting its last frame with full-window damage,
   so an app that does nothing still gets its pixels back; an app that
-  ignores the event simply leaves its window blank while the desktop
-  keeps running.
+  ignores the event simply leaves an empty plate inside its frame while
+  the desktop keeps running.
 - **Two triggers, one decision.** The ladder reads the band *and* each
   window's visibility, so it runs when either moves: on the band's wake
   (`Compositor::release_content_under_pressure`) and on the hide

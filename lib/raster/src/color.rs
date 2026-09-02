@@ -375,6 +375,30 @@ pub fn blend_span(dst: &mut [Pixel], src: &[Pixel], factor: u8, dither: DitherRo
     blend_span_mapped(dst, src, factor, dither, first_x, |pixel| pixel);
 }
 
+/// [`blend_span`] for a run whose source is one colour rather than a second
+/// span: `src` is composited over every pixel of `dst`, each rounding at the
+/// bias its own surface column takes.
+///
+/// A window's backdrop — the plate a decorated window lays under its client,
+/// wherever the client's own pixels do not reach — is a flat fill with no
+/// slice behind it, and must round exactly as the neighbouring client run
+/// does or the seam between them would show.
+pub fn blend_solid_span(
+    dst: &mut [Pixel],
+    src: Pixel,
+    factor: u8,
+    dither: DitherRow,
+    first_x: u32,
+) {
+    if src.a == 0 {
+        return;
+    }
+    let identity = |pixel: Pixel| pixel;
+    dither_tiles(dst, dither, first_x, |dst, bias| {
+        blend_one(dst, src, factor, bias, &identity);
+    });
+}
+
 /// [`blend_span`], with `map` applied to each source pixel on its way in.
 ///
 /// `map` may not turn a transparent source opaque: the skip above happens

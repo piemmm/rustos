@@ -30,6 +30,14 @@ use tairix_reclaim::{CacheBudget, PressureBand, ReclaimCache, ReportedPressure};
 /// The seat every renderer under test belongs to.
 const TEST_SEAT: u64 = 1;
 
+/// The house bar thickness, read from the one definition rather than
+/// restated, so a test pinning cross-axis geometry moves with it.
+const THICKNESS: u32 = TaskbarConfig::bottom_bar(0, 0).thickness;
+
+/// The cross-axis breadth the bar's content sits in at `Scale::ONE`: its
+/// thickness less the one-pixel rim on each side.
+const STRIP: u32 = THICKNESS - 2;
+
 /// A modest display backing (roughly 1280x720x4) so the derived budget is
 /// representative of a real output rather than degenerate.
 const TEST_FB_BYTES: usize = 1280 * 720 * 4;
@@ -556,18 +564,21 @@ fn the_leading_launcher_partitions_the_leading_end() {
     let bar = bottom_bar();
     let layout = bar.layout(Scale::ONE);
     // The bar stands off the screen by the 5 px taskbar margin it floats in
-    // (x 5..995, top 800 − 5 − 40); every region then sits inside the bar's
-    // 1 px rim, so the content strip runs x 6..994 and is 38 px thick.
-    assert_eq!(layout.bar, Rect::new(5, 755, 990, 40));
-    assert_eq!(layout.library, Rect::new(6, 756, 48, 38));
+    // (x 5..995, top 800 − 5 − the bar's thickness); every region then sits
+    // inside the bar's 1 px rim, so the content strip runs x 6..994 across
+    // the thickness less those two rims.
+    let top = coord(800 - 5 - THICKNESS);
+    let strip = top + 1;
+    assert_eq!(layout.bar, Rect::new(5, top, 990, THICKNESS));
+    assert_eq!(layout.library, Rect::new(6, strip, 48, STRIP));
     // The rule sits a control gap (8) past the Library button, one border
-    // thick, inset a control padding (10) from both long edges of the 38 px
-    // content strip; the application strip follows the whole 17 px gutter.
-    assert_eq!(layout.separator, Rect::new(62, 766, 1, 18));
+    // thick, inset a control padding (10) from both long edges of the content
+    // strip; the application strip follows the whole 17 px gutter.
+    assert_eq!(layout.separator, Rect::new(62, strip + 10, 1, STRIP - 20));
     assert_eq!(layout.app_strip.left(), 71);
     // The Switchboard capsule owns the trailing end of that strip; the clock
     // ends where it starts.
-    assert_eq!(layout.switchboard, Rect::new(950, 756, 44, 38));
+    assert_eq!(layout.switchboard, Rect::new(950, strip, 44, STRIP));
     assert_eq!(layout.clock.right(), 950);
 }
 
@@ -637,11 +648,11 @@ fn vertical_bar_places_the_launcher_at_the_top() {
     let bar = Taskbar::new(config, &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
     // A left bar floats off the top, bottom, and left screen edges by the
-    // 5 px margin; its 40 px thickness is untouched. The launcher sits inside
-    // its 1 px rim, so it starts at 6 and is 38 px broad, and the application
-    // strip begins one whole gutter below it.
-    assert_eq!(layout.bar, Rect::new(5, 5, 40, 790));
-    assert_eq!(layout.library, Rect::new(6, 6, 38, 48));
+    // 5 px margin; its thickness is untouched. The launcher sits inside its
+    // 1 px rim, so it starts at 6 and is as broad as the content strip, and
+    // the application strip begins one whole gutter below it.
+    assert_eq!(layout.bar, Rect::new(5, 5, THICKNESS, 790));
+    assert_eq!(layout.library, Rect::new(6, 6, STRIP, 48));
     assert_eq!(layout.app_strip.top(), 71);
 }
 
@@ -792,10 +803,14 @@ fn the_launcher_outranks_everything_after_it_on_a_tiny_screen() {
     // clips last, so it is whole and the strip is what collapses; of the
     // trailing regions the Switchboard capsule outranks the clock and the
     // icons, so the 2 px that remain are its.
+    // The screen is also too shallow for the bar's whole thickness: it keeps
+    // the 5 px margin against the edge it faces and takes what is left, so
+    // the rule is inset a control padding from the shortened content strip.
     let bar = Taskbar::new(TaskbarConfig::bottom_bar(79, 50), &Theme::dark().floating());
     let layout = bar.layout(Scale::ONE);
+    let across = THICKNESS.min(50 - 5);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.separator, Rect::new(62, 16, 1, 18));
+    assert_eq!(layout.separator, Rect::new(62, 11, 1, across - 2 - 20));
     assert!(layout.app_strip.is_empty());
     assert!(layout.clock.is_empty());
     assert_eq!(layout.switchboard.width, 2);
@@ -994,12 +1009,13 @@ fn app_strip_positions_on_all_four_edges() {
 fn bar_pins_to_all_four_edges() {
     // Each bar stands off the three screen edges it faces by the 5 px
     // taskbar margin; only the side facing the work area keeps its place,
-    // and the 40 px thickness is unchanged.
+    // and the house thickness is unchanged.
+    let (right, bottom) = (coord(1000 - 5 - THICKNESS), coord(800 - 5 - THICKNESS));
     for (edge, expect) in [
-        (Edge::Top, Rect::new(5, 5, 990, 40)),
-        (Edge::Bottom, Rect::new(5, 755, 990, 40)),
-        (Edge::Left, Rect::new(5, 5, 40, 790)),
-        (Edge::Right, Rect::new(955, 5, 40, 790)),
+        (Edge::Top, Rect::new(5, 5, 990, THICKNESS)),
+        (Edge::Bottom, Rect::new(5, bottom, 990, THICKNESS)),
+        (Edge::Left, Rect::new(5, 5, THICKNESS, 790)),
+        (Edge::Right, Rect::new(right, 5, THICKNESS, 790)),
     ] {
         let config = TaskbarConfig {
             edge,
@@ -5596,7 +5612,10 @@ fn narrow_screen_collapses_clock_and_icons_before_the_switchboard() {
         StatusKind::Network
     )]);
     let layout = bar.layout(Scale::ONE);
-    assert_eq!(layout.switchboard, Rect::new(71, 756, 32, 38));
+    assert_eq!(
+        layout.switchboard,
+        Rect::new(71, coord(800 - 5 - THICKNESS) + 1, 32, STRIP)
+    );
     assert!(layout.clock.is_empty());
     assert!(layout.notification_area.is_empty());
     assert!(layout.notifications[0].is_empty());
