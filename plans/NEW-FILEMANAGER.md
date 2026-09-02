@@ -71,6 +71,29 @@ band resolves to the first enabled command, the rail's row grid, no rail row
 above the band, degenerate windows total) and the `operation` cancel-routing
 set (a press on the drawn button cancels; the same y over the rail does not).
 
+**Both chrome bands are off by default, and are the user's to turn on.** A
+window opens showing the listing alone: neither the places rail nor the
+command toolbar reserves any of it. `chrome::ToolbarBand` (`Shown`/`Hidden`)
+is threaded through every measurement of the listing and every hit-test that
+inverts one, beside the `Option<&Places>` that already said whether a rail is
+drawn — so `chrome_height` is zero, `sidebar_view` starts the rail at the top
+of the window, and `toolbar_bounds` yields *no* rectangle rather than a flat
+one (the shared `Toolbar` lays its buttons out from whatever origin it is
+given, so a zero-height band would have resolved a press on the window's top
+row against a strip nothing painted — fail closed). `userland/apps/files`
+holds the pair per window as `chrome::Chrome`, defaulting to `Chrome::HIDDEN`,
+and a window showing no rail routes nothing to one.
+
+`F9` shows or hides the rail and `Ctrl+F9` the toolbar. These are what keep
+every command the toolbar carries reachable while it is hidden — the view
+toggle, the sort cycle, and the Trash tools have no keyboard equivalent of
+their own — until the desktop settings application sets the same two fields
+from the user's stored preference (`plans/NEW-DESKTOP-SETTINGS.md`); the
+accelerators stay afterwards, as the in-window spelling of the setting. The
+read-only picker is unchanged: `ManagerChrome::none()` still carries
+`ToolbarBand::Shown`, and `picker::PICKER_CHROME` names it once so the painted
+band and the hit-tests that invert it cannot disagree.
+
 **FM12 (pointer activation gestures)**: four gestures reach the one `activate`
 dispatch a keyboard `Enter` uses (so pointer and keyboard never diverge, §2.2)
 — double-click (activate), shift-double-click (list a bundle rather than run

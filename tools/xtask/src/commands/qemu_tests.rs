@@ -8842,18 +8842,43 @@ fn served_window_layout(
     let frame = window_frame(resizable);
     let scale = tairix_geometry::Scale::ONE;
     let insets = frame.insets(scale, theme);
-    let origin = tairix_desktop_session::windows::cascade_origin_for(slot);
-    let outer = tairix_geometry::Rect::new(
-        origin.x,
-        origin.y,
-        width
-            .saturating_add(insets.left)
-            .saturating_add(insets.right),
-        height
-            .saturating_add(insets.top)
-            .saturating_add(insets.bottom),
+    // The session places the *outer* rectangle: its cascade slot, pulled onto
+    // the work area, through the one shared rule. Reconstructing the slot
+    // alone would put a window big enough to overhang it where the session
+    // does not, and every scripted click aimed from here would miss.
+    let outer = tairix_desktop_session::windows::placed_outer(
+        slot,
+        (
+            width
+                .saturating_add(insets.left)
+                .saturating_add(insets.right),
+            height
+                .saturating_add(insets.top)
+                .saturating_add(insets.bottom),
+        ),
+        served_work_area(theme),
     );
     frame.layout(outer, scale, theme)
+}
+
+/// The work area the session places served windows onto: the guest's screen
+/// less the production taskbar's own band, through the session's own
+/// definition rather than a hand-copied inset.
+fn served_work_area(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
+    tairix_desktop_session::shell::work_area_excluding(
+        tairix_geometry::Rect::new(
+            0,
+            0,
+            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+        ),
+        taskbar_bar_rect(theme),
+        tairix_taskbar::TaskbarConfig::bottom_bar(
+            tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+            tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+        )
+        .edge,
+    )
 }
 
 /// The window manager's furniture for a window the session decorates.

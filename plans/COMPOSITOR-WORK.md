@@ -326,8 +326,16 @@ guarantees:
   entry); the engine's `WindowHost::window_resized` moves the compositor's
   client geometry to the size the app re-mapped (`resize_window_client`), and
   the app's next present sizes its buffer. An interactive resize-grab
-  (`ResizeEnded`) forwards the settled client size to the app the same way,
-  once, at the end of the drag.
+  forwards the new client size to the app the same way on **every** sample,
+  so its content is resized with the frame rather than stretched until the
+  button comes up. The window manager owns the geometry for the whole drag:
+  `window_resized` accepts the app's re-map without moving the window while
+  a grab is live, because the drag recomputes the outer rectangle from the
+  pointer each sample and adopting the app's (necessarily a sample stale)
+  size would fight it. A run of samples folds to its newest twice over — in
+  the session's hold-back where the app is behind, and in the shared client
+  reader (`tairix_window::WindowEvents`) otherwise — so an app slower than
+  the pointer lags a frame, never a queue.
 - **Force-quit** is **not** a title-bar control — it remains the separate
   capability-checked recovery path.
 - **Resizability is per-window and opt-in.** The mechanism (grabber,

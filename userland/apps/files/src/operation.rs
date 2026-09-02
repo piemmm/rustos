@@ -18,7 +18,7 @@
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WindowEvent;
 use tairix_browse::render::{content_area, progress_cancel_at};
-use tairix_browse::Places;
+use tairix_browse::{Places, ToolbarBand};
 use tairix_geometry::{Rect, Scale};
 use tairix_theme::Theme;
 
@@ -40,21 +40,23 @@ pub enum OperationControl {
 /// or nothing that affects the run. A press anywhere but the Cancel button is
 /// ignored, so nothing navigates behind the modal panel (fail closed).
 ///
-/// `window` is the whole window and `places` the drawn rail. The panel is
-/// painted in what the rail leaves, so the press is resolved against that
-/// same shared inset: testing the window itself misses the drawn button by
-/// the rail's width. Taking the two values the frame is drawn from — and
-/// insetting here rather than at the call site — is what keeps the painted
-/// button and the press that must match it from ever disagreeing.
+/// `window` is the whole window, `places` the drawn rail (`None` when the
+/// window shows none), and `toolbar` whether the command band is drawn. The
+/// panel is painted in what that chrome leaves, so the press is resolved
+/// against the same shared inset: testing the window itself misses the drawn
+/// button by the rail's width. Taking the values the frame is drawn from —
+/// and insetting here rather than at the call site — is what keeps the
+/// painted button and the press that must match it from ever disagreeing.
 #[must_use]
 pub fn operation_control(
-    places: &Places,
+    places: Option<&Places>,
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    toolbar: ToolbarBand,
     event: &WindowEvent,
 ) -> OperationControl {
-    let panel = content_area(window, scale, theme, Some(places));
+    let panel = content_area(window, scale, theme, places, toolbar);
     match event {
         WindowEvent::CloseRequested { .. } => OperationControl::Close,
         WindowEvent::Key {

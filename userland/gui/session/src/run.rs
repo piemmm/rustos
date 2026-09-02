@@ -232,7 +232,11 @@ mod program {
     /// the same lease/rendezvous anomaly as the other three — so the session
     /// exits fail-loud rather than run a desktop whose wallpaper chooser can
     /// never apply anything.
-    const EXIT_NO_PINBOARD_ENDPOINT: i32 = 101;
+    ///
+    /// Out of sequence with its neighbours because the slot it would have
+    /// taken is [`tairix_rt::EXIT_PANIC`], and a session that exits with the
+    /// runtime's panic status cannot be told from one that panicked.
+    const EXIT_NO_PINBOARD_ENDPOINT: i32 = 104;
 
     /// Exit code when the user chose *Log Out*. The session ended because it
     /// was asked to, so it is a success: nothing failed, and the login
@@ -4489,13 +4493,17 @@ mod program {
                         );
                     }
                 }
-                // An interactive edge resize-grab settled: tell the owning app
-                // its new client content size once, at the end of the drag, so
-                // it re-lays-out and re-maps its frame region. The per-frame
-                // `Resized` ticks during the drag are the window manager's own
-                // live geometry and are not forwarded (the app is told once,
-                // here).
-                InputResponse::ResizeEnded { window } => {
+                // An interactive edge resize-grab moved or settled: tell the
+                // owning app its new client content size so it re-lays-out
+                // and re-maps its frame region. Every sample is forwarded,
+                // not just the last, because a window whose content only
+                // catches up when the button comes up is being stretched
+                // rather than resized. A size is a value the app converges
+                // on, so the hold-back folds a run of them to the newest
+                // (`holdback`) and the client's own reader drops the stale
+                // ones it has already been sent (`tairix_window`): an app
+                // slower than the pointer lags a frame, never a queue.
+                InputResponse::Resized { window } | InputResponse::ResizeEnded { window } => {
                     if let (Some(window_id), Some(client)) = (
                         windows.ipc_id(window),
                         compositor.window_client_rect(window),
@@ -4578,13 +4586,11 @@ mod program {
                     }
                 }
                 // Window-manager-local outcomes the session does not forward
-                // app-ward: a scrollbar press, a move-grab, and the per-frame
-                // resize ticks (the app is told once, at `ResizeEnded`, above).
+                // app-ward: a scrollbar press and a move-grab.
                 InputResponse::Scrolled { .. }
                 | InputResponse::FurniturePressed { .. }
                 | InputResponse::Moved { .. }
                 | InputResponse::MoveEnded { .. }
-                | InputResponse::Resized { .. }
                 // A pointer motion or key that reached no window belongs to
                 // the desktop's icon column, which `route_desktop` has
                 // already applied; nothing is forwarded app-ward.

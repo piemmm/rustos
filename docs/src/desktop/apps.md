@@ -597,7 +597,8 @@ and dates rather than tiles. `tools` is the manager-only
 `ManagerTool` set drawn after the read-only commands — the file manager passes
 `MANAGER_TOOLS`, the read-only picker an empty slice. The toolbar strip is drawn at the top
 (see the frame model above); the item area sits below it
-(`chrome_height` = the toolbar strip), the one header offset
+(`chrome_height` = the toolbar strip when it is shown, and zero when it is
+not), the one header offset
 the item views, the scrollbar gutter, and every hit-test share so paint and
 hit-test can never disagree (`AGENTS.md` §2.2). The window title carries the
 current path, so no band of the window is spent restating it. In the **list**
@@ -902,6 +903,27 @@ window less the rail on the leading edge, full height — and is the rectangle
 those entry points are hit-tested against, so a click resolves to the control
 the user saw. With no rail it returns the window unchanged, so the trusted
 picker's pixels and hit-tests are exactly as they were.
+
+**Both bands are off when a window opens, and are the user's to turn on.** A
+file manager window is the listing: `chrome::Chrome::HIDDEN` is what every
+window starts on, so neither the rail nor the command strip reserves any of it.
+`chrome::ToolbarBand` (`Shown` / `Hidden`) travels beside the
+`Option<&Places>` that already said whether a rail is drawn, through every
+measurement of the listing and every hit-test that inverts one — so
+`chrome_height` is zero, `sidebar_view` starts the rail at the top of the
+window, and `toolbar_bounds` yields **no** rectangle rather than a flat one.
+That last point is the fail-closed one: the shared `Toolbar` lays its buttons
+out from whatever origin it is given, so a zero-height band would have
+resolved a press on the window's top row against a strip nothing painted
+(`AGENTS.md` §5.4). A window showing no rail likewise routes nothing to one.
+
+`F9` shows or hides the rail; `Ctrl+F9` the toolbar. They are what keeps every
+command the strip carries reachable while it is hidden — the view toggle, the
+sort cycle, and the Trash tools have no keyboard equivalent of their own —
+until the desktop settings application sets the same two fields from the
+user's stored preference. The picker is unaffected: `ManagerChrome::none()`
+still carries `ToolbarBand::Shown`, and `picker::PICKER_CHROME` names that
+once so the painted band and the hit-tests cannot disagree.
 
 Rows are drawn with the shared `ListRow` control, which already carries the
 artwork seam, so a volume shows its medium's artwork and falls back to the

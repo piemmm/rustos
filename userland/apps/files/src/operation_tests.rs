@@ -12,7 +12,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{content_area, progress_cancel_at, progress_dialog_rect, sidebar_view};
-use tairix_browse::{Places, Volume};
+use tairix_browse::{Places, ToolbarBand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
@@ -20,6 +20,9 @@ use super::{operation_control, OperationControl};
 
 /// The window the operation's panel is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 480);
+
+/// The chrome these tests measure against: the command band shown.
+const BAND: ToolbarBand = ToolbarBand::Shown;
 
 /// The window this app is given, addressed by every synthesised event.
 const WINDOW_ID: u64 = 7;
@@ -40,7 +43,7 @@ fn places() -> Places {
 
 /// The rail's drawn width in this test's window.
 fn rail_width(places: &Places) -> u32 {
-    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places))
+    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places), BAND)
         .expect("the rail has rows")
         .width()
 }
@@ -103,14 +106,21 @@ fn named(code: NamedKeyCode) -> WindowEvent {
 
 /// Route `event` to the running operation with this test's window and rail.
 fn route(places: &Places, event: &WindowEvent) -> OperationControl {
-    operation_control(places, Scale::ONE, &Theme::dark(), WINDOW, event)
+    operation_control(
+        Some(places),
+        Scale::ONE,
+        &Theme::dark(),
+        WINDOW,
+        BAND,
+        event,
+    )
 }
 
 #[test]
 fn a_press_on_the_drawn_cancel_button_cancels_the_operation() {
     let places = places();
     let theme = Theme::dark();
-    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places));
+    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places), BAND);
     let drawn = cancel_corner(panel_area, &theme);
 
     assert_eq!(route(&places, &press(drawn)), OperationControl::Cancel);
@@ -126,7 +136,7 @@ fn a_press_on_the_drawn_cancel_button_cancels_the_operation() {
 fn a_press_over_the_rail_beside_the_button_leaves_the_operation_running() {
     let places = places();
     let theme = Theme::dark();
-    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places));
+    let panel_area = content_area(WINDOW, Scale::ONE, &theme, Some(&places), BAND);
     let drawn = cancel_corner(panel_area, &theme);
     let rail = rail_width(&places);
     assert!(rail > 0, "this window draws a rail");
@@ -180,17 +190,18 @@ fn a_window_too_small_for_the_panel_resolves_no_cancel() {
     // and nothing panics.
     for point in [Point::new(0, 0), Point::new(400, 400)] {
         assert_eq!(
-            operation_control(&places, Scale::ONE, &theme, tiny, &press(point)),
+            operation_control(Some(&places), Scale::ONE, &theme, tiny, BAND, &press(point)),
             OperationControl::Ignore
         );
     }
     // Escape still stops the run whatever the window's size.
     assert_eq!(
         operation_control(
-            &places,
+            Some(&places),
             Scale::ONE,
             &theme,
             tiny,
+            BAND,
             &named(NamedKeyCode::Escape)
         ),
         OperationControl::Cancel

@@ -80,7 +80,7 @@ mod tests;
 
 pub use chrome::{chrome_cache, ChromeEpoch, WindowChrome};
 pub use color::{Color, Pixel};
-pub use compositor::Compositor;
+pub use compositor::{Compositor, PointerTarget};
 pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
@@ -94,7 +94,7 @@ pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};
 pub use window::{Window, WindowId};
 
 pub use tairix_controls::{
-    ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,
+    ResizeEdge, ScrollModel, ScrollOrientation, ScrollRange, TrackHit, WindowActivationState,
     WindowControlKind, WindowFrame, WindowFurnitureState, WindowSizeState,
 };
 /// The icon class a decorated window's title-bar identity names, re-exported

@@ -1890,6 +1890,11 @@ pub(crate) const fn continues(so_far: i32, next: i32) -> bool {
 
 /// The screen rectangle with the band the taskbar occupies on `edge` removed.
 ///
+/// Public because a host-side observer must reconstruct the same rectangle a
+/// window is placed onto ([`windows::placed_outer`](crate::windows::placed_outer)),
+/// and re-deriving it there would be a second definition of where the bar's
+/// band ends.
+///
 /// The band runs from that screen edge to the bar's inner side, so it covers
 /// the bar *and* the wallpaper margin the bar floats above: the gap is behind
 /// the bar from the work area's point of view, and a window given it could
@@ -1899,7 +1904,8 @@ pub(crate) const fn continues(so_far: i32, next: i32) -> bool {
 /// because a floating bar spans no screen edge to infer it from. A bar the
 /// screen does not contain leaves the whole screen usable rather than
 /// guessing.
-fn work_area_excluding(screen: Rect, bar: Rect, edge: Edge) -> Rect {
+#[must_use]
+pub fn work_area_excluding(screen: Rect, bar: Rect, edge: Edge) -> Rect {
     let clamp = |value: i32, lo: i32, hi: i32| value.max(lo).min(hi);
     let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
     match edge {

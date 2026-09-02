@@ -13,7 +13,7 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
-use tairix_browse::{Browser, Places, SidebarView, ToolbarCommand, Volume};
+use tairix_browse::{Browser, Places, SidebarView, ToolbarBand, ToolbarCommand, Volume};
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
@@ -25,6 +25,10 @@ use crate::test_fs::{browser, FakeFs};
 
 /// The window the rail is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 480);
+
+/// The chrome these tests drive: both bands shown, the layout the rail's
+/// own routing is measured in.
+const BAND: ToolbarBand = ToolbarBand::Shown;
 
 /// The window this app is given, addressed by every synthesised event.
 const WINDOW_ID: u64 = 7;
@@ -60,7 +64,7 @@ fn row_centre(places: &Places, index: usize) -> Point {
 
 /// The rail's geometry in this test's window.
 fn rail(places: &Places) -> SidebarView {
-    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places)).expect("the rail has rows")
+    sidebar_view(WINDOW, Scale::ONE, &Theme::dark(), Some(places), BAND).expect("the rail has rows")
 }
 
 /// A primary press at `point`.
@@ -125,6 +129,7 @@ fn routed(
         Scale::ONE,
         &Theme::dark(),
         WINDOW,
+        BAND,
         event,
         &mut damage,
     );
@@ -140,6 +145,7 @@ fn hovered(places: &mut Places, event: &WindowEvent) -> (bool, Region) {
         Scale::ONE,
         &Theme::dark(),
         WINDOW,
+        BAND,
         event,
         &mut damage,
     );
@@ -503,6 +509,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         Scale::ONE,
         &theme,
         WINDOW,
+        BAND,
         &named(NamedKeyCode::F5)
     ));
     assert!(!is_refresh_request(
@@ -510,6 +517,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         Scale::ONE,
         &theme,
         WINDOW,
+        BAND,
         &named(NamedKeyCode::Enter)
     ));
 
@@ -524,7 +532,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     for y in WINDOW.origin.y..bottom {
         for x in WINDOW.origin.x..right {
             let point = Point::new(x, y);
-            match toolbar_command_at(&browser, Scale::ONE, &theme, WINDOW, point) {
+            match toolbar_command_at(&browser, Scale::ONE, &theme, WINDOW, BAND, point) {
                 Some(ToolbarCommand::Refresh) if refresh.is_none() => refresh = Some(point),
                 Some(command) if command != ToolbarCommand::Refresh && other.is_none() => {
                     other = Some(point);
@@ -541,7 +549,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
     // The two routers are disjoint: the toolbar owns its band outright, so the
     // press that refreshes is never also a press on a place.
     assert_eq!(
-        sidebar_index_at(WINDOW, Scale::ONE, &theme, Some(&places), refresh),
+        sidebar_index_at(WINDOW, Scale::ONE, &theme, Some(&places), BAND, refresh),
         None
     );
     assert!(is_refresh_request(
@@ -549,6 +557,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         Scale::ONE,
         &theme,
         WINDOW,
+        BAND,
         &press(refresh)
     ));
     assert!(!is_refresh_request(
@@ -556,6 +565,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         Scale::ONE,
         &theme,
         WINDOW,
+        BAND,
         &press(other)
     ));
     // A motion over Refresh is not a request; only a press is.
@@ -564,6 +574,7 @@ fn the_refresh_gesture_is_f5_or_the_toolbars_refresh_command() {
         Scale::ONE,
         &theme,
         WINDOW,
+        BAND,
         &motion(refresh)
     ));
 }

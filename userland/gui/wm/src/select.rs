@@ -74,7 +74,7 @@ use tairix_theme::CursorKind;
 use crate::geometry::Point;
 use crate::input::InputRouter;
 use crate::window::Window;
-use crate::Compositor;
+use crate::{Compositor, PointerTarget};
 
 /// Worst-case per-entry bookkeeping the cache charges on top of a cursor
 /// image's own pixel bytes: the LRU/index tick and charged-size fields
@@ -107,13 +107,14 @@ pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) 
     if router.is_moving() {
         return CursorKind::Move;
     }
-    let Some(id) = compositor.window_at(at) else {
-        // Nothing is drawn here, but a resizable window's grab band may still
-        // straddle its edge onto this point. Announcing it is what makes the
-        // outward half discoverable at all: it draws nothing of its own.
-        return compositor
-            .resize_target(at)
-            .map_or(CursorKind::Arrow, |(_, edge)| resize_cursor(edge));
+    // The same one-pass resolution the press uses, so the shape the pointer
+    // shows and the gesture a press starts can never disagree about whose
+    // edge is under it. Announcing the outward band half is what makes it
+    // discoverable at all: it draws nothing of its own.
+    let id = match compositor.pointer_target(at) {
+        Some(PointerTarget::Window(id)) => id,
+        Some(PointerTarget::ResizeBand(_, edge)) => return resize_cursor(edge),
+        None => return CursorKind::Arrow,
     };
     if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, at) {
         return resize_cursor(edge);

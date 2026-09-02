@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_browse::render::{sidebar_index_at, sidebar_view, toolbar_command_at};
-use tairix_browse::{Browser, DirectorySource, Places, ToolbarCommand, Volume};
+use tairix_browse::{Browser, DirectorySource, Places, ToolbarBand, ToolbarCommand, Volume};
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
@@ -113,13 +113,14 @@ impl RailMark {
         scale: Scale,
         theme: &Theme,
         window: Rect,
+        toolbar: ToolbarBand,
         damage: &mut Region,
     ) -> bool {
         let now = Self::of(places);
         if now == self {
             return false;
         }
-        let Some(view) = sidebar_view(window, scale, theme, Some(places)) else {
+        let Some(view) = sidebar_view(window, scale, theme, Some(places), toolbar) else {
             return true;
         };
         if now.focused != self.focused {
@@ -166,6 +167,7 @@ pub fn is_refresh_request<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    toolbar: ToolbarBand,
     event: &WindowEvent,
 ) -> bool {
     match event {
@@ -178,7 +180,7 @@ pub fn is_refresh_request<S: DirectorySource>(
             ..
         } => true,
         WindowEvent::Pointer { x, y, action, .. } => press_point(*action, *x, *y)
-            .and_then(|point| toolbar_command_at(browser, scale, theme, window, point))
+            .and_then(|point| toolbar_command_at(browser, scale, theme, window, toolbar, point))
             .is_some_and(|command| command == ToolbarCommand::Refresh),
         _ => false,
     }
@@ -209,6 +211,7 @@ pub fn track_hover(
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    toolbar: ToolbarBand,
     event: &WindowEvent,
     damage: &mut Region,
 ) -> bool {
@@ -221,8 +224,15 @@ pub fn track_hover(
     else {
         return false;
     };
-    let row = sidebar_index_at(window, scale, theme, Some(places), pointer_point(*x, *y));
-    let view = sidebar_view(window, scale, theme, Some(places));
+    let row = sidebar_index_at(
+        window,
+        scale,
+        theme,
+        Some(places),
+        toolbar,
+        pointer_point(*x, *y),
+    );
+    let view = sidebar_view(window, scale, theme, Some(places), toolbar);
     let moved = damage::move_mark(
         places.hovered(),
         row,
@@ -243,18 +253,20 @@ pub fn track_hover(
 /// it, and the `Escape` that hands focus back. `Tab` moves the focus between
 /// the rail and the file view from either side, so every state the row control
 /// offers is reachable from the keyboard alone.
+#[allow(clippy::too_many_arguments)] // The rail, its geometry, the event, and the round's report.
 pub fn apply_event<S: DirectorySource>(
     browser: &mut Browser<S>,
     places: &mut Places,
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    toolbar: ToolbarBand,
     event: &WindowEvent,
     damage: &mut Region,
 ) -> Option<SidebarOutcome> {
     let before = RailMark::of(places);
     let marked = |places: &Places, damage: &mut Region| {
-        SidebarOutcome::reported(before.report(places, scale, theme, window, damage))
+        SidebarOutcome::reported(before.report(places, scale, theme, window, toolbar, damage))
     };
     match event {
         WindowEvent::Key {
@@ -297,7 +309,7 @@ pub fn apply_event<S: DirectorySource>(
         }
         WindowEvent::Pointer { x, y, action, .. } => {
             let point = press_point(*action, *x, *y)?;
-            let index = sidebar_index_at(window, scale, theme, Some(places), point)?;
+            let index = sidebar_index_at(window, scale, theme, Some(places), toolbar, point)?;
             places.set_focused(true);
             places.set_cursor(index);
             let mut outcome = navigate_to(browser, places, index);

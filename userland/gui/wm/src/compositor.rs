@@ -75,6 +75,18 @@ enum StackEnd {
     Back,
 }
 
+/// What the window stack claims a screen point for
+/// ([`Compositor::pointer_target`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PointerTarget {
+    /// The window's own outer rectangle covers the point; its furniture hit
+    /// map ([`Compositor::frame_hit`]) says what within it.
+    Window(WindowId),
+    /// Only the window's outward resize band reaches the point, at `edge`.
+    /// The band lies outside the window, so nothing of it is drawn there.
+    ResizeBand(WindowId, ResizeEdge),
+}
+
 /// A software compositing window manager surface.
 ///
 /// The compositor owns its output's display density as a [`Scale`]: the
@@ -2104,22 +2116,27 @@ impl Compositor {
         Some(frame.hit(window.bounds(), self.scale, &self.theme, point))
     }
 
-    /// The window whose resize band claims the screen `point`, and which
-    /// edge, when nothing else is drawn there.
+    /// What the window stack claims the screen `point` for, resolved in one
+    /// pass from the topmost window down.
     ///
     /// A resizable frame's grab band straddles its outer edge
-    /// ([`GrabReach`](tairix_controls::GrabReach)), so its outer half falls
-    /// outside the window: this is how that half is reached. It is
-    /// deliberately consulted **only** where [`window_at`](Self::window_at)
-    /// finds nothing — over the desktop, in the gap between windows — so a
-    /// band can never take a press from a window whose own pixels are under
-    /// the pointer. The topmost claimant wins, as it would for any other
-    /// pointer question.
+    /// ([`GrabReach`](tairix_controls::GrabReach)), so half of it lies
+    /// outside the window and has to be reached through the stack rather
+    /// than through the window's own rectangle. Asking both questions —
+    /// "do your pixels cover this?" and "does your band reach it?" — of each
+    /// window in turn is what makes stacking order decide between them: a
+    /// front window's band beats a window *behind* it, and no window's band
+    /// can take a press from pixels drawn in front of it. Resolving the two
+    /// in separate passes gets the second half of that wrong, which leaves a
+    /// window's edge dead wherever it overlaps another.
     #[must_use]
-    pub fn resize_target(&self, point: Point) -> Option<(WindowId, ResizeEdge)> {
+    pub fn pointer_target(&self, point: Point) -> Option<PointerTarget> {
         self.windows.iter().rev().find_map(|window| {
             if !window.is_visible() {
                 return None;
+            }
+            if window.bounds().contains(point) {
+                return Some(PointerTarget::Window(window.id()));
             }
             let FurniturePart::ResizeEdge(edge) =
                 window
@@ -2128,7 +2145,7 @@ impl Compositor {
             else {
                 return None;
             };
-            Some((window.id(), edge))
+            Some(PointerTarget::ResizeBand(window.id(), edge))
         })
     }
 

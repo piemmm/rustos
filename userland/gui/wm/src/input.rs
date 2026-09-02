@@ -73,7 +73,7 @@ use tairix_controls::{
 use crate::geometry::{Point, Rect};
 use crate::viewport::FurnitureHit;
 use crate::window::{Window, WindowId};
-use crate::Compositor;
+use crate::{Compositor, PointerTarget};
 
 // The device-level pointer vocabulary the router consumes is shared with the
 // taskbar, which routes the same events but may not depend on the window
@@ -433,6 +433,21 @@ impl InputRouter {
         }
     }
 
+    /// The window an interactive resize-grab is dragging, or `None` when no
+    /// resize is in progress.
+    ///
+    /// The grab owns that window's geometry for its whole duration: it
+    /// recomputes the outer rectangle from the captured start on every
+    /// pointer sample, so an owner told its new size mid-drag must re-render
+    /// at it rather than ask for a geometry of its own.
+    #[must_use]
+    pub const fn resizing(&self) -> Option<WindowId> {
+        match &self.resize_grab {
+            Some(grab) => Some(grab.window),
+            None => None,
+        }
+    }
+
     /// Give keyboard focus to `window`, validated against `compositor`.
     ///
     /// This is the programmatic counterpart of focusing by a pointer press:
@@ -700,18 +715,21 @@ impl InputRouter {
         // A fresh press supersedes any prior client grab; it is re-armed below
         // only when this press lands on client content.
         self.client_grab = None;
-        let Some(window) = compositor.window_at(self.pointer) else {
-            // Nothing is drawn here, but a resizable window's grab band may
-            // still straddle its edge onto this point — the outward half of
-            // an invisible border, which exists so the edge stays easy to hit
-            // without eating into the client behind it.
-            if let Some((window, edge)) = compositor.resize_target(self.pointer) {
+        // One resolution in stacking order: a window's own pixels and the
+        // outward half of its invisible resize border compete as equals, so
+        // the front window's edge stays grabbable where it overlaps the one
+        // behind.
+        let window = match compositor.pointer_target(self.pointer) {
+            Some(PointerTarget::Window(window)) => window,
+            Some(PointerTarget::ResizeBand(window, edge)) => {
                 compositor.raise(window);
                 self.focused = Some(window);
                 return self.begin_resize_grab(window, edge, compositor);
             }
-            self.focused = None;
-            return InputResponse::DesktopPressed;
+            None => {
+                self.focused = None;
+                return InputResponse::DesktopPressed;
+            }
         };
         compositor.raise(window);
         self.focused = Some(window);

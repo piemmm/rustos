@@ -245,6 +245,39 @@ pub enum ManagerTool {
     EmptyTrash,
 }
 
+/// Whether a browse view draws its command toolbar.
+///
+/// The strip is chrome the *view* owns, not a fixed part of the layout, so
+/// every measurement of the listing takes this and paint and hit-test can
+/// never disagree about whether the band is there. Hidden means hidden: the
+/// band reserves no height and no point in the window resolves to a toolbar
+/// command or a manager tool.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ToolbarBand {
+    /// Drawn across the top of the window, reserving its band above the
+    /// listing and the places rail.
+    Shown,
+    /// Not drawn: the listing starts at the top of the window.
+    Hidden,
+}
+
+impl ToolbarBand {
+    /// Whether the strip is drawn and reserves its band.
+    #[must_use]
+    pub const fn is_shown(self) -> bool {
+        matches!(self, Self::Shown)
+    }
+
+    /// The other state, for a toggle.
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Shown => Self::Hidden,
+            Self::Hidden => Self::Shown,
+        }
+    }
+}
+
 /// The complete set of manager-only write tools, in their left-to-right toolbar
 /// order (drawn after the shared read-only [`TOOLBAR_COMMANDS`]).
 ///

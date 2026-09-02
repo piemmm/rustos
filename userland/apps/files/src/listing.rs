@@ -15,7 +15,7 @@
 //! which is a whole-window repaint the caller concludes for itself.
 
 use tairix_browse::render::{entry_rect, item_area, scrollbar_bounds};
-use tairix_browse::{Browser, DirectorySource};
+use tairix_browse::{Browser, DirectorySource, ToolbarBand};
 use tairix_controls::damage;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_theme::Theme;
@@ -51,6 +51,7 @@ impl ViewMark {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         damage: &mut Region,
     ) -> bool {
         let now = Self::of(browser);
@@ -58,13 +59,13 @@ impl ViewMark {
             return false;
         }
         if now.offset != self.offset {
-            scrolled(scale, theme, viewport, damage);
+            scrolled(scale, theme, viewport, toolbar, damage);
             return true;
         }
         damage::move_mark(
             self.focus,
             now.focus,
-            |index| entry_rect(browser, scale, theme, viewport, index),
+            |index| entry_rect(browser, scale, theme, viewport, toolbar, index),
             damage,
         );
         true
@@ -73,9 +74,15 @@ impl ViewMark {
 
 /// Report what a scroll of the listing repainted: every entry the view draws,
 /// and the bar whose thumb moved with them.
-pub fn scrolled(scale: Scale, theme: &Theme, viewport: Rect, damage: &mut Region) {
+pub fn scrolled(
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    damage: &mut Region,
+) {
     damage.add(item_area(scale, theme, viewport));
-    if let Some(bar) = scrollbar_bounds(scale, theme, viewport) {
+    if let Some(bar) = scrollbar_bounds(scale, theme, viewport, toolbar) {
         damage.add(bar);
     }
 }

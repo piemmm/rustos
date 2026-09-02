@@ -149,8 +149,8 @@ pub use activate::{Activation, BundleIntent};
 pub use browser::Browser;
 pub use chrome::{
     apply_command, context_command_from_item, context_menu, ContextCommand, ContextMenuModel,
-    ManagerTool, ManagerToolModel, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS,
-    TOOLBAR_COMMANDS,
+    ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS,
+    MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};

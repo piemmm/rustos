@@ -31,6 +31,7 @@ use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_browse::render::{entry_index_at, render_into, reveal_selection, toolbar_command_at};
 use tairix_browse::ManagerChrome;
+use tairix_browse::ToolbarBand;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_geometry::Scale;
 use tairix_icon::NoArtwork;
@@ -45,6 +46,15 @@ pub const PICKER_TITLE: &str = "Choose a file";
 
 /// Between the fixed prefix and the location it is showing.
 const PICKER_TITLE_SEPARATOR: &str = ": ";
+
+/// The chrome the picker draws: no manager surface at all, and the shared
+/// read-only command toolbar. Named once so the painted band and the three
+/// hit-tests that invert it cannot disagree about whether there is one.
+const PICKER_CHROME: ManagerChrome<'static> = ManagerChrome::none();
+
+/// The band [`PICKER_CHROME`] shows, for the layout questions that take it
+/// alone.
+pub(crate) const PICKER_TOOLBAR: ToolbarBand = PICKER_CHROME.toolbar;
 
 /// Bytes a location has left once the fixed prefix is spelled. Derived here
 /// once, so the prefix and the room it leaves can never drift apart.
@@ -239,11 +249,16 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         );
         // A toolbar command takes priority over the item area it sits above;
         // an enabled command runs, a disabled one resolves to nothing.
-        if let Some(command) = self
-            .active
-            .as_ref()
-            .and_then(|active| toolbar_command_at(&active.browser, scale, theme, viewport, local))
-        {
+        if let Some(command) = self.active.as_ref().and_then(|active| {
+            toolbar_command_at(
+                &active.browser,
+                scale,
+                theme,
+                viewport,
+                PICKER_TOOLBAR,
+                local,
+            )
+        }) {
             return self.navigate(shell, compositor, move |browser| {
                 match apply_command(browser, command) {
                     Ok(true) => NavOutcome::Redraw,
@@ -251,10 +266,16 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 }
             });
         }
-        let index = self
-            .active
-            .as_ref()
-            .and_then(|active| entry_index_at(&active.browser, scale, theme, viewport, local))?;
+        let index = self.active.as_ref().and_then(|active| {
+            entry_index_at(
+                &active.browser,
+                scale,
+                theme,
+                viewport,
+                PICKER_TOOLBAR,
+                local,
+            )
+        })?;
         self.navigate(shell, compositor, move |browser| {
             open_or_choose(browser, index)
         })
@@ -308,6 +329,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                             scale.scale_length(WIN_WIDTH),
                             scale.scale_length(WIN_HEIGHT),
                         ),
+                        PICKER_TOOLBAR,
                     );
                 }
                 redraw(&active.browser, active.wm, shell, compositor);
@@ -474,7 +496,7 @@ fn render_surface<S: DirectorySource>(
         scale,
         theme,
         Rect::new(0, 0, w, h),
-        &ManagerChrome::none(),
+        &PICKER_CHROME,
         &mut NoArtwork,
     );
     Some(surface)

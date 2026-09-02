@@ -1489,6 +1489,73 @@ fn the_drained_wait_answers_without_parking() {
     );
 }
 
+/// A run of resizes for one window folds to its newest: an interactive
+/// resize-grab reports one per pointer sample, and an app that re-laid-out
+/// for each would do the work once per queued sample to reach the size the
+/// last one already named.
+#[test]
+fn a_run_of_resizes_folds_to_the_newest_extent() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    let resized = |width_px, height_px| WindowEvent::Resized {
+        window_id: window,
+        width_px,
+        height_px,
+    };
+    let mut waiter = WindowEvents::new(QueueSource::new([
+        resized(100, 50).to_le_bytes(),
+        resized(120, 60).to_le_bytes(),
+        resized(140, 70).to_le_bytes(),
+    ]));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(resized(140, 70))),
+        "the whole run collapses onto the size the last sample named"
+    );
+    assert_eq!(waiter.try_wait(&mut client), Ok(None));
+}
+
+/// Only a *consecutive* run folds, and only for the same window: the event
+/// that ends the run is put back untouched, so folding can neither reorder
+/// the queue nor lose anything from it.
+#[test]
+fn folding_a_resize_run_keeps_every_other_event_in_order() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    let resized = |window_id, width_px| WindowEvent::Resized {
+        window_id,
+        width_px,
+        height_px: 50,
+    };
+    let key = WindowEvent::Focus {
+        window_id: window,
+        focused: true,
+    };
+    let mut waiter = WindowEvents::new(QueueSource::new([
+        resized(window, 100).to_le_bytes(),
+        resized(window, 120).to_le_bytes(),
+        key.to_le_bytes(),
+        resized(window, 140).to_le_bytes(),
+        resized(window + 1, 160).to_le_bytes(),
+    ]));
+    assert_eq!(waiter.try_wait(&mut client), Ok(Some(resized(window, 120))));
+    assert_eq!(waiter.try_wait(&mut client), Ok(Some(key)));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(resized(window, 140))),
+        "a resize for another window does not join this one's run"
+    );
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(resized(window + 1, 160)))
+    );
+    assert_eq!(waiter.try_wait(&mut client), Ok(None));
+}
+
 /// The drained path answers a redraw request on the app's behalf exactly as
 /// the parked one does, so a loop that interleaves work cannot leave a window
 /// blank where a parked loop would have re-presented it.

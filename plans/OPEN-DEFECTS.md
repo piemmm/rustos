@@ -858,6 +858,41 @@ copy-repair wrote to the device with no read-only guard, so a mount held
 read-only precisely because its medium must not be touched was written anyway
 (fixed — the copy-repair is one read-only-aware rule, and reading that code
 found two more read-only writes on the same path).
+- **D77 — the desktop session panics inside `alloc` under the 32-window
+  pressure soak, intermittently (OPEN).** `desktop-pressure-qemu-aarch64`
+  fails when the session process dies after 31 of its 32 windows are on
+  screen, so the guest's own verdict is never reached and the run is killed at
+  the ceiling with the machine idle.
+  - **Intermittent, which is the defect.** Two runs of the identical tree:
+    one failed at the 606 s ceiling, the next passed in 148 s. A green re-run
+    is not a fix — the variance is the bug, and the fix is structural, never a
+    retry or a ceiling bump.
+  - **It is a Rust panic in `alloc`, not a fail-loud exit.** The runtime's
+    panic record names a location under the toolchain's own
+    `library/alloc/…`, which is `handle_alloc_error`: the allocation failed
+    and the consumer had no fallible path. Allocation failure is a `Result`,
+    never a panic, and the pressure soak is precisely the state the session
+    must degrade through rather than die in — so this is a real violation
+    whatever its frequency. The surrounding evidence agrees: the same `elsh`
+    bundle load climbs 0.16 s → 0.38 s → 1.3 s → 20.6 s → 23.2 s across
+    successive windows, so the guest is deep in thrash when the session goes.
+  - **The scope is the session's allocation discipline, not one call.**
+    Userland's heap returns null on exhaustion as its contract requires, so
+    *every* infallible `Vec`/`String`/`BTreeMap` growth on the session's
+    pressure path turns that null into a panic. Naming the offending site
+    needs the panic's byte figure from a failing run, and fixing it properly
+    means the paths that grow under pressure use fallible reservation.
+  - **Two things found while diagnosing it are fixed.** A userland panic's
+    reason reached only `stderr`, so a service — or a graphical session whose
+    console is the screen it composites over — died leaving nothing but an
+    exit status: the runtime now records the report through the system log as
+    well (`tairix_rt::PANIC_REPORTED`, the `7000..8000` range `lib/rt` owns),
+    allocation-free, message before location so the log's message bound
+    cannot truncate away what happened. And the session's
+    `EXIT_NO_PINBOARD_ENDPOINT` was `101` — `tairix_rt::EXIT_PANIC` — so a
+    panic and a clean bind refusal were indistinguishable from the status; the
+    runtime's code is now reserved and public, and the session's moved to
+    `104`.
 - **D76 — three riscv64 QEMU verticals blow their absolute ceiling only under
   the loaded matrix (OPEN).** `autoload-input`, `netstack-autoload` and
   `netstack-dhcp` on riscv64 leave the guest alive and parked in WFI at the

@@ -103,7 +103,12 @@ extern "C" fn __stack_chk_fail() -> ! {
 
 /// Exit code the runtime terminates with on a panic — the same `101` the
 /// hosted Rust runtime uses, distinct from the startup-validation failure.
-const EXIT_PANIC: i32 = 101;
+///
+/// **Reserved: no program may use it for a condition of its own.** A program
+/// that does makes its own fail-loud exit indistinguishable from a panic in
+/// the status alone, which is exactly the reading a diagnosis starts from.
+/// Public so a program choosing its own codes can see that this one is taken.
+pub const EXIT_PANIC: i32 = 101;
 
 /// The largest panic report written to stderr, in bytes. A fixed bound keeps
 /// the panic path allocation-free (the panic may itself be an out-of-memory
@@ -118,15 +123,56 @@ fn write_stderr_best_effort(bytes: &[u8]) {
     let _ = crate::io::Write::write_all(&mut err, bytes);
 }
 
+/// Record the panic `info` through the system log, best-effort.
+///
+/// The second channel a fatal report goes out on, because the first reaches
+/// only a user at a terminal: a service's stderr has no reader, and a
+/// graphical session's console is the screen it is drawing over, so without
+/// this such a program dies leaving nothing but an exit status. Encoded in a
+/// stack buffer and emitted with one syscall, so the path allocates nothing —
+/// the panic may itself be the allocator failing. A report that will not
+/// encode, or a caller holding no log grant, drops the record rather than
+/// turning the teardown into a second failure.
+///
+/// The message leads and the location follows, which is the opposite of the
+/// stderr report's order: a log message is clamped to
+/// [`LOG_MESSAGE_MAX`](tairix_abi::LOG_MESSAGE_MAX), and a panic raised inside
+/// the standard library carries a source path long enough to consume that
+/// whole budget on its own — so leading with the location would truncate away
+/// the half that says what went wrong.
+fn log_panic_best_effort(info: &PanicInfo<'_>) {
+    use core::fmt::Write as _;
+    let mut line = crate::io::FixedFmtBuf::<{ tairix_abi::LOG_MESSAGE_MAX }>::new();
+    let _ = write!(line, "{}", info.message());
+    if let Some(at) = info.location() {
+        let _ = write!(line, " at {}:{}", at.file(), at.line());
+    }
+    let Ok(text) = core::str::from_utf8(line.as_bytes()) else {
+        return;
+    };
+    let mut record = [0u8; tairix_abi::LOG_RECORD_MAX];
+    if let Ok(len) = tairix_abi::encode_log_record(
+        &mut record,
+        tairix_log::Level::Error.as_u8(),
+        crate::PANIC_REPORTED.0,
+        text,
+        &[],
+    ) {
+        let _ = crate::log_emit(&record[..len]);
+    }
+}
+
 /// Panic handler: a hosted program has no unwinder, so a panic is an
 /// unrecoverable fault. The runtime states the panic's message and location
-/// on stderr first — an abnormal termination must say why, a silent non-zero
-/// exit is a defect — through a fixed stack buffer ([`FixedFmtBuf`]: the
-/// panic may be an out-of-memory condition, so this path never allocates),
-/// then terminates through the `exit` syscall rather than returning to
-/// corrupt state (fail closed). Programs are written to be panic-free; this
-/// satisfies the `no_std` contract once and for all rt programs, so none
-/// repeats it.
+/// on **both** channels an abnormal termination has — `stderr` for a user at
+/// a terminal and the system log for one who is not — through a fixed stack
+/// buffer ([`FixedFmtBuf`]: the panic may be an out-of-memory condition, so
+/// this path never allocates), then terminates through the `exit` syscall
+/// rather than returning to corrupt state (fail closed). A silent non-zero
+/// exit is a defect, and stderr alone is silence for a service or for a
+/// graphical session whose console is the screen it is compositing over.
+/// Programs are written to be panic-free; this satisfies the `no_std`
+/// contract once and for all rt programs, so none repeats it.
 ///
 /// [`FixedFmtBuf`]: crate::io::FixedFmtBuf
 #[panic_handler]
@@ -138,6 +184,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     let _ = write!(report, "{info}");
     let _ = report.write_str("\n");
     write_stderr_best_effort(report.as_bytes());
+    log_panic_best_effort(info);
     exit(EXIT_PANIC)
 }
 

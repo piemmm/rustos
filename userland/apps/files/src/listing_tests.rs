@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use tairix_browse::render::{entry_rect, item_area, render_into, scrollbar_bounds, ManagerChrome};
-use tairix_browse::{Browser, DirectorySource};
+use tairix_browse::{Browser, DirectorySource, ToolbarBand};
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -20,6 +20,10 @@ use crate::test_fs::{filled, FilledFs};
 
 /// The window the listing is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 320);
+
+/// The chrome these tests measure against: the command band shown, which is
+/// the layout with a header to offset the listing by.
+const BAND: ToolbarBand = ToolbarBand::Shown;
 
 /// A listing longer than the window can show, so the focus can be walked off
 /// the bottom and scroll the view.
@@ -57,7 +61,8 @@ fn unreported_change(before: &Surface, after: &Surface, damage: &Region) -> Opti
 
 /// The rectangle entry `index` is drawn in.
 fn rect_of<S: DirectorySource>(browser: &Browser<S>, index: usize) -> Rect {
-    entry_rect(browser, Scale::ONE, &Theme::dark(), WINDOW, index).expect("the entry is on screen")
+    entry_rect(browser, Scale::ONE, &Theme::dark(), WINDOW, BAND, index)
+        .expect("the entry is on screen")
 }
 
 /// Report what `act` moved, answering the rectangles and whether it moved
@@ -69,7 +74,14 @@ fn round<S: DirectorySource>(
     let mark = ViewMark::of(browser);
     let mut damage = damage::sink();
     act(browser);
-    let moved = mark.report(browser, Scale::ONE, &Theme::dark(), WINDOW, &mut damage);
+    let moved = mark.report(
+        browser,
+        Scale::ONE,
+        &Theme::dark(),
+        WINDOW,
+        BAND,
+        &mut damage,
+    );
     (moved, damage)
 }
 
@@ -107,7 +119,9 @@ fn a_scroll_reports_every_entry_and_the_bar_beside_them() {
     assert!(moved);
     let mut want = damage::sink();
     want.add(item_area(Scale::ONE, &theme, WINDOW));
-    want.add(scrollbar_bounds(Scale::ONE, &theme, WINDOW).expect("a scrollable listing has a bar"));
+    want.add(
+        scrollbar_bounds(Scale::ONE, &theme, WINDOW, BAND).expect("a scrollable listing has a bar"),
+    );
     assert_eq!(damage.rects(), want.rects());
 }
 

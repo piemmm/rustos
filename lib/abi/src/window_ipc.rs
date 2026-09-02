@@ -2771,13 +2771,22 @@ pub enum WindowEvent {
         /// The window that was minimized.
         window_id: u64,
     },
-    /// The window manager changed the window's client content size — a
-    /// resize-grab that concluded, or a maximize/restore size toggle. The
+    /// The window manager changed the window's client content size — one
+    /// sample of a live resize-grab, or a maximize/restore size toggle. The
     /// app re-lays-out to the new size: it allocates a fresh frame region
     /// of `width_px` × `height_px`, re-maps the window onto it
     /// ([`WindowRequest::Resize`]), and presents. The size is the client
     /// content area in pixels (the window-manager furniture is not the
     /// app's to size); it is never zero.
+    ///
+    /// A drag reports every sample, so content is resized with the frame
+    /// rather than stretched until the button comes up. The extent is a
+    /// value the window converges on, not an occurrence it must witness, so
+    /// an unbroken run of them folds to the newest — in the session's
+    /// hold-back when the app is behind, and in the client's own reader
+    /// otherwise — and the window manager owns the geometry until the drag
+    /// ends: the app lays out at the size it is told and never asks for one
+    /// of its own mid-drag.
     Resized {
         /// The window whose client size changed.
         window_id: u64,

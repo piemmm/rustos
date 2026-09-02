@@ -50,7 +50,9 @@ use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
 use crate::browser::Browser;
-use crate::chrome::{self, ManagerTool, ManagerToolModel, ToolbarCommand, ToolbarModel};
+use crate::chrome::{
+    self, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand, ToolbarModel,
+};
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
@@ -124,10 +126,10 @@ pub fn render_into<S: DirectorySource>(
     let palette = theme.palette();
 
     surface.fill(palette.surface.into());
-    let area = content_area(viewport, scale, theme, chrome.sidebar);
+    let area = content_area(viewport, scale, theme, chrome.sidebar, chrome.toolbar);
     if let (Some(places), Some(view)) = (
         chrome.sidebar,
-        sidebar_view(viewport, scale, theme, chrome.sidebar),
+        sidebar_view(viewport, scale, theme, chrome.sidebar, chrome.toolbar),
     ) {
         let selected = places.index_of(browser.components());
         draw_sidebar(surface, scale, theme, places, &view, selected, artwork);
@@ -135,16 +137,18 @@ pub fn render_into<S: DirectorySource>(
     // The toolbar is window chrome: its band spans the full window, above the
     // rail, so it aligns with the rest of the desktop's chrome. Everything
     // below it is laid out in `area`, the window less the rail.
-    draw_toolbar(
-        surface,
-        scale,
-        theme,
-        browser,
-        viewport,
-        chrome.tools,
-        chrome.tool_model,
-        artwork,
-    );
+    if chrome.toolbar.is_shown() {
+        draw_toolbar(
+            surface,
+            scale,
+            theme,
+            browser,
+            viewport,
+            chrome.tools,
+            chrome.tool_model,
+            artwork,
+        );
+    }
 
     let content = content_viewport(area, scale, theme);
     if awaiting_listing(browser) {
@@ -152,10 +156,26 @@ pub fn render_into<S: DirectorySource>(
         return;
     }
     match browser.view_mode() {
-        ViewMode::List => draw_list(surface, scale, theme, browser, content, artwork),
-        ViewMode::Grid => draw_grid(surface, scale, theme, browser, content, artwork),
+        ViewMode::List => draw_list(
+            surface,
+            scale,
+            theme,
+            browser,
+            content,
+            chrome.toolbar,
+            artwork,
+        ),
+        ViewMode::Grid => draw_grid(
+            surface,
+            scale,
+            theme,
+            browser,
+            content,
+            chrome.toolbar,
+            artwork,
+        ),
     }
-    draw_scrollbar(surface, scale, theme, browser, area);
+    draw_scrollbar(surface, scale, theme, browser, area, chrome.toolbar);
 }
 
 /// What the listing area says while a directory read is still in flight.
@@ -221,17 +241,22 @@ pub struct ManagerChrome<'a> {
     /// view with no rail (the window is then laid out exactly as it is with no
     /// sidebar at all).
     pub sidebar: Option<&'a Places>,
+    /// Whether the command toolbar strip is drawn across the top.
+    pub toolbar: ToolbarBand,
 }
 
 impl ManagerChrome<'_> {
     /// The chrome of a view with no manager surface at all: no write tools, no
-    /// enable model, and no places rail.
+    /// enable model, and no places rail — but the shared read-only command
+    /// toolbar, which is not a manager surface and which every consumer of the
+    /// browser draws by default.
     #[must_use]
     pub const fn none() -> Self {
         Self {
             tools: &[],
             tool_model: ManagerToolModel::none(),
             sidebar: None,
+            toolbar: ToolbarBand::Shown,
         }
     }
 }
@@ -261,9 +286,10 @@ fn separator_height(scale: Scale, theme: &Theme) -> u32 {
 /// no rows).
 ///
 /// The rail is laid out *below* the command toolbar band — inset at the top by
-/// [`toolbar_height`], with the rest of the window's height — because the
-/// toolbar is window chrome that spans the full width. Its row pitch is
-/// [`row_height`], the pitch the list rows use, so the rail's
+/// [`chrome_height`], with the rest of the window's height — because the
+/// toolbar is window chrome that spans the full width. A view with no toolbar
+/// reserves no band, so the rail starts at the top of the window. Its row
+/// pitch is [`row_height`], the pitch the list rows use, so the rail's
 /// rows land on exactly the row grid of the listing beside them.
 ///
 /// The one definition the painter, the pointer hit-test
@@ -275,13 +301,14 @@ pub fn sidebar_view(
     scale: Scale,
     theme: &Theme,
     sidebar: Option<&Places>,
+    toolbar: ToolbarBand,
 ) -> Option<SidebarView> {
     let places = sidebar?;
     if places.is_empty() {
         return None;
     }
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let band = toolbar_height(scale, theme);
+    let band = chrome_height(scale, theme, toolbar);
     Some(SidebarView::new(
         Rect::new(
             window.origin.x,
@@ -313,8 +340,14 @@ pub fn sidebar_view(
 /// sidebar (the trusted file picker) is laid out precisely as it was before
 /// there was one.
 #[must_use]
-pub fn content_area(window: Rect, scale: Scale, theme: &Theme, sidebar: Option<&Places>) -> Rect {
-    let Some(view) = sidebar_view(window, scale, theme, sidebar) else {
+pub fn content_area(
+    window: Rect,
+    scale: Scale,
+    theme: &Theme,
+    sidebar: Option<&Places>,
+    toolbar: ToolbarBand,
+) -> Rect {
+    let Some(view) = sidebar_view(window, scale, theme, sidebar, toolbar) else {
         return window;
     };
     let rail = view.width();
@@ -340,9 +373,10 @@ pub fn sidebar_index_at(
     scale: Scale,
     theme: &Theme,
     sidebar: Option<&Places>,
+    toolbar: ToolbarBand,
     point: Point,
 ) -> Option<usize> {
-    let view = sidebar_view(window, scale, theme, sidebar)?;
+    let view = sidebar_view(window, scale, theme, sidebar, toolbar)?;
     let x = u32::try_from(point.x).ok()?;
     let y = u32::try_from(point.y).ok()?;
     view.index_at(x, y)
@@ -453,9 +487,10 @@ fn draw_list<S: DirectorySource>(
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
+    toolbar: ToolbarBand,
     artwork: &mut dyn IconArtwork,
 ) {
-    let view = list_view(browser, scale, theme, content);
+    let view = list_view(browser, scale, theme, content, toolbar);
     let offset = browser.scroll_offset();
     let selected = browser.selected_index();
     let parent = browser.components();
@@ -504,9 +539,10 @@ fn draw_grid<S: DirectorySource>(
     theme: &Theme,
     browser: &Browser<S>,
     content: Rect,
+    toolbar: ToolbarBand,
     artwork: &mut dyn IconArtwork,
 ) {
-    let view = grid_view(browser, scale, theme, content);
+    let view = grid_view(browser, scale, theme, content, toolbar);
     let Some((area_x, area_y, area_w, area_h)) = area_pixels(view.tile_area()) else {
         return;
     };
@@ -563,8 +599,9 @@ fn draw_scrollbar<S: DirectorySource>(
     theme: &Theme,
     browser: &Browser<S>,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) {
-    let Some(bounds) = scrollbar_bounds(scale, theme, viewport) else {
+    let Some(bounds) = scrollbar_bounds(scale, theme, viewport, toolbar) else {
         return;
     };
     // Draw the browser's own interactive bar (its live hover/drag/held state),
@@ -572,7 +609,7 @@ fn draw_scrollbar<S: DirectorySource>(
     // position match the listing exactly. The bar is `Copy`, so this reflects
     // the live interaction state without disturbing the stored offset owner.
     let mut bar: ScrollBar = *browser.scrollbar();
-    bar.set_model(scroll_model(browser, scale, theme, viewport));
+    bar.set_model(scroll_model(browser, scale, theme, viewport, toolbar));
     bar.render(surface, bounds, scale, theme);
 }
 
@@ -583,9 +620,14 @@ fn draw_scrollbar<S: DirectorySource>(
 /// [`scroll_pointer`] hit-tests against), so a pointer hit-test and the drawn
 /// bar can never disagree.
 #[must_use]
-pub fn scrollbar_bounds(scale: Scale, theme: &Theme, viewport: Rect) -> Option<Rect> {
+pub fn scrollbar_bounds(
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) -> Option<Rect> {
     let gutter = gutter_width(scale, theme, viewport.width);
-    let header = chrome_height(scale, theme);
+    let header = chrome_height(scale, theme, toolbar);
     if gutter == 0 || viewport.height <= header {
         return None;
     }
@@ -616,17 +658,19 @@ pub fn scrollbar_bounds(scale: Scale, theme: &Theme, viewport: Rect) -> Option<R
 /// browser the one owner of the authoritative offset. `event` must carry the
 /// window-local pointer position (a press/release is preceded here by a
 /// synthetic move to that position, exactly as the window controls are fed).
+#[allow(clippy::too_many_arguments)] // The bar's geometry, the sample, and the round's report.
 pub fn scroll_pointer<S: DirectorySource>(
     browser: &mut Browser<S>,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
     point: Point,
     event: &InputEvent,
     damage: &mut Region,
 ) -> Option<bool> {
-    let bounds = scrollbar_bounds(scale, theme, viewport)?;
-    let model = scroll_model(browser, scale, theme, viewport);
+    let bounds = scrollbar_bounds(scale, theme, viewport, toolbar)?;
+    let model = scroll_model(browser, scale, theme, viewport, toolbar);
     let bar = browser.scrollbar_mut();
     bar.set_model(model);
     if let ScrollRouted::ScrollTo { offset } =
@@ -773,13 +817,18 @@ fn gutter_width(scale: Scale, theme: &Theme, viewport_width: u32) -> u32 {
 /// rail-inset [`content_area`] — it reaches the window's leading edge and the
 /// places rail begins below it. One definition, so the drawn toolbar and each
 /// of the three hit-tests that invert it cannot place it differently.
-fn toolbar_bounds(scale: Scale, theme: &Theme, window: Rect) -> Rect {
-    Rect::new(
-        window.origin.x,
-        window.origin.y,
-        window.width,
-        toolbar_height(scale, theme),
-    )
+/// A hidden band has no rectangle at all rather than a flat one: the shared
+/// [`Toolbar`] lays its buttons out from the origin it is given and would
+/// resolve a press on the window's top row against a strip nothing painted.
+fn toolbar_bounds(scale: Scale, theme: &Theme, window: Rect, toolbar: ToolbarBand) -> Option<Rect> {
+    toolbar.is_shown().then(|| {
+        Rect::new(
+            window.origin.x,
+            window.origin.y,
+            window.width,
+            chrome_height(scale, theme, toolbar),
+        )
+    })
 }
 
 /// The content viewport (the window minus the reserved scrollbar gutter). The
@@ -828,12 +877,18 @@ pub fn toolbar_height(scale: Scale, theme: &Theme) -> u32 {
 }
 
 /// The total height reserved for the window chrome above the item area: the
-/// command toolbar strip, and nothing else. This is the header the item views
-/// lay out below and the top of the scrollbar gutter, so paint and hit-test
-/// share one offset.
+/// command toolbar strip when `toolbar` is drawn, and nothing else. This is
+/// the header the item views lay out below and the top of the scrollbar
+/// gutter, so paint and hit-test share one offset — and it is zero for a view
+/// with no strip, whose listing therefore starts at the top of the window
+/// rather than below an empty band.
 #[must_use]
-pub fn chrome_height(scale: Scale, theme: &Theme) -> u32 {
-    toolbar_height(scale, theme)
+pub fn chrome_height(scale: Scale, theme: &Theme, toolbar: ToolbarBand) -> u32 {
+    if toolbar.is_shown() {
+        toolbar_height(scale, theme)
+    } else {
+        0
+    }
 }
 
 /// The group each toolbar command belongs to, so related commands read as a
@@ -898,7 +953,9 @@ fn draw_toolbar<S: DirectorySource>(
     artwork: &mut dyn IconArtwork,
 ) {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(scale, theme, window);
+    let Some(bounds) = toolbar_bounds(scale, theme, window, ToolbarBand::Shown) else {
+        return;
+    };
     toolbar.render(surface, bounds, scale, theme, artwork);
 }
 
@@ -918,11 +975,12 @@ pub fn toolbar_command_at<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    band: ToolbarBand,
     point: Point,
 ) -> Option<ToolbarCommand> {
     let model = ToolbarModel::for_browser(browser);
     let toolbar = build_toolbar(model, &[], ManagerToolModel::none());
-    let bounds = toolbar_bounds(scale, theme, window);
+    let bounds = toolbar_bounds(scale, theme, window, band)?;
     let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let command = *chrome::TOOLBAR_COMMANDS.get(index)?;
     model.is_enabled(command).then_some(command)
@@ -942,17 +1000,19 @@ pub fn toolbar_command_at<S: DirectorySource>(
 /// `window` is the **whole** window, the rectangle the toolbar band spans —
 /// not the rail-inset [`content_area`] the listing takes.
 #[must_use]
+#[allow(clippy::too_many_arguments)] // The band, the sample, and the tools with their enable state.
 pub fn manager_tool_at<S: DirectorySource>(
     browser: &Browser<S>,
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    band: ToolbarBand,
     point: Point,
     tools: &[ManagerTool],
     tool_model: ManagerToolModel,
 ) -> Option<ManagerTool> {
     let toolbar = build_toolbar(ToolbarModel::for_browser(browser), tools, tool_model);
-    let bounds = toolbar_bounds(scale, theme, window);
+    let bounds = toolbar_bounds(scale, theme, window, band)?;
     let index = toolbar.tool_at(bounds, scale, theme, point)?;
     let tool_index = index.checked_sub(chrome::TOOLBAR_COMMANDS.len())?;
     let tool = tools.get(tool_index).copied()?;
@@ -981,6 +1041,7 @@ pub fn manager_tool_rect<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     window: Rect,
+    band: ToolbarBand,
     tools: &[ManagerTool],
     tool: ManagerTool,
 ) -> Option<Rect> {
@@ -990,7 +1051,7 @@ pub fn manager_tool_rect<S: DirectorySource>(
         tools,
         ManagerToolModel::new(true),
     );
-    let bounds = toolbar_bounds(scale, theme, window);
+    let bounds = toolbar_bounds(scale, theme, window, band)?;
     let index = chrome::TOOLBAR_COMMANDS.len().checked_add(position)?;
     toolbar.tool_rect(index, bounds, scale, theme)
 }
@@ -1001,11 +1062,12 @@ fn list_view<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     content: Rect,
+    toolbar: ToolbarBand,
 ) -> ListView {
     ListView::new(
         content,
         row_height(scale, theme),
-        chrome_height(scale, theme),
+        chrome_height(scale, theme, toolbar),
         browser.entries().len(),
     )
 }
@@ -1021,11 +1083,12 @@ fn grid_view<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     content: Rect,
+    toolbar: ToolbarBand,
 ) -> GridView {
     GridView::new(
         content,
         grid_metrics(scale, theme),
-        chrome_height(scale, theme),
+        chrome_height(scale, theme, toolbar),
         browser.entries().len(),
         GridFlow::RowsFromLeading,
         GridFill::Spread,
@@ -1042,8 +1105,9 @@ pub fn scroll_model<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) -> ScrollModel {
-    let view = view_layout_for(browser, scale, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     scroll_model_for(&view, browser.scroll_offset())
 }
 
@@ -1062,9 +1126,10 @@ pub fn scroll_lines<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
     delta: i64,
 ) -> bool {
-    let view = view_layout_for(browser, scale, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let model = scroll_model_for(&view, browser.scroll_offset());
     let moved = model.scroll_by(delta);
     let changed = moved.offset() != model.offset();
@@ -1080,8 +1145,9 @@ pub fn reveal_selection<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) {
-    let view = view_layout_for(browser, scale, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     let revealed = view.reveal(browser.scroll_offset(), browser.selected_index());
     browser.set_scroll_offset(revealed);
 }
@@ -1100,11 +1166,12 @@ pub fn entry_index_at<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
     point: Point,
 ) -> Option<usize> {
     let x = u32::try_from(point.x).ok()?;
     let y = u32::try_from(point.y).ok()?;
-    let view = view_layout_for(browser, scale, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     view.index_at(browser.scroll_offset(), x, y)
 }
 
@@ -1123,8 +1190,16 @@ pub fn selection_rect<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) -> Option<Rect> {
-    entry_rect(browser, scale, theme, viewport, browser.selected_index()?)
+    entry_rect(
+        browser,
+        scale,
+        theme,
+        viewport,
+        toolbar,
+        browser.selected_index()?,
+    )
 }
 
 /// The window-local pixel rectangle entry `index` is drawn in, or `None` when
@@ -1140,9 +1215,10 @@ pub fn entry_rect<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
     index: usize,
 ) -> Option<Rect> {
-    let view = view_layout_for(browser, scale, theme, viewport);
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
     view.item_rect(browser.scroll_offset(), index)
 }
 
@@ -1173,8 +1249,9 @@ pub fn visible_range<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) -> core::ops::Range<usize> {
-    view_layout_for(browser, scale, theme, viewport).visible_range(browser.scroll_offset())
+    view_layout_for(browser, scale, theme, viewport, toolbar).visible_range(browser.scroll_offset())
 }
 
 /// The resolved view layout for `browser` at `viewport` — the one dispatch the
@@ -1185,11 +1262,12 @@ fn view_layout_for<S: DirectorySource>(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
+    toolbar: ToolbarBand,
 ) -> ViewLayout {
     let content = content_viewport(viewport, scale, theme);
     match browser.view_mode() {
-        ViewMode::List => ViewLayout::List(list_view(browser, scale, theme, content)),
-        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, scale, theme, content)),
+        ViewMode::List => ViewLayout::List(list_view(browser, scale, theme, content, toolbar)),
+        ViewMode::Grid => ViewLayout::Grid(grid_view(browser, scale, theme, content, toolbar)),
     }
 }
 

@@ -3386,7 +3386,12 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     // The first entry row sits directly below the chrome (the command toolbar
     // strip), so compute it from the shared `chrome_height` the renderer
     // reserves.
-    let row = i32::try_from(chrome_height(Scale::ONE, theme)).expect("a small chrome height");
+    let row = i32::try_from(chrome_height(
+        Scale::ONE,
+        theme,
+        crate::picker::PICKER_TOOLBAR,
+    ))
+    .expect("a small chrome height");
     let first_row = Point::new(4, row);
     assert_eq!(
         picker.handle_click(first_row, &mut shell, &mut comp),

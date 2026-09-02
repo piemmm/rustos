@@ -894,6 +894,29 @@ nothing at all: the empty epoch is what the service reads as a withdrawal,
 so sending it before there is an entry to withdraw would spend a round trip
 to say nothing.
 
+## Where a served window opens
+
+An application never chooses its own position. `windows::placed_outer` is the
+one placement rule: it takes the next slot of the diagonal cascade
+(`windows::cascade_origin_for` — `CASCADE_ORIGIN` stepping by `CASCADE_STEP`,
+wrapping after `CASCADE_WRAP` so late windows never walk off screen) and pulls
+the whole decorated rectangle onto the **work area** — `work_area_excluding`,
+the screen less the taskbar's band, the same rectangle a maximize fills, so
+the two agree on what is reachable. `ShellWindowHost::window_opened` calls it,
+and so does the QEMU verticals' host-side reconstruction of where a window
+sits, so a scripted click and the guest can never disagree.
+
+The cascade slot is a preference, not a placement. A window big enough to
+overhang it from that slot would otherwise open with its right and bottom
+edges off screen or behind the bar, where the pointer cannot reach them — the
+invisible resize edges among them, which is what made resizing look broken on
+every window after the first on a small display. The clamp runs once the
+decoration band is on and the outer rectangle is therefore known, so it
+measures the real window rather than re-deriving the frame's insets
+(`AGENTS.md` §2.2); a slot that already fits moves nothing and marks no
+damage. A window larger than the work area in an axis is pinned to its start,
+so the title bar and the leading edge stay reachable whatever else is not.
+
 ## The app-ward hold-back
 
 A refused send is **owed**, not lost. Back-pressure says the app is behind,

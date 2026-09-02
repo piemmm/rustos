@@ -2018,12 +2018,15 @@ mod program {
                                 open.frames.release();
                             }
                         }
-                        // The window manager resized the window (a settled
-                        // drag-resize, or a maximize/restore): hand the new
-                        // client size back to the caller, which re-maps the
-                        // frame region, reshapes the grid, and updates the pty
-                        // window size. Returning here leaves any events queued
-                        // behind it for the next wake (level-triggered peek).
+                        // The window manager resized the window (a live
+                        // drag-resize sample, or a maximize/restore): hand the
+                        // new client size back to the caller, which re-maps
+                        // the frame region, reshapes the grid, and updates the
+                        // pty window size. A run of drag samples has already
+                        // folded to its newest in the shared reader, so this
+                        // reshapes once per size the grid actually takes.
+                        // Returning here leaves any events queued behind it
+                        // for the next wake (level-triggered peek).
                         WindowEvent::Resized {
                             width_px,
                             height_px,

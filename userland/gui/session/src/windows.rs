@@ -29,7 +29,7 @@ use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::EventId;
 use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
-use tairix_wm::{Color, Compositor, Point, Rect, Surface, WindowControlKind, WindowId};
+use tairix_wm::{Color, Compositor, Point, Rect, Surface, Window, WindowControlKind, WindowId};
 
 use crate::apps::{AppBarBridge, BUNDLE_RUN_SUFFIX};
 use crate::launch::LaunchTable;
@@ -303,12 +303,13 @@ impl SessionWindows {
     }
 }
 
-/// Top-left of the `opened`-th served window (zero-based), in screen
-/// pixels: the diagonal cascade from [`CASCADE_ORIGIN`], wrapping so late
-/// windows never walk off screen. The one placement rule the session
-/// applies and a host-side observer (the AW3/AW4 QEMU vertical's click
-/// script and screendump assertions) measures against — never a
-/// re-derived guess.
+/// The `opened`-th cascade slot (zero-based), in screen pixels: the diagonal
+/// cascade from [`CASCADE_ORIGIN`], wrapping so late windows never walk off
+/// screen.
+///
+/// A *slot*, not a placement: [`placed_outer`] is what a window actually
+/// opens at, because a window big enough to overhang the work area from its
+/// slot is pulled back onto it.
 #[must_use]
 pub fn cascade_origin_for(opened: u64) -> Point {
     #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
@@ -318,6 +319,26 @@ pub fn cascade_origin_for(opened: u64) -> Point {
         CASCADE_ORIGIN + step * CASCADE_STEP,
         CASCADE_ORIGIN + step * CASCADE_STEP,
     )
+}
+
+/// Where the `opened`-th served window of `outer` size actually opens: its
+/// cascade slot, pulled fully onto `work_area`.
+///
+/// The one placement rule the session applies and a host-side observer (the
+/// AW3/AW4 QEMU vertical's click script and screendump assertions) measures
+/// against — never a re-derived guess.
+///
+/// The slot alone is a preference. A window big enough to overhang the work
+/// area from it would open with its right and bottom edges off screen or
+/// behind the taskbar, where the pointer cannot reach them — the invisible
+/// resize edges among them, which is what made resizing look broken on every
+/// window after the first. A window larger than the work area in an axis is
+/// pinned to that axis's start, so the title bar and the leading edge stay
+/// reachable whatever else is not.
+#[must_use]
+pub fn placed_outer(opened: u64, outer: (u32, u32), work_area: Rect) -> Rect {
+    let slot = cascade_origin_for(opened);
+    Rect::new(slot.x, slot.y, outer.0, outer.1).clamped_onto(work_area)
 }
 
 /// Apply a title-bar window-control command to `wm`'s lifecycle and return
@@ -626,6 +647,18 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             sizing.min_width_px(),
             sizing.min_height_px(),
         );
+        // Placed once the decoration band is on and the outer rectangle is
+        // therefore known, so the clamp measures the real window rather than
+        // re-deriving the frame's insets. A slot that already fits moves
+        // nothing and costs no damage.
+        if let Some(bounds) = self.compositor.window(wm).map(Window::bounds) {
+            let placed = placed_outer(
+                self.windows.opened,
+                (bounds.width, bounds.height),
+                self.shell.work_area(self.compositor),
+            );
+            self.compositor.move_window(wm, placed.origin);
+        }
         // A served window's pixels come from the app, which the session can
         // ask to present them again, so the compositor may give them back
         // under memory pressure. Windows the session paints itself (the
@@ -762,6 +795,16 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let Some(record) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
         };
+        // An interactive drag owns the geometry for its whole duration: it
+        // recomputes the outer rectangle from the pointer on every sample, so
+        // adopting the size the app re-mapped at would set the window back to
+        // wherever the app had got to and the two would fight once per sample.
+        // The re-map itself is accepted — that is what sizes the pixels the
+        // app is about to present — and the settled size goes out when the
+        // grab ends.
+        if self.shell.router().wm().resizing() == Some(record.wm) {
+            return Ok(());
+        }
         if self
             .compositor
             .resize_window_client(record.wm, surface.width_px, surface.height_px)
@@ -933,7 +976,7 @@ mod tests {
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
-    use tairix_wm::{InputEvent, PointerButton};
+    use tairix_wm::{InputEvent, PointerButton, ResizeEdge};
 
     use crate::tests::window_owner;
 
@@ -1929,6 +1972,26 @@ mod tests {
         open_one_sized(host, window_id, WindowSizing::default())
     }
 
+    /// Open one served window of an explicit client size and sizing
+    /// contract.
+    fn open_one_full(
+        host: &mut ShellWindowHost<'_>,
+        window_id: u64,
+        width: u32,
+        height: u32,
+        sizing: WindowSizing,
+    ) -> WindowId {
+        host.window_opened(
+            window_owner(1),
+            window_id,
+            &mode(width, height, DisplayFormat::Rgba8888),
+            "app",
+            sizing,
+        )
+        .expect("opens");
+        host.windows.records.get(&window_id).expect("live").wm
+    }
+
     /// Open one served window with an explicit sizing contract.
     fn open_one_sized(
         host: &mut ShellWindowHost<'_>,
@@ -1944,6 +2007,144 @@ mod tests {
         )
         .expect("opens");
         host.windows.records.get(&window_id).expect("live").wm
+    }
+
+    /// A window big enough to overhang its cascade slot is pulled onto the
+    /// work area, so every edge the pointer must reach — the resize edges
+    /// among them — is on screen and clear of the taskbar.
+    ///
+    /// The reported defect: on a 640x480 desktop the second cascaded
+    /// terminal opened with its right edge past the screen and its bottom
+    /// behind the bar, which left the right edge and both bottom corners
+    /// unreachable and made diagonal resizing look broken on every window
+    /// after the first.
+    #[test]
+    fn an_opened_window_is_pulled_fully_onto_the_work_area() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            // A client wide and tall enough that even the first cascade slot
+            // overhangs the 640x480 work area.
+            open_one_full(&mut host, 7, 600, 400, RESIZABLE)
+        };
+        let work_area = shell.work_area(&compositor);
+        let bounds = compositor.window(wm).expect("live").bounds();
+        assert_eq!(
+            bounds.clamped_onto(work_area),
+            bounds,
+            "an opened window sits wholly inside the work area"
+        );
+        // Every band the frame offers starts its own resize-grab, which is
+        // what the placement is for: the corners resize both axes at once
+        // and are the furthest thing on the frame from the title bar. The
+        // points are the bands' inward half, because a window flush against
+        // the work area has its outward half over the taskbar or off the
+        // screen, where nothing can reach it.
+        for (at, edge) in [
+            (
+                Point::new(bounds.right() - 1, bounds.bottom() - 1),
+                ResizeEdge::BottomRight,
+            ),
+            (
+                Point::new(bounds.left(), bounds.bottom() - 1),
+                ResizeEdge::BottomLeft,
+            ),
+            (
+                Point::new(bounds.right() - 1, bounds.bottom() - 32),
+                ResizeEdge::Right,
+            ),
+            (
+                Point::new(bounds.left() + 96, bounds.bottom() - 1),
+                ResizeEdge::Bottom,
+            ),
+        ] {
+            shell.handle(InputEvent::PointerMoved { to: at }, &mut compositor, 0);
+            shell.handle(
+                InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                },
+                &mut compositor,
+                0,
+            );
+            assert_eq!(
+                shell.router().wm().resizing_edge(),
+                Some(edge),
+                "a press at {at:?} grabs the {edge:?} band"
+            );
+            shell.handle(
+                InputEvent::PointerReleased {
+                    button: PointerButton::Primary,
+                },
+                &mut compositor,
+                0,
+            );
+        }
+    }
+
+    /// [`placed_outer`] pins an axis the window is too big for, so a window
+    /// larger than the work area shows its top and leading edge — the title
+    /// bar and the side the pointer reaches it by — rather than its middle.
+    #[test]
+    fn placed_outer_pins_an_axis_the_window_cannot_fit() {
+        let work_area = Rect::new(0, 0, 640, 435);
+        // Fits at its slot: left exactly there.
+        assert_eq!(
+            placed_outer(0, (200, 120), work_area),
+            Rect::new(cascade_origin_for(0).x, cascade_origin_for(0).y, 200, 120)
+        );
+        // Overhangs: pulled back so the far edges land on the work area's.
+        assert_eq!(
+            placed_outer(1, (562, 380), work_area),
+            Rect::new(640 - 562, 435 - 380, 562, 380)
+        );
+        // Bigger than the work area in both axes: pinned to its start.
+        assert_eq!(
+            placed_outer(3, (900, 700), work_area),
+            Rect::new(0, 0, 900, 700)
+        );
+    }
+
+    /// The clamp is a bound, not a placement rule: a window that fits its
+    /// cascade slot opens exactly there, so successive opens still step.
+    #[test]
+    fn a_window_that_fits_its_cascade_slot_opens_there() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let (first, second) = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            (
+                open_one_full(&mut host, 7, 200, 120, RESIZABLE),
+                open_one_full(&mut host, 9, 200, 120, RESIZABLE),
+            )
+        };
+        assert_eq!(
+            compositor.window(first).expect("live").bounds().origin,
+            cascade_origin_for(0)
+        );
+        assert_eq!(
+            compositor.window(second).expect("live").bounds().origin,
+            cascade_origin_for(1),
+            "the cascade still steps for a window that fits"
+        );
     }
 
     #[test]
@@ -2336,6 +2537,97 @@ mod tests {
         assert_eq!(
             host.window_resized(99, &mode(10, 10, DisplayFormat::Rgba8888)),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// A live resize-grab owns the window's geometry, so the size the app
+    /// re-mapped at is accepted without moving it: the drag recomputes the
+    /// outer rectangle from the pointer every sample, and adopting the app's
+    /// size instead would set the window back to wherever the app had got to
+    /// and the two would fight once per sample.
+    #[test]
+    fn a_live_resize_grab_keeps_the_geometry_the_drag_set() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            open_one_full(&mut host, 7, 200, 120, RESIZABLE)
+        };
+        // Grab the bottom-right corner and drag it out.
+        let bounds = compositor.window(wm).expect("live").bounds();
+        let corner = Point::new(bounds.right() - 1, bounds.bottom() - 1);
+        shell.handle(InputEvent::PointerMoved { to: corner }, &mut compositor, 0);
+        shell.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        shell.handle(
+            InputEvent::PointerMoved {
+                to: Point::new(corner.x + 40, corner.y + 30),
+            },
+            &mut compositor,
+            0,
+        );
+        let dragged = compositor.window(wm).expect("live").client_size();
+        assert_eq!(dragged, (240, 150), "the drag set the client extent");
+
+        // The app catches up a sample late: its re-map is accepted, and the
+        // geometry stays the drag's.
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
+                .expect("accepted");
+        }
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            dragged,
+            "a stale re-map never pulls the window back"
+        );
+
+        // Once the grab ends the app's own size moves the window again.
+        shell.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+            };
+            host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
+                .expect("resizes");
+        }
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            (240, 150)
         );
     }
 

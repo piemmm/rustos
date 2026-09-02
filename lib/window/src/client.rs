@@ -868,12 +868,19 @@ pub trait EventSource {
 /// The app's typed event wait over an [`EventSource`].
 pub struct WindowEvents<S: EventSource> {
     source: S,
+    /// The one frame read ahead while folding a run of resizes and found
+    /// not to belong to it. Returned before the source is drained again, so
+    /// folding never reorders or drops an event.
+    read_ahead: Option<[u8; WindowEvent::WIRE_LEN]>,
 }
 
 impl<S: EventSource> WindowEvents<S> {
     /// A typed wait over `source`.
     pub const fn new(source: S) -> Self {
-        Self { source }
+        Self {
+            source,
+            read_ahead: None,
+        }
     }
 
     /// Park until the next event arrives, decode it, and answer a
@@ -903,7 +910,12 @@ impl<S: EventSource> WindowEvents<S> {
         client: &mut WindowClient<T>,
     ) -> Result<WindowEvent, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        self.source.next(&mut frame)?;
+        if let Some(held) = self.read_ahead.take() {
+            frame = held;
+        } else {
+            self.source.next(&mut frame)?;
+        }
+        self.fold_resizes(&mut frame)?;
         decode_delivered(client, &frame)
     }
 
@@ -924,10 +936,52 @@ impl<S: EventSource> WindowEvents<S> {
         client: &mut WindowClient<T>,
     ) -> Result<Option<WindowEvent>, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        if !self.source.try_next(&mut frame)? {
+        if let Some(held) = self.read_ahead.take() {
+            frame = held;
+        } else if !self.source.try_next(&mut frame)? {
             return Ok(None);
         }
+        self.fold_resizes(&mut frame)?;
         decode_delivered(client, &frame).map(Some)
+    }
+
+    /// Advance `frame` past an unbroken run of [`WindowEvent::Resized`] for
+    /// the same window, leaving the newest one in it.
+    ///
+    /// A client extent is a value the window converges on, not an occurrence
+    /// it must witness: an interactive resize-grab reports one per pointer
+    /// sample, and an app that re-laid-out and re-mapped for each of them
+    /// would do that work once per queued sample to arrive at the size the
+    /// last one already named. Only a *consecutive* run folds — the frame
+    /// that ends it is put back untouched — so nothing is reordered and no
+    /// other event is lost. The reads are non-blocking, so a fold never
+    /// waits for an event that may not come.
+    ///
+    /// A frame that will not decode ends the run and is put back, so its
+    /// typed refusal reaches the caller on the next drain rather than being
+    /// swallowed here.
+    fn fold_resizes(&mut self, frame: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+        let Some(window) = resized_window(frame) else {
+            return Ok(());
+        };
+        let mut ahead = [0u8; WindowEvent::WIRE_LEN];
+        while self.source.try_next(&mut ahead)? {
+            if resized_window(&ahead) != Some(window) {
+                self.read_ahead = Some(ahead);
+                return Ok(());
+            }
+            *frame = ahead;
+        }
+        Ok(())
+    }
+}
+
+/// The window a delivered frame reports a new client extent for, or `None`
+/// when it is any other event (or will not decode).
+fn resized_window(frame: &[u8; WindowEvent::WIRE_LEN]) -> Option<u64> {
+    match WindowEvent::from_bytes(frame) {
+        Ok(WindowEvent::Resized { window_id, .. }) => Some(window_id),
+        _ => None,
     }
 }
 

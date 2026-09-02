@@ -3012,6 +3012,15 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// The event the runtime records when a program dies in its panic handler.
+///
+/// The report goes to `stderr` too, but a program whose stderr has no reader —
+/// a service, or a graphical session whose console is the very screen it is
+/// compositing over — would otherwise die leaving nothing but an exit status,
+/// and the reason has to land somewhere a user can find it. `lib/rt` owns the
+/// `7000..8000` event-id range.
+pub const PANIC_REPORTED: tairix_log::EventId = tairix_log::EventId(7000);
+
 /// A [`tairix_log::Sink`] that marshals each structured event to the kernel's
 /// diagnostic log sink through [`log_emit`].
 ///

@@ -3674,6 +3674,7 @@ fn high_contrast_thickens_the_furniture_glyphs() {
 
 // ---- server-side window decorations (Stage C input) ------------------
 
+use crate::PointerTarget;
 use tairix_controls::{FurniturePart, ResizeEdge};
 
 /// The mid-height of the title band of decorated window `id`, in screen
@@ -3698,12 +3699,12 @@ fn scan_title(c: &Compositor, id: WindowId, pred: impl Fn(FurniturePart) -> bool
     })
 }
 
-/// The outward half of a straddling grab band is reachable, but only where
-/// nothing else is drawn: it exists so an edge stays easy to hit without
-/// eating into the client, not so a window can take presses from one in front
-/// of it.
+/// The outward half of a straddling grab band is reachable, and stacking
+/// order decides between it and a window's own pixels: it exists so an edge
+/// stays easy to hit without eating into the client, not so a window behind
+/// can take presses from one in front.
 #[test]
-fn resize_target_claims_the_overhang_only_where_no_window_is_drawn() {
+fn pointer_target_resolves_a_grab_band_against_the_stack_it_is_in() {
     let (mut c, id) = decorated_compositor();
     let bounds = c.window(id).unwrap().bounds();
     let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
@@ -3711,23 +3712,41 @@ fn resize_target_claims_the_overhang_only_where_no_window_is_drawn() {
 
     assert_eq!(c.window_at(just_outside), None, "nothing is drawn there");
     assert_eq!(
-        c.resize_target(just_outside),
-        Some((id, ResizeEdge::Left)),
+        c.pointer_target(just_outside),
+        Some(PointerTarget::ResizeBand(id, ResizeEdge::Left)),
         "the band reaches out over the bare desktop"
     );
     assert_eq!(
-        c.resize_target(Point::new(bounds.left() - 64, mid_y)),
+        c.pointer_target(Point::new(bounds.left() - 64, mid_y)),
         None,
         "and no further than the band"
     );
+    assert_eq!(
+        c.pointer_target(Point::new(bounds.left() + 1, mid_y)),
+        Some(PointerTarget::Window(id)),
+        "inside its own rectangle the window claims the point"
+    );
 
-    // A second window covering that column: its own pixels are what the
-    // pointer is on, so the pick never reaches the band behind it.
+    // A second window drawn over that column: its pixels are what the
+    // pointer is on, so the band behind it loses.
     let over = c.add_window(
         Point::new(bounds.left() - 30, bounds.top()),
         opaque(40, 100, BLUE),
     );
-    assert_eq!(c.window_at(just_outside), Some(over));
+    assert_eq!(
+        c.pointer_target(just_outside),
+        Some(PointerTarget::Window(over)),
+        "a band never takes a press from pixels drawn in front of it"
+    );
+
+    // Raising the resizable window puts its band in front of those pixels,
+    // which is what keeps an overlapping window's edge grabbable.
+    c.raise(id);
+    assert_eq!(
+        c.pointer_target(just_outside),
+        Some(PointerTarget::ResizeBand(id, ResizeEdge::Left)),
+        "the front window's band outranks the window behind it"
+    );
 
     // A fixed-size window has no band at all.
     let (mut fixed_c, fixed) = decorated_compositor();
@@ -3738,7 +3757,7 @@ fn resize_target_claims_the_overhang_only_where_no_window_is_drawn() {
             ..decorated()
         })
     ));
-    assert_eq!(fixed_c.resize_target(just_outside), None);
+    assert_eq!(fixed_c.pointer_target(just_outside), None);
 }
 
 #[test]

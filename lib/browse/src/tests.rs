@@ -32,6 +32,11 @@ use crate::places::{PlaceKind, Places, Volume};
 use crate::select::Selection;
 use crate::source::{DirectorySource, Listing};
 
+/// The chrome these tests measure against unless they say otherwise: the
+/// command band shown, so the listing has a header to be offset by. The
+/// hidden band has its own tests.
+const BAND: crate::ToolbarBand = crate::ToolbarBand::Shown;
+
 /// Paint `browser` into a freshly allocated `viewport`-sized surface.
 ///
 /// The renderer paints into a surface its caller owns and keeps for the life
@@ -210,7 +215,7 @@ fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
     let window = Rect::new(0, 0, 400, 400);
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
     let view =
-        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
 
     for index in 0..places.len() {
         let rect = view.row_rect(index).expect("drawn row");
@@ -237,7 +242,8 @@ fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
     assert_eq!(view.index_at(0, below), None);
     // A window with no room for even one row resolves nothing at all.
     let squat = Rect::new(0, 0, 400, 1);
-    let tiny = crate::render::sidebar_view(squat, Scale::ONE, &theme, Some(&places)).expect("rail");
+    let tiny =
+        crate::render::sidebar_view(squat, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     assert_eq!(tiny.index_at(0, 0), None);
 }
 
@@ -247,34 +253,116 @@ fn the_content_area_is_inset_by_the_rail_and_untouched_without_one() {
     let window = Rect::new(0, 0, 400, 300);
     let places = Places::new(&home(), &[]);
     let view =
-        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     let rail = view.width();
     assert!(rail > 0);
 
-    let inset = crate::render::content_area(window, Scale::ONE, &theme, Some(&places));
+    let inset = crate::render::content_area(window, Scale::ONE, &theme, Some(&places), BAND);
     assert_eq!(inset.origin.x, i32::try_from(rail).expect("rail width"));
     assert_eq!(inset.width, window.width - rail);
     assert_eq!(inset.origin.y, window.origin.y);
     assert_eq!(inset.height, window.height);
     // Everything the view lays out follows the inset, so the scrollbar sits
     // against the window's right edge rather than the rail's.
-    let bar = crate::render::scrollbar_bounds(Scale::ONE, &theme, inset).expect("scrollbar");
+    let bar = crate::render::scrollbar_bounds(Scale::ONE, &theme, inset, BAND).expect("scrollbar");
     assert!(bar.origin.x > inset.origin.x);
     assert!(u32::try_from(bar.origin.x).expect("bar x") + bar.width <= window.width);
 
     // With no rail the area is the window, byte for byte, so a view without a
     // sidebar is laid out exactly as it was before there was one.
     assert_eq!(
-        crate::render::content_area(window, Scale::ONE, &theme, None),
+        crate::render::content_area(window, Scale::ONE, &theme, None, BAND),
         window
     );
     // An empty rail is no rail at all.
     let empty = Places::default();
-    assert!(crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&empty)).is_none());
+    assert!(crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&empty), BAND).is_none());
     assert_eq!(
-        crate::render::content_area(window, Scale::ONE, &theme, Some(&empty)),
+        crate::render::content_area(window, Scale::ONE, &theme, Some(&empty), BAND),
         window
     );
+}
+
+/// A hidden command band reserves nothing and resolves nothing: the listing
+/// starts at the top of the window, the rail beside it does too, and no point
+/// in the window answers as a toolbar command or a manager tool.
+///
+/// The file manager opens with the band hidden, so this is the layout every
+/// window is drawn in until the user asks for the strip.
+#[test]
+fn a_hidden_toolbar_band_reserves_no_height_and_resolves_nothing() {
+    use crate::chrome::{ManagerToolModel, ToolbarBand, MANAGER_TOOLS};
+    use crate::render::{
+        chrome_height, manager_tool_at, sidebar_view, toolbar_command_at, toolbar_height,
+    };
+    use tairix_geometry::Point;
+
+    const HIDDEN: ToolbarBand = ToolbarBand::Hidden;
+
+    let theme = Theme::dark();
+    let window = Rect::new(0, 0, 400, 300);
+    let places = Places::new(&home(), &[]);
+    let browser = Browser::open_root(MockFs::fixture()).expect("root");
+
+    assert!(
+        toolbar_height(Scale::ONE, &theme) > 0,
+        "the band has a size"
+    );
+    assert_eq!(
+        chrome_height(Scale::ONE, &theme, HIDDEN),
+        0,
+        "but a window that does not draw it reserves none of it"
+    );
+    assert_eq!(
+        chrome_height(Scale::ONE, &theme, BAND),
+        toolbar_height(Scale::ONE, &theme)
+    );
+
+    // The rail starts at the top of the window rather than below a band that
+    // is not there.
+    let hidden_rail =
+        sidebar_view(window, Scale::ONE, &theme, Some(&places), HIDDEN).expect("rail");
+    let shown_rail = sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
+    assert_eq!(hidden_rail.rail_rect().origin.y, window.origin.y);
+    assert!(shown_rail.rail_rect().origin.y > hidden_rail.rail_rect().origin.y);
+    assert!(hidden_rail.rail_rect().height > shown_rail.rail_rect().height);
+
+    // No point in the window resolves to a command or a tool: there is no
+    // drawn button for a press to land on, and hit-testing a band that was
+    // never painted would take presses from the listing beneath it.
+    for (x, y) in (0..window.width).flat_map(|x| [0_i32, 4, 12, 40, 299].map(move |y| (x, y))) {
+        let point = Point::new(i32::try_from(x).expect("window width"), y);
+        assert_eq!(
+            toolbar_command_at(&browser, Scale::ONE, &theme, window, HIDDEN, point),
+            None,
+            "no command at {point:?}"
+        );
+        assert_eq!(
+            manager_tool_at(
+                &browser,
+                Scale::ONE,
+                &theme,
+                window,
+                HIDDEN,
+                point,
+                MANAGER_TOOLS,
+                ManagerToolModel::new(true),
+            ),
+            None,
+            "no tool at {point:?}"
+        );
+    }
+    // Shown, the same band answers — so the hidden case is the flag, not a
+    // window that could never have resolved one.
+    let band = toolbar_height(Scale::ONE, &theme);
+    let hit = (0..band)
+        .flat_map(|y| (0..window.width).map(move |x| (x, y)))
+        .find_map(|(x, y)| {
+            let point = Point::new(i32::try_from(x).ok()?, i32::try_from(y).ok()?);
+            toolbar_command_at(&browser, Scale::ONE, &theme, window, BAND, point)
+        })
+        .is_some();
+    assert!(hit, "the drawn band resolves a command");
 }
 
 /// The command toolbar is window chrome: its band spans the whole window, so
@@ -293,7 +381,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
     let window = Rect::new(0, 0, 400, 300);
     let places = Places::new(&home(), &[]);
     let band = toolbar_height(Scale::ONE, &theme);
-    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places))
+    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND)
         .expect("rail")
         .width();
     assert!(rail > 0);
@@ -312,6 +400,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
                 tools: MANAGER_TOOLS,
                 tool_model: ManagerToolModel::new(true),
                 sidebar,
+                toolbar: BAND,
             },
             &mut NoArtwork,
         )
@@ -336,7 +425,8 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
     let (x, command) = (0..window.width)
         .find_map(|x| {
             let probe = Point::new(i32::try_from(x).ok()?, y);
-            toolbar_command_at(&browser, Scale::ONE, &theme, window, probe).map(|cmd| (x, cmd))
+            toolbar_command_at(&browser, Scale::ONE, &theme, window, BAND, probe)
+                .map(|cmd| (x, cmd))
         })
         .expect("an enabled command is drawn in the band");
     assert_eq!(command, ToolbarCommand::Back);
@@ -350,6 +440,7 @@ fn the_toolbar_band_spans_the_whole_window_above_the_rail() {
             Scale::ONE,
             &theme,
             Some(&places),
+            BAND,
             Point::new(i32::try_from(x).expect("command x"), y),
         ),
         None
@@ -372,7 +463,7 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
     let band = toolbar_height(Scale::ONE, &theme);
     let row = row_height(Scale::ONE, &theme);
-    let view = sidebar_view(window, Scale::ONE, &theme, Some(&places)).expect("rail");
+    let view = sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
 
     let rail = view.rail_rect();
     assert_eq!(rail.origin.x, window.origin.x);
@@ -387,11 +478,12 @@ fn the_rail_starts_below_the_toolbar_band_on_the_listings_row_grid() {
 
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     browser.select(0).expect("select the first entry");
-    let area = content_area(window, Scale::ONE, &theme, Some(&places));
-    let listing = selection_rect(&browser, Scale::ONE, &theme, area).expect("first row drawn");
+    let area = content_area(window, Scale::ONE, &theme, Some(&places), BAND);
+    let listing =
+        selection_rect(&browser, Scale::ONE, &theme, area, BAND).expect("first row drawn");
     assert_eq!(
         listing.origin.y,
-        i32::try_from(chrome_height(Scale::ONE, &theme)).expect("chrome")
+        i32::try_from(chrome_height(Scale::ONE, &theme, BAND)).expect("chrome")
     );
     assert_eq!(first.origin.y, listing.origin.y);
 
@@ -421,7 +513,7 @@ fn a_press_in_the_toolbar_band_is_never_a_rail_row() {
     let window = Rect::new(0, 0, 400, 400);
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
     let band = toolbar_height(Scale::ONE, &theme);
-    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places))
+    let rail = sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND)
         .expect("rail")
         .width();
 
@@ -433,6 +525,7 @@ fn a_press_in_the_toolbar_band_is_never_a_rail_row() {
                     Scale::ONE,
                     &theme,
                     Some(&places),
+                    BAND,
                     Point::new(i32::try_from(x).expect("x"), i32::try_from(y).expect("y")),
                 ),
                 None,
@@ -447,6 +540,7 @@ fn a_press_in_the_toolbar_band_is_never_a_rail_row() {
             Scale::ONE,
             &theme,
             Some(&places),
+            BAND,
             Point::new(0, i32::try_from(band).expect("band")),
         ),
         Some(0)
@@ -472,9 +566,9 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
     let places = Places::new(&home(), &[]);
 
     // The picker keeps the whole window and lays out no rail to press.
-    assert_eq!(content_area(window, Scale::ONE, &theme, None), window);
+    assert_eq!(content_area(window, Scale::ONE, &theme, None, BAND), window);
     assert_eq!(
-        sidebar_index_at(window, Scale::ONE, &theme, None, Point::new(0, 0)),
+        sidebar_index_at(window, Scale::ONE, &theme, None, BAND, Point::new(0, 0)),
         None
     );
 
@@ -483,6 +577,7 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
         Scale::ONE,
         &theme,
         window,
+        BAND,
         MANAGER_TOOLS,
         ManagerTool::NewFolder,
     )
@@ -500,6 +595,7 @@ fn the_toolbar_is_painted_where_the_window_hit_test_finds_it() {
                 tools,
                 tool_model: ManagerToolModel::new(true),
                 sidebar,
+                toolbar: BAND,
             },
             &mut NoArtwork,
         )
@@ -534,28 +630,42 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
     // Shorter than the toolbar band: the band owns every pixel, so the rail
     // has no height and nothing in the window resolves to a place.
     let squat = Rect::new(0, 0, 400, 1);
-    let view = sidebar_view(squat, Scale::ONE, &theme, Some(&places)).expect("rail");
+    let view = sidebar_view(squat, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     assert_eq!(view.rail_rect().height, 0);
     assert_eq!(view.row_rect(0), None);
     assert_eq!(
-        sidebar_index_at(squat, Scale::ONE, &theme, Some(&places), Point::new(0, 0)),
+        sidebar_index_at(
+            squat,
+            Scale::ONE,
+            &theme,
+            Some(&places),
+            BAND,
+            Point::new(0, 0)
+        ),
         None
     );
 
     // Narrower than the rail: the rail is clamped to the window and the
     // content area keeps what is left rather than wrapping past the edge.
     let narrow = Rect::new(0, 0, 3, 400);
-    let thin = sidebar_view(narrow, Scale::ONE, &theme, Some(&places)).expect("rail");
+    let thin = sidebar_view(narrow, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     assert!(thin.width() <= narrow.width);
-    let area = content_area(narrow, Scale::ONE, &theme, Some(&places));
+    let area = content_area(narrow, Scale::ONE, &theme, Some(&places), BAND);
     assert!(u32::try_from(area.origin.x).expect("area x") + area.width <= narrow.width);
 
     // No pixels at all: no row, and still a surface rather than a panic.
     let nothing = Rect::new(0, 0, 0, 0);
-    let none = sidebar_view(nothing, Scale::ONE, &theme, Some(&places)).expect("rail");
+    let none = sidebar_view(nothing, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     assert_eq!(none.row_rect(0), None);
     assert_eq!(
-        sidebar_index_at(nothing, Scale::ONE, &theme, Some(&places), Point::new(0, 0)),
+        sidebar_index_at(
+            nothing,
+            Scale::ONE,
+            &theme,
+            Some(&places),
+            BAND,
+            Point::new(0, 0)
+        ),
         None
     );
     for window in [squat, narrow, nothing] {
@@ -568,6 +678,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
                 tools: MANAGER_TOOLS,
                 tool_model: ManagerToolModel::new(true),
                 sidebar: Some(&places),
+                toolbar: BAND,
             },
             &mut NoArtwork,
         );
@@ -599,6 +710,7 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
         tools: &[],
         tool_model: crate::ManagerToolModel::none(),
         sidebar: Some(&places),
+        toolbar: BAND,
     };
     let unselected = paint(
         &browser,
@@ -620,7 +732,7 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
         &chrome,
         &mut NoArtwork,
     );
-    let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places))
+    let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places), BAND)
         .expect("rail")
         .row_rect(4)
         .expect("the System row");
@@ -971,7 +1083,7 @@ fn render_gives_the_selected_entry_the_shared_selection_chrome() {
     // answers a question about a face nothing draws with.
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, Scale::ONE);
     let row_height = font.glyph_height() + 4;
-    let header = crate::render::chrome_height(Scale::ONE, &theme);
+    let header = crate::render::chrome_height(Scale::ONE, &theme, BAND);
     let surface = paint(
         &browser,
         Scale::ONE,
@@ -1052,17 +1164,17 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     // The horizontal bands, top to bottom.
     assert!(toolbar_height(hidpi, &theme) > toolbar_height(Scale::ONE, &theme));
     assert!(row_height(hidpi, &theme) > row_height(Scale::ONE, &theme));
-    assert!(chrome_height(hidpi, &theme) > chrome_height(Scale::ONE, &theme));
+    assert!(chrome_height(hidpi, &theme, BAND) > chrome_height(Scale::ONE, &theme, BAND));
 
     // The reserved scrollbar gutter, and the header it begins below.
-    let bar = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter at 100%");
-    let bar_hidpi = scrollbar_bounds(hidpi, &theme, vp).expect("a gutter at 200%");
+    let bar = scrollbar_bounds(Scale::ONE, &theme, vp, BAND).expect("a gutter at 100%");
+    let bar_hidpi = scrollbar_bounds(hidpi, &theme, vp, BAND).expect("a gutter at 200%");
     assert!(bar_hidpi.width > bar.width);
     assert!(bar_hidpi.origin.y > bar.origin.y);
 
     // The places rail and the icon grid's tiles.
-    let rail = sidebar_view(vp, Scale::ONE, &theme, Some(&places)).expect("a rail at 100%");
-    let rail_hidpi = sidebar_view(vp, hidpi, &theme, Some(&places)).expect("a rail at 200%");
+    let rail = sidebar_view(vp, Scale::ONE, &theme, Some(&places), BAND).expect("a rail at 100%");
+    let rail_hidpi = sidebar_view(vp, hidpi, &theme, Some(&places), BAND).expect("a rail at 200%");
     assert!(rail_hidpi.width() > rail.width());
     let tiles = grid_metrics(Scale::ONE, &theme);
     let tiles_hidpi = grid_metrics(hidpi, &theme);
@@ -1301,7 +1413,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
     let browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(Scale::ONE, &theme);
     // The chrome (toolbar + path bar) reserved above the first entry row.
-    let header = chrome_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme, BAND);
     // A window wide enough for content beside the scrollbar gutter, the chrome
     // plus several entry rows tall. Clicks land in the content column (x=4).
     let vp = |h: u32| Rect::new(0, 0, 200, h);
@@ -1311,6 +1423,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
             Scale::ONE,
             &theme,
             vp(h),
+            BAND,
             Point::new(4, i32::try_from(y).unwrap()),
         )
     };
@@ -1341,6 +1454,7 @@ fn entry_index_at_mirrors_the_rendered_rows() {
             Scale::ONE,
             &theme,
             vp(viewport_height),
+            BAND,
             Point::new(199, i32::try_from(header).unwrap())
         ),
         None
@@ -1355,14 +1469,14 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
     let theme = Theme::dark();
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root opens");
     let row = row_height(Scale::ONE, &theme);
-    let header = chrome_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme, BAND);
     // Two visible entry rows below the chrome; select the last entry and reveal
     // it so the list scrolls to keep it on the bottom row — as the app does.
     let viewport_height = header + row * 2;
     let vp = Rect::new(0, 0, 200, viewport_height);
     let last = browser.entries().len() - 1;
     browser.select(last).expect("selectable");
-    reveal_selection(&mut browser, Scale::ONE, &theme, vp);
+    reveal_selection(&mut browser, Scale::ONE, &theme, vp, BAND);
     // The bottom visible row is the selected (last) entry; the row above
     // it is its predecessor — exactly what `render` draws.
     assert_eq!(
@@ -1371,6 +1485,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(4, i32::try_from(header + row).unwrap())
         ),
         Some(last)
@@ -1381,6 +1496,7 @@ fn entry_index_at_accounts_for_the_scroll_anchor() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(4, i32::try_from(header).unwrap())
         ),
         Some(last - 1)
@@ -1732,20 +1848,34 @@ fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
         0,
         0,
         200,
-        crate::render::chrome_height(Scale::ONE, &theme) + row * 4,
+        crate::render::chrome_height(Scale::ONE, &theme, BAND) + row * 4,
     );
 
     // Scrolling up at the top does nothing (already clamped).
-    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, -1));
+    assert!(!scroll_lines(
+        &mut browser,
+        Scale::ONE,
+        &theme,
+        vp,
+        BAND,
+        -1
+    ));
     assert_eq!(browser.scroll_offset(), 0);
     // Scrolling down moves one line per tick.
-    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, 3));
+    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 3));
     assert_eq!(browser.scroll_offset(), 3);
     // Scrolling far past the end clamps to the last full page (20 rows, four
     // visible → max offset 16) and reports no further movement beyond it.
-    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, 1000));
+    assert!(scroll_lines(
+        &mut browser,
+        Scale::ONE,
+        &theme,
+        vp,
+        BAND,
+        1000
+    ));
     assert_eq!(browser.scroll_offset(), 16);
-    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, 5));
+    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 5));
     assert_eq!(browser.scroll_offset(), 16);
 }
 
@@ -1760,7 +1890,7 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     let vp = Rect::new(0, 0, 200, row * 6);
     // Twenty times more content than the viewport shows: the bar is a real,
     // draggable thumb, not a full-track placeholder.
-    let model = scroll_model(&browser, Scale::ONE, &theme, vp);
+    let model = scroll_model(&browser, Scale::ONE, &theme, vp, BAND);
     assert!(model.range().is_scrollable());
 
     let bar_bounds = Rect::new(184, i32::try_from(row).unwrap(), 16, row * 5);
@@ -1772,10 +1902,10 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     let top_thumb = geometry.thumb().start;
 
     // Scroll to the end; the drawn thumb moves to the bottom of its travel.
-    scroll_lines(&mut browser, Scale::ONE, &theme, vp, 1000);
+    scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 1000);
     let bar = ScrollBar::new(
         ScrollOrientation::Vertical,
-        scroll_model(&browser, Scale::ONE, &theme, vp),
+        scroll_model(&browser, Scale::ONE, &theme, vp, BAND),
     );
     let end_geometry = bar
         .geometry(bar_bounds, Scale::ONE, &theme)
@@ -1790,8 +1920,8 @@ fn scrollbar_bounds_matches_the_reserved_gutter() {
 
     let theme = Theme::dark();
     let vp = Rect::new(0, 0, 200, 200);
-    let header = crate::render::chrome_height(Scale::ONE, &theme);
-    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
+    let header = crate::render::chrome_height(Scale::ONE, &theme, BAND);
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp, BAND).expect("a gutter exists");
     // The bar sits in the reserved right-edge gutter (its right edge is the
     // window's right edge), below the chrome header, and is a real strip wide.
     assert_eq!(bounds.right(), i32::try_from(vp.width).unwrap());
@@ -1799,7 +1929,7 @@ fn scrollbar_bounds_matches_the_reserved_gutter() {
     assert!(bounds.width > 0);
     assert!(bounds.left() > 0 && bounds.left() < i32::try_from(vp.width).unwrap());
     // A window too short for any item area has no gutter.
-    assert!(scrollbar_bounds(Scale::ONE, &theme, Rect::new(0, 0, 200, header)).is_none());
+    assert!(scrollbar_bounds(Scale::ONE, &theme, Rect::new(0, 0, 200, header), BAND).is_none());
 }
 
 #[test]
@@ -1816,9 +1946,9 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
         0,
         0,
         200,
-        crate::render::chrome_height(Scale::ONE, &theme) + row * 6,
+        crate::render::chrome_height(Scale::ONE, &theme, BAND) + row * 6,
     );
-    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp, BAND).expect("a gutter exists");
     let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
 
     // A press on the increment (down) button at the bottom of the bar steps
@@ -1833,6 +1963,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             down,
             &press,
             &mut sink()
@@ -1850,6 +1981,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             off,
             &press,
             &mut sink()
@@ -1873,15 +2005,15 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
         0,
         0,
         200,
-        crate::render::chrome_height(Scale::ONE, &theme) + row * 6,
+        crate::render::chrome_height(Scale::ONE, &theme, BAND) + row * 6,
     );
-    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp).expect("a gutter exists");
+    let bounds = scrollbar_bounds(Scale::ONE, &theme, vp, BAND).expect("a gutter exists");
     let cx = bounds.left() + i32::try_from(bounds.width).unwrap() / 2;
 
     // Find a point on the thumb using the same layout the router uses.
     let probe = ScrollBar::new(
         ScrollOrientation::Vertical,
-        scroll_model(&browser, Scale::ONE, &theme, vp),
+        scroll_model(&browser, Scale::ONE, &theme, vp, BAND),
     );
     let thumb_y = (bounds.top()..bounds.bottom())
         .find(|&y| {
@@ -1899,6 +2031,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(cx, thumb_y),
             &press,
             &mut sink()
@@ -1916,6 +2049,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             to,
             &moved,
             &mut sink()
@@ -1935,6 +2069,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             to,
             &release,
             &mut sink()
@@ -1950,6 +2085,7 @@ fn scrollbar_thumb_drag_scrolls_and_release_ends_the_capture() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(10, bounds.top() + 3),
             &off,
             &mut sink()
@@ -1981,8 +2117,8 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
 
     // The row shares its leftover width out between its tiles, so the first
     // tile is asked where it is rather than assumed to hug the window's edge.
-    let first =
-        selection_rect(&browser, Scale::ONE, &theme, vp).expect("the first tile is on screen");
+    let first = selection_rect(&browser, Scale::ONE, &theme, vp, BAND)
+        .expect("the first tile is on screen");
     assert!(
         first.left() > 0,
         "the shared-out width reaches the row's leading end: {first:?}"
@@ -1994,6 +2130,7 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(first.left() + 1, first.top() + 1)
         ),
         Some(0)
@@ -2005,13 +2142,14 @@ fn the_grid_view_renders_and_hit_tests_the_first_tile() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(0, first.top() + 1)
         ),
         None
     );
     // A click on the header resolves to nothing.
     assert_eq!(
-        entry_index_at(&browser, Scale::ONE, &theme, vp, Point::new(4, 0)),
+        entry_index_at(&browser, Scale::ONE, &theme, vp, BAND, Point::new(4, 0)),
         None
     );
 }
@@ -2768,6 +2906,7 @@ fn navigation_history_is_bounded_and_drops_the_oldest() {
 // without a kernel.
 
 mod rename_model {
+    use super::BAND;
     use core::cell::RefCell;
 
     use alloc::string::ToString;
@@ -2924,7 +3063,7 @@ mod rename_model {
 
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         browser.select(1).expect("select second entry");
-        let rect = crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport)
+        let rect = crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport, BAND)
             .expect("a selected row has a rectangle");
         // It lies within the window and below the one-row path-bar header.
         let header = crate::render::row_height(Scale::ONE, &theme);
@@ -2935,7 +3074,7 @@ mod rename_model {
         browser.open_index(2).expect("enter System");
         browser.open_index(0).expect("enter Fonts");
         assert_eq!(
-            crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport),
+            crate::render::selection_rect(&browser, Scale::ONE, &theme, viewport, BAND),
             None
         );
     }
@@ -5644,7 +5783,7 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 400, chrome_height(Scale::ONE, &theme) + 40);
+    let vp = Rect::new(0, 0, 400, chrome_height(Scale::ONE, &theme, BAND) + 40);
 
     // Scan the toolbar strip's middle row and collect every command a click
     // resolves to, so the test does not depend on each tool's exact pixel x.
@@ -5657,6 +5796,7 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
                 Scale::ONE,
                 &theme,
                 vp,
+                BAND,
                 Point::new(i32::try_from(x).unwrap(), y),
             ) {
                 if !found.contains(&cmd) {
@@ -5694,6 +5834,7 @@ fn render_toolbar_command_at_resolves_enabled_commands_and_fails_closed() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(
                 4,
                 i32::try_from(toolbar_height(Scale::ONE, &theme)).unwrap()
@@ -5718,7 +5859,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
         0,
         0,
         400,
-        crate::render::chrome_height(Scale::ONE, &theme) + 40,
+        crate::render::chrome_height(Scale::ONE, &theme, BAND) + 40,
     );
     let browser = Browser::open_root(MockFs::fixture()).expect("root");
     let y = i32::try_from(toolbar_height(Scale::ONE, &theme) / 2).unwrap();
@@ -5729,12 +5870,13 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     let mut saw_new_folder = false;
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
-        let command = toolbar_command_at(&browser, Scale::ONE, &theme, vp, point);
+        let command = toolbar_command_at(&browser, Scale::ONE, &theme, vp, BAND, point);
         let tool = manager_tool_at(
             &browser,
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             point,
             MANAGER_TOOLS,
             tool_model,
@@ -5757,7 +5899,16 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
     for x in 0..vp.width {
         let point = Point::new(i32::try_from(x).unwrap(), y);
         assert_eq!(
-            manager_tool_at(&browser, Scale::ONE, &theme, vp, point, &[], tool_model),
+            manager_tool_at(
+                &browser,
+                Scale::ONE,
+                &theme,
+                vp,
+                BAND,
+                point,
+                &[],
+                tool_model
+            ),
             None
         );
     }
@@ -5769,6 +5920,7 @@ fn render_manager_tool_at_resolves_new_folder_disjoint_from_the_read_only_comman
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             Point::new(
                 4,
                 i32::try_from(toolbar_height(Scale::ONE, &theme)).unwrap()
@@ -5800,6 +5952,7 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
         Scale::ONE,
         &theme,
         vp,
+        BAND,
         MANAGER_TOOLS,
         ManagerTool::NewFolder,
     )
@@ -5814,6 +5967,7 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             centre,
             MANAGER_TOOLS,
             tool_model
@@ -5828,6 +5982,7 @@ fn render_manager_tool_rect_is_the_forward_mirror_of_manager_tool_at() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             &[],
             ManagerTool::NewFolder
         ),
@@ -5859,6 +6014,7 @@ fn render_manager_tool_at_gates_empty_trash_on_the_model() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             point,
             MANAGER_TOOLS,
             disabled,
@@ -5885,6 +6041,7 @@ fn render_manager_tool_at_gates_empty_trash_on_the_model() {
             Scale::ONE,
             &theme,
             vp,
+            BAND,
             point,
             MANAGER_TOOLS,
             enabled,
@@ -7022,6 +7179,7 @@ mod title_location {
 // These tests pin what that read costs as much as what it draws.
 
 mod occupancy {
+    use super::BAND;
     use super::*;
 
     use alloc::rc::Rc;
@@ -7122,7 +7280,7 @@ mod occupancy {
     /// Resolve occupancy for everything the browser would draw — what the app
     /// does at the head of each frame.
     fn resolve_visible<S: DirectorySource>(browser: &mut Browser<S>) {
-        let range = visible_range(browser, Scale::ONE, &Theme::dark(), viewport());
+        let range = visible_range(browser, Scale::ONE, &Theme::dark(), viewport(), BAND);
         browser.resolve_occupancy(range);
     }
 
@@ -7306,7 +7464,7 @@ mod occupancy {
         let mut browser = Browser::open_root(source).expect("root");
         browser.set_view_mode(ViewMode::List);
 
-        let on_screen = visible_range(&browser, Scale::ONE, &Theme::dark(), viewport()).len();
+        let on_screen = visible_range(&browser, Scale::ONE, &Theme::dark(), viewport(), BAND).len();
         assert!(
             on_screen > 0 && on_screen < ENTRIES,
             "the window, not the listing"

@@ -84,6 +84,7 @@
 extern crate alloc;
 
 pub mod appbar;
+pub mod chrome;
 pub mod command;
 pub mod gesture;
 pub mod icons;
@@ -133,9 +134,9 @@ mod program {
         CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan,
         DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind, ManagerChrome, ManagerTool,
         ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places,
-        ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarCommand,
-        TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT,
-        WIN_SIZING, WIN_WIDTH,
+        ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarBand,
+        ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
+        MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -158,6 +159,7 @@ mod program {
     };
 
     use crate::appbar;
+    use crate::chrome::Chrome;
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
     use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
     use crate::listing::{self, ViewMark};
@@ -412,6 +414,9 @@ mod program {
         /// volumes, but its own focus, cursor, and hover — one window's
         /// pointer must not highlight a row in another.
         places: Places,
+        /// Which of its own chrome bands this window is showing. Per window
+        /// like the rail above, so one window's chrome is not another's.
+        chrome: Chrome,
         /// The pixel layout its frame region is shaped as.
         mode: DisplayMode,
         /// The live frame region this window presents from, released when the
@@ -477,6 +482,7 @@ mod program {
             &mut win.browser,
             &win.overlays,
             &win.places,
+            win.chrome,
             theme,
             &mut FrameTarget {
                 client,
@@ -581,6 +587,7 @@ mod program {
             browser,
             overlays: initial_overlays(),
             places: places.clone(),
+            chrome: Chrome::HIDDEN,
             mode,
             frames,
             title,
@@ -774,10 +781,16 @@ mod program {
         }
 
         let win = &mut windows[index];
+        // The chrome toggle is a window-level gesture like the refresh below,
+        // not a listing key: it changes what the frame is laid out from, so it
+        // is applied to the record before this round's canvas is built and the
+        // whole window is repainted at the new layout.
+        let chrome_toggled = chrome_toggle(win, event);
         let canvas = Canvas {
             theme,
             mode: &win.mode,
             scale: desktop.scale(),
+            chrome: win.chrome,
         };
         // The user asked this window to re-read what is there, so the rail
         // re-reads the mount table in the same gesture — and a component's
@@ -791,6 +804,7 @@ mod program {
             canvas.scale,
             canvas.theme(),
             canvas.window(),
+            canvas.chrome.toolbar,
             event,
         ) {
             let (home, volumes) = places_source();
@@ -827,10 +841,36 @@ mod program {
             close_window(windows, index, client);
             return None;
         }
+        let repaint = merge(repaint, whole_if(chrome_toggled));
         if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
             return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
         }
         None
+    }
+
+    /// Apply the chrome toggle `event` names to `win`, answering whether a
+    /// band moved.
+    ///
+    /// `F9` shows or hides the places rail and `Ctrl+F9` the command toolbar.
+    /// A window opens with neither, so these are what reach every command the
+    /// toolbar carries — the view toggle, the sort cycle, the Trash tools —
+    /// until the desktop settings application sets the same two fields from
+    /// the user's stored preference.
+    fn chrome_toggle(win: &mut OpenWindow, event: &WindowEvent) -> bool {
+        let WindowEvent::Key {
+            key: KeyInput::Pressed { key, modifiers },
+            ..
+        } = event
+        else {
+            return false;
+        };
+        match win.chrome.toggled_by(*key, *modifiers) {
+            Some(chrome) => {
+                win.chrome = chrome;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Open one more window at `location` (the user's home when `None`),
@@ -1542,6 +1582,10 @@ mod program {
         mode: &'a DisplayMode,
         /// The desktop's UI density.
         scale: Scale,
+        /// The chrome bands this window is showing, so every measurement of
+        /// the listing and every hit-test that inverts one read the same
+        /// answer as the paint did.
+        chrome: Chrome,
     }
 
     impl<'a> Canvas<'a> {
@@ -1578,10 +1622,12 @@ mod program {
     /// a hundred thousand entries costs one directory read per row on screen,
     /// not per entry, and each answer — including a refusal — is remembered
     /// until the next listing.
+    #[allow(clippy::too_many_arguments)] // The window's state, its chrome, and the frame target.
     fn present_frame<S, T>(
         browser: &mut Browser<S>,
         overlays: &Overlays,
         places: &Places,
+        chrome: Chrome,
         theme: &Theme,
         target: &mut FrameTarget<'_, T>,
         icons: &RefCell<Icons>,
@@ -1601,9 +1647,11 @@ mod program {
         // the view is placed within what is left — the one shared inset the
         // pointer hit-tests resolve through, so a dialog is never centred over
         // the rail it does not belong to.
-        let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
+        let rail = chrome.rail(places);
+        let toolbar = chrome.toolbar;
+        let viewport = tairix_browse::render::content_area(window, scale, theme, rail, toolbar);
         browser.resolve_occupancy(tairix_browse::render::visible_range(
-            browser, scale, theme, viewport,
+            browser, scale, theme, viewport, toolbar,
         ));
         let browser = &*browser;
         // The title is the location, so it is sent only when the browser has
@@ -1640,7 +1688,8 @@ mod program {
                         &ManagerChrome {
                             tools: MANAGER_TOOLS,
                             tool_model: manager_tool_model(browser),
-                            sidebar: Some(places),
+                            sidebar: rail,
+                            toolbar,
                         },
                         &mut pipeline.source(),
                     );
@@ -1649,9 +1698,9 @@ mod program {
                 // selected item's row through the shared selection geometry, so
                 // the field sits on the item the user is renaming.
                 if let Some(field) = rename {
-                    if let Some(bounds) =
-                        tairix_browse::render::selection_rect(browser, scale, theme, viewport)
-                    {
+                    if let Some(bounds) = tairix_browse::render::selection_rect(
+                        browser, scale, theme, viewport, toolbar,
+                    ) {
                         field.render(surface, bounds, scale, theme);
                     }
                 }
@@ -1722,7 +1771,14 @@ mod program {
         // Everything below the rail lays out in what the rail leaves, resolved
         // through the one shared inset the renderer paints with, so a click
         // lands on exactly the control the user saw.
-        let viewport = tairix_browse::render::content_area(window, scale, theme, Some(places));
+        let toolbar = canvas.chrome.toolbar;
+        let viewport = tairix_browse::render::content_area(
+            window,
+            scale,
+            theme,
+            canvas.chrome.rail(places),
+            toolbar,
+        );
 
         // A close request closes *this* window whatever mode it is in; an open
         // rename edit or properties overlay is simply abandoned (nothing was
@@ -1754,6 +1810,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 outcome,
             );
             return (whole_if(changed), close);
@@ -1796,6 +1853,7 @@ mod program {
                     scale,
                     theme,
                     viewport,
+                    toolbar,
                     *key,
                     *modifiers,
                 ),
@@ -1807,17 +1865,26 @@ mod program {
         // The rail owns the window's leading edge: its hover highlight tracks
         // every motion that reaches here, and it consumes the presses and keys
         // that belong to it. Whatever it does not consume routes to the view,
-        // carrying any repaint the highlight alone owed.
-        let hover = reported_if(sidebar::track_hover(
-            places, scale, theme, window, event, damage,
-        ));
-        if let Some(outcome) =
-            sidebar::apply_event(browser, places, scale, theme, window, event, damage)
-        {
-            if let Some(reason) = &outcome.refused {
-                report_error(reason);
+        // carrying any repaint the highlight alone owed. A window showing no
+        // rail routes nothing to one: there is no drawn row for a press to
+        // land on, and hit-testing a rail that was never painted would take
+        // presses from the listing beneath it.
+        let hover = if canvas.chrome.rail {
+            reported_if(sidebar::track_hover(
+                places, scale, theme, window, toolbar, event, damage,
+            ))
+        } else {
+            Repaint::Nothing
+        };
+        if canvas.chrome.rail {
+            if let Some(outcome) = sidebar::apply_event(
+                browser, places, scale, theme, window, toolbar, event, damage,
+            ) {
+                if let Some(reason) = &outcome.refused {
+                    report_error(reason);
+                }
+                return (merge(outcome.repaint, hover), false);
             }
-            return (merge(outcome.repaint, hover), false);
         }
 
         let (repaint, close) = apply_nav_event(win, acts, canvas, viewport, event, damage);
@@ -1844,6 +1911,7 @@ mod program {
         } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
+        let toolbar = canvas.chrome.toolbar;
         match event {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
@@ -1866,6 +1934,7 @@ mod program {
                         scale,
                         theme,
                         viewport,
+                        toolbar,
                         bundle_intent(modifiers.shift),
                         AfterHandoff::Keep,
                     ))
@@ -1885,6 +1954,7 @@ mod program {
                         scale,
                         theme,
                         viewport,
+                        toolbar,
                         *key,
                         *modifiers,
                         damage,
@@ -1902,10 +1972,11 @@ mod program {
                     scale,
                     theme,
                     viewport,
+                    toolbar,
                     i64::from(*dy),
                 );
                 if moved {
-                    listing::scrolled(scale, theme, viewport, damage);
+                    listing::scrolled(scale, theme, viewport, toolbar, damage);
                 }
                 (reported_if(moved), false)
             }
@@ -2041,6 +2112,7 @@ mod program {
         event: &WindowEvent,
         damage: &mut Region,
     ) -> (Repaint, bool) {
+        let toolbar = canvas.chrome.toolbar;
         let WindowState {
             browser, overlays, ..
         } = win;
@@ -2060,23 +2132,25 @@ mod program {
         let mut scrolled = None;
         let mark = ViewMark::of(browser);
         for input in pointer_input_events(*action, point) {
-            if let Some(repaint) =
-                scroll_pointer(browser, scale, theme, viewport, point, &input, damage)
-            {
+            if let Some(repaint) = scroll_pointer(
+                browser, scale, theme, viewport, toolbar, point, &input, damage,
+            ) {
                 scrolled = Some(scrolled.unwrap_or(false) || repaint);
             }
         }
         if let Some(repaint) = scrolled {
             // The bar reported its own drawn state; an offset it actually
             // moved draws every entry somewhere new besides.
-            mark.report(browser, scale, theme, viewport, damage);
+            mark.report(browser, scale, theme, viewport, toolbar, damage);
             return (reported_if(repaint), false);
         }
         if *action == PointerAction::Moved {
             return (Repaint::Nothing, false);
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
-            let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
+            let hit = tairix_browse::render::entry_index_at(
+                browser, scale, theme, viewport, toolbar, point,
+            );
             return whole(open_context_menu(
                 browser,
                 overlays,
@@ -2171,6 +2245,7 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         key: KeyValue,
         modifiers: AbiModifiers,
         damage: &mut Region,
@@ -2184,6 +2259,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 ToolbarCommand::Back,
             )),
             KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => whole(apply_toolbar_command(
@@ -2191,6 +2267,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 ToolbarCommand::Forward,
             )),
             KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => whole(apply_toolbar_command(
@@ -2198,6 +2275,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 ToolbarCommand::Up,
             )),
             KeyValue::Named(NamedKeyCode::F5) => whole(apply_toolbar_command(
@@ -2205,6 +2283,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 ToolbarCommand::Refresh,
             )),
             // Ctrl+Shift+N: the keyboard equivalent of the New Folder tool.
@@ -2212,13 +2291,16 @@ mod program {
             KeyValue::Char(ch)
                 if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
             {
-                whole(begin_new_folder(browser, rename, scale, theme, viewport))
+                whole(begin_new_folder(
+                    browser, rename, scale, theme, viewport, toolbar,
+                ))
             }
             KeyValue::Named(NamedKeyCode::Down) => walk_selection(
                 browser,
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 damage,
                 Browser::select_next,
             ),
@@ -2227,6 +2309,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 damage,
                 Browser::select_previous,
             ),
@@ -2235,9 +2318,9 @@ mod program {
             }
             // F2 begins an in-place rename of the selected item; with nothing
             // selected (an empty directory) it is a no-op.
-            KeyValue::Named(NamedKeyCode::F2) => {
-                whole(begin_rename(browser, rename, scale, theme, viewport))
-            }
+            KeyValue::Named(NamedKeyCode::F2) => whole(begin_rename(
+                browser, rename, scale, theme, viewport, toolbar,
+            )),
             _ => (Repaint::Nothing, false),
         }
     }
@@ -2250,14 +2333,15 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         damage: &mut Region,
         step: fn(&mut Browser<S>),
     ) -> (Repaint, bool) {
         let mark = ViewMark::of(browser);
         step(browser);
-        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         (
-            reported_if(mark.report(browser, scale, theme, viewport, damage)),
+            reported_if(mark.report(browser, scale, theme, viewport, toolbar, damage)),
             false,
         )
     }
@@ -2288,18 +2372,20 @@ mod program {
     /// A refused activation (an unreadable directory the engine could not
     /// descend into) leaves the browser where it was and repaints nothing
     /// (fail closed).
+    #[allow(clippy::too_many_arguments)] // The selection's context, the intent, and what follows a handoff.
     fn activate<S: DirectorySource>(
         browser: &mut Browser<S>,
         launcher: &RefCell<Launcher>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         intent: BundleIntent,
         handoff: AfterHandoff,
     ) -> (bool, bool) {
         match browser.activate_selected(intent) {
             Ok(Activation::Descended) => {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
                 (true, false)
             }
             Ok(Activation::LaunchBundle { path }) => {
@@ -3422,6 +3508,7 @@ mod program {
         modifiers: AbiModifiers,
         damage: &mut Region,
     ) -> (Repaint, bool) {
+        let toolbar = canvas.chrome.toolbar;
         let theme = canvas.theme();
         let scale = canvas.scale;
         if let Some(tool) = manager_tool_at(
@@ -3429,16 +3516,18 @@ mod program {
             scale,
             theme,
             canvas.window(),
+            toolbar,
             point,
             MANAGER_TOOLS,
             manager_tool_model(browser),
         ) {
             overlays.double_click.reset();
             return whole(apply_manager_tool(
-                browser, overlays, scale, theme, viewport, tool,
+                browser, overlays, scale, theme, viewport, toolbar, tool,
             ));
         }
-        let hit = tairix_browse::render::entry_index_at(browser, scale, theme, viewport, point);
+        let hit =
+            tairix_browse::render::entry_index_at(browser, scale, theme, viewport, toolbar, point);
         match gesture::primary_press(&mut overlays.double_click, tairix_rt::clock_get(), hit) {
             PrimaryPress::Activate { index } => {
                 let _ = browser.select(index);
@@ -3448,6 +3537,7 @@ mod program {
                     scale,
                     theme,
                     viewport,
+                    toolbar,
                     bundle_intent(modifiers.shift),
                     AfterHandoff::Keep,
                 ))
@@ -3457,7 +3547,7 @@ mod program {
             PrimaryPress::Select { index } => {
                 let mark = ViewMark::of(browser);
                 let selected = browser.select(index).is_ok();
-                let moved = mark.report(browser, scale, theme, viewport, damage);
+                let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
                 (reported_if(selected && moved), false)
             }
             PrimaryPress::Chrome => whole(apply_chrome_press(browser, canvas, viewport, point)),
@@ -3482,15 +3572,21 @@ mod program {
         viewport: Rect,
         point: Point,
     ) -> (bool, bool) {
+        let toolbar = canvas.chrome.toolbar;
         let theme = canvas.theme();
         let scale = canvas.scale;
         // A click on a toolbar command runs it through the same shared dispatch
         // the keyboard accelerators use; a disabled command resolves to nothing
         // (`toolbar_command_at` fails closed) and repaints nothing.
-        if let Some(command) =
-            tairix_browse::render::toolbar_command_at(browser, scale, theme, canvas.window(), point)
-        {
-            return apply_toolbar_command(browser, scale, theme, viewport, command);
+        if let Some(command) = tairix_browse::render::toolbar_command_at(
+            browser,
+            scale,
+            theme,
+            canvas.window(),
+            toolbar,
+            point,
+        ) {
+            return apply_toolbar_command(browser, scale, theme, viewport, toolbar, command);
         }
         (false, false)
     }
@@ -3569,6 +3665,7 @@ mod program {
     /// refusal is stated on `stderr` and the window carries on. A row id this
     /// window never declared names no command and is dropped (fail closed —
     /// an outcome is never guessed at).
+    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, and the outcome.
     fn apply_menu_outcome<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3576,12 +3673,13 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         outcome: MenuOutcome,
     ) -> (bool, bool) {
         match outcome {
             MenuOutcome::Chosen(item) => match context_command_from_item(item) {
                 Some(command) => dispatch_context_command(
-                    browser, overlays, launcher, scale, theme, viewport, command,
+                    browser, overlays, launcher, scale, theme, viewport, toolbar, command,
                 ),
                 None => (false, false),
             },
@@ -3597,6 +3695,7 @@ mod program {
     /// paths the toolbar and keyboard drive, so the right-click menu can never
     /// diverge from them. Every verb is the user's own permission- checked
     /// action under their identity — the menu adds no authority.
+    #[allow(clippy::too_many_arguments)] // The window's state, its geometry, and the command.
     fn dispatch_context_command<S: DirectorySource>(
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
@@ -3604,6 +3703,7 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         command: ContextCommand,
     ) -> (bool, bool) {
         match command {
@@ -3613,6 +3713,7 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 BundleIntent::Launch,
                 AfterHandoff::Keep,
             ),
@@ -3624,13 +3725,19 @@ mod program {
                 scale,
                 theme,
                 viewport,
+                toolbar,
                 BundleIntent::Launch,
                 AfterHandoff::CloseWindow,
             ),
             ContextCommand::OpenWith => begin_open_with(browser, overlays),
-            ContextCommand::Rename => {
-                begin_rename(browser, &mut overlays.rename, scale, theme, viewport)
-            }
+            ContextCommand::Rename => begin_rename(
+                browser,
+                &mut overlays.rename,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            ),
             ContextCommand::Cut => apply_clipboard_verb(
                 browser,
                 &mut overlays.clipboard,
@@ -3838,11 +3945,12 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         command: ToolbarCommand,
     ) -> (bool, bool) {
         match tairix_browse::apply_command(browser, command) {
             Ok(true) => {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
                 (true, false)
             }
             Ok(false) | Err(_) => (false, false),
@@ -3859,13 +3967,19 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         tool: ManagerTool,
     ) -> (bool, bool) {
         match tool {
-            ManagerTool::NewFolder => {
-                begin_new_folder(browser, &mut overlays.rename, scale, theme, viewport)
-            }
-            ManagerTool::Trash => go_to_trash(browser, scale, theme, viewport),
+            ManagerTool::NewFolder => begin_new_folder(
+                browser,
+                &mut overlays.rename,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            ),
+            ManagerTool::Trash => go_to_trash(browser, scale, theme, viewport, toolbar),
             ManagerTool::EmptyTrash => begin_empty_trash(browser, &mut overlays.delete),
         }
     }
@@ -3909,6 +4023,7 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
     ) -> (bool, bool) {
         let Some(home) = home_components() else {
             io::write_stderr_line("files: no home directory, so no Trash");
@@ -3925,7 +4040,7 @@ mod program {
         }
         match browser.navigate_to(trash) {
             Ok(true) => {
-                tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+                tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
                 (true, false)
             }
             // Already in the Trash, or (fail closed) it could not be listed.
@@ -4009,6 +4124,7 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
     ) -> (bool, bool) {
         let name = suggest_new_dir_name(browser.entries());
         match browser.create_directory(&name, |path| {
@@ -4019,7 +4135,7 @@ mod program {
                 Err(Errno::from_syscall(ret))
             }
         }) {
-            Ok(()) => begin_rename(browser, rename, scale, theme, viewport),
+            Ok(()) => begin_rename(browser, rename, scale, theme, viewport, toolbar),
             Err(err) => {
                 let msg = err.message();
                 let _ = writeln!(Stderr, "files: {msg}");
@@ -4038,11 +4154,12 @@ mod program {
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
     ) -> (bool, bool) {
         let Some(name) = browser.selected_name().map(ToString::to_string) else {
             return (false, false);
         };
-        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+        tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         let mut field = TextField::new().with_text(&name).with_max_len(FS_NAME_MAX);
         field.set_focused(true);
         *rename = Some(field);
@@ -4343,18 +4460,21 @@ mod program {
     /// success, or stating the refusal reason in the field and staying open);
     /// a cancel abandons the edit; an edit repaints and live-validates the
     /// typed name so a clash or bad character is flagged as the user types.
+    #[allow(clippy::too_many_arguments)] // The editor, its geometry, and the key.
     fn apply_rename_key<S: DirectorySource>(
         browser: &mut Browser<S>,
         rename: &mut Option<TextField>,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
+        toolbar: ToolbarBand,
         key: KeyValue,
         modifiers: AbiModifiers,
     ) -> (bool, bool) {
         let (editor_key, mods) = to_editor_key(key, modifiers);
-        let bounds = tairix_browse::render::selection_rect(browser, scale, theme, viewport)
-            .unwrap_or(Rect::EMPTY);
+        let bounds =
+            tairix_browse::render::selection_rect(browser, scale, theme, viewport, toolbar)
+                .unwrap_or(Rect::EMPTY);
         let action = match rename.as_mut() {
             Some(field) => field.on_key(editor_key, mods, bounds, &mut damage::sink()),
             None => return (false, false),
@@ -4376,7 +4496,9 @@ mod program {
                     // closes the editor; the selection follows the entry.
                     Ok(()) | Err(RenameError::Unchanged) => {
                         *rename = None;
-                        tairix_browse::render::reveal_selection(browser, scale, theme, viewport);
+                        tairix_browse::render::reveal_selection(
+                            browser, scale, theme, viewport, toolbar,
+                        );
                         (true, false)
                     }
                     // A refused rename stays open with the honest reason shown
@@ -4892,12 +5014,14 @@ mod program {
                                 theme,
                                 mode: &win.mode,
                                 scale: desktop.scale(),
+                                chrome: win.chrome,
                             };
                             match operation_control(
-                                &win.places,
+                                canvas.chrome.rail(&win.places),
                                 canvas.scale,
                                 canvas.theme(),
                                 canvas.window(),
+                                canvas.chrome.toolbar,
                                 &event,
                             ) {
                                 OperationControl::Cancel => {

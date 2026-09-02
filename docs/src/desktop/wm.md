@@ -588,15 +588,33 @@ by the window manager's own resize: `resize_window` and
 furniture out from (`Window::client_size`) and do not touch the buffer, and
 `present_window_content` establishes the buffer whenever the one held does
 not describe the presented frame. This is what makes a live resize correct.
-A resize-grab moves the frame on every pointer motion while the app is told
-its new size once, when the drag settles, so in between the app is still
-presenting the geometry it last knew. Reshaping its buffer under it would
-refuse each of those presents, which an app cannot tell from a dead session;
-instead the compositor simply draws the part of the buffer that lands inside
-the client area (`Window::row`), which is exactly what the user should see —
-and the drag costs no per-motion copy of the window's pixels. A buffer
-established afresh carried nothing over, so the whole client area is marked
-dirty rather than the rectangle the conversion reported.
+A resize-grab moves the frame on every pointer motion and tells the app its
+new size on every one too, so its content is resized with the frame rather
+than stretched until the button comes up. Reshaping its buffer under it would
+refuse each present it makes in the meantime, which an app cannot tell from a
+dead session; instead the compositor simply draws the part of the buffer that
+lands inside the client area (`Window::row`), so an app a sample behind is a
+sample behind rather than a refused frame. A buffer established afresh
+carried nothing over, so the whole client area is marked dirty rather than
+the rectangle the conversion reported.
+
+**The drag owns the geometry for its whole duration.** It recomputes the
+outer rectangle from the captured start and the live pointer on every sample,
+so `WindowHost::window_resized` accepts the app's re-map *without* moving the
+window while a grab is live (`InputRouter::resizing` names the grabbed
+window): adopting the size the app re-mapped at — necessarily a sample stale —
+would set the window back to wherever the app had got to, and the two would
+fight once per pointer sample. The settled size goes out when the grab ends,
+and the app's `Resize` moves the geometry again from there.
+
+**A run of resize reports folds to its newest, twice over.** A client extent
+is a value the window converges on, not an occurrence it must witness, so the
+session's hold-back overwrites a held `Resized` where it stands (see
+[the desktop session](./session.md)) and the shared client reader
+(`tairix_window::WindowEvents`) drops the stale ones it has already been
+sent, keeping only the last of an unbroken run for one window. An app slower
+than the pointer therefore lags a frame, never a queue of re-maps for sizes
+the window has already left.
 
 **Cursor damage is the rectangle it left plus the one it reached.** The
 pointer overlay is not damaged as it moves; `composite` diffs the
@@ -1105,14 +1123,19 @@ as its colour. See [theming](./theming.md) for the four roles.
     frame first, that inner strip also wins over a window's root-viewport
     scrollbar furniture. Drawing stays strictly separated even so — the frame
     paints no furniture mark inside the client.
-  - **The outer half is claimed only where nothing else is drawn.**
+  - **The outer half is resolved against the stack it is in.**
     `WindowFrame::hit` classifies a point outside `bounds` too, but *which*
-    window owns such a point is the window manager's call:
-    `Compositor::resize_target` is consulted only where `Compositor::window_at`
-    finds nothing — over the desktop, or in the gap between windows — and then
-    the topmost claimant wins. So reaching for an edge can never take a press
-    from a window whose own pixels are under the pointer, and the change is
-    purely additive over bare desktop. Only the primary press and the cursor
+    window owns such a point is the window manager's call, and
+    `Compositor::pointer_target` makes it in **one** pass from the topmost
+    window down: each window in turn is asked both "do your pixels cover
+    this?" and "does your band reach it?", and the first to claim wins
+    (`PointerTarget::Window` / `PointerTarget::ResizeBand`). Stacking order
+    therefore decides between the two — a front window's band beats a window
+    *behind* it, and no window's band can take a press from pixels drawn in
+    front of it. Asking the two questions in separate passes gets the first
+    half wrong: it left a window's edge dead wherever its outward half
+    overlapped another window, which is what made resizing look broken on
+    every window after the first. Only the primary press and the cursor
     consult it; a secondary press, a wheel, and pointer-move still belong to
     the desktop there, so the backdrop menu stays reachable everywhere it was.
   - **The title bar keeps its whole band** — it is resolved first, and the side
