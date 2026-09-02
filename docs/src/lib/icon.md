@@ -148,19 +148,26 @@ re-reading it every frame.
 
 ## What pressure may take, and what it may not
 
-The cache is built through `tairix_reclaim::working_set_ui_cache`, so its whole
-budget is declared the owner's live **working set** and its first
-`UI_CACHE_RESERVE_BYTES` are declared **irreducible**: mild and moderate memory
-pressure leave the working set alone, and severe and critical take only the
-speculation above the reserve. Re-deriving an entry here is not local work the
+The cache is built through `tairix_reclaim::working_set_ui_cache`, so a quarter
+of its budget is declared the owner's live **working set** — what one frame
+draws — and its first `UI_CACHE_RESERVE_BYTES` are declared **irreducible**:
+mild and moderate memory pressure take the scroll-back and off-screen
+speculation above the working set but not the working set itself, and severe
+and critical take everything above the reserve. Re-deriving an entry here is not local work the
 session can repeat at will — it is a capability-gated read plus a
-parser-sandbox round trip — and the budget is a small fraction of one frame of
-the output the icons are drawn on, so there is nothing in it to trim that the
-desktop is not currently drawing. Giving it back at the first tightening frees
-a negligible figure and immediately costs both again, per icon, on the next
-repaint (`plans/SMARTRAM.md` section 6.4). On any output whose frame is under
-16 mebibytes the whole budget sits inside the reserve, so on every display
-TAIRiX currently drives, no band takes a decoded icon at all.
+parser-sandbox round trip — so giving it back at the first tightening frees a
+figure the machine barely notices and immediately costs both again, per icon,
+on the next repaint (`plans/SMARTRAM.md` section 6.4).
+
+The ceiling is **one screenful**, not a fraction of one. Icons are drawn on the
+output, so no more of them can be visible at once than fill it — and a grid of
+them is nowhere near a fraction of it: a 480×480 file-manager window draws some
+117 KiB of icon where a sixteenth of its frame is 57 KiB. A cache that cannot
+hold what one frame draws evicts an entry the very next paint asks for again,
+which is either a wrong picture on screen or a read and a round trip per icon
+per frame. On an output whose frame is a mebibyte or less the whole budget sits
+inside the reserve and no band takes a decoded icon at all; above that, severe
+and critical take what is held above the reserve.
 
 Where retention genuinely is refused — an entry larger than what the budget can
 hold, or an output whose budget is smaller than one decode — the decode cannot
@@ -193,18 +200,22 @@ thread on it behind the runtime's futex mutex and is woken back through its
 wait-set, and the file manager pumps one job per turn of its own event loop
 (`plans/FIX-DESKTOP.md` DESK-8, `plans/NEW-FILEMANAGER.md`).
 
-### Rounds
+### What the desk remembers
 
-The decode cache is budgeted, so it can be asked to hold more than it will.
-Without a rule, a decode the cache declined to retain would be asked for again
-by the very repaint its landing drove, decoded again, and declined again — for
-ever. A **round** forecloses that: a key answered once is not decoded again
-until the embedder next acts (`ArtworkDesk::begin_round`, driven from any wake
-that is not the embedder's own landing repaint). Work in flight and answers not
-yet collected survive the boundary, so no decode is run twice for want of
-somewhere to keep it; a *declined* key survives it too, because a round
-boundary is not what makes a refused answer retainable —
-`ArtworkDesk::retry_declined` is, on the band's own wake.
+An answer handed over is *forgotten*: the cache that collected it owns it, and
+if the cache later drops it the next paint's miss is a genuine one that must be
+produced again. Remembering "already answered" instead left an evicted icon
+drawing its glyph until unrelated input arrived, because nothing else would ever
+ask for it — the file-manager defect that made a scrolled grid of
+`/System/Commands` fall back to the generic bundle picture.
+
+The decode cache is budgeted, though, so it can be asked to hold more than it
+will, and a decode it *refuses* must not be offered again: the repaint its
+landing drove would ask, the answer would be refused again, and every icon on
+screen would be read and decoded every frame, precisely when the machine is
+short of the memory that would have held them. The cache says so
+(`ArtworkResolver::declined`) and the key is held as declined until
+`ArtworkDesk::retry_declined` re-offers it on the pressure band's own wake.
 
 A pending tier **stops** the walk rather than falling through, because whether
 a later tier is reached at all depends on what this one turns out to be. A

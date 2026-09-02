@@ -262,14 +262,13 @@ the built-in glyph for that frame.
   which thread ran it cannot change what it produced.
 - It nudges the session when its queue drains rather than after each icon, so a
   bring-up wanting thirty of them costs one repaint and they appear together.
-- A **round** stops a landing chasing its own tail. The artwork cache is
-  budgeted, so it can be asked to hold more than it will; without a rule, a
-  decode it declined to retain would be asked for again by the very repaint the
-  landing drove. Within a round a key answered once is not decoded again, and
-  the session opens a fresh round on any wake that is not the worker's nudge —
-  which is exactly when what is on screen can have changed. Work in flight and
-  answers not yet collected both survive the boundary, so nothing is computed
-  twice for want of somewhere to keep it.
+- A **declined** answer stops a landing chasing its own tail. The artwork cache
+  is budgeted, so it can be asked to hold more than it will; without a rule, a
+  decode it refused to retain would be asked for again by the very repaint the
+  landing drove. The cache reports the refusal and the desk holds that key until
+  the pressure band moves. An answer the cache *took* is simply forgotten by the
+  desk, so an icon it later evicts is decoded again rather than drawing its
+  glyph for ever.
 - Most surfaces adopt a landing simply by asking the cache again. The two that
   *store* the picture instead — the bar's application strip and a window's
   title-bar identity — are offered it again explicitly on the wake.

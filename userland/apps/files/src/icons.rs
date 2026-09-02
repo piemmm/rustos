@@ -83,16 +83,6 @@ impl<R: ArtworkReader, D: ArtworkRasteriser> IconPipeline<R, D> {
         self.desk.take_landed()
     }
 
-    /// Open a fresh round, because the app acted on an event and what the grid
-    /// draws may have changed.
-    ///
-    /// Without the boundary a key the cache evicted would be answered "not
-    /// yet" for ever, and a decode the cache declined to retain would be asked
-    /// for again by the repaint its own landing drove.
-    pub fn begin_round(&mut self) {
-        self.desk.begin_round();
-    }
-
     /// Give back what a changed memory-pressure band no longer allows,
     /// answering the bytes released.
     ///

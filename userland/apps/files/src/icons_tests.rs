@@ -35,8 +35,8 @@ const ASSET: &str = "/System/Graphics/Icons/one.png";
 /// then its kind's raster master, then its kind's vector master.
 const TIERS: usize = 3;
 
-/// A frame so small that a sixteenth of it — the artwork budget — has no room
-/// for a single [`SIDE`]-square decode's pixels.
+/// A frame with no room for a single [`SIDE`]-square decode's pixels, so the
+/// artwork budget it derives has none either.
 const FRAME_TOO_SMALL_FOR_ONE_ICON: usize = 1024;
 
 /// The gauge the pipelines under test are governed by, held at normal for its
@@ -264,9 +264,8 @@ fn a_request_whose_every_tier_refuses_settles_on_the_glyph() {
     assert_eq!(work(&pipe), (TIERS, 0));
 }
 
-/// A decode the cache retained is not produced again inside one round, and a
-/// round boundary does not make it produced again either — the retained answer
-/// is what serves it.
+/// A decode the cache retained is never produced again: the retained answer is
+/// what serves every later paint, however many there are.
 #[test]
 fn a_retained_decode_is_never_produced_twice() {
     let mut pipe = pipeline();
@@ -274,9 +273,8 @@ fn a_retained_decode_is_never_produced_twice() {
     assert!(pipe.pump());
     assert!(paint(&mut pipe));
 
-    pipe.begin_round();
     assert!(paint(&mut pipe));
-    assert!(!pipe.pump(), "a fresh round re-asked for a retained decode");
+    assert!(!pipe.pump(), "a repaint re-asked for a retained decode");
     assert_eq!(work(&pipe), (1, 1));
 }
 
@@ -285,7 +283,7 @@ fn a_retained_decode_is_never_produced_twice() {
 /// answer is refused again, and every tile on screen is read and decoded on
 /// every frame — precisely when memory is short.
 #[test]
-fn a_declined_decode_is_not_re_asked_within_a_round_or_by_the_next() {
+fn a_declined_decode_is_never_offered_again_until_the_band_moves() {
     let mut pipe = IconPipeline::new(cacheless(), CountingReader::new(), decoder());
 
     assert!(!paint(&mut pipe));
@@ -295,12 +293,8 @@ fn a_declined_decode_is_not_re_asked_within_a_round_or_by_the_next() {
     assert!(!paint(&mut pipe));
     assert_eq!(work(&pipe), (1, 1));
 
-    pipe.begin_round();
     assert!(!paint(&mut pipe));
-    assert!(
-        !pipe.pump(),
-        "a declined decode was offered again by a fresh round"
-    );
+    assert!(!pipe.pump(), "a declined decode was offered again");
     assert_eq!(work(&pipe), (1, 1));
 }
 
@@ -315,11 +309,329 @@ fn a_band_change_offers_a_declined_decode_again() {
     assert!(!paint(&mut pipe), "the decode was declined");
 
     let _ = pipe.trim();
-    pipe.begin_round();
     assert!(!paint(&mut pipe));
     assert!(
         pipe.pump(),
         "a band change must remake the decision it refused"
     );
     assert_eq!(work(&pipe), (2, 2));
+}
+
+// ---------------------------------------------------------------------
+// A whole window's grid, over the real renderer
+// ---------------------------------------------------------------------
+//
+// The tests above drive one tile. These drive a window's worth through the
+// real `lib/browse` grid renderer at the app's own default window size, which
+// is what caught the defect the single-tile tests could not see: a repaint
+// drew every tile's artwork *once* and then gave most of them back to the
+// glyph, because the cache could not hold what one frame draws and an evicted
+// key was answered "not yet" for ever.
+
+mod grid {
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::cell::Cell;
+
+    use tairix_abi::{
+        AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+        BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
+    };
+    use tairix_browse::render::scroll_lines;
+    use tairix_browse::{
+        render_into, Browser, DirectorySource, Entry, EntryKind, Listing, ManagerChrome,
+        ManagerToolModel, ToolbarBand, ViewMode, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
+    };
+    use tairix_geometry::{Rect, Scale};
+    use tairix_icon::{
+        artwork_cache, ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource,
+        IconPicture, IconRequest,
+    };
+    use tairix_log::DiscardSink;
+    use tairix_raster::Surface;
+    use tairix_reclaim::{PressureBand, ReportedPressure};
+    use tairix_theme::Theme;
+
+    use crate::icons::IconPipeline;
+
+    /// Bundles in the browsed directory: more than a window shows, so the view
+    /// scrolls and the visible set is a true subset.
+    const BUNDLES: usize = 64;
+
+    /// The bundle icon every fixture bundle names in its own manifest.
+    const ICON: &str = "icon.png";
+
+    /// Held at normal for its whole life, so tests running in parallel cannot
+    /// perturb one another's band.
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+
+    /// Discards audit records; the cache's audit path is covered where it is
+    /// defined.
+    static SINK: DiscardSink = DiscardSink;
+
+    /// A directory of application bundles, as `/System/Commands` is.
+    struct Bundles;
+
+    impl DirectorySource for Bundles {
+        fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+            Ok(Listing::Ready(
+                (0..BUNDLES)
+                    .map(|i| {
+                        Entry::new(
+                            format!("cmd-{i:03}.app"),
+                            EntryKind::Bundle,
+                            0,
+                            Time64::UNIX_EPOCH,
+                        )
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    /// A structurally valid manifest naming [`ICON`] as the bundle's own icon.
+    /// The artwork layer decodes the header's shape, not its signature.
+    fn manifest() -> Vec<u8> {
+        fn inline<const N: usize>(text: &str) -> ([u8; N], u8) {
+            let mut buf = [0u8; N];
+            buf[..text.len()].copy_from_slice(text.as_bytes());
+            (buf, u8::try_from(text.len()).expect("short"))
+        }
+        let (id, id_len) = inline::<BUNDLE_ID_MAX>("os.tairix.test");
+        let (name, name_len) = inline::<BUNDLE_NAME_MAX>("test");
+        let (version, version_len) = inline::<BUNDLE_VERSION_MAX>("0.1.0");
+        let (library_icon, library_icon_len) = inline::<LIBRARY_ICON_MAX>(ICON);
+        AppInfoHeader {
+            magic: APPINFO_MAGIC,
+            abi_version: tairix_abi::ABI_VERSION_CURRENT,
+            flags: 0,
+            capability_count: 0,
+            mime_count: 0,
+            id_len,
+            name_len,
+            version_len,
+            purpose_len: 0,
+            author_len: 0,
+            library_icon_len,
+            library: 0,
+            reserved0: [0; 1],
+            id,
+            name,
+            version,
+            library_icon,
+            purpose: [0; tairix_abi::BUNDLE_PURPOSE_MAX],
+            author: [0; tairix_abi::BUNDLE_AUTHOR_MAX],
+            syscall_table_hash: [0; SYSCALL_TABLE_HASH_LEN],
+            content_hash: [0; 32],
+            signer_pubkey: [0; 32],
+            publisher_pubkey: [0; 32],
+            publisher_cert: [0; 64],
+            signature: [0; 64],
+        }
+        .to_le_bytes()
+        .to_vec()
+    }
+
+    /// Serves every bundle's manifest and its named icon, counting reads.
+    struct BundleReader {
+        reads: usize,
+    }
+
+    impl ArtworkReader for BundleReader {
+        fn read(&mut self, path: &str) -> Option<Vec<u8>> {
+            self.reads += 1;
+            if path.ends_with("/AppInfo") {
+                return Some(manifest());
+            }
+            path.ends_with(ICON).then(|| vec![0u8; 16])
+        }
+    }
+
+    /// Answers the exact square asked for, opaque so a served picture is
+    /// observably artwork, and counts every sandbox round trip.
+    struct Decoder {
+        decodes: usize,
+    }
+
+    impl ArtworkRasteriser for Decoder {
+        fn rasterise(&mut self, side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+            self.decodes += 1;
+            Some(vec![255u8; (side as usize) * (side as usize) * 4])
+        }
+    }
+
+    /// What one frame drew: artwork tiles against glyph-mask ones.
+    #[derive(Default)]
+    struct Drawn {
+        artwork: Cell<usize>,
+        glyph: Cell<usize>,
+    }
+
+    /// The app's real lookup, tallying which tier each draw site ended on.
+    struct Tally<'a> {
+        source: IconArtworkSource<'a>,
+        drawn: &'a Drawn,
+    }
+
+    impl IconArtwork for Tally<'_> {
+        fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>> {
+            // Copied out before the lookup borrows `self` for the returned
+            // picture's lifetime.
+            let drawn = self.drawn;
+            let picture = self.source.artwork(request, side);
+            let counter = match picture {
+                Some(IconPicture::Artwork(_)) => &drawn.artwork,
+                Some(IconPicture::Mask(_)) | None => &drawn.glyph,
+            };
+            counter.set(counter.get() + 1);
+            picture
+        }
+    }
+
+    /// A window's worth of the real grid over the real pipeline.
+    struct Window {
+        pipeline: IconPipeline<BundleReader, Decoder>,
+        browser: Browser<Bundles>,
+        surface: Surface,
+        theme: Theme,
+        viewport: Rect,
+    }
+
+    impl Window {
+        /// A grid window of the app's own default client size, its artwork
+        /// budget derived from that window's frame exactly as the app derives
+        /// it.
+        fn open() -> Self {
+            PRESSURE.report(PressureBand::Normal);
+            let (w, h) = (WIN_WIDTH, WIN_HEIGHT);
+            let frame_bytes = (w as usize) * 4 * (h as usize);
+            let mut browser = Browser::open_root(Bundles).expect("the fixture root lists");
+            browser.set_view_mode(ViewMode::Grid);
+            Self {
+                pipeline: IconPipeline::new(
+                    artwork_cache("files.test-grid", 1, frame_bytes, &PRESSURE, &SINK),
+                    BundleReader { reads: 0 },
+                    Decoder { decodes: 0 },
+                ),
+                browser,
+                surface: Surface::new(w, h).expect("a window-sized surface"),
+                theme: Theme::dark(),
+                viewport: Rect::new(0, 0, w, h),
+            }
+        }
+
+        /// Paint the whole window, reporting what each tile drew.
+        fn paint(&mut self) -> (usize, usize) {
+            let drawn = Drawn::default();
+            let chrome = ManagerChrome {
+                tools: MANAGER_TOOLS,
+                tool_model: ManagerToolModel::none(),
+                sidebar: None,
+                toolbar: ToolbarBand::Hidden,
+            };
+            let mut tally = Tally {
+                source: self.pipeline.source(),
+                drawn: &drawn,
+            };
+            render_into(
+                &mut self.surface,
+                &self.browser,
+                Scale::ONE,
+                &self.theme,
+                self.viewport,
+                &chrome,
+                &mut tally,
+            );
+            (drawn.artwork.get(), drawn.glyph.get())
+        }
+
+        /// Run every decode the last paint recorded, as the loop does before
+        /// the repaint that draws the batch.
+        fn drain(&mut self) -> usize {
+            let mut ran = 0;
+            while self.pipeline.pump() {
+                ran += 1;
+            }
+            ran
+        }
+
+        /// Scroll the grid by `lines`, as a wheel tick does.
+        fn scroll(&mut self, lines: i64) {
+            assert!(
+                scroll_lines(
+                    &mut self.browser,
+                    Scale::ONE,
+                    &self.theme,
+                    self.viewport,
+                    ToolbarBand::Hidden,
+                    lines,
+                ),
+                "the grid did not scroll"
+            );
+        }
+
+        /// Paint and drain until a paint records nothing more, then report what
+        /// that settled paint drew.
+        fn settle(&mut self) -> (usize, usize) {
+            for _ in 0..8 {
+                let drawn = self.paint();
+                if self.drain() == 0 {
+                    return drawn;
+                }
+            }
+            panic!("the grid never settled");
+        }
+    }
+
+    /// The reported defect: after the decodes had landed and a frame had drawn
+    /// them, the *next* frame of the same unchanged window gave most tiles back
+    /// to the built-in glyph — and nothing re-decoded them, so the window sat
+    /// like that until unrelated input arrived. Scrolling made it frequent
+    /// because a scroll is what brings undecoded tiles into view.
+    #[test]
+    fn a_grid_keeps_every_tile_s_artwork_across_repaints() {
+        let mut win = Window::open();
+        let (tiles, glyphs) = win.settle();
+        assert!(tiles > 0, "the grid drew no tiles at all");
+        assert_eq!(glyphs, 0, "a settled grid still drew {glyphs} glyphs");
+
+        let decodes = win.pipeline.rasteriser.decodes;
+        for frame in 1..=3 {
+            assert_eq!(
+                win.paint(),
+                (tiles, 0),
+                "repaint {frame} gave tiles back to the glyph"
+            );
+        }
+        assert_eq!(
+            win.pipeline.rasteriser.decodes, decodes,
+            "a repaint of an unchanged window re-decoded artwork it already held"
+        );
+    }
+
+    /// Scrolling to fresh tiles and back keeps every tile's artwork: the icons
+    /// scrolled away are still retained, so returning to them costs no decode.
+    #[test]
+    fn scrolling_back_and_forth_costs_no_second_decode() {
+        let mut win = Window::open();
+        let (tiles, _) = win.settle();
+
+        win.scroll(3);
+        let scrolled = win.settle();
+        assert_eq!(scrolled, (tiles, 0), "a scrolled grid drew glyphs");
+        let decodes = win.pipeline.rasteriser.decodes;
+
+        win.scroll(-3);
+        assert_eq!(
+            win.paint(),
+            (tiles, 0),
+            "scrolling back drew glyphs for artwork already decoded"
+        );
+        assert_eq!(
+            win.pipeline.rasteriser.decodes, decodes,
+            "scrolling back re-decoded what was still retained"
+        );
+    }
 }

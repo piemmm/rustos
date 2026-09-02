@@ -14,18 +14,22 @@
 //! worker thread on it behind the runtime's futex mutex, and the file manager
 //! pumps one job per turn of its own event loop.
 //!
-//! # Rounds
+//! # What the desk remembers, and for how long
 //!
-//! The decode cache is budgeted, so it can be asked to hold more than it will.
-//! Without a rule, a decode the cache declined to retain would be asked for
-//! again by the very repaint its landing drove, decoded again, and declined
-//! again — for ever. A **round** forecloses that: a key answered once is not
-//! decoded again until the embedder next acts. The embedder opens a fresh one
-//! on any wake that is not its own landing repaint, which is exactly when what
-//! is on screen can have changed.
+//! An answer handed over is *forgotten*: the cache that collected it owns it,
+//! and if the cache later drops it the next paint's miss is a genuine one that
+//! must be produced again. Remembering "already answered" instead would leave
+//! an evicted icon drawing its glyph until unrelated input arrived, because
+//! nothing else would ever ask for it.
 //!
-//! Work in flight and answers not yet collected survive a round boundary, so
-//! no decode is ever run twice for want of somewhere to keep it.
+//! The decode cache is budgeted, though, so it can be asked to hold more than
+//! it will, and a decode it *refuses* must not be offered again — the repaint
+//! its landing drove would ask, the answer would be refused again, and every
+//! icon on screen would be read and decoded every frame, precisely when the
+//! machine is short of the memory that would have held them. The cache says so
+//! ([`ArtworkResolver::declined`]) and the key is then held back until
+//! [`ArtworkDesk::retry_declined`] offers it again, on the wake of the
+//! pressure band that refused it.
 
 use alloc::collections::{BTreeMap, VecDeque};
 
@@ -57,20 +61,17 @@ enum State {
     /// over-long, or undecodable asset — which the cache retains just as it
     /// retains artwork.
     Done(Option<Surface>),
-    /// Collected already in this round.
-    Answered,
     /// Collected, and the cache could not keep it: no room the current
-    /// pressure band allows. Kept across rounds, unlike [`State::Answered`],
-    /// because decoding it again would only be refused again.
+    /// pressure band allows. Held rather than forgotten, because decoding it
+    /// again would only be refused again.
     Declined,
 }
 
-/// What has been asked for, what is being produced, what has come back, and
-/// what has already been answered this round.
+/// What has been asked for, what is being produced, and what has come back.
 ///
 /// The embedder supplies the exclusion and the blocking; nothing here waits.
 pub struct ArtworkDesk {
-    /// Every job this round knows about, indexed for an O(log n) collect —
+    /// Every job this desk knows about, indexed for an O(log n) collect —
     /// a paint asks once per icon it draws, so the lookup is on the frame path.
     slots: BTreeMap<ArtworkJob, State>,
     /// The order [`State::Wanted`] jobs are handed out in: first asked, first
@@ -99,8 +100,9 @@ impl ArtworkDesk {
     /// Answer a draw site's miss on `key` at `side`, recording the decode if
     /// this desk has neither run it nor been asked for it already.
     ///
-    /// [`Resolved::Done`] once per round — the answer is *moved out*, because
-    /// the caller is the cache that will retain it. Every other state is
+    /// [`Resolved::Done`] hands the answer *over* — the caller is the cache
+    /// that will retain it — and the slot goes with it, so a later miss on the
+    /// same key is a genuine one and is produced again. Every other state is
     /// [`Resolved::Pending`]: the draw takes the tier below it, which for the
     /// last tier is the built-in glyph.
     ///
@@ -112,15 +114,12 @@ impl ArtworkDesk {
             side,
         };
         match self.slots.get_mut(&job) {
-            Some(state @ State::Done(_)) => {
-                let State::Done(artwork) = core::mem::replace(state, State::Answered) else {
-                    return Resolved::Pending;
-                };
+            Some(State::Done(artwork)) => {
+                let artwork = artwork.take();
+                self.slots.remove(&job);
                 Resolved::Done(artwork)
             }
-            Some(State::Wanted | State::Running | State::Answered | State::Declined) => {
-                Resolved::Pending
-            }
+            Some(State::Wanted | State::Running | State::Declined) => Resolved::Pending,
             None => {
                 if !self.stopping {
                     self.slots.insert(job.clone(), State::Wanted);
@@ -138,8 +137,8 @@ impl ArtworkDesk {
     /// frame that needs it rather than a round trip per icon after it.
     ///
     /// A key this desk already knows is left exactly as it is, so a prefetch
-    /// can never consume an answer a draw is about to collect, nor re-queue
-    /// one this round has already given out.
+    /// can never consume an answer a draw is about to collect, nor queue a
+    /// second decode for one already in flight.
     pub fn want(&mut self, key: &ArtworkKey, side: u32) {
         if self.stopping {
             return;
@@ -212,17 +211,29 @@ impl ArtworkDesk {
     /// Note that the cache could not keep what `job` produced, so this desk
     /// stops offering it until the band that refused it moves.
     ///
-    /// Without this the refusal is silent and self-renewing: the round the
-    /// landing triggered asks again, the answer is refused again, and every
-    /// icon on screen is read and decoded on every repaint — precisely when
-    /// the machine is short of the memory that would have held the answer.
+    /// Without this the refusal is silent and self-renewing: the repaint the
+    /// landing drove asks again, the answer is refused again, and every icon on
+    /// screen is read and decoded on every repaint — precisely when the machine
+    /// is short of the memory that would have held the answer.
+    ///
+    /// The [`collect`](Self::collect) that handed the answer over has already
+    /// forgotten the key, so this is normally an insert. A key a producer is
+    /// midway through is left alone: that decode has yet to be answered, and
+    /// the refusal will be repeated on the collect that answers it.
     pub fn decline(&mut self, key: &ArtworkKey, side: u32) {
+        if self.stopping {
+            return;
+        }
         let job = ArtworkJob {
             key: key.clone(),
             side,
         };
-        if let Some(state) = self.slots.get_mut(&job) {
-            *state = State::Declined;
+        match self.slots.get_mut(&job) {
+            Some(State::Running) => {}
+            Some(state) => *state = State::Declined,
+            None => {
+                self.slots.insert(job, State::Declined);
+            }
         }
     }
 
@@ -231,18 +242,6 @@ impl ArtworkDesk {
     pub fn retry_declined(&mut self) {
         self.slots
             .retain(|_, state| !matches!(state, State::Declined));
-    }
-
-    /// Open a fresh round: every key answered in the last one may be asked for
-    /// again.
-    ///
-    /// Work in flight and answers not yet collected are kept, so a round
-    /// boundary never discards a decode or causes one to be run twice.
-    /// Declined keys are kept too: a round boundary is not what makes a
-    /// refused answer retainable.
-    pub fn begin_round(&mut self) {
-        self.slots
-            .retain(|_, state| !matches!(state, State::Answered));
     }
 
     /// Stop handing out work, so a parked producer leaves its loop.

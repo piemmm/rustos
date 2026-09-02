@@ -4654,3 +4654,41 @@ are the live candidates):
 that the peer observer's confirmation survives a starved host; the autoload
 half needs the driver-load step to carry its own bounded, fail-closed budget
 so a load that never completes is reported rather than waited on.
+
+## D78 — the file manager's icon cache could not hold one frame of its own grid, and an evicted icon was never decoded again (FIXED)
+
+Reported as "the files.app icons on `/System/Commands` frequently show the
+default pixmap instead of the app's own, especially while scrolling". Two
+defects, either of which alone was enough.
+
+- **The budget was ~3× short of a single frame.** `working_set_ui_cache`
+  ceilinged at `CacheBudget::from_backing` — a *sixteenth* of the output — while
+  documenting itself as holding what can be visible at once. Measured on the
+  file manager's own default 480×480 window: sixteen 42-pixel grid tiles need
+  117 KiB where the ceiling was 57 KiB, and the shortfall is scale-invariant
+  (the tile grid and the ceiling both scale with area). The ceiling is now one
+  screenful (`CacheBudget::from_ceiling`), which is the honest bound — icons are
+  drawn *on* the output, so no more of them can be visible at once than fill it.
+  Only a quarter of it is the pressure-proof working set (`WORKING_SET_DIVISOR`,
+  twice the measured need): declaring the whole screenful irreducible until
+  severe would pin megabytes the session is not drawing on precisely the machine
+  that is tightening.
+- **An evicted answer was answered "not yet" for ever.** `ArtworkDesk` marked a
+  collected key *answered* and only forgot it at a round boundary the embedder
+  opened on input. So a second repaint within one round — which any tier walk on
+  the rail or toolbar provokes — found the evicted key still "answered", drew the
+  built-in glyph, recorded no decode, and the window sat wrong until unrelated
+  input arrived. Measured: 16 of 16 tiles correct on the first repaint, 5 of 16
+  on the next. A collected answer is now *forgotten* — the cache owns it, so a
+  later miss is genuine and is produced again — and the self-renewing refusal the
+  round rule also guarded is left to `ArtworkResolver::declined`, which was
+  already the precise instrument for it. The round concept and `begin_round` are
+  gone from both embedders.
+
+**Regression cover:** `lib/reclaim` (a frame's icons fit the working-set ceiling
+and do not fit the cursor fraction), `lib/icon` (a key the cache dropped is
+decoded again; a refusal reported after the collect that forgot the key is still
+recorded; a refusal in flight leaves the decode to land), and
+`userland/apps/files` (a whole window's grid, over the real renderer at the real
+window size, keeps every tile's artwork across repeated repaints and a scroll,
+and re-decodes nothing).

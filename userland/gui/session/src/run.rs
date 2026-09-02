@@ -2169,16 +2169,6 @@ mod program {
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
-            // Any wake but a worker's nudge is the desktop *acting*, so the
-            // icon decoder opens a fresh round: what is on screen may have
-            // changed, and every key it answered for the last round may be
-            // asked for again. A nudge does not, which is what stops a decode
-            // the cache declines to retain being asked for by the very repaint
-            // its landing drove — the desktop would otherwise repaint itself
-            // for ever over a cache it cannot fill.
-            if token != WORKER_TOKEN {
-                artworks.begin_round();
-            }
             // Dispatch on the woken member's token and handle only that
             // source: `call_recv` *blocks* when nothing is pending, so a
             // seat-input wake must never touch the window endpoint (and
@@ -3337,14 +3327,8 @@ mod program {
             self.desk.lock().take_landed()
         }
 
-        /// Open a fresh round, because the desktop acted and what it draws may
-        /// have changed.
-        fn begin_round(&self) {
-            self.desk.lock().begin_round();
-        }
-
-        /// Note that the cache refused to keep this decode, so no round asks
-        /// for it again until the band moves.
+        /// Note that the cache refused to keep this decode, so nothing asks for
+        /// it again until the band moves.
         fn decline(&self, key: &ArtworkKey, side: u32) {
             self.desk.lock().decline(key, side);
         }

@@ -2244,8 +2244,8 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   responding rather than one that is saving memory. So each of these caches
   declares `UI_CACHE_RESERVE_BYTES` (one mebibyte, clamped by its own
   ceiling) irreducible, and no band — severe and critical included — takes it.
-  On the 1024×768 boot console that is the whole of the cursor, notification,
-  and artwork budgets and a mebibyte of the three-mebibyte chrome and frost
+  On the 1024×768 boot console that is the whole of the cursor and notification
+  budgets and a mebibyte of the three-mebibyte chrome, frost, and artwork
   ceilings.
 - **What the desktop cannot rebuild by itself keeps a working-set floor too.**
   Every cache above is rebuilt from data the process already holds: a
@@ -2253,16 +2253,18 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   read *plus* a parser-sandbox round trip, and a glyph on the client side of
   the font endpoint costs an IPC round trip — so those two are built through
   `tairix_reclaim::desktop::working_set_ui_cache` and
-  `tairix_font::client_glyph_cache_budget`, which declare their whole budget
-  the session's live working set. Mild and moderate pressure leave them
-  alone; severe and critical take the speculation above the reserve.
+  `tairix_font::client_glyph_cache_budget`, which declare a working-set floor
+  mild and moderate may not take — the glyph cache its whole budget, the icon
+  cache a quarter of its one-screenful ceiling, which is what one frame draws.
+  Severe and critical take everything above the reserve.
 
-  Not a special case, a measured one. Their budgets are a small fraction of
-  one frame of the output the pixels are drawn on, and no more of them than
-  fills that output can be visible at once, so there is nothing in them to
-  trim that the desktop is not currently drawing: releasing them frees a
-  negligible figure and immediately costs a read and a round trip per icon
-  and a round trip per glyph, while the machine is short. On a 256 MiB board
+  Not a special case, a measured one. No more of those pixels can be visible
+  at once than fill the output they are drawn on, so the icon cache is
+  ceilinged at one screenful of it — a *fraction* of one cannot hold what a
+  single frame draws, and a 480×480 file-manager window draws some 117 KiB of
+  icon where a sixteenth of its frame is 57 KiB. Releasing what is held frees
+  a figure the machine barely notices and immediately costs a read and a round
+  trip per icon and a round trip per glyph, while the machine is short. On a 256 MiB board
   a screenful of terminal windows takes the machine into mild pressure, and
   before the floor existed each further window took 10 to 120 seconds instead
   of a fifth of one — the bar and the desktop drawing built-in glyphs in

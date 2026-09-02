@@ -89,7 +89,6 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
         is_pending(&desk.collect(&asset("/a.png"), 8)),
         "the answer is moved out to the cache, never served twice"
     );
-    assert!(!desk.has_work(), "and asking again starts no second decode");
 }
 
 /// The prefetch half: asking early records the decode without collecting
@@ -138,11 +137,12 @@ fn warming_the_same_key_twice_starts_one_decode() {
     assert!(desk.next_job().is_none());
 }
 
-/// A key this round has already answered is not warmed again either: the round
-/// rule binds the prefetch exactly as it binds the draw, so a cache too tight
-/// to hold what is on screen cannot be made to decode for ever.
+/// Warming a key whose answer has been handed over starts a decode again: the
+/// cache owns that answer now and is the only thing that knows whether it still
+/// holds it, so the desk cannot second-guess a miss. A cache that does still
+/// hold it never asks (it peeks before warming).
 #[test]
-fn a_want_for_a_key_answered_this_round_starts_nothing() {
+fn a_want_for_a_key_already_handed_over_starts_a_decode_again() {
     let mut desk = ArtworkDesk::new();
     desk.want(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
@@ -153,14 +153,7 @@ fn a_want_for_a_key_answered_this_round_starts_nothing() {
     ));
 
     desk.want(&asset("/a.png"), 8);
-    assert!(!desk.has_work());
-
-    desk.begin_round();
-    desk.want(&asset("/a.png"), 8);
-    assert!(
-        desk.has_work(),
-        "and the next round may warm it again, like any other key"
-    );
+    assert!(desk.has_work());
 }
 
 #[test]
@@ -186,28 +179,13 @@ fn a_refusal_is_delivered_and_collected_like_a_picture() {
     ));
 }
 
-/// The rule that stops the desktop repainting for ever over a cache too tight
-/// to hold what one frame draws: within a round, a key answered once is not
-/// decoded again however many times the paint asks for it.
+/// The reported file-manager defect: an answer the cache took and then evicted
+/// must be produced again the next time a paint misses on it. Remembering the
+/// key as answered instead left the tile drawing its built-in glyph with
+/// nothing left to re-decode it, so the window sat wrong until unrelated input
+/// arrived.
 #[test]
-fn a_key_answered_this_round_is_not_decoded_again() {
-    let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&asset("/a.png"), 8);
-    let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
-    // The cache took the answer and then dropped it under its budget, so the
-    // next paint misses on the very same key.
-    let _ = desk.collect(&asset("/a.png"), 8);
-    let _ = desk.collect(&asset("/a.png"), 8);
-    assert!(
-        !desk.has_work(),
-        "an answered key was queued again inside its round"
-    );
-    assert!(desk.next_job().is_none());
-}
-
-#[test]
-fn a_fresh_round_lets_an_answered_key_be_decoded_again() {
+fn a_key_the_cache_dropped_is_decoded_again() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
@@ -217,12 +195,18 @@ fn a_fresh_round_lets_an_answered_key_be_decoded_again() {
         Resolved::Done(_)
     ));
 
-    desk.begin_round();
+    // The cache took that answer and then dropped it under its budget, so the
+    // next paint misses on the very same key.
+    assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
     assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
     assert_eq!(
         desk.next_job(),
         Some(job("/a.png", 8)),
-        "the desktop acted, so what is on screen may have changed"
+        "a miss on a key the cache no longer holds is a genuine miss"
+    );
+    assert!(
+        desk.next_job().is_none(),
+        "and it is queued once, not once per asking paint"
     );
 }
 
@@ -242,9 +226,8 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
     ));
     desk.decline(&asset("/a.png"), 8);
 
-    // Every later round asks for nothing: the draw takes its glyph.
+    // Every later paint asks for nothing: the draw takes its glyph.
     for _ in 0..3 {
-        desk.begin_round();
         assert!(is_pending(&desk.collect(&asset("/a.png"), 8)));
         assert!(!desk.has_work(), "a declined key queues no decode");
         assert!(desk.next_job().is_none());
@@ -256,25 +239,51 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
     assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
 }
 
-/// Declining a key the desk is not holding changes nothing: the cache and the
-/// desk are separate, so a stale report must not resurrect a slot.
+/// The collect that hands an answer over forgets the key, so the refusal that
+/// follows it names a key the desk is no longer holding. It must still be
+/// recorded — that report is the whole of what stops the refusal renewing
+/// itself.
 #[test]
-fn declining_an_unknown_key_records_nothing() {
+fn declining_a_key_the_collect_forgot_still_records_the_refusal() {
     let mut desk = ArtworkDesk::new();
     desk.decline(&asset("/gone.png"), 8);
     assert!(!desk.has_work());
     assert!(is_pending(&desk.collect(&asset("/gone.png"), 8)));
-    assert_eq!(
-        desk.next_job(),
-        Some(job("/gone.png", 8)),
-        "the key is new, not declined"
+    assert!(
+        desk.next_job().is_none(),
+        "a refused key was offered for decoding again"
     );
+
+    desk.retry_declined();
+    assert!(is_pending(&desk.collect(&asset("/gone.png"), 8)));
+    assert_eq!(desk.next_job(), Some(job("/gone.png", 8)));
 }
 
-/// A round boundary governs re-asking, never the decode itself: an answer
-/// nobody has collected yet survives it, so no work is thrown away.
+/// A refusal reported while a producer is midway through that key leaves the
+/// decode alone: it has yet to be answered, and the collect that answers it
+/// will report the refusal again if it still stands.
 #[test]
-fn a_fresh_round_keeps_work_in_flight_and_answers_not_yet_collected() {
+fn declining_a_key_in_flight_leaves_the_decode_to_land() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 8);
+    let running = desk.next_job().expect("a job");
+
+    desk.decline(&asset("/a.png"), 8);
+    assert!(
+        desk.deliver(&running, Some(picture(8))),
+        "the decode in flight was stranded"
+    );
+    assert!(matches!(
+        desk.collect(&asset("/a.png"), 8),
+        Resolved::Done(Some(_))
+    ));
+}
+
+/// Asking again never throws work away: an answer nobody has collected yet is
+/// still there to collect, and a decode in flight is awaited rather than
+/// re-recorded.
+#[test]
+fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/done.png"), 8);
     let _ = desk.collect(&asset("/running.png"), 8);
@@ -282,14 +291,12 @@ fn a_fresh_round_keeps_work_in_flight_and_answers_not_yet_collected() {
     let running = desk.next_job().expect("the second job");
     assert!(desk.deliver(&done, Some(picture(8))));
 
-    desk.begin_round();
-
     assert!(
         matches!(
             desk.collect(&asset("/done.png"), 8),
             Resolved::Done(Some(_))
         ),
-        "an uncollected answer was discarded by the round boundary"
+        "an uncollected answer was discarded"
     );
     assert!(
         is_pending(&desk.collect(&asset("/running.png"), 8)),
@@ -299,10 +306,11 @@ fn a_fresh_round_keeps_work_in_flight_and_answers_not_yet_collected() {
     assert!(desk.deliver(&running, Some(picture(8))));
 }
 
-/// A key re-asked after its round ended is queued afresh, and exactly once: the
-/// entry the first round left in the map must not become a second hand-out.
+/// A key re-asked after its answer was handed over is queued afresh, and
+/// exactly once: the entry the first hand-out left behind must not become a
+/// second one.
 #[test]
-fn a_key_re_asked_in_a_new_round_is_handed_out_exactly_once() {
+fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
@@ -312,7 +320,6 @@ fn a_key_re_asked_in_a_new_round_is_handed_out_exactly_once() {
         Resolved::Done(_)
     ));
 
-    desk.begin_round();
     let _ = desk.collect(&asset("/a.png"), 8);
     assert_eq!(desk.next_job(), Some(job("/a.png", 8)));
     assert!(desk.next_job().is_none());
@@ -411,10 +418,6 @@ fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
     ));
 
     ArtworkResolver::declined(&mut desk, &key, 16);
-    desk.begin_round();
     assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
-    assert!(
-        !desk.has_work(),
-        "a declined key must not be re-offered by a fresh round"
-    );
+    assert!(!desk.has_work(), "a declined key must not be re-offered");
 }

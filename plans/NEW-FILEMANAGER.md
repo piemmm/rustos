@@ -522,10 +522,10 @@ uses (`plans/FIX-DESKTOP.md` DESK-8). A tile that misses records the decode and
 draws its built-in glyph; the event loop runs **one** recorded decode per turn
 (`IconPipeline::pump`) between servicing input, and repaints when the desk runs
 dry — one whole-window pass per batch, because a present is a compositor round
-trip and far dearer than the decode that produced one tile. A fresh round opens
-on every delivered event, which is what stops a decode the cache evicted from
-being answered "not yet" for ever, and a band change re-offers what the cache
-declined (`IconPipeline::trim`). `draw_grid` asks only for the tiles on screen,
+trip and far dearer than the decode that produced one tile. An answer the cache
+took is forgotten by the desk, so an icon it later evicts is decoded again
+rather than answered "not yet" for ever, and a band change re-offers what the
+cache *refused* (`IconPipeline::trim`). `draw_grid` asks only for the tiles on screen,
 so the desk only ever holds the visible set and there is no second definition
 of "what is on screen". The manager is single-threaded by choice: one window's
 grid is a bounded set of tiles and its loop has nothing else to block on, so a
@@ -533,7 +533,9 @@ thread and its stack would buy only what a turn of the loop already
 interleaves. Host-tested in `userland/apps/files/src/icons_tests.rs` (a paint
 performs no read and no sandbox round trip, the pump delivers what the paint
 recorded, a retained decode is never produced twice, every tier's refusal
-settles on the glyph, a declined decode is not re-asked until the band moves)
+settles on the glyph, a declined decode is not re-asked until the band moves,
+and a whole window's grid keeps every tile's artwork across repaints and a
+scroll)
 — with the inline resolver's read-and-decode-in-the-paint cost pinned beside
 them so those assertions cannot go vacuous.
 

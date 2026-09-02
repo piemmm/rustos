@@ -96,19 +96,17 @@ over a resolution-independent design grid, so the same glyph is
   — the difference between a launcher opening on its applications' own icons and
   opening on glyphs it replaces one round trip at a time.
 - `desk` — `ArtworkDesk`, the deferring `ArtworkResolver`: what has been asked
-  for, what a producer is running, what has come back, and what has already
-  been answered this round. It holds no lock, thread, or syscall, so its whole
-  policy is host-tested, and it lives here beside the contract it implements
-  because two processes drive it — the desktop session from a worker thread
-  behind the runtime's futex mutex (`plans/FIX-DESKTOP.md` DESK-8), the file
-  manager from its own event loop (`plans/NEW-FILEMANAGER.md`), and
-  `userland/apps/*` may not depend on `userland/gui/*` (`AGENTS.md` §17.4).
-  A **round** (`begin_round`) stops a landing chasing its own tail: the cache
-  is budgeted, so without the rule a decode it declined to retain would be
-  asked for again by the very repaint the landing drove, for ever. Work in
-  flight, answers not yet collected, and declined keys all survive a round
-  boundary; `retry_declined` is what re-offers a refused answer, on the
-  pressure band's own wake.
+  for, what a producer is running, and what has come back. It holds no lock,
+  thread, or syscall, so its whole policy is host-tested, and it lives here
+  beside the contract it implements because two processes drive it — the
+  desktop session from a worker thread behind the runtime's futex mutex
+  (`plans/FIX-DESKTOP.md` DESK-8), the file manager from its own event loop
+  (`plans/NEW-FILEMANAGER.md`), and `userland/apps/*` may not depend on
+  `userland/gui/*` (`AGENTS.md` §17.4). An answer handed over is forgotten —
+  the cache owns it, so a later miss is a genuine one and is produced again.
+  A decode the cache *refused* is held as declined instead, which is what stops
+  a landing chasing its own tail; `retry_declined` re-offers it on the pressure
+  band's own wake.
 
 ## Asset model
 
@@ -123,8 +121,8 @@ its broad family's built-in glyph, so a system without the class artwork
 still shows a meaningful icon.
 
 A kind ships **one** class master, in whichever format suits the artwork: the
-folder is vector (`folder.svg`), the illustrative file-class and disk pictures
-are raster masters. Shipping one id in both formats is a packaging defect the
+folders are vector (`folder.svg`, `folder-filled.svg`), the illustrative
+file-class, application and disk pictures are raster masters. Shipping one id in both formats is a packaging defect the
 image build refuses, since the raster tier would always win and the vector
 could never be selected.
 

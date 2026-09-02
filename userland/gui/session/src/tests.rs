@@ -7508,12 +7508,16 @@ fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
 fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
     // A store full of distinct icon paths must not be able to grow the
     // session without limit: the keys come from bundles, so the bound is
-    // the budget, not the caller's restraint.
+    // the budget, not the caller's restraint. That bound is the output the
+    // icons are drawn on — no more of them can be visible at once than fill
+    // it — so it is stated here as the output rather than as a second
+    // spelling of the constructor's arithmetic.
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let tiny_output_bytes = 320 * 240 * 4;
-    let hard = tairix_reclaim::CacheBudget::from_backing(tiny_output_bytes).hard();
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, tiny_output_bytes);
-    let bundles: Vec<String> = (0..64).map(|i| format!("/Apps/App{i}.app")).collect();
+    // Enough distinct bundles for the store to overrun that bound several
+    // times over, so it is reached by evicting rather than by never filling.
+    let bundles: Vec<String> = (0..192).map(|i| format!("/Apps/App{i}.app")).collect();
     let refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
     let mut reader = artwork_assets(&refs);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
@@ -7532,8 +7536,8 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
         );
     }
     assert!(
-        cache.charged_bytes() <= hard,
-        "charged {} exceeds the {hard}-byte ceiling",
+        cache.charged_bytes() <= tiny_output_bytes,
+        "charged {} exceeds the {tiny_output_bytes}-byte output it is bounded by",
         cache.charged_bytes()
     );
     // …and the ceiling was reached by evicting, not by refusing

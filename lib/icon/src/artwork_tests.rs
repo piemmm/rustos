@@ -610,36 +610,47 @@ fn layers_painted(icon: &crate::vector::VectorIcon, color: tairix_raster::Color)
         .count()
 }
 
-/// The Switchboard launcher icon is the designer's own drawing rather than a
-/// traced approximation: it is built from rounded rectangles, circles, and
-/// strokes. Pinning what it decodes to is what would catch the decoder
-/// quietly dropping one of those and leaving a wrong picture on the taskbar.
+/// The folder masters are the designer's own drawings rather than traced
+/// approximations, and they are the vector class tier's whole shipped set.
+/// Pinning what they decode to is what would catch the decoder quietly
+/// dropping a shape and leaving a wrong picture on every folder on screen.
 ///
-/// Its Program Library neighbour is an illustrative raster master, so nothing
-/// here decodes it; the image build proves it is artwork the desktop will
-/// draw.
+/// The illustrative class masters beside them are raster, so nothing here
+/// decodes those; the image build proves each is artwork the desktop will draw.
 #[test]
-fn the_launcher_icon_draws_the_artwork_it_was_authored_with() {
-    let ink = tairix_raster::Color::rgb(0x17, 0x14, 0x12);
-    let paper = tairix_raster::Color::rgb(0xFF, 0xF4, 0xEA);
-    let accent = tairix_raster::Color::rgb(0xB8, 0x5C, 0x2E);
+fn the_folder_icons_draw_the_artwork_they_were_authored_with() {
+    let plate = tairix_raster::Color::rgb(0x3A, 0x86, 0xE8);
+    let body = tairix_raster::Color::rgb(0x4C, 0x9A, 0xF0);
+    let accent = tairix_raster::Color::rgb(0x65, 0xAA, 0xF5);
+    let paper = tairix_raster::Color::rgb(0xFF, 0xFF, 0xFF);
 
-    // Three faders, each a rounded track carrying a round knob.
-    let switchboard = shipped_vector("switchboard.svg");
-    assert_eq!(switchboard.layers().len(), 12);
-    assert_eq!(layers_painted(&switchboard, paper), 3);
-    assert_eq!(layers_painted(&switchboard, accent), 3);
-    assert_eq!(layers_painted(&switchboard, ink), 6);
+    // A back plate with its tab, a front body, and a flat top accent.
+    let folder = shipped_vector("folder.svg");
+    assert_eq!(folder.layers().len(), 3);
+    for ink in [plate, body, accent] {
+        assert_eq!(layers_painted(&folder, ink), 1);
+    }
 
-    // It covers a substantial part of its slot: a silhouette that decoded but
-    // drew almost nothing would still pass a "not empty" check.
-    let image = switchboard.rasterise(64).expect("renderable");
-    let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
-    assert!(
-        drawn > 64 * 64 / 4,
-        "switchboard covers only {drawn} of {} pixels",
-        64 * 64
-    );
+    // The same folder with three papers stacked between plate and body, each
+    // paper an edge, a fill, and a two-layer turned corner.
+    let filled = shipped_vector("folder-filled.svg");
+    assert_eq!(filled.layers().len(), 15);
+    for ink in [plate, body, accent] {
+        assert_eq!(layers_painted(&filled, ink), 1);
+    }
+    assert_eq!(layers_painted(&filled, paper), 3, "one fill per paper");
+
+    // Each covers a substantial part of its slot: a silhouette that decoded
+    // but drew almost nothing would still pass a "not empty" check.
+    for (name, icon) in [("folder", &folder), ("folder-filled", &filled)] {
+        let image = icon.rasterise(64).expect("renderable");
+        let drawn = image.pixels().iter().filter(|pixel| pixel.a > 0).count();
+        assert!(
+            drawn > 64 * 64 / 4,
+            "{name} covers only {drawn} of {} pixels",
+            64 * 64
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -941,11 +952,11 @@ fn cache_at_on(band: PressureBand, fb_bytes: usize) -> (&'static ReportedPressur
     )
 }
 
-/// An output whose whole artwork budget is smaller than any decode's pixels,
-/// so every admission is refused. A sixteenth of this is the ceiling, and the
-/// reserve is clamped to it, which is what makes "retains nothing" reachable
-/// without a band that empties the cache.
-const FB_TOO_SMALL_FOR_ONE_ICON: usize = 1024;
+/// An output whose whole artwork budget — one screenful of it — is smaller
+/// than a single decode's pixels plus its bookkeeping, so every admission is
+/// refused. The reserve is clamped to that ceiling, which is what makes
+/// "retains nothing" reachable without a band that empties the cache.
+const FB_TOO_SMALL_FOR_ONE_ICON: usize = 256;
 
 #[test]
 fn tightening_pressure_never_takes_the_drawn_icon_away() {

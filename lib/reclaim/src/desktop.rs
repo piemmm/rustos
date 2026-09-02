@@ -34,9 +34,10 @@
 //! All three constructors declare
 //! [`UI_CACHE_RESERVE_BYTES`] irreducible,
 //! clamped by each cache's own display-derived ceiling. The three differ in
-//! how much *speculation* they hold above that — a cursor fraction, a
-//! screenful, a whole working set — and in which bands take it; none of
-//! them is ever emptied outright, because a session with no rasterised
+//! how much they hold above that — a cursor fraction for pixels a rasterise
+//! rebuilds, a screenful for the bulkier kinds bounded by what can be seen —
+//! and in which bands take it; none of them is ever emptied outright, because
+//! a session with no rasterised
 //! pixels left redraws the same screen through a filesystem read, a
 //! sandbox round trip, or an IPC call per element, every repaint.
 //!
@@ -156,22 +157,23 @@ where
 /// (a capability-gated read plus a parser-sandbox round trip), a glyph
 /// fetched over the font endpoint.
 ///
-/// Classified and bounded exactly like [`disposable_ui_cache`]: same
-/// declaration, same display-derived budget, so it is still the first
-/// memory the model reclaims among equals. It differs in one respect —
-/// the whole of that budget is declared the session's live working set
-/// ([`CacheBudget::with_working_set_floor`]), so mild and moderate
-/// pressure leave it alone and severe takes it down to the shared
-/// irreducible reserve.
+/// Declared exactly like [`disposable_ui_cache`] and ceilinged at one
+/// screenful like [`screenful_ui_cache`], for that constructor's reason: no
+/// more of these pixels can be visible at once than fill the output they are
+/// drawn on. A grid of icons is the demanding case and it is nowhere near the
+/// cursor fraction — a 480×480 file-manager window draws some 117 KiB of icon
+/// where a sixteenth of its frame is 57 KiB — so that fraction cannot hold
+/// what one frame draws, and the cache evicts entries the very next paint
+/// asks for again.
 ///
-/// The budget *is* the working set here rather than a speculative
-/// allowance around one: it is a small fraction of one frame of the very
-/// output the pixels are drawn on, and no more of them than fills that
-/// output can be visible at once. There is nothing in it to trim that the
-/// session is not currently drawing, which is why dropping it frees a
-/// negligible figure and immediately costs a read and a round trip per
-/// icon and a round trip per glyph — the resources a machine short of
-/// memory has least of.
+/// It differs from [`screenful_ui_cache`] in what mild and moderate pressure
+/// may take: those two leave a quarter of the ceiling — what one frame draws —
+/// alone ([`CacheBudget::with_working_set_floor`]) rather than the whole of it,
+/// because rebuilding one of these costs a capability-gated read and a sandbox
+/// round trip per icon, or a round trip per glyph — the resources a machine
+/// short of memory has least of. Everything above that share is scroll-back and
+/// off-screen speculation and goes at the first tightening; severe and critical
+/// take it down to the shared irreducible reserve like every other UI cache.
 #[must_use]
 pub fn working_set_ui_cache<K, V, E>(
     label: &'static str,
@@ -186,17 +188,28 @@ where
     V: CachedBytes,
     E: PartialEq + Clone,
 {
-    let budget = CacheBudget::from_backing(fb_bytes);
+    let budget = CacheBudget::from_ceiling(fb_bytes);
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
         budget
-            .with_working_set_floor(budget.hard())
+            .with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR)
             .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
     )
 }
+
+/// The share of [`working_set_ui_cache`]'s one-screenful ceiling that mild and
+/// moderate pressure may not take: what one frame actually draws, rather than
+/// everything the ceiling allows.
+///
+/// Measured on the demanding case, a file manager's icon grid: its default
+/// 480×480 window draws sixteen 42-pixel tiles, 117 KiB of icon against a
+/// 900 KiB frame — an eighth of it. A quarter is that with headroom for the
+/// glyph masks drawn beside undecoded tiles, and still leaves three quarters of
+/// the ceiling reclaimable at the first tightening.
+const WORKING_SET_DIVISOR: usize = 4;
 
 #[cfg(test)]
 mod tests {
@@ -283,6 +296,89 @@ mod tests {
             "the cursor/icon fraction is far too small for window furniture"
         );
         assert!(glyphs.charged_bytes() <= CacheBudget::from_backing(fb_bytes).hard());
+    }
+
+    /// The working-set ceiling holds what one frame draws. Icons are drawn
+    /// *on* the output, so their pixels cannot outrun its own — but a
+    /// sixteenth of it cannot hold them, and a cache that evicts an icon the
+    /// next paint asks for again either draws the wrong picture or decodes it
+    /// afresh every frame, at a capability-gated read and a sandbox round trip
+    /// each.
+    #[test]
+    fn the_working_set_ceiling_holds_a_frame_of_icons_the_glyph_fraction_cannot() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        // A file manager's default 480x480 window, and the sixteen 42-pixel
+        // icons its grid draws in one frame — the measured figures, not a
+        // round number.
+        let fb_bytes = 480 * 4 * 480;
+        let icon = 42 * 42 * 4;
+        let tiles = 16u32;
+
+        let mut icons: ReclaimCache<u32, Glyph, u64> =
+            working_set_ui_cache("test.icons", 1, fb_bytes, 32, gauge, sink);
+        let mut fraction: ReclaimCache<u32, Glyph, u64> =
+            disposable_ui_cache("test.fraction", 1, fb_bytes, 32, gauge, sink);
+        for key in 0..tiles {
+            for cache in [&mut icons, &mut fraction] {
+                let _ = cache.get_or_build(&1, key, || {
+                    Some(Glyph {
+                        bytes: vec![0x33; icon],
+                    })
+                });
+            }
+        }
+
+        assert_eq!(
+            icons.len(),
+            tiles as usize,
+            "a frame's icons did not all fit the working-set ceiling"
+        );
+        assert!(
+            fraction.len() < tiles as usize,
+            "the cursor fraction is what could not hold one frame of them"
+        );
+    }
+
+    /// Mild pressure hands back the scroll-back and off-screen speculation but
+    /// not what a frame draws. Keeping the whole screenful there would pin a
+    /// figure the session is not drawing on precisely the machine that is
+    /// tightening; giving all of it back would put every icon on screen through
+    /// a read and a sandbox round trip on the next repaint.
+    #[test]
+    fn mild_pressure_takes_the_speculation_and_leaves_a_frame_of_icons() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        // A 1080p output, where a quarter of the ceiling is well clear of the
+        // shared reserve and so is the figure actually under test.
+        let fb_bytes = 1920 * 1080 * 4;
+        let floor = fb_bytes / super::WORKING_SET_DIVISOR;
+        assert!(floor > UI_CACHE_RESERVE_BYTES, "the reserve would dominate");
+        let icon = 42 * 42 * 4;
+
+        let mut icons: ReclaimCache<u32, Glyph, u64> =
+            working_set_ui_cache("test.icons.mild", 1, fb_bytes, 32, gauge, sink);
+        for key in 0..u32::try_from(fb_bytes / icon).expect("a screenful of icons") {
+            let _ = icons.get_or_build(&1, key, || {
+                Some(Glyph {
+                    bytes: vec![0x44; icon],
+                })
+            });
+        }
+        assert!(
+            icons.charged_bytes() > floor,
+            "the fixture never filled past the floor it is testing"
+        );
+
+        gauge.report(PressureBand::Mild);
+        assert!(icons.enforce_pressure() > 0, "the speculation must go");
+        assert!(icons.charged_bytes() <= floor);
+        assert!(
+            icons.len() * icon >= fb_bytes / 8,
+            "mild pressure took what a frame draws, not just the speculation"
+        );
     }
 
     #[test]

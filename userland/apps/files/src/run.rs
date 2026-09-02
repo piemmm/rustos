@@ -5103,13 +5103,6 @@ mod program {
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
 
-            // The app is acting on something that is not the pump's own
-            // repaint, so what the grid draws may have changed: a key, a
-            // click, a re-list. Open a fresh artwork round, which is what
-            // stops a decode the cache evicted from being answered "not yet"
-            // for ever.
-            icons.borrow_mut().begin_round();
-
             // The desktop belongs to the seat, not to one window, so a change
             // is adopted once and every window is repainted in it.
             match desktop.apply(&event) {

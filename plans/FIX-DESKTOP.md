@@ -669,13 +669,13 @@ Each stage is independently reviewable and must leave the whole-project
   (`plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
   `userland/gui/*`. One policy, two drive mechanisms: a worker thread here, an
   event-loop pump there.
-- **Rounds.** The decode cache is budgeted, so it can be asked to hold more than
-  it will; without a rule a decode it declined to retain would be asked for
-  again by the very repaint its landing drove, for ever. Within a round a key
-  answered once is not decoded again, and a fresh round opens on any wake that
-  is *not* the worker's nudge — exactly when what is on screen can have changed.
-  Work in flight and answers not yet collected survive the boundary, so nothing
-  is computed twice for want of somewhere to keep it.
+- **What the desk remembers.** An answer handed over is forgotten: the cache
+  owns it, so if the cache later evicts it the next paint's miss is genuine and
+  is decoded again. The decode cache is budgeted, though, so it can be asked to
+  hold more than it will, and a decode it *refuses* must not be offered again —
+  the repaint its landing drove would ask, the answer would be refused again,
+  for ever. The cache reports that refusal and the desk holds the key declined
+  until the pressure band moves.
 - **One repaint per batch.** The worker nudges when its queue drains rather than
   after each icon, so a bring-up wanting thirty of them costs the desktop one
   repaint and they appear together; a lone icon empties the queue at once and
@@ -722,8 +722,8 @@ Each stage is independently reviewable and must leave the whole-project
   decode happens on the serve loop through `InlineArtwork`, exactly where it
   used to be.
 - **Tests:** the desk policy host-tested beside its code (handshake, dedup by
-  key *and* pixel side, hand-out order, the round rule both ways, a stale queue
-  entry yielding no duplicate, teardown); `lib/icon`'s deferred suite (a pending
+  key *and* pixel side, hand-out order, a dropped answer decoded again against a
+  refused one held, a stale queue entry yielding no duplicate, teardown); `lib/icon`'s deferred suite (a pending
   decode retains nothing, a landed one is served and retained, a pending tier
   stops the walk, a landed refusal advances it one tier at a time,
   `owned_artwork` telling `Pending` from `Refused`, and a picture handed back

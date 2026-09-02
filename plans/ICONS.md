@@ -85,14 +85,21 @@ guarantees.
   no icon at all — is not re-read every frame.
 - **Decoded once means once, not once per band.** The cache is the *working
   set* of the surfaces drawing from it, not speculation around one: re-deriving
-  an entry costs a capability-gated read plus a sandbox round trip, and the
-  whole budget is a small fraction of one frame of the output the icons are
-  drawn on. So mild and moderate memory pressure leave it alone
-  (`tairix_reclaim::working_set_ui_cache`, `plans/SMARTRAM.md` section 6.4);
-  severe and critical still take it, and the glyph tier is then the honest
-  answer. A refusal the cache cannot avoid is reported to the resolver
+  an entry costs a capability-gated read plus a sandbox round trip. So mild and
+  moderate memory pressure take the scroll-back speculation but leave what one
+  frame draws (`tairix_reclaim::working_set_ui_cache`, `plans/SMARTRAM.md`
+  section 6.4); severe and critical take it down to the shared reserve, and the
+  glyph tier is then the honest answer. A refusal the cache cannot avoid is reported to the resolver
   (`ArtworkResolver::declined`) and not re-offered until the band moves, so
   giving the pixels up is never a storm of reads that cannot be kept.
+- **The ceiling is one screenful, because that bounds what a frame can draw.**
+  Icons are drawn on the output, so no more of them can be visible at once than
+  fill it. A *fraction* of one frame cannot hold them — a 480×480 file-manager
+  window draws some 117 KiB of icon where a sixteenth of its frame is 57 KiB —
+  and a cache that evicts an entry the next paint asks for again either shows a
+  wrong picture or pays the read and the round trip per icon per frame. Only a
+  quarter of that ceiling is the pressure-proof working set, though: the rest is
+  scroll-back nothing is drawing, and it goes at the first tightening.
 - **Rendered exactly, at the size it is drawn.** A vector asset is rasterised
   straight onto the requested `side`×`side` surface — never at a nominal size
   and rescaled — and every pixel takes the *exact* fraction of its own area
