@@ -101,6 +101,10 @@ pub enum DecodeError {
     /// 64-bit integer — reachable only with degenerate, very large
     /// caller-supplied [`DecodeLimits`], never with a sane limit.
     DimensionsOverflow,
+    /// A buffer the decode needs was refused by the allocator. Unlike every
+    /// other variant this is a property of the machine, not of the input, so
+    /// the same image may decode later.
+    OutOfMemory,
 
     /// The file did not begin with the PNG signature.
     BadSignature,
@@ -278,6 +282,7 @@ impl DecodeError {
             Self::HeightExceedsLimit => "image height exceeds the caller's limit",
             Self::PixelCountExceedsLimit => "image pixel count exceeds the caller's limit",
             Self::DimensionsOverflow => "image geometry overflowed size arithmetic",
+            Self::OutOfMemory => "image decode buffer could not be allocated",
             Self::BadSignature => "not a PNG file (bad signature)",
             Self::ChunkTruncated => "PNG chunk is truncated",
             Self::ChunkLengthExceedsInput => "PNG chunk declares a length longer than the input",

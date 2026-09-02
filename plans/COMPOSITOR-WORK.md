@@ -141,7 +141,10 @@ guarantees:
   through. The strips are cut from one transient outer-sized render because
   the drawing primitives refuse a negative-origin destination; only the strips
   are kept, so retained bytes scale with the band and never with the window
-  area. A zero-extent edge holds no surface at all.
+  area. That transient is twelve times what it yields and is re-paid per
+  chrome-cache miss, which `plans/OPEN-DEFECTS.md` D79 tracks along with the
+  `Surface`/`lib/controls` capability its removal needs; this stage's
+  behaviour is unchanged by it. A zero-extent edge holds no surface at all.
 - **The window's silhouette is the frame's rim, and the client is clipped to
   it.** `Window::shape` reports one shape for either kind of window — a
   decorated window's `WindowFrame::rim` radius over its outer rectangle, a plain

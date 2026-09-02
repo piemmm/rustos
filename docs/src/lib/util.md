@@ -34,6 +34,20 @@ and panic-free throughout.
   floats with exact one-step nearest-even rounding down to the
   subnormals — so `seq` demands full-token consumption and `printf`
   diagnoses a partial conversion over the one grammar.
+* `fallible` — reserving a buffer whose size comes from the data before
+  filling it, so a request the machine refuses is a typed refusal rather
+  than an allocation abort. Userland's heap answers exhaustion with a
+  null pointer, which `alloc` turns into a process abort, and a buffer
+  sized by image geometry or a decoded payload — a window's surface is
+  close to a megabyte — is exactly what a machine short of memory
+  refuses. `filled` and `collected` reserve exactly what a one-shot
+  buffer needs; `grow_to` reserves amortised for a scratch grown across
+  uses, so repeated growth is not quadratic; `reserve` serves a buffer
+  filled by pushing. The rasteriser's surfaces and resample plans
+  (`lib/raster`), the compositor's scan-out frame and layer buffers
+  (`userland/gui/wm`), and the PNG decoder's row and output buffers
+  (`lib/image`) all reserve through this one definition, so a desktop
+  under memory pressure degrades rather than dying in it.
 * `fmt` — no-allocation numeric formatters that render task / port /
   capability identifiers into `lib/log`'s structured field values
   without touching an allocator on the hot path. Promoted from

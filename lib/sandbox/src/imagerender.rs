@@ -125,8 +125,8 @@ pub enum IconRefusal {
     UnsupportedFormat,
     /// The bytes are the recognised format but failed its decoder.
     MalformedImage,
-    /// The image decoded successfully but could not be rasterised at the
-    /// requested `side` (e.g. the output surface could not be allocated).
+    /// A buffer the decode or the rasterise needed could not be allocated,
+    /// so the picture is sound but this machine cannot produce it right now.
     /// The caller falls back to its own built-in glyph either way.
     Unrenderable,
 }
@@ -303,7 +303,10 @@ fn rasterise_png(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
     // JPEG, so the progressive-coefficient-store bound is never consulted
     // here.
     let limits = DecodeLimits::new(MAX_ARTWORK_SIDE, MAX_ARTWORK_SIDE, PNG_DECODE_MAX_PIXELS, 0);
-    let image = tairix_image::decode(icon, &limits).map_err(|_| IconRefusal::MalformedImage)?;
+    let image = tairix_image::decode(icon, &limits).map_err(|err| match err {
+        DecodeError::OutOfMemory => IconRefusal::Unrenderable,
+        _ => IconRefusal::MalformedImage,
+    })?;
     scale_to_square(image.width(), image.height(), image.pixels(), side)
 }
 
@@ -607,10 +610,11 @@ pub enum WallpaperRefusal {
     /// An `OP_WALLPAPER_BAND` request named an empty range, or one
     /// reaching past the prepared destination's height.
     BandOutOfRange,
-    /// The prepared source or placement could not be drawn into the
-    /// requested band. Unreachable in practice — `OP_WALLPAPER_PREPARE`
-    /// only ever holds geometry it has already validated — but the render
-    /// path stays total rather than assuming that holds.
+    /// A buffer the decode or the render needed could not be allocated, or
+    /// the prepared source or placement could not be drawn into the
+    /// requested band — the latter unreachable in practice, since
+    /// `OP_WALLPAPER_PREPARE` only ever holds geometry it has already
+    /// validated, but the render path stays total rather than assuming so.
     Unrenderable,
 }
 
@@ -893,8 +897,12 @@ fn decode_wallpaper_source(
         MAX_WALLPAPER_DECODE_PIXELS,
         MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES,
     );
-    tairix_image::decode_fitted(bytes, &limits, FitBox::new(request_w, request_h))
-        .map_err(|_| WallpaperRefusal::MalformedImage)
+    tairix_image::decode_fitted(bytes, &limits, FitBox::new(request_w, request_h)).map_err(|err| {
+        match err {
+            DecodeError::OutOfMemory => WallpaperRefusal::Unrenderable,
+            _ => WallpaperRefusal::MalformedImage,
+        }
+    })
 }
 
 /// Turn a decoded image and the placement computed for its nominal size

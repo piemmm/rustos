@@ -1752,6 +1752,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-compress",
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]
@@ -5757,6 +5758,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]

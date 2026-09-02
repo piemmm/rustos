@@ -22,6 +22,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
+use tairix_util::fallible;
 
 use crate::color::{mix, Pixel};
 use crate::dither::DitherRow;
@@ -114,19 +115,6 @@ impl BlurScratch {
         self.aux = Vec::new();
         self.pieces = Vec::new();
     }
-}
-
-/// Lengthen `buffer` to `count` pixels, reserving first so exhaustion is
-/// answered with `false` rather than an allocation abort.
-fn grow(buffer: &mut Vec<Pixel>, count: usize) -> bool {
-    let Some(extra) = count.checked_sub(buffer.len()) else {
-        return true;
-    };
-    if buffer.try_reserve(extra).is_err() {
-        return false;
-    }
-    buffer.resize(count, Pixel::TRANSPARENT);
-    true
 }
 
 impl Surface {
@@ -315,7 +303,10 @@ impl Surface {
         ) else {
             return;
         };
-        if output == 0 || !grow(frosted, output) || !grow(aux, intermediate) {
+        if output == 0
+            || !fallible::grow_to(frosted, output, Pixel::TRANSPARENT)
+            || !fallible::grow_to(aux, intermediate, Pixel::TRANSPARENT)
+        {
             return;
         }
         // One piece is the ordinary case — a serial runner, or a frost too small
@@ -552,7 +543,16 @@ impl Frost {
             }
             return;
         }
-        let mut split: Vec<RowBand<'_>> = bands.collect();
+        let mut split: Vec<RowBand<'_>> = Vec::new();
+        if !fallible::reserve(&mut split, count) {
+            // Without room for every band the mix would be partial; run the
+            // rows serially instead, which needs no split at all.
+            for mut band in bands {
+                self.mix_rows(&mut band, pieces, coverage);
+            }
+            return;
+        }
+        split.extend(bands);
         tairix_parallel::for_each(runner, &mut split, &|band| {
             self.mix_rows(band, pieces, coverage);
         });

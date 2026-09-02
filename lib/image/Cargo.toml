@@ -17,6 +17,11 @@ workspace = true
 # of that foreign-format interoperability, so PNG decoding never carries a
 # second copy of it.
 tairix-compress = { path = "../compress", version = "=0.0.0" }
+# The one shared fallible-allocation reservation: a decoded image's row and
+# output buffers are sized by the file's own declared geometry, bounded by the
+# decode limits but still megabytes at master resolution, so a machine short of
+# memory refuses one and the decode reports that rather than aborting.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget

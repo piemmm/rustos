@@ -15,7 +15,6 @@
 //! behind the same public surface; today the software path is the
 //! fallback every platform always has.
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -34,6 +33,7 @@ use tairix_parallel::JobRunner;
 use tairix_raster::BlurScratch;
 use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
 use tairix_theme::{CursorKind, Theme};
+use tairix_util::fallible;
 
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{Color, DitherRow, Pixel};
@@ -243,6 +243,14 @@ impl FastPaths {
     };
 }
 
+/// A zeroed scan-out frame for `mode`, or `None` when the mode describes no
+/// frame ([`scanout_len`]) or the allocator refuses one that size.
+///
+/// A screen's frame is megabytes, so the refusal is real and is reported.
+fn scanout_frame(mode: &DisplayMode) -> Option<Vec<u8>> {
+    fallible::filled(scanout_len(mode)?, 0u8)
+}
+
 impl Compositor {
     /// Create a compositor for the given display `mode`, clearing the
     /// screen to an opaque `background`.
@@ -286,7 +294,7 @@ impl Compositor {
             ..background
         };
         let back = Surface::filled(mode.width_px, mode.height_px, background.premultiply())?;
-        let frame = vec![0u8; scanout_len(&mode)?];
+        let frame = scanout_frame(&mode)?;
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
@@ -356,19 +364,14 @@ impl Compositor {
         let Some(order) = ChannelOrder::for_format(mode.format) else {
             return false;
         };
-        let Some(frame_len) = scanout_len(&mode) else {
-            return false;
-        };
         let Some(back) =
             Surface::filled(mode.width_px, mode.height_px, self.background.premultiply())
         else {
             return false;
         };
-        let mut frame = Vec::new();
-        if frame.try_reserve_exact(frame_len).is_err() {
+        let Some(frame) = scanout_frame(&mode) else {
             return false;
-        }
-        frame.resize(frame_len, 0);
+        };
         self.mode = mode;
         self.order = order;
         self.back = back;
@@ -2924,8 +2927,10 @@ impl Compositor {
 
     /// Bake a `width`×`height` region into a premultiplied, display-format
     /// layer buffer placed at `(dst_x, dst_y)`. `sample` yields each
-    /// surface-local pixel, or `None` for a transparent one. Returns
-    /// `None` only if the buffer size overflows `usize`.
+    /// surface-local pixel, or `None` for a transparent one. Returns `None`
+    /// if the buffer size overflows `usize` or the allocator refuses it — a
+    /// layer is a whole window's rectangle, so under memory pressure the
+    /// caller composes the frame in software instead.
     fn encode_layer(
         &self,
         width: u32,
@@ -2937,7 +2942,7 @@ impl Compositor {
         let w = usize::try_from(width).ok()?;
         let h = usize::try_from(height).ok()?;
         let count = w.checked_mul(h)?.checked_mul(4)?;
-        let mut pixels = vec![0u8; count];
+        let mut pixels = fallible::filled(count, 0u8)?;
         for ly in 0..height {
             let row = usize::try_from(ly).ok()?;
             for lx in 0..width {

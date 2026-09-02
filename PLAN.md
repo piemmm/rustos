@@ -142,7 +142,11 @@ Do **not** begin a stage before all its listed dependencies are complete.
   event says so; `userland/system/timed`'s configuration store and RTC +
   `userland/system/init`'s administrator enrolment overrides on the encrypted
   root, hoisted out of `timed` when the service manager hit the same
-  boot-order problem).
+  boot-order problem), and `fallible` (reserving a buffer whose size comes
+  from the data before filling it, so an image- or payload-sized request the
+  machine refuses is a typed refusal rather than an allocation abort;
+  `lib/raster`'s surfaces and resample plans + `userland/gui/wm`'s scan-out
+  frame and layer buffers + `lib/image`'s PNG row and output buffers).
 - The cross-checked `syscalls.rs` ↔ `table.rs` pair is reserved for Stage 2
   so `cargo xtask abi-check` always sees both halves.
 

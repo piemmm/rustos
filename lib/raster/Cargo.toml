@@ -27,7 +27,9 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # tangent and square root the affine transform and a gradient's focal ray need.
 # Taking them from here keeps an external libm out of the trusted computing base
 # and means this crate rotates and scales identically to the glyph rasteriser
-# and the SVG decoder.
+# and the SVG decoder. `fallible`: the one shared reservation every buffer
+# sized by image geometry takes, so a surface a machine short of memory
+# refuses is a `None` and not an allocation abort.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]

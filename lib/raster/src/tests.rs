@@ -234,6 +234,20 @@ fn new_surface_is_transparent() {
     assert!(s.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
 }
 
+/// A window's surface is close to a megabyte, so a machine short of memory
+/// is what refuses one. Userland's heap answers exhaustion with a null
+/// pointer, which an infallible growth turns into a process abort — the
+/// desktop session's death under the 32-window pressure soak — so both
+/// constructors reserve the pixels and hand the refusal back instead. The
+/// extent here makes the reservation impossible arithmetically, so the
+/// refusal is the allocator's answer rather than a property of the host's
+/// free memory.
+#[test]
+fn a_surface_the_allocator_refuses_is_none_not_a_panic() {
+    assert_eq!(Surface::new(u32::MAX, u32::MAX), None);
+    assert_eq!(Surface::filled(u32::MAX, u32::MAX, RED.premultiply()), None);
+}
+
 #[test]
 fn surface_get_set_bounds() {
     let mut s = Surface::new(2, 2).expect("allocates");

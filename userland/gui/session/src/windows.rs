@@ -611,13 +611,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         title: &str,
         sizing: WindowSizing,
     ) -> Result<(), Errno> {
-        // The engine validated the geometry (non-zero, stride covers a
-        // row); a surface too large to allocate is refused, never a
-        // panic.
+        // The engine has already mapped the client's own frame region of
+        // this geometry, so the extent is representable and the only refusal
+        // left is the allocator's.
         let Some(content) =
             Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
         else {
-            return Err(Errno::LengthOutOfRange);
+            return Err(Errno::OutOfMemory);
         };
         let origin = self.windows.next_origin();
         // The compositor takes ownership of the content surface; the
@@ -698,7 +698,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         let Some(content) =
             Surface::filled(surface.width_px, surface.height_px, OPEN_FILL.premultiply())
         else {
-            return Err(Errno::LengthOutOfRange);
+            return Err(Errno::OutOfMemory);
         };
         let placed = Rect::new(
             client.left().saturating_add(offset_x),

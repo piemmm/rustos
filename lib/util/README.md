@@ -24,6 +24,11 @@ code.
   longest-prefix `endptr` semantics, decimal and hexadecimal floats
   with exact one-step rounding, `inf`/`nan`). Consumers: the `seq` and
   `printf` command apps.
+* `fallible` — reserving a data-sized buffer before filling it
+  (`filled`, `collected`, `grow_to`, `reserve`), so an image- or
+  payload-sized allocation the machine refuses is a typed refusal rather
+  than an allocation abort. Consumers: `lib/raster`, `userland/gui/wm`,
+  `lib/image`.
 * `fmt` — no-allocation numeric formatters for structured-log field
   values. Consumers: `kernel/sec`, `kernel/ipc`.
 * `size` — the GNU coreutils size vocabulary: `-B`/`--block-size`

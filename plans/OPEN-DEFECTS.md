@@ -858,36 +858,82 @@ copy-repair wrote to the device with no read-only guard, so a mount held
 read-only precisely because its medium must not be touched was written anyway
 (fixed — the copy-repair is one read-only-aware rule, and reading that code
 found two more read-only writes on the same path).
-- **D77 — the desktop session panics inside `alloc` under the 32-window
-  pressure soak, intermittently (OPEN).** `desktop-pressure-qemu-aarch64`
-  fails when the session process dies after 31 of its 32 windows are on
-  screen, so the guest's own verdict is never reached and the run is killed at
-  the ceiling with the machine idle.
-  - **Intermittent, which is the defect.** Two runs of the identical tree:
-    one failed at the 606 s ceiling, the next passed in 148 s. A green re-run
-    is not a fix — the variance is the bug, and the fix is structural, never a
-    retry or a ceiling bump.
-  - **It is a Rust panic in `alloc`, not a fail-loud exit.** The runtime's
-    panic record names a location under the toolchain's own
-    `library/alloc/…`, which is `handle_alloc_error`: the allocation failed
-    and the consumer had no fallible path. Allocation failure is a `Result`,
-    never a panic, and the pressure soak is precisely the state the session
-    must degrade through rather than die in — so this is a real violation
-    whatever its frequency. The surrounding evidence agrees: the same `elsh`
-    bundle load climbs 0.16 s → 0.38 s → 1.3 s → 20.6 s → 23.2 s across
-    successive windows, so the guest is deep in thrash when the session goes.
-  - **The scope is the session's allocation discipline, not one call.**
-    Userland's heap returns null on exhaustion as its contract requires, so
-    *every* infallible `Vec`/`String`/`BTreeMap` growth on the session's
-    pressure path turns that null into a panic, and fixing it properly means
-    the paths that grow under pressure use fallible reservation.
-  - **The byte figure the site hunt needs: 975,840.** A failing run reports
-    `memory allocation of 975840 bytes failed` from the session
-    (`comm=desktop`, task 17) at t=166.9 s with 31 windows up, immediately
-    before its `code=101` and the seat lease being reclaimed from the dead
-    owner. So the offending growth is one ~953 KiB request on the pressure
-    path rather than a slow leak, which is the discriminator for finding it:
-    look for a single allocation of that order, not an accumulation.
+- **D77 — the desktop session panicked inside `alloc` under the 32-window
+  pressure soak — FIXED.** `desktop-pressure-qemu-aarch64` failed
+  intermittently when the session process died after 31 of its 32 windows
+  were on screen (one run at the 606 s ceiling, the next green in 148 s), so
+  the guest's verdict was never reached. The panic record's
+  `library/alloc/…` location was `raw_vec`'s allocation abort: the request
+  was `975,840` bytes from `comm=desktop`, and 975,840 = 642 × 380 × 4, one
+  decorated terminal window's *outer* rectangle at the vertical's 1024×768
+  screen (80×25 cells of an 8×14 face, plus the 1-pixel band and 29-pixel
+  title/border the theme's metrics give). Two sites allocate exactly that —
+  `WindowChrome::render`'s outer-sized transient and `FrostedBackdrop::capture`
+  — and a third, `window_opened`'s content surface, is the same class one
+  window-border smaller.
+  - **The cause was one infallible `vec!` under an API that published a
+    refusal.** `Surface::filled` — reached by every `Surface::new` in the
+    graphical stack — documented "the caller fails closed rather than
+    panicking" while allocating `vec![fill; count]`, which aborts the process
+    on exhaustion. So the `Option`/`Result` refusal every consumer already
+    handled was unreachable for the one cause that actually fires, and the
+    careful degradations written against it were dead prose:
+    `repaint_window`'s "an exhausted machine leaves the window exactly as it
+    was rather than blanking it", `content_for_present`'s "a refusal leaves
+    the window showing what it was showing", `WindowChrome::render`'s "fail
+    closed", `FrostedBackdrop::capture`'s "simply retains nothing", and
+    `Surface::layered`'s degrade-to-plain-size arm.
+  - **Fixed by one shared reservation, `tairix_util::fallible`.** Every buffer
+    whose size comes from the data reserves before it fills and reports the
+    refusal: `filled`/`collected` reserve exactly for a one-shot buffer,
+    `grow_to` amortised for a scratch grown across uses (so repeated growth is
+    not quadratic — `lib/raster`'s blur scratch, which already had this
+    discipline privately, now shares the one definition), and `reserve` serves
+    a buffer filled by pushing. Wired through `lib/raster` (`Surface::filled`
+    and so `new`, `from_rgba8`, the scan converter's per-fill coverage row,
+    `resample`'s destination, and the resample plan / row cache / accumulator),
+    `userland/gui/wm` (the scan-out frame — whose two spellings are now one —
+    and each baked layer buffer), and `lib/image` (the PNG defilter, raw and
+    output buffers).
+  - **The refused window now states the true reason.** `window_opened`
+    reported `LengthOutOfRange` for both an impossible extent and an
+    exhausted heap. The engine maps the client's own frame region of that
+    exact geometry *before* calling the host, so the extent is proven
+    representable and only the allocator can still refuse: the session
+    answers `Errno::OutOfMemory`. Two new typed refusals carry the same
+    distinction outward — `ResampleError::OutOfMemory` and
+    `DecodeError::OutOfMemory`, each documented as a property of the machine
+    rather than of the request, so the same call may be granted later. The
+    parser sandbox routes the new decode refusal to its *resource* answer
+    (`IconRefusal`/`WallpaperRefusal::Unrenderable`) rather than through the
+    blanket `MalformedImage` its `map_err(|_| …)` would have given, so a
+    picture the machine could not hold is not reported as a bad file.
+  - **Regression cover.** `lib/util` proves a refused reservation is answered
+    and not aborted, and that a granted one holds exactly what was asked for;
+    `lib/raster` proves `Surface::new`/`filled`, `resample` and
+    `Surface::resampled` return their refusal at an extent whose byte count
+    cannot be reserved. Both raster tests panic in `raw_vec` against the
+    pre-fix tree, which is the same abort the guest recorded.
+  - **Proven on the vertical, which now fails for a different reason.** On
+    the whole-project gate the session survived the full 600 s under the same
+    pressure that killed it — no panic, no `code=101`, 31 windows up, the
+    desktop idle in its serve loop rather than dead — and both screendumps
+    were taken and asserted. The 32nd window is now *refused* instead:
+    `Screen::new` (the terminal's own client-side picture,
+    `Surface::new(640, 350)`) returns `None`, `open_window` states "screen
+    surface refused; no window opened" and the terminal carries on. Before
+    this that same allocation aborted a process — which is the whole defect.
+    The vertical requires all 32 windows, so it is now red on the honest
+    answer rather than on a corpse; D80 is that question.
+  - **What this does *not* cover, deliberately.** The allocations made
+    fallible are the ones sized by *data* — image geometry, screen extent, a
+    decoded payload — the megabyte-class requests a machine short of memory
+    actually refuses. Small fixed-shape bookkeeping (a `Vec` of window ids, a
+    layout's rect list, a title `String`) stays infallible: `alloc`'s
+    collections have no fallible push, and threading a `Result` through every
+    layout function to answer a 32-byte refusal would be a worse design for a
+    failure the process cannot survive anyway. D79 is the churn that made the
+    refusal fire in the first place.
   - **Two things found while diagnosing it are fixed.** A userland panic's
     reason reached only `stderr`, so a service — or a graphical session whose
     console is the screen it composites over — died leaving nothing but an
@@ -899,6 +945,68 @@ found two more read-only writes on the same path).
     panic and a clean bind refusal were indistinguishable from the status; the
     runtime's code is now reserved and public, and the session's moved to
     `104`.
+- **D80 — the 32-window pressure soak is balanced on the edge of exhaustion,
+  so its premise is load-dependent (OPEN).** `desktop-pressure-qemu-aarch64`
+  asks one terminal process for 32 windows on the aarch64 virt board's default
+  RAM (`usable_bytes` 186,310,656 — about 177 MiB). Each window retains the
+  terminal's own `Screen` surface (896,000 bytes at the default 640×350 grid),
+  its shared frame region (that again, times `FRAME_COUNT`), and the session's
+  window content surface — and each is behind an `elsh` bundle load whose
+  measured cost climbs 0.24 s → 1.3 s → 2.3 s → 20.9 s → 16.1 s as the
+  machine tightens. Thirty-two of those plus thirty-two shells is the whole
+  board, so whether the last window fits is decided by what else happens to be
+  resident: the identical tree has both passed in 148 s and, on the gate run
+  that closed D77, been refused at window 32 and killed at the 600 s ceiling.
+  - **This is the load-dependence §7 forbids, not a flake to re-run.** A green
+    solo run is not evidence the premise holds, and neither the ceiling nor the
+    window count may be moved to make it pass.
+  - **Two structural resolutions, and they are different work.** Either the
+    per-window cost comes down until 32 windows genuinely fit with headroom —
+    the retained trio above is the budget, and D79's churn is on top of it — or
+    the vertical drives the pressure band by a means that does not sit on the
+    exhaustion boundary, while still asserting what it exists to assert (the
+    icon bar keeps its real artwork through mild and moderate pressure).
+    Choosing between them is a scope decision, not a defect fix.
+  - **Its refusal is currently invisible, which is why this took a source
+    read to diagnose.** The terminal states "screen surface refused; no window
+    opened" on `stderr`, and a graphical app's stderr in a desktop session has
+    no reader — the same argument `lib/rt`'s panic reporting already makes for
+    a fatal exit (`PANIC_REPORTED`, "a graphical session whose console is the
+    very screen it is compositing over"). The charter's refusal clause asks for
+    the app's *own UI* when it is interactive and `stderr` otherwise, so
+    routing a non-fatal refusal to the system log as well is a policy question
+    to settle rather than assume.
+
+- **D79 — a decorated window's furniture is rendered through a transient the
+  size of the whole window, to keep four thin strips (OPEN).**
+  `WindowChrome::render` allocates an outer-sized `Surface` (975,840 bytes for
+  a default terminal), paints the frame into it, copies the four furniture
+  bands out, and frees it. The bands total about 80 KiB, so the transient is
+  twelve times what is kept, and `vec![fill; count]` writes every one of those
+  pixels transparent before the paint begins. It is per *chrome-cache miss*,
+  and the chrome cache is ceilinged at one screenful and reclaimed under
+  pressure — which is precisely the state the D77 soak drives — so a screenful
+  of decorated windows re-pays it per frame once the cache is cold. That churn
+  is the best candidate for why a ~953 KiB request was refused on a machine
+  that had, minutes earlier, satisfied thirty of them.
+  - **Not a defect of the code that wrote it.** `plans/COMPOSITOR-WORK.md`
+    Stage B records the transient as forced: the `lib/controls` paint
+    vocabulary works in unsigned surface coordinates (`surface_rect` refuses a
+    negative destination origin, and every helper below it takes
+    `(u32, u32, u32, u32)`), so only the *top* band — the one whose local
+    origin is already `(0, 0)` — can be painted straight into its own strip.
+  - **The fix is the missing capability, not a workaround.** A surface cannot
+    presently be a window onto a larger coordinate space, which is what a
+    strip is. Either a scoped origin translation on `Surface` (the natural
+    sibling of `with_clip`, mapping space to buffer in the one place
+    `span_offsets` already computes an index, with a `base_row` precedent) or
+    a signed paint vocabulary in `lib/controls`. Both reach the whole
+    desktop's drawing layer, so this is its own change on its own gate, and
+    `plans/COMPOSITOR-WORK.md` Stage B is updated by it.
+  - **Do not "fix" it by sharing one transient across the residency pass.**
+    That would keep the allocation and make chrome rendering stateful across
+    windows for a fraction of the win; the strips want to be painted once,
+    into themselves.
 - **D76 — three riscv64 QEMU verticals blow their absolute ceiling only under
   the loaded matrix (OPEN).** `autoload-input`, `netstack-autoload` and
   `netstack-dhcp` on riscv64 leave the guest alive and parked in WFI at the

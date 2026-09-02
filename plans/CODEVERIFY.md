@@ -66,6 +66,12 @@ it is not enumerated here.
   not a test and not a documented `// SAFETY-INVARIANT:` boot-time invariant.
 - `.unwrap()` / `.expect()` outside `#[cfg(test)]` / `tests/`.
 - Allocation or `Result` failure handled by panic rather than as a value (§4).
+  This includes the *implicit* abort: a `vec![v; n]`, `with_capacity`,
+  `collect`, `resize`, `extend` or `push` whose count comes from the data is
+  a `handle_alloc_error` call, so a file with no explicit `panic!` still dies
+  on exhaustion. A data-sized buffer reserves through `tairix_util::fallible`
+  (`plans/OPEN-DEFECTS.md` D77 is the whole graphical stack failing this while
+  reading clean).
 
 ### Hacks and shortcuts (§2.1, §2.17, §15.10)
 

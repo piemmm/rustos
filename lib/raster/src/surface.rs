@@ -19,10 +19,10 @@ use core::num::NonZeroU64;
 use core::ops::Range;
 use core::slice;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_reclaim::CachedBytes;
+use tairix_util::fallible;
 
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
@@ -235,9 +235,9 @@ impl CachedBytes for Surface {
 impl Surface {
     /// Allocate a `width`×`height` surface cleared to fully transparent.
     ///
-    /// Returns `None` if the pixel count overflows `usize` (a surface
-    /// that could never be allocated), so the caller fails closed rather
-    /// than panicking.
+    /// Returns `None` if the pixel count overflows `usize` (a surface that
+    /// could never be allocated) or the allocator refuses the pixels, so the
+    /// caller fails closed rather than panicking.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Option<Self> {
         Self::filled(width, height, Pixel::TRANSPARENT)
@@ -245,6 +245,10 @@ impl Surface {
 
     /// Allocate a `width`×`height` surface with every pixel set to
     /// `fill` (a premultiplied [`Pixel`]).
+    ///
+    /// Returns `None` on either refusal [`new`](Self::new) states. A surface
+    /// is close to a megabyte at window size, so it is what a machine short
+    /// of memory refuses: the pixels are reserved before they are written.
     #[must_use]
     pub fn filled(width: u32, height: u32, fill: Pixel) -> Option<Self> {
         let count = pixel_count(width, height)?;
@@ -252,7 +256,7 @@ impl Surface {
             width,
             height,
             clip: ClipRect::whole(width, height),
-            pixels: vec![fill; count],
+            pixels: fallible::filled(count, fill)?,
             floor: AlphaFloor::flat(fill.a),
         })
     }
@@ -353,8 +357,8 @@ impl Surface {
     ///
     /// Returns `None` if `rgba.len()` is not exactly `width * height * 4`
     /// (checked throughout, so an absurd `width`/`height` fails closed
-    /// rather than panicking), the same failure contract [`Surface::new`]
-    /// gives for a pixel count that could never be allocated.
+    /// rather than panicking), and on either allocation refusal
+    /// [`Surface::new`] states.
     #[must_use]
     pub fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
         let count = pixel_count(width, height)?;
@@ -363,10 +367,12 @@ impl Surface {
             return None;
         }
         let (quads, _remainder) = rgba.as_chunks::<4>();
-        let pixels = quads
-            .iter()
-            .map(|&[r, g, b, a]| Color::rgba(r, g, b, a).premultiply())
-            .collect();
+        let pixels = fallible::collected(
+            count,
+            quads
+                .iter()
+                .map(|&[r, g, b, a]| Color::rgba(r, g, b, a).premultiply()),
+        )?;
         Some(Self {
             width,
             height,
@@ -387,8 +393,8 @@ impl Surface {
     ///
     /// # Errors
     ///
-    /// [`ResampleError::DestinationTooLarge`] when the destination could not
-    /// be allocated, and every geometry refusal
+    /// [`ResampleError::OutOfMemory`] when the destination could not be
+    /// allocated, and every geometry refusal
     /// [`resample_rows`](crate::resample_rows) states.
     pub fn resampled(
         &self,
@@ -396,8 +402,7 @@ impl Surface {
         dest_width: u32,
         dest_height: u32,
     ) -> Result<Self, ResampleError> {
-        let mut out =
-            Self::new(dest_width, dest_height).ok_or(ResampleError::DestinationTooLarge)?;
+        let mut out = Self::new(dest_width, dest_height).ok_or(ResampleError::OutOfMemory)?;
         resample_pixels(
             (self.width, self.height, &self.pixels),
             region,
@@ -1075,6 +1080,10 @@ impl Surface {
     /// Kept separate from [`fill_scan`](Self::fill_scan) so this loop — the
     /// whole of the compositing work — exists once however many contour
     /// container types the entry points offer.
+    ///
+    /// A fill whose one row of coverage the allocator refuses paints nothing,
+    /// exactly as one the clip window admits nothing of does — the entry
+    /// points report no outcome, and an undrawn shape beats a dead process.
     fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
         let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.width, self.height) else {
             return;
@@ -1090,7 +1099,9 @@ impl Surface {
             Paint::Solid(color) => Some(color.premultiply()),
             Paint::Gradient(_) => None,
         };
-        let mut alphas = vec![0_u8; pixels];
+        let Some(mut alphas) = fallible::filled(pixels, 0_u8) else {
+            return;
+        };
         for py in self.clip.rows(y_start, y_end - y_start) {
             let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
                 continue;

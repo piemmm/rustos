@@ -200,6 +200,15 @@ minimum-capability parser sandbox, which is the actual capability
 boundary: a crash or resource exhaustion here is contained to that sandbox,
 never the calling service.
 
+Containment is the backstop, not the plan. A decode's row and output
+buffers are sized by the file's own declared geometry — bounded by
+`DecodeLimits`, but still megabytes at master resolution — so they are what
+a machine short of memory refuses. They are reserved through
+`tairix_util::fallible` and a refusal becomes `DecodeError::OutOfMemory`,
+so the caller reads why its picture did not decode instead of watching its
+sandbox die. Unlike every other variant it is a property of the machine
+rather than of the input, so the same image may decode later.
+
 ## API shape
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — format identification from a
@@ -231,7 +240,8 @@ never the calling service.
   `CompressedData` variant wrapping `tairix_compress::zlib::Error`, and the
   `Jpeg*` family covering signature, marker, segment, quantisation- and
   Huffman-table, entropy-data, scan-header, restart-marker,
-  unsupported-mode, and progressive-coefficient-store refusals.
+  unsupported-mode, and progressive-coefficient-store refusals, plus
+  `OutOfMemory` for a buffer the allocator refused.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by

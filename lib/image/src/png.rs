@@ -23,6 +23,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_util::fallible;
+
 use crate::{crc32, DecodeError, DecodeLimits, RasterImage};
 
 /// The 8-byte PNG file signature.
@@ -521,7 +523,7 @@ fn defilter_pass(
     let total = row_sample_bytes
         .checked_mul(to_usize(pass_height)?)
         .ok_or(DecodeError::DimensionsOverflow)?;
-    let mut out = vec![0u8; total];
+    let mut out = fallible::filled(total, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let mut raw_pos = 0usize;
     let mut previous_row_start: Option<usize> = None;
 
@@ -706,7 +708,7 @@ fn decode_pixels(
 
     let expected = expected_decompressed_len(&passes, bpp_bits)?;
     let expected_len = to_usize64(expected)?;
-    let mut raw = vec![0u8; expected_len];
+    let mut raw = fallible::filled(expected_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let produced = tairix_compress::zlib::decompress_into(idat, &mut raw)
         .map_err(DecodeError::CompressedData)?;
     if produced != expected_len {
@@ -721,7 +723,7 @@ fn decode_pixels(
             .checked_mul(4)
             .ok_or(DecodeError::DimensionsOverflow)?,
     )?;
-    let mut output = vec![0u8; output_len];
+    let mut output = fallible::filled(output_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let width = to_usize(ihdr.width)?;
 
     let mut raw_pos = 0usize;

@@ -1470,10 +1470,27 @@ one chain, opened through `OpenMenu` rather than drawn by the application
 
 Every fallible entry point returns a `Result`/`Option` rather than
 panicking (`AGENTS.md` §2.9): `Compositor::new` and `Surface::new` return
-`None` for a surface too large to allocate or a stride too small for one
-scanline, and an unsupported pixel format is refused at construction
-rather than guessed (`AGENTS.md` §2.1). There is no `unsafe` in the
-crate.
+`None` for a surface whose extent is unrepresentable or a stride too small
+for one scanline, and an unsupported pixel format is refused at
+construction rather than guessed (`AGENTS.md` §2.1). There is no `unsafe`
+in the crate.
+
+**An allocation the machine refuses is one of those refusals, not a
+crash.** Every buffer here is sized by the screen or by a window: the
+scan-out frame and back buffer are megabytes, a baked layer or a frosted
+backdrop is a whole window's rectangle, and a decorated window's furniture
+is rendered through an outer-sized transient. Userland's heap answers
+exhaustion with a null pointer, which an infallible `Vec` growth turns into
+a process abort — so each of these reserves its pixels through
+`tairix_util::fallible` and hands the refusal back. That is what makes the
+degradations documented above reachable rather than theoretical: a window
+whose content cannot be reallocated keeps showing what it was showing, a
+window whose furniture cannot be rendered draws its content over the
+background band, a frost that cannot be captured retains nothing, and a
+`Create` the session cannot back is declined with `Errno::OutOfMemory` —
+the true reason, since the engine has already mapped the client's own frame
+region of that same geometry, so the extent is proven representable and
+only the allocator can still refuse.
 
 ## Graphical assets (SVG-first)
 

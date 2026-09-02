@@ -45,6 +45,11 @@
 //!   shell's `elevate` builtin, the login supervisor's elevation broker,
 //!   and `lib/controls`' masked text field, so "the secret is gone" means
 //!   the same thing everywhere a credential is marshalled.
+//! * [`fallible`] — reserving a data-sized buffer before filling it, so
+//!   exhaustion is a refusal rather than an allocation abort, consumed by
+//!   the rasteriser (`lib/raster`), the compositor (`userland/gui/wm`), and
+//!   the PNG decoder (`lib/image`), so every buffer a picture's size decides
+//!   is reserved the same way.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -67,6 +72,7 @@ pub mod cfloat;
 pub mod cnum;
 pub mod conf;
 pub mod count;
+pub mod fallible;
 pub mod fmt;
 pub mod mathf;
 pub mod retry;

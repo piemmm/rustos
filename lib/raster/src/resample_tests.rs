@@ -282,6 +282,28 @@ fn an_enlarged_alpha_edge_keeps_its_colour_across_the_ramp() {
     );
 }
 
+/// The destination is the one buffer a resample allocates, and at window
+/// or wallpaper size it is what a machine short of memory refuses. Both
+/// entry points reserve it and report the refusal; before this an
+/// infallible growth aborted the process instead. The extent here makes
+/// the reservation impossible arithmetically, so the refusal is the
+/// allocator's answer rather than a property of the host's free memory.
+#[test]
+fn a_destination_the_allocator_refuses_reports_out_of_memory() {
+    let bytes = flat(2, 2, [10, 20, 30, 255]);
+    let src = Rgba8Image::new(2, 2, &bytes).expect("valid source");
+    assert_eq!(
+        resample(&src, whole(2, 2), 1 << 31, 1 << 30).err(),
+        Some(ResampleError::OutOfMemory)
+    );
+
+    let surface = Surface::new(2, 2).expect("allocates");
+    assert_eq!(
+        surface.resampled(whole(2, 2), u32::MAX, u32::MAX).err(),
+        Some(ResampleError::OutOfMemory)
+    );
+}
+
 #[test]
 fn an_extreme_aspect_change_stays_total_and_exact() {
     let pixels = flat(1, 1024, [10, 20, 30, 255]);

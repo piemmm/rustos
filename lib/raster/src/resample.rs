@@ -83,12 +83,13 @@
 //! no more working memory than reducing it to a screen.
 //!
 //! Every entry point is total: degenerate geometry, a source region that
-//! does not lie inside its image, a mis-sized output buffer, and a band
-//! that runs past the destination all return a typed refusal rather than
-//! panicking or writing a partial result.
+//! does not lie inside its image, a mis-sized output buffer, a band that
+//! runs past the destination, and a buffer the allocator refuses all return
+//! a typed refusal rather than panicking or writing a partial result.
 
-use alloc::vec;
 use alloc::vec::Vec;
+
+use tairix_util::fallible;
 
 use crate::color::Pixel;
 
@@ -129,8 +130,9 @@ const ROW_SLOTS: usize = 8;
 
 /// Why a resample was refused.
 ///
-/// Every variant is a fail-closed refusal of geometry the caller got wrong;
-/// no input produces a partially-written destination.
+/// Every variant but [`OutOfMemory`](Self::OutOfMemory) is a fail-closed
+/// refusal of geometry the caller got wrong; no input, and no refusal,
+/// produces a partially-written destination.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ResampleError {
     /// The source image's declared size does not match its pixel bytes.
@@ -143,8 +145,14 @@ pub enum ResampleError {
     BandOutOfBounds,
     /// The output buffer is not exactly `rows * destination width * 4` bytes.
     OutputSizeMismatch,
-    /// The destination pixel count does not fit in memory on this target.
+    /// The destination's byte count does not fit `usize` on this target, so
+    /// no buffer could ever describe it.
     DestinationTooLarge,
+    /// A buffer this resample needs — the destination, or one of the
+    /// filter's working buffers — was refused by the allocator. Unlike every
+    /// other variant this is a property of the machine, not of the request,
+    /// so the same call may be granted later.
+    OutOfMemory,
 }
 
 /// A borrowed straight-alpha RGBA8 image: the shape
@@ -420,8 +428,9 @@ impl Rows for PixelImage<'_> {
 /// # Errors
 ///
 /// Every [`ResampleError`] [`resample_rows`] can raise, plus
-/// [`ResampleError::DestinationTooLarge`] when the destination buffer could
-/// not be allocated on this target.
+/// [`ResampleError::DestinationTooLarge`] when the destination's byte count
+/// is unrepresentable on this target, and [`ResampleError::OutOfMemory`]
+/// when the allocator refuses the buffer.
 pub fn resample(
     src: &Rgba8Image<'_>,
     region: Region,
@@ -429,7 +438,7 @@ pub fn resample(
     dest_height: u32,
 ) -> Result<Vec<u8>, ResampleError> {
     let len = pixel_bytes(dest_width, dest_height).ok_or(ResampleError::DestinationTooLarge)?;
-    let mut out = vec![0u8; len];
+    let mut out = fallible::filled(len, 0u8).ok_or(ResampleError::OutOfMemory)?;
     resample_rows(
         src,
         region,
@@ -483,8 +492,7 @@ pub fn resample_rows(
     // A validated byte length is a whole number of samples, so the ragged
     // tail this splits off is always empty.
     let (quads, _tail) = out.as_chunks_mut::<CHANNELS>();
-    filter_band(src, region, band, quads);
-    Ok(())
+    filter_band(src, region, band, quads)
 }
 
 /// Resample `region` of the `width`×`height` premultiplied image `src` into
@@ -528,8 +536,7 @@ pub(crate) fn resample_pixels(
     if out.len() != samples {
         return Err(ResampleError::OutputSizeMismatch);
     }
-    filter_band(&image, region, band, out);
-    Ok(())
+    filter_band(&image, region, band, out)
 }
 
 /// One contiguous run of destination rows, of a destination of a stated size.
@@ -569,20 +576,29 @@ fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, Resam
 
 /// Filter `band` of `region` into `out`, which [`validate`] has already
 /// matched against the band's own geometry.
+///
+/// # Errors
+///
+/// [`ResampleError::OutOfMemory`] when the allocator refuses one of the
+/// plan or scratch buffers, before any of `out` is written.
 fn filter_band<R: Rows>(
     src: &R,
     region: Region,
     band: Band,
     out: &mut [<R::Space as Space>::Sample],
-) {
-    let columns = Axis::plan(region.x, region.width, band.dest_width);
-    let rows_plan = Axis::plan(region.y, region.height, band.dest_height);
+) -> Result<(), ResampleError> {
+    let columns =
+        Axis::plan(region.x, region.width, band.dest_width).ok_or(ResampleError::OutOfMemory)?;
+    let rows_plan =
+        Axis::plan(region.y, region.height, band.dest_height).ok_or(ResampleError::OutOfMemory)?;
     if columns.is_identity() && rows_plan.is_identity() {
         copy_rows(src, region, band, out);
-        return;
+        return Ok(());
     }
-    let mut cache = RowCache::new(band.dest_width, rows_plan.stride);
-    let mut accumulator = vec![0i64; samples_per_row(band.dest_width)];
+    let mut cache =
+        RowCache::new(band.dest_width, rows_plan.stride).ok_or(ResampleError::OutOfMemory)?;
+    let mut accumulator = fallible::filled(samples_per_row(band.dest_width), 0i64)
+        .ok_or(ResampleError::OutOfMemory)?;
     let width = band.dest_width as usize;
     let last = band.last_row().unwrap_or(band.dest_height);
     for (dest_y, chunk) in (band.first_row..last).zip(out.chunks_exact_mut(width.max(1))) {
@@ -613,6 +629,7 @@ fn filter_band<R: Rows>(
         }
         write_row::<R::Space>(&accumulator, chunk);
     }
+    Ok(())
 }
 
 /// Copy `region` of `src` straight into `band`'s destination rows.
@@ -693,8 +710,9 @@ struct Axis {
 
 impl Axis {
     /// Plan `dest_extent` destination samples over the `extent` source
-    /// samples starting at `origin`.
-    fn plan(origin: u32, extent: u32, dest_extent: u32) -> Self {
+    /// samples starting at `origin`, or `None` when the allocator refuses
+    /// the plan.
+    fn plan(origin: u32, extent: u32, dest_extent: u32) -> Option<Self> {
         let reducing = extent > dest_extent;
         let width = if reducing {
             area_taps(extent, dest_extent)
@@ -702,8 +720,8 @@ impl Axis {
             CUBIC_TAPS
         };
         let dest = dest_extent as usize;
-        let mut first = vec![0i64; dest];
-        let mut weights = vec![0i32; dest.saturating_mul(width)];
+        let mut first = fallible::filled(dest, 0i64)?;
+        let mut weights = fallible::filled(dest.saturating_mul(width), 0i32)?;
         for dest_sample in 0..dest_extent {
             let span = dest_sample as usize * width;
             let Some(row) = weights.get_mut(span..span + width) else {
@@ -723,7 +741,10 @@ impl Axis {
         }
 
         let (lead, stride) = live_span(&weights, width);
-        let mut taps = Vec::with_capacity(dest.saturating_mul(stride));
+        let mut taps = Vec::new();
+        if !fallible::reserve(&mut taps, dest.saturating_mul(stride)) {
+            return None;
+        }
         for (dest_sample, row) in weights.chunks_exact(width).enumerate() {
             let base = first.get(dest_sample).copied().unwrap_or(0);
             for tap in lead..lead + stride {
@@ -734,7 +755,7 @@ impl Axis {
                 });
             }
         }
-        Self { taps, stride }
+        Some(Self { taps, stride })
     }
 
     /// The taps of destination sample `dest_sample`, or nothing when the
@@ -933,15 +954,15 @@ struct RowCache {
 impl RowCache {
     /// A cache for `dest_width`-wide rows, deep enough for a destination
     /// row that reads `taps` source rows but never deeper than
-    /// [`ROW_SLOTS`].
-    fn new(dest_width: u32, taps: usize) -> Self {
+    /// [`ROW_SLOTS`], or `None` when the allocator refuses the rows.
+    fn new(dest_width: u32, taps: usize) -> Option<Self> {
         let slots = taps.clamp(1, ROW_SLOTS);
         let stride = samples_per_row(dest_width);
-        Self {
-            rows: vec![0i32; slots.saturating_mul(stride)],
-            held: vec![None; slots],
+        Some(Self {
+            rows: fallible::filled(slots.saturating_mul(stride), 0i32)?,
+            held: fallible::filled(slots, None)?,
             stride,
-        }
+        })
     }
 
     /// Source row `source_row` of `src`, filtered along `columns`.

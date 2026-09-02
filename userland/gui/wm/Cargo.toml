@@ -59,6 +59,10 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # `ReclaimCache` built from the shared desktop cache policy, never an
 # unbounded cache of its own.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The one shared fallible-allocation reservation: the scan-out frame and each
+# baked layer buffer are sized by the screen, so they are what a machine short
+# of memory refuses, and the compositor reports that rather than aborting.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the cursor cache's
 # audit sink is typed against: the controller never invents its own
 # logging vocabulary.
