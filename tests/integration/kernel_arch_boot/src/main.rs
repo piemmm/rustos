@@ -5,10 +5,16 @@
 //!
 //! `kernel_core::kernel_main` emits `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) once every init phase has succeeded. The
-//! integration test binary observes the audit sink, and as soon as
-//! the boot-completed record fires it flips QEMU's `isa-debug-exit`
-//! device to success (`qemu_exit::exit_success`). The host-side
-//! `tools/qemu::Runner` then registers the test as
+//! integration test binary observes the audit sink, and on the
+//! boot-completed record it exercises the growable kernel heap and
+//! requires the production boot to have installed the fatal fault
+//! handler — with that slot empty the dedicated `#PF` entry keeps its
+//! fail-closed default (park the CPU with interrupts masked, print
+//! nothing), so the machine dies mutely and deadlocks every peer
+//! waiting on a lock the parked CPU still holds
+//! (`plans/OPEN-DEFECTS.md` D13) — before flipping QEMU's
+//! `isa-debug-exit` device to success (`qemu_exit::exit_success`). The
+//! host-side `tools/qemu::Runner` then registers the test as
 //! `tairix_qemu::Outcome::Pass`.
 //!
 //! ## How it differs from the production `tairix-kernel` binary
@@ -74,6 +80,11 @@ mod kernel {
     /// integration test stops re-shipping a stale literal here.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
+    /// `EventId` this vertical's own FAIL diagnostics carry, so the
+    /// transcript names *which* post-boot check refused. Outside the
+    /// `kernel/core` 4000-range boot ids above.
+    const BOOT_TEST_FAIL_EVENT_ID: EventId = EventId(4310);
+
     /// Sink that forwards every event to [`SERIAL_SINK`] (so the
     /// serial log captured by `tools/qemu::Runner` records the full
     /// boot timeline) and, on observing [`BOOT_COMPLETED_EVENT_ID`],
@@ -96,6 +107,20 @@ mod kernel {
                 // Boot proved the remap window exists; this proves the heap
                 // can grow a region into it and dereference every page.
                 if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
+                    qemu_exit::exit_failure();
+                }
+                // A booted kernel must be able to say why it died. With the
+                // fatal-fault slot empty the dedicated `#PF` entry keeps its
+                // fail-closed default — park the CPU with interrupts masked,
+                // print nothing — so the machine goes silent, and deadlocks
+                // every peer waiting on a lock the parked CPU still holds.
+                if tairix_arch_x86_64::fault::fault_handler().is_none() {
+                    SerialSink::new().write_event(&Event {
+                        level: tairix_log::Level::Error,
+                        id: BOOT_TEST_FAIL_EVENT_ID,
+                        message: "boot left the fatal-fault slot empty",
+                        fields: &[],
+                    });
                     qemu_exit::exit_failure();
                 }
                 qemu_exit::exit_success();

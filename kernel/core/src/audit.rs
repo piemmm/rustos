@@ -23,6 +23,7 @@
 //! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
+//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, and `fault_pc` fields name the port's exception syndrome, the faulting address, and the faulting instruction; the register and `frame_N` blocks are the panic dump's. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
@@ -88,6 +89,15 @@ pub enum AuditEvent {
     RamSelfTest,
     /// The kernel panicked; the handler logged context and is halting.
     Panic,
+    /// A fatal CPU exception was taken in kernel mode — a same-privilege
+    /// abort, page fault, or illegal instruction the kernel has no fix-up
+    /// for.
+    ///
+    /// Distinct from [`Self::Panic`] because the two carry different
+    /// evidence and call for different triage: a panic names a source
+    /// location, a fault names the hardware syndrome, the faulting address,
+    /// and the faulting instruction. Neither is fabricated for the other.
+    KernelFault,
     /// A syscall handler's backing subsystem is intentionally not yet
     /// wired in.
     ///
@@ -601,6 +611,7 @@ impl AuditEvent {
             Self::BootCompleted => 4004,
             Self::RamSelfTest => 4005,
             Self::Panic => 4010,
+            Self::KernelFault => 4011,
             Self::SyscallFeatureUnavailable => 4020,
             Self::SyscallNoCallerContext => 4021,
             Self::ProcessSpawned => 4030,
@@ -668,6 +679,7 @@ impl AuditEvent {
             Self::BootCompleted => "kernel boot completed",
             Self::RamSelfTest => "ram self-test completed",
             Self::Panic => "kernel panic",
+            Self::KernelFault => "fatal kernel fault",
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
             Self::SyscallNoCallerContext => "syscall has no caller context",
             Self::ProcessSpawned => "process spawned",
@@ -750,6 +762,7 @@ mod tests {
             AuditEvent::BootCompleted,
             AuditEvent::RamSelfTest,
             AuditEvent::Panic,
+            AuditEvent::KernelFault,
             AuditEvent::SyscallFeatureUnavailable,
             AuditEvent::SyscallNoCallerContext,
             AuditEvent::ProcessSpawned,
@@ -819,6 +832,7 @@ mod tests {
             AuditEvent::BootCompleted.id().0,
             AuditEvent::RamSelfTest.id().0,
             AuditEvent::Panic.id().0,
+            AuditEvent::KernelFault.id().0,
             AuditEvent::SyscallFeatureUnavailable.id().0,
             AuditEvent::SyscallNoCallerContext.id().0,
             AuditEvent::ProcessSpawned.id().0,

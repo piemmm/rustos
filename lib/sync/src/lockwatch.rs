@@ -27,6 +27,49 @@
 use core::panic::Location;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+/// Installed resolver for the running CPU's dense id (a `fn() -> Option<u32>`
+/// stored as a `usize`, `0` = none). One seam, read both by the spinlocks
+/// (to stamp a lock's owner) and by the kernel's observer (to pick the
+/// per-CPU slot to record into), so the two can never disagree about which
+/// core they are on.
+static CPU_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Resolver for the running CPU's dense id. Must be lock-free (it runs
+/// inside the lock primitives) — a banked-register read, never a lookup
+/// that could itself take a lock.
+pub type CpuIdFn = fn() -> Option<u32>;
+
+/// Install the running-CPU-id resolver. Idempotent; the last writer wins.
+pub fn install_cpu_id(resolver: CpuIdFn) {
+    CPU_ID.store(resolver as usize, Ordering::Relaxed);
+}
+
+/// The running CPU's dense id, or [`None`] before a resolver is installed.
+#[inline]
+#[must_use]
+pub fn current_cpu() -> Option<u32> {
+    let raw = CPU_ID.load(Ordering::Relaxed);
+    if raw == 0 {
+        return None;
+    }
+    // SAFETY: `install_cpu_id` only ever stores a value produced by
+    // `CpuIdFn as usize`; a non-zero slot is therefore a valid such `fn`
+    // with no captured environment.
+    let f: CpuIdFn = unsafe { core::mem::transmute::<usize, CpuIdFn>(raw) };
+    f()
+}
+
+/// An owner stamp: `0` means unowned, otherwise the owning CPU's dense id
+/// plus one, so a zeroed cell reads as "nobody" without stealing CPU 0's id.
+#[inline]
+#[must_use]
+pub fn owner_stamp() -> u32 {
+    match current_cpu() {
+        Some(cpu) => cpu.saturating_add(1),
+        None => 0,
+    }
+}
+
 /// A lock-lifecycle transition reported to the installed [`ObserverFn`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -45,6 +88,11 @@ pub enum LockEvent {
     /// The CPU's current lock was released (the most recent record is
     /// dropped).
     Released = 3,
+    /// A spin-acquire is still contended: `aux` carries the contended lock's
+    /// current owner stamp, so a wedged spinner's report names *which* core
+    /// is holding the lock against it — and, when the holder's own record
+    /// claims to hold it, proves that record is live rather than stale.
+    Contended = 4,
 }
 
 /// The observer the kernel installs to record lock lifecycle events into
@@ -53,7 +101,10 @@ pub enum LockEvent {
 /// `site_ptr` is the acquiring call's `&'static Location<'static>` reduced
 /// to a `usize` (`0` for [`LockEvent::Released`], which carries no site).
 /// The kernel observer reconstructs the reference to read `file`/`line`.
-pub type ObserverFn = fn(event: LockEvent, site_ptr: usize);
+///
+/// `aux` is the contended lock's owner stamp for [`LockEvent::Contended`]
+/// and `0` for every other event.
+pub type ObserverFn = fn(event: LockEvent, site_ptr: usize, aux: u32);
 
 /// The installed observer, as a thin `fn` pointer stored as a `usize`
 /// (`0` = none). Relaxed access is sufficient: this is a best-effort
@@ -67,7 +118,7 @@ pub fn install(observer: ObserverFn) {
 
 /// Forward one event to the installed observer, if any.
 #[inline]
-fn dispatch(event: LockEvent, site_ptr: usize) {
+fn dispatch(event: LockEvent, site_ptr: usize, aux: u32) {
     let raw = OBSERVER.load(Ordering::Relaxed);
     if raw != 0 {
         // SAFETY: `install` only ever stores a value produced by
@@ -75,7 +126,7 @@ fn dispatch(event: LockEvent, site_ptr: usize) {
         // `ObserverFn`, which is a plain `fn` with no captured environment
         // and `'static` validity.
         let f: ObserverFn = unsafe { core::mem::transmute::<usize, ObserverFn>(raw) };
-        f(event, site_ptr);
+        f(event, site_ptr, aux);
     }
 }
 
@@ -83,13 +134,23 @@ fn dispatch(event: LockEvent, site_ptr: usize) {
 /// of the acquiring call).
 #[inline]
 pub fn note(event: LockEvent, site: &'static Location<'static>) {
-    dispatch(event, core::ptr::from_ref(site) as usize);
+    dispatch(event, core::ptr::from_ref(site) as usize, 0);
+}
+
+/// Report that the spin for `site` is still contended, and by whom.
+#[inline]
+pub fn note_contended(site: &'static Location<'static>, owner: u32) {
+    dispatch(
+        LockEvent::Contended,
+        core::ptr::from_ref(site) as usize,
+        owner,
+    );
 }
 
 /// Report the release (drop) of the CPU's current lock.
 #[inline]
 pub fn note_release() {
-    dispatch(LockEvent::Released, 0);
+    dispatch(LockEvent::Released, 0, 0);
 }
 
 #[cfg(test)]
@@ -132,5 +193,14 @@ mod tests {
         assert_eq!(LockEvent::Acquired as u8, 1);
         assert_eq!(LockEvent::TryAcquired as u8, 2);
         assert_eq!(LockEvent::Released as u8, 3);
+        assert_eq!(LockEvent::Contended as u8, 4);
+    }
+
+    /// With no CPU-id resolver installed the owner stamp is `0` ("nobody"),
+    /// so a lock taken before the kernel installs one records no owner
+    /// rather than falsely naming CPU 0.
+    #[test]
+    fn the_owner_stamp_is_nobody_without_a_resolver() {
+        assert_eq!(owner_stamp(), 0);
     }
 }

@@ -453,7 +453,16 @@ static LOCK_DIAG_CPU_FN: core::sync::atomic::AtomicUsize = core::sync::atomic::A
 #[cfg(feature = "watchdog-diagnostics")]
 pub fn install_lock_diagnostics(current_cpu: fn() -> Option<CpuId>) {
     LOCK_DIAG_CPU_FN.store(current_cpu as usize, Ordering::Relaxed);
+    tairix_sync::lockwatch::install_cpu_id(lock_diag_current_cpu_id);
     tairix_sync::lockwatch::install(lock_observer);
+}
+
+/// The running CPU's dense id for `tairix_sync`, which stamps a lock's
+/// owner with it. Same resolver the observer uses, so the owner stamp and
+/// the per-CPU slot can never name different cores.
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_diag_current_cpu_id() -> Option<u32> {
+    lock_diag_current_cpu().map(|cpu| cpu as u32)
 }
 
 /// Resolve the running CPU's dense id through the installed resolver, or
@@ -480,7 +489,7 @@ fn lock_diag_current_cpu() -> Option<CpuId> {
 /// and stores into per-CPU atomics. A context with no resolvable CPU or no
 /// per-CPU slot (pre-init, or a stray id) records nothing (fail-safe).
 #[cfg(feature = "watchdog-diagnostics")]
-fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize) {
+fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize, aux: u32) {
     use tairix_sync::lockwatch::LockEvent;
     let Some(cpu) = lock_diag_current_cpu() else {
         return;
@@ -495,6 +504,8 @@ fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize) {
         // pushed by the preceding `Acquiring` for the same lock.
         LockEvent::Acquired => lock_mark_held(state),
         LockEvent::Released => lock_pop(state),
+        // The spin is still blocked: remember who is holding it against us.
+        LockEvent::Contended => lock_note_owner(state, aux),
     }
 }
 
@@ -514,6 +525,7 @@ fn lock_push(state: &CpuState, site_ptr: usize, acquiring: bool) {
     let recordable = depth < cpu_state::LOCK_STACK_MAX;
     if recordable {
         state.lock_sites[depth].store(0, Ordering::Relaxed);
+        state.lock_owner[depth].store(0, Ordering::Relaxed);
         set_acquiring(state, depth, false);
     }
     state
@@ -532,6 +544,17 @@ fn lock_mark_held(state: &CpuState) {
     if let Some(top) = depth.checked_sub(1) {
         if top < cpu_state::LOCK_STACK_MAX {
             set_acquiring(state, top, false);
+        }
+    }
+}
+
+/// Record the owner stamp of the lock the innermost entry is spinning for.
+#[cfg(feature = "watchdog-diagnostics")]
+fn lock_note_owner(state: &CpuState, owner: u32) {
+    let depth = state.lock_depth.load(Ordering::Relaxed);
+    if let Some(top) = depth.checked_sub(1) {
+        if top < cpu_state::LOCK_STACK_MAX {
+            state.lock_owner[top].store(owner, Ordering::Relaxed);
         }
     }
 }
@@ -1393,6 +1416,11 @@ struct Diag {
     /// section). Rendered as the `k_lock_state` tag.
     #[cfg(feature = "watchdog-diagnostics")]
     lock_acquiring: bool,
+    /// Owner stamp of the contended [`Self::lock_site`] (`0` = unknown or
+    /// unheld, else holding CPU id + 1), read from the lock by this CPU
+    /// while spinning. Rendered as `k_lock_owner`.
+    #[cfg(feature = "watchdog-diagnostics")]
+    lock_owner: u32,
     /// A **fresh** program counter of the hard-locked CPU, read by the
     /// observer over the port's non-maskable external-debug channel
     /// ([`WatchdogArch::remote_pc_sample`], aarch64 CoreSight `EDPCSR`).
@@ -1478,6 +1506,8 @@ impl Diag {
         #[cfg(feature = "watchdog-diagnostics")]
         lock_acquiring: false,
         #[cfg(feature = "watchdog-diagnostics")]
+        lock_owner: 0,
+        #[cfg(feature = "watchdog-diagnostics")]
         live_pc: None,
         #[cfg(feature = "watchdog-diagnostics")]
         live_context: 0,
@@ -1500,10 +1530,10 @@ impl Diag {
     /// clamped to the deepest stored entry (a nesting that deep is
     /// pathological and the outer entries still name a real held lock).
     #[cfg(feature = "watchdog-diagnostics")]
-    fn lock_snapshot(state: &CpuState) -> (usize, bool) {
+    fn lock_snapshot(state: &CpuState) -> (usize, bool, u32) {
         let depth = state.lock_depth.load(Ordering::Acquire);
         if depth == 0 {
-            return (0, false);
+            return (0, false, 0);
         }
         let top = depth - 1;
         let idx = top.min(cpu_state::LOCK_STACK_MAX - 1);
@@ -1513,7 +1543,12 @@ impl Diag {
         // acquiring one.
         let acquiring = top < cpu_state::LOCK_STACK_MAX
             && state.lock_acquiring.load(Ordering::Relaxed) & (1u32 << top) != 0;
-        (site, acquiring)
+        let owner = if idx < cpu_state::LOCK_STACK_MAX {
+            state.lock_owner[idx].load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        (site, acquiring, owner)
     }
 
     /// Read a CPU's recorded last-known context. The observer-supplied
@@ -1544,7 +1579,7 @@ impl Diag {
             (breadcrumb, breadcrumb_detail, breadcrumb_seq, bt, bt_len)
         };
         #[cfg(feature = "watchdog-diagnostics")]
-        let (lock_site, lock_acquiring) = Self::lock_snapshot(state);
+        let (lock_site, lock_acquiring, lock_owner) = Self::lock_snapshot(state);
         Self {
             pc: state.wd_ctx_pc.load(Ordering::Acquire),
             task: state.wd_ctx_task.load(Ordering::Acquire),
@@ -1566,6 +1601,8 @@ impl Diag {
             bt_len,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_site,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring,
             // A fresh cross-core sample is an observer action, not part of a
@@ -1882,10 +1919,10 @@ fn report_detail_to(
     let mut kdetail_buf = [0u8; 18];
     let mut bt_buf = [0u8; BT_RENDER_BYTES];
 
-    let mut fields: [tairix_log::Field<'_>; 15] = [tairix_log::Field {
+    let mut fields: [tairix_log::Field<'_>; DETAIL_FIELDS_MAX] = [tairix_log::Field {
         key: "cpu",
         value: tairix_log::FieldValue::UnsignedInt(u64::from(cpu)),
-    }; 15];
+    }; DETAIL_FIELDS_MAX];
     let mut n = 1;
     // `observer` correlates this detail line with its summary line on the
     // audit trail (both carry the same `cpu`/`observer`).
@@ -2005,6 +2042,18 @@ fn report_detail_to(
             }),
         };
         n += 1;
+        // Which core holds the lock against this one. Stamped by the holder
+        // and read by this CPU while spinning, so it pairs a wedged spinner
+        // with its holder instead of leaving that to be inferred — and a
+        // holder whose own record claims `held` is confirmed live by the
+        // spinner naming it here. `0` means the stamp was not observed.
+        if diag.lock_owner != 0 {
+            fields[n] = tairix_log::Field {
+                key: "k_lock_owner",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(diag.lock_owner - 1)),
+            };
+            n += 1;
+        }
     }
     // The pre-silence backtrace, image-relative frames — the whole call nest
     // the CPU was in ~1 s before it went silent, which the lone `pre_silence`
@@ -2018,6 +2067,14 @@ fn report_detail_to(
 /// separating comma (20), and the trailing comma is simply not written.
 #[cfg(feature = "watchdog-diagnostics")]
 const BT_RENDER_BYTES: usize = cpu_state::WD_BT_MAX * 20;
+
+/// Slots for the lockup-detail record's fields. Every field is written by
+/// index, so this must stay at or above the number a single report can emit
+/// (currently 15, several of them mutually exclusive); the spare slot is
+/// headroom, because overrunning it in the reporter would fault the very
+/// path that diagnoses a wedge.
+#[cfg(feature = "watchdog-diagnostics")]
+const DETAIL_FIELDS_MAX: usize = 16;
 
 /// Append the `k_bt=+<off0>,+<off1>,…` pre-silence-backtrace field to
 /// `fields` at index `n`, returning the new length. Each frame is rendered
@@ -2100,6 +2157,9 @@ mod tests {
             }
             state.lock_depth.store(0, Ordering::Relaxed);
             state.lock_acquiring.store(0, Ordering::Relaxed);
+            for slot in &state.lock_owner {
+                slot.store(0, Ordering::Relaxed);
+            }
             for slot in &state.lock_sites {
                 slot.store(0, Ordering::Relaxed);
             }
@@ -2151,6 +2211,8 @@ mod tests {
             lock_site: 0,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             #[cfg(feature = "watchdog-diagnostics")]
             live_pc: None,
             #[cfg(feature = "watchdog-diagnostics")]
@@ -2682,6 +2744,8 @@ mod tests {
             bt_len: 3,
             lock_site: 0,
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             live_pc: Some(TEST_IMAGE_BASE + 0x0018_1dc0),
             live_context: 0x0000_2000,
             in_flight: Diag::IN_FLIGHT_UNREAD,
@@ -2745,6 +2809,8 @@ mod tests {
             bt_len: 1,
             lock_site: 0,
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             live_pc: None,
             live_context: 0,
             in_flight: Diag::IN_FLIGHT_UNREAD,
@@ -2909,26 +2975,26 @@ mod tests {
         const INNER: usize = 0x2000;
         let state = reset(60);
         // No lock held → nothing recorded.
-        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
         // Spin-acquire the outer lock: recorded as acquiring, then promoted
         // to held once the CAS wins.
         lock_push(state, OUTER, true);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, true));
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, true, 0));
         lock_mark_held(state);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, false));
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, false, 0));
         // A nested (held) inner lock becomes the innermost record.
         lock_push(state, INNER, false);
-        assert_eq!(Diag::lock_snapshot(state), (INNER, false));
+        assert_eq!(Diag::lock_snapshot(state), (INNER, false, 0));
         // Releasing the inner lock restores the outer (held) as innermost.
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, false));
+        assert_eq!(Diag::lock_snapshot(state), (OUTER, false, 0));
         // Releasing the outer lock leaves nothing recorded.
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
         // A stray extra release underflows safely (fail-safe: no panic, no
         // wraparound into a bogus depth).
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
     }
 
     /// A CPU spinning for a lock stays `acquiring` across a nested lock
@@ -2946,17 +3012,42 @@ mod tests {
         const NESTED: usize = 0x4000;
         let state = reset(62);
         lock_push(state, CONTENDED, true);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true));
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
         // An interrupt taken mid-spin takes and releases its own lock.
         lock_push(state, NESTED, true);
         lock_mark_held(state);
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true));
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
         // Only winning the CAS promotes the outer entry to held.
         lock_mark_held(state);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false));
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false, 0));
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+    }
+
+    /// A contended entry records *which* core holds the lock against it, and
+    /// claiming a slot clears any owner the previous occupant left — so the
+    /// report can never pair a spinner with a stale holder.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn a_contended_lock_records_its_holder() {
+        const CONTENDED: usize = 0x5000;
+        const OTHER: usize = 0x6000;
+        let state = reset(63);
+        lock_push(state, CONTENDED, true);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
+        // The holder stamp is the owning CPU's id plus one.
+        lock_note_owner(state, 4);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 4));
+        // Winning the lock leaves the observed holder in place; the entry is
+        // simply no longer acquiring.
+        lock_mark_held(state);
+        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false, 4));
+        lock_pop(state);
+        // A slot reused by an uncontended acquire reports no owner.
+        lock_push(state, OTHER, false);
+        assert_eq!(Diag::lock_snapshot(state), (OTHER, false, 0));
+        lock_pop(state);
     }
 
     /// Nesting past the recorded cap still balances on release (depth counts
@@ -2974,9 +3065,9 @@ mod tests {
         for _ in 0..cpu_state::LOCK_STACK_MAX {
             lock_pop(state);
         }
-        assert_eq!(Diag::lock_snapshot(state), (0x1000, false));
+        assert_eq!(Diag::lock_snapshot(state), (0x1000, false, 0));
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false));
+        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
     }
 
     /// The debug detail names the stuck spinlock as `k_lock=<file>` +
@@ -3004,6 +3095,8 @@ mod tests {
             bt_len: 0,
             lock_site: core::ptr::from_ref::<core::panic::Location<'static>>(site) as usize,
             lock_acquiring: true,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             live_pc: None,
             live_context: 0,
             in_flight: Diag::IN_FLIGHT_UNREAD,
@@ -3017,6 +3110,8 @@ mod tests {
         let sink2: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let held = Diag {
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             ..d
         };
         report_detail_to(sink2, Level::Error, 3, Some(0), &held);
@@ -3047,6 +3142,8 @@ mod tests {
             bt_len: 0,
             lock_site: ptr,
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             live_pc: None,
             live_context: 0,
             in_flight: Diag::IN_FLIGHT_UNREAD,
@@ -3378,6 +3475,8 @@ mod tests {
             bt_len: 0,
             lock_site: 0,
             lock_acquiring: false,
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: 0,
             live_pc: None,
             live_context: 0,
             in_flight: Diag::IN_FLIGHT_UNREAD,

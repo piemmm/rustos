@@ -31,6 +31,11 @@
 //!    proof the production boot brings every discovered core into
 //!    service; a `SecondaryCpuStartFailed` (`EventId(4071)`) is an
 //!    immediate FAIL.
+//! 4. It also requires the production boot to have installed the fatal
+//!    fault handler: with that slot empty an EL1 exception parks the CPU
+//!    with every interrupt masked and prints nothing, so the machine dies
+//!    mutely and deadlocks every peer waiting on a lock the parked CPU
+//!    still holds (`plans/OPEN-DEFECTS.md` D13).
 //!
 //! A regression that fails any init phase — or that loses a secondary
 //! core — never reaches the finisher, so the run times out and the
@@ -121,6 +126,9 @@ mod kernel {
     const FAIL_VIDEO_INACTIVE: NonZeroU16 = fail_point!(1);
     const FAIL_SECONDARY_START: NonZeroU16 = fail_point!(2);
     const FAIL_KHEAP_GROWTH: NonZeroU16 = fail_point!(3);
+    /// Failure finisher code for a boot that left the fatal-fault slot
+    /// empty, so a kernel-mode exception would park the CPU mutely.
+    const FAIL_NO_FAULT_HANDLER: NonZeroU16 = fail_point!(4);
 
     /// Set once `BootCompleted` was observed (with the video console
     /// active); the PASS finisher additionally requires every secondary
@@ -178,6 +186,14 @@ mod kernel {
                 // can grow a region into it and dereference every page.
                 if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
                     qemu_exit::exit_failure(FAIL_KHEAP_GROWTH);
+                }
+                // A booted kernel must be able to say why it died. With the
+                // fatal-fault slot empty an EL1 exception parks the CPU with
+                // every interrupt masked and prints nothing, so the machine
+                // goes silent — and deadlocks every peer waiting on a lock
+                // the parked CPU still holds.
+                if tairix_arch_aarch64::fault::fault_handler().is_none() {
+                    qemu_exit::exit_failure(FAIL_NO_FAULT_HANDLER);
                 }
                 BOOT_COMPLETED.store(true, Ordering::SeqCst);
                 Self::exit_if_complete();

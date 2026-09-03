@@ -1,39 +1,37 @@
-//! Panic-handler bridge between the riscv64 kernel binary and
-//! [`tairix_kernel_core::handle_panic`].
+//! riscv64 half of the fatal-report bridge: the port's four values plus
+//! its two entry points ([`handle_panic_via_kernel_core`] for a `panic!`,
+//! [`install_kernel_fault_handler`] for a fatal S-mode trap).
 //!
 //! # Why this lives in the bin's library half
 //!
 //! The architecture crate (`tairix_arch_riscv64`) may not depend on
 //! `kernel/core` (the layering contract: an arch port names only the Arch
-//! HAL and `lib/*`), so the bridge that turns a `#[panic_handler]` into a
-//! `kernel_core::handle_panic` call lives here, in the bin crate that
-//! already links both — the exact sibling of [`crate::x86_64::panic_ctx`]
-//! and [`crate::aarch64::panic_ctx`]. The previous per-arch SBI-banner
-//! body in the arch crate is gone (one panic path, not three).
+//! HAL and `lib/*`), so the bridge that turns a `#[panic_handler]` or a
+//! trap-vector callback into a `kernel_core` report lives here, in the bin
+//! crate that already links both. The shared policy is
+//! [`crate::fatal_bridge`]; this module is only the riscv64 values.
 //!
 //! # How [`RiscvBinArch`] is reached
 //!
-//! `handle_panic` needs a `PanicContext` carrying a `&RiscvBinArch` (for
-//! `current_cpu` / `halt`) and the audit sink. The arch handle is built
-//! partway through boot, so `boot` publishes `Arc::as_ptr(&arc)` into
-//! [`PANIC_ARCH_PTR`] before any code that could panic runs. The handler
-//! loads the pointer, and:
-//!
-//! * if non-null, forwards through `kernel_core::handle_panic` with the
-//!   port's [`Backtracer`] attached, so the dump carries registers and a
-//!   bounded backtrace;
-//! * otherwise (a pre-init panic) it emits one best-effort SBI-console
-//!   record and parks the hart forever (fail closed, never a silent reset).
+//! The report needs a `&RiscvBinArch` (for `current_cpu` / `halt`). The
+//! arch handle is built partway through boot, so `boot` publishes
+//! `Arc::as_ptr(&arc)` into [`PANIC_ARCH_PTR`] before any code that could
+//! panic runs. Before that publish the report falls back to one
+//! best-effort SBI-console line and parks (fail closed, never a silent
+//! reset).
 
-use core::fmt::Write as _;
+use core::fmt::{Arguments, Write as _};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use tairix_arch_api::backtrace::CpuStateCapture;
 use tairix_arch_riscv64::backtrace::Backtracer;
+use tairix_arch_riscv64::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_arch_riscv64::serial::SbiWriter;
 use tairix_arch_riscv64::{halt_current_hart, SERIAL_SINK};
-use tairix_kernel_core::{handle_panic, PanicContext};
+use tairix_log::Sink;
 
+use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
 use crate::riscv64::boot::RiscvBinArch;
 
 /// The riscv64 post-mortem CPU-state handle the bridge attaches.
@@ -57,31 +55,63 @@ pub static PANIC_ARCH_PTR: AtomicPtr<RiscvBinArch> = AtomicPtr::new(core::ptr::n
 /// standard caller is `Arc::as_ptr(&arc)`, where `arc` is kept alive by
 /// `BootInfo`'s `arch` field.
 pub unsafe fn publish_arch(arch_ptr: *const RiscvBinArch) {
-    // `Release` so a panic observes the initialised pointer; the matching
-    // `Acquire` load is in [`handle_panic_via_kernel_core`].
+    // `Release` so a report observes the initialised pointer; the matching
+    // `Acquire` load is in `RiscvFatal::arch`.
     PANIC_ARCH_PTR.store(arch_ptr.cast_mut(), Ordering::Release);
 }
 
-/// Shared `#[panic_handler]` body for the riscv64 kernel binaries.
-///
-/// Always returns `!`. Forwards to `tairix_kernel_core::handle_panic`
-/// once the arch handle is published; otherwise emits one SBI-console
-/// record and parks the hart.
-pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
-    let raw = PANIC_ARCH_PTR.load(Ordering::Acquire);
-    if raw.is_null() {
-        // Pre-init panic: no arch handle for `current_cpu`.
-        let mut w = SbiWriter;
-        let _ = writeln!(w, "[tairix-kernel] riscv64 panic before init: {info}");
-        halt_current_hart()
-    } else {
+/// This port's [`FatalReport`] values.
+struct RiscvFatal;
+
+impl FatalReport for RiscvFatal {
+    type Arch = RiscvBinArch;
+
+    fn arch() -> Option<&'static RiscvBinArch> {
+        let raw = PANIC_ARCH_PTR.load(Ordering::Acquire);
+        if raw.is_null() {
+            return None;
+        }
         // SAFETY: `publish_arch` only ever stores `Arc::as_ptr(&arc)`,
         // where `arc: Arc<RiscvBinArch>` is held by `kernel_core`'s
         // `BootInfo` for the running kernel's lifetime; the pointee
-        // therefore outlives every panic that can observe a non-null
+        // therefore outlives every report that can observe a non-null
         // pointer.
-        let arch: &RiscvBinArch = unsafe { &*raw };
-        let ctx = PanicContext::new(arch, &SERIAL_SINK).with_backtrace(&BACKTRACER);
-        handle_panic(info, &ctx)
+        Some(unsafe { &*raw })
     }
+
+    fn audit_sink() -> &'static (dyn Sink + Sync) {
+        &SERIAL_SINK
+    }
+
+    fn backtrace() -> &'static dyn CpuStateCapture {
+        &BACKTRACER
+    }
+
+    fn report_before_init(reason: Arguments<'_>) -> ! {
+        let mut w = SbiWriter;
+        let _ = writeln!(w, "[tairix-kernel] riscv64 {reason}");
+        halt_current_hart()
+    }
+}
+
+/// Shared `#[panic_handler]` body for the riscv64 kernel binaries.
+pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
+    report_panic::<RiscvFatal>(info)
+}
+
+/// Install the production fatal-fault handler on this port.
+///
+/// Called at `boot` entry, before `stvec` can deliver anything, so no
+/// S-mode trap is ever taken with the slot empty — an empty slot parks the
+/// hart with interrupts masked and prints nothing, which is how a kernel
+/// fault used to disappear.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] when something published a
+/// handler first. The slot is set-once by design, so the existing handler
+/// keeps the machine's fatal policy; only a QEMU vertical that deliberately
+/// observes its own faults installs ahead of boot.
+pub fn install_kernel_fault_handler() -> Result<(), SetFaultHandlerError> {
+    set_fault_handler(report_kernel_fault::<RiscvFatal>)
 }

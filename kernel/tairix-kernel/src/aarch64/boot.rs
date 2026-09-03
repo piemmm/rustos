@@ -351,6 +351,19 @@ pub fn boot(
     let mut boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
 
+    // Route a fatal EL1 (kernel-mode) exception into the one fatal-report
+    // path, now that the vectors above can deliver one and before any
+    // further work can fault. With the slot empty the vector parks the CPU
+    // with every interrupt masked and prints nothing, so a kernel fault
+    // becomes a mute machine — and, if it lands inside a lock's critical
+    // section, a system-wide deadlock behind the guard it never dropped.
+    //
+    // The slot is set-once and this call never overrides an occupant: a
+    // QEMU vertical that observes its own deliberate faults publishes its
+    // handler ahead of `boot` and keeps it, asserting its own install
+    // succeeded. Either way the machine has exactly one fatal policy.
+    let _ = crate::aarch64::panic_ctx::install_kernel_fault_handler();
+
     // The screen grids need the heap the cacheable identity map just made
     // usable, so they are attached here rather than at display discovery.
     if mmu_on {

@@ -1687,6 +1687,73 @@ the RTO disarms (it froze before the fix). Arch-neutral — every port shares
 
 ## D13 — secondary-CPU hard lockup under `stress --cpu 20` (enabler landed, fix OPEN)
 
+**Root cause of the Pi 4 boot wedge (same family, now established).** On a
+Raspberry Pi 4 the boot wedges reproducibly right after the `bcm2835` i2c
+driver instances exit (`EXIT_NO_CHILDREN`, 94): CPU 1 holds
+`CallEndpoint::inner` acquired in `recv_call` and never releases it, and the
+task-exit path on another CPU spins for that same lock forever, so driver
+autoload never resumes. `k_lock_owner` proves the hold is **live**, not a
+stale record, and the heap lock's own instrumentation proves neither core is
+in the allocator.
+
+`recv_call`'s critical section is a handful of `O(1)` operations with no
+nested lock, no allocation and nothing that can block, so the holding core
+cannot be *executing* there for ten seconds. It matches one path exactly: a
+same-EL (kernel) synchronous exception taken inside that section reaches
+`fatal_exception`, finds **no installed fault handler**, and falls through to
+`halt_current_cpu()` — `msr DAIFSet, #0xf` plus a `wfi` loop. That masks every
+interrupt (hence a *hard* lockup the maskable sample cannot see), leaves the
+`SpinLockGuard` undropped (hence the live owner stamp), never re-stamps the
+breadcrumb (hence `k_site=kernel_body` frozen), and prints nothing.
+
+That the fault *occurred* is still inference, not observation: the state
+matches `halt_current_cpu()` exactly, and `recv_call`'s critical section
+cannot be executing for ten seconds, but nothing has printed a syndrome. The
+handler installed under defect 1 below is what settles it — the next metal
+reproduction reports `syndrome` / `fault_addr` / `fault_pc` instead of going
+quiet. One hypothesis worth auditing meanwhile: the endpoint / `Inner`
+lifetime, since the driver-store kthread holds the endpoint on its own frame
+while `callreg` holds an `Arc`.
+
+Two defects follow:
+
+1. **A kernel fault was silent in production — FIXED.** `set_fault_handler`
+   existed on every port but *only* QEMU integration-test binaries ever
+   called it, so the production kernel took the no-handler branch and parked
+   mutely. The panic path itself was already complete
+   (`plans/FIX-PANICS.md`) — kernel faults simply never reached it. Closed by
+   giving that path a second entry: `kernel_core::fault_dump` takes the
+   arch-neutral `KernelFault { syndrome, address, pc }` triple and shares the
+   whole reporting body with `panic_dump` (same register snapshot, same
+   bounded backtrace, same re-entrancy guard, same halt), emitting
+   `AuditEvent::KernelFault` (`4011`) with `syndrome` / `fault_addr` /
+   `fault_pc`. A distinct event, not an extended `Panic`: a fault has no
+   source position and a panic has no syndrome, and neither is fabricated for
+   the other. The per-port piece is the four values of one
+   `fatal_bridge::FatalReport` impl, so the null-arch-handle window, the sink
+   choice, and the context assembly have one definition shared by the
+   `#[panic_handler]` and the `extern "C"` fault shim across all three
+   bare-metal ports; `boot` installs the shim the moment its exception vector
+   is live. wasm32 has no synchronous-exception vector to install into (the
+   host traps), so it is untouched.
+   The metal consequence: the Pi 4 wedge now names the faulting instruction,
+   turning the remaining unknown — *what* faults inside `recv_call` — into a
+   one-line diagnosis. One port is only partly covered: on x86_64 just the
+   dedicated `#PF` entry reaches the handler, because the other exception
+   vectors share a vector-agnostic default IDT thunk that cannot name a
+   syndrome — D79.
+2. **Parking a lock-holding core escalates one core's fault into a
+   system-wide deadlock (OPEN).** Every other core that touches a lock the
+   parked core held wedges behind it. `kernel/arch/aarch64/src/exceptions.rs`
+   already records exactly this lesson for the EL0 case (the Cortex-A72 boot
+   wedge) while the same-EL path still does it. Reporting the fault (1 above)
+   does not change this: `fault_dump` still ends in `KernelArch::halt`, so the
+   faulting core still parks holding whatever guard it held. The fix needs a
+   **new closed Arch HAL slice** to stop the other cores on a kernel panic —
+   with the per-slice conformance vertical the HAL contract requires, on all
+   four Tier-1 ports. `MachineTakeover` is not reusable: it flattens paging,
+   which is wrong underneath a panic dump.
+
 **State:** the `stress --cpu 20 --timeout 120s --background` wedge on the
 debug image is a *distinct* defect from D12 (whose interrupt-completion path
 is confirmed correct). The report is a bare hard lockup on a secondary core
@@ -1717,6 +1784,13 @@ and fabricating an SMP-deadlock fix is a hack (§2.1).
   subsystem descends into, and while it was uninstrumented a core wedged
   *inside* it was reported against whichever outer lock it happened to hold
   — the single most likely way for this defect to have hidden.
+- **`k_lock_owner` names the core holding a contended lock.** Each
+  `SpinLock` stamps its owner on acquire; a spinner republishes what it reads
+  and the report renders it. This is what pairs a wedged waiter with its
+  holder, and what distinguishes a *live* hold from a stale record — a
+  `held` entry is confirmed only when a spinner independently names that
+  core. Hold age comes from the existing `stalled_ms`, not a second clock
+  read on the acquire path.
 - **`k_lock_state` is per entry, so it no longer mislabels a waiter as a
   holder.** `lock_acquiring` carries one bit per stack entry; a single
   top-of-stack flag was cleared by *any* nested lock release, so a core
@@ -4794,7 +4868,16 @@ does not explain it; something stalls.
   `sc=irq_bind` never appears. The driver never armed, so the harness's
   readiness-gated key injection (`AUTOLOAD_INPUT_KEY_MARKER`) correctly never
   fired and the witness was unreachable. The load step itself is what did not
-  complete.
+  complete. It reproduces: an independent whole-project run hit the same
+  vertical at the same 120 s ceiling with 42.4 s of silence at the kill (42.5 s
+  before), the guest again alive and parked in `wait_for_interrupt`.
+  Narrowing, from that run's transcripts:
+  - The input device **is** discovered — the virtio-MMIO probe reports
+    `id=4137 … want=0x12 got=0x12 base=0x10007000` — so the failure is between
+    a discovered node with a matched bundle and `id=7001`, not in discovery.
+  - `timed`'s four-server NTP retry round ends at ~77.6 s and nothing else has
+    anything to print once the keyboard never arms, which is the whole 42.4 s
+    of silence. It is a consequence, not a second stall to chase.
 - *`netstack-autoload` / `netstack-dhcp`*: the **guest succeeded**. The driver
   loaded (`id=7001`), published its channel (`id=4180`), `netstack` bound the
   interface (`id=16009`/`id=13010`), and five inbound echo requests were served
@@ -4810,6 +4893,25 @@ watchdog measures in guest time.
 **What is *not* the diagnosis.** "Machine load" is not an accepted cause
 (§7) and a green solo re-run is not a fix. The solo numbers above are
 diagnostic evidence that the failure is load-dependent, nothing more.
+
+Two candidates are ruled out, both by comparison against verticals that
+*passed* in the same loaded matrix:
+
+- **The riscv64 root-unlock give-up is not it.** The failing transcript carries
+  `id=4142 … cause=unlock_refused` → `id=4138 … cause=console_unreadable` →
+  `id=4139 root-unlock: gave up fail-closed`, which reads like a load-dependent
+  give-up. It is not: the same three records appear in `netstack-autoload`,
+  `netstack-bond`, `netstack-dhcp6`, and `netstack-static` on riscv64, all of
+  which passed in that matrix. The riscv64 SBI console has no readable input
+  half (its read backing is the fail-closed `NULL_CONSOLE_READ`), so the
+  passphrase read can never succeed and the fail-closed give-up is this port's
+  normal boot state. `/System` still mounts read-only, so the driver store
+  stays readable.
+- **"Candidate accepted but never loaded" is not by itself anomalous.** The
+  passing `netstack-autoload-qemu-riscv64` also accepts the `virtio_kbd`
+  candidate and never loads it — that board has no virtio-input device for it
+  to match. Only a run where the input node *is* discovered and the matched
+  bundle still never reaches `id=7001` is evidence of this defect.
 
 **Where the fix has to come from** (§7 names the three shapes; the first two
 are the live candidates):
@@ -4870,3 +4972,52 @@ recorded; a refusal in flight leaves the decode to land), and
 `userland/apps/files` (a whole window's grid, over the real renderer at the real
 window size, keeps every tile's artwork across repeated repaints and a scroll,
 and re-decodes nothing).
+
+---
+
+## D79 — on x86_64 only a page fault reaches the fatal-fault report; every other kernel-mode exception still dies mutely (OPEN)
+
+Noticed while closing D13's first defect (the production kernel now installs a
+fatal-fault handler on every port, so a kernel-mode exception reaches
+`kernel_core::fault_dump` and states its syndrome / faulting address /
+faulting instruction). aarch64 and riscv64 fan **every** unhandled exception
+into one tail (`exceptions::fatal_exception` / `trap::fatal_exception`), so
+that install covers all of them. x86_64 does not: `percpu::init` fills every
+IDT slot with the one fail-closed default thunk, and only vector 14 (`#PF`)
+is later replaced with a dedicated, error-code-aware entry that consults the
+installed handler. So a kernel-mode `#GP`, `#UD`, `#DF`, `#SS`, alignment
+check, or machine check reaches
+`interrupts::tairix_arch_x86_64_default_interrupt`, whose whole body is
+`qemu_exit::exit_failure()` — a write to QEMU's `isa-debug-exit` port
+followed by `halt_forever()`. On real hardware that port write does nothing,
+so the machine parks with no diagnosis at all: exactly the mute-death defect
+D13 named, surviving on one port for one class of exception.
+
+Two problems compose:
+
+- **No per-vector stub, so no syndrome to report.** The default thunk is
+  vector-agnostic by construction (`interrupts.s` pushes `SavedRegs` and calls
+  one Rust function), so it cannot say *which* exception fired or read the
+  error code the CPU pushed for the subset of vectors that push one. Routing it
+  to `fault_dump` today would mean fabricating `syndrome`/`fault_addr`, which
+  the record must never do. The honest fix is what the arch crate's own module
+  doc already stages: extend `define_isr!` to emit vector-specific stubs
+  (vector number, and error code where the vector pushes one), then point every
+  exception vector at them and reach the installed handler exactly as the
+  `#PF` entry does.
+- **A test-harness affordance sits in a production fatal path.** The default
+  thunk's `qemu_exit::exit_failure()` writes port `0xf4` on a production
+  kernel. It must park through the port's ordinary halt, with the report
+  written first.
+
+Not fixed in the D13 change: per-vector IDT stubs are a self-contained piece of
+x86_64 work with their own conformance surface, and folding them into the
+fatal-report change would have made neither reviewable. Surfaced here rather
+than left silent.
+
+**Done when:** every kernel-mode exception vector on x86_64 carries a stub
+that names its vector (and error code where one exists), reaches the installed
+`FaultHandlerFn`, and produces one `AuditEvent::KernelFault` record before the
+CPU halts; the default thunk no longer writes a QEMU debug port; and a QEMU
+vertical proves a deliberate kernel-mode `#UD` (or `#GP`) is reported rather
+than parking silently, alongside the existing `#PF` verticals.

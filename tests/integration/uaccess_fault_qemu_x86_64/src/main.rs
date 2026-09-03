@@ -181,9 +181,12 @@ mod kernel {
     /// The symbol the arch crate's boot trampoline calls.
     #[no_mangle]
     pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
-        // Install the fail-loud fault observer before any deliberate
-        // fault can fire; the production pipeline installs the dedicated
-        // `#PF` entry and arms the guarded-copy slot itself.
+        // Claim the set-once fatal-fault slot before `boot` publishes the
+        // production reporter into it: this vertical is the fail-loud
+        // observer of its own deliberate in-window faults, so it owns the
+        // machine's fatal policy for this image and must be first. The
+        // production pipeline installs the dedicated `#PF` entry and arms
+        // the guarded-copy slot itself.
         if fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler");
         }
