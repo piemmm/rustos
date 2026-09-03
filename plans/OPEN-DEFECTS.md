@@ -101,6 +101,24 @@ The open items, in priority order:
   waiting, so a contender that published in that window slept for ever —
   DONE.** The `stress_qemu_aarch64` early-boot silence recorded under D13 as a
   masked-section wedge. It is not one: every core is idle. Detail below.
+- **D83 — on x86_64 only a page fault reached the fatal-fault report; every
+  other kernel-mode exception died mutely — FIXED.** Each of vectors `0..=31`
+  now carries a stub naming itself and its error code, funnelled into one
+  fatal tail; the vector is packed into the neutral syndrome so a record can
+  say which exception fired. Detail below.
+- **D82 — refining a live translation is a break-before-make violation —
+  OPEN, blocked on D52.** riscv64's missing remote publish fence is fixed;
+  removing the window itself means moving kthread kernel stacks off the
+  identity map into the shared kernel remap window, whose page reclamation
+  makes D52 a prerequisite. Detail below.
+- **D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with
+  no record, and a spurious LAPIC interrupt is treated as fatal — OPEN.** The
+  D83 shape surviving for vectors `32..=255`, which still share one
+  vector-agnostic thunk.
+- **D86 — on x86_64 a ring-3 exception other than a page fault kills the
+  machine instead of the task — OPEN.** The other ports route a
+  lower-privilege fault to a user-fault terminator; this port has no such
+  slot, so any process can end the machine with `ud2`.
 - **D54 — a desktop worker thread issues ~2500 file opens at session start,
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
@@ -3773,11 +3791,36 @@ is now a per-run output too.
 
 **Mechanism.** `tairix_arch_x86_64::tlb_shootdown` reaches the other CPUs by
 raising an IPI at each and spinning until every one has acknowledged from its
-ISR. That protocol assumes each target *can* take the interrupt. A CPU that
-initiates a shootdown while its own interrupts are masked cannot acknowledge
-one, so two concurrent initiators can cycle: B holds the global mailbox and
-waits for A's acknowledge, while A — masked — waits to acquire the mailbox.
-Neither is a bug in isolation; the cycle needs both.
+ISR. That protocol assumes each target *can* take the interrupt. A CPU whose
+own interrupts are masked cannot acknowledge one.
+
+**One initiator is enough — the record previously said the cycle "needs
+both", and that is wrong.** The masked CPU that cannot acknowledge does not
+have to be a second *initiator*; it only has to be masked and unable to make
+progress. `tairix_kalloc`'s heap lock masks the calling CPU **before** it
+spins for the lock (`FreeListAllocator::with_inner` over
+`IrqSafeSpinLock`), so:
+
+- CPU A holds the heap lock (masked), shrinks a grown region, and drives
+  `KernelVirtMap::unmap_run` → `shootdown_range` → IPI at B, then spins for
+  B's acknowledge;
+- CPU B makes any kernel heap allocation, masks its interrupts, and spins
+  for the heap lock A holds.
+
+B cannot take A's IPI; A never sees B's acknowledge. Both spin for ever.
+This is reachable with the kernel heap as the *only* production initiator,
+which is what the original record ruled out. It is x86_64-only for the same
+reason the fix below is (aarch64 broadcasts in hardware; the riscv64 SBI
+RFENCE is served by firmware in M-mode, which S-mode masking does not gate).
+It has not been observed because the heap rarely serves from grown regions
+at all (see D53), so a shrink is rare.
+
+**What this means for the fix.** Serving the in-flight request from the
+*mailbox-acquire* spin (below) does not close it: the deadlocked waiter is
+spinning on the **heap lock**, not on the mailbox. The serve point must
+therefore be every interrupt-masked spin — i.e. a hook in `lib/sync`'s
+`IrqSafeSpinLock` acquire path, installed by the x86_64 boot path, so any
+masked spin drains a pending shootdown — in addition to the mailbox spin.
 
 **Why it surfaced now.** Until the fragmentation-immune kernel-heap growth
 landed (`plans/FIX-KHEAP.md`), nothing in production drove
@@ -3785,16 +3828,18 @@ landed (`plans/FIX-KHEAP.md`), nothing in production drove
 verticals did. Kernel-heap teardown is the first production initiator, and it
 runs under the global heap lock, which masks interrupts for the whole hold.
 
-**Why the tree is safe today, and why that is not good enough.** That same
-heap lock serialises every instance of the only production initiator, so two
-initiators cannot coexist and the cycle cannot form. The safety therefore
-rests on the current *caller set*, not on the protocol — the moment a second
-production initiator lands (process address-space teardown is the obvious
-one, and the HAL exists for it) the cycle becomes reachable. The precondition
-is stated in `tairix_arch_api::CrossCpuTlbShootdown`'s contract and in the
-x86_64 module docs so a second caller reads it before adding one, but a
-stated precondition is a weaker guarantee than a protocol that cannot
-deadlock.
+**Why it has not bitten.** The heap serves almost everything from its 64 MiB
+bootstrap region, so `HeapSource::shrink` — the only path that tears a window
+run down — is rare (D53 records that nothing observed so far establishes the
+heap reaches grown regions at all). Rarity is not a defence: the deadlock is
+a total system hang with no diagnosis, and it needs only one heap shrink to
+coincide with one heap allocation on another CPU.
+
+**It also blocks other work.** `CrossCpuTlbShootdown`'s contract says
+"adding a second production initiator requires closing this first", which
+gates any subsystem that must reclaim window pages — including moving the
+kthread kernel stacks off the identity map into the shared kernel window,
+the fix D82 needs (see there).
 
 **The fix.** Let a target acknowledge from a spin as well as from its ISR,
 exactly once: publish a generation counter last (after the range and the
@@ -3808,11 +3853,15 @@ no software acknowledge) and riscv64 needs nothing (the SBI RFENCE is served
 by the firmware in M-mode, which S-mode masking does not gate) — this is an
 x86_64-only protocol defect.
 
-**Definition of done.** The generation-marker protocol lands, the
+**Definition of done.** The generation-marker protocol lands *and is reached
+from every interrupt-masked spin*, not only the mailbox one: a `lib/sync`
+acquire-path hook the x86_64 boot installs, so a CPU masked on the heap lock
+(or any other `IrqSafeSpinLock`) serves the in-flight request. The
 `cross_cpu_tlb_shootdown_qemu_x86_64` vertical is extended to drive a
-shootdown from a CPU with interrupts masked while a second CPU initiates
-concurrently, and the precondition wording added to the HAL contract for this
-entry is deleted (§2.14) because the protocol no longer needs it.
+shootdown from a CPU holding a masking lock while a second CPU spins for that
+same lock — the shape derived above, not merely two concurrent initiators —
+and the precondition wording in the HAL contract and the x86_64 module docs
+is deleted (§2.14) because the protocol no longer needs it.
 
 ## D53 — kernel-heap grow/shrink thrash now costs per-page work (OPEN, reachability unconfirmed)
 
@@ -4984,6 +5033,23 @@ already-fine hierarchy changes no granule and pays no invalidation.
 `refining_a_fresh_2mib_block_reports_a_granule_change`); the invalidation
 instruction itself has no off-target effect.
 
+**The fix originally landed on aarch64 only, and that was a defect in its
+own right** (§2.21: a fix left in one arch's file for its identical twin to
+be re-derived later). x86_64 and riscv64 carried the same missing
+maintenance — the same stale coarse entry, the same varying victim — and
+the same false "break-before-make-free" claim in their docs. Both now share
+the shape: `refine_to_page` reports the granule change and `split_block`
+pays it, with one whole-address-space local invalidation per port (a `CR3`
+reload on x86_64, whose leaves are never `GLOBAL`; a whole-hart
+`sfence.vma` on riscv64). Intel SDM Vol 3A §4.10.4.1 is explicit that
+software changing a linear address's page size must invalidate before the
+address is used again, so this was never merely theoretical on x86_64.
+riscv64's decision is host-tested
+(`refining_a_leaf_reports_the_granule_change_that_owes_a_fence`); x86_64's
+walk dereferences identity-mapped tables and so is bare-metal-gated, proven
+by `stack_guard_qemu_x86_64`. Reaching the *other* CPUs stays the caller's
+on both ports (neither has a broadcast invalidate), which is part of D82.
+
 The false claims that hid this — `split_block`'s own "break-before-make-free
 for the running region", `prepare_guard_arena`'s, `unmap_single_page`'s "so
 disturbs no live address", and the `docs/src/platform/aarch64.md` copy — are
@@ -5033,7 +5099,7 @@ console post-MMU is still owed, so a scan-out the active root does not cover
 would be caught in the matrix rather than on metal — the console now refuses
 such a surface, so this proves the refusal rather than the fault.
 
-## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN)
+## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN, blocked on D52)
 
 Two paths refine a block on a root that is **already the active translation
 regime**: `boot.rs` calls `AddressSpace::prepare_guard_arena` after
@@ -5043,49 +5109,103 @@ with a table is a **block-size change on a live translation**: identical output
 address and permissions, different granule, and a TLB holding both granules for
 one address is CONSTRAINED UNPREDICTABLE.
 
-D81 was the consequence of that violation going *unmaintained*, and is fixed:
-`split_block` now invalidates the whole regime on every PE whenever a granule
-changed. **What remains is the break-before-make window itself** — the few
-instructions between publishing the table descriptor and completing the
-invalidation, during which a PE may latch a conflicting entry. The invalidation
-clears it, so the exposure is bounded rather than permanent, but it is still a
-window the architecture leaves undefined.
+D81 was the consequence of that violation going *unmaintained*, and is fixed on
+every port: `split_block` now invalidates the whole address space locally
+whenever a granule changed. **What remains is the break-before-make window
+itself** — the few instructions between publishing the table descriptor and
+completing the invalidation, during which a PE may latch a conflicting entry.
+The invalidation clears it, so the exposure is bounded rather than permanent,
+but it is still a window the architecture leaves undefined.
 
-**Break-before-make cannot simply be added here:** the break window would
-leave the range unmapped, and for gigapage 0 that range holds the executing
-kernel, its stack, and its page tables. The fix is for the live refinement
-never to happen — carve the arena *before* the MMU is enabled and lay it down
-at 4 KiB granularity from the start, so the tables are complete when
-`enable_mmu_and_vectors` issues its `dsb sy` / `tlbi vmalle1` / `isb`, and make
-the runtime path find an already-fine hierarchy (which then changes no granule
-and needs no invalidation at all).
+### The runtime path is the hard half, and pre-MMU work does not reach it
 
-**Why it is not fixed in the change that found it:** the arena extent is
-derived post-MMU from `build_boot_memory_layout`, which allocates a `Vec` and
-so needs the heap, which needs the cacheable identity map. Removing the live
-refinement therefore requires reading the `/memory` windows pre-MMU into a
-fixed-capacity array and carving the arena from those — with one shared
-`carve_guard_arena` over a slice, so the pre-MMU and post-MMU views cannot
-disagree. That is a boot-discovery restructure, not a barrier.
+The record previously framed the fix as "carve the arena before the MMU is
+enabled and lay it down at 4 KiB granularity, so the runtime path finds an
+already-fine hierarchy". That closes the **boot** root and nothing else. The
+runtime refinement is reached from `thread_create`:
 
-**riscv64 owes a remote fence.** `publish_mappings` there reasons that "the
-scheduler never runs one space on two harts at once, so no remote fence is
-owed". That holds for a process space and **not** for the kernel/boot root,
-which is active on every hart — so a granule change on it needs an SBI
-`remote_sfence_vma` to the sharing harts, where the port currently issues a
-local `sfence.vma` only. Sv39 additionally permits caching invalid entries, so
-this port cannot lean on aarch64's "a walker never caches an invalid entry"
-reasoning either. The riscv64 QEMU verticals are single-hart, so the matrix
-cannot currently observe this.
+`kernel/core/src/threads.rs` -> `LiveUserSpace::unmap_kernel_stack_guard` ->
+`VirtualMemory::unmap_single_page` -> `split_block`, **on the calling
+process's own active root**, for whichever 2 MiB arena block the new thread's
+stack region happens to land in. A process root is built by
+`new_identity_gigapages`, so every arena block is a coarse identity block in
+it until something refines it — and pre-MMU work on the boot root cannot
+refine a root that does not exist yet.
 
-**Done when:** no `split_block` call reaches a root that is the active
-translation regime; the arena is laid down fine-grained before the MMU is
-enabled; and riscv64's granule-change maintenance reaches every hart sharing
-the root.
+Three ways out were considered and rejected:
+
+- **Break-before-make on the 2 MiB block.** The break window leaves the range
+  unmapped, and the range holds *other kthreads' stacks* — a peer CPU may be
+  executing on one, translating through this very root. Not available.
+- **Refine the whole arena in each root at construction.** Covers the blocks
+  that exist when the root is built; a block the arena chains *later* (the
+  growable capacity, drawn from the frame allocator at an arbitrary physical
+  address) is coarse in every already-live root, so the live refinement
+  returns.
+- **Share the identity gigapages' L2 tables across roots**, so refining once
+  is visible everywhere. A chained block can be in any gigapage of the
+  identity window, so this would mean sharing all 512 — replacing every 1 GiB
+  block descriptor with a table, i.e. giving up gigapage TLB coverage for the
+  whole kernel. A real performance regression for a rare event.
+
+### The fix: kthread stacks do not belong in the identity map
+
+A guard page that is **never mapped** needs no refinement, no unmap and no
+maintenance. Map each kthread kernel stack as a run of pages in the *shared
+kernel remap window* (`kernel/mem::KernelVirtMap`, whose sub-hierarchy every
+root installs — `install_kernel_window_slots`) with the guard page's slot left
+unmapped. Then:
+
+- no root ever refines a block for a guard page, so `split_block`,
+  `prepare_guard_arena`, `BlockSplit`, `VirtualMemory::unmap_single_page` and
+  `LiveUserSpace::unmap_kernel_stack_guard` all lose their last consumer and
+  are deleted (§2.14), along with the physical guard-arena carve in
+  `kernel/tairix-kernel/src/mem_map.rs` and the `stack_arena` block/free-list
+  machinery that exists only because the arena is a physical carve;
+- the guard is absent in *every* root at once rather than per-root;
+- the VA sub-allocation is `kernel/mem::SlotWindow` (heap-free, already the
+  kernel heap's) over a documented split of the port's window, and the frames
+  come from the frame allocator like any other kernel memory.
+
+**This is blocked on D52.** Reclaiming a freed stack's pages under memory
+pressure (§26.3 — a pool of freed kernel stacks is exactly the reclaimable
+cache that rule names) drives `KernelVirtMap::unmap_run`, which makes the
+stack teardown a second production initiator of the x86_64 cross-CPU
+shootdown. `tairix_arch_api::CrossCpuTlbShootdown`'s contract states that
+adding one requires closing D52 first — and D52 turns out to be worse than
+recorded (a single initiator plus one masked waiter on the heap lock already
+deadlocks; see there). D52 is therefore a prerequisite, not a parallel item.
+
+### riscv64's remote fence — FIXED
+
+`publish_mappings` reasoned that "the scheduler never runs one space on two
+harts at once, so no remote fence is owed". True for a process space, false
+for the kernel remap window and the boot root, which are active on every
+hart — and Sv39 permits caching *invalid* entries, so a hart that already
+walked an absent leaf keeps faulting on it until it is fenced, however
+correct the tables become.
+
+An address space cannot know which CPUs share it, so the reach is declared
+per port and performed by the consumer that holds the cross-CPU handle:
+`CrossCpuTlbShootdown::publish_needs_remote` (default `false` — aarch64 and
+x86_64 never cache an absent entry and keep paying nothing), overridden
+`true` on riscv64, and `KernelRemap::map_chunk` follows the local publish
+with a `shootdown_range` over exactly the installed run when the port
+declares it. Host-tested both ways in `kernel/mem/src/kvmap.rs`
+(`an_installation_reaches_every_cpu_where_the_port_declares_it_must`,
+`a_refused_installation_publishes_nothing_remotely`, and the pre-existing
+`mapping_publishes_without_invalidating_anything` for the no-remote posture).
+The riscv64 QEMU verticals are single-hart, so the matrix still cannot
+observe the multi-hart effect.
+
+**Done when:** kthread kernel stacks are window-backed with an unmapped
+guard page; no `split_block` call reaches a root that is the active
+translation regime (and the surface itself is gone, per above); D52 has
+landed first.
 
 ---
 
-## D83 — on x86_64 only a page fault reaches the fatal-fault report; every other kernel-mode exception still dies mutely (OPEN)
+## D83 — on x86_64 only a page fault reaches the fatal-fault report; every other kernel-mode exception still dies mutely (FIXED)
 
 Noticed while closing D13's first defect (the production kernel now installs a
 fatal-fault handler on every port, so a kernel-mode exception reaches
@@ -5125,9 +5245,132 @@ x86_64 work with their own conformance surface, and folding them into the
 fatal-report change would have made neither reviewable. Surfaced here rather
 than left silent.
 
-**Done when:** every kernel-mode exception vector on x86_64 carries a stub
-that names its vector (and error code where one exists), reaches the installed
-`FaultHandlerFn`, and produces one `AuditEvent::KernelFault` record before the
-CPU halts; the default thunk no longer writes a QEMU debug port; and a QEMU
-vertical proves a deliberate kernel-mode `#UD` (or `#GP`) is reported rather
-than parking silently, alongside the existing `#PF` verticals.
+### The fix
+
+`kernel/arch/x86_64/src/exceptions.rs` gives every architecturally-defined
+vector (`0..=31`, less the resumable `#PF`) its own stub: the vector as an
+immediate, the CPU-pushed hardware error code where there is one and a
+synthetic zero where there is not, the faulting `rip`, and the saved `CS` so
+the record can say which ring it came from. `define_exception_isr!` emits
+them (the exception counterpart of `define_isr!`, whose stubs resume through
+`iretq` and so cannot carry an error code); one `exception_vectors!` table
+declares each vector once and generates both the stubs and the install list,
+with a `const` assertion that no entry strays outside the exception range or
+claims vector 14. All of them funnel into `fatal_exception`, which reaches
+the installed `FaultHandlerFn` — the same fatal policy the other ports'
+single exception tail reaches — and parks if the slot is empty.
+
+x86_64 has no cause register, so the vector *is* the cause: it is packed
+with the error code and the privilege verdict into the neutral syndrome word
+(`fault::exception_syndrome`, decoded by `syndrome_vector` /
+`syndrome_error_code` / `syndrome_from_user`). The error code occupies the
+low 32 bits deliberately, so `is_not_present` / `is_user` / `is_write`
+remain valid decoders of a `#PF` syndrome and every existing `#PF` consumer
+reads the same bits; `#PF` now reports through the same packing, so there is
+one syndrome spelling. The faulting-address field is `0` for every vector
+but `#PF`: none of them supplies one, and `CR2` would name whichever page
+fault happened *last* — a fabricated field is worse than an absent one.
+
+`install_vector` now derives a gate's IST index from the same
+`percpu::ist_for_vector` mapping `percpu::init` used, so overwriting `#DF`
+or `#NMI` keeps its dedicated stack instead of silently defeating the swap;
+the "must not overwrite vectors 2 or 8" caveat is deleted with the footgun.
+The default thunk keeps only vectors `32..=255` and parks through the port's
+ordinary halt — `reset::park_cpu`, now the single definition every
+parked-CPU path shares — instead of writing QEMU's debug-exit port.
+
+Proven by `tests/integration/kernel_exception_qemu_x86_64`: it boots the
+**production** pipeline (the stubs are installed there, in `bring_up_bsp`),
+claims the fatal slot ahead of `boot`, executes `ud2` on `BootCompleted`,
+and asserts the report decodes to vector 6 with no error code, the
+kernel-mode verdict, no faulting address and a non-zero `rip` — a check a
+vector-agnostic thunk could not satisfy. The `AuditEvent::KernelFault`
+record itself is the shared `kernel_core::fault_dump` path the other ports
+already exercise.
+
+### Residue, recorded not buried
+
+- **A ring-3 exception other than `#PF` still ends the machine.** aarch64
+  and riscv64 hand a lower-privilege fault to a `user_fault_terminator`,
+  which kills the task and leaves the CPU running; x86_64 has no such slot
+  (its `#PF` path folds the kill into the resolver). The stub reports the
+  ring-3 origin honestly in the syndrome rather than claiming a kernel
+  fault, but wiring the terminator is D86.
+- **A delivery at an uninstalled vector `>= 32` parks without a record**,
+  because one shared thunk serves them all and cannot name its vector. That
+  includes the LAPIC spurious vector (`0xFF`), which is not an error at all
+  and should not be fatal. D85.
+
+---
+
+## D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with no record, and a spurious LAPIC interrupt is treated as fatal (OPEN)
+
+Noticed while closing D83. Vectors `0..=31` now each carry a stub that names
+themselves and reaches the fatal report; vectors `32..=255` still share the
+one vector-agnostic thunk `percpu::init` installed
+(`interrupts::tairix_arch_x86_64_default_interrupt`). It parks the CPU
+fail-closed — no longer through QEMU's debug-exit port, which D83 removed —
+but it cannot say *which* vector fired, so the park carries no diagnosis.
+That is the same mute-death shape D83 closed for exceptions, surviving for
+the interrupt range.
+
+Worse, one of those vectors is not an error at all. The boot path programs
+the LAPIC's spurious-interrupt vector to `0xFF`
+(`lapic.software_enable(0xFF)` in `x86_64/boot.rs`). A spurious interrupt is
+a normal, expected hardware event — it needs no end-of-interrupt and must
+simply return — yet it lands on the fail-closed thunk and ends the machine.
+Nothing has been observed hitting it, and it is a pre-existing posture
+(before D83 it exited QEMU with FAILURE), but "the machine dies if the LAPIC
+delivers a spurious interrupt" is not a defensible steady state.
+
+**The fix.** Emit a stub per vector for `32..=255` as well, so every
+delivery names its own vector: `Idt::with_default_handler` becomes a
+per-vector populator over the generated table (the IST index already comes
+from the shared `percpu::ist_for_vector`), and `interrupts.s` plus the
+vector-agnostic thunk are deleted (§2.14) because nothing points at them.
+The spurious vector gets a dedicated non-fatal entry that returns through
+`iretq` without an EOI, per Intel SDM Vol 3A §11.9.
+
+**Done when:** every IDT vector carries a stub that names it; an unexpected
+interrupt is reported with its vector before the CPU parks; the LAPIC
+spurious vector returns instead of parking; `interrupts.s` and the
+vector-agnostic thunk are gone; and a QEMU vertical drives a delivery at an
+uninstalled vector and observes the record.
+
+---
+
+## D86 — on x86_64 a ring-3 exception other than a page fault kills the machine instead of the task (OPEN)
+
+Noticed while closing D83. aarch64 and riscv64 route a lower-privilege
+unhandled exception to an installed user-fault terminator
+(`fault::user_fault_terminator`, wired by each port's boot path): it records
+the crash exit, reclaims the task, and suspends it with an exit action, so
+the CPU carries on running other work. The comment on aarch64's
+`fatal_exception` records why — parking the whole CPU for one task's bad
+instruction "escalated a one-task fault into a system-wide hard lockup (the
+Cortex-A72 boot wedge)".
+
+x86_64 has no such slot. Its `#PF` entry folds the task kill into the
+`UserFaultResolveFn`, whose signature is page-fault-shaped
+(`(faulting_addr, write, frame)`), so it cannot serve `#UD`, `#GP`, `#AC` or
+any other vector. A ring-3 `ud2` therefore reaches the same fatal report a
+kernel fault does and ends the machine — an unprivileged denial of service
+from any process.
+
+D83's stubs make the record *honest* about it (the packed syndrome sets the
+ring-3 bit, so nothing claims a kernel fault happened) but do not fix it:
+the terminator does not exist on this port to route to.
+
+**The fix.** Add the `UserFaultTerminateFn` slot to
+`kernel/arch/x86_64/src/fault.rs` mirroring the aarch64/riscv64 shape, wire
+the production terminator from `kernel/tairix-kernel/src/x86_64/` (the
+arch-neutral half already exists — the other two ports' `dispatch.rs`
+shims), and have `exceptions::fatal_exception` offer a ring-3 exception to
+it before the fatal path, exactly as aarch64's tail does. Read
+`plans/FIX-WILD.md` first: the crash record, the register snapshot and the
+user-stack backtrace are its staged work and this is the entry point they
+hang off.
+
+**Done when:** a ring-3 `#UD` or `#GP` kills the faulting task with a crash
+record and leaves the CPU running; a QEMU vertical proves it on x86_64
+alongside the existing aarch64/riscv64 user-fault verticals.

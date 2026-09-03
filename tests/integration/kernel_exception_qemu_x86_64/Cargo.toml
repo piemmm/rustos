@@ -1,0 +1,39 @@
+[package]
+name = "tairix-test-kernel-exception-qemu-x86_64"
+description = "x86_64 QEMU integration test: a deliberate kernel-mode #UD reaches the fatal-fault report naming its own vector, instead of parking the CPU silently. Boots the production tairix-kernel pipeline (which installs the per-vector exception stubs) and, on BootCompleted, executes `ud2`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Freestanding "take a real kernel-mode exception that is not a page fault
+# and observe it reported with its vector" integration test
+# (`plans/OPEN-DEFECTS.md` D83). Before the per-vector exception stubs
+# landed, every vector but `#PF` routed through one vector-agnostic thunk
+# whose whole body wrote QEMU's debug-exit port and halted: on real
+# hardware that write does nothing, so the machine parked with no
+# diagnosis. This vertical boots the production `tairix-kernel` pipeline —
+# the stubs are installed there, not by a test-only path — claims the
+# set-once fatal slot first so it observes its own deliberate fault, and
+# asserts the report names vector 6 (`#UD`) taken from kernel mode.
+#
+# Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature)
+# prevents feature unification from leaking it into any production build
+# (fail closed).
+
+[[bin]]
+name = "tairix-test-kernel-exception-qemu-x86_64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

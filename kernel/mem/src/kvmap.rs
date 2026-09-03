@@ -193,12 +193,20 @@ impl<P: PageTable + Send> KernelVirtMap for KernelRemap<P> {
             }
         }
         // An invalid-to-valid leaf cannot be stale in any CPU's TLB, so what
-        // is owed is ordering, not invalidation — and no cross-CPU work at
-        // all: a CPU that faults on one of the new leaves walks the tables
-        // and finds it. Invalidating here instead cost a whole-domain TLB
-        // broadcast per chunk on aarch64, which is what made a fragmented
-        // pool's many-chunk growth ruinous.
+        // is owed is ordering, not invalidation — and, on a port whose ISA
+        // never caches an absent entry, no cross-CPU work at all: a CPU
+        // that faults on one of the new leaves walks the tables and finds
+        // it. Invalidating here instead cost a whole-domain TLB broadcast
+        // per chunk on aarch64, which is what made a fragmented pool's
+        // many-chunk growth ruinous.
         space.publish_mappings(vaddr, pages);
+        // The window is one shared sub-hierarchy every root installs, so a
+        // leaf added here is reachable from every CPU at once — and a port
+        // that may have cached the absence needs each of them fenced, not
+        // just the publisher. Ports that do not declare it pay nothing.
+        if self.xtlb.publish_needs_remote() {
+            self.xtlb.shootdown_range(vaddr, pages);
+        }
         Ok(())
     }
 
@@ -262,11 +270,14 @@ mod tests {
     const PAGE: u64 = PAGE_SIZE as u64;
 
     /// Records the ranges the port was asked to invalidate, so the tests can
-    /// prove teardown synchronises before a frame is handed back.
+    /// prove teardown synchronises before a frame is handed back — and
+    /// declares whether an installation needs the cross-CPU publish, so both
+    /// port postures are exercised on the host.
     #[derive(Default)]
     struct CountingXtlb {
         pages: AtomicUsize,
         calls: AtomicUsize,
+        publish_remote: bool,
     }
 
     impl CrossCpuTlbShootdown for CountingXtlb {
@@ -279,12 +290,53 @@ mod tests {
             self.pages.fetch_add(page_count, Ordering::Relaxed);
             self.calls.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn publish_needs_remote(&self) -> bool {
+            self.publish_remote
+        }
     }
 
     fn remap(pages: usize) -> (KernelRemap<HostPageTable>, &'static CountingXtlb) {
-        let xtlb: &'static CountingXtlb = alloc::boxed::Box::leak(alloc::boxed::Box::default());
+        remap_with_publish(pages, false)
+    }
+
+    /// [`remap`] over a port that declares whether an installation needs
+    /// the cross-CPU publish.
+    fn remap_with_publish(
+        pages: usize,
+        publish_remote: bool,
+    ) -> (KernelRemap<HostPageTable>, &'static CountingXtlb) {
+        let xtlb: &'static CountingXtlb =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(CountingXtlb {
+                publish_remote,
+                ..CountingXtlb::default()
+            }));
         let window = KernelWindow::new(WINDOW_BASE, pages).expect("valid window");
         (KernelRemap::new(window, HostPageTable::new(), xtlb), xtlb)
+    }
+
+    #[test]
+    fn an_installation_reaches_every_cpu_where_the_port_declares_it_must() {
+        // A port whose ISA may cache the *absence* leaves a peer faulting
+        // forever on a leaf the tables plainly hold, so the window's shared
+        // sub-hierarchy owes it a fence over exactly the installed run.
+        let (map, xtlb) = remap_with_publish(WINDOW_PAGES, true);
+        map.map_chunk(WINDOW_BASE, Frame(0x200), 4).expect("maps");
+        assert_eq!(xtlb.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(xtlb.pages.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn a_refused_installation_publishes_nothing_remotely() {
+        // The undo path already synchronises the leaves it withdrew; a
+        // failed chunk must not additionally publish a run it did not
+        // install.
+        let (map, xtlb) = remap_with_publish(WINDOW_PAGES, true);
+        map.map_chunk(WINDOW_BASE, Frame(1), 1).expect("maps");
+        let before = xtlb.calls.load(Ordering::Relaxed);
+        map.map_chunk(WINDOW_BASE, Frame(2), 1)
+            .expect_err("already mapped");
+        assert_eq!(xtlb.calls.load(Ordering::Relaxed), before);
     }
 
     #[test]
@@ -409,8 +461,9 @@ mod tests {
     #[test]
     fn mapping_publishes_without_invalidating_anything() {
         // A not-present-to-present leaf is never stale, so installing one
-        // must cost no cross-CPU invalidation: doing it anyway made a
-        // many-chunk growth issue one whole-domain TLB broadcast per chunk.
+        // must cost no cross-CPU invalidation on a port that declares none:
+        // doing it anyway made a many-chunk growth issue one whole-domain
+        // TLB broadcast per chunk.
         let (map, xtlb) = remap(WINDOW_PAGES);
         map.map_chunk(WINDOW_BASE, Frame(0x40), 8).expect("maps");
         map.map_chunk(WINDOW_BASE + 8 * PAGE, Frame(0x300), 8)

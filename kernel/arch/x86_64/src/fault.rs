@@ -1,13 +1,17 @@
 //! x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook.
 //!
 //! The production IDT ([`crate::interrupts`]) routes every vector at
-//! `percpu::init` time through the fail-closed default thunk,
-//! and the LAPIC timer / external-IRQ vectors are then overwritten with
-//! their dedicated stubs. A page fault, however, *pushes a hardware
-//! error code* (Intel SDM Vol 3A §6.14.2, §4.7), which the no-error
-//! default thunk does not account for — so vector 14 needs its own
-//! dedicated entry. This module is that entry, plus a single settable
-//! fault observer the kernel cannot otherwise reach.
+//! `percpu::init` time through the fail-closed default thunk; every
+//! architecturally-defined exception vector is then overwritten with its
+//! own entry ([`crate::exceptions`]) and the LAPIC timer / external-IRQ
+//! vectors with their dedicated stubs. A page fault is the one exception
+//! the kernel can *resolve* — a demand-paged file mapping, or a fault
+//! inside the guarded user-copy window — so vector 14 keeps its own
+//! resumable entry here rather than sharing the diverging exception tail.
+//! This module is that entry, the packed [`crate::fault::exception_syndrome`]
+//! every
+//! exception reports through, and a single settable fault observer the
+//! kernel cannot otherwise reach.
 //!
 //! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
 //! `tairix_arch_riscv64::fault`) and aarch64
@@ -125,16 +129,76 @@ pub const fn is_resolvable_user_fault(error_code: u64) -> bool {
         && error_code & (PF_ERR_WRITE | PF_ERR_INSTR) == 0
 }
 
-/// Signature of the fault handler the dedicated `#PF` entry invokes.
+/// Bit position of the vector field in the packed exception syndrome
+/// ([`exception_syndrome`]).
+const SYNDROME_VECTOR_SHIFT: u32 = 32;
+
+/// Bit set in a packed exception syndrome when the exception was taken
+/// from ring 3 rather than from kernel mode.
+const SYNDROME_FROM_USER: u64 = 1 << 40;
+
+/// Pack an x86_64 exception into the neutral fault syndrome word.
 ///
-/// `error_code` is the architectural `#PF` error code (decode it through
-/// [`is_not_present`] / [`is_user`] / [`is_write`]); `faulting_addr` is
-/// the faulting linear address read from `CR2`; `rip` is the PC of the
-/// faulting instruction. The handler **must not return**: this kernel
-/// slice has no fix-up logic to resume the faulting instruction, so a
-/// return would re-trap forever. Test handlers report the outcome to
-/// QEMU through [`crate::qemu_exit`].
-pub type FaultHandlerFn = extern "C" fn(error_code: u64, faulting_addr: u64, rip: u64) -> !;
+/// x86_64 has no single cause register: the cause is the *vector*, and
+/// only some vectors push an error code. The two are folded into one word
+/// so the neutral `(syndrome, address, pc)` triple every port reports can
+/// carry both — the error code in bits `0..32` and the vector in bits
+/// `32..40`, with bit `40` set when the exception came from ring 3.
+///
+/// The error code occupies the low half deliberately: it keeps
+/// [`is_not_present`] / [`is_user`] / [`is_write`] valid decoders of a
+/// `#PF` syndrome, so a handler that only ever provokes page faults reads
+/// the same bits it always did. Those decoders are meaningful **only** when
+/// [`syndrome_vector`] reports [`PAGE_FAULT_VECTOR`]; for any other vector
+/// the error code's bits carry that vector's own meaning (a selector for
+/// `#TS`/`#NP`/`#SS`/`#GP`, zero for `#DF` and `#AC`) or nothing at all.
+#[must_use]
+pub const fn exception_syndrome(vector: u8, error_code: u64, from_user: bool) -> u64 {
+    // A hardware error code is 32 bits wide (Intel SDM Vol 3A §6.13), so
+    // the low half holds it losslessly; mask rather than trust the caller.
+    let code = error_code & 0xFFFF_FFFF;
+    let user = if from_user { SYNDROME_FROM_USER } else { 0 };
+    code | ((vector as u64) << SYNDROME_VECTOR_SHIFT) | user
+}
+
+/// The IDT vector a packed [`exception_syndrome`] names.
+#[must_use]
+pub const fn syndrome_vector(syndrome: u64) -> u8 {
+    #[allow(clippy::cast_possible_truncation)]
+    // SAFETY-INVARIANT: the field is 8 bits wide by construction
+    // (`exception_syndrome` shifts a `u8` into `32..40`), so the mask makes
+    // the narrowing lossless.
+    let vector = ((syndrome >> SYNDROME_VECTOR_SHIFT) & 0xFF) as u8;
+    vector
+}
+
+/// The hardware error code a packed [`exception_syndrome`] carries, or `0`
+/// for a vector that pushes none.
+#[must_use]
+pub const fn syndrome_error_code(syndrome: u64) -> u64 {
+    syndrome & 0xFFFF_FFFF
+}
+
+/// `true` when a packed [`exception_syndrome`] records an exception taken
+/// from ring 3.
+#[must_use]
+pub const fn syndrome_from_user(syndrome: u64) -> bool {
+    syndrome & SYNDROME_FROM_USER != 0
+}
+
+/// Signature of the fault handler an exception entry invokes.
+///
+/// `syndrome` is the packed [`exception_syndrome`] naming the vector, the
+/// hardware error code, and the privilege level the exception came from;
+/// for a `#PF` its low half is the architectural error code, so
+/// [`is_not_present`] / [`is_user`] / [`is_write`] decode it directly.
+/// `faulting_addr` is the faulting linear address read from `CR2` for a
+/// `#PF` and `0` for every other vector, which pushes no faulting address.
+/// `rip` is the PC of the faulting instruction. The handler **must not
+/// return**: this kernel slice has no fix-up logic to resume the faulting
+/// instruction, so a return would re-trap forever. Test handlers report
+/// the outcome to QEMU through [`crate::qemu_exit`].
+pub type FaultHandlerFn = extern "C" fn(syndrome: u64, faulting_addr: u64, rip: u64) -> !;
 
 /// Slot holding the installed fault handler as a raw function pointer
 /// (`0` = none installed).
@@ -460,7 +524,11 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         }
     }
     match fault_handler() {
-        Some(handler) => handler(error_code, faulting_addr, rip),
+        Some(handler) => handler(
+            exception_syndrome(PAGE_FAULT_VECTOR, error_code, is_user(error_code)),
+            faulting_addr,
+            rip,
+        ),
         None => crate::qemu_exit::exit_failure(),
     }
 }
@@ -509,6 +577,46 @@ unsafe fn user_register_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn syndrome_round_trips_the_vector_error_code_and_privilege() {
+        let syndrome = exception_syndrome(13, 0x1234_5678, true);
+        assert_eq!(syndrome_vector(syndrome), 13);
+        assert_eq!(syndrome_error_code(syndrome), 0x1234_5678);
+        assert!(syndrome_from_user(syndrome));
+
+        let kernel = exception_syndrome(6, 0, false);
+        assert_eq!(syndrome_vector(kernel), 6);
+        assert_eq!(syndrome_error_code(kernel), 0);
+        assert!(!syndrome_from_user(kernel));
+    }
+
+    #[test]
+    fn a_page_fault_syndrome_still_decodes_through_the_error_code_helpers() {
+        // The error code occupies the low half precisely so a handler that
+        // provokes only page faults keeps reading the same bits.
+        let code = PF_ERR_USER | PF_ERR_WRITE;
+        let syndrome = exception_syndrome(PAGE_FAULT_VECTOR, code, true);
+        assert_eq!(syndrome_vector(syndrome), PAGE_FAULT_VECTOR);
+        assert!(is_not_present(syndrome));
+        assert!(is_user(syndrome));
+        assert!(is_write(syndrome));
+        assert!(is_resolvable_user_fault(exception_syndrome(
+            PAGE_FAULT_VECTOR,
+            PF_ERR_USER,
+            true
+        )));
+    }
+
+    #[test]
+    fn a_wider_than_32_bit_error_code_cannot_reach_the_vector_field() {
+        // Fail closed on a malformed input rather than corrupt the vector
+        // a reader decodes the record by.
+        let syndrome = exception_syndrome(8, u64::MAX, false);
+        assert_eq!(syndrome_vector(syndrome), 8);
+        assert_eq!(syndrome_error_code(syndrome), 0xFFFF_FFFF);
+        assert!(!syndrome_from_user(syndrome));
+    }
 
     #[test]
     fn page_fault_vector_matches_intel_sdm() {

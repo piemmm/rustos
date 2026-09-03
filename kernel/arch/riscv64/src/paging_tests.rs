@@ -335,6 +335,35 @@ fn split_block_is_idempotent_and_fails_closed() {
 }
 
 #[test]
+fn refining_a_leaf_reports_the_granule_change_that_owes_a_fence() {
+    // The decision that drives the fence, on its own: a coarse leaf
+    // becoming a table changes the granule every address under it
+    // translates at, so the whole former leaf's range is owed
+    // maintenance — flushing only the page the caller came for leaves the
+    // rest of it refusing translations the tables plainly hold (the fault
+    // proved on aarch64 in `plans/OPEN-DEFECTS.md` D81).
+    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x30_0000;
+
+    assert_eq!(
+        space.refine_to_page(va),
+        Ok(true),
+        "a fresh gigapage leaf changes two granules"
+    );
+    assert_eq!(
+        space.refine_to_page(va),
+        Ok(false),
+        "an already-fine hierarchy changes no granule and owes no fence"
+    );
+    // A neighbouring page inside the same 2 MiB block is already fine, so
+    // it owes nothing either.
+    assert_eq!(space.refine_to_page(va + 0x1000), Ok(false));
+    // A page in a *different* 2 MiB block of the same gigapage still owes
+    // the fence: its covering megapage leaf has not been re-expressed.
+    assert_eq!(space.refine_to_page(va + 0x20_0000), Ok(true));
+}
+
+#[test]
 fn prepare_guard_arena_splits_every_covering_block_preserving_translation() {
     use tairix_arch_api::mmu::{self};
     let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 2).expect("identity map");

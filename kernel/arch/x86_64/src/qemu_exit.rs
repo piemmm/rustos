@@ -69,14 +69,12 @@ unsafe fn write_port(value: u8) {
     }
 }
 
+/// Park the CPU after the exit byte is written, so a run without QEMU's
+/// `isa-debug-exit` device attached still terminates. The port has one
+/// parked-CPU sequence and this is not a second copy of it.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn halt_forever() -> ! {
-    loop {
-        // SAFETY: `cli;hlt` is a well-defined parked-CPU sequence on x86_64. Looping defends against spurious wake-ups.
-        unsafe {
-            core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
-        }
-    }
+    crate::reset::park_cpu()
 }
 
 #[cfg(test)]

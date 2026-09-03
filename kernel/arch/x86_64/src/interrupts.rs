@@ -541,23 +541,128 @@ macro_rules! define_isr {
     };
 }
 
+/// Emit the shared body of a vector-specific **exception** stub.
+///
+/// `$pad` is the instruction that normalises the stack layout: empty for a
+/// vector whose CPU-pushed error code is already there, and a synthetic
+/// `pushq $0` for one that pushes none, so everything after it reads the
+/// same offsets. Not called directly — [`crate::define_exception_isr`] is
+/// the surface, and this exists only so its two forms do not each carry a
+/// copy of the body.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! exception_isr_body {
+    ($name:ident, $dispatch:path, $vector:literal, $pad:literal) => {
+        /// Auto-generated vector-specific exception stub. The body is
+        /// fully described in [`crate::define_exception_isr`]'s rustdoc.
+        ///
+        /// # Safety
+        ///
+        /// Only the CPU's IDT may invoke this symbol. Calling it directly
+        /// from Rust is undefined behaviour because it expects the
+        /// CPU-pushed interrupt frame on the stack, not a return address.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        #[unsafe(naked)]
+        #[no_mangle]
+        pub unsafe extern "C" fn $name() {
+            core::arch::naked_asm!(
+                $pad,
+                "pushq %rax",
+                "pushq %rcx",
+                "pushq %rdx",
+                "pushq %rbx",
+                "pushq %rbp",
+                "pushq %rsi",
+                "pushq %rdi",
+                "pushq %r8",
+                "pushq %r9",
+                "pushq %r10",
+                "pushq %r11",
+                "pushq %r12",
+                "pushq %r13",
+                "pushq %r14",
+                "pushq %r15",
+                // Above the 15 saved GPRs (120 bytes) sit the error code,
+                // then the CPU-pushed frame: rip, cs, rflags, rsp, ss.
+                "movq ${vector}, %rdi",
+                "movq 120(%rsp), %rsi",
+                "movq 128(%rsp), %rdx",
+                "movq 136(%rsp), %rcx",
+                // Read every stack operand before disturbing %rsp.
+                //
+                // A ring-0 -> ring-0 delivery performs no stack switch, so
+                // the CPU does not re-align %rsp (Intel SDM Vol 3A
+                // §6.14.2 aligns it only when the stack changes) and the
+                // resulting alignment depends on whether the vector
+                // pushed an error code. Force it rather than reason about
+                // it: `and` to 16, then `sub 8` so the System V AMD64
+                // §3.2.2 callee sees a 16-aligned frame after the call's
+                // return-address push. The dispatcher never returns, so
+                // the discarded %rsp is not owed back.
+                "andq $-16, %rsp",
+                "subq $8, %rsp",
+                "call {dispatch}",
+                // The dispatcher diverges; a return is a kernel bug.
+                "ud2",
+                vector = const $vector,
+                dispatch = sym $dispatch,
+                options(att_syntax),
+            )
+        }
+    };
+}
+
+/// Emit a vector-specific exception stub that reaches a diverging Rust
+/// dispatcher with `(vector, error_code, rip, cs)`.
+///
+/// ```text
+/// define_exception_isr!(isr_gp => dispatch, vector = 13, error_code);
+/// define_exception_isr!(isr_ud => dispatch, vector = 6);
+/// ```
+///
+/// The `error_code` marker is written for the vectors the CPU pushes one
+/// for (`8`, `10`–`14`, `17`, `21` — Intel SDM Vol 3A §6.13); a stub
+/// without it pushes a synthetic zero so the frame layout is uniform. The
+/// dispatcher must be `extern "C" fn(u64, u64, u64, u64) -> !`; this is
+/// the exception counterpart of [`crate::define_isr`], whose stubs resume
+/// through `iretq` and therefore cannot carry an error code.
+#[macro_export]
+macro_rules! define_exception_isr {
+    ($name:ident => $dispatch:path, vector = $vector:literal, error_code) => {
+        $crate::exception_isr_body!($name, $dispatch, $vector, "");
+    };
+    ($name:ident => $dispatch:path, vector = $vector:literal) => {
+        $crate::exception_isr_body!($name, $dispatch, $vector, "pushq $0");
+    };
+}
+
 // --- Default ISR Rust callback -------------------------------------
 
 /// Rust callback invoked by the assembly thunk
 /// `tairix_arch_x86_64_isr_default` (`interrupts.s`) with a pointer to
-/// the saved-regs block. Treated by as a closed-fail:
-/// any unexpected interrupt halts the binary through the platform's
-/// QEMU-exit hook.
+/// the saved-regs block: an unexpected *interrupt* at a vector nothing
+/// installed an ISR for. Fails closed by parking the CPU forever.
 ///
-/// Only compiled on the freestanding target — the `qemu_exit` failure
-/// helper itself is `cfg(target_os = "none")` (it executes a privileged
-/// port-I/O instruction). Host unit tests cover the IDT-entry surface
-/// directly; the asm-driven dispatch is exercised end-to-end by the
-/// QEMU integration test (`scheduler_stress_qemu`).
+/// It parks through the ordinary halt rather than QEMU's `isa-debug-exit`
+/// port: a debug-port write is a test-harness affordance, and on real
+/// hardware it does nothing, so a production kernel must not take a fatal
+/// decision through it.
+///
+/// Every architecturally-defined exception vector (`0..=31`) is
+/// overwritten by [`crate::exceptions`] with a stub that names its vector
+/// and reaches the fatal report, so this thunk is only ever reached for a
+/// vector in `32..=255`. It cannot name that vector — one shared thunk
+/// serves them all — so the park carries no record; per-vector interrupt
+/// stubs (and a non-fatal entry for the LAPIC spurious vector, which is
+/// not an error at all) are tracked in `plans/OPEN-DEFECTS.md` D85.
+///
+/// Only compiled on the freestanding target. Host unit tests cover the
+/// IDT-entry surface directly; the asm-driven dispatch is exercised
+/// end-to-end by the QEMU integration test (`scheduler_stress_qemu`).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_x86_64_default_interrupt(_saved_regs: *mut SavedRegs) -> ! {
-    crate::qemu_exit::exit_failure();
+    crate::reset::park_cpu()
 }
 
 // --- Tests ----------------------------------------------------------

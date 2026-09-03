@@ -382,15 +382,22 @@ impl AddressSpace {
     /// table of 512 × 4 KiB pages — leaving every address translating
     /// identically but now at 4 KiB granularity.
     ///
-    /// The split is **break-before-make-free for the running region**: it
-    /// only ever *adds* table levels that reproduce the existing
-    /// translation, never invalidating a live address, so it is safe to
-    /// run against the active translation regime. It is idempotent — a
-    /// level that is already a table pointer is left untouched — so
-    /// re-splitting an already-fine region succeeds without allocating.
-    /// The split itself changes no translation result and so needs no TLB
-    /// maintenance; the caller flushes after a subsequent
-    /// [`MmuAddressSpace::unmap`].
+    /// It is idempotent — a level that is already a table pointer is left
+    /// untouched — so re-splitting an already-fine region succeeds without
+    /// allocating and pays no invalidation.
+    ///
+    /// It is **not** break-before-make-free. Re-expressing a leaf
+    /// preserves each address's output and permissions but changes the
+    /// *granule* it translates at, and a hart holding the coarse
+    /// translation can fault a walk the tables plainly satisfy. The
+    /// maintenance owed is therefore the whole former leaf's range, not the
+    /// one page a caller came for, so a granule change pays one whole-hart
+    /// `sfence.vma` here rather than leaving the caller's
+    /// per-page fence to cover a gigapage-sized change
+    /// (`plans/OPEN-DEFECTS.md` D81, proved on aarch64 and fixed on every
+    /// port). Reaching the *other* harts is the caller's, through the
+    /// port's SBI RFENCE seam; the precondition remains that the root is
+    /// not the active regime (D82).
     ///
     /// # Errors
     ///
@@ -402,9 +409,23 @@ impl AddressSpace {
     /// re-expression of the same translation), so the address space is
     /// never left describing a *different* mapping.
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        if self.refine_to_page(vaddr)? {
+            invalidate_all_local();
+        }
+        Ok(())
+    }
+
+    /// Re-express the leaf covering `vaddr` at 4 KiB granularity,
+    /// reporting whether any level's granule actually changed.
+    ///
+    /// Split out so the decision that drives the fence is separable from
+    /// the bare instruction that performs it. An already-fine hierarchy
+    /// reports `false` and costs no fence.
+    fn refine_to_page(&mut self, vaddr: u64) -> Result<bool, MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
+        let mut refined = false;
         let frames = self.frames;
         let i2 = vpn_index(vaddr, 2);
 
@@ -426,6 +447,7 @@ impl AddressSpace {
             // contents, and fault on an address the leaf it replaced covered.
             publish_table_update();
             self.root[i2] = pte_from_phys(phys, flags::VALID);
+            refined = true;
         }
 
         // The root slot now holds a table pointer; recover the L1 table.
@@ -447,10 +469,11 @@ impl AddressSpace {
             // Ordered for the same reason as the child above.
             publish_table_update();
             l1[i1] = pte_from_phys(phys, flags::VALID);
+            refined = true;
         }
         // L1 now resolves `vaddr` through a 4 KiB page leaf.
         publish_table_update();
-        Ok(())
+        Ok(refined)
     }
 
     /// Re-express every coarse leaf covering the arena
@@ -465,10 +488,11 @@ impl AddressSpace {
     /// arena spans: a guard-page arena that the boot path laid down inside
     /// the coarse identity gigapages has no per-4 KiB leaf to clear, so the
     /// whole arena is split up-front, at boot, while it holds no running
-    /// context. Because `split_block` only ever *adds* table levels that
-    /// reproduce the existing translation, preparing the arena changes no
-    /// address's mapping and needs no TLB maintenance — it is safe against
-    /// the active translation regime and is idempotent.
+    /// context. It inherits [`Self::split_block`]'s precondition — the
+    /// root must **not** be the active regime, because re-expressing a
+    /// leaf changes the granule an address translates at — and is
+    /// idempotent (a re-prepare of an already-fine arena allocates nothing
+    /// and fences nothing).
     ///
     /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
     /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
@@ -888,8 +912,13 @@ impl TlbShootdown for AddressSpace {
         // Sv39 permits an implementation to cache invalid entries, so
         // making a leaf valid genuinely needs the fence — this port cannot
         // publish an installation with a bare barrier the way aarch64 can.
-        // One whole-hart fence covers the range; the scheduler never runs
-        // one space on two harts at once, so no remote fence is owed.
+        // One whole-hart fence covers the range, but it reaches only *this*
+        // hart: a space active on several (the kernel remap window, the
+        // boot root) owes the others one too, which the port declares
+        // through `CrossCpuTlbShootdown::publish_needs_remote` so the
+        // consumer follows this with an SBI RFENCE. An address space has no
+        // way to know which harts share it, so the reach cannot be decided
+        // here.
         if page_count != 0 {
             invalidate_all_local();
         }

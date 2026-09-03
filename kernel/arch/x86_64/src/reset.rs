@@ -1,4 +1,4 @@
-//! x86_64 platform reset (warm reboot).
+//! x86_64 terminal platform states: warm reboot, and parking a CPU.
 //!
 //! x86 has no single architected "reset the machine" instruction, so a warm
 //! reboot is driven through the legacy platform hardware every PC-class
@@ -24,6 +24,44 @@
 //! subsystem exists the x86_64 port reports power-off as unsupported (the
 //! `KernelArch::poweroff` default), which is honest rather than writing a
 //! guessed, chipset-specific control port from here.
+
+/// Park the calling CPU forever: mask its interrupts, then halt.
+///
+/// The port's one parked-CPU sequence — the fail-closed terminus of a
+/// fatal report, an unexpected interrupt, a stop-request acknowledge, and
+/// the `hlt` behind QEMU's exit byte. Only `NMI` and `SMI` can wake a
+/// `cli`'d `hlt`; both return here and re-halt, which is what makes the
+/// `!` honest.
+///
+/// Lives here rather than in `kernel_arch` because that module is gated on
+/// the `sched-arch` feature, and a freestanding consumer without the Arch
+/// HAL still has to be able to park.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn park_cpu() -> ! {
+    // SAFETY: `cli` and `hlt` are serialising instructions documented in
+    // Intel SDM Vol 2B (CLI) and Vol 2A (HLT). They touch no memory and
+    // have no calling-convention side effects.
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+    loop {
+        // SAFETY: as above. `IF` is masked, so only `NMI`/`SMI` wake the
+        // CPU; both land back here and re-execute `hlt`.
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+}
+
+/// Host twin of the freestanding park: a host build has no `hlt`, and no
+/// host test calls this (the `-> !` signature is proven by a compile-time
+/// assertion, never by blocking a test thread).
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub fn park_cpu() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// Reset control register I/O port (the ICH/PCH "reset control" register,
 /// PIIX/ICH datasheets). Byte-wide.

@@ -2702,11 +2702,13 @@ remainder); a window too small for a 2 MiB block degrades to no arena
 
 `AddressSpace::prepare_guard_arena(base, len)` re-expresses the arena at
 4 KiB granularity by applying `split_block` to every 2 MiB block the arena
-spans. Because the split only *adds* table levels (it is the same
-break-before-make-free operation above), preparing the arena over the
-*active* boot tables changes no translation and needs no TLB maintenance;
-it is idempotent and fails closed (`Misaligned` / `NotMapped` /
-`PoolExhausted`). `boot_aarch64` keeps the live boot `AddressSpace`
+spans. It is idempotent and fails closed (`Misaligned` / `NotMapped` /
+`PoolExhausted`). It inherits `split_block`'s precondition — the root must
+**not** be the active regime, because re-expressing a block changes the
+granule its addresses translate at — so preparing the arena over the
+*active* boot tables is a break-before-make violation that the split's
+whole-regime invalidation bounds but does not remove
+(`plans/OPEN-DEFECTS.md` D82). `boot_aarch64` keeps the live boot `AddressSpace`
 (`enable_mmu_and_vectors` returns it) and prepares the arena after the RAM
 window is discovered, recording a `guard_arena_prepared` audit field. The
 boot page-table pool is sized for this worst case

@@ -381,6 +381,17 @@ impl CrossCpuTlbShootdown for RiscvArch {
         self.shootdown_range(vaddr, 1);
     }
 
+    fn publish_needs_remote(&self) -> bool {
+        // Sv39 permits an implementation to cache an invalid PTE, so a
+        // hart that already walked an absent leaf keeps faulting on it
+        // until an `sfence.vma` discards the cached absence — the local
+        // fence `paging::publish_mappings` issues covers only the
+        // publishing hart. A space active on several harts (the kernel
+        // remap window, the boot root) therefore owes the other harts a
+        // fence as well, which the SBI RFENCE below delivers.
+        true
+    }
+
     fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
         if page_count == 0 {
             return;

@@ -521,10 +521,17 @@ pub trait AddressSpace {
     /// (`plans/PI.md` G1–G3): a guard page that
     /// the boot path mapped inside a coarse identity *block* has no
     /// per-4 KiB leaf to clear until the block is re-expressed as a table
-    /// of finer leaves. The split only ever *adds* table levels that
-    /// reproduce the existing translation — it never invalidates a live
-    /// address — so it is break-before-make-free against the running
-    /// regime and is idempotent.
+    /// of finer leaves. It is idempotent: an already-fine hierarchy
+    /// allocates nothing and pays no maintenance.
+    ///
+    /// It is **not** break-before-make-free. Adding a table level
+    /// preserves each address's output and permissions but changes the
+    /// *granule* it translates at, and a CPU holding the coarse
+    /// translation may fault a walk the tables plainly satisfy. A port
+    /// therefore owes the maintenance for the whole former block's range
+    /// — not the one page the caller came for — whenever a granule
+    /// actually changed, and the root must not be the active translation
+    /// regime (`plans/OPEN-DEFECTS.md` D81, D82).
     ///
     /// The default fails closed with [`MapError::Unsupported`] for a port
     /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
@@ -555,10 +562,19 @@ pub trait AddressSpace {
     /// the boot path's coarse identity blocks has no per-4 KiB leaf to
     /// clear until those blocks are re-expressed as tables of finer
     /// leaves. Done up-front, at boot, while the arena holds no running
-    /// context. Because the split only ever *adds* table levels that
-    /// reproduce the existing translation, preparing the arena changes no
-    /// address's mapping and needs no TLB maintenance — it is
-    /// break-before-make-free against the active regime and is idempotent.
+    /// context. It is idempotent: an already-fine hierarchy allocates
+    /// nothing and changes no granule.
+    ///
+    /// It is **not** break-before-make-free. Adding a table level
+    /// preserves each address's output and permissions but changes the
+    /// *granule* it translates at, and a TLB holding both granules for one
+    /// address is CONSTRAINED UNPREDICTABLE — which is why
+    /// [`Self::split_block`] owns the maintenance for the whole former
+    /// block's range rather than leaving a caller to flush one page of it
+    /// (`plans/OPEN-DEFECTS.md` D81). The precondition is therefore that
+    /// the root **must not** be the active translation regime; a live
+    /// refinement is bounded by that maintenance but still opens a window
+    /// the architecture leaves undefined (D82).
     ///
     /// The default fails closed with [`MapError::Unsupported`] for a port
     /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]

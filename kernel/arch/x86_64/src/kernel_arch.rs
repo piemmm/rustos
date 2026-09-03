@@ -583,24 +583,7 @@ impl SecondaryBringup for X86_64Arch {
 pub fn halt() -> ! {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        // SAFETY: `cli` and `hlt` are unprivileged-w.r.t.-the-kernel
-        // serialising instructions documented in Intel SDM Vol 2A
-        // (HLT) and Vol 2B (CLI). They touch no memory, have no
-        // calling-convention side effects, and the surrounding `loop`
-        // guarantees the `!` return type.
-        unsafe {
-            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
-        }
-        loop {
-            // SAFETY: same justification as the `cli` above; `hlt`
-            // blocks the CPU until the next external interrupt.
-            // Because we masked `IF` with `cli` above, the only
-            // wakeups possible are NMI and SMI, both of which return
-            // here and re-execute `hlt` on the next loop iteration.
-            unsafe {
-                core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-            }
-        }
+        crate::reset::park_cpu()
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {

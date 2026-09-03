@@ -2545,6 +2545,32 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/OPEN-DEFECTS.md` D83: every kernel-mode exception vector on
+    // x86_64 carries a stub that names it and reaches the fatal report.
+    // Boots the **production** `tairix-kernel` pipeline (the per-vector
+    // exception stubs are installed there) and, on `BootCompleted`,
+    // executes `ud2`; the vertical's own fatal observer asserts the
+    // reported syndrome decodes to vector 6 taken from kernel mode — a
+    // check a vector-agnostic thunk could not satisfy.
+    QemuTest {
+        package: "tairix-test-kernel-exception-qemu-x86_64",
+        binary: "tairix-test-kernel-exception-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
     // *production* fault-form, the riscv64 sibling of
     // `tairix-test-stack-overrun-qemu-aarch64`.

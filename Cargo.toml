@@ -285,6 +285,7 @@ members = [
     "tests/integration/kernel_arch_boot",
     "tests/integration/kernel_arch_boot_riscv64",
     "tests/integration/kernel_arch_boot_aarch64",
+    "tests/integration/kernel_exception_qemu_x86_64",
     "tests/integration/uart_console_qemu_aarch64",
     "tests/integration/kernel_arch_boot_wasm32",
     "tests/integration/framebuffer_display_wasm32",

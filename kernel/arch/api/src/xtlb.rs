@@ -149,6 +149,32 @@ pub trait CrossCpuTlbShootdown {
             vaddr = vaddr.wrapping_add(PAGE_BYTES);
         }
     }
+
+    /// Whether a freshly *installed* leaf must be published to the other
+    /// CPUs as well as ordered locally
+    /// ([`crate::tlb::TlbShootdown::publish_mappings`]).
+    ///
+    /// The default is `false`, which is what "a leaf that was absent
+    /// cannot be stale in any TLB" buys: a CPU that faults on the new
+    /// leaf walks the tables and finds it, so an installation owes
+    /// ordering, not invalidation, and costs no cross-CPU work at all.
+    ///
+    /// A port whose ISA permits caching an **invalid** entry cannot rely
+    /// on that — a CPU holding the cached absence keeps faulting until it
+    /// is fenced — so it declares `true` and the consumer follows the
+    /// local publish with a [`Self::shootdown_range`] over the same run.
+    /// Sv39 is such an ISA (RISC-V privileged spec: an implementation may
+    /// cache invalid PTEs, and `sfence.vma` is what discards them); the
+    /// declaration exists so the ports that do *not* need it keep paying
+    /// nothing, rather than every installation broadcasting to be safe.
+    ///
+    /// This is a per-port constant, not a per-space one: a port cannot
+    /// know from an address space alone which CPUs share it, and only a
+    /// space active on more than one CPU (the kernel remap window and the
+    /// boot root) is ever published from a CPU other than its user's.
+    fn publish_needs_remote(&self) -> bool {
+        false
+    }
 }
 
 /// The cross-CPU TLB-shootdown conformance vertical.
@@ -179,6 +205,14 @@ pub mod conformance {
         xtlb.shootdown_page(0xFFFF_FFFF_FFFF_F000);
         xtlb.shootdown_range(vaddr, 0);
         xtlb.shootdown_range(vaddr | 0xFFF, 3);
+        // A declaration, not an action: what the suite can prove is that
+        // the port answers it without panicking and answers it the same
+        // way twice (it is a property of the ISA, never of a call site).
+        assert_eq!(
+            xtlb.publish_needs_remote(),
+            xtlb.publish_needs_remote(),
+            "publish_needs_remote must be a stable per-port declaration"
+        );
     }
 
     #[cfg(test)]

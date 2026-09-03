@@ -1386,9 +1386,12 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     overrides forwarding to them (one body, §2.2). Sv39 carries the same
     R/W/X/U/A/D leaf encoding at every level, so the shared `shatter_pte_into`
     helper changes only the PPN per sub-entry (preserving every permission
-    bit); the split only *adds* table levels reproducing the existing
-    translation, so it is break-before-make-free, idempotent, and fails closed
-    (`Misaligned`/`NotMapped`/`PoolExhausted`). Host-proven (the `paging_tests`
+    bit); the split is idempotent and fails closed
+    (`Misaligned`/`NotMapped`/`PoolExhausted`). It is **not**
+    break-before-make-free — re-expressing a leaf changes the granule its
+    addresses translate at, so a granule change pays one whole-hart fence
+    and the root must not be the active regime
+    (`plans/OPEN-DEFECTS.md` D81/D82). Host-proven (the `paging_tests`
     split/identity/idempotency/fail-closed/arena/HAL-forward suite replaced the
     old `Pending` fail-closed test) and end to end on `-M virt` by
     `tests/integration/stack_guard_qemu_riscv64` (the sibling of
@@ -1439,8 +1442,11 @@ instead of a next-reschedule detection, is now **landed `[x]`** (G1–G3c):
     low physical address, so it is only valid bare-metal). The shared
     `shatter_huge_into` helper copies the leaf's `USER`/`NO_EXECUTE` bits onto
     every sub-entry + the new table pointer, so the split is an attribute-
-    faithful, break-before-make-free, idempotent re-expression that fails
-    closed (`Misaligned`/`NotMapped`/`PoolExhausted`). Proven end to end by
+    faithful, idempotent re-expression that fails closed
+    (`Misaligned`/`NotMapped`/`PoolExhausted`). It is **not**
+    break-before-make-free — it changes the page size the address is cached
+    at, so a granule change pays one `CR3` reload and the root must not be
+    the active regime (`plans/OPEN-DEFECTS.md` D81/D82). Proven end to end by
     the new `tests/integration/stack_guard_qemu_x86_64` (enrolled in
     `tools/xtask/src/commands/qemu_tests.rs`, single CPU, 60 s, the sibling of
     `stack_guard_qemu_{aarch64,riscv64}`): it boots the production

@@ -127,6 +127,14 @@ pub mod cpuname;
 /// `tairix-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod entropy;
+/// x86_64 exception entries: one stub per architecturally-defined vector
+/// (`0..=31`, less the resumable `#PF` in [`fault`]), each naming its
+/// vector and its hardware error code, funnelled into the one fatal tail
+/// that reaches the installed fault handler. The x86_64 counterpart of the
+/// aarch64/riscv64 `fatal_exception` tails. The vector-table shape is
+/// host-unit-tested; the naked stubs and the installer are
+/// freestanding-only.
+pub mod exceptions;
 /// x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook: the
 /// dedicated, error-code-aware page-fault ISR the production IDT installs
 /// on vector 14 and the set-once fault observer the kernel reaches it

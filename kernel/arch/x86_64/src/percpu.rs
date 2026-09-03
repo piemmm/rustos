@@ -62,6 +62,27 @@ pub const IST_INDEX_DF: u8 = 1;
 /// IST index used for the `#NMI` (vector 2) gate.
 pub const IST_INDEX_NMI: u8 = 2;
 
+/// The IST index vector `vector`'s gate must carry, or `0` for a gate
+/// that runs on the interrupted stack.
+///
+/// `#DF` and `#NMI` are the two vectors Intel SDM Vol 3A §6.14.5 says a
+/// production long-mode kernel must give a dedicated stack: `#DF` because
+/// it is precisely the exception raised when the current stack cannot be
+/// used, `#NMI` because it can arrive on any stack at any time. Every
+/// other vector is fine on the interrupted stack.
+///
+/// One definition, read by both `init` (which populates the whole table)
+/// and `install_vector` (which overwrites individual slots later), so an
+/// overwrite cannot silently drop a gate's IST and defeat the stack swap.
+#[must_use]
+pub const fn ist_for_vector(vector: u8) -> u8 {
+    match vector {
+        2 => IST_INDEX_NMI,
+        8 => IST_INDEX_DF,
+        _ => 0,
+    }
+}
+
 /// Errors returned by `init` or `install_vector`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitError {
@@ -369,11 +390,7 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     // (c2) module documents.
     let handler = crate::interrupts_default_isr_addr();
     let selector = PerCpuGdt::selectors().kernel_cs;
-    slot.idt = Idt::with_default_handler(handler, selector, |v| match v {
-        2 => IST_INDEX_NMI,
-        8 => IST_INDEX_DF,
-        _ => 0,
-    });
+    slot.idt = Idt::with_default_handler(handler, selector, ist_for_vector);
 
     // SAFETY: `slot` is borrowed from a `'static mut` arena, so the
     // `'static` lifetime promised by `PerCpuGdt::install` and
@@ -397,10 +414,12 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
 /// `cpu_index` selects which per-CPU IDT to mutate; `vector` is the
 /// 0..=255 architecturally-fixed slot to overwrite; `handler` is the
 /// linear address of the ISR entry point (typically the symbol of a
-/// stub emitted by [`crate::define_isr`]). The IDT entry is built as
-/// a 64-bit interrupt gate at DPL 0, IST 0 — vectors that need an IST
-/// stack (NMI, #DF) are already installed by `init` and must not be
-/// overwritten through this entry point.
+/// stub emitted by [`crate::define_isr`] or
+/// [`crate::define_exception_isr`]). The IDT entry is built as a 64-bit
+/// interrupt gate at DPL 0 whose IST index comes from the same
+/// [`ist_for_vector`] mapping [`init`] used, so overwriting `#DF` or
+/// `#NMI` keeps its dedicated stack rather than silently defeating the
+/// stack swap.
 ///
 /// The CPU re-reads the IDT base on every interrupt delivery, so
 /// overwriting an entry while interrupts are disabled is safe; the
@@ -420,13 +439,9 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
 /// * Interrupts on the calling CPU must be disabled.
 /// * `handler` must be the address of a valid ISR (either the
 ///   default thunk from `interrupts.s` or a stub produced by
-///   [`crate::define_isr`]). Pointing the slot at any other address
-///   makes the CPU jump to invalid code on the next delivery.
-/// * `vector` must not be `2` (`#NMI`) or `8` (`#DF`): those slots
-///   are owned by `init` and route through dedicated IST stacks;
-///   overwriting them with an IST-0 entry would defeat the
-///   double-fault stack-swap guarantee. The function does not
-///   refuse those vectors at runtime — the caller is responsible.
+///   [`crate::define_isr`] / [`crate::define_exception_isr`]). Pointing
+///   the slot at any other address makes the CPU jump to invalid code on
+///   the next delivery.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Result<(), InitError> {
     use crate::interrupts::IdtEntry;
@@ -443,7 +458,10 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
     unsafe {
         let entry_ptr = core::ptr::addr_of_mut!((*slot_ptr).idt.entries[vector as usize]);
         let selector = PerCpuGdt::selectors().kernel_cs;
-        core::ptr::write_volatile(entry_ptr, IdtEntry::interrupt_gate(handler, selector, 0));
+        core::ptr::write_volatile(
+            entry_ptr,
+            IdtEntry::interrupt_gate(handler, selector, ist_for_vector(vector)),
+        );
     }
     Ok(())
 }
@@ -524,6 +542,21 @@ pub unsafe fn install_tss_rsp0(cpu_index: usize, rsp0: u64) -> Result<(), InitEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_double_fault_and_nmi_gates_carry_an_ist() {
+        // Intel SDM Vol 3A §6.14.5: those two must run on a dedicated
+        // stack. Every other vector runs on the interrupted stack, and the
+        // mapping is shared by the table populator and the later per-vector
+        // overwrites so an overwrite cannot silently drop the stack swap.
+        assert_eq!(ist_for_vector(8), IST_INDEX_DF);
+        assert_eq!(ist_for_vector(2), IST_INDEX_NMI);
+        for vector in 0u8..=255 {
+            if vector != 2 && vector != 8 {
+                assert_eq!(ist_for_vector(vector), 0, "vector {vector}");
+            }
+        }
+    }
     use core::sync::atomic::Ordering;
 
     #[test]

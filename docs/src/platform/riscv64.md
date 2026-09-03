@@ -982,11 +982,16 @@ R/W/X/U/A/D encoding at *every* level, so the shared `shatter_pte_into`
 helper only changes the PPN per sub-entry (`block & !PTE_PPN_MASK`
 captures `VALID` + every permission bit), reproducing the identical
 translation at the finer granularity (`AGENTS.md` §2.2 — one attribute
-vocabulary). The split only ever *adds* table levels that reproduce the
-existing translation, so it is **break-before-make-free** for the running
-region, is idempotent (a level that is already a table pointer is left
-untouched), and needs no TLB maintenance; it fails closed
-(`Misaligned`/`NotMapped`/`PoolExhausted`). After the split the single
+vocabulary). It is idempotent (a level that is already a table pointer is
+left untouched, allocating nothing and fencing nothing) and fails closed
+(`Misaligned`/`NotMapped`/`PoolExhausted`). It is **not**
+break-before-make-free: re-expressing a leaf preserves each address's
+output and permissions but changes the *granule* it translates at, and a
+hart holding the coarse translation can fault a walk the tables plainly
+satisfy — so a granule change pays one whole-hart `sfence.vma` here rather
+than leaving a caller's per-page fence to cover a gigapage-sized change
+(`plans/OPEN-DEFECTS.md` D81). Reaching the other harts is the caller's,
+and the root must not be the active regime (D82). After the split the single
 4 KiB page tears down with the existing `unmap` + `TlbShootdown::flush_page`.
 
 `AddressSpace::prepare_guard_arena(base, len)` is `split_block` applied to

@@ -704,15 +704,24 @@ impl AddressSpace {
     /// ([`flags::HUGE`]) is the PAT attribute, not a page-size flag (Intel
     /// SDM Vol 3A §4.5), so leaving it set would change the memory type.
     ///
-    /// The split is **break-before-make-free for the running region**: it
-    /// only ever *adds* table levels that reproduce the existing
-    /// translation, never invalidating a live address, so it is safe to
-    /// run against the active translation regime. It is idempotent — a
-    /// level that is already a table pointer is left untouched — so
-    /// re-splitting an already-fine region succeeds without allocating.
-    /// The split itself changes no translation result and so needs no TLB
-    /// maintenance; the caller flushes after a subsequent
-    /// [`MmuAddressSpace::unmap`].
+    /// It is idempotent — a level that is already a table pointer is left
+    /// untouched — so re-splitting an already-fine region succeeds without
+    /// allocating and pays no invalidation.
+    ///
+    /// It is **not** break-before-make-free. Re-expressing a huge leaf
+    /// preserves each address's output and permissions but changes the
+    /// *page size* the TLB caches it at, and Intel SDM Vol 3A §4.10.4.1
+    /// requires software that changes the page size for a linear address to
+    /// invalidate before the address is used again — otherwise a CPU
+    /// holding the coarse entry can fault a walk the tables plainly
+    /// satisfy. The maintenance owed is therefore the whole former leaf's
+    /// range, not the one page a caller came for, so a granule change pays
+    /// one [`invalidate_all_local`] here rather than leaving the caller's
+    /// per-page flush to cover a gigapage-sized change
+    /// (`plans/OPEN-DEFECTS.md` D81, proved on aarch64 and fixed on every
+    /// port). Reaching the *other* CPUs is the caller's, through the port's
+    /// shootdown seam; the precondition remains that the root is not the
+    /// active regime (D82).
     ///
     /// Like the rest of the four-level walk this recovers intermediate
     /// tables through the low identity map, so it is only valid on the
@@ -731,9 +740,24 @@ impl AddressSpace {
     /// never left describing a *different* mapping.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        if self.refine_to_page(vaddr)? {
+            invalidate_all_local();
+        }
+        Ok(())
+    }
+
+    /// Re-express the leaf covering `vaddr` at 4 KiB granularity,
+    /// reporting whether any level's page size actually changed.
+    ///
+    /// Split out so the decision that drives the TLB maintenance is
+    /// separable from the bare instruction that performs it. An
+    /// already-fine hierarchy reports `false` and costs no invalidation.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    fn refine_to_page(&mut self, vaddr: u64) -> Result<bool, MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
+        let mut refined = false;
         let frames = self.frames;
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
         let i3 = ((vaddr >> 30) & 0x1FF) as usize;
@@ -768,6 +792,7 @@ impl AddressSpace {
             shatter_huge_into(entries, e3, 21, true);
             pdpt[i3] =
                 phys | flags::PRESENT | flags::WRITABLE | (e3 & (flags::USER | flags::NO_EXECUTE));
+            refined = true;
         }
 
         // The PDPT slot now holds a table pointer; recover the PD.
@@ -788,9 +813,10 @@ impl AddressSpace {
             shatter_huge_into(entries, e2, 12, false);
             pd[i2] =
                 phys | flags::PRESENT | flags::WRITABLE | (e2 & (flags::USER | flags::NO_EXECUTE));
+            refined = true;
         }
         // The PD now resolves `vaddr` through a 4 KiB page leaf.
-        Ok(())
+        Ok(refined)
     }
 
     /// Re-express every coarse huge-page leaf covering the arena
@@ -805,10 +831,11 @@ impl AddressSpace {
     /// spans: a guard-page arena that the boot path laid down inside the
     /// coarse identity huge pages has no per-4 KiB leaf to clear, so the
     /// whole arena is split up-front, at boot, while it holds no running
-    /// context. Because `split_block` only ever *adds* table levels that
-    /// reproduce the existing translation, preparing the arena changes no
-    /// address's mapping and needs no TLB maintenance — it is safe against
-    /// the active translation regime and is idempotent.
+    /// context. It inherits [`Self::split_block`]'s precondition — the
+    /// root must **not** be the active regime, because re-expressing a
+    /// leaf changes the page size an address is cached at — and is
+    /// idempotent (a re-prepare of an already-fine arena allocates nothing
+    /// and invalidates nothing).
     ///
     /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
     /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
@@ -1021,9 +1048,22 @@ pub unsafe fn widen_boot_identity(gib: usize, directories: u64) -> bool {
 
     IDENTITY_GIGAPAGES.store(gib, Ordering::Release);
 
-    // SAFETY: reloading `CR3` with the value it already holds is a pure
-    // TLB flush of the non-global entries; the root is unchanged and still
-    // maps the executing code, stack, and per-CPU data.
+    invalidate_all_local();
+    true
+}
+
+/// Discard every cached translation on the calling CPU by reloading `CR3`
+/// with the value it already holds.
+///
+/// The port sets no `GLOBAL` leaf, so a `CR3` reload discards the whole
+/// TLB and the paging-structure caches; the root is unchanged and still
+/// maps the executing code, stack, and per-CPU data. This is the port's
+/// only whole-address-space local invalidation, shared by the identity
+/// widening and the block split — never a second copy of the sequence.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn invalidate_all_local() {
+    // SAFETY: `mov cr3` with the value already loaded is a pure TLB flush.
+    // It changes no translation and touches no memory.
     unsafe {
         core::arch::asm!(
             "mov {t}, cr3",
@@ -1032,7 +1072,6 @@ pub unsafe fn widen_boot_identity(gib: usize, directories: u64) -> bool {
             options(nostack, preserves_flags),
         );
     }
-    true
 }
 
 /// Reserve the kernel remap window: draw the shared PDPT, publish the PML4
