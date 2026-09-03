@@ -48,11 +48,14 @@ vertically (main axis `y`). Regions are laid out along the main axis and the
 code is otherwise orientation-agnostic.
 
 `TaskbarConfig::bottom_bar` is the house style: a **48** logical-pixel
-thickness, a 48 launcher, 48 application slots, 24 notification icons, an 80
-clock, and a 44 Switchboard capsule. Nothing sizes an icon from the thickness
-itself — every slot spans the bar's content strip and each control sizes its
-own icon off the plate it is given (`icon_side`), so a change to the thickness
-moves the icons with it and nothing needs re-tuning.
+thickness, 24 notification icons, an 80 clock, and the one `ICON_SLOT_EXTENT`
+of 48 for every slot that holds a single picture — the leading launcher, each
+application slot, and the trailing account capsule. That extent is named once
+rather than per region, so the two ends of the bar carry the same-sized icon by
+construction. Nothing sizes an icon from the thickness itself — every slot
+spans the bar's content strip and each control sizes its own icon off the plate
+it is given (`icon_side`), so a change to the thickness moves the icons with it
+and nothing needs re-tuning.
 
 `BarLayout::compute` insets the bar by the theme's `taskbar_margin` on the
 three sides facing a screen edge: left, right, and bottom for a bottom bar;
@@ -82,17 +85,19 @@ From the leading end to the trailing end:
   (see *The application strip*).
 - **Notification area** — status/notification icons, packed immediately
   before the clock.
-- **Clock** — immediately before the Switchboard capsule. Its display text is
+- **Clock** — immediately before the account capsule. Its display text is
   held by a `Clock` model whose label the caller sets (formatting a `Time64`
   value into a string is an upstream concern, `AGENTS.md` §21); the bar stores
   only the text to draw.
-- **Switchboard capsule** — anchored to the very trailing end, immovable
+- **Account capsule** — anchored to the very trailing end, immovable
   (`plans/NEW-TASKBAR.md` T9). The `SwitchboardTray` model derives the shared
   `tairix-controls` `TraySignal` capsule from the Switchboard service's
   tray-signal summary plus the session's unresponsive count — one pure
   derive, dominant state hung > pressure > jobs > recovery > calm, with the
   working seam / pressure rail / recovery posture composed orthogonally, and
-  an absent service deriving the calm capsule (fail closed). Its slot is
+  an absent service deriving the calm capsule (fail closed). It wears the
+  signed-in account rather than a system glyph (see *The account's identity
+  disc*). Its slot is
   computed **first** among the trailing regions, so the clock, the icons, and
   the applications can never displace it — only the permanent leading launchers
   outrank it on a degenerate screen. Hover expands the capsule's instrument
@@ -148,23 +153,60 @@ press on the rule or in the gutter around it reaches the bare bar and is
 out `Rect::EMPTY` and simply draws nothing — the launchers keep their places
 either way.
 
-## Rounded edges
+## The account's identity disc
 
-`BarLayout::corner_radius` carries the radius taken from the active theme's
-`taskbar_corner_radius` metric. The window manager cuts the bar window to it
-through its single anti-aliased rounded-corner path, exactly as it rounds
-windows, and the bar's own background plate is laid down at that same radius so
-its rim follows the silhouette the cut leaves. Because the bar floats clear of
-the screen edges it faces, all four corners round against the wallpaper. Both
-round through `lib/raster`'s one coverage path; there is no second
-rounded-corner implementation (`AGENTS.md` §2.2).
+The trailing capsule draws the account the session is signed in as. The
+embedder names it (`DesktopShell::set_account`, from the session's `USER`) and
+the bar keeps only the one character it draws: a name is not an identity the
+bar could act on, and holding just the mark means a live update cannot put a
+name on a surface that never shows one.
+
+The picture is the account's **circular identity disc** — the shared
+`tairix_icon::monogram_disc`, the same generator the login screen's account
+tiles and prompt draw through, so the mark a person signed in as is the mark
+they then live with. It is produced at exactly the side the capsule paints at,
+in the theme's accent over `on_accent`, so nothing scales or crops it. Nothing
+sets a picture on an account yet; when something does, it resolves through this
+same disc and stays a circle.
+
+The disc is built by the paint that draws it rather than cached, so it is right
+by construction at every theme, scale, and account: one round-rect fill and one
+cached glyph over a few hundred pixels, against a repaint that already fills
+the whole bar. A cache would be a fourth invalidation surface for a picture
+that costs a fortieth of the frame it appears in, and one a theme switch could
+leave stale.
+
+Resolution is total and the disc always exists: an account name that yields no
+character still marks the disc (`?`), so the capsule can never be blank. Only
+where a picture of that side cannot exist at all does the capsule fall through
+to `IconKind::User`'s built-in bust glyph. The disc outranks the shipped
+class-artwork tier: no generic picture stands in for a person, so the capsule
+asks the artwork lookup for nothing while it has a disc. Both the capsule and a
+running application's slot resolve their own-picture-then-class order through
+one helper, so the two cannot diverge.
+
+## Semicircular ends
+
+The bar is a **stadium**: its two ends are semicircles, not rounded corners.
+`BarLayout::corner_radius` is therefore half the bar's own thickness — derived,
+not themed, because a themed number could only ever coincide with the shape.
+The window manager cuts the bar window to it through its single anti-aliased
+rounded-corner path, exactly as it rounds windows, and the bar's own background
+plate is laid down at that same radius so its rim follows the silhouette the
+cut leaves. The shared coverage path clamps a radius to half the shorter side,
+so the derived radius *is* the stadium and the two agree by construction.
+Because the bar floats clear of the screen edges it faces, both ends curve
+against the wallpaper. Both round through `lib/raster`'s one coverage path;
+there is no second rounded-corner implementation (`AGENTS.md` §2.2). A side bar
+is the same rule across its own thickness: its top and bottom are the
+semicircles.
 
 ## The owned theme
 
 The bar owns a copy of the active `Theme` (`Taskbar::theme`), adopted at
 construction and swapped by `Taskbar::apply_theme`. Layout, hit-testing, and
-painting all read that one copy, so the radius a hit-test assumes and the
-radius the painter draws can never come from two different themes.
+painting all read that one copy, so the metrics a hit-test assumes and the
+metrics the painter draws can never come from two different themes.
 
 Both take `Theme::floating`, so the ground for floating chrome is adopted once
 and every surface the bar paints — and every control on them — is translucent by
@@ -375,9 +417,9 @@ panel has no separate header band.
 Every application icon the bar draws resolves through **one** rule, written
 once in `render` rather than restated per slot (`AGENTS.md` §2.2):
 
-1. the artwork its owner already supplied for that specific application (a
-   running application's own bundle icon, a library row's own icon, a picker
-   cell's window thumbnail), else
+1. the artwork the slot carries of its *own* (a running application's own
+   bundle icon, a library row's own icon, a picker cell's window thumbnail, the
+   trailing capsule's account disc), else
 2. the artwork the `IconArtwork` lookup holds for the slot's `IconKind` — the
    shipped class master under `/System/Graphics/Icons`, else
 3. the control's built-in vector glyph.

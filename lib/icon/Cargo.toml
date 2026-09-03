@@ -32,11 +32,20 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # The audit sink the reclaimable-memory cache logs classification and
 # eviction through — supplied by the process that builds the cache.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The shared text rasteriser. An account's identity disc bears its
+# monogram, drawn through the one shared blitter rather than a second glyph
+# path of this crate's own.
+tairix-font = { path = "../font", version = "=0.0.0" }
 # The shared file-name validator. An application bundle names its own icon in
 # its manifest, and that name is untrusted input: it is accepted only as a
 # plain file name, checked by the one path parser the tree already has rather
 # than a second spelling of the same rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
+
+# An account disc's own tests draw its monogram, so they inject the shared
+# solid test transport (never a running `fontd`).
+[dev-dependencies]
+tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

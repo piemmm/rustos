@@ -4,12 +4,14 @@ The shared desktop-icon library (`lib/icon`, `AGENTS.md` §6 / §10 — `PLAN.md
 Stage 7). It lives in `lib/*` so the taskbar, the desktop session, and the
 file manager all draw icons without depending on one another (`AGENTS.md`
 §17.4). The crate is `no_std`, `#![forbid(unsafe_code)]`, and owns no scan
-converter or colour arithmetic of its own — it draws through `lib/raster`'s
-one `Surface::fill_polygon` path and its one `Surface::layered` composition,
-exactly like `lib/cursor`.
+converter, colour arithmetic, or glyph rasteriser of its own — it draws
+through `lib/raster`'s one `Surface::fill_polygon` path and its one
+`Surface::layered` composition, exactly like `lib/cursor`, and marks an
+account's disc through `lib/font`.
 
 The built-in glyph representation (`VectorIcon`, `IconLayer`, `IconKind`,
-`builtin_icon`, the SVG-first `IconSet`/`IconAssetSource` loader) is described
+`builtin_icon`, the SVG-first `IconSet`/`IconAssetSource` loader) and an
+account's circular identity disc (`monogram_of`, `monogram_disc`) are described
 under [Desktop icons](../desktop/icons.md). This page covers the crate's
 **asset model** and the `artwork` layer that resolves it.
 

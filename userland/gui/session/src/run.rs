@@ -2034,6 +2034,9 @@ mod program {
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
+        // The bar's trailing capsule wears this account's identity disc, the
+        // same mark the login screen drew for it.
+        shell.set_account(&mut compositor, account);
         // Offer the rows that need re-authentication only where this session
         // really has a broker for it: the Lock row (which would otherwise
         // strand the user behind a screen with no way back) and the clock's

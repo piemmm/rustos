@@ -8,10 +8,10 @@ use alloc::vec::Vec;
 use tairix_controls::{ControlState, FocusState, IconTile, PointerState, SelectionState};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconKind, IconPicture};
+use tairix_icon::{monogram_disc, monogram_of, IconKind, IconPicture};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Rgba, TextRole, Theme, Timeline};
+use tairix_theme::{TextRole, Theme, Timeline};
 
 use crate::layout::{centre_on, down, Column, CHOOSER_HINT_GAP, NOTICE_BAND, SIDE_MARGIN};
 use crate::motion::fade;
@@ -25,9 +25,6 @@ pub(crate) const OTHER_LABEL: &str = "Other…";
 /// than as a leftover, in the quiet plate colours rather than the accent, so
 /// it is still plainly not one of the listed people.
 pub(crate) const OTHER_MONOGRAM: char = '\u{2026}';
-
-/// The monogram drawn for an account whose name yields no character.
-pub(crate) const FALLBACK_MONOGRAM: char = '?';
 
 /// One tile's width in pixels at the reference density.
 pub(crate) const TILE_WIDTH: u32 = 132;
@@ -109,19 +106,6 @@ impl AccountTile {
     pub fn monogram(&self) -> char {
         monogram_of(&self.display_name)
     }
-}
-
-/// The disc mark for `name`: its first character uppercased, or
-/// [`FALLBACK_MONOGRAM`] when there is nothing to take one from.
-///
-/// Shared by the chooser's tiles and the prompt's larger disc, so the person
-/// sees the same mark before and after picking an account. A scalar whose
-/// uppercase form is several characters (`ß`) contributes the first of them,
-/// since only one is drawn.
-pub(crate) fn monogram_of(name: &str) -> char {
-    name.chars().next().map_or(FALLBACK_MONOGRAM, |ch| {
-        ch.to_uppercase().next().unwrap_or(ch)
-    })
 }
 
 /// Private record of a selection-mark cross-fade between two tiles.
@@ -548,12 +532,13 @@ impl Chooser {
     ///
     /// One definition, so the disc a person picks is the disc that then
     /// travels to the prompt and the disc the prompt settles on.
-    pub(crate) fn slot_disc(&self, slot: usize, theme: &Theme) -> (char, Rgba, Rgba) {
+    pub(crate) fn slot_disc(&self, slot: usize, theme: &Theme) -> (char, Color, Color) {
         let palette = theme.palette();
-        match self.account(slot) {
+        let (mark, fill, ink) = match self.account(slot) {
             Some(account) => (account.monogram(), palette.accent, palette.on_accent),
             None => (OTHER_MONOGRAM, palette.surface_raised, palette.on_surface),
-        }
+        };
+        (mark, Color::from(fill), Color::from(ink))
     }
 
     /// The square tile `slot` draws its disc in, in the paint's own geometry.
@@ -702,42 +687,6 @@ fn span(count: usize, tile: u32, gap: u32) -> u32 {
 /// `origin` moved on by `offset` pixels.
 fn advance(origin: i32, offset: u32) -> i32 {
     origin.saturating_add(i32::try_from(offset).unwrap_or(i32::MAX))
-}
-
-/// A `side`×`side` disc bearing `monogram`, in the `(fill, ink)` colours the
-/// caller chose.
-///
-/// The one disc definition the chooser's tiles and the prompt's larger disc
-/// share, so the mark a person picks is the mark they then see. The caller
-/// chooses the text role `font` comes from, since a tile's disc and the
-/// prompt's larger one carry the mark at different sizes. Produced at exactly
-/// the side asked for, so it can never be scaled or cropped by whatever
-/// places it. `None` when there is no room for a picture at all, which leaves
-/// an icon tile drawing its fallback glyph.
-pub(crate) fn monogram_disc(
-    monogram: char,
-    side: u32,
-    font: BitmapFont,
-    (fill, ink): (Rgba, Rgba),
-) -> Option<Surface> {
-    if side == 0 {
-        return None;
-    }
-    let mut disc = Surface::new(side, side)?;
-    disc.fill_round_rect(0, 0, side, side, side / 2, Color::from(fill));
-
-    let mut encoded = [0u8; 4];
-    let text = &*monogram.encode_utf8(&mut encoded);
-    let width = font.text_width(text).min(side);
-    let height = font.line_height().min(side);
-    font.draw_text(
-        &mut disc,
-        i32::try_from((side - width) / 2).unwrap_or(0),
-        i32::try_from((side - height) / 2).unwrap_or(0),
-        text,
-        Color::from(ink),
-    );
-    Some(disc)
 }
 
 /// Mark a tile whose account already has a session running, in the tile

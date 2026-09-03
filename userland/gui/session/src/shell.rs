@@ -1387,6 +1387,19 @@ impl DesktopShell {
         }
     }
 
+    /// Name the signed-in account to the taskbar, so its trailing capsule
+    /// wears that account's identity disc, re-presenting when it changed the
+    /// rendering.
+    ///
+    /// Only the embedder knows who is signed in. A session that never calls
+    /// this leaves the capsule on the mark a nameless account gets, rather
+    /// than an initial nobody chose.
+    pub fn set_account(&mut self, compositor: &mut Compositor, name: &str) {
+        if self.session.taskbar_mut().set_account(name) {
+            self.present(compositor);
+        }
+    }
+
     /// Attest to the taskbar whether this session's console has a
     /// re-authentication broker, so every menu row that needs one is
     /// offered only where choosing it could really act: the system menu's

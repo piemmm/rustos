@@ -629,7 +629,7 @@ fn tray_signal_rests_bare_on_the_bar_in_both_themes() {
 #[test]
 fn tray_signal_draws_shipped_artwork_in_place_of_its_glyph() {
     let theme = Theme::dark();
-    let sig = TraySignal::new(IconKind::Switchboard, "Switchboard");
+    let sig = TraySignal::new(IconKind::User, "Switchboard");
     let art = Color::rgb(255, 0, 255);
     let s = tray_surface_with_artwork(&sig, &theme, art);
 
@@ -649,7 +649,7 @@ fn tray_signal_seats_its_icon_at_the_side_every_other_bar_icon_uses() {
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, SS, SS);
     let capsule =
-        TraySignal::new(IconKind::Switchboard, "Switchboard").icon_side(bounds, Scale::ONE, &theme);
+        TraySignal::new(IconKind::User, "Switchboard").icon_side(bounds, Scale::ONE, &theme);
     let slot = TaskbarItem::new(IconKind::Generic).icon_side(bounds, Scale::ONE, &theme);
     assert_eq!(capsule, slot);
     assert!(
@@ -664,7 +664,7 @@ fn tray_signal_seats_its_icon_at_the_side_every_other_bar_icon_uses() {
 #[test]
 fn tray_signal_draws_artwork_at_exactly_the_side_it_reports() {
     let theme = Theme::dark();
-    let sig = TraySignal::new(IconKind::Switchboard, "Switchboard");
+    let sig = TraySignal::new(IconKind::User, "Switchboard");
     let side = sig.icon_side(Rect::new(0, 0, SS, SS), Scale::ONE, &theme);
     assert!(
         side > 0 && side < SS,
@@ -871,20 +871,20 @@ fn tray_signal_without_badge_keeps_prior_rendering() {
 #[test]
 fn tray_signal_capsule_ignores_the_readout_only_fields() {
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
-        let base = TraySignal::new(IconKind::Switchboard, "System normal")
+        let base = TraySignal::new(IconKind::User, "System normal")
             .with_value("CPU 7%")
             .with_action(Button::labelled("Open Switchboard"));
         for other in [
             // A different value line — the every-sample case.
-            TraySignal::new(IconKind::Switchboard, "System normal")
+            TraySignal::new(IconKind::User, "System normal")
                 .with_value("sysmon — 31% CPU")
                 .with_action(Button::labelled("Open Switchboard")),
             // A different state name.
-            TraySignal::new(IconKind::Switchboard, "Background work")
+            TraySignal::new(IconKind::User, "Background work")
                 .with_value("CPU 7%")
                 .with_action(Button::labelled("Open Switchboard")),
             // No value and no action at all.
-            TraySignal::new(IconKind::Switchboard, "System normal"),
+            TraySignal::new(IconKind::User, "System normal"),
         ] {
             assert!(base.draws_same_capsule(&other));
             assert_eq!(
@@ -901,17 +901,17 @@ fn tray_signal_capsule_ignores_the_readout_only_fields() {
 #[test]
 fn tray_signal_capsule_tracks_every_field_it_draws() {
     let theme = Theme::dark();
-    let base = TraySignal::new(IconKind::Switchboard, "System normal");
+    let base = TraySignal::new(IconKind::User, "System normal");
     for other in [
         TraySignal::new(IconKind::Battery, "System normal"),
-        TraySignal::new(IconKind::Switchboard, "System normal")
+        TraySignal::new(IconKind::User, "System normal")
             .with_state(ControlState::idle().with_activity(ActivityState::Working)),
-        TraySignal::new(IconKind::Switchboard, "System normal").with_state(
+        TraySignal::new(IconKind::User, "System normal").with_state(
             ControlState::idle().with_pressure(PressureState::Under(PressureKind::Memory)),
         ),
-        TraySignal::new(IconKind::Switchboard, "System normal")
+        TraySignal::new(IconKind::User, "System normal")
             .with_state(ControlState::idle().with_recovery(RecoveryState::Hung)),
-        TraySignal::new(IconKind::Switchboard, "System normal").with_badge(TrayBadge::new(
+        TraySignal::new(IconKind::User, "System normal").with_badge(TrayBadge::new(
             TrayBadgeContent::Alert,
             TrayBadgeTone::Danger,
         )),

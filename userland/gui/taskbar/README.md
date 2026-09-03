@@ -294,15 +294,16 @@ owns:
   (`AGENTS.md` §2.2). Reading the asset bytes needs a filesystem capability and
   is the desktop's job, so the set is built outside this crate and handed in.
 
-## Rounded edges
+## Semicircular ends
 
-`BarLayout::corner_radius` carries the radius from the active theme's
-`taskbar_corner_radius`. The window manager cuts the bar window to it through
-its single anti-aliased rounded-corner path, the same one it uses for windows,
-and the bar's own background plate is laid down at that same radius so its rim
-follows the silhouette the cut leaves instead of squaring off across it. Both
-round through `lib/raster`'s one coverage path; there is no second
-implementation (`AGENTS.md` §2.2).
+The bar is a stadium: `BarLayout::corner_radius` is half its own thickness, so
+each end is a semicircle rather than a rounded corner, and no theme can set a
+number that disagrees with the shape. The window manager cuts the bar window to
+it through its single anti-aliased rounded-corner path, the same one it uses for
+windows, and the bar's own background plate is laid down at that same radius so
+its rim follows the silhouette the cut leaves instead of squaring off across it.
+Both round through `lib/raster`'s one coverage path, which clamps to half the
+shorter side; there is no second implementation (`AGENTS.md` §2.2).
 
 ## Dependencies and layering
 

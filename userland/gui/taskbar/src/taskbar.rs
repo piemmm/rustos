@@ -47,6 +47,16 @@ use crate::system::{self, SystemPermits};
 use crate::tasks::TaskList;
 use crate::tray::SwitchboardTray;
 
+/// Main-axis length of an icon slot on the house-style bar, in *logical*
+/// pixels at the reference density.
+///
+/// Every slot on the bar that holds one picture — the leading Library
+/// launcher, each running application, and the trailing account capsule —
+/// takes this one extent, so the bar reads as a row of equally sized icons
+/// and the two ends match. Each control still sizes its own picture off the
+/// plate it is handed, so nothing here fixes a glyph size.
+const ICON_SLOT_EXTENT: u32 = 48;
+
 /// Where the taskbar sits and how big each region is.
 ///
 /// The screen dimensions are *physical* pixels (the real framebuffer). The
@@ -113,11 +123,11 @@ impl TaskbarConfig {
             screen_width,
             screen_height,
             thickness: 48,
-            launcher_extent: 48,
-            app_extent: 48,
+            launcher_extent: ICON_SLOT_EXTENT,
+            app_extent: ICON_SLOT_EXTENT,
             icon_extent: 24,
             clock_extent: 80,
-            switch_extent: 44,
+            switch_extent: ICON_SLOT_EXTENT,
         }
     }
 }
@@ -196,12 +206,6 @@ impl Taskbar {
     #[must_use]
     pub const fn theme(&self) -> &Theme {
         &self.theme
-    }
-
-    /// The corner radius the window manager applies to the bar.
-    #[must_use]
-    pub fn corner_radius(&self) -> u32 {
-        self.theme.metrics().taskbar_corner_radius
     }
 
     /// The Library launcher button, for painting.
@@ -414,6 +418,15 @@ impl Taskbar {
     /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
     pub fn set_tray_unresponsive(&mut self, count: u16) -> bool {
         let parts = self.tray.set_unresponsive(count);
+        self.repaint |= parts;
+        parts.any()
+    }
+
+    /// Adopt the signed-in account's name, from which the trailing capsule's
+    /// identity disc takes its mark. See
+    /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
+    pub fn set_account(&mut self, name: &str) -> bool {
+        let parts = self.tray.set_account(name);
         self.repaint |= parts;
         parts.any()
     }

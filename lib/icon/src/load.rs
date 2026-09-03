@@ -47,7 +47,7 @@ pub const ICON_KINDS: [IconKind; 48] = [
     IconKind::Trash,
     IconKind::EmptyTrash,
     IconKind::Library,
-    IconKind::Switchboard,
+    IconKind::User,
     IconKind::ServiceBundle,
     IconKind::TextHtml,
     IconKind::TextRust,

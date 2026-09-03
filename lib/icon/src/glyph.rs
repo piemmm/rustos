@@ -99,9 +99,15 @@ pub enum IconKind {
     /// A three-by-three grid of application tiles, for the taskbar's
     /// program-library launcher.
     Library,
-    /// Three horizontal fader tracks with a knob offset differently on each,
-    /// for the taskbar's always-trailing Switchboard tray capsule.
-    Switchboard,
+    /// A head-and-shoulders bust, for a user account.
+    ///
+    /// The last-resort mark for the desktop's own account capsule at the
+    /// trailing end of the icon bar, and for anywhere else an account is
+    /// shown with no picture behind it. An account that has a name resolves
+    /// to its circular identity disc ([`monogram_disc`](crate::monogram_disc))
+    /// instead, so this is reached only when no picture can be produced at
+    /// all.
+    User,
     /// A long-running system service bundle; shares the app-bundle glyph.
     ServiceBundle,
     /// An HTML document; shares the text glyph.
@@ -186,7 +192,7 @@ impl IconKind {
             "trash" => Self::Trash,
             "empty-trash" => Self::EmptyTrash,
             "library" => Self::Library,
-            "switchboard" => Self::Switchboard,
+            "user" => Self::User,
             "service-bundle" => Self::ServiceBundle,
             "text-html" => Self::TextHtml,
             "text-x-rust" => Self::TextRust,
@@ -247,7 +253,7 @@ impl IconKind {
             Self::Trash => 20,
             Self::EmptyTrash => 21,
             Self::Library => 22,
-            Self::Switchboard => 23,
+            Self::User => 23,
             Self::ServiceBundle => 24,
             Self::TextHtml => 25,
             Self::TextRust => 26,
@@ -308,7 +314,7 @@ impl IconKind {
             Self::Trash => "trash",
             Self::EmptyTrash => "empty-trash",
             Self::Library => "library",
-            Self::Switchboard => "switchboard",
+            Self::User => "user",
             Self::ServiceBundle => "service-bundle",
             Self::TextHtml => "text-html",
             Self::TextRust => "text-x-rust",
@@ -394,7 +400,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Trash => trash(color),
         IconKind::EmptyTrash => empty_trash(color),
         IconKind::Library => library(color),
-        IconKind::Switchboard => switchboard(color),
+        IconKind::User => user(color),
         IconKind::Disk | IconKind::DiskHard | IconKind::DiskSolidState | IconKind::DiskUsb => {
             disk(color)
         }
@@ -725,23 +731,31 @@ fn library(color: Color) -> alloc::vec::Vec<IconLayer> {
     layers
 }
 
-/// Three horizontal fader tracks, each with a small knob offset to a
-/// different position along it — the mixer/fader motif for the desktop's
-/// Switchboard tray capsule.
-fn switchboard(color: Color) -> alloc::vec::Vec<IconLayer> {
-    const LINE1: &[(i32, i32)] = &[(3, 6), (21, 6), (21, 8), (3, 8)];
-    const KNOB1: &[(i32, i32)] = &[(5, 5), (9, 5), (9, 9), (5, 9)];
-    const LINE2: &[(i32, i32)] = &[(3, 11), (21, 11), (21, 13), (3, 13)];
-    const KNOB2: &[(i32, i32)] = &[(15, 10), (19, 10), (19, 14), (15, 14)];
-    const LINE3: &[(i32, i32)] = &[(3, 16), (21, 16), (21, 18), (3, 18)];
-    const KNOB3: &[(i32, i32)] = &[(10, 15), (14, 15), (14, 19), (10, 19)];
+/// A user account: a head over shoulders, the bust silhouette an account is
+/// universally drawn as.
+fn user(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const HEAD: &[(i32, i32)] = &[
+        (12, 4),
+        (15, 5),
+        (16, 8),
+        (15, 11),
+        (12, 12),
+        (9, 11),
+        (8, 8),
+        (9, 5),
+    ];
+    const SHOULDERS: &[(i32, i32)] = &[
+        (12, 12),
+        (16, 13),
+        (19, 16),
+        (20, 20),
+        (4, 20),
+        (5, 16),
+        (8, 13),
+    ];
     vec![
-        IconLayer::from_points(color, LINE1),
-        IconLayer::from_points(color, KNOB1),
-        IconLayer::from_points(color, LINE2),
-        IconLayer::from_points(color, KNOB2),
-        IconLayer::from_points(color, LINE3),
-        IconLayer::from_points(color, KNOB3),
+        IconLayer::from_points(color, HEAD),
+        IconLayer::from_points(color, SHOULDERS),
     ]
 }
 

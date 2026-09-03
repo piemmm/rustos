@@ -1739,6 +1739,7 @@ name = "tairix-icon"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-font",
  "tairix-log",
  "tairix-path",
  "tairix-raster",

@@ -4,8 +4,8 @@
 monitor service** (`plans/NEW-TASKBAR.md` T10–T12): a small, dedicated
 process the desktop session spawns as the logged-in user, which samples the
 live system through the System Information API, feeds the taskbar's
-always-right-most Switchboard icon its tray signals, and hosts the live
-overview window that icon opens.
+always-right-most account capsule its tray signals, and hosts the live
+overview window that capsule opens.
 
 ## Role
 

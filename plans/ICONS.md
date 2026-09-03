@@ -213,9 +213,12 @@ must actually draw something.
 
 ## 5. I4 — the taskbar and the program library — **done**
 
-The bar's two permanent launchers and its trailing Switchboard capsule draw
-their shipped artwork; a pin and a running-task item use the application's own
-icon, then its kind's artwork, then the glyph — one rule, expressed once.
+The bar's two permanent launchers draw their shipped artwork; a pin and a
+running-task item use the application's own icon, then its kind's artwork, then
+the glyph — one rule, expressed once. The trailing account capsule takes the
+first rung of that same rule with the account's own circular identity disc
+(`tairix_icon::monogram_disc`, shared with the login screen), so no shipped
+class picture ever stands in for a person.
 The program-library popup shows
 each application's own icon, resolved only for the rows actually on screen
 and re-resolved on scroll. The session owns the one `ArtworkCache` and its

@@ -576,7 +576,11 @@ a defect. A page carries the whole list's `total`, so a client walks pages
 until it has them all.
 
 **A tile draws a monogram, not an avatar.** There is no per-user avatar
-store on the system, so an avatar id would name nothing.
+store on the system, so an avatar id would name nothing. The disc itself is
+the shared `tairix_icon::monogram_disc`, so the desktop's own account capsule
+on the icon bar (`plans/NEW-TASKBAR.md` T9) draws the same picture for the
+same account, and a per-user avatar — when there is one to name — lands in
+that one generator rather than two.
 
 The two greeter requests are refused unless the caller's **kernel-attested**
 uid is the `greeter` service account and its attested console matches the

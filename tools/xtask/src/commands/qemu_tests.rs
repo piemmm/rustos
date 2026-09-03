@@ -9895,9 +9895,9 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     let taskbar = shell.session().taskbar();
     let bar = taskbar.layout(scale);
     let library_button = rect_centre(bar.library, "Library button")?;
-    let sweep_end = rect_centre(bar.switchboard, "Switchboard capsule")?;
+    let sweep_end = rect_centre(bar.switchboard, "account capsule")?;
     // The sweep walks the bar's own centre line: its ends are the launcher
-    // button and the Switchboard capsule, which anchor the two ends of the
+    // button and the account capsule, which anchor the two ends of the
     // bar, so one pass between them crosses everything drawn in between.
     let sweep_start = Point::new(library_button.x, sweep_end.y);
 

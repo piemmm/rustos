@@ -49,8 +49,10 @@ something, and an open one — `File`, `AppBundle`, the type badges
 `Text`/`Image`/`Archive`/`Executable`, the toolbar's `NavBack`/`NavForward`/`NavUp`/
 `Refresh`/`ViewToggle`/`Sort`/`NewFolder`, and `Trash`/`EmptyTrash`), the
 taskbar's `Library` (the program-library launcher's three-by-three tile
-grid, `plans/NEW-TASKBAR.md` T4) and `Switchboard` (its always-trailing tray
-capsule), `ListMenu` (three bulleted bars, for the button that opens a
+grid, `plans/NEW-TASKBAR.md` T4) and `User` (a head-and-shoulders bust, the
+last-resort mark for the always-trailing account capsule — an account with a
+name draws its circular identity disc instead, see below),
+`ListMenu` (three bulleted bars, for the button that opens a
 screen's own section list beside a location breadcrumb,
 `plans/NEW-SWITCHBOARD.md` S2), the task-command kinds the Switchboard's
 Tasks section names its commands with — `Job` (an hourglass, for queued or
@@ -81,6 +83,24 @@ which every app must ship (`plans/APPS.md` §14) and which decodes through this
 same path. The complete order a request resolves through — a thing's own icon,
 then its class's raster master, then the class vector asset, then the built-in
 glyph — is described under [tairix-icon](../lib/icon.md).
+
+## An account's identity disc
+
+An account is drawn as a **circle**, never a class glyph: `monogram_of(name)`
+takes its mark and `monogram_disc(mark, side, font, colours)` produces the
+picture, at exactly the side the slot asked for so nothing scales or crops it.
+One definition serves the login screen's account tiles and prompt
+(`lib/greeter`) and the desktop's own account capsule at the trailing end of
+the icon bar (`plans/NEW-TASKBAR.md` T9), so the mark a person signs in as is
+the mark they then live with.
+
+The disc is the tier beneath a picture an account carries of its own. Nothing
+sets one yet, so today every account resolves to its monogram; when something
+does, it resolves through this same disc and stays circular. Resolution is
+total: a name that yields no character still marks the disc with
+`FALLBACK_MONOGRAM` (`?`), so an account surface can never be blank
+(`AGENTS.md` §2.9), and only where a picture of that side cannot exist at all
+does a slot fall through to the `User` glyph.
 
 ## In the taskbar
 

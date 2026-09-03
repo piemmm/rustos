@@ -197,7 +197,10 @@ whole surface be exercised on the host without a kernel.
 
 A surface built `with_accounts` opens on a centred row of account tiles — a
 monogram disc, the display name, and a badge on any account that already has a
-live session — and moves to the secret field for whichever is picked. The row
+live session — and moves to the secret field for whichever is picked. The disc
+is the shared `tairix_icon::monogram_disc`, the same one the desktop's own
+account capsule on the icon bar draws, so the mark a person signs in as is the
+mark they then live with. The row
 wraps into a grid only when the screen cannot hold it, so a grid where a row
 would do never reads as a list. `Escape` returns to the chooser and wipes
 whatever had been typed.

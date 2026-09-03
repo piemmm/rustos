@@ -36,7 +36,7 @@
 //! raised notification (severity mapped to the card's composed state),
 //! presented by the window manager as its own small window above the bar.
 //!
-//! [`TaskbarRenderer::render_tray_readout`] paints the Switchboard capsule's
+//! [`TaskbarRenderer::render_tray_readout`] paints the account capsule's
 //! expanded readout: the shared [`TraySignal`](tairix_controls::TraySignal)
 //! draws its own elevated plate at the geometry
 //! [`Taskbar::tray_readout_layout`] computed, presented by the window
@@ -234,9 +234,11 @@ impl TaskbarRenderer {
     ///
     /// `artwork` is the desktop's shipped icon lookup: the two leading
     /// launchers draw the [`Library`](IconKind::Library) and
-    /// [`Folder`](IconKind::Folder) artwork, the trailing Switchboard capsule
-    /// draws its own kind's, and a running application's slot draws its own
-    /// artwork when it has one, its kind's shipped artwork otherwise. Every
+    /// [`Folder`](IconKind::Folder) artwork, and a running application's slot
+    /// draws its own artwork when it has one, its kind's shipped artwork
+    /// otherwise. The trailing capsule asks the lookup for nothing while it
+    /// can draw the account's own identity disc, which is what an account
+    /// looks like — no shipped class picture stands in for a person. Every
     /// one of those falls back to its
     /// built-in glyph when the lookup returns `None` — the shared icon slot
     /// does that itself — so a system with no `/System/Graphics` is fully
@@ -334,10 +336,14 @@ impl TaskbarRenderer {
         );
 
         if !layout.switchboard.is_empty() {
-            let signal = taskbar.tray().signal();
+            let tray = taskbar.tray();
+            let signal = tray.signal();
             let bounds = local_rect(layout.switchboard, origin);
             let side = signal.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(IconRequest::kind(signal.icon()), side);
+            // The capsule wears the account, not a class glyph, so its own
+            // disc outranks anything the shipped-artwork lookup holds.
+            let disc = tray.identity_disc(side, scale, theme);
+            let art = slot_artwork(disc.as_ref(), signal.icon(), side, artwork);
             signal.render(&mut surface, bounds, scale, theme, art);
         }
         Some(surface)
@@ -661,19 +667,21 @@ fn draw_icon(
     surface.blit(x, y, &image);
 }
 
-/// Resolve the artwork an application slot draws: its own application artwork
-/// when it has one, else its kind's shipped artwork at `side`, else `None` for
-/// the control's built-in glyph.
+/// Resolve the artwork a slot draws: the picture the slot carries of its
+/// *own* when it has one, else its kind's shipped artwork at `side`, else
+/// `None` for the control's built-in glyph.
 ///
-/// The final glyph fallback is the shared icon slot's own, so `None` here is
-/// not a blank slot.
+/// One order for both slots that own a picture — a running application's
+/// bundle icon and the trailing capsule's account disc — so neither can be
+/// resolved in a different order from the other. The final glyph fallback is
+/// the shared icon slot's own, so `None` here is not a blank slot.
 fn slot_artwork<'a>(
-    app: Option<&'a Surface>,
+    own: Option<&'a Surface>,
     kind: IconKind,
     side: u32,
     artwork: &'a mut dyn IconArtwork,
 ) -> Option<IconPicture<'a>> {
-    match app {
+    match own {
         Some(surface) => Some(IconPicture::Artwork(surface)),
         None => artwork.artwork(IconRequest::kind(kind), side),
     }

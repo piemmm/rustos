@@ -875,7 +875,6 @@ fn sample_theme(id: ThemeId) -> Theme {
         },
         Metrics {
             window_corner_radius: 4,
-            taskbar_corner_radius: 4,
             taskbar_margin: 3,
             chrome_backdrop_blur: 5,
             popup_corner_radius: 4,

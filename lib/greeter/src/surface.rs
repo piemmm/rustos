@@ -11,12 +11,12 @@ use tairix_abi::Duration64;
 use tairix_controls::{damage, TextAction, TextField, ValidationState};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
-use tairix_icon::{glyph_mask, IconKind};
+use tairix_icon::{glyph_mask, monogram_disc, monogram_of, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
 
-use crate::chooser::{monogram_disc, monogram_of, AccountTile, Chooser, Step, OTHER_MONOGRAM};
+use crate::chooser::{AccountTile, Chooser, Step, OTHER_MONOGRAM};
 use crate::layout::{
     back_band, centre_on, chrome_band, chrome_bands, draw_centred, notice_band, Prompt, FIELD_WIDTH,
 };
@@ -1394,7 +1394,7 @@ impl AuthSurface {
             mark,
             side,
             BitmapFont::for_role(theme.fonts(), TextRole::Display, scale),
-            (fill, ink),
+            (Color::from(fill), Color::from(ink)),
         )?;
         fade(&mut disc, strength);
         Some(disc)

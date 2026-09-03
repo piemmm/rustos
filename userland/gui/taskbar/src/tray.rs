@@ -23,6 +23,16 @@
 //! idle with no value: it never fabricates a reading it was not fed (fail
 //! closed).
 //!
+//! The capsule wears the signed-in account rather than a system glyph: the
+//! desktop's one system control point is the account it belongs to, and the
+//! rows behind it (lock, switch user, log out, shut down) are that account's.
+//! The picture is the account's circular identity disc
+//! ([`identity_disc`](SwitchboardTray::identity_disc)) — the same mark the
+//! login screen drew — so the mark a person signed in as is the mark they then
+//! live with. An account has no picture of its own yet, so the disc is its
+//! monogram; a name that yields no character still marks the disc, so there is
+//! always a picture and it is always a circle.
+//!
 //! The readout always carries one safe action, "Open Switchboard": a click
 //! that completes on it reports [`TraySignalAction::Activated`], which the
 //! taskbar's input router (`crate::input`) turns into the response that
@@ -40,10 +50,12 @@ use tairix_controls::{
     ActivityState, Button, ControlState, FocusState, PointerState, PressureKind, PressureState,
     RecoveryState, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
 };
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{monogram_disc, monogram_of, IconKind};
 use tairix_input::InputEvent;
-use tairix_theme::Theme;
+use tairix_raster::{Color, Surface};
+use tairix_theme::{TextRole, Theme};
 
 use crate::repaint::TaskbarRepaint;
 
@@ -55,6 +67,7 @@ pub struct SwitchboardTray {
     signal: TraySignal,
     summary: Option<TraySummary>,
     unresponsive: u16,
+    monogram: char,
 }
 
 impl Default for SwitchboardTray {
@@ -64,14 +77,54 @@ impl Default for SwitchboardTray {
 }
 
 impl SwitchboardTray {
-    /// A calm tray: no summary published yet, nothing unresponsive.
+    /// A calm tray: no summary published yet, nothing unresponsive, and no
+    /// account named — so the disc bears the mark a nameless account gets
+    /// rather than a fabricated initial.
     #[must_use]
     pub fn new() -> Self {
         Self {
             signal: derive_signal(None, 0).into_signal(PointerState::None, FocusState::default()),
             summary: None,
             unresponsive: 0,
+            monogram: monogram_of(""),
         }
+    }
+
+    /// Adopt the signed-in account's name, from which the disc takes its
+    /// mark. Returns the surfaces whose pixels the new mark actually moved.
+    ///
+    /// Only the embedder knows who is signed in, and the bar holds nothing
+    /// but the one character it draws: a name is not an identity the bar can
+    /// act on, and keeping only the mark means a live update cannot leak a
+    /// name onto a surface that never shows one.
+    pub fn set_account(&mut self, name: &str) -> TaskbarRepaint {
+        let monogram = monogram_of(name);
+        if self.monogram == monogram {
+            return TaskbarRepaint::NONE;
+        }
+        self.monogram = monogram;
+        TaskbarRepaint {
+            bar: true,
+            ..TaskbarRepaint::NONE
+        }
+    }
+
+    /// The account's `side`×`side` circular identity picture, in the theme's
+    /// accent — the same disc the login screen drew for the same account.
+    ///
+    /// Produced at exactly the side the capsule draws at, so nothing scales
+    /// or crops it, and always a circle. `None` only where a picture of that
+    /// side cannot exist at all, which leaves the capsule on its own glyph
+    /// rather than a blank slot.
+    #[must_use]
+    pub fn identity_disc(&self, side: u32, scale: Scale, theme: &Theme) -> Option<Surface> {
+        let palette = theme.palette();
+        monogram_disc(
+            self.monogram,
+            side,
+            BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
+            (Color::from(palette.accent), Color::from(palette.on_accent)),
+        )
     }
 
     /// Adopt the latest published summary — or its absence, when the
@@ -237,7 +290,7 @@ impl DerivedSignal {
         let mut state = self.state;
         state.pointer = pointer;
         state.focus = focus;
-        let mut signal = TraySignal::new(IconKind::Switchboard, self.label)
+        let mut signal = TraySignal::new(IconKind::User, self.label)
             .with_state(state)
             .with_action(Button::labelled(OPEN_SWITCHBOARD_ACTION));
         if let Some(value) = self.value {

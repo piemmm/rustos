@@ -384,7 +384,6 @@ pub(crate) const CHROME_PLATE_ALPHA: u8 = CHROME_ALPHA + (u8::MAX - CHROME_ALPHA
 fn common_metrics() -> Metrics {
     Metrics {
         window_corner_radius: 8,
-        taskbar_corner_radius: 12,
         taskbar_margin: 5,
         chrome_backdrop_blur: 7,
         popup_corner_radius: 6,

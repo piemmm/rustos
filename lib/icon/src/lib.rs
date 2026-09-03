@@ -45,6 +45,7 @@
 
 extern crate alloc;
 
+pub mod account;
 pub mod artwork;
 pub mod desk;
 pub mod glyph;
@@ -55,6 +56,7 @@ pub mod vector;
 #[cfg(test)]
 mod tests;
 
+pub use account::{monogram_disc, monogram_of, FALLBACK_MONOGRAM};
 pub use artwork::{
     artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
     render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,

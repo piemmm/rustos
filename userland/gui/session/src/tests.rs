@@ -891,11 +891,14 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
     assert_eq!(comp.window_count(), 1);
 }
 
+/// The bar is presented as the stadium its layout describes, and a theme
+/// switch that re-lays it keeps it one: the radius follows the bar's own
+/// thickness, so it is the same window, re-cut, rather than a new one.
 #[test]
-fn a_theme_switch_re_rounds_the_presented_bar() {
+fn the_presented_bar_is_cut_to_its_stadium() {
     let mut session = session();
     session
-        .register_theme(custom_dark(ThemeId(100), 99))
+        .register_theme(custom_dark(ThemeId(100), 20))
         .unwrap();
     let mut comp = compositor();
     let mut renderer = TaskbarRenderer::new(test_icon_cache());
@@ -909,12 +912,13 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         &mut NoArtwork,
     );
     let id = presenter.bar_window().expect("the bar was presented");
-    let dark_radius = session.taskbar().layout(Scale::ONE).corner_radius;
+    let bar = session.taskbar().layout(Scale::ONE).bar;
     assert_eq!(
         comp.window(id).expect("the bar window").corners(),
         Corners::Rounded {
-            radius: dark_radius
-        }
+            radius: bar.height / 2
+        },
+        "each end of the presented bar is a semicircle"
     );
 
     session.set_theme(ThemeId(100)).unwrap();
@@ -926,21 +930,24 @@ fn a_theme_switch_re_rounds_the_presented_bar() {
         &mut NoArtwork,
     );
 
-    let light_radius = session.taskbar().layout(Scale::ONE).corner_radius;
-    assert_ne!(dark_radius, light_radius);
+    let widened = session.taskbar().layout(Scale::ONE).bar;
+    assert_ne!(
+        widened.width, bar.width,
+        "the switched margin re-laid the bar"
+    );
     assert_eq!(
         comp.window(id).expect("the same bar window").corners(),
         Corners::Rounded {
-            radius: light_radius
+            radius: widened.height / 2
         },
-        "the switched corner radius reached the presented bar"
+        "and the re-laid bar is still a stadium across its thickness"
     );
     assert_eq!(comp.window_count(), 1);
 }
 
-/// A custom theme cloned from a built-in but with a distinctive taskbar corner
-/// radius, so a test can *observe* that a theme switch reached the taskbar.
-fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
+/// A custom theme cloned from a built-in but with a distinctive taskbar
+/// margin, so a test can *observe* that a theme switch reached the taskbar.
+fn custom_dark(id: ThemeId, taskbar_margin: u32) -> Theme {
     let base = Theme::dark();
     Theme::new(
         id,
@@ -948,7 +955,7 @@ fn custom_dark(id: ThemeId, taskbar_corner_radius: u32) -> Theme {
         Appearance::Dark,
         *base.palette(),
         Metrics {
-            taskbar_corner_radius,
+            taskbar_margin,
             ..*base.metrics()
         },
         *base.fonts(),
@@ -979,7 +986,7 @@ fn switching_theme_re_themes_the_taskbar() {
         .expect("the id is registered");
     assert_eq!(session.active_theme().id(), ThemeId(100));
     assert_eq!(
-        session.taskbar().layout(Scale::ONE).corner_radius,
+        session.taskbar().layout(Scale::ONE).bar.left(),
         99,
         "set_theme relays the new metrics to the taskbar"
     );
@@ -987,8 +994,8 @@ fn switching_theme_re_themes_the_taskbar() {
     session.set_theme(ThemeId::LIGHT).expect("light theme");
     assert_eq!(session.active_theme().id(), ThemeId::LIGHT);
     assert_eq!(
-        session.taskbar().layout(Scale::ONE).corner_radius,
-        Theme::light().metrics().taskbar_corner_radius,
+        u32::try_from(session.taskbar().layout(Scale::ONE).bar.left()).expect("on screen"),
+        Theme::light().metrics().taskbar_margin,
         "switching theme relays the light metrics to the taskbar"
     );
 }
@@ -996,7 +1003,7 @@ fn switching_theme_re_themes_the_taskbar() {
 #[test]
 fn set_theme_fails_closed_on_unknown_id() {
     let mut session = session();
-    let before = session.taskbar().corner_radius();
+    let before = session.taskbar().theme().id();
 
     let unknown = ThemeId(424_242);
     assert_eq!(
@@ -1005,7 +1012,7 @@ fn set_theme_fails_closed_on_unknown_id() {
     );
     assert_eq!(session.active_theme().id(), ThemeId::DARK);
     assert_eq!(
-        session.taskbar().corner_radius(),
+        session.taskbar().theme().id(),
         before,
         "a refused switch leaves the taskbar untouched"
     );
@@ -1015,7 +1022,7 @@ fn set_theme_fails_closed_on_unknown_id() {
 fn register_theme_rejects_a_duplicate_id() {
     let mut session = session();
     assert_eq!(
-        session.register_theme(custom_dark(ThemeId::DARK, 50)),
+        session.register_theme(custom_dark(ThemeId::DARK, 20)),
         Err(ThemeError::DuplicateId(ThemeId::DARK))
     );
 }

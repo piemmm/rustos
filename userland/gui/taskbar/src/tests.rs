@@ -576,10 +576,10 @@ fn the_leading_launcher_partitions_the_leading_end() {
     // strip; the application strip follows the whole 17 px gutter.
     assert_eq!(layout.separator, Rect::new(62, strip + 10, 1, STRIP - 20));
     assert_eq!(layout.app_strip.left(), 71);
-    // The Switchboard capsule owns the trailing end of that strip; the clock
-    // ends where it starts.
-    assert_eq!(layout.switchboard, Rect::new(950, strip, 44, STRIP));
-    assert_eq!(layout.clock.right(), 950);
+    // The account capsule owns the trailing end of that strip, at the same
+    // extent as the leading launcher; the clock ends where it starts.
+    assert_eq!(layout.switchboard, Rect::new(946, strip, 48, STRIP));
+    assert_eq!(layout.clock.right(), 946);
 }
 
 #[test]
@@ -953,14 +953,14 @@ fn app_slots_clip_fail_closed_on_a_tiny_screen() {
         TaskbarConfig::bottom_bar(213, 40),
         &Theme::dark().floating(),
     );
-    // The Library launcher (48) plus the separator gutter (17) takes 65.
-    // Switchboard (44) plus clock (80) take 124. Screen 213, less the two
+    // The Library launcher (48) plus the separator gutter (17) takes 65. The
+    // account capsule (48) plus clock (80) take 128. Screen 213, less the two
     // 5 px margins the bar floats in and the two 1 px rims its content sits
-    // inside, leaves 201. Remaining for the application strip: 201 - 189 = 12.
+    // inside, leaves 201. Remaining for the application strip: 201 - 193 = 8.
     bar.set_apps(alloc::vec![app("App")]);
     let layout = bar.layout(Scale::ONE);
     assert_eq!(layout.library.width, 48);
-    assert_eq!(layout.apps[0].width, 12, "the slot clips to fit");
+    assert_eq!(layout.apps[0].width, 8, "the slot clips to fit");
 
     // Even smaller: the slot is empty and can never be hit.
     let mut bar = Taskbar::new(
@@ -1223,14 +1223,36 @@ fn hit_testing_follows_the_scale() {
 
 // ---- theming --------------------------------------------------------
 
+/// The bar is a stadium: rounding it by half its shorter side makes each end
+/// a semicircle, so the radius follows the bar's thickness at every scale
+/// rather than a number that could only accidentally match it.
 #[test]
-fn corner_radius_comes_from_the_theme() {
-    let bar = bottom_bar();
-    assert_eq!(
-        bar.corner_radius(),
-        Theme::dark().metrics().taskbar_corner_radius
-    );
-    assert_eq!(bar.layout(Scale::ONE).corner_radius, bar.corner_radius());
+fn the_bar_is_a_stadium_so_each_end_is_a_semicircle() {
+    for percent in [100, 150, 200] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let layout = bottom_bar().layout(scale);
+        assert_eq!(
+            layout.corner_radius,
+            layout.bar.height / 2,
+            "the radius is half the bar's thickness at {percent}%"
+        );
+        assert_eq!(
+            layout.corner_radius,
+            layout.bar.width.min(layout.bar.height) / 2,
+            "and so is the stadium radius the compositor clamps to at {percent}%"
+        );
+    }
+}
+
+/// A vertical bar's ends are its top and bottom, so the same rule has to
+/// round by its *width* — the thickness is whichever axis faces the work area.
+#[test]
+fn a_side_bar_is_a_stadium_across_its_own_thickness() {
+    let mut config = TaskbarConfig::bottom_bar(1000, 800);
+    config.edge = Edge::Left;
+    let bar = Taskbar::new(config, &Theme::dark().floating());
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(layout.corner_radius, layout.bar.width / 2);
 }
 
 #[test]
@@ -3996,8 +4018,8 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
     // A slot's wash is content, and content is laid out inside the bar's rim,
     // so the pointer can never rub the bar's edge off. Every pixel of both
     // long edges across the slot's span is swept rather than one sample; the
-    // rounded ends are left out because the cut is what the rim does there,
-    // and its own test owns that.
+    // semicircular ends are left out because the cut is what the rim does
+    // there, and its own test owns that.
     for theme in [Theme::dark(), Theme::light()] {
         let palette = theme.palette();
         let rim = floating_ground(&theme, palette.rim);
@@ -4038,28 +4060,33 @@ fn a_hovered_or_pressed_slot_never_washes_over_the_bar_rim() {
                     "{name}: the {state} {slot_label} inks its wash inside its slot"
                 );
 
+                // Only the two end arcs are cut: everywhere between them the
+                // bar's full thickness is drawn, so the straight run of the
+                // slot is what the long edges are inspected over.
                 let radius = coord(layout.corner_radius);
                 let (x_lo, x_hi) = (
                     slot.left().max(frame.left() + radius),
                     slot.right().min(frame.right() - radius),
                 );
-                let (y_lo, y_hi) = (
-                    slot.top().max(frame.top() + radius),
-                    slot.bottom().min(frame.bottom() - radius),
-                );
                 assert!(
-                    x_lo < x_hi && y_lo < y_hi,
-                    "{name}: the {slot_label} slot clears the rounded ends"
+                    x_lo < x_hi,
+                    "{name}: the {slot_label} slot clears the semicircular ends"
                 );
                 let along = u32::try_from(x_hi - x_lo).expect("a positive span");
-                let across = u32::try_from(y_hi - y_lo).expect("a positive span");
 
                 let mut strips = alloc::vec![
                     ("top", Rect::new(x_lo, frame.top(), along, 1)),
                     ("bottom", Rect::new(x_lo, frame.bottom() - 1, along, 1)),
                 ];
+                // The leading end is a semicircle, so the one pixel of the
+                // bar's leading column that is inside it at all is the arc's
+                // extreme — the only place a slot seated against that end
+                // could rub the rim off.
                 if slot.left() == frame.left() + coord(plate_border(&theme, Scale::ONE)) {
-                    strips.push(("leading", Rect::new(frame.left(), y_lo, 1, across)));
+                    strips.push((
+                        "leading",
+                        Rect::new(frame.left(), frame.top() + radius, 1, 1),
+                    ));
                 }
 
                 for (edge_label, strip) in strips {
@@ -4728,13 +4755,17 @@ fn the_launcher_button_draws_its_shipped_artwork() {
     ));
 }
 
-/// The trailing capsule is an icon on the bar like any other, so it resolves
-/// its kind's shipped artwork rather than always drawing the built-in glyph.
+/// The trailing capsule wears the account, not a class picture: it draws the
+/// identity disc and never asks the shipped-artwork lookup for a stand-in.
 #[test]
-fn the_switchboard_capsule_draws_its_shipped_artwork() {
-    let bar = bottom_bar();
-    let capsule_colour = Color::rgb(255, 0, 255);
-    let mut artwork = FakeArtwork::new(&[(IconKind::Switchboard, capsule_colour)]);
+fn the_account_capsule_draws_its_identity_disc_and_asks_for_no_class_artwork() {
+    let mut bar = bottom_bar();
+    assert!(
+        bar.set_account("ann"),
+        "naming the account moves the capsule"
+    );
+    let stand_in = Color::rgb(255, 0, 255);
+    let mut artwork = FakeArtwork::new(&[(IconKind::User, stand_in)]);
 
     let layout = bar.layout(Scale::ONE);
     assert!(!layout.switchboard.is_empty(), "the capsule is on the bar");
@@ -4743,15 +4774,116 @@ fn the_switchboard_capsule_draws_its_shipped_artwork() {
         .expect("bar renders");
 
     assert!(
-        artwork.asked_for(IconKind::Switchboard),
-        "the capsule resolves the switchboard artwork"
+        !artwork.asked_for(IconKind::User),
+        "the account's own disc outranks any shipped class picture"
     );
-    assert!(region_has_pixel(
-        &surface,
-        layout.bar,
-        layout.switchboard,
-        capsule_colour.premultiply()
-    ));
+    assert!(
+        !region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.switchboard,
+            stand_in.premultiply()
+        ),
+        "so none of the stand-in reaches the capsule"
+    );
+    assert!(
+        region_has_pixel(
+            &surface,
+            layout.bar,
+            layout.switchboard,
+            role(Theme::dark().floating().palette().accent)
+        ),
+        "the disc is drawn in the accent the login screen marked the account in"
+    );
+}
+
+/// The disc is a circle: the middle of the capsule's picture is the disc and
+/// the corners of the square it is produced in are clear.
+#[test]
+fn the_identity_disc_is_circular() {
+    let mut bar = bottom_bar();
+    let _ = bar.set_account("ann");
+    let theme = Theme::dark().floating();
+    let layout = bar.layout(Scale::ONE);
+    let side = bar
+        .tray()
+        .signal()
+        .icon_side(layout.switchboard, Scale::ONE, &theme);
+    let disc = bar
+        .tray()
+        .identity_disc(side, Scale::ONE, &theme)
+        .expect("the capsule has room for a picture");
+
+    assert_eq!((disc.width(), disc.height()), (side, side));
+    for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
+        assert_eq!(
+            disc.get(x, y).expect("in bounds").a,
+            0,
+            "the corner at ({x}, {y}) lies outside the circle"
+        );
+    }
+    assert_eq!(
+        disc.get(side / 2, 0).expect("in bounds").a,
+        u8::MAX,
+        "the top of the circle is on it"
+    );
+}
+
+/// The two ends of the bar carry one picture each and they are the same size:
+/// the account capsule is an icon slot on exactly the launcher's rule.
+#[test]
+fn the_account_capsule_draws_at_the_launcher_icon_size() {
+    let bar = bottom_bar();
+    let theme = Theme::dark().floating();
+    for percent in [100, 150, 200] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let layout = bar.layout(scale);
+        let launcher = bar
+            .library_button()
+            .icon_side(layout.library, scale, &theme);
+        let capsule = bar
+            .tray()
+            .signal()
+            .icon_side(layout.switchboard, scale, &theme);
+        assert!(launcher > 0, "the launcher draws a picture at {percent}%");
+        assert_eq!(
+            capsule, launcher,
+            "the two ends of the bar draw the same icon size at {percent}%"
+        );
+    }
+}
+
+/// A name the bar was never given leaves the disc on the mark a nameless
+/// account gets, rather than an initial nobody chose.
+#[test]
+fn an_unnamed_account_still_has_a_disc() {
+    let bar = bottom_bar();
+    let theme = Theme::dark().floating();
+    assert!(
+        bar.tray().identity_disc(32, Scale::ONE, &theme).is_some(),
+        "a bar told no account still draws a picture"
+    );
+}
+
+/// Naming the same account twice moves nothing: the capsule's repaint gate is
+/// the mark it draws, not the call.
+#[test]
+fn re_naming_the_same_account_latches_nothing() {
+    let mut bar = bottom_bar();
+    assert!(bar.set_account("ann"));
+    assert_eq!(
+        bar.take_repaint(),
+        TaskbarRepaint {
+            bar: true,
+            ..TaskbarRepaint::NONE
+        }
+    );
+    assert!(!bar.set_account("ann"));
+    assert!(!bar.take_repaint().any());
+    assert!(
+        !bar.set_account("Anna"),
+        "a different name with the same mark draws the same disc"
+    );
 }
 
 #[test]

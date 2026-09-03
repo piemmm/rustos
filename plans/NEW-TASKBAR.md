@@ -19,9 +19,10 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   **signed** manifest. There is no pinning: applications are launched from
   the program library or from a desktop shortcut;
 - on the right, the **notification area**;
-- and, always right-most and immovable, the **Switchboard** icon — the
+- and, always right-most and immovable, the **account capsule** — the
+  signed-in account's own circular identity disc, behind which lives the
   system-overview surface that implements `plans/desktop1.png` and
-  `plans/desktop2a.png` and is where System Settings is reached.
+  `plans/desktop2a.png` and where System Settings is reached.
 
 Read first, in order: `AGENTS.md` (all of it, especially §2, §5, §10,
 §16, §17, §24, §26, §27), `plans/GUI-CONTROLS-DESIGN.md` (the Reactive
@@ -95,7 +96,7 @@ the remaining pieces together and fills the gaps.
 - **One control implementation, ever (§2.2).** Every visible surface here —
   the library launcher, the file-manager button, the application slots and
   their hover picker's cells, the
-  notification tray, the Switchboard icon, and the whole Switchboard window —
+  notification tray, the trailing account capsule, and the whole Switchboard window —
   is composed from the shared Reactive Alloy controls in `lib/controls`
   (`Button`/`IconButton`, `Menu`/`MenuItem`, `ListRow`/`Card`/`Panel`,
   `TaskbarItem`, `TraySignal`, `Notification`, `Dialog`, `ScrollBar`, and the
@@ -167,16 +168,25 @@ each control sizes its own icon off the plate it is handed (`icon_side`), so a
 change to the thickness carries the icons with it and nothing needs
 re-tuning. The clearance that slot keeps is the shared one every icon plate on
 the desktop uses — a twelfth of the plate on each side, so an icon fills about
-83% of its slot — and the Switchboard capsule is on that same rule. It was the
+83% of its slot — and the account capsule is on that same rule. It was the
 one control that sized its icon off the body font's glyph height instead,
 which drew the desktop's rightmost icon a third of its neighbours' size.
+
+Every slot that holds a single picture — the leading launcher, each
+application, and the trailing capsule — takes one `ICON_SLOT_EXTENT` along the
+main axis, named once rather than authored per region, so the bar's two ends
+draw the same-sized icon by construction rather than by two numbers that
+happen to agree.
 
 The bar is drawn as the shared floating surface plate
 (`tairix_controls::paint_surface_plate`, the recipe every popup it opens also
 wears): a rim one `plate_border` thick in the palette's `rim` tone, then the
-ground inside it, both at the chrome weight below and both rounded by
-`taskbar_corner_radius` — the same radius the compositor cuts the bar window
-to, so the rim follows the silhouette rather than squaring off across it. The
+ground inside it, both at the chrome weight below and both rounded by half the
+bar's thickness — the same radius the compositor cuts the bar window to, so the
+bar is a stadium with semicircular ends and the rim follows that silhouette
+rather than squaring off across it. The radius is derived from the thickness
+rather than themed, because the shape is the requirement and a themed number
+could only coincide with it. The
 rim reads a step lighter than the ground on a dark theme and a step darker on a
 light one, and stays see-through.
 
@@ -238,11 +248,21 @@ wallpaper gap  ┌────────────────────�
   Empty when nothing is running. A window is reached through the hover picker
   a slot opens, never through a slot of its own (T6/T7).
 - **Notification area:** status icons + transient notifications, left of the
-  clock; the clock sits between it and the Switchboard icon (desktop1
+  clock; the clock sits between it and the account capsule (desktop1
   panel 1). A secondary press on the clock opens the clock's own menu (T17);
   a primary press on it is claimed and inert, as on a status signal.
-- **Switchboard icon:** always the trailing-most element, reserved, immovable;
-  no application or tray icon may occupy or displace its slot.
+- **Account capsule:** always the trailing-most element, reserved, immovable;
+  no application or tray icon may occupy or displace its slot. It is the
+  Switchboard tray — its badges, seam, rail, readout, and gestures are the
+  system's posture — but it *wears the signed-in account*: the picture is the
+  account's circular identity disc (`tairix_icon::monogram_disc`, the one the
+  login screen draws), because the rows behind it (lock, switch user, log out,
+  shut down) are that account's. The session names the account
+  (`DesktopShell::set_account`); the bar keeps only the mark it draws. Nothing
+  sets a picture on an account yet, so today the disc is the monogram; when
+  something does, it resolves through that same disc and stays circular. Its
+  slot takes the one `ICON_SLOT_EXTENT` the leading launcher does, so the bar's
+  two ends carry the same-sized icon.
 - Vertical / top / right edges reflow along the cross axis by the existing
   `Edge`/`Orientation` model; "left/right" above is main-axis leading/trailing.
 
@@ -945,11 +965,12 @@ fail-closed, click-to-dismiss, inert status press, and card render across
 dark/light/high-contrast/reduced-motion), and the session suite (the
 producer→attest→relay→dismiss path with producer isolation).
 
-## T9 — The Switchboard taskbar icon (always right-most, immovable) — **done**
+## T9 — The trailing account capsule (always right-most, immovable) — **done**
 
 What now stands:
 - `userland/gui/taskbar`: the trailing-most slot is reserved for the
-  Switchboard capsule. It is computed **first** among the trailing regions,
+  account capsule (the Switchboard tray, worn as the signed-in account —
+  §1). It is computed **first** among the trailing regions,
   so applications, notifications, and the clock can never displace it (only
   the permanent leading launchers outrank it on a degenerate screen);
   `hit_test` → `Hit::Switchboard`. The mockup microinteractions landed

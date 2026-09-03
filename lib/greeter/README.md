@@ -37,7 +37,9 @@ charter forbids.
   paint and the pointer hit test read.
 - `AccountTile` — one account on the chooser: display name, login name, a
   live-session flag, and the monogram drawn on its disc. Only what is drawn;
-  never credential material, a capability set, or a home path.
+  never credential material, a capability set, or a home path. The disc itself
+  is the shared `tairix_icon::monogram_disc`, so the login screen and the
+  desktop's own account capsule draw one picture, not two.
 - `Verifier` / `Verdict` — the seam the embedder drives. The surface holds no
   credential store and no authority: it asks about `(account, secret)` and
   reacts to `Verified`, `Refused`, or `Unreachable`. An embedder that

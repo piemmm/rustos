@@ -23,10 +23,13 @@
 //! the rim and never over it. [`BarLayout::bar`] itself is the whole bar,
 //! rim included.
 //!
-//! The layout also carries the taskbar's [`corner_radius`](BarLayout::corner_radius),
-//! sourced from the active theme. The taskbar does not round its own corners:
-//! the window manager applies this radius through its single anti-aliased
-//! rounded-corner path, exactly as it rounds windows.
+//! The layout also carries the taskbar's [`corner_radius`](BarLayout::corner_radius).
+//! The bar is a stadium: its two ends are semicircles, so the radius is half
+//! the bar's own thickness rather than a themed number that could only
+//! accidentally equal it. The taskbar does not round its own corners — the
+//! window manager applies this radius through its single anti-aliased
+//! rounded-corner path, exactly as it rounds windows — and the bar's rim is
+//! painted with the same radius, so rim and silhouette trace one curve.
 
 use alloc::vec::Vec;
 
@@ -61,7 +64,8 @@ pub struct BarLayout {
     /// faces by the theme's taskbar margin. Every other region here is laid
     /// out inside that rim.
     pub bar: Rect,
-    /// The corner radius the window manager applies to the bar. `0` is square.
+    /// The corner radius the window manager applies to the bar: half its
+    /// thickness, which makes each end a semicircle.
     pub corner_radius: u32,
     /// The Library launcher button, at the leading end. [`Rect::EMPTY`] when
     /// the bar is too short to hold it.
@@ -93,8 +97,8 @@ pub struct BarLayout {
 impl BarLayout {
     /// Compute the layout for `config` with `app_count` running
     /// applications and `icon_count` notification icons, taking the bar's
-    /// corner radius, separator rule, and the rule's spacing from `theme` at
-    /// the desktop `scale`.
+    /// separator rule and the rule's spacing from `theme` at the desktop
+    /// `scale`.
     ///
     /// The screen dimensions in `config` are *physical* pixels (the real
     /// framebuffer), while the bar's extents and thickness and the theme's
@@ -121,7 +125,6 @@ impl BarLayout {
         let scaled = config.scaled(scale);
         let config = &scaled;
         let metrics = theme.metrics();
-        let corner_radius = scale.scale_length(metrics.taskbar_corner_radius);
         let orientation = config.edge.orientation();
         let (main_screen, cross_screen) = match orientation {
             Orientation::Horizontal => (config.screen_width, config.screen_height),
@@ -161,6 +164,9 @@ impl BarLayout {
         };
 
         let bar = bar_placer.place(0, main_total);
+        // A stadium: rounding by half the shorter side turns the bar's two
+        // ends into semicircles, whichever edge it is pinned to.
+        let corner_radius = bar.width.min(bar.height) / 2;
 
         let placer = bar_placer.inside(border);
         let content_total = main_total.saturating_sub(border.saturating_mul(2));

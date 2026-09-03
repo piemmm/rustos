@@ -25,8 +25,8 @@ over a resolution-independent design grid, so the same glyph is
 - `vector` — `IconLayer`, `VectorIcon`: the vector representation and
   `rasterise(side) -> Surface`.
 - `glyph` — `IconKind` (the closed glyph set: the taskbar's network, volume,
-  battery, and bell, its program-library launcher, and its Switchboard tray
-  capsule; the file manager's folder, folder-open, generic file, app-bundle,
+  battery, and bell, its program-library launcher, and the user bust behind
+  its account capsule; the file manager's folder, folder-open, generic file, app-bundle,
   text, image, archive, and executable; the file manager's toolbar commands
   nav-back, nav-forward, nav-up, refresh, view-toggle, sort, new-folder,
   trash, and empty-trash; list-menu, for a screen's own section list behind a
@@ -42,6 +42,16 @@ over a resolution-independent design grid, so the same glyph is
   paravirtual device and an unknown medium alike to the generic `Disk`
   rather than guessing. The mapping lives here, beside the vocabulary, so
   every desktop consumer draws the same icon for the same medium.
+- `account` — `monogram_of(name)` and `monogram_disc(mark, side, font, colours)`:
+  an account's **circular identity picture**. One definition, drawn by the
+  login screen's account tiles and prompt (`lib/greeter`) and by the desktop's
+  own account capsule on the icon bar, so the mark a person signs in as is the
+  mark they then live with (`AGENTS.md` §2.2). The disc is produced at exactly
+  the side asked for, so nothing scales or crops it, and it is always a circle.
+  It is the tier beneath a picture an account carries of its own; nothing sets
+  one yet, so today every account resolves to its monogram, and a name that
+  yields no character still gets `FALLBACK_MONOGRAM` rather than a blank
+  (`AGENTS.md` §2.9).
 - `svg` — `VectorIcon::from_svg` and `decode_svg(bytes)`: build an icon from a
   decoded `lib/svg` `SvgImage` (the SVG-first asset rule, `AGENTS.md` §10). A
   malformed or undecodable asset fails closed, so the caller substitutes a
@@ -111,7 +121,8 @@ over a resolution-independent design grid, so the same glyph is
 ## Asset model
 
 An icon resolves through the thing's own icon (an application bundle's
-`Resources/` master, named by its manifest) and then two on-disk class tiers
+`Resources/` master named by its manifest, or an account's own identity disc)
+and then two on-disk class tiers
 over an always-present built-in floor: raster artwork (`<id>.png`) preferred,
 vector SVG (`<id>.svg`) next, and the built-in `builtin_icon` glyph always
 last, so resolution is total even on a system that ships no artwork at all
@@ -139,6 +150,8 @@ Like `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, and `lib/cursor`,
 this crate lives in `lib/*` so the taskbar consumes it without the taskbar and
 the window manager depending on one another (`AGENTS.md` §17.4). It is
 `no_std`, `#![forbid(unsafe_code)]`, and owns no colour arithmetic of its own.
+It draws text through `lib/font` — an account disc bears its monogram — rather
+than a glyph path of its own.
 
 The taskbar's renderer holds an `IconSet` — the built-in set until
 `set_icons` installs one decoded from the on-disk `/System/Graphics` assets —

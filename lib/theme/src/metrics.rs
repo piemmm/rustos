@@ -2,9 +2,10 @@
 //! shape the desktop.
 //!
 //! These are the *data* the window manager's single anti-aliased
-//! rounded-corner path consumes: the theme says how
-//! round a window or the taskbar is, and the compositor rounds it. A
-//! radius of `0` means square corners.
+//! rounded-corner path consumes: the theme says how round a window is, and
+//! the compositor rounds it. A radius of `0` means square corners. The
+//! taskbar is not among them — it is a stadium, so its radius follows its own
+//! thickness rather than a number a theme could set.
 //!
 //! Every length here is in *logical* pixels at the reference density
 //! (`tairix_geometry::REFERENCE_DPI`). The desktop's DPI / UI scale
@@ -19,9 +20,6 @@ pub struct Metrics {
     /// Corner radius applied to ordinary top-level windows, in logical
     /// pixels. `0` is square.
     pub window_corner_radius: u32,
-    /// Corner radius applied to the taskbar, rounded through the same
-    /// compositor path as windows.
-    pub taskbar_corner_radius: u32,
     /// How far the taskbar stands off the screen edges it faces, in logical
     /// pixels. `0` hugs them.
     ///

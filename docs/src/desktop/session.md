@@ -710,8 +710,12 @@ icon launch names. One rule, in one place, for every launch site
 
 ## The Switchboard tray feed and hang detection
 
-The taskbar's right-most Switchboard capsule renders live state from two
-independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
+The taskbar's right-most capsule wears the signed-in account — the session
+names it once at bring-up (`DesktopShell::set_account`, from the `USER` login
+exported) and the bar draws that account's circular identity disc, the same one
+the login screen drew. Behind the picture the capsule is the Switchboard tray,
+rendering live state from two independent, honest feeds
+(`plans/NEW-TASKBAR.md` T9/T10):
 
 - **The published summary.** The `Run` binary spawns the Switchboard monitor
   service (`/System/Services/switchboard.app`, `SWITCHBOARD_RUN_PATH`) at

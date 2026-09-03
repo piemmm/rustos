@@ -8,10 +8,11 @@ use alloc::vec::Vec;
 
 use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::FALLBACK_MONOGRAM;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Color;
 
-use crate::chooser::{AccountTile, Chooser, Step, FALLBACK_MONOGRAM, OTHER_LABEL};
+use crate::chooser::{AccountTile, Chooser, Step, OTHER_LABEL};
 use crate::surface::{
     AuthSurface, Backdrop, EventContext, Verdict, CHOOSE_HINT, HINT, NAME_HINT, NAME_REQUIRED,
 };
