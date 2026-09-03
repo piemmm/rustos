@@ -561,10 +561,6 @@ one invariant:
   memory pressure, or whose app ignores the redraw request, reads as an empty
   window rather than a hole.
 
-Because the plate is opaque, `Window::solid_core` now claims every drawable
-client column whether or not the client has presented that far, so the stack
-beneath a growing window is not needlessly re-blended.
-
 ## 3. Definition of done
 
 - Files — and every other windowed app — is drawn with a title bar

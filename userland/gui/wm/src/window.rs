@@ -65,6 +65,11 @@ pub struct Window {
     /// density; the compositor resolves it to physical pixels through the
     /// output's scale when it blurs.
     blur_radius: u16,
+    /// Whether the last composite frosted this window: retained its backdrop
+    /// and composed the window over that, rather than compositing it as the
+    /// plain translucent window it also is. The compositor's own answer, set
+    /// once per frame while it rations backdrop retention.
+    frosted: bool,
     corners: Corners,
     visible: bool,
     cursor: CursorKind,
@@ -140,6 +145,7 @@ impl Window {
             content: Some(surface),
             opacity: 255,
             blur_radius: 0,
+            frosted: false,
             corners: Corners::Square,
             visible: true,
             cursor: CursorKind::Arrow,
@@ -193,8 +199,9 @@ impl Window {
     }
 
     /// Whether this window's own pixels leave what is composed beneath its
-    /// rectangle showing through it as a *field*, so the compositor is worth
-    /// retaining that backdrop for.
+    /// rectangle showing through it as a *field*, so the window is worth
+    /// retaining that backdrop for — a candidate for retention, never a claim
+    /// on it: the compositor rations how many candidates a frame serves.
     ///
     /// Two things do it: a backdrop blur, which reads the backdrop to blur it,
     /// and a whole-window opacity below full, which admits it everywhere. Both
@@ -218,6 +225,27 @@ impl Window {
     #[must_use]
     pub const fn blur_radius(&self) -> u16 {
         self.blur_radius
+    }
+
+    /// Whether the compositor is retaining this window's backdrop and
+    /// composing the window over it.
+    ///
+    /// A window that [reads its backdrop](Self::reads_backdrop) asks to be; the
+    /// compositor rations how many it grants, because stacked ones all read the
+    /// same pixels and each retained answer is a whole window's worth of them.
+    /// One it refuses still composites correctly — translucent, simply not
+    /// frosted.
+    pub(crate) const fn is_frosted(&self) -> bool {
+        self.frosted
+    }
+
+    /// Record what the compositor decided about this window's backdrop,
+    /// reporting whether that changed — which is to say, whether the window
+    /// now draws differently from the way it was last drawn.
+    pub(crate) const fn set_frosted(&mut self, frosted: bool) -> bool {
+        let changed = self.frosted != frosted;
+        self.frosted = frosted;
+        changed
     }
 
     /// Corner style.
@@ -431,90 +459,6 @@ impl Window {
         self.take_content_wiped();
         self.content = Some(fresh);
         self.content.as_mut().map(|content| (content, true))
-    }
-
-    /// Read back the alpha of whatever a paint has just written into this
-    /// window's content, so [`solid_core`](Self::solid_core) can be trusted
-    /// again.
-    ///
-    /// Every borrow of the content buffer is settled by the compositor call
-    /// that took it. A path that forgot to costs the window its skip — an
-    /// unsettled surface reports a floor of zero — and never a wrong pixel.
-    pub(crate) fn settle_content_alpha(&mut self) {
-        if let Some(content) = self.content.as_mut() {
-            content.settle_alpha_floor();
-        }
-    }
-
-    /// The screen rectangle inside which every pixel this window composes is
-    /// one of its own client pixels at full corner coverage, paired with the
-    /// least alpha any of them can carry.
-    ///
-    /// This is what bounds how much of what lies *behind* the window can
-    /// still reach the screen: over that rectangle the window transmits at
-    /// most `1 - alpha` of it, so a stack of them multiplies out to a
-    /// contribution an 8-bit channel may be unable to record at all. Outside
-    /// it the window may be drawing furniture, a corner arc, or nothing, so
-    /// nothing is claimed there — which is why the rectangle is the drawable
-    /// client area taken in by the reach of the shape its client is cut to,
-    /// and not the window's bounds.
-    ///
-    /// A decorated window draws its own plate under the whole client area, so
-    /// its claim reaches every drawable column whether or not the client has
-    /// presented that far; an undecorated one claims only the pixels it
-    /// actually holds. A hidden window, or an undecorated one whose pixels
-    /// are released, claims nothing.
-    pub(crate) fn solid_core(&self) -> (Rect, u8) {
-        if !self.visible {
-            return (Rect::EMPTY, 0);
-        }
-        let (extent_w, extent_h) = self.client_extent();
-        // A plate covers the whole extent, so the claim is all of it at
-        // whichever of the two layers carries the least alpha.
-        let (drawable_w, drawable_h, floor) = match (self.plate, self.content.as_ref()) {
-            (Some(plate), Some(content)) => {
-                (extent_w, extent_h, content.alpha_floor().min(plate.a))
-            }
-            (Some(plate), None) => (extent_w, extent_h, plate.a),
-            (None, Some(content)) => (
-                extent_w.min(content.width()),
-                extent_h.min(content.height()),
-                content.alpha_floor(),
-            ),
-            (None, None) => return (Rect::EMPTY, 0),
-        };
-        let (x0, y0, x1, y1) = match self.client_cut() {
-            None => (0, 0, drawable_w, drawable_h),
-            Some(cut) => {
-                // Full coverage is everything the plate's own corner radius
-                // does not reach, stated in the plate's coordinates and read
-                // back in the client's.
-                let reach = cut.shape.corner_reach();
-                let (dx, dy) = cut.offset;
-                (
-                    reach.saturating_sub(dx),
-                    reach.saturating_sub(dy),
-                    cut.shape
-                        .width
-                        .saturating_sub(reach)
-                        .saturating_sub(dx)
-                        .min(drawable_w),
-                    cut.shape
-                        .height
-                        .saturating_sub(reach)
-                        .saturating_sub(dy)
-                        .min(drawable_h),
-                )
-            }
-        };
-        let client = self.client_rect();
-        let core = Rect::new(
-            client.left().saturating_add_unsigned(x0),
-            client.top().saturating_add_unsigned(y0),
-            x1.saturating_sub(x0),
-            y1.saturating_sub(y0),
-        );
-        (core, veiled_by(self.opacity, floor))
     }
 
     /// The window's screen rectangle.
@@ -871,11 +815,8 @@ impl Window {
 
     /// Replace the content pixels with `surface`, adopting its extent as
     /// the window's client size (a replacement may be a different shape).
-    pub(crate) fn replace_surface(&mut self, mut surface: Surface) {
+    pub(crate) fn replace_surface(&mut self, surface: Surface) {
         self.client_size = (surface.width(), surface.height());
-        // Whatever painted it is done, so its alpha is read back here once
-        // rather than left for the first frame that asks what the window hides.
-        surface.settle_alpha_floor();
         self.content = Some(surface);
     }
 
@@ -1645,15 +1586,4 @@ impl RowCut {
 /// Combine two `0..=255` factors as `a * b / 255` (shared `div255`).
 fn combine(a: u8, b: u8) -> u8 {
     div255(u32::from(a) * u32::from(b))
-}
-
-/// The least alpha a content pixel of at least `alpha` can compose at through
-/// a window opacity of `factor`.
-///
-/// Not [`combine`]: composition scales by the ordered dither's own bias rather
-/// than by nearest rounding, and the lowest bias in the tile floors the
-/// quotient. A bound that rounded would claim a level the darkest column of the
-/// dither does not carry.
-fn veiled_by(factor: u8, alpha: u8) -> u8 {
-    u8::try_from(u32::from(factor) * u32::from(alpha) / u32::from(u8::MAX)).unwrap_or(u8::MAX)
 }

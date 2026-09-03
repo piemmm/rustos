@@ -54,8 +54,8 @@ router**:
   window's shape — and of *nothing at or above its own layer*. So it is kept in
   a `ReclaimCache` (`frost_cache`, one screenful, `lib/reclaim`'s shared
   desktop policy — a frost is a whole window's rectangle, so a stack of
-  overlapping ones can want several times that, which is what the unseen-core
-  entry below keys on) and a window's own repaint copies it back instead of
+  overlapping ones can want several times that, which is what the ration below
+  bounds) and a window's own repaint copies it back instead of
   composing that stack again. A blur of radius zero leaves the composed layers
   exactly as it found them, so an unblurred translucent window retains its
   backdrop through the very same path (`Window::reads_backdrop`) rather than a
@@ -91,23 +91,26 @@ router**:
   counts no second lookup), so admitting one frost cannot evict another the
   same pass had already decided to reuse. A frost is a blurred image of the
   user's desktop, so a released entry is wiped, not merely dropped.
-- A frost nothing can show (`Compositor::unseen_core`): compositing is `over`,
-  so what a frost still contributes to the screen is the destination weight of
-  its own window and every one above. Each transmission is a rounded division
-  by 255, so the largest per-channel difference a wrong backdrop survives as
-  shrinks by `d -> ceil(d * (255 - alpha) / 255)` — four layers at 80% opacity
-  take the widest 8-bit difference down to **one**, which is as far as integer
-  compositing goes through translucency. The walk climbs from the blurred
-  window, intersecting each covering window's `solid_core` (its drawable client
-  area inside the reach of the shape its client is cut to, paired with its
-  content's `Surface::alpha_floor`) and taking the region in by the radius of
-  every blur above that still has a difference worth spreading. Only where the
-  frosts of a whole pass together exceed the budget — so admitting one means
-  pushing a live one out and every frame rebuilds all of them — is the
-  resulting rectangle left uncomputed (`FrostPlan::Unseen`, blurred around
-  through the same `blur_backdrop(index, keep)`), and then it is neither
-  composed beneath nor captured. Retaining beats any partial blur otherwise,
-  which is why a frost the cache will keep is always blurred whole.
+- Frosting is rationed, front to back (`Compositor::grant_backdrops`): stacked
+  frosted windows all read the same pixels, so `n` of them want `n` screenfuls
+  of retention against a budget of one. Granting each in turn — "does one more
+  fit?" — is true of every window in such a stack, so each frame blurred,
+  evicted and re-blurred the lot: sixteen cascaded terminals at the shipped
+  translucent, blurred default took the desktop to a crawl, one repainted cell
+  costing several screenfuls of blur and of blending. Each frame therefore
+  spends the cache's live ceiling from the **front** of the stack and stops
+  (`ReclaimCache::holds`): what the budget reaches is frosted and retained
+  (`Window::is_frosted`), and what it does not composites as the plain
+  translucent window it also is — byte for byte what the same window draws with
+  its blur turned off. Depth is bounded by the one fact that matters, what can
+  be retained, so a large screen wastes nothing and a small one is not asked
+  for what it has not got; frosts that do not overlap all fit, since together
+  they cover no more than the screen. Nothing is admitted only to be evicted,
+  so a repainted cell in a sixteen-deep cascade blurs **nothing** where it
+  blurred some 4.7 M pixels. The cost is that a window buried under a pile of
+  them reads as translucent rather than as frosted glass where it still shows;
+  gaining or losing a frost marks the window's own damage, because the ration
+  turns on the live pressure band as well as on the scene.
 - Damage tracking (`tairix_geometry::Region`): only changed pixels are
   recomposited, and the region's rectangles are pairwise disjoint, so no
   pixel is composited or presented twice and two far-apart updates stay two

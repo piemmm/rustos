@@ -713,6 +713,11 @@ impl<T: WindowTransport> WindowClient<T> {
     /// (typically translucent) pixels over it, so a frosted-glass panel
     /// reads correctly. `0` disables the effect.
     ///
+    /// The radius is a request the compositor honours as its own retention
+    /// budget allows: a window buried under a pile of frosted ones may be
+    /// composited with its opacity alone. That is not an error and is not
+    /// reported as one.
+    ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for a radius above

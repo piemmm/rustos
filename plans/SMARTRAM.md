@@ -1082,10 +1082,11 @@ weaker policy:
   drops it, which is why a cursor sample, a fade step and the window's own
   content all keep it. A frost is a *whole window's* rectangle, so unlike
   furniture a stack of overlapping ones can want several times the screenful
-  the ceiling allows — the compositor asks `ReclaimCache::admits` before
-  building one, and where a pass's frosts together exceed the budget it leaves
-  the part no output channel could record uncomputed instead of rebuilding all
-  of them every frame (`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
+  the ceiling allows — the compositor weighs the whole set it is choosing
+  against the live ceiling (`ReclaimCache::holds`) and frosts the stack from
+  the front until the budget runs out, so it never over-commits and never
+  rebuilds all of them every frame; a window it refuses composites as the
+  plain translucent window it also is (`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
 - **The font service's glyph rasters, on both sides.** The service's own
   rasterised coverage and the client-side memoisation of what it fetched
   are `ReclaimCache`es too, built from the single

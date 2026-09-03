@@ -71,14 +71,6 @@ struct ClipRect {
 }
 
 impl ClipRect {
-    /// The window admitting nothing.
-    const EMPTY: Self = Self {
-        x0: 0,
-        y0: 0,
-        x1: 0,
-        y1: 0,
-    };
-
     /// The window admitting a whole `width`×`height` surface.
     const fn whole(width: u32, height: u32) -> Self {
         Self {
@@ -87,36 +79,6 @@ impl ClipRect {
             x1: width,
             y1: height,
         }
-    }
-
-    /// Whether this window admits nothing.
-    const fn is_empty(self) -> bool {
-        self.x0 >= self.x1 || self.y0 >= self.y1
-    }
-
-    /// The smallest window admitting both, which is `other` where this one
-    /// admits nothing.
-    fn united(self, other: Self) -> Self {
-        if self.is_empty() {
-            return other;
-        }
-        if other.is_empty() {
-            return self;
-        }
-        Self {
-            x0: self.x0.min(other.x0),
-            y0: self.y0.min(other.y0),
-            x1: self.x1.max(other.x1),
-            y1: self.y1.max(other.y1),
-        }
-    }
-
-    /// How many pixels this window admits.
-    fn area(self) -> u64 {
-        if self.is_empty() {
-            return 0;
-        }
-        u64::from(self.x1 - self.x0) * u64::from(self.y1 - self.y0)
     }
 
     /// This window narrowed to `[x, x+w) × [y, y+h)`.
@@ -215,46 +177,6 @@ impl Origin {
     }
 }
 
-/// A lower bound on the alpha every pixel of a [`Surface`] carries, and the
-/// borrows it has yet to account for.
-///
-/// The bound is what lets a consumer prove that what lies *behind* a surface
-/// cannot reach the screen: a stack of surfaces transmits at most the product
-/// of `1 - floor` across it. Under-stating it costs that consumer work and
-/// never correctness, so an unaccounted borrow reads as fully transparent.
-#[derive(Clone, Debug)]
-struct AlphaFloor {
-    /// Least alpha carried by any pixel outside `pending`.
-    settled: u8,
-    /// Pixels handed out for writing and not yet read back.
-    pending: ClipRect,
-    /// Pixels folded in since `settled` was last taken from the whole
-    /// surface, which is what makes the exact retake amortised.
-    folded: u64,
-}
-
-impl AlphaFloor {
-    /// The floor of a surface every pixel of which carries `alpha`.
-    const fn flat(alpha: u8) -> Self {
-        Self {
-            settled: alpha,
-            pending: ClipRect::EMPTY,
-            folded: 0,
-        }
-    }
-
-    /// The floor of a `width`×`height` surface whose pixels were written
-    /// without going through a borrow — the whole of it is outstanding, so
-    /// nothing is claimed until it is read back.
-    const fn unscanned(width: u32, height: u32) -> Self {
-        Self {
-            settled: 0,
-            pending: ClipRect::whole(width, height),
-            folded: 0,
-        }
-    }
-}
-
 /// A row-major, premultiplied-alpha pixel buffer.
 ///
 /// Two surfaces are equal when they carry the same pixels *and* the same
@@ -262,10 +184,7 @@ impl AlphaFloor {
 /// [`Surface::with_clip`] and [`Surface::with_origin`] both restore what they
 /// found before returning, so a surface observed outside such a paint carries
 /// the whole-surface window at the buffer's own origin and equality is decided
-/// by its pixels alone. The alpha floor
-/// ([`alpha_floor`](Surface::alpha_floor)) is a bound derived from those
-/// pixels and how tight it happens to be is not part of a surface's identity,
-/// so it takes no part in the comparison.
+/// by its pixels alone.
 #[derive(Clone, Debug)]
 pub struct Surface {
     width: u32,
@@ -273,7 +192,6 @@ pub struct Surface {
     clip: ClipRect,
     origin: Origin,
     pixels: Vec<Pixel>,
-    floor: AlphaFloor,
 }
 
 impl PartialEq for Surface {
@@ -299,7 +217,6 @@ impl CachedBytes for Surface {
     /// surface leaves no rendered user data behind in freed heap memory.
     fn wipe(&mut self) {
         self.pixels.fill(Pixel::TRANSPARENT);
-        self.floor = AlphaFloor::flat(0);
     }
 }
 
@@ -329,7 +246,6 @@ impl Surface {
             clip: ClipRect::whole(width, height),
             origin: Origin::default(),
             pixels: fallible::filled(count, fill)?,
-            floor: AlphaFloor::flat(fill.a),
         })
     }
 
@@ -451,7 +367,6 @@ impl Surface {
             clip: ClipRect::whole(width, height),
             origin: Origin::default(),
             pixels,
-            floor: AlphaFloor::unscanned(width, height),
         })
     }
 
@@ -482,7 +397,6 @@ impl Surface {
             (dest_width, dest_height),
             &mut out.pixels,
         )?;
-        out.floor = AlphaFloor::unscanned(dest_width, dest_height);
         Ok(out)
     }
 
@@ -502,82 +416,6 @@ impl Surface {
     #[must_use]
     pub fn pixels(&self) -> &[Pixel] {
         &self.pixels
-    }
-
-    /// A lower bound on the alpha every pixel of this surface carries: `255`
-    /// only if every one of them is opaque, and `0` while a borrow this
-    /// surface handed out has not been read back
-    /// ([`settle_alpha_floor`](Self::settle_alpha_floor)).
-    ///
-    /// A compositor multiplies `1 - floor` across a stack to bound what the
-    /// layers beneath it can still contribute to the screen, and skips
-    /// computing a backdrop that cannot reach it. Under-stating the bound
-    /// only costs that work, so an unaccounted write reads as fully
-    /// transparent rather than as whatever the buffer held before it.
-    #[must_use]
-    pub const fn alpha_floor(&self) -> u8 {
-        if self.floor.pending.is_empty() {
-            self.floor.settled
-        } else {
-            0
-        }
-    }
-
-    /// Read the alpha of the pixels borrowed since the last call back into
-    /// the floor, retaking it from the whole surface once as much area has
-    /// been borrowed as the surface holds.
-    ///
-    /// A partial write can only *lower* the bound between retakes: the pixel
-    /// that held the old minimum may be one of the ones just overwritten, and
-    /// finding out costs a pass over everything. Deferring that pass until a
-    /// surface's worth of area has been rewritten leaves the bound tight for
-    /// a buffer painted a rectangle at a time — a window's content, repainted
-    /// where it changed — at an amortised one extra read per pixel written.
-    pub fn settle_alpha_floor(&mut self) {
-        let pending = self.floor.pending;
-        if pending.is_empty() {
-            return;
-        }
-        self.floor.pending = ClipRect::EMPTY;
-        self.floor.folded = self.floor.folded.saturating_add(pending.area());
-        let held = u64::try_from(self.pixels.len()).unwrap_or(u64::MAX);
-        if self.floor.folded >= held {
-            self.floor.folded = 0;
-            self.floor.settled = self.least_alpha(ClipRect::whole(self.width, self.height));
-            return;
-        }
-        self.floor.settled = self.floor.settled.min(self.least_alpha(pending));
-    }
-
-    /// The least alpha any pixel of `window` carries, `255` where it holds
-    /// none.
-    fn least_alpha(&self, window: ClipRect) -> u8 {
-        let mut least = u8::MAX;
-        for y in window.y0..window.y1 {
-            let Some(start) = self.row_start(y) else {
-                continue;
-            };
-            let (Some(lo), Some(hi)) = (
-                usize::try_from(window.x0)
-                    .ok()
-                    .and_then(|x| start.checked_add(x)),
-                usize::try_from(window.x1)
-                    .ok()
-                    .and_then(|x| start.checked_add(x)),
-            ) else {
-                continue;
-            };
-            let Some(row) = self.pixels.get(lo..hi) else {
-                continue;
-            };
-            for pixel in row {
-                least = least.min(pixel.a);
-                if least == 0 {
-                    return 0;
-                }
-            }
-        }
-        least
     }
 
     /// The premultiplied pixel at `(x, y)`, or `None` if out of bounds.
@@ -1479,14 +1317,6 @@ impl Surface {
     pub fn row_span_mut(&mut self, y: u32, x: u32, w: u32) -> Option<(u32, &mut [Pixel])> {
         let place = span_offsets(self.clip, self.width, 0..self.height, self.origin, y, x, w)?;
         let span = self.pixels.get_mut(place.offsets)?;
-        let columns = u32::try_from(span.len()).unwrap_or(0);
-        let (column, row) = place.at;
-        self.floor.pending = self.floor.pending.united(ClipRect {
-            x0: column,
-            y0: row,
-            x1: column.saturating_add(columns),
-            y1: row.saturating_add(1),
-        });
         Some((place.first, span))
     }
 
@@ -1529,14 +1359,6 @@ impl Surface {
         let admitted = row.max(self.clip.y0)..row.saturating_add(requested).min(self.clip.y1);
         let span = admitted.end.saturating_sub(admitted.start);
         let per_band = rows_per_band.max(1);
-        // A band's own writes cannot reach back here, so the whole block is
-        // recorded as outstanding before it is handed out.
-        self.floor.pending = self.floor.pending.united(ClipRect {
-            x0: self.clip.x0,
-            y0: admitted.start,
-            x1: self.clip.x1,
-            y1: admitted.end,
-        });
         let block = usize::try_from(u64::from(per_band) * u64::from(self.width))
             .ok()
             .filter(|block| *block > 0 && span > 0)
@@ -1616,9 +1438,6 @@ struct SpanPlace {
     /// caller asked in, so a caller pairing source data with the span
     /// advances that source by the difference from what it asked for.
     first: u32,
-    /// That same pixel's buffer column and row, which is where the alpha
-    /// floor records the write.
-    at: (u32, u32),
     /// The pixels the span occupies within the borrowed block.
     offsets: Range<usize>,
 }
@@ -1654,7 +1473,6 @@ fn span_offsets(
     let hi = start.checked_add(usize::try_from(columns.end).ok()?)?;
     Some(SpanPlace {
         first: origin.space_column(columns.start),
-        at: (columns.start, row),
         offsets: lo..hi,
     })
 }

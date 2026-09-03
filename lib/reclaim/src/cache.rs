@@ -482,30 +482,32 @@ where
         }
     }
 
-    /// Whether a value of `payload_bytes` would fit alongside everything
-    /// already retained, at the live pressure band.
+    /// Whether `entries` values whose payloads total `payload_bytes` would
+    /// together fit this cache at the live pressure band, if it held nothing
+    /// else.
     ///
-    /// A consumer that can answer its question a cheaper way when the cache
-    /// cannot help asks this before building the retainable answer. Admission
-    /// itself will evict to make room (see [`retain`](Self::retain)), which is
-    /// right when the oldest entry has gone cold and wrong when every entry is
-    /// live: a working set larger than the budget then rebuilds all of itself
-    /// every pass, paying the build *and* the eviction for nothing. This is the
-    /// question "is the budget already spoken for", not "would admission
-    /// succeed".
+    /// The question a consumer asks while *choosing* which entries to keep,
+    /// releasing the ones it does not choose: what is charged now is the last
+    /// choice's consequence, not a constraint on this one, and admission would
+    /// evict to make room anyway (see [`retain`](Self::retain)). Asking instead
+    /// whether one more fits alongside everything retained is what lets a
+    /// working set larger than the budget rebuild all of itself every pass,
+    /// paying the build *and* the eviction for nothing — so a consumer whose
+    /// candidates outrun its budget bounds the set here and spends it where it
+    /// counts.
     ///
-    /// A poisoned or unclassified cache admits nothing.
+    /// A poisoned or unclassified cache holds nothing.
     #[must_use]
-    pub fn admits(&self, payload_bytes: usize) -> bool {
+    pub fn holds(&self, entries: usize, payload_bytes: usize) -> bool {
         if self.poisoned {
             return false;
         }
         let Some(policy) = self.policy else {
             return false;
         };
-        let cost = payload_bytes.saturating_add(self.entry_metadata_bytes);
+        let overhead = entries.saturating_mul(self.entry_metadata_bytes);
         let ceiling = shrink_target(self.pressure.sample(), policy.class(), self.budget);
-        self.charged_bytes().saturating_add(cost) <= ceiling
+        payload_bytes.saturating_add(overhead) <= ceiling
     }
 
     /// Apply the band's forced shrink now, returning the bytes
@@ -1027,6 +1029,33 @@ mod tests {
             .get_or_build(&1, 8, || Some(Block::of(256, 2)))
             .expect("built");
         assert!(!served.is_cached(), "no growth under pressure");
+    }
+
+    #[test]
+    fn holds_weighs_a_whole_set_against_the_ceiling_and_ignores_what_is_charged() {
+        // A 64 KiB backing gives a 4 KiB ceiling, and every entry is charged
+        // its own bookkeeping on top of its payload.
+        let (mut cache, gauge, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        let ceiling = 64 * 1024 / 16;
+        assert!(cache.holds(1, ceiling - METADATA));
+        assert!(!cache.holds(1, ceiling - METADATA + 1));
+        assert!(
+            !cache.holds(2, ceiling - METADATA),
+            "the second entry's bookkeeping is charged too"
+        );
+
+        // What is retained now is the last choice's consequence, so it must not
+        // narrow this one: a consumer choosing afresh releases what it drops.
+        cache.retain(&1, 7, Block::of(ceiling - METADATA, 0xAA));
+        assert_eq!(cache.charged_bytes(), ceiling);
+        assert!(
+            cache.holds(1, ceiling - METADATA),
+            "a full cache still holds"
+        );
+
+        // The live band is the ceiling, not the budget as declared.
+        gauge.report(PressureBand::Critical);
+        assert!(!cache.holds(1, ceiling - METADATA));
     }
 
     #[test]

@@ -68,15 +68,6 @@ pub(crate) enum FrostPlan {
     /// around it, because the window has moved, resized, or changed shape and
     /// only that border can differ.
     Core(Rect),
-    /// Blur the border around this screen rectangle and leave the rectangle
-    /// itself alone: the windows over it — its own included — transmit so
-    /// little of it that no 8-bit output channel can record what is there.
-    ///
-    /// Nothing is copied into the core and the frost is **not** retained: the
-    /// pixels inside it are not the blur's own output, and an entry records a
-    /// whole rectangle that a later frame may copy back once the windows
-    /// hiding it have moved away.
-    Unseen(Rect),
     /// Blur the whole rectangle: nothing retained applies to it.
     Blur,
 }
@@ -138,9 +129,10 @@ pub type FrostEpoch = (u32, u32, u32);
 /// output's backing byte size, which is also this cache's ceiling: what the
 /// desktop may hold in frosted backdrops is one screen's worth of pixels. A
 /// frost is a whole window's rectangle, so a stack of overlapping ones can want
-/// several times that, and a pass whose frosts together exceed the ceiling
-/// leaves the buried ones uncomputed rather than rebuilding all of them every
-/// frame (`Compositor::unseen_core`). `pressure` and `sink` are the process's
+/// several times that; a frame therefore frosts the stack from the front until
+/// this ceiling runs out and composites the rest as the plain translucent
+/// windows they are, rather than rebuilding all of them every frame
+/// (`Compositor::grant_backdrops`). `pressure` and `sink` are the process's
 /// live pressure gauge and audit sink. The embedder — the only party that
 /// knows all four — calls this once and hands the result to
 /// [`Compositor::new`](crate::Compositor::new).
@@ -164,8 +156,8 @@ pub fn frost_cache(
 /// The bytes a frost of `rect` charges the cache: its pixels alone, which is
 /// what a [`FrostedBackdrop`] owns and therefore what the cache weighs.
 ///
-/// Read before a frost is built, so a frame can tell whether the budget is
-/// already spoken for and answer the cheaper way if it is.
+/// Read before any frost is built, so a frame can choose which windows to
+/// frost against what the budget will actually hold.
 pub(crate) fn frost_bytes(rect: Rect) -> usize {
     let area = usize::try_from(rect.width)
         .ok()
