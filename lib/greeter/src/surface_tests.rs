@@ -38,7 +38,7 @@ fn chrome() -> Chrome {
 
 #[test]
 fn typing_builds_the_secret_and_enter_offers_it_once_exactly_as_typed() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified]);
 
     let outcome = submit(&mut surface, "Hunter2!", &mut verifier);
@@ -51,7 +51,7 @@ fn typing_builds_the_secret_and_enter_offers_it_once_exactly_as_typed() {
 /// secret, so a verifier that checks a named account checks the right one.
 #[test]
 fn the_account_being_asked_for_reaches_the_verifier() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
 
     submit(&mut surface, "x", &mut verifier);
@@ -60,23 +60,30 @@ fn the_account_being_asked_for_reaches_the_verifier() {
     assert_eq!(surface.selected_account(), Some("ann"));
 }
 
-/// A name the embedder could not resolve is still a question about somebody,
-/// so the placeholder heading is what the authority is asked about.
+/// A name the embedder could not resolve is headed by the placeholder, and
+/// the authority is offered *nothing* — the placeholder is a line of display
+/// text, and offering it as a login name would ask about an account called
+/// "Locked". A name nobody has cannot be mistaken for one somebody does.
 #[test]
-fn an_unnamed_account_is_asked_about_under_the_placeholder() {
-    let mut surface = AuthSurface::new("");
+fn an_unnamed_account_offers_no_login_name_to_the_authority() {
+    let mut surface = AuthSurface::new("", "");
     let mut verifier = Scripted::refusing();
 
     submit(&mut surface, "x", &mut verifier);
 
-    assert_eq!(verifier.accounts, vec![String::from(UNNAMED_ACCOUNT)]);
+    assert_eq!(verifier.accounts, vec![String::new()]);
+    assert_ne!(
+        verifier.accounts,
+        vec![String::from(UNNAMED_ACCOUNT)],
+        "the heading's placeholder is never offered as a credential"
+    );
 }
 
 /// Editing keys reach the field, so the secret offered is the one on screen
 /// at the moment Enter is pressed rather than everything ever typed.
 #[test]
 fn backspace_edits_the_secret_before_it_is_offered() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
 
     for ch in "Hunterx".chars() {
@@ -92,7 +99,7 @@ fn backspace_edits_the_secret_before_it_is_offered() {
 /// move the caret without reporting an edit.
 #[test]
 fn every_key_asks_for_a_repaint() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
 
     assert!(feed(&mut surface, &key(Key::Char('a')), &mut verifier).redraw());
@@ -103,7 +110,7 @@ fn every_key_asks_for_a_repaint() {
 /// caller leaning on the keyboard is truncated, not reallocated.
 #[test]
 fn the_secret_is_bounded_at_the_documented_maximum() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     let long = "x".repeat(MAX_PASSWORD + 10);
 
@@ -118,7 +125,7 @@ fn the_secret_is_bounded_at_the_documented_maximum() {
 #[test]
 fn the_secret_is_erased_after_every_verdict() {
     for verdict in [Verdict::Verified, Verdict::Refused, Verdict::Unreachable] {
-        let mut surface = AuthSurface::new("ann");
+        let mut surface = AuthSurface::new("ann", "ann");
         let mut verifier = Scripted::new(vec![verdict]);
 
         submit(&mut surface, "secret", &mut verifier);
@@ -134,15 +141,15 @@ fn the_secret_is_erased_after_every_verdict() {
 
 #[test]
 fn the_resting_notice_is_the_hint() {
-    assert_eq!(AuthSurface::new("ann").notice(), HINT);
+    assert_eq!(AuthSurface::new("ann", "ann").notice(), HINT);
 }
 
 /// "Wrong password" and "I could not ask" call for different reactions from
 /// the person at the keyboard, so they never read the same.
 #[test]
 fn a_refusal_and_an_unreachable_authority_read_differently() {
-    let mut refused = AuthSurface::new("ann");
-    let mut unreachable = AuthSurface::new("ann");
+    let mut refused = AuthSurface::new("ann", "ann");
+    let mut unreachable = AuthSurface::new("ann", "ann");
 
     submit(
         &mut refused,
@@ -164,7 +171,7 @@ fn a_refusal_and_an_unreachable_authority_read_differently() {
 /// stops standing over the new one.
 #[test]
 fn typing_again_clears_the_previous_verdict() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Refused]);
     submit(&mut surface, "wrong", &mut verifier);
     assert_eq!(surface.notice(), REFUSED);
@@ -180,7 +187,7 @@ fn typing_again_clears_the_previous_verdict() {
 /// especially must not be mistaken for a cancel-and-dismiss.
 #[test]
 fn no_event_concludes_the_surface_without_a_verified_verdict() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
 
     for event in [
@@ -205,7 +212,7 @@ fn no_event_concludes_the_surface_without_a_verified_verdict() {
 #[test]
 fn only_the_screen_leaving_stops_the_surface_answering_input() {
     let theme = theme();
-    let mut arriving = AuthSurface::new("ann");
+    let mut arriving = AuthSurface::new("ann", "ann");
     let mut asked = Scripted::refusing();
     arriving.begin_entry_fade(0, &theme);
 
@@ -216,7 +223,7 @@ fn only_the_screen_leaving_stops_the_surface_answering_input() {
         "a surface that is still arriving is still asking"
     );
 
-    let mut leaving = AuthSurface::new("ann");
+    let mut leaving = AuthSurface::new("ann", "ann");
     let mut unasked = Scripted::refusing();
     leaving.begin_session_fade(0, &theme);
 
@@ -229,7 +236,7 @@ fn only_the_screen_leaving_stops_the_surface_answering_input() {
 /// screen that has just come up has gone.
 #[test]
 fn a_finished_entry_fade_is_not_a_finished_session_fade() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_entry_fade(0, &theme());
 
     assert!(!surface.session_fade_begun(), "arriving is not leaving");
@@ -245,7 +252,7 @@ fn a_finished_entry_fade_is_not_a_finished_session_fade() {
 /// every frame after.
 #[test]
 fn an_arrived_screen_owes_no_further_frame_and_holds_no_veil() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_entry_fade(0, &theme());
     assert!(surface.veiled(), "it comes up under the black");
 
@@ -258,7 +265,7 @@ fn an_arrived_screen_owes_no_further_frame_and_holds_no_veil() {
     assert_eq!(surface.motion_due(u64::MAX), None);
     assert_eq!(
         render(&surface),
-        render(&AuthSurface::new("ann")),
+        render(&AuthSurface::new("ann", "ann")),
         "an arrived screen is the screen, with nothing over it"
     );
 }
@@ -269,7 +276,7 @@ fn an_arrived_screen_owes_no_further_frame_and_holds_no_veil() {
 #[test]
 fn leaving_part_way_through_the_entry_fade_does_not_brighten_the_screen() {
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_entry_fade(0, &theme);
     let frame = surface.motion_due(0).expect("an arriving screen asks");
     surface.advance(frame);
@@ -288,14 +295,14 @@ fn leaving_part_way_through_the_entry_fade_does_not_brighten_the_screen() {
 /// there, with no veil drawn and no frame owed for one.
 #[test]
 fn a_reduced_motion_entry_fade_is_over_before_it_begins() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
 
     assert!(!surface.begin_entry_fade(0, &still()).redraw());
 
     assert!(!surface.veiled(), "there is nothing to uncover");
     assert_eq!(surface.motion_due(0), None, "nothing is armed");
     assert!(!surface.session_fade_begun());
-    assert_eq!(render(&surface), render(&AuthSurface::new("ann")));
+    assert_eq!(render(&surface), render(&AuthSurface::new("ann", "ann")));
 }
 
 /// A screen lock has no chooser to step back to, so Escape is inert: it
@@ -303,7 +310,7 @@ fn a_reduced_motion_entry_fade_is_over_before_it_begins() {
 /// what was typed still in the field.
 #[test]
 fn a_surface_with_no_chooser_ignores_escape() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     for ch in "half".chars() {
         feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
@@ -321,7 +328,7 @@ fn a_surface_with_no_chooser_ignores_escape() {
 /// say yes cannot be reached by typing, hovering, or clicking.
 #[test]
 fn only_a_submission_reaches_the_authority() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified, Verdict::Verified]);
 
     for event in [key(Key::Char('a')), moved(500, 300), PRESS, RELEASE] {
@@ -338,7 +345,7 @@ fn only_a_submission_reaches_the_authority() {
 #[test]
 fn the_column_is_a_centred_stack_at_every_density() {
     let screen = Rect::new(0, 0, 1400, 1100);
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
 
     for percent in [100, 200] {
         let scale = Scale::from_percent(percent).expect("a supported density");
@@ -393,7 +400,7 @@ fn the_column_grows_with_the_desktop_scale() {
 #[test]
 fn a_small_screen_still_gets_a_usable_prompt() {
     let small = Rect::new(0, 0, 640, 480);
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
     let block = panel_rect(small, Scale::ONE);
     let field = surface.field_rect(small, Scale::ONE, &theme());
 
@@ -425,7 +432,7 @@ fn the_chrome_is_the_same_whichever_body_is_up() {
             let band = chrome_band(screen, scale);
             let mut chooser = AuthSurface::with_accounts(tiles.clone());
             chooser.set_chrome(chrome());
-            let mut prompt = AuthSurface::new("ann");
+            let mut prompt = AuthSurface::new("ann", "ann");
             prompt.set_chrome(chrome());
 
             let shown = |surface: &AuthSurface| {
@@ -457,7 +464,7 @@ fn the_prompt_block_never_grows_past_the_screen() {
 
 #[test]
 fn the_field_sits_inside_the_panel() {
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
     let panel = panel_rect(SCREEN, Scale::ONE);
 
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
@@ -473,7 +480,7 @@ fn the_field_sits_inside_the_panel() {
 /// rect the hit test reads, so the two cannot drift apart.
 #[test]
 fn the_painted_field_is_the_rectangle_the_pointer_is_tested_against() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
     let before = render(&surface);
@@ -496,7 +503,7 @@ fn the_painted_field_is_the_rectangle_the_pointer_is_tested_against() {
 /// wakes it.
 #[test]
 fn only_a_pointer_within_the_field_rect_reaches_the_field() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
 
@@ -514,9 +521,9 @@ fn only_a_pointer_within_the_field_rect_reaches_the_field() {
 /// is not a reason to refuse to ask: it falls back to the placeholder.
 #[test]
 fn an_empty_account_heads_the_surface_with_the_placeholder() {
-    let empty = render(&AuthSurface::new(""));
-    let placeholder = render(&AuthSurface::new(UNNAMED_ACCOUNT));
-    let named_account = render(&AuthSurface::new("ann"));
+    let empty = render(&AuthSurface::new("", ""));
+    let placeholder = render(&AuthSurface::new(UNNAMED_ACCOUNT, UNNAMED_ACCOUNT));
+    let named_account = render(&AuthSurface::new("ann", "ann"));
 
     assert_eq!(empty, placeholder);
     assert_ne!(empty, named_account);
@@ -527,7 +534,7 @@ fn an_empty_account_heads_the_surface_with_the_placeholder() {
 /// draws a blank screen.
 #[test]
 fn every_part_of_the_column_paints_inside_its_own_band() {
-    let mut surface = AuthSurface::new("Ann Example");
+    let mut surface = AuthSurface::new("Ann Example", "Ann Example");
     surface.set_chrome(chrome());
     let prompt = Prompt::new(SCREEN, Scale::ONE);
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
@@ -555,7 +562,7 @@ fn every_part_of_the_column_paints_inside_its_own_band() {
 #[test]
 fn the_column_reads_against_its_backdrop_on_both_themes() {
     for active in [Theme::dark(), Theme::light()] {
-        let mut surface = AuthSurface::new("Ann Example");
+        let mut surface = AuthSurface::new("Ann Example", "Ann Example");
         surface.set_chrome(chrome());
         let prompt = Prompt::new(SCREEN, Scale::ONE);
         let field = surface.field_rect(SCREEN, Scale::ONE, &active);
@@ -583,7 +590,7 @@ fn the_column_reads_against_its_backdrop_on_both_themes() {
 
 #[test]
 fn a_frame_is_produced_at_every_supported_density() {
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
 
     for percent in [Scale::MIN_PERCENT, 50, 100, 150, 200, Scale::MAX_PERCENT] {
         let scale = Scale::from_percent(percent).expect("a supported density");
@@ -601,7 +608,7 @@ fn a_frame_is_produced_at_every_supported_density() {
 /// closed on it.
 #[test]
 fn a_screen_with_no_pixels_yields_no_frame() {
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
 
     for screen in [Rect::new(0, 0, 0, 600), Rect::new(0, 0, 1000, 0)] {
         assert!(surface

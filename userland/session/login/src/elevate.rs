@@ -472,6 +472,7 @@ mod tests {
         fn root() -> AuthenticatedUser {
             AuthenticatedUser {
                 username: "root".to_string(),
+                shown_name: "System Administrator".to_string(),
                 uid: Uid(0),
                 primary_gid: Gid(0),
                 supplementary_gids: Vec::new(),

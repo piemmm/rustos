@@ -17,12 +17,15 @@ use tairix_controls::{
     MenuItem, MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent,
     TrayBadgeTone,
 };
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet, NoArtwork};
+use tairix_icon::{
+    monogram_disc, monogram_of, IconArtwork, IconKind, IconPicture, IconRequest, IconSet, NoArtwork,
+};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, Theme, ThemeId};
+use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, TextRole, Theme, ThemeId};
 
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{CacheBudget, PressureBand, ReclaimCache, ReportedPressure};
@@ -4797,24 +4800,35 @@ fn the_account_capsule_draws_its_identity_disc_and_asks_for_no_class_artwork() {
     );
 }
 
-/// The disc is a circle: the middle of the capsule's picture is the disc and
-/// the corners of the square it is produced in are clear.
+/// The square the capsule's picture is drawn in, at `scale`.
+fn capsule_icon_square(bar: &Taskbar, scale: Scale, theme: &Theme) -> u32 {
+    bar.tray()
+        .signal()
+        .icon_side(bar.layout(scale).switchboard, scale, theme)
+}
+
+/// The disc is a circle: the corners of the square it is produced in are
+/// clear and the middle of each edge is on it.
 #[test]
 fn the_identity_disc_is_circular() {
     let mut bar = bottom_bar();
     let _ = bar.set_account("ann");
     let theme = Theme::dark().floating();
-    let layout = bar.layout(Scale::ONE);
-    let side = bar
-        .tray()
-        .signal()
-        .icon_side(layout.switchboard, Scale::ONE, &theme);
     let disc = bar
         .tray()
-        .identity_disc(side, Scale::ONE, &theme)
+        .identity_disc(
+            capsule_icon_square(&bar, Scale::ONE, &theme),
+            Scale::ONE,
+            &theme,
+        )
         .expect("the capsule has room for a picture");
 
-    assert_eq!((disc.width(), disc.height()), (side, side));
+    let side = disc.width();
+    assert_eq!(
+        disc.height(),
+        side,
+        "the disc is square, so it can be round"
+    );
     for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
         assert_eq!(
             disc.get(x, y).expect("in bounds").a,
@@ -4829,10 +4843,48 @@ fn the_identity_disc_is_circular() {
     );
 }
 
-/// The two ends of the bar carry one picture each and they are the same size:
-/// the account capsule is an icon slot on exactly the launcher's rule.
+/// A generated disc keeps the clearance authored artwork carries inside its
+/// own square, so its edge lands where the launcher's mark does rather than a
+/// size beyond it. The clearance scales with the desktop, so the proportion
+/// holds rather than thinning out at a high density.
 #[test]
-fn the_account_capsule_draws_at_the_launcher_icon_size() {
+fn the_identity_disc_keeps_a_clearance_inside_its_icon_square() {
+    let mut bar = bottom_bar();
+    let _ = bar.set_account("ann");
+    let theme = Theme::dark().floating();
+    for percent in [100, 200] {
+        let scale = Scale::from_percent(percent).expect("a valid scale");
+        let square = capsule_icon_square(&bar, scale, &theme);
+        let disc = bar
+            .tray()
+            .identity_disc(square, scale, &theme)
+            .expect("the capsule has room for a picture");
+        let clearance = (square - disc.width()) / 2;
+        assert_eq!(
+            clearance,
+            scale.scale_length(1),
+            "the clearance follows the desktop scale at {percent}%"
+        );
+        assert!(
+            disc.width() < square,
+            "the disc is held inside its square at {percent}%"
+        );
+    }
+}
+
+/// An icon square with no room for a picture inside its clearance yields no
+/// disc at all, which leaves the capsule on its glyph rather than blank.
+#[test]
+fn an_icon_square_smaller_than_its_clearance_yields_no_disc() {
+    let bar = bottom_bar();
+    let theme = Theme::dark().floating();
+    assert!(bar.tray().identity_disc(2, Scale::ONE, &theme).is_none());
+}
+
+/// The two ends of the bar carry one picture each in the same square: the
+/// account capsule is an icon slot on exactly the launcher's rule.
+#[test]
+fn the_account_capsule_draws_in_the_launchers_icon_square() {
     let bar = bottom_bar();
     let theme = Theme::dark().floating();
     for percent in [100, 150, 200] {
@@ -4848,7 +4900,44 @@ fn the_account_capsule_draws_at_the_launcher_icon_size() {
         assert!(launcher > 0, "the launcher draws a picture at {percent}%");
         assert_eq!(
             capsule, launcher,
-            "the two ends of the bar draw the same icon size at {percent}%"
+            "the two ends of the bar draw into the same square at {percent}%"
+        );
+    }
+}
+
+/// The bar marks an account exactly as the login screen did: the same shown
+/// name through the same generator, so "System Administrator" reads the same
+/// on the desktop as it did on the screen the person logged in on. It was fed
+/// the *login* name once, which marked the same account `R` on one surface and
+/// `S` on the other.
+#[test]
+fn the_capsule_marks_an_account_as_the_login_screen_did() {
+    let mut bar = bottom_bar();
+    let theme = Theme::dark().floating();
+    let square = capsule_icon_square(&bar, Scale::ONE, &theme);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::Heading, Scale::ONE);
+    let palette = theme.palette();
+    let colours = (Color::from(palette.accent), Color::from(palette.on_accent));
+
+    for shown in ["System Administrator", "Ada Lovelace", "ann", ""] {
+        let _ = bar.set_account(shown);
+        // What the login screen would draw for the same account, at the side
+        // the bar draws in: the tile and the capsule are one generator.
+        let expected = monogram_disc(
+            monogram_of(shown),
+            square - 2 * Scale::ONE.scale_length(1),
+            font,
+            colours,
+        )
+        .expect("the login screen's own disc");
+        let drawn = bar
+            .tray()
+            .identity_disc(square, Scale::ONE, &theme)
+            .expect("the capsule's disc");
+        assert_eq!(
+            drawn.pixels(),
+            expected.pixels(),
+            "the capsule marks {shown:?} as the login screen does"
         );
     }
 }

@@ -91,7 +91,7 @@ fn an_idle_surface_asks_for_no_frame() {
     assert_eq!(chooser.motion_due(0), None);
     assert_eq!(chooser.motion_due(u64::MAX), None);
 
-    let mut lock = AuthSurface::new("ann");
+    let mut lock = AuthSurface::new("ann", "ann");
     assert_eq!(lock.motion_due(0), None);
     assert!(!lock.advance(1_000).redraw());
 }
@@ -103,7 +103,7 @@ fn an_idle_surface_asks_for_no_frame() {
 #[test]
 fn a_chooserless_question_shakes_and_fades() {
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Refused]);
     let _ = render(&surface);
 
@@ -502,7 +502,7 @@ fn the_shake_swings_both_ways_decays_and_rests_at_zero() {
 fn a_refusal_shakes_the_question_within_the_band_it_reports() {
     let span = span_of(MotionInteraction::AttemptRejected);
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Refused]);
     let _ = render(&surface);
 
@@ -554,8 +554,8 @@ fn a_refusal_shakes_the_question_within_the_band_it_reports() {
 #[test]
 fn a_reduced_motion_refusal_says_so_without_moving() {
     let still = still();
-    let mut shaken = AuthSurface::new("ann");
-    let mut quiet = AuthSurface::new("ann");
+    let mut shaken = AuthSurface::new("ann", "ann");
+    let mut quiet = AuthSurface::new("ann", "ann");
 
     for (surface, theme) in [(&mut shaken, theme()), (&mut quiet, still)] {
         let mut verifier = Scripted::new(vec![Verdict::Refused]);
@@ -586,7 +586,7 @@ fn the_veil_darkens_to_black() {
     let span = span_of(MotionInteraction::SessionFade);
     assert!(span > 0, "the shipped theme animates the session fade");
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     assert_eq!(
         surface.reveal(),
         u8::MAX,
@@ -618,7 +618,7 @@ fn the_veil_darkens_to_black() {
 fn a_veil_step_owes_a_blit_and_not_a_paint() {
     let span = span_of(MotionInteraction::SessionFade);
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let painted = render(&surface);
 
     let opening = surface.begin_session_fade(0, &theme);
@@ -676,7 +676,7 @@ fn input_during_the_fade_changes_nothing() {
 fn a_second_begin_does_not_restart_the_fade() {
     let span = span_of(MotionInteraction::SessionFade);
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_session_fade(0, &theme);
     surface.advance(span / 2);
     let half = render(&surface);
@@ -691,7 +691,7 @@ fn a_second_begin_does_not_restart_the_fade() {
 #[test]
 fn a_veil_at_full_black_asks_for_no_further_frame() {
     let fade = span_of(MotionInteraction::SessionFade);
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
 
     surface.begin_session_fade(BOOT, &theme());
     surface.advance(BOOT + fade);
@@ -706,7 +706,7 @@ fn a_veil_at_full_black_asks_for_no_further_frame() {
 /// leaves without presenting a frame for it.
 #[test]
 fn a_reduced_motion_fade_is_finished_at_once() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.begin_session_fade(0, &still());
 
     assert!(surface.session_fade_finished());
@@ -719,7 +719,7 @@ fn a_reduced_motion_fade_is_finished_at_once() {
 fn a_surface_that_has_begun_leaving_says_so() {
     let span = span_of(MotionInteraction::SessionFade);
     let theme = theme();
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     assert!(!surface.session_fade_begun(), "nothing has begun");
 
     surface.begin_session_fade(0, &theme);
@@ -734,7 +734,7 @@ fn a_surface_that_has_begun_leaving_says_so() {
 
     // A theme with nothing to fade is still a screen that is leaving, even
     // though no frame is ever presented for it.
-    let mut instant = AuthSurface::new("ann");
+    let mut instant = AuthSurface::new("ann", "ann");
     instant.begin_session_fade(0, &still());
     assert!(instant.session_fade_begun());
 }

@@ -582,6 +582,18 @@ on the icon bar (`plans/NEW-TASKBAR.md` T9) draws the same picture for the
 same account, and a per-user avatar — when there is one to name — lands in
 that one generator rather than two.
 
+**One string behind every mark.** A tile's mark comes from the account's
+*shown* name — `UserRecord::shown_name`, the record's human-readable name or
+its login name when it carries none — which is the one definition the account
+list here, the screen lock's prompt, and the desktop's capsule all read. Login
+carries it to a session beside `USER` as `tairix_abi::ENV_SHOWN_NAME`, because
+a desktop cannot re-derive it (it holds no account database, and must not) and
+deriving a mark from the login name instead marked `root` as `R` on the
+desktop where this screen had shown "System Administrator". The name a person
+is *shown* and the name offered to an authority are separate throughout —
+`AuthSurface::new(login, shown)` — so a display placeholder can never be
+offered as a credential.
+
 The two greeter requests are refused unless the caller's **kernel-attested**
 uid is the `greeter` service account and its attested console matches the
 authority's own — the `handle_elevate_request` placement check. `Background`

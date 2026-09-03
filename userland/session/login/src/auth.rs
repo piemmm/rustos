@@ -42,6 +42,7 @@ fn authenticated_user(record: &UserRecord) -> Result<AuthenticatedUser, Errno> {
     };
     Ok(AuthenticatedUser {
         username: record.username().to_string(),
+        shown_name: record.shown_name().to_string(),
         uid: record.uid(),
         primary_gid: record.primary_gid(),
         supplementary_gids: record.supplementary_gids().to_vec(),

@@ -28,8 +28,9 @@ charter forbids.
 
 ## What lives here
 
-- `AuthSurface` — the surface. `new` names one account and goes straight to
-  its secret; `with_accounts` starts on the chooser. `on_event` applies one
+- `AuthSurface` — the surface. `new(login, shown)` names one account — read
+  and marked as `shown`, offered to the authority as `login` — and goes
+  straight to its secret; `with_accounts` starts on the chooser. `on_event` applies one
   pointer or key event and reports an `Outcome` (repaint needed? verified?
   what changed?), `render` paints the whole frame, `notice` is the line
   currently shown under the field, `selected_account` is the login name a

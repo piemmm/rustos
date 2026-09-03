@@ -97,6 +97,7 @@ impl Authenticator for OneAccount {
         }
         Ok(AuthenticatedUser {
             username: ACCOUNT.to_string(),
+            shown_name: ACCOUNT.to_string(),
             uid: Uid(1000),
             primary_gid: Gid(1000),
             supplementary_gids: Vec::new(),

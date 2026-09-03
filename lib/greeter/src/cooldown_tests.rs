@@ -26,7 +26,7 @@ fn chrome(clock: &str) -> Chrome {
 /// is happening rather than believing the machine is broken.
 #[test]
 fn a_live_cooldown_is_shown_under_the_field() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
 
     let outcome = surface.set_cooldown(Duration64::from_secs(42));
 
@@ -39,7 +39,7 @@ fn a_live_cooldown_is_shown_under_the_field() {
 /// re-shows the lockout instead of asking.
 #[test]
 fn a_submission_during_a_cooldown_never_reaches_the_verifier() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified]);
     surface.set_cooldown(Duration64::from_secs(30));
     let locked = String::from(surface.notice());
@@ -58,7 +58,7 @@ fn a_submission_during_a_cooldown_never_reaches_the_verifier() {
 /// minutes: a refused-for-cooldown submission erases it like any other.
 #[test]
 fn a_submission_during_a_cooldown_still_erases_the_secret() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     surface.set_cooldown(Duration64::from_secs(30));
     submit(&mut surface, "hunter2", &mut verifier);
@@ -74,7 +74,7 @@ fn a_submission_during_a_cooldown_still_erases_the_secret() {
 /// otherwise.
 #[test]
 fn typing_does_not_clear_a_live_cooldown() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     surface.set_cooldown(Duration64::from_secs(9));
     let locked = String::from(surface.notice());
@@ -87,7 +87,7 @@ fn typing_does_not_clear_a_live_cooldown() {
 /// Zero clears it, and the surface goes back to asking.
 #[test]
 fn zero_clears_the_cooldown_and_submitting_works_again() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified]);
     surface.set_cooldown(Duration64::from_secs(5));
 
@@ -102,7 +102,7 @@ fn zero_clears_the_cooldown_and_submitting_works_again() {
 /// surface that could never be submitted again.
 #[test]
 fn a_negative_cooldown_is_not_a_lockout() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified]);
 
     let outcome = surface.set_cooldown(Duration64::from_secs(-5));
@@ -116,7 +116,7 @@ fn a_negative_cooldown_is_not_a_lockout() {
 /// with time on it never reads as over.
 #[test]
 fn a_part_second_remainder_rounds_up() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
 
     surface.set_cooldown(Duration64::new(0, 1).expect("a canonical span"));
 
@@ -127,7 +127,7 @@ fn a_part_second_remainder_rounds_up() {
 /// every tick does not force a repaint.
 #[test]
 fn an_unchanged_cooldown_asks_for_no_repaint() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.set_cooldown(Duration64::from_secs(5));
 
     let again = surface.set_cooldown(Duration64::from_secs(5));
@@ -161,8 +161,8 @@ fn stepping_back_to_the_chooser_drops_the_previous_account_s_cooldown() {
 
 #[test]
 fn chrome_is_drawn_on_the_backdrop() {
-    let bare = AuthSurface::new("ann");
-    let mut dressed = AuthSurface::new("ann");
+    let bare = AuthSurface::new("ann", "ann");
+    let mut dressed = AuthSurface::new("ann", "ann");
 
     let outcome = dressed.set_chrome(chrome("09:41"));
 
@@ -174,7 +174,7 @@ fn chrome_is_drawn_on_the_backdrop() {
 /// within the same minute costs no frame.
 #[test]
 fn unchanged_chrome_asks_for_no_repaint() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.set_chrome(chrome("09:41"));
 
     let again = surface.set_chrome(chrome("09:41"));
@@ -187,7 +187,7 @@ fn unchanged_chrome_asks_for_no_repaint() {
 /// hostile or broken source cannot run off the screen.
 #[test]
 fn chrome_strings_are_cut_to_the_documented_bound() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let long = "x".repeat(MAX_CHROME * 3);
 
     let first = surface.set_chrome(Chrome {
@@ -213,7 +213,7 @@ fn chrome_strings_are_cut_to_the_documented_bound() {
 /// the thing the user is typing into.
 #[test]
 fn chrome_stays_clear_of_the_panel() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let before = render(&surface);
     surface.set_chrome(chrome("09:41"));
     let after = render(&surface);

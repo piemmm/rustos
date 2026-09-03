@@ -144,13 +144,8 @@ impl SessionDirectory for DbAccounts<'_> {
                 // An account whose recorded names the wire cannot carry is
                 // omitted rather than refusing the whole page; it stays
                 // reachable by typing its name.
-                let display = if record.display_name().is_empty() {
-                    record.username()
-                } else {
-                    record.display_name()
-                };
                 SessionAccount::new(
-                    display,
+                    record.shown_name(),
                     record.username(),
                     self.live.is_live(record.username()),
                 )

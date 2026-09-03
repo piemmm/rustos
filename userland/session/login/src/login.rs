@@ -505,6 +505,7 @@ mod tests {
             if c.username == self.username && c.password == self.password {
                 Ok(AuthenticatedUser {
                     username: c.username.to_string(),
+                    shown_name: c.username.to_string(),
                     uid: Uid(1000),
                     primary_gid: Gid(1000),
                     supplementary_gids: Vec::new(),
@@ -523,6 +524,7 @@ mod tests {
             if uid == 1000 && password == self.password {
                 Ok(AuthenticatedUser {
                     username: self.username.to_string(),
+                    shown_name: self.username.to_string(),
                     uid: Uid(1000),
                     primary_gid: Gid(1000),
                     supplementary_gids: Vec::new(),

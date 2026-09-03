@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{BootSession, Errno};
+use tairix_abi::{BootSession, Errno, ENV_SHOWN_NAME};
 use tairix_caps::CapabilitySet;
 use tairix_sysconfig::{LoginType, SystemConfig};
 
@@ -63,6 +63,12 @@ pub struct AuthenticatedUser {
     /// the raw typed line). Exported to the session as `USER`/`LOGNAME` and
     /// shown in the shell prompt.
     pub username: String,
+    /// The name shown for the account on screen — its human-readable name, or
+    /// the login name when the record carries none
+    /// ([`UserRecord::shown_name`](tairix_users::UserRecord::shown_name)).
+    /// Exported to the session as [`ENV_SHOWN_NAME`], so the desktop marks the
+    /// account exactly as the login screen just did.
+    pub shown_name: String,
     /// The authenticated user's id.
     pub uid: Uid,
     /// The user's primary group.
@@ -110,12 +116,18 @@ pub const DEFAULT_LANG: &str = "en-US";
 /// `$USER`/`$HOME`/… reflect the real user rather than a guess. Shell-owned
 /// variables (`OLDPWD`, `ELSH_PROMPT`) and the hostname default are the
 /// shell's to fill; login sets only what it authoritatively knows.
+///
+/// [`ENV_SHOWN_NAME`] carries the account's *shown* name beside its login
+/// name, because a graphical session names and marks the account on screen
+/// (the screen lock's prompt, the desktop's account capsule) and must do so
+/// exactly as the login screen just did.
 #[must_use]
 pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
     use alloc::format;
     alloc::vec![
         format!("USER={}", user.username),
         format!("LOGNAME={}", user.username),
+        format!("{ENV_SHOWN_NAME}={}", user.shown_name),
         format!("HOME={}", user.home),
         format!("SHELL={}", user.shell),
         format!("PWD={}", user.home),
@@ -451,6 +463,7 @@ mod tests {
     fn session_environment_carries_the_authenticated_identity() {
         let user = AuthenticatedUser {
             username: "ada".to_string(),
+            shown_name: "Ada Lovelace".to_string(),
             uid: Uid(1000),
             primary_gid: Gid(1000),
             supplementary_gids: Vec::new(),
@@ -459,9 +472,13 @@ mod tests {
             shell: "/System/Commands/elsh.app/Run".to_string(),
         };
         let env = session_environment(&user);
-        // The identity is drawn from the account, and PWD starts at home.
+        // The identity is drawn from the account, and PWD starts at home. The
+        // shown name travels beside the login name rather than instead of it:
+        // a desktop names and marks the account on screen, and it must do so
+        // as the login screen just did.
         assert!(env.contains(&"USER=ada".to_string()));
         assert!(env.contains(&"LOGNAME=ada".to_string()));
+        assert!(env.contains(&"FULLNAME=Ada Lovelace".to_string()));
         assert!(env.contains(&"HOME=/Users/ada".to_string()));
         assert!(env.contains(&"SHELL=/System/Commands/elsh.app/Run".to_string()));
         assert!(env.contains(&"PWD=/Users/ada".to_string()));
@@ -479,6 +496,7 @@ mod tests {
     fn session_program_maps_text_to_the_shell_and_graphical_to_the_desktop() {
         let user = AuthenticatedUser {
             username: "ada".to_string(),
+            shown_name: "Ada Lovelace".to_string(),
             uid: Uid(1000),
             primary_gid: Gid(1000),
             supplementary_gids: Vec::new(),

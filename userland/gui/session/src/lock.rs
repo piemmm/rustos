@@ -87,8 +87,14 @@ impl ScreenLock {
         self.engaged.is_some()
     }
 
-    /// Lock the screen, naming `account` so the user knows whose password is
-    /// wanted. An empty name heads the prompt with the surface's placeholder.
+    /// Lock the screen, naming the account as `shown` so the user knows whose
+    /// password is wanted, and offering `login` to the broker. An empty
+    /// `shown` name heads the prompt with the surface's placeholder.
+    ///
+    /// The prompt reads and marks the account exactly as the login screen
+    /// did, because it is the same surface asking the same person; the broker
+    /// ignores the offered name and checks this process's own attested
+    /// identity regardless.
     ///
     /// Returns whether the screen is now locked. A lock already up answers
     /// `true` and changes nothing. A surface the compositor cannot give
@@ -97,7 +103,7 @@ impl ScreenLock {
     /// were protected.
     pub fn engage(
         &mut self,
-        account: &str,
+        (login, shown): (&str, &str),
         shell: &DesktopShell,
         compositor: &mut Compositor,
     ) -> bool {
@@ -105,7 +111,7 @@ impl ScreenLock {
             return true;
         }
         let screen = compositor.screen_rect();
-        let surface = AuthSurface::new(account);
+        let surface = AuthSurface::new(login, shown);
         let Some(frame) = render_frame(&surface, screen, compositor.scale(), shell) else {
             return false;
         };

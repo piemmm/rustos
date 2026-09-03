@@ -396,24 +396,30 @@ fn shifted(rect: Rect, by: i32) -> Rect {
 }
 
 impl AuthSurface {
-    /// A surface asking for `account`'s secret, focused and ready to type
-    /// into. An empty name heads it with [`UNNAMED_ACCOUNT`].
+    /// A surface asking `login`'s secret, headed and marked as `shown`,
+    /// focused and ready to type into. An empty `shown` name heads it with
+    /// [`UNNAMED_ACCOUNT`].
+    ///
+    /// The two names are separate for the same reason a picked chooser tile
+    /// keeps them apart: `shown` is what the person reads and what the disc's
+    /// mark is taken from, while `login` is only ever offered to the
+    /// authority. A caller with one name passes it as both.
     ///
     /// There is no chooser behind it, so `Escape` leads nowhere: a screen
     /// lock asks about the one account whose session it covers, and stepping
     /// back from that question is not an answer.
     #[must_use]
-    pub fn new(account: &str) -> Self {
-        let account = if account.is_empty() {
+    pub fn new(login: &str, shown: &str) -> Self {
+        let shown = if shown.is_empty() {
             UNNAMED_ACCOUNT
         } else {
-            account
+            shown
         };
         Self {
             mode: Mode::Secret,
             chooser: None,
-            account: account.to_string(),
-            heading: account.to_string(),
+            account: login.to_string(),
+            heading: shown.to_string(),
             field: secret_field(),
             notice: HINT.to_string(),
             notice_rev: 0,

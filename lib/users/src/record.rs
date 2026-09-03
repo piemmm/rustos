@@ -302,6 +302,23 @@ impl UserRecord {
         &self.display_name
     }
 
+    /// The name a surface shows for this account: its human-readable name, or
+    /// its login name when the record carries none.
+    ///
+    /// The one definition of "what this person is called on screen", so the
+    /// login screen's account tile, the screen lock's prompt, and the
+    /// desktop's own account capsule cannot name — or mark — the same person
+    /// differently. Never empty for a record that parsed, since a login name
+    /// cannot be.
+    #[must_use]
+    pub fn shown_name(&self) -> &str {
+        if self.display_name.is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
+
     /// The absolute home directory path; [`None`] only on a
     /// [`AccountState::NoLogin`] account.
     #[must_use]
@@ -517,6 +534,20 @@ mod tests {
         StoredPassword::Password(
             PasswordRecord::new(b"byron", [0x5A; 16], MIN_ITERATIONS).expect("valid"),
         )
+    }
+
+    #[test]
+    fn a_shown_name_is_the_human_readable_one() {
+        let record = UserRecord::new(identity(&[]), password()).expect("valid");
+        assert_eq!(record.shown_name(), "Ada Lovelace");
+    }
+
+    #[test]
+    fn a_record_with_no_human_readable_name_is_shown_by_its_login_name() {
+        let mut bare = identity(&[]);
+        bare.display_name = "";
+        let record = UserRecord::new(bare, password()).expect("valid");
+        assert_eq!(record.shown_name(), "ada");
     }
 
     fn no_login_identity() -> Identity<'static> {

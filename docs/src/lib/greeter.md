@@ -17,11 +17,18 @@ is exactly the duplication the charter forbids, so there is one.
 
 ## The surface
 
-`AuthSurface::new(account)` names whose secret is wanted and goes straight to
-the field; an empty name is shown as `UNNAMED_ACCOUNT`, because failing to
-resolve a name must never be a reason to let anybody through. That is the
-lock's constructor: a lock has exactly one account to ask about, so it has no
-chooser and `Escape` does nothing.
+`AuthSurface::new(login, shown)` names whose secret is wanted and goes
+straight to the field; an empty `shown` name is headed with `UNNAMED_ACCOUNT`,
+because failing to resolve a name must never be a reason to let anybody
+through. That is the lock's constructor: a lock has exactly one account to ask
+about, so it has no chooser and `Escape` does nothing.
+
+The **two names are separate**, exactly as they are once a chooser tile is
+picked: `shown` is what the person reads and what the disc's mark is taken
+from, while `login` is only ever offered to the authority. That is why the
+placeholder heading is never offered as a credential — it is display text, and
+an account called "Locked" is not one anybody has. A caller holding only one
+name passes it as both.
 
 `AuthSurface::with_accounts(tiles)` is the login screen's constructor: it opens
 on the chooser instead.

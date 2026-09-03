@@ -200,6 +200,18 @@ All userland crates (`system`, `session`, `shell`, `gui`, `apps`, `net`). The
 known seed issue (the shell parser `unreachable!`) lives here; see the
 backlog above.
 
+Known seed issue — **session environment-variable names are spelled at both
+ends** (§2.2). `USER`, `LOGNAME`, `HOME`, `SHELL`, `PWD`, `PATH`, `TERM`, and
+`LANG` are written as literals by login's `session_environment` and read back
+as literals by every consumer (the desktop session, the shell, `lib/cmdres`,
+`man`, `terminal.app`), so a writer and a reader must agree on a string neither
+owns. The one name introduced since — the account's shown name — has a single
+definition in the process ABI (`tairix_abi::ENV_SHOWN_NAME`), which is the
+shape the rest should take: a reserved session variable belongs beside the
+reserved descriptor numbers, not in eight `format!` calls and eight
+`env_var(b"…")` reads. Hoisting the existing eight touches every reader, so it
+is staged here rather than smuggled into an unrelated change.
+
 ### Stage V5 — `tools/*` and `tests/*` — Status: planned
 
 `tools/xtask`, `tools/qemu`, `tools/cc`, `tools/mkimage`, `tools/ci`;

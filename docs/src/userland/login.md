@@ -124,7 +124,7 @@ request.
 
 | Request | Sent by | Reply |
 | --- | --- | --- |
-| `Accounts { offset }` | the login screen | one `AccountPage`: a display name, a login name, and a live-session flag per account, plus the whole list's `total` |
+| `Accounts { offset }` | the login screen | one `AccountPage`: a shown name (`UserRecord::shown_name` — the human-readable one, else the login name), a login name, and a live-session flag per account, plus the whole list's `total` |
 | `Authenticate { username, password }` | the login screen | a verdict. It starts nothing |
 | `Background` | the presenting desktop session | a verdict: the session is now recorded as background |
 
@@ -460,7 +460,13 @@ program PID 1 `init`'s `session` directive launches and supervises
   `desktop` command word resolves to) for a graphical one
   (`session_program`, one mapping defined beside `SessionKind`) — is
   spawned **as the authenticated user** and supervised;
-  its exit code closes the session. Login holds `CAP_SPAWN_AS_USER` and
+  its exit code closes the session. The session environment
+  (`session_environment`) carries the identity- and locale-bearing variables a
+  POSIX login sets, plus `tairix_abi::ENV_SHOWN_NAME` — the account's *shown*
+  name beside its login name, because a graphical session names and marks the
+  account on screen and must do so exactly as this screen just did, and it
+  holds no account database of its own to look the name up in.
+  Login holds `CAP_SPAWN_AS_USER` and
   starts the program through the uid-switching spawn with the session
   environment, so the kernel resolves the user's full credential (uid,
   primary gid, supplementary groups) from the authoritative identity

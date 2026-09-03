@@ -103,7 +103,8 @@ mod program {
     };
     use tairix_abi::{
         DriverError, Errno, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp, WaitSourceKind,
-        WaitStatus, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, WAIT_PID_ANY,
+        WaitStatus, CONSOLE_INHERIT, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT,
+        WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
@@ -2034,9 +2035,15 @@ mod program {
         let account = tairix_rt::env_var(b"USER")
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .unwrap_or_default();
+        // What this account is *called*, as the login screen showed it: a mark
+        // derived from the login name instead differs from that screen's.
+        // Unset leaves the surfaces unnamed rather than guessing.
+        let shown_name = tairix_rt::env_var(ENV_SHOWN_NAME.as_bytes())
+            .and_then(|raw| core::str::from_utf8(raw).ok())
+            .unwrap_or_default();
         // The bar's trailing capsule wears this account's identity disc, the
         // same mark the login screen drew for it.
-        shell.set_account(&mut compositor, account);
+        shell.set_account(&mut compositor, shown_name);
         // Offer the rows that need re-authentication only where this session
         // really has a broker for it: the Lock row (which would otherwise
         // strand the user behind a screen with no way back) and the clock's
@@ -2763,6 +2770,7 @@ mod program {
                         &mut lock,
                         &mut menu,
                         account,
+                        shown_name,
                         &mut launched,
                         &mut apps,
                         &mut switchboard_pid,
@@ -2839,6 +2847,7 @@ mod program {
                                 &mut lock,
                                 &mut menu,
                                 account,
+                                shown_name,
                                 &mut launched,
                                 &mut apps,
                                 &mut switchboard_pid,
@@ -4170,6 +4179,7 @@ mod program {
         lock: &mut ScreenLock,
         menu: &mut MenuChain,
         account: &str,
+        shown_name: &str,
         launched: &mut LaunchTable,
         apps: &mut AppBarPanel,
         switchboard: &mut Option<u64>,
@@ -4710,7 +4720,7 @@ mod program {
                 // believing the screen is secured.
                 confirm.abandon(shell, compositor);
                 elevate.abandon(shell, compositor);
-                if !lock.engage(account, shell, compositor) {
+                if !lock.engage((account, shown_name), shell, compositor) {
                     io::write_stderr_line("desktop: could not lock the screen; it is still open");
                 }
             }

@@ -175,8 +175,16 @@ which drew the desktop's rightmost icon a third of its neighbours' size.
 Every slot that holds a single picture — the leading launcher, each
 application, and the trailing capsule — takes one `ICON_SLOT_EXTENT` along the
 main axis, named once rather than authored per region, so the bar's two ends
-draw the same-sized icon by construction rather than by two numbers that
+draw into the same square by construction rather than by two numbers that
 happen to agree.
+
+An equal *square* is not yet an equal-looking icon. Shipped artwork is authored
+with room inside its own square (the program-library master's mark reaches
+about 93% of its side), while the account capsule's disc is generated and fills
+whatever square it is given, so at the full side it read a size larger than the
+launcher opposite it. The capsule therefore holds its disc a `DISC_CLEARANCE`
+inside the square and lets the shared icon slot centre it — a logical length,
+scaling with the square, so the match holds at every density.
 
 The bar is drawn as the shared floating surface plate
 (`tairix_controls::paint_surface_plate`, the recipe every popup it opens also
@@ -258,7 +266,13 @@ wallpaper gap  ┌────────────────────�
   account's circular identity disc (`tairix_icon::monogram_disc`, the one the
   login screen draws), because the rows behind it (lock, switch user, log out,
   shut down) are that account's. The session names the account
-  (`DesktopShell::set_account`); the bar keeps only the mark it draws. Nothing
+  (`DesktopShell::set_account`) with its *shown* name — the record's
+  human-readable name, else its login name (`UserRecord::shown_name`), which
+  login exports beside `USER` as `tairix_abi::ENV_SHOWN_NAME`. Never the login
+  name: marking the capsule from that left one account reading `R` here and
+  `S` on the login screen. The tile, the screen lock's prompt, and this capsule
+  take one string, so one account has one mark. The bar keeps only the mark it
+  draws. Nothing
   sets a picture on an account yet, so today the disc is the monogram; when
   something does, it resolves through that same disc and stays circular. Its
   slot takes the one `ICON_SLOT_EXTENT` the leading launcher does, so the bar's

@@ -41,6 +41,7 @@ impl FixedAuth {
     fn ada() -> AuthenticatedUser {
         AuthenticatedUser {
             username: "ada".to_string(),
+            shown_name: "Ada Lovelace".to_string(),
             uid: Uid(1000),
             primary_gid: Gid(1000),
             supplementary_gids: Vec::new(),

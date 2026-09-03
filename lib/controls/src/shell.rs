@@ -1184,12 +1184,15 @@ impl TrayCapsule {
 }
 
 impl TraySignal {
-    /// The pixel side the capsule's icon paints at inside `bounds`.
+    /// The pixel side of the square the capsule's icon is drawn in inside
+    /// `bounds`.
     ///
     /// This is the render geometry itself, exposed so an owner rasterising the
-    /// shipped artwork produces it at exactly the size [`Self::render`] will
-    /// place — the two can never disagree. `0` when the bounds are off-surface
-    /// or leave no room inside the plate border.
+    /// shipped artwork produces it at exactly the square [`Self::render`] will
+    /// place it in — the two can never disagree. An owner *generating* a
+    /// picture may produce a smaller one, which the shared icon slot centres
+    /// in this square. `0` when the bounds are off-surface or leave no room
+    /// inside the plate border.
     #[must_use]
     pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         TrayCapsule::icon_side(bounds, scale, theme)

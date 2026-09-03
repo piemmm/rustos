@@ -559,6 +559,22 @@ pub const STDINFO: u32 = 3;
 /// Number of standard file descriptors the process ABI reserves: exactly fd 0/1/2/3.
 pub const STD_STREAM_COUNT: usize = 4;
 
+/// The session environment variable carrying the account's **shown name** —
+/// its human-readable name, or its login name when the account record carries
+/// none.
+///
+/// `USER` is the login name a session authenticates and scripts read; this is
+/// the name a session *shows* the person. A graphical session both names and
+/// marks its account on screen — the screen lock's prompt, the desktop's
+/// account capsule — and must do so exactly as the login screen just did, so
+/// the authority that authenticated the account exports the name it showed
+/// rather than leaving each surface to derive one of its own from whatever it
+/// happens to hold. Named here because the writer and the reader are separate
+/// processes and one of them must not invent a second spelling. POSIX reserves
+/// no such variable; this is the word the installer already uses for the
+/// field.
+pub const ENV_SHOWN_NAME: &str = "FULLNAME";
+
 /// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
 /// the child to the **caller's own** descriptor table instead of naming an
 /// installed console index.

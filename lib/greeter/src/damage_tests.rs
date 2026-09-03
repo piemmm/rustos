@@ -33,7 +33,7 @@ fn chrome() -> Chrome {
 /// everything that moved.
 #[test]
 fn a_keystroke_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
     let before = render(&surface);
 
@@ -54,7 +54,7 @@ fn a_keystroke_damages_no_more_than_it_reports() {
 /// The same holds for a verdict, which repaints the notice under the field.
 #[test]
 fn a_verdict_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Refused]);
     for ch in "wrong".chars() {
         feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
@@ -102,7 +102,7 @@ fn a_focus_move_damages_no_more_than_it_reports() {
 /// And for the clock, which repaints only its own band.
 #[test]
 fn a_chrome_change_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     surface.set_chrome(chrome());
     let before = render(&surface);
 
@@ -127,7 +127,7 @@ fn a_chrome_change_damages_no_more_than_it_reports() {
 /// panel, because the notice under the field changes with it.
 #[test]
 fn a_keystroke_reports_the_field_and_a_verdict_reports_the_panel() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Refused]);
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
 
@@ -161,7 +161,7 @@ fn a_focus_move_reports_the_animating_tiles() {
 /// screen does not repaint the whole display once a minute.
 #[test]
 fn a_clock_tick_reports_only_the_chrome_band() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let _ = render(&surface);
 
     let ticked = surface.set_chrome(chrome());
@@ -195,7 +195,7 @@ fn every_mode_change_reports_the_whole_screen() {
 /// repaint in part.
 #[test]
 fn a_verified_secret_reports_the_whole_screen() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::new(vec![Verdict::Verified]);
 
     let outcome = submit(&mut surface, "hunter2", &mut verifier);
@@ -208,7 +208,7 @@ fn a_verified_secret_reports_the_whole_screen() {
 /// repaint nobody needs.
 #[test]
 fn an_event_that_changes_nothing_reports_an_empty_rectangle() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
 
     let outcome = feed(&mut surface, &crate::testkit::moved(1, 1), &mut verifier);
@@ -221,7 +221,7 @@ fn an_event_that_changes_nothing_reports_an_empty_rectangle() {
 /// not know where it is, and says so rather than guessing a rectangle.
 #[test]
 fn an_unplaced_surface_reports_the_whole_screen() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
 
     assert_eq!(surface.set_chrome(chrome()).damage(), None);
     assert_eq!(
@@ -267,7 +267,7 @@ fn advance_reports_animating_tile_damage_or_nothing() {
 /// makes it quiet here is that nothing is running, not the mode it is in.
 #[test]
 fn advancing_a_resting_question_is_quiet() {
-    let mut surface = AuthSurface::new("ann");
+    let mut surface = AuthSurface::new("ann", "ann");
     let _ = render(&surface);
     assert!(!surface.advance(1_000).redraw());
     assert_eq!(surface.motion_due(1_000), None);

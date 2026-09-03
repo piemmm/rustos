@@ -156,18 +156,36 @@ either way.
 ## The account's identity disc
 
 The trailing capsule draws the account the session is signed in as. The
-embedder names it (`DesktopShell::set_account`, from the session's `USER`) and
-the bar keeps only the one character it draws: a name is not an identity the
-bar could act on, and holding just the mark means a live update cannot put a
-name on a surface that never shows one.
+embedder names it (`DesktopShell::set_account`) and the bar keeps only the one
+character it draws: a name is not an identity the bar could act on, and
+holding just the mark means a live update cannot put a name on a surface that
+never shows one.
+
+The name it is given is the account's **shown** name — the human-readable name
+from its record, or its login name when the record carries none
+(`tairix_users::UserRecord::shown_name`) — which login exports beside `USER` as
+`tairix_abi::ENV_SHOWN_NAME`. It is deliberately *not* `USER`: the login name
+is what a broker is offered, and marking the capsule from it left the same
+account reading `R` on the desktop and `S` on the screen the person logged in
+on. The login screen's tile, the screen lock's prompt, and this capsule all
+take the same string, so one account has one mark.
 
 The picture is the account's **circular identity disc** — the shared
 `tairix_icon::monogram_disc`, the same generator the login screen's account
 tiles and prompt draw through, so the mark a person signed in as is the mark
-they then live with. It is produced at exactly the side the capsule paints at,
-in the theme's accent over `on_accent`, so nothing scales or crops it. Nothing
+they then live with. It is drawn in the theme's accent over `on_accent`, at
+exactly the side it is produced for, so nothing scales or crops it. Nothing
 sets a picture on an account yet; when something does, it resolves through this
 same disc and stays a circle.
+
+It is produced a `DISC_CLEARANCE` *inside* the icon square, and centred there
+by the shared icon slot. Shipped artwork is authored with a little room inside
+its own square — the program-library master's mark reaches about 93% of its
+side — while a generated disc fills whatever square it is given, edge to edge,
+so a disc at the full side reads a size larger than the launcher opposite it.
+The clearance is a logical length, and the square scales too, so the two ends
+of the bar keep the same proportion at every density rather than the disc
+swelling as the desktop grows.
 
 The disc is built by the paint that draws it rather than cached, so it is right
 by construction at every theme, scale, and account: one round-rect fill and one

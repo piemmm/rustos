@@ -304,9 +304,14 @@ pub(crate) const FULL_COLOUR: u8 = 255;
 ///
 /// This is the one place every collection control — a taskbar item, a card, a
 /// list row — turns a resolved picture into pixels, so the three can never draw
-/// it differently. A picture is blitted centred in the slot: a stale cache
-/// entry from mid-scale-change, or a surface sized differently from `side`, is
-/// placed in the middle rather than overflowing the slot from its corner.
+/// it differently. A picture is blitted **centred** in the slot, which is a
+/// contract rather than a courtesy: shipped artwork arrives at exactly `side`
+/// with its mark inset inside it, so a *generated* picture that has no
+/// authored inset of its own keeps the same clearance by being produced
+/// smaller and centred here (the icon bar's account disc). A stale cache entry
+/// from mid-scale-change, or any other surface sized differently from `side`,
+/// therefore lands in the middle too rather than overflowing the slot from its
+/// corner.
 ///
 /// **Nothing is rasterised here on the cached path.** Both the decode of
 /// shipped artwork and the coverage of a built-in glyph are resolved once per

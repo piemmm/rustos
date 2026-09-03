@@ -6934,7 +6934,7 @@ fn engaging_locks_the_screen_and_covers_the_whole_screen_rectangle() {
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
 
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
 
     assert!(lock.is_locked());
     assert_eq!(comp.window_count(), 1, "exactly one lock window");
@@ -6947,10 +6947,10 @@ fn engaging_an_already_locked_screen_is_idempotent() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
 
     assert!(
-        lock.engage("someone else", &shell, &mut comp),
+        lock.engage(("someone else", "someone else"), &shell, &mut comp),
         "a lock already up answers true and changes nothing"
     );
 
@@ -6962,6 +6962,45 @@ fn engaging_an_already_locked_screen_is_idempotent() {
 /// not merely with some other, unspecified stand-in text — and a non-empty
 /// name is used instead. Neither string is observable through a public
 /// accessor, so this probes the one thing that is: what the lock draws.
+/// The lock is headed and marked by the name the account is *shown* under, not
+/// the login name a broker is offered: it is the login screen's own surface
+/// asking the same person, so it must read the same. The two travel separately
+/// so naming the prompt cannot change what is offered.
+#[test]
+fn the_lock_prompt_is_headed_by_the_shown_name_not_the_login_name() {
+    let shell = shell();
+    let mut by_login = compositor();
+    let mut by_shown = compositor();
+    let mut shown_alone = compositor();
+    let mut a = ScreenLock::new();
+    let mut b = ScreenLock::new();
+    let mut c = ScreenLock::new();
+
+    assert!(a.engage(("root", "root"), &shell, &mut by_login));
+    assert!(b.engage(("root", "System Administrator"), &shell, &mut by_shown));
+    // The same shown name under a different login: what is drawn follows the
+    // shown name alone.
+    assert!(c.engage(("other", "System Administrator"), &shell, &mut shown_alone));
+
+    let content = |comp: &Compositor| {
+        comp.window(locked_window(comp))
+            .expect("live")
+            .content()
+            .expect("content is retained")
+            .clone()
+    };
+    assert_ne!(
+        content(&by_login),
+        content(&by_shown),
+        "the prompt reads the shown name, so a different one draws differently"
+    );
+    assert_eq!(
+        content(&by_shown),
+        content(&shown_alone),
+        "and the login name offered to the broker never reaches the pixels"
+    );
+}
+
 #[test]
 fn an_empty_account_name_heads_the_prompt_with_the_unnamed_placeholder() {
     let shell = shell();
@@ -6972,9 +7011,13 @@ fn an_empty_account_name_heads_the_prompt_with_the_unnamed_placeholder() {
     let mut placeholder = ScreenLock::new();
     let mut named = ScreenLock::new();
 
-    assert!(empty.engage("", &shell, &mut comp_empty));
-    assert!(placeholder.engage(UNNAMED_ACCOUNT, &shell, &mut comp_placeholder));
-    assert!(named.engage("ann", &shell, &mut comp_named));
+    assert!(empty.engage(("", ""), &shell, &mut comp_empty));
+    assert!(placeholder.engage(
+        (UNNAMED_ACCOUNT, UNNAMED_ACCOUNT),
+        &shell,
+        &mut comp_placeholder
+    ));
+    assert!(named.engage(("ann", "ann"), &shell, &mut comp_named));
 
     let empty_id = locked_window(&comp_empty);
     let placeholder_id = locked_window(&comp_placeholder);
@@ -7005,7 +7048,7 @@ fn a_wrong_password_leaves_the_screen_locked() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused]);
 
     let outcome = submit(
@@ -7032,7 +7075,7 @@ fn an_unreachable_broker_leaves_the_screen_locked() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Unreachable]);
 
     let outcome = submit(
@@ -7060,7 +7103,7 @@ fn a_correct_password_unlocks_the_screen_and_removes_the_lock_window() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let id = locked_window(&comp);
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
@@ -7086,7 +7129,7 @@ fn the_typed_password_is_offered_to_the_verifier_exactly_as_typed() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
     submit(
@@ -7109,7 +7152,7 @@ fn the_password_is_erased_after_every_attempt() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Refused, Verdict::Verified]);
 
     submit(
@@ -7145,7 +7188,7 @@ fn no_key_dismisses_the_lock_without_a_verified_password() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
 
     lock.handle(
@@ -7193,7 +7236,7 @@ fn a_pointer_press_does_not_unlock_and_reaches_nothing_else() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
 
     let outcome = lock.handle(
@@ -7222,7 +7265,7 @@ fn keep_topmost_raises_the_lock_above_a_window_added_after_it() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let lock_id = locked_window(&comp);
 
     let intruder = opaque_window(&mut comp, Point::new(0, 0), 10, 10);
@@ -7246,7 +7289,7 @@ fn abandon_takes_the_lock_down_and_unlocks_nothing() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let id = locked_window(&comp);
 
     lock.abandon(&mut comp);
@@ -7263,7 +7306,7 @@ fn repaint_while_locked_keeps_exactly_one_lock_window_and_stays_locked() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
 
     lock.repaint(&shell, &mut comp);
 
@@ -7317,7 +7360,7 @@ fn a_drain_that_never_unlocks_feeds_every_event_to_the_lock() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
 
     let drained = drain(
@@ -7346,7 +7389,7 @@ fn a_mid_batch_unlock_discards_the_rest_of_the_drain() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
     // A keystroke and a submitting Enter behind the unlock: were they
     // routed on, this second Enter would offer "s" as a password.
@@ -7389,7 +7432,7 @@ fn a_pointer_sample_behind_the_unlock_never_moves_the_desktop_cursor() {
     shell.refresh_cursor(&mut comp);
     let resting = comp.cursor_bounds().expect("the pointer is shown");
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::scripted(vec![Verdict::Verified]);
 
     let drained = drain(
@@ -9197,7 +9240,7 @@ fn session_surfaces_adapt_to_display_scale() {
     // chosen coordinate, which a later layout change could silently make
     // meaningless.
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("user", &shell, &mut comp));
+    assert!(lock.engage(("user", "user"), &shell, &mut comp));
     let lock_id = locked_window(&comp);
     let screen = comp.screen_rect();
 
@@ -10142,7 +10185,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     let shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
-    assert!(lock.engage("ann", &shell, &mut comp));
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
     assert_eq!(
         lock.park_deadline_ns(LOCK_EVENT_NS, NO_DEADLINE_NS),

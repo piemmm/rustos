@@ -26,7 +26,7 @@ fn ramp() -> Surface {
 /// The wallpaper reaches the frame at all.
 #[test]
 fn the_backdrop_blits_the_wallpaper() {
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
     let image = picture(Color::rgb(255, 0, 0));
 
     assert_ne!(
@@ -41,7 +41,7 @@ fn the_backdrop_blits_the_wallpaper() {
 /// neither may touch a pixel of it.
 #[test]
 fn the_picture_reaches_the_frame_verbatim() {
-    let surface = AuthSurface::new("ann");
+    let surface = AuthSurface::new("ann", "ann");
     let image = ramp();
 
     let frame = render_over(&surface, &image);
@@ -64,7 +64,7 @@ fn the_picture_reaches_the_frame_verbatim() {
 /// desktop colour landed behind the line.
 #[test]
 fn text_over_a_bright_picture_inks_ground_the_plain_draw_leaves_showing() {
-    let surface = AuthSurface::new("Ann Example");
+    let surface = AuthSurface::new("Ann Example", "Ann Example");
     let ink = theme().palette().on_surface;
 
     let frame = render_over(&surface, &picture(Color::rgb(255, 255, 255)));

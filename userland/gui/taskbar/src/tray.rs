@@ -59,6 +59,17 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::repaint::TaskbarRepaint;
 
+/// Clearance an account disc keeps inside the icon square it is drawn in, per
+/// side, in logical pixels at the reference density.
+///
+/// Shipped icon artwork is authored with a little room inside its own square —
+/// the program-library master's mark reaches about 93% of its side — while a
+/// generated disc fills whatever square it is given, edge to edge. A disc at
+/// the full side therefore reads a size larger than the launcher opposite it.
+/// The square and this length both scale with the desktop, so the proportion
+/// holds at every density.
+const DISC_CLEARANCE: u32 = 1;
+
 /// The Switchboard tray capsule: the shared [`TraySignal`] control plus the
 /// facts it is derived from — the latest published [`TraySummary`] and the
 /// session's count of unresponsive applications.
@@ -109,19 +120,23 @@ impl SwitchboardTray {
         }
     }
 
-    /// The account's `side`×`side` circular identity picture, in the theme's
-    /// accent — the same disc the login screen drew for the same account.
+    /// The account's circular identity picture for an icon square of `side`,
+    /// in the theme's accent — the same disc the login screen drew for the
+    /// same account.
     ///
-    /// Produced at exactly the side the capsule draws at, so nothing scales
-    /// or crops it, and always a circle. `None` only where a picture of that
-    /// side cannot exist at all, which leaves the capsule on its own glyph
-    /// rather than a blank slot.
+    /// Produced a clearance inside that square, and centred in it by the
+    /// shared icon slot, so the disc's edge lands where an authored icon's
+    /// mark does rather than a size beyond it. Always a circle, and produced
+    /// at exactly the side it is drawn at, so nothing scales or crops it.
+    /// `None` where a picture cannot exist inside that square at all, which
+    /// leaves the capsule on its own glyph rather than a blank slot.
     #[must_use]
     pub fn identity_disc(&self, side: u32, scale: Scale, theme: &Theme) -> Option<Surface> {
         let palette = theme.palette();
+        let clearance = scale.scale_length(DISC_CLEARANCE).saturating_mul(2);
         monogram_disc(
             self.monogram,
-            side,
+            side.saturating_sub(clearance),
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             (Color::from(palette.accent), Color::from(palette.on_accent)),
         )

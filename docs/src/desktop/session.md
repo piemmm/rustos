@@ -711,11 +711,15 @@ icon launch names. One rule, in one place, for every launch site
 ## The Switchboard tray feed and hang detection
 
 The taskbar's right-most capsule wears the signed-in account — the session
-names it once at bring-up (`DesktopShell::set_account`, from the `USER` login
-exported) and the bar draws that account's circular identity disc, the same one
-the login screen drew. Behind the picture the capsule is the Switchboard tray,
-rendering live state from two independent, honest feeds
-(`plans/NEW-TASKBAR.md` T9/T10):
+names it once at bring-up (`DesktopShell::set_account`) and the bar draws that
+account's circular identity disc, the same one the login screen drew. The name
+comes from `tairix_abi::ENV_SHOWN_NAME`, which login exports beside `USER`: it
+is the account's *shown* name, so the desktop marks the person exactly as the
+screen they logged in on did rather than deriving a mark from the login name.
+The screen lock is headed by the same string for the same reason — it is the
+login screen's own surface asking the same person. Behind the picture the
+capsule is the Switchboard tray, rendering live state from two independent,
+honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
 
 - **The published summary.** The `Run` binary spawns the Switchboard monitor
   service (`/System/Services/switchboard.app`, `SWITCHBOARD_RUN_PATH`) at
