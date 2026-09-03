@@ -2219,6 +2219,61 @@ fn pump_folds_a_run_of_wheel_ticks_over_one_window() {
     );
 }
 
+/// A run of interactive-resize samples is one app-ward event, and the settle
+/// that ends the drag is its own.
+///
+/// The embedder reads the window's *current* client extent when it forwards a
+/// resize, and `pump` applies the whole batch before any outcome is forwarded
+/// — so every sample of a run would carry the size the last one settled on.
+/// Sending one per sample was a message and a wake per pointer sample to say
+/// the same thing, on the path a user watches for lag.
+#[test]
+fn pump_folds_a_run_of_resize_samples_over_one_window() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(60, 60), 200, 140);
+    assert!(comp.set_window_frame(
+        window,
+        tairix_wm::WindowFrame::new(tairix_wm::WindowFurnitureState {
+            activation: tairix_wm::WindowActivationState::Active,
+            size: tairix_wm::WindowSizeState::Restored,
+            movable: true,
+            resizable: true,
+        })
+    ));
+    let bounds = comp.window(window).expect("live").bounds();
+
+    // Grab the bottom-right corner, then drag it out over four samples.
+    shell.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut comp, 0);
+    shell.handle(PRIMARY_PRESS, &mut comp, 0);
+
+    let events = &[
+        moved(bounds.right() + 9, bounds.bottom() + 9),
+        moved(bounds.right() + 19, bounds.bottom() + 19),
+        moved(bounds.right() + 29, bounds.bottom() + 29),
+        PRIMARY_RELEASE,
+    ];
+    let outcomes = shell
+        .pump(&mut MemoryInput::new(events), &mut comp, 0)
+        .expect("source does not fault");
+
+    assert_eq!(
+        outcomes,
+        alloc::vec![
+            ShellOutcome::WindowManager(InputResponse::Resized { window }),
+            ShellOutcome::WindowManager(InputResponse::ResizeEnded { window }),
+        ],
+        "three samples fold to one; the settle stays its own"
+    );
+    // The folded outcome is not a shortened drag: the window is where the
+    // last sample put it.
+    let dragged = comp.window(window).expect("live").bounds();
+    assert_eq!(
+        (dragged.width, dragged.height),
+        (bounds.width + 30, bounds.height + 30)
+    );
+}
+
 /// A reversal is a separate gesture: folding it would move the app's scroll
 /// model somewhere the tick-by-tick sequence would not, because a tick that
 /// clamps at a range end is not recovered by the tick back.

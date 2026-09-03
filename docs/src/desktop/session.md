@@ -737,11 +737,15 @@ independent, honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   that observes whether an app drains its window events: every app-ward
   event is a non-blocking mailbox send. To avoid flooding an app with a dense
   gesture it must then drain one sample at a time from a bounded mailbox,
-  `pump` folds an adjacent run of one gesture over one window — motion by
-  latest-wins (a position is level-triggered) and wheel ticks by summing a run
-  in one direction (a delta is additive, and a reversal ends the run) — while
-  ensuring every sample still drives the window manager's own hover and drag
-  state. The production event
+  `pump` folds an adjacent run of one gesture over one window — motion and
+  interactive resize by latest-wins (a position and a geometry are both
+  level-triggered, and a resize outcome is forwarded by reading the window's
+  *current* extent after the whole batch has been applied, so every earlier
+  sample of a run would carry the size the last one settled on) and wheel
+  ticks by summing a run in one direction (a delta is additive, and a reversal
+  ends the run) — while ensuring every sample still drives the window
+  manager's own hover and drag state. A `ResizeEnded` is the settle the app
+  must witness, so it ends a run rather than joining it. The production event
   sink folds each outcome into the `vigil::HangTracker` — an owner whose sends
   come back refused as the kernel's transient `WouldBlock` back-pressure
   signal continuously for `UNRESPONSIVE_AFTER_NS` (4 s) is flagged *not

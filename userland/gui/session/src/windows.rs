@@ -2044,30 +2044,38 @@ mod tests {
             bounds,
             "an opened window sits wholly inside the work area"
         );
-        // Every band the frame offers starts its own resize-grab, which is
-        // what the placement is for: the corners resize both axes at once
-        // and are the furthest thing on the frame from the title bar. The
+        // Every band the frame offers starts its own resize-grab *and drags*,
+        // which is what the placement is for: the corners resize both axes at
+        // once and are the furthest thing on the frame from the title bar. The
         // points are the bands' inward half, because a window flush against
         // the work area has its outward half over the taskbar or off the
-        // screen, where nothing can reach it.
-        for (at, edge) in [
+        // screen, where nothing can reach it. Asserting the drag and not only
+        // the latch is deliberate: a grab that arms and then refuses every
+        // motion is what shipped, and a test that stopped at the latch could
+        // not see it.
+        for (at, edge, delta) in [
             (
                 Point::new(bounds.right() - 1, bounds.bottom() - 1),
                 ResizeEdge::BottomRight,
+                Point::new(-24, -18),
             ),
             (
                 Point::new(bounds.left(), bounds.bottom() - 1),
                 ResizeEdge::BottomLeft,
+                Point::new(24, -18),
             ),
             (
                 Point::new(bounds.right() - 1, bounds.bottom() - 32),
                 ResizeEdge::Right,
+                Point::new(-24, 0),
             ),
             (
                 Point::new(bounds.left() + 96, bounds.bottom() - 1),
                 ResizeEdge::Bottom,
+                Point::new(0, -18),
             ),
         ] {
+            let before = compositor.window(wm).expect("live").bounds();
             shell.handle(InputEvent::PointerMoved { to: at }, &mut compositor, 0);
             shell.handle(
                 InputEvent::PointerPressed {
@@ -2082,12 +2090,27 @@ mod tests {
                 "a press at {at:?} grabs the {edge:?} band"
             );
             shell.handle(
+                InputEvent::PointerMoved {
+                    to: Point::new(at.x + delta.x, at.y + delta.y),
+                },
+                &mut compositor,
+                0,
+            );
+            assert_ne!(
+                compositor.window(wm).expect("live").bounds(),
+                before,
+                "and dragging the {edge:?} band moves that edge"
+            );
+            shell.handle(
                 InputEvent::PointerReleased {
                     button: PointerButton::Primary,
                 },
                 &mut compositor,
                 0,
             );
+            // Each band is aimed at the rectangle the window *opened* at, so
+            // the drag just made is undone before the next one is aimed.
+            assert!(compositor.resize_window(wm, bounds));
         }
     }
 

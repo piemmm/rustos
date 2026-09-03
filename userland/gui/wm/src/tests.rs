@@ -2115,9 +2115,24 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
     );
     assert_eq!(router.resizing_edge(), Some(ResizeEdge::Left));
 
+    // And it *drags*: the gesture is armed against the frame's grab region,
+    // so the outward half moves the edge exactly as the inward half does.
+    // Arming it against the window rectangle instead left every press out
+    // here holding a grab that no motion could advance — a resize cursor
+    // over an edge that could not be dragged.
+    let response = router.handle(moved(bounds.left() - 21, mid_y), &mut c);
+    assert!(matches!(response, InputResponse::Resized { window } if window == id));
+    let widened = c.window(id).unwrap().bounds();
+    assert_eq!(widened.left(), bounds.left() - 20);
+    assert_eq!(widened.width, bounds.width + 20);
+    assert_eq!(
+        router.handle(release_primary(), &mut c),
+        InputResponse::ResizeEnded { window: id }
+    );
+
     // Clear of the band the desktop has it back.
     let mut router = InputRouter::new();
-    router.handle(moved(bounds.left() - 64, mid_y), &mut c);
+    router.handle(moved(widened.left() - 64, mid_y), &mut c);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Arrow
@@ -2126,6 +2141,75 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
         router.handle(press_primary(), &mut c),
         InputResponse::DesktopPressed
     );
+}
+
+/// Every band's outward half drags, and an Escape from out there restores the
+/// pre-drag rectangle.
+///
+/// The band the pointer announces is half outside the window, so a gesture
+/// armed against the window rectangle refuses precisely the half a user aims
+/// at when the resize cursor appears over the backdrop: the grab latches, the
+/// cursor keeps its double arrow, and no motion moves an edge. Escape was dead
+/// out there too — the cancel is the grabber's, and it had never begun.
+#[test]
+fn each_band_s_outward_half_drags_and_cancels() {
+    for (edge, delta, grew) in [
+        (ResizeEdge::Left, (-24, 0), (24, 0)),
+        (ResizeEdge::Right, (24, 0), (24, 0)),
+        (ResizeEdge::Bottom, (0, 18), (0, 18)),
+        (ResizeEdge::BottomLeft, (-24, 18), (24, 18)),
+        (ResizeEdge::BottomRight, (24, 18), (24, 18)),
+    ] {
+        let (mut c, id) = decorated_compositor();
+        let before = c.window(id).unwrap().bounds();
+        let at = outward_aim(edge, before);
+        assert!(
+            !before.contains(at),
+            "{edge:?}: the aim is the band's outward half, outside the window"
+        );
+
+        let mut router = InputRouter::new();
+        router.handle(moved(at.x, at.y), &mut c);
+        router.handle(press_primary(), &mut c);
+        assert_eq!(router.resizing_edge(), Some(edge));
+
+        let response = router.handle(moved(at.x + delta.0, at.y + delta.1), &mut c);
+        assert!(
+            matches!(response, InputResponse::Resized { window } if window == id),
+            "{edge:?}: a drag from the outward half resizes"
+        );
+        let dragged = c.window(id).unwrap().bounds();
+        assert_eq!(
+            (dragged.width, dragged.height),
+            (before.width + grew.0, before.height + grew.1),
+            "{edge:?}: by the pointer delta"
+        );
+
+        // Escape reaches a gesture that really began, and restores exactly.
+        assert_eq!(
+            router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c),
+            InputResponse::ResizeEnded { window: id },
+            "{edge:?}: Escape cancels"
+        );
+        assert_eq!(c.window(id).unwrap().bounds(), before);
+        assert!(router.resizing_edge().is_none());
+    }
+}
+
+/// A point one pixel beyond `outer` in the direction of `edge`: inside that
+/// band's outward half, outside the window. The side bands are aimed at the
+/// window's vertical mid-point, clear of both the title bar above and the
+/// corner bands below.
+fn outward_aim(edge: ResizeEdge, outer: Rect) -> Point {
+    let mid_x = i32::midpoint(outer.left(), outer.right());
+    let mid_y = i32::midpoint(outer.top(), outer.bottom());
+    match edge {
+        ResizeEdge::Left => Point::new(outer.left() - 1, mid_y),
+        ResizeEdge::Right => Point::new(outer.right(), mid_y),
+        ResizeEdge::Bottom => Point::new(mid_x, outer.bottom()),
+        ResizeEdge::BottomLeft => Point::new(outer.left() - 1, outer.bottom()),
+        ResizeEdge::BottomRight => Point::new(outer.right(), outer.bottom()),
+    }
 }
 
 #[test]
@@ -5515,6 +5599,51 @@ fn a_resize_invalidates_only_that_window_s_furniture() {
     ));
     assert!(!c.chrome_resident(first));
     assert!(c.chrome_resident(second));
+}
+
+/// A resize to the geometry a window already has is accepted and costs
+/// nothing — no damage, and its rendered furniture stays.
+///
+/// An interactive drag asks for a rectangle per pointer sample, and most
+/// samples do not move the grabbed edge: a horizontal edge drag with any
+/// vertical wobble recomputes the same rectangle, and a drag held at the
+/// window's minimum recomputes it for as long as it is held. Reporting those
+/// as changes re-rendered a whole window's furniture and recomposited it, per
+/// sample, for a geometry nobody could see change — while the drag still has
+/// to be told the window is alive, so the accepted/refused answer cannot
+/// carry the change (a refusal ends the grab).
+#[test]
+fn a_resize_to_the_geometry_already_in_force_costs_nothing() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = titled_window(&mut c, 10, 10, 40, "steady");
+    let outer = c.window(id).expect("window").bounds();
+    let client = c.window_client_rect(id).expect("decorated");
+    c.composite();
+    assert!(c.chrome_resident(id));
+
+    assert!(
+        c.resize_window(id, outer),
+        "the window is alive and the size is acceptable"
+    );
+    assert!(
+        !c.has_damage(),
+        "an outer resize to nowhere repaints nothing"
+    );
+    assert!(c.chrome_resident(id));
+
+    assert!(c.resize_window_client(id, client.width, client.height));
+    assert!(
+        !c.has_damage(),
+        "and neither does the app re-mapping the size it already had"
+    );
+    assert!(c.chrome_resident(id));
+    assert_eq!(c.window(id).expect("window").bounds(), outer);
+
+    // A real change still repaints, so this is not a resize that stopped
+    // working.
+    assert!(c.resize_window_client(id, client.width + 8, client.height));
+    assert!(c.has_damage());
+    assert!(!c.chrome_resident(id));
 }
 
 #[test]

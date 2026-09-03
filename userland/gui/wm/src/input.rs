@@ -308,6 +308,11 @@ struct ResizeGrab {
     grabber: ResizeGrabber,
     start_outer: Rect,
     start_pointer: Point,
+    /// The region the gesture is armed against — the frame's grab region, not
+    /// its outer rectangle. A band straddles the outer edge, so a press that
+    /// the frame's hit map accepted routinely lands outside the window, and
+    /// arming against the window would refuse the whole outward half.
+    grab_region: Rect,
     /// The smallest outer size this window may be dragged down to, in
     /// physical pixels, captured at grab start so the clamp never re-derives
     /// the frame metrics mid-drag.
@@ -315,18 +320,18 @@ struct ResizeGrab {
 }
 
 impl ResizeGrab {
-    /// Advance the gesture with pointer `event` over the captured outer
-    /// rectangle, returning what the grabber made of it.
+    /// Advance the gesture with pointer `event` over the captured grab
+    /// region, returning what the grabber made of it.
     fn gesture(&mut self, event: &InputEvent) -> Option<ResizeEvent> {
         self.grabber
-            .on_pointer(event, self.start_outer, &mut damage::sink())
+            .on_pointer(event, self.grab_region, &mut damage::sink())
     }
 
     /// Offer `key` to the gesture (Escape cancels), returning what the grabber
     /// made of it.
     fn gesture_key(&mut self, key: Key) -> Option<ResizeEvent> {
         self.grabber
-            .on_key(key, self.start_outer, &mut damage::sink())
+            .on_key(key, self.grab_region, &mut damage::sink())
     }
 }
 
@@ -1112,8 +1117,9 @@ impl InputRouter {
         edge: ResizeEdge,
         compositor: &Compositor,
     ) -> InputResponse {
-        let (Some(start_outer), Some(min_outer)) = (
+        let (Some(start_outer), Some(grab_region), Some(min_outer)) = (
             compositor.window(window).map(Window::bounds),
+            compositor.window_grab_region(window),
             compositor.window_min_outer_size(window),
         ) else {
             return InputResponse::FurniturePressed { window };
@@ -1124,11 +1130,12 @@ impl InputRouter {
             grabber: ResizeGrabber::new(),
             start_outer,
             start_pointer: self.pointer,
+            grab_region,
             min_outer,
         };
-        // Prime the grabber's pointer, then begin its gesture over the whole
-        // outer rectangle (the pointer is inside it): the shared control owns
-        // the gesture lifecycle and the Escape cancel.
+        // Prime the grabber's pointer, then begin its gesture over the frame's
+        // grab region, which the press is inside by construction: the shared
+        // control owns the gesture lifecycle and the Escape cancel.
         grab.gesture(&InputEvent::PointerMoved { to: self.pointer });
         grab.gesture(&InputEvent::PointerPressed {
             button: PointerButton::Primary,

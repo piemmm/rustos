@@ -2200,11 +2200,36 @@ impl Compositor {
         Some(window.min_outer_size(self.scale, &self.theme))
     }
 
+    /// The region an interactive resize of the window named by `id` may be
+    /// grabbed in, at the active scale and theme — `None` for an unknown,
+    /// undecorated, or non-resizable window.
+    ///
+    /// A resize band straddles the outer edge, so half of every grab lands
+    /// outside the window: this is the region the gesture is armed against,
+    /// and arming against the window rectangle instead leaves that outward
+    /// half showing a resize cursor over an edge that cannot be dragged.
+    #[must_use]
+    pub fn window_grab_region(&self, id: WindowId) -> Option<Rect> {
+        let window = self.window(id)?;
+        window
+            .frame()?
+            .grab_region(window.bounds(), self.scale, &self.theme)
+    }
+
     /// Resize the window named by `id` so its outer rectangle becomes
     /// `new_outer`: the client size becomes the implied one, and the origin
     /// and decoration follow. Returns `false` for an unknown window or when
     /// the implied client size is empty. The union of the old and new outer
     /// bounds is marked dirty.
+    ///
+    /// A resize to the geometry the window already has is accepted and
+    /// repaints nothing, exactly as a move to the current origin does
+    /// ([`move_window`](Self::move_window)). An interactive drag asks for a
+    /// rectangle per pointer sample and most samples do not move the grabbed
+    /// edge — the pointer wanders along the axis the edge does not follow, or
+    /// the drag is already at the window's minimum — so repainting on the
+    /// request rather than on the change would re-render a whole window's
+    /// furniture for a geometry nobody can see change.
     ///
     /// The client's pixels are not reallocated — that is the client's own
     /// next present. A decorated window fills whatever of the new client
@@ -2214,12 +2239,15 @@ impl Compositor {
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
-            let changed = window.resize_to_outer(new_outer, scale, theme);
-            if changed {
-                damage.add(before);
-                damage.add(window.bounds());
+            if !window.resize_to_outer(new_outer, scale, theme) {
+                return false;
             }
-            changed
+            let after = window.bounds();
+            if after != before {
+                damage.add(before);
+                damage.add(after);
+            }
+            true
         })
         .unwrap_or(false)
     }
@@ -2228,7 +2256,8 @@ impl Compositor {
     /// `client_h`, keeping its origin and repainting the decoration at the
     /// new size. Returns `false` for an unknown window or an empty client
     /// size (fail closed). The union of the old and new outer bounds is
-    /// marked dirty.
+    /// marked dirty, and a resize to the size already in force repaints
+    /// nothing.
     ///
     /// This is the window-channel `Resize` path: the app hands the session a
     /// new *client* content size, so the compositor sizes the content directly
@@ -2237,12 +2266,15 @@ impl Compositor {
     pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.bounds();
-            let changed = window.resize_client(client_w, client_h, scale, theme);
-            if changed {
-                damage.add(before);
-                damage.add(window.bounds());
+            if !window.resize_client(client_w, client_h, scale, theme) {
+                return false;
             }
-            changed
+            let after = window.bounds();
+            if after != before {
+                damage.add(before);
+                damage.add(after);
+            }
+            true
         })
         .unwrap_or(false)
     }

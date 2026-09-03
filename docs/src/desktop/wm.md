@@ -635,14 +635,27 @@ would set the window back to wherever the app had got to, and the two would
 fight once per pointer sample. The settled size goes out when the grab ends,
 and the app's `Resize` moves the geometry again from there.
 
-**A run of resize reports folds to its newest, twice over.** A client extent
-is a value the window converges on, not an occurrence it must witness, so the
-session's hold-back overwrites a held `Resized` where it stands (see
+**A resize to the geometry already in force costs nothing.** `resize_window`
+and `resize_window_client` accept it — the drag has to be told its window is
+alive, and a refusal ends the grab — but mark no damage and keep the window's
+rendered furniture, exactly as a move to the current origin does. Most samples
+of a drag do not move the grabbed edge: the pointer wanders along the axis the
+edge does not follow, and a drag held at the window's minimum recomputes the
+same rectangle for as long as it is held. Repainting on the *request* rather
+than on the *change* re-rendered a whole window's furniture and recomposited
+it, per sample, for a geometry nobody could see change.
+
+**A run of resize reports folds to its newest, three times over.** A client
+extent is a value the window converges on, not an occurrence it must witness.
+The session's input drain keeps only the last `Resized` of an unbroken run
+over one window (`DesktopShell::pump`) — it forwards the window's *current*
+extent, and the whole batch is applied before any outcome is forwarded, so
+every earlier sample of the run would carry the size the last one settled on.
+Behind that, the hold-back overwrites a held `Resized` where it stands (see
 [the desktop session](./session.md)) and the shared client reader
 (`tairix_window::WindowEvents`) drops the stale ones it has already been
-sent, keeping only the last of an unbroken run for one window. An app slower
-than the pointer therefore lags a frame, never a queue of re-maps for sizes
-the window has already left.
+sent. An app slower than the pointer therefore lags a frame, never a queue of
+re-maps for sizes the window has already left.
 
 **Cursor damage is the rectangle it left plus the one it reached.** The
 pointer overlay is not damaged as it moves; `composite` diffs the
@@ -1176,6 +1189,16 @@ as its colour. See [theming](./theming.md) for the four roles.
     bands are explicitly bounded to start at its foot on *both* sides of the
     edge, so the outward half never claims a column beside a band it does not
     reach on the inside.
+  - **The gesture is armed against the frame's grab region, not the window.**
+    `WindowFrame::grab_region` (via `Compositor::window_grab_region`) is the
+    outer rectangle grown by the widest band's outward reach on the three
+    sides that carry one, and it is what the shared `ResizeGrabber` is handed
+    as its hit region. Handing it the window rectangle instead refused
+    precisely the outward half the hit map had just accepted: the grab
+    latched, the pointer kept its double arrow, and no motion moved an edge —
+    an affordance that advertised itself and then did nothing, on half the
+    area of every band. `hit` remains the gate that decides *which* edge a
+    point grabs; the region only has to contain every point it accepts.
   - What makes the invisible border discoverable is the **pointer**: the same
     hit map drives cursor selection, so crossing into the band — inside or
     outside the window — swaps the arrow for the double arrow of the axis that

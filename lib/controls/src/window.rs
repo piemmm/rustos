@@ -2157,6 +2157,33 @@ impl WindowFrame {
         grab.flatten().map_or(inside, FurniturePart::ResizeEdge)
     }
 
+    /// The rectangle a press may begin one of this frame's resize drags in:
+    /// `bounds` grown by the widest band's outward reach on the three sides
+    /// that carry a band. `None` for a non-resizable frame, which offers none.
+    ///
+    /// A band straddles the outer edge ([`GrabReach`]), so a legitimate grab
+    /// lands *outside* `bounds`. A host that armed its gesture against the
+    /// window rectangle alone would refuse exactly the outward half
+    /// [`Self::hit`] classifies as a [`FurniturePart::ResizeEdge`] — an edge
+    /// that shows a resize cursor and then does nothing. This is a bounding
+    /// region, not a second hit map: [`Self::hit`] stays the gate deciding
+    /// *which* edge a point grabs, and this only has to contain every point it
+    /// accepts. The top is not grown, because the title bar lives there and no
+    /// band reaches above it.
+    #[must_use]
+    pub fn grab_region(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+        if !self.furniture.resizable {
+            return None;
+        }
+        let reach = GrabReach::outward(GrabReach::of(scale, theme).corner);
+        Some(Rect::new(
+            bounds.left().saturating_sub(to_i32(reach)),
+            bounds.top(),
+            bounds.width.saturating_add(reach.saturating_mul(2)),
+            bounds.height.saturating_add(reach),
+        ))
+    }
+
     /// Paint the frame chrome (rim, body background, title bar) into `surface`
     /// at `bounds`. The client viewport is left for the compositor to clip the
     /// application into; the frame never paints client pixels.

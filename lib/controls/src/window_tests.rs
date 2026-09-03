@@ -2216,6 +2216,59 @@ fn a_side_band_starts_below_the_title_bar_outside_the_window_too() {
     );
 }
 
+/// The grab region contains every point [`WindowFrame::hit`] hands to a
+/// resize gesture, the outward halves included, and a fixed-size window
+/// offers none.
+///
+/// The defect this closes: the window manager armed the gesture against the
+/// window rectangle, which excludes the outward half of every band by
+/// construction — so half of each edge showed a resize cursor and then
+/// refused to drag. The region is the gesture's; `hit` stays the gate.
+#[test]
+fn the_grab_region_holds_every_point_a_band_claims() {
+    let theme = Theme::dark();
+    let bounds = frame_bounds();
+    let frame = WindowFrame::new(furniture());
+    let region = frame
+        .grab_region(bounds, Scale::ONE, &theme)
+        .expect("a resizable frame offers a grab region");
+    let reach = GrabReach::of(Scale::ONE, &theme);
+    let corner_out = i32::try_from(GrabReach::outward(reach.corner)).expect("corner");
+
+    // Every point of the outward columns and row a band can claim, sampled
+    // one pixel apart, is inside the region.
+    for x in bounds.left() - corner_out..bounds.right() + corner_out {
+        for y in bounds.top()..bounds.bottom() + corner_out {
+            let at = Point::new(x, y);
+            if matches!(
+                frame.hit(bounds, Scale::ONE, &theme, at),
+                FurniturePart::ResizeEdge(_)
+            ) {
+                assert!(region.contains(at), "{at:?} is claimed but out of reach");
+            }
+        }
+    }
+
+    assert!(
+        region.contains(Point::new(bounds.left(), bounds.top())),
+        "and the window's own pixels are inside it too"
+    );
+    assert_eq!(
+        region.top(),
+        bounds.top(),
+        "the title bar tops the window, so no band reaches above it"
+    );
+    assert!(
+        WindowFrame::new(WindowFurnitureState {
+            resizable: false,
+            ..furniture()
+        })
+        .grab_region(bounds, Scale::ONE, &theme)
+        .is_none(),
+        "a fixed-size window has no band to grab"
+    );
+}
+
 /// A fixed-size window has no band at all, so it claims nothing outside
 /// itself and cannot be dragged larger from beside its own edge.
 #[test]

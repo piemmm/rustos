@@ -1675,13 +1675,20 @@ impl DesktopShell {
     /// this leaves is the one N settles would have left. A drain that found no
     /// event settles nothing, keeping an idle wake free.
     ///
-    /// Two gestures fold, each by the rule its own quantity obeys: pointer
+    /// Three gestures fold, each by the rule its own quantity obeys: pointer
     /// motion carries a position, which is level-triggered, so the newest
-    /// sample supersedes the ones before it; wheel ticks carry a delta,
-    /// which is additive, so a run in one direction sums into a single
-    /// tick that leaves the app's scroll model exactly where the run
-    /// would. A reversal is a distinct gesture — a tick that clamps at a
-    /// range end is not recovered by the tick back — so it ends the run.
+    /// sample supersedes the ones before it; an interactive resize names a
+    /// geometry, likewise level-triggered, and the embedder reads the window's
+    /// *current* client extent when it forwards one — so every sample of a run
+    /// would carry the size the last one settled on, and all but the last are
+    /// duplicates by construction; wheel ticks carry a delta, which is
+    /// additive, so a run in one direction sums into a single tick that leaves
+    /// the app's scroll model exactly where the run would. A reversal is a
+    /// distinct gesture — a tick that clamps at a range end is not recovered
+    /// by the tick back — so it ends the run.
+    ///
+    /// [`ResizeEnded`](InputResponse::ResizeEnded) is not part of that run: it
+    /// is the settle the app must witness, so it ends one like a release does.
     ///
     /// A run holds only while it stays an unbroken
     /// sequence of the same foldable outcome naming the *same* window: a
@@ -1847,9 +1854,10 @@ fn flatten_ground(picture: &Surface, colour: Color) -> Option<Surface> {
 }
 
 /// Fold `next` into `last` when the two are one continuing gesture over the
-/// same window — motion by latest-wins, wheel ticks by summing a run in one
-/// direction — returning [`None`] once folded and `Some(next)` when it must
-/// be kept as its own outcome. [`DesktopShell::pump`] states the rules.
+/// same window — motion and resize by latest-wins, wheel ticks by summing a
+/// run in one direction — returning [`None`] once folded and `Some(next)`
+/// when it must be kept as its own outcome. [`DesktopShell::pump`] states the
+/// rules.
 fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutcome> {
     match (&mut *last, next) {
         (
@@ -1861,6 +1869,10 @@ fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutc
             *last = moved;
             None
         }
+        (
+            ShellOutcome::WindowManager(InputResponse::Resized { window: into }),
+            ShellOutcome::WindowManager(InputResponse::Resized { window }),
+        ) if *into == window => None,
         (
             ShellOutcome::WindowManager(InputResponse::AppScroll {
                 window: into,
