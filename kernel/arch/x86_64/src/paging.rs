@@ -761,6 +761,10 @@ impl AddressSpace {
         if e3 & flags::HUGE != 0 {
             let TableFrame { phys, entries } =
                 frames.alloc_table().ok_or(MapError::PoolExhausted)?;
+            // No store barrier is owed between filling the child and
+            // publishing the pointer to it, unlike the weakly-ordered ports:
+            // TSO makes these stores globally visible in program order, so a
+            // walker cannot reach the table before its contents.
             shatter_huge_into(entries, e3, 21, true);
             pdpt[i3] =
                 phys | flags::PRESENT | flags::WRITABLE | (e3 & (flags::USER | flags::NO_EXECUTE));

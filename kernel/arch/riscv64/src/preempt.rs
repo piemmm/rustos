@@ -684,15 +684,17 @@ pub(crate) fn on_software_interrupt() {
     unsafe {
         core::arch::asm!("csrc sip, {}", in(reg) SIP_SSIP, options(nomem, nostack));
     }
-    // A cross-CPU quiesce turns this delivered IPI into a one-way stop: the
-    // pre-boot Supervisor's whole-RAM takeover needs every other
-    // hart halted before it flattens paging (`satp = 0`) and overwrites RAM.
-    // `SSIP` was just cleared above, so the software interrupt is
-    // hardware-acknowledged; acknowledge to the boot hart's bounded handshake
-    // that this hart is down, then park masked (`sstatus.SIE = 0`) and
-    // memory-free forever, never returning to run the scheduler again. This
-    // hart uses the same id here that its reschedule callback below does.
-    if tairix_arch_api::quiesce_stop_requested() {
+    // A cross-CPU stop request turns this delivered IPI into a one-way halt.
+    // Two callers latch it: the pre-boot Supervisor's whole-RAM takeover,
+    // which needs every other hart down before it flattens paging
+    // (`satp = 0`), and a fatal kernel report, whose dying hart must not leave
+    // peers running over state it abandoned. `SSIP` was just cleared above, so
+    // the software interrupt is hardware-acknowledged; acknowledge to the
+    // requester's bounded handshake that this hart is down, then park masked
+    // (`sstatus.SIE = 0`) and memory-free forever, never returning to run the
+    // scheduler again. This hart uses the same id here that its reschedule
+    // callback below does.
+    if tairix_arch_api::quiesce_stop_requested(current_hartid()) {
         tairix_arch_api::quiesce_acknowledge(current_hartid());
         crate::kernel_arch::halt_current_hart();
     }

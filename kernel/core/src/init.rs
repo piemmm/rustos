@@ -617,17 +617,22 @@ impl<A: KernelArch + 'static> crate::smp::SecondaryDispatch for KernelSecondaryD
 ///
 /// Both tables carry one `AtomicBool` per dense CPU id, sized to the
 /// discovered core count (never a fixed ceiling) and leaked `&'static` for the
-/// kernel's lifetime. The liveness table is the one a started secondary marks
-/// as it comes online and the bring-up barrier reads; the ack table backs the
-/// destructive-takeover stop handshake, published alongside liveness so that
-/// handshake reads real per-CPU state.
+/// kernel's lifetime. The liveness table records every CPU running kernel
+/// code: the boot CPU is marked here, each started secondary marks itself as
+/// it comes online, and the bring-up barrier reads it. The ack table backs the
+/// cross-CPU stop handshake — the destructive takeover's and a fatal report's
+/// alike — and is published alongside liveness so both read real per-CPU
+/// state.
 ///
 /// # Errors
 ///
 /// Returns a stable cause string if the coordinator refuses the publish (the
 /// tables are set-once per boot), so the caller fails closed rather than
 /// running a later takeover against stale liveness.
-fn init_liveness_and_quiesce_tables(cpu_count: u32) -> Result<&'static [AtomicBool], &'static str> {
+fn init_liveness_and_quiesce_tables(
+    cpu_count: u32,
+    boot_cpu: CpuId,
+) -> Result<&'static [AtomicBool], &'static str> {
     let table = || -> &'static [AtomicBool] {
         Box::leak(
             (0..cpu_count)
@@ -638,6 +643,15 @@ fn init_liveness_and_quiesce_tables(cpu_count: u32) -> Result<&'static [AtomicBo
     };
     let online = table();
     let quiesce_ack = table();
+    // The boot CPU is running kernel code by the time this table exists, and
+    // only secondaries ever mark themselves. Without this the table means
+    // "secondaries that came up" rather than "CPUs that are running", so a
+    // cross-CPU stop raised *on a secondary* would leave the boot CPU running
+    // — harmless for the takeover, whose requester is always the boot CPU,
+    // but a fatal report on any other core would fail to stop it.
+    if let Some(slot) = online.get(boot_cpu as usize) {
+        slot.store(true, Ordering::Release);
+    }
     match tairix_arch_api::quiesce_publish_tables(online, quiesce_ack) {
         Ok(()) => Ok(online),
         Err(tairix_arch_api::QuiescePublishError::AlreadyPublished) => {
@@ -690,7 +704,7 @@ fn start_secondaries<A: KernelArch + 'static>(
     // discovered core count (never a fixed ceiling). A publish failure is
     // set-once/wiring corruption: fail closed, loud, rather than run a
     // destructive takeover against stale liveness later.
-    let online = match init_liveness_and_quiesce_tables(cpu_count) {
+    let online = match init_liveness_and_quiesce_tables(cpu_count, boot_cpu) {
         Ok(online) => online,
         Err(cause) => {
             emit(

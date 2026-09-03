@@ -366,9 +366,7 @@ pub fn boot(
 
     // The screen grids need the heap the cacheable identity map just made
     // usable, so they are attached here rather than at display discovery.
-    if mmu_on {
-        attach_video_console_grids();
-    }
+    let video_console = mmu_on && attach_video_console_grids();
 
     if let Some(pcie) = early.pcie {
         log_pcie_discovery(log_sink, &pcie);
@@ -422,12 +420,20 @@ pub fn boot(
     // G2: re-express the reserved kthread-stack guard arena at 4 KiB
     // granularity over the *active* boot tables, so a guard page in it can
     // later be unmapped without shattering the 2 MiB block the CPU runs on
-    // (`plans/PI.md` stage G2 → G3). The split only *adds* table levels
-    // reproducing the existing translation, so it is safe against the live
-    // regime and needs no TLB maintenance. A window too small to carve an
-    // arena, or a pool that cannot supply the replacement tables, leaves
-    // the guard in its software-canary form — fail closed, never fatal to
-    // boot (`plans/PI.md` G2 watch-out).
+    // (`plans/PI.md` stage G2 → G3). A window too small to carve an arena,
+    // or a pool that cannot supply the replacement tables, leaves the guard
+    // in its software-canary form — fail closed, never fatal to boot
+    // (`plans/PI.md` G2 watch-out).
+    //
+    // Refining the *live* regime is an architectural violation, not a
+    // safe optimisation: replacing a valid 1 GiB block with a table changes
+    // the granule every address under it translates at, and a TLB holding
+    // both granules for one address may fault the walk. Break-before-make
+    // is what the architecture requires and is impossible here — the break
+    // window would unmap the executing kernel — so the fix is to carve the
+    // arena before the MMU is enabled and lay it down fine from the start.
+    // That needs the RAM windows pre-MMU and is tracked as
+    // `plans/OPEN-DEFECTS.md` D82.
     let arena_prepared = match (boot_space.as_mut(), &layout_result) {
         (Some(space), Ok(layout)) => layout
             .arena
@@ -467,7 +473,10 @@ pub fn boot(
             dtb_present: yes_no(dtb != 0),
             console_discovered: yes_no(early.console),
             gic_discovered: yes_no(early.gic),
-            video_console: yes_no(early.video.is_some()),
+            video_console: yes_no(video_console),
+            fb_base: early.video.map_or(0, |v| v.fb_base),
+            fb_len: early.video.map_or(0, |v| v.fb_len_bytes),
+            boot_root: boot_space.as_ref().map_or(0, AddressSpace::root_phys),
             device_gigapages: device_mask[0],
             ram_discovered: yes_no(!ram_windows.is_empty()),
             mem_map_built: yes_no(mem_map_built),
@@ -576,14 +585,17 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
 /// lifetime.
 ///
 /// Callable only once the MMU is on: the grids need the heap, which needs
-/// the cacheable identity map. With no display discovered this is a no-op
-/// and the UART keeps the console (fail closed).
-fn attach_video_console_grids() {
-    if let Some(cells) = video::text_cell_count() {
-        let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
-        let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
-        video::attach_console(Box::leak(main), Box::leak(alt));
-    }
+/// the cacheable identity map. Reports whether the screen actually took the
+/// console: with no display discovered, or a scan-out the active root does
+/// not cover, the UART keeps it (fail closed) and the boot record says so
+/// rather than claiming a console the machine never had.
+fn attach_video_console_grids() -> bool {
+    let Some(cells) = video::text_cell_count() else {
+        return false;
+    };
+    let main = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+    let alt = alloc::vec![video::Cell::BLANK; cells].into_boxed_slice();
+    video::attach_console(Box::leak(main), Box::leak(alt))
 }
 
 /// Record the discovered PCIe root-complex windows once, post-MMU.
@@ -857,6 +869,27 @@ struct BootStatus {
     gic_discovered: &'static str,
     /// The framebuffer boot console came up.
     video_console: &'static str,
+    /// Physical base and byte length of the firmware scan-out, or zeros when
+    /// no display came up.
+    ///
+    /// The console paints this range from arbitrary kernel contexts, so it
+    /// must be translatable under whichever root is active. A capture that
+    /// shows a fault address inside it says the scan-out was never mapped in
+    /// that root; one past its end says a repaint overran
+    /// (`plans/OPEN-DEFECTS.md` D81).
+    fb_base: u64,
+    /// Byte length of the scan-out named by [`Self::fb_base`].
+    fb_len: u64,
+    /// Physical root of the boot translation regime, or zero when the MMU
+    /// stayed off.
+    ///
+    /// A fatal report names the root that was active (`root=`); comparing it
+    /// against this says whether the faulting context was on the boot space
+    /// or on some other root, which the address alone cannot distinguish —
+    /// the boot tables are a `.bss` static, so their address is
+    /// indistinguishable by magnitude from a frame-allocated one
+    /// (`plans/OPEN-DEFECTS.md` D81).
+    boot_root: u64,
     /// Low word of the Device gigapage mask (gigapages 0..64 — both
     /// supported boards keep their MMIO below 64 GiB), so a metal capture
     /// shows what the identity map typed Device (`virt`: 0x1; Pi 4: 0x8).
@@ -901,6 +934,9 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
     let mut device_mask_buf = [0u8; 16];
     let mut timer_hz_buf = [0u8; 16];
     let mut cpu_count_buf = [0u8; 12];
+    let mut fb_base_buf = [0u8; 16];
+    let mut fb_len_buf = [0u8; 16];
+    let mut boot_root_buf = [0u8; 16];
     // Every field of this line is a string, so they are listed as pairs
     // and mapped into the borrowed slice `log` renders.
     let pairs = [
@@ -910,6 +946,15 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
         ("console_discovered", status.console_discovered),
         ("gic_discovered", status.gic_discovered),
         ("video_console", status.video_console),
+        (
+            "fb_base_hex",
+            format_hex_u64(status.fb_base, &mut fb_base_buf),
+        ),
+        ("fb_len_hex", format_hex_u64(status.fb_len, &mut fb_len_buf)),
+        (
+            "boot_root_hex",
+            format_hex_u64(status.boot_root, &mut boot_root_buf),
+        ),
         (
             "device_gigapages_hex",
             format_hex_u64(status.device_gigapages, &mut device_mask_buf),

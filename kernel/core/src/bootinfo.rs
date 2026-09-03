@@ -685,6 +685,35 @@ pub trait KernelArch: SchedulerArch {
     /// x86_64 COM1 sink) have nothing to top up and inherit zero work; the
     /// aarch64 port overrides it with its non-blocking `serial::pump_tx`.
     fn pump_console_tx(&self) {}
+
+    /// Drain buffered console output to the device, **waiting** for it, and
+    /// return when the queue is empty or the transmitter has stopped
+    /// draining.
+    ///
+    /// Called by the fatal-report path immediately before it halts. By then
+    /// nothing else can get those bytes out: the report has stopped every
+    /// other CPU, so no dispatch loop is left to call
+    /// [`Self::pump_console_tx`], and this CPU is about to park forever — an
+    /// unflushed report dies in the ring and the machine appears to have
+    /// died silently, which is the whole failure the report exists to
+    /// prevent.
+    ///
+    /// # Contract
+    ///
+    /// * It **may** block on the device, unlike [`Self::pump_console_tx`]: a
+    ///   CPU about to stop dispatching can no longer starve anything by
+    ///   waiting. It must still give up if the transmitter stops draining
+    ///   rather than wait forever.
+    /// * It must be safe to call with device IRQs masked, since the report
+    ///   runs with the world stopped.
+    /// * It must never panic.
+    ///
+    /// # Default
+    ///
+    /// A no-op: a port whose console transmit is synchronous with no
+    /// buffered ring (the riscv64 SBI console, the x86_64 COM1 sink) has
+    /// already put every byte on the wire.
+    fn flush_console_blocking(&self) {}
 }
 
 /// IRQ routing handed from the architecture port to the kernel core

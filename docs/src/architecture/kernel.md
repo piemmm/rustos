@@ -164,6 +164,15 @@ vector parks the CPU with interrupts masked and prints nothing. Both causes
 share the register snapshot, the bounded backtrace, and the re-entrancy
 guard — see `docs/src/architecture/panic-diagnostics.md`.
 
+Both causes additionally **stop the world** before the record is written:
+a kernel invariant is already broken and this CPU cannot resume, so peers
+left running would either deadlock on a guard it abandoned or advance over
+half-updated state. The report reuses the one cross-CPU stop protocol
+(`tairix_arch_api::quiesce`) through its best-effort initiator, and records
+`peers_asked` / `peers_stopped` / `peer_unresponsive` — a peer that cannot
+answer a pending IPI is wedged with interrupts masked, so naming it is part
+of the diagnosis.
+
 Neither handler allocates: every formatting buffer is stack-resident, so
 both paths survive a wedged heap.
 

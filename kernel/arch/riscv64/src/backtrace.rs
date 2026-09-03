@@ -162,7 +162,23 @@ impl CpuStateCapture for Backtracer {
     fn stack_bounds(&self) -> Option<StackBounds> {
         None
     }
+
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    fn active_root(&self) -> Option<u64> {
+        let satp: u64;
+        // SAFETY: reading `satp` into an output operand has no side effects
+        // and cannot fault in S-mode.
+        unsafe {
+            core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack, preserves_flags));
+        }
+        Some(satp)
+    }
 }
+
+// `translation` keeps the trait's honest `Unsupported`: riscv64 has no
+// non-faulting address-translation instruction, so probing an address would
+// mean walking the tables by hand — dereferencing the very memory a fault
+// report cannot vouch for.
 
 #[cfg(test)]
 mod tests {

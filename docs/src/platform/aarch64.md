@@ -494,13 +494,26 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   So immediately after `enable_mmu_and_vectors`, `boot` leaks two
   `[Cell]` grids sized to `video::text_cell_count()` (the discovered
   `columns × rows`) and hands them to `video::attach_console`, which
-  builds the `TextConsole`, clears the surface through it, and only then
-  publishes `video::is_active` — so console output switches to the
-  screen once the grid is live. This mirrors the per-CPU
-  `Aarch64ArchStorage` pattern: the caller (which has a heap) owns the
-  `'static` storage, the arch crate stays allocator-free. With no
-  display discovered `text_cell_count` is `None` and the UART keeps the
-  console (fail closed).
+  proves the surface is reachable, builds the `TextConsole`, clears the
+  surface through it, and only then publishes `video::is_active` — so
+  console output switches to the screen once the grid is live. This
+  mirrors the per-CPU `Aarch64ArchStorage` pattern: the caller (which
+  has a heap) owns the `'static` storage, the arch crate stays
+  allocator-free. With no display discovered `text_cell_count` is
+  `None` and the UART keeps the console (fail closed).
+- **The scan-out is proved reachable before anything paints it.**
+  Whether the surface translates is a property of the *active* root, not
+  of the surface: the boot identity map is what covers it, and the paint
+  entry points are reachable from contexts that did not establish that
+  map. So `attach_console` walks every 4 KiB page of the extent with the
+  non-faulting `AT` probe and refuses the console if any page does not
+  translate — the UART keeps it and the boot record reports
+  `video_console=false`, rather than a renderer faulting with the render
+  lock held and taking the machine down instead of losing a screen.
+  `apply_surface` re-proves it because that is the path a fatal report
+  takes to reclaim the screen, where a fault costs the machine its only
+  diagnosis. Probing per page rather than per extremity is what makes the
+  answer total.
 - **Rendering — a real `xterm-256color` terminal, in a shared engine.**
   The terminal is not this port's own code: it is the shared,
   architecture-neutral `tairix_fbcon` engine (`lib/fbcon`, `AGENTS.md`
@@ -2627,17 +2640,38 @@ recomputing each sub-entry's output address, setting `TABLE_OR_PAGE` for
 the L3 page leaves — so the same memory keeps mapping with identical
 permissions (one attribute vocabulary, §2.2).
 
-The split is **break-before-make-free for the running region**: it only
-ever *adds* table levels that reproduce the existing translation, never
-invalidating a live address, so it is safe to run against the active
-regime — unlike a naive block→table swap, whose break window would
-momentarily unmap the kernel's own running stack/code (the reason the
-fault-form is staged G1..G3 in `plans/PI.md` rather than shattering the
-block the CPU executes in). It is idempotent (a level already a table is
-left untouched) and fails closed (`Misaligned` / `NotMapped` /
-`PoolExhausted`). After a split, the single 4 KiB page unmaps through the
-existing `MmuAddressSpace::unmap` and its stale TLB entry is dropped with
-`TlbShootdown::flush_page`.
+**A split invalidates the whole regime, on every PE.** Replacing a valid
+block leaf with a table descriptor leaves the output address and
+permissions identical but changes the *granule* every address under it
+translates at, and a TLB holding both granules for one address is
+CONSTRAINED UNPREDICTABLE — it may fault the walk. The stale entries
+belong to the block's **other** addresses, so a per-page flush is the
+wrong range: it leaves the rest of the former block refusing translations
+the tables plainly hold. `split_block` therefore issues one
+`tlbi vmalle1is` whenever a granule actually changed, and none when the
+hierarchy was already fine. Over-invalidating once beats a `tlbi` per leaf
+of a gigapage, and this is never a hot path.
+
+Break-before-make is what the architecture asks for, and here the break
+window would momentarily unmap the kernel's own running code, stack, and
+page tables — so it cannot be added. What remains exposed is the few
+instructions between publishing the table and completing the invalidation.
+Refining a root *before* anything translates through it avoids even that,
+and is the open defect `plans/OPEN-DEFECTS.md` D82.
+
+Within a split, the child table's 512 entries are ordered ahead of the
+descriptor that publishes them (`publish_table_update`, a `dsb ishst`):
+both are plain stores to Normal memory, so without it a walker may follow
+the new table while its high entries still read as the frame's previous
+contents. The fill is ascending, so a walker that raced it would see low
+indices populated and high ones absent.
+
+It is idempotent (a level already a table is left untouched) and fails
+closed (`Misaligned` / `NotMapped` / `PoolExhausted`). After a split, the
+single 4 KiB page unmaps through the existing `MmuAddressSpace::unmap` and
+its stale TLB entry is dropped with `TlbShootdown::flush_page` — an
+unmap *does* withdraw a translation, so it needs the maintenance a split
+does not.
 
 The table arithmetic is host-tested (`paging_tests.rs`:
 `split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping`,

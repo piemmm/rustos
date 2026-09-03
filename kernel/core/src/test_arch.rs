@@ -125,6 +125,9 @@ pub struct TestArch {
     idle_mask_gate_released: AtomicBool,
     /// Number of [`KernelArch::wait_for_interrupt`] calls observed.
     interrupt_waits: AtomicU64,
+    /// Number of [`KernelArch::flush_console_blocking`] calls observed, so a
+    /// test can assert the fatal report drained its record before halting.
+    console_flushes: AtomicU64,
     /// Number of [`KernelArch::pump_console_tx`] calls observed.
     ///
     /// The dispatch loop calls the buffered-console-transmit hook on every
@@ -173,6 +176,7 @@ impl TestArch {
             idle_mask_gate_entered: AtomicBool::new(false),
             idle_mask_gate_released: AtomicBool::new(false),
             interrupt_waits: AtomicU64::new(0),
+            console_flushes: AtomicU64::new(0),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
             poweroffs: AtomicU64::new(0),
@@ -252,6 +256,15 @@ impl TestArch {
     #[must_use]
     pub fn pump_console_tx_count(&self) -> u64 {
         self.pump_tx_calls.load(Ordering::Relaxed)
+    }
+
+    /// Number of times [`KernelArch::flush_console_blocking`] was reached.
+    ///
+    /// Lets a test assert the fatal report drained its own record to the
+    /// device before halting.
+    #[must_use]
+    pub fn console_flush_count(&self) -> u64 {
+        self.console_flushes.load(Ordering::Relaxed)
     }
 
     /// Stage the value the *next* [`KernelArch::monotonic_ns`] call
@@ -402,6 +415,10 @@ impl KernelArch for TestArch {
         // dispatch loop reached the seam so a test can assert the
         // per-dispatch console-transmit top-up happens.
         self.pump_tx_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn flush_console_blocking(&self) {
+        self.console_flushes.fetch_add(1, Ordering::Relaxed);
     }
 
     fn poweroff(&self) {

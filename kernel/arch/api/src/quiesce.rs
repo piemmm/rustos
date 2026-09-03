@@ -47,15 +47,40 @@
 //! If no liveness table has been published (a single-CPU boot, or a boot that
 //! never brought secondaries up), there is nothing to quiesce and
 //! [`quiesce_others`] succeeds immediately.
+//!
+//! # Two initiators, one handshake
+//!
+//! [`quiesce_others`] is the *fail-closed* initiator: a tear-down that cannot
+//! prove every peer stopped must abandon, so it waits patiently and reports an
+//! error naming the peer. [`stop_others_best_effort`] is the initiator a fatal
+//! kernel report uses: it cannot abandon — the kernel is already dying — so it
+//! waits a much shorter budget and *reports what it achieved* instead of
+//! failing. Both latch the same request, poke through the same per-port IPI,
+//! and are acknowledged by the same per-port receive path; only the patience
+//! and the failure policy differ.
 
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
 use crate::CpuId;
 
-/// The published stop request. `true` once [`quiesce_others`] has asked the
-/// other CPUs to halt; each core's interrupt-receive path reads it through
+/// The published stop request. `true` once an initiator has asked the other
+/// CPUs to halt; each core's interrupt-receive path reads it through
 /// [`stop_requested`].
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Sentinel for "no stop has been requested" in [`REQUESTER`]. No dense
+/// [`CpuId`] can name a CPU at `u32::MAX`.
+const NO_REQUESTER: u32 = u32::MAX;
+
+/// The CPU that latched the request, so its own receive path can ignore it.
+///
+/// Without this the requester can be halted by its own poke arriving late: a
+/// panic raised with interrupts enabled (a syscall body runs that way) latches
+/// the request and then, before it has written its record, takes an IPI a peer
+/// had already sent — whereupon its own receive path would acknowledge and
+/// park it, losing the one diagnosis the machine was about to produce. The
+/// requester must always reach its own halt.
+static REQUESTER: AtomicU32 = AtomicU32::new(NO_REQUESTER);
 
 /// Base of the kernel-published per-CPU **liveness** table (one
 /// [`AtomicBool`] per dense [`CpuId`], `true` once that CPU is online). Null
@@ -100,6 +125,18 @@ pub enum PublishError {
 /// interrupt in a hundred million spins is not going to.
 const QUIESCE_WAIT_SPINS: u64 = 100_000_000;
 
+/// The bounded number of ack-poll spins a **fatal report** waits for its
+/// peers, two orders of magnitude below [`QUIESCE_WAIT_SPINS`].
+///
+/// The tear-down handshake can afford patience: the machine is otherwise idle
+/// and its caller abandons on timeout. A fatal report cannot — it is holding
+/// up the one diagnosis the machine will ever emit, and it halts either way.
+/// A healthy peer only has to take an already-pending IPI and run a handful of
+/// instructions, so it acknowledges orders of magnitude inside this budget; a
+/// peer that *cannot* is wedged with interrupts masked, which is precisely
+/// what the report wants to name rather than stall behind.
+const REPORT_WAIT_SPINS: u64 = 1_000_000;
+
 /// Publish the kernel's per-CPU liveness and acknowledgement tables.
 ///
 /// Called once by the kernel during SMP bring-up, before any quiesce can be
@@ -133,14 +170,21 @@ pub fn publish_tables(
     Ok(())
 }
 
-/// Whether a cross-CPU quiesce has been requested.
+/// Whether the calling CPU has been asked to stop.
 ///
-/// Each port's interrupt-receive path reads this on every delivered IPI;
-/// when it is `true` the receiving CPU must [`acknowledge`] and park masked
-/// forever rather than return to normal kernel execution.
+/// Each port's interrupt-receive path reads this on every delivered IPI,
+/// naming itself; when it is `true` the receiving CPU must [`acknowledge`]
+/// and park masked forever rather than return to normal kernel execution.
+///
+/// Always `false` on the CPU that latched the request: that core is tearing
+/// the machine down or reporting its death and must reach its own halt rather
+/// than be parked by its own poke arriving late.
 #[must_use]
-pub fn stop_requested() -> bool {
-    STOP_REQUESTED.load(Ordering::Acquire)
+pub fn stop_requested(cpu: CpuId) -> bool {
+    // The latch is read first: a reader that observes it has, by the
+    // release/acquire pairing in `latch_and_poke`, also observed the
+    // requester it was stored with.
+    STOP_REQUESTED.load(Ordering::Acquire) && REQUESTER.load(Ordering::Acquire) != cpu
 }
 
 /// Acknowledge, from the calling CPU, that it has seen the stop request and
@@ -168,10 +212,11 @@ pub fn acknowledge(cpu: CpuId) {
 /// Request that every *online* CPU other than `current` stop, poke each one,
 /// and wait a bounded time for them all to acknowledge.
 ///
-/// `current` is the calling (boot) CPU, which is not asked to stop. `send_ipi`
-/// delivers the port's directed inter-processor interrupt to a peer (the
-/// caller supplies [`crate::SchedulerArch::send_ipi`]); a self-directed IPI is
-/// a no-op, so it is harmless even if a stale liveness bit named `current`.
+/// `current` is the calling (boot) CPU, which is not asked to stop and is
+/// recorded as the requester, so a poke arriving back at it is ignored by its
+/// own receive path rather than parking it. `send_ipi` delivers the port's
+/// directed inter-processor interrupt to a peer (the caller supplies
+/// [`crate::SchedulerArch::send_ipi`]).
 ///
 /// Returns `Ok(())` once every expected peer has acknowledged (or there are
 /// none — a single-CPU or not-yet-published system). Returns `Err(cpu)`
@@ -181,34 +226,105 @@ pub fn acknowledge(cpu: CpuId) {
 /// The stop request stays latched after this returns (acknowledged peers are
 /// parked forever), which is exactly what the one-way tear-down wants.
 pub fn quiesce_others(current: CpuId, send_ipi: impl FnMut(CpuId)) -> Result<(), CpuId> {
-    let len = TABLE_LEN.load(Ordering::Acquire);
-    let online_base = ONLINE_BASE.load(Ordering::Acquire);
-    if len == 0 || online_base.is_null() {
+    let Some((online, ack)) = published_tables() else {
         // No liveness table published: single-CPU boot, or secondaries were
         // never brought up. Nothing to quiesce.
         return Ok(());
+    };
+    latch_and_poke(current, online, ack, send_ipi);
+    match wait_counted(current, online, ack, QUIESCE_WAIT_SPINS).unresponsive {
+        None => Ok(()),
+        Some(cpu) => Err(cpu),
+    }
+}
+
+/// What a best-effort stop achieved.
+///
+/// A count rather than a verdict, because the caller is a fatal report that
+/// proceeds either way — and because "which peer would not stop" is itself
+/// evidence: a peer that cannot answer a pending IPI is wedged with interrupts
+/// masked, the shape of failure a hard lockup takes.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct StopOutcome {
+    /// Online peers the stop asked to halt (never counting `current`).
+    pub asked: u32,
+    /// How many of them acknowledged within the budget.
+    pub stopped: u32,
+    /// One peer that did not, when any remained.
+    pub unresponsive: Option<CpuId>,
+}
+
+impl StopOutcome {
+    /// The outcome on a machine with no peers to stop.
+    const NONE: Self = Self {
+        asked: 0,
+        stopped: 0,
+        unresponsive: None,
+    };
+}
+
+/// Stop every other *online* CPU **best effort**, for a fatal kernel report.
+///
+/// Latches the same stop request [`quiesce_others`] does, pokes every online
+/// peer through `send_ipi`, and waits a short bounded budget for their
+/// acknowledgements — then returns what it achieved instead of failing. The
+/// caller is a panic or a fatal-fault report: it cannot abandon and must not
+/// stall, so an unresponsive peer is *named in the report*, not waited on.
+///
+/// The stop request stays latched, so a peer that takes its IPI later still
+/// parks rather than running on over state the dying core abandoned.
+pub fn stop_others_best_effort(current: CpuId, send_ipi: impl FnMut(CpuId)) -> StopOutcome {
+    let Some((online, ack)) = published_tables() else {
+        return StopOutcome::NONE;
+    };
+    latch_and_poke(current, online, ack, send_ipi);
+    wait_counted(current, online, ack, REPORT_WAIT_SPINS)
+}
+
+/// The published liveness and acknowledgement tables, or [`None`] when none
+/// have been published (nothing to stop).
+fn published_tables() -> Option<(&'static [AtomicBool], &'static [AtomicBool])> {
+    let len = TABLE_LEN.load(Ordering::Acquire);
+    let online_base = ONLINE_BASE.load(Ordering::Acquire);
+    if len == 0 || online_base.is_null() {
+        return None;
     }
     let ack_base = ACK_BASE.load(Ordering::Acquire);
     // SAFETY: both bases are the `&'static [AtomicBool]` tables published by
     // `publish_tables`, both of length `len`; reconstructing the slices is
     // sound for the kernel's lifetime.
-    let online = unsafe { core::slice::from_raw_parts(online_base, len) };
-    let ack = unsafe { core::slice::from_raw_parts(ack_base, len) };
+    unsafe {
+        Some((
+            core::slice::from_raw_parts(online_base, len),
+            core::slice::from_raw_parts(ack_base, len),
+        ))
+    }
+}
 
+/// Clear stale acknowledgements, latch the stop request, and poke every online
+/// peer. Shared by both initiators so the request can never be latched one way
+/// in one of them and another way in the other.
+fn latch_and_poke(
+    current: CpuId,
+    online: &[AtomicBool],
+    ack: &[AtomicBool],
+    send_ipi: impl FnMut(CpuId),
+) {
     // Clear the ack table before latching the request, so a stale ack from a
     // prior handshake can never satisfy this one.
     for slot in ack {
         slot.store(false, Ordering::Relaxed);
     }
+    // The requester is published before the latch, so no CPU can observe the
+    // request without also observing who is exempt from it.
+    REQUESTER.store(current, Ordering::Release);
     STOP_REQUESTED.store(true, Ordering::Release);
-
     poke_others(current, online, send_ipi);
-    wait_for_acks(current, online, ack, QUIESCE_WAIT_SPINS)
 }
 
 /// Send a stop IPI to every online CPU other than `current`.
 ///
-/// Factored out (with [`wait_for_acks`]) so the peer-selection logic is
+/// Factored out (with [`wait_counted`]) so the peer-selection logic is
 /// exercised on the host over plain slices, independently of the published
 /// statics and the real per-port IPI.
 fn poke_others(current: CpuId, online: &[AtomicBool], mut send_ipi: impl FnMut(CpuId)) {
@@ -225,42 +341,63 @@ fn poke_others(current: CpuId, online: &[AtomicBool], mut send_ipi: impl FnMut(C
 }
 
 /// Spin, bounded by `budget` iterations, until every online CPU other than
-/// `current` has acknowledged, returning `Ok(())`; otherwise return `Err(cpu)`
-/// naming a peer that never acknowledged (fail closed).
+/// `current` has acknowledged, and report what was achieved.
 ///
-/// Pure over its slices and budget so the host suite can drive both the
-/// all-acknowledged and the timed-out paths with a tiny budget, with no
+/// The one wait both initiators use: [`quiesce_others`] narrows the outcome to
+/// its fail-closed `Result`, while [`stop_others_best_effort`] returns it
+/// whole. Pure over its slices and budget so the host suite can drive the
+/// all-acknowledged, partial, and timed-out paths with a tiny budget and no
 /// dependence on the published statics.
-fn wait_for_acks(
+///
+/// The spin is the narrow, bounded hardware handshake the charter permits: the
+/// caller is tearing the machine down or reporting its death and has nothing
+/// else it may safely do, and the budget makes it terminate regardless.
+fn wait_counted(
     current: CpuId,
     online: &[AtomicBool],
     ack: &[AtomicBool],
     budget: u64,
-) -> Result<(), CpuId> {
+) -> StopOutcome {
     let mut spins = 0u64;
     loop {
-        let mut missing = None;
-        for (idx, live) in online.iter().enumerate() {
-            // As in `poke_others`: an index no `CpuId` can name is not a real
-            // CPU, so it is never awaited.
-            let Ok(cpu) = CpuId::try_from(idx) else {
-                continue;
-            };
-            if cpu != current && live.load(Ordering::Acquire) && !ack[idx].load(Ordering::Acquire) {
-                missing = Some(cpu);
-                break;
-            }
+        let outcome = tally(current, online, ack);
+        if outcome.unresponsive.is_none() {
+            return outcome;
         }
-        match missing {
-            None => return Ok(()),
-            Some(cpu) => {
-                spins += 1;
-                if spins >= budget {
-                    return Err(cpu);
-                }
-                core::hint::spin_loop();
-            }
+        spins += 1;
+        if spins >= budget {
+            return outcome;
         }
+        core::hint::spin_loop();
+    }
+}
+
+/// Count the online peers of `current` and how many have acknowledged, naming
+/// the first that has not.
+fn tally(current: CpuId, online: &[AtomicBool], ack: &[AtomicBool]) -> StopOutcome {
+    let mut asked = 0u32;
+    let mut stopped = 0u32;
+    let mut unresponsive = None;
+    for (idx, live) in online.iter().enumerate() {
+        // A dense CpuId is a `u32`; a table longer than `u32::MAX` cannot name
+        // a real CPU, so a non-representable index is never awaited.
+        let Ok(cpu) = CpuId::try_from(idx) else {
+            continue;
+        };
+        if cpu == current || !live.load(Ordering::Acquire) {
+            continue;
+        }
+        asked += 1;
+        if ack[idx].load(Ordering::Acquire) {
+            stopped += 1;
+        } else if unresponsive.is_none() {
+            unresponsive = Some(cpu);
+        }
+    }
+    StopOutcome {
+        asked,
+        stopped,
+        unresponsive,
     }
 }
 

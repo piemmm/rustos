@@ -69,6 +69,7 @@ for filesystems, the feature section below.
 | Machine power-off / restart (`system_power`) | ◐ restart | ✓ PSCI | ✓ SBI | — |
 | Side-channel mitigation | ✓ | ✓ | ✓ | ✓ |
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
+| Fatal kernel-fault report (registers, backtrace, stop-the-world) | ◐ `#PF` only | ✓ | ✓ | — |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
 | Runtime CPU-feature dispatch (page-zero accel) | ✓ ERMS | ✓ DC ZVA | — baseline | — baseline |
 | Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |

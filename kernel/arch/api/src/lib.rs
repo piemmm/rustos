@@ -153,7 +153,7 @@ pub mod xtlb;
 pub use backtrace::{
     conformance as backtrace_conformance, walk as backtrace_walk, Backtrace, BacktraceEntry,
     BacktraceProfile, CpuStateCapture, FrameLayout, NamedReg, RegisterSnapshot, StackBounds,
-    StackReader, MAX_FRAMES as BACKTRACE_MAX_FRAMES, MAX_NAMED_REGS,
+    StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES, MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 
 pub use sidechannel::{
@@ -221,7 +221,9 @@ pub use takeover::{conformance as takeover_conformance, MachineTakeover, Takeove
 
 pub use quiesce::{
     acknowledge as quiesce_acknowledge, publish_tables as quiesce_publish_tables, quiesce_others,
+    stop_others_best_effort as quiesce_stop_others_best_effort,
     stop_requested as quiesce_stop_requested, PublishError as QuiescePublishError,
+    StopOutcome as QuiesceStopOutcome,
 };
 
 pub use watchdog::{

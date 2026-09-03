@@ -28,6 +28,7 @@
 
 use tairix_arch_api::{
     Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
+    Translation, MAX_TABLE_LEVELS,
 };
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -160,6 +161,67 @@ impl CpuStateCapture for Backtracer {
     #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
     fn stack_bounds(&self) -> Option<StackBounds> {
         None
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    fn active_root(&self) -> Option<u64> {
+        let ttbr0: u64;
+        // SAFETY: reading `TTBR0_EL1` into an output operand has no side
+        // effects and cannot fault at EL1.
+        unsafe {
+            core::arch::asm!("mrs {}, ttbr0_el1", out(reg) ttbr0, options(nomem, nostack, preserves_flags));
+        }
+        Some(ttbr0)
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    fn translation(&self, addr: u64, write: bool) -> Translation {
+        let par = crate::paging::translate_el1(addr, write);
+        if crate::paging::par_faulted(par) {
+            Translation::Unmapped { status: par }
+        } else {
+            Translation::Mapped(crate::paging::par_phys(par, addr))
+        }
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    fn translation(&self, addr: u64, write: bool) -> Translation {
+        // Off-target: `AT` exists only on the real PE. The freestanding arm
+        // above is the probe; the host build has no regime to interrogate.
+        let _ = (addr, write);
+        Translation::Unsupported
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    fn translation_after_tlb_flush(&self, addr: u64, write: bool) -> Translation {
+        // `AT` is permitted to answer from the TLB, so a stale or
+        // granule-conflicting entry makes it refuse an address the tables
+        // map. Discarding every cached translation first forces the answer to
+        // come from the tables themselves.
+        crate::paging::invalidate_all_inner_shareable();
+        self.translation(addr, write)
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    fn translation_after_tlb_flush(&self, addr: u64, write: bool) -> Translation {
+        let _ = (addr, write);
+        Translation::Unsupported
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    fn table_path(&self, addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+        match self.active_root() {
+            Some(root) => crate::paging::table_path(root, addr, out),
+            None => 0,
+        }
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    fn table_path(&self, addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+        // Off-target: there is no live translation regime to walk, and the
+        // walk's own probe exists only on the real PE.
+        let _ = (addr, out);
+        0
     }
 }
 

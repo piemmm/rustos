@@ -1685,7 +1685,7 @@ delivers a cumulative ACK up to `snd_max` and asserts `snd_una` advances and
 the RTO disarms (it froze before the fix). Arch-neutral — every port shares
 `lib/net`.
 
-## D13 — secondary-CPU hard lockup under `stress --cpu 20` (enabler landed, fix OPEN)
+## D13 — secondary-CPU hard lockup under `stress --cpu 20` (mute-fault and deadlock-escalation defects FIXED; the metal `--cpu 20` wedge still to re-confirm)
 
 **State:** the `stress --cpu 20 --timeout 120s --background` wedge on the
 debug image is a *distinct* defect from D12 (whose interrupt-completion path
@@ -1984,6 +1984,29 @@ metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer
 wedges on metal. (The QEMU stress vertical's own early-boot silence was D67,
 a different defect entirely, and is fixed. The FIQ and EDPCSR samplers remain
 the standing masked-section observers for any *future* wedge.)
+
+**The next metal boot decided it: see D81.** The fault theory was right. A
+same-EL *write* to an untranslated scan-out page, inside
+`video::reclaim_surface`'s repaint, on a core holding both the render lock and
+the kernel heap lock — with the two peers already queued behind it. The
+mute-fault and deadlock-escalation defects below are what made that one boot
+conclusive where a dozen before it were not.
+
+**What that boot decided, as staged.** The two defects above are closed, so a
+reproduction can no longer be silent: a same-EL fault inside `recv_call` now
+prints its `syndrome` / `fault_addr` / `fault_pc` and stops the world with a
+peer census. Three outcomes, each conclusive:
+
+- An `id=4011` record — the fault theory is confirmed and the syndrome names
+  the faulting access outright.
+- No fatal record but the boot still wedges — the theory is *wrong*: the hold
+  is not a parked fault, and the live-owner stamp has some other explanation
+  (the endpoint / `Inner` lifetime is the standing hypothesis, since the
+  driver-store kthread holds the endpoint on its own frame while `callreg`
+  holds an `Arc`).
+- An `id=4010`/`id=4011` record naming `peer_unresponsive` — whichever core
+  that is was already wedged with interrupts masked before the report, which
+  is the hard-lockup half rather than the fault half.
 
 ---
 
@@ -4779,6 +4802,25 @@ alongside `desktop-pressure-qemu-aarch64`:
 | `autoload-input-qemu-riscv64` | 120 s | UNFINISHED | 42.5 s | 6.9 s |
 | `netstack-autoload-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | 9.6 s |
 | `netstack-dhcp-qemu-riscv64` | 720 s | UNFINISHED | 179.5 s | 7.9 s |
+| `netstack-bond-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | — |
+| `netstack-static-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | — |
+
+`netstack-static-qemu-riscv64` matters more than another row: it had
+previously been observed *passing* the loaded matrix, which is what made it
+usable as a control. A vertical crossing from control to affected says the set
+is bounded by host demand on the day, not by anything about the vertical — so a
+future run must re-establish its own controls rather than trusting this list.
+
+**The set is wider than four, and the two sub-mechanisms do not split by
+vertical.** `netstack-bond-qemu-riscv64` was added from a later run, and it
+failed the *autoload* way, not the netstack way: only the boot-floor
+`virtio_blk` reached `id=7001`, and `id=4180` (channel published),
+`id=16009`/`id=13010` (interface bound) and `id=16012` (echo served) are all
+absent — so the guest did **not** succeed, unlike the netstack rows above it.
+Its in-guest stall record is `stalled_ms=101058`, matching the `101047`
+already listed below. Treat the vertical names here as a sample of the
+affected riscv64 set rather than its definition, and read the sub-mechanism
+off each run's transcript rather than off the row.
 
 All three are the *absolute* runtime ceiling, not the inactivity deadline, and
 all three leave the guest alive and parked in `wait_for_interrupt` with nothing
@@ -4870,3 +4912,218 @@ recorded; a refusal in flight leaves the decode to land), and
 `userland/apps/files` (a whole window's grid, over the real renderer at the real
 window size, keeps every tile's artwork across repeated repaints and a scroll,
 and re-decodes nothing).
+
+---
+
+## D81 — a block split invalidated one page instead of the block's whole range, so a stale coarse TLB entry faulted unrelated addresses (FIXED, awaiting metal confirmation)
+
+**This is the Pi 4 boot wedge D13 chased**, and the fatal-fault reporting D13
+closed is what made it legible. The mechanism is proved from metal, and the fix
+is landed; it reproduced in roughly 1 boot in 20, so a clean run is weak
+evidence and confirmation needs several boots.
+
+### The mechanism
+
+`unmap_single_page` tears down a kthread kernel-stack guard page on a **live**
+root. To reach a 4 KiB leaf it calls `split_block`, which refines the covering
+2 MiB block (and, the first time in a gigapage, the 1 GiB block) into a table
+of finer entries — then flushed **one page**, the guard page it came for.
+
+Refining a block changes the *granule* every address that block covered
+translates at. A TLB holding a coarse entry for any of those other addresses
+now conflicts with the finer walk, and the architecture permits it to fault
+that walk. So the maintenance owed was the whole former block's range on every
+PE; the code invalidated one 4 KiB page of it, leaving every other address in
+the block able to take a spurious level-2 translation fault against tables that
+plainly mapped it.
+
+The kernel heap shares low identity-mapped RAM with those guard pages, which is
+why the victim was heap metadata: the faulting PCs resolve to
+`tairix_kalloc::Inner::push_free` and `tairix_kalloc::Block::has`.
+
+### The evidence that fixed it
+
+`id=4011 fatal kernel fault cpu=1 syndrome=0x96000046 fault_addr=0x02ca1a88
+fault_pc=0x2ce15c root=0x4540000 fault_maps=no fault_par=0x080d
+fault_hole=block maps_after_tlbi=yes par_after_tlbi=0x02ca1a88
+desc_0=0x4541003 desc_1=0x0040000002c00701 peers_stopped=2 peers_asked=3`
+
+- `DFSC=0b000110` — translation fault at **level 2**, i.e. the 2 MiB granule.
+- **`maps_after_tlbi=yes`** — discarding the cached translations makes the same
+  address translate, tables untouched. That is what convicted TLB maintenance
+  rather than the tables, and no combination of the older fields could.
+- `desc_1` is a **valid** 2 MiB block for the enclosing region, every time.
+- **The address varied across captures** — `0x3e402000`, `0x02a7cb38`,
+  `0x02ca1a88` — always inside gigapage 0, always a block `desc_1` maps. A
+  varying victim is the signature of a granule conflict: it refuses whatever
+  the core happens to touch, not a particular address.
+
+Three explanations were killed by reading the port rather than by inference,
+and are recorded so they are not re-derived:
+
+- **Not cache visibility.** `TCR_VALUE` sets `IRGN0`/`ORGN0` to write-back
+  read/write-allocate and `SH0` to inner-shareable, so table walks are
+  cacheable and coherent with the data caches.
+- **Not ASID aliasing.** The entries are global (`desc_1` bit 11 clear), but
+  `activate_user_root` already issues `tlbi vmalle1` on every root change.
+- **Not a dirty secondary TLB.** `adopt_boot_translation` →
+  `program_stage1_translation` issues `tlbi vmalle1`, so a secondary starts
+  clean; the conflicting entry is latched *after* it is online, by a runtime
+  split.
+
+### The fix
+
+`split_block` reports whether a granule actually changed and, when it did,
+issues one `tlbi vmalle1is` — the whole regime, on every PE — instead of
+leaving the caller's per-page flush to cover a block-sized change. An
+already-fine hierarchy changes no granule and pays no invalidation.
+`refine_to_page` carries that decision so it is host-testable
+(`refining_a_block_reports_the_granule_change_that_owes_tlb_maintenance`,
+`refining_a_fresh_2mib_block_reports_a_granule_change`); the invalidation
+instruction itself has no off-target effect.
+
+The false claims that hid this — `split_block`'s own "break-before-make-free
+for the running region", `prepare_guard_arena`'s, `unmap_single_page`'s "so
+disturbs no live address", and the `docs/src/platform/aarch64.md` copy — are
+corrected in place.
+
+**Residual exposure, tracked as D82:** the few instructions between publishing
+the table and completing the invalidation are still a break-before-make
+violation. Refining a root before anything translates through it removes even
+that.
+
+### Landed alongside, from the same investigation
+
+- **The report stops the world before it reads anything about the machine**
+  (`kernel/core/src/panic.rs`). Both the probe and the descriptor walk were
+  previously taken while peers ran, so they could describe two different
+  states — and did, which cost a diagnosis. Regression test:
+  `the_translation_readings_are_taken_after_the_stop`.
+- **The post-flush re-probe** (`maps_after_tlbi` / `par_after_tlbi`), a closed
+  Arch-HAL slice (`translation_after_tlb_flush`) with its own conformance
+  vertical: a port that cannot probe cannot report a verdict. This is the
+  reading that decided the defect.
+- **The console proves the scan-out reachable before painting it.**
+  `attach_console` walks every 4 KiB page of the surface with the non-faulting
+  probe and refuses the console if any page does not translate, so the UART
+  keeps it and `video_console` reports the refusal. `apply_surface` re-proves
+  it, because that is the path a fatal report takes to reclaim the screen. The
+  `// SAFETY:` claim that the surface is "identity-mapped RAM" was false and is
+  now earned. (Unrelated to the fault above, which is why the first capture's
+  framebuffer address was a red herring.)
+- **`split_block` orders a child table's fill ahead of the descriptor that
+  publishes it** on aarch64 and riscv64; x86_64 needs none under TSO and says
+  so, rather than leaving the asymmetry to look like an oversight.
+
+### Not the defect
+
+`configure_identity_typing` passes `(fb_base, fb_len)` to `identity_ram_mask`,
+which is a **per-gigapage** mask, so on this board it only re-marks gigapage 0
+— already set by the kernel's own extent. That makes the call redundant *here*,
+not wrong: on a board whose scan-out lies outside both `/memory` and the
+kernel's gigapage it is the only thing that maps it, and `widen_ram_gigapages`
+merges rather than replaces. A second, finer-grained mapping path would add
+machinery with no case where it helps.
+
+**Done when:** several consecutive Pi 4 boots clear the window the fault used
+to land in, and a QEMU vertical repaints the framebuffer console post-MMU so a
+scan-out the active root does not cover is caught in the matrix rather than on
+metal.
+
+## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN)
+
+Two paths refine a block on a root that is **already the active translation
+regime**: `boot.rs` calls `AddressSpace::prepare_guard_arena` after
+`enable_mmu_and_vectors`, and at runtime `VirtualMemory::unmap_single_page`
+splits the block covering a kthread guard page. Replacing a valid block leaf
+with a table is a **block-size change on a live translation**: identical output
+address and permissions, different granule, and a TLB holding both granules for
+one address is CONSTRAINED UNPREDICTABLE.
+
+D81 was the consequence of that violation going *unmaintained*, and is fixed:
+`split_block` now invalidates the whole regime on every PE whenever a granule
+changed. **What remains is the break-before-make window itself** — the few
+instructions between publishing the table descriptor and completing the
+invalidation, during which a PE may latch a conflicting entry. The invalidation
+clears it, so the exposure is bounded rather than permanent, but it is still a
+window the architecture leaves undefined.
+
+**Break-before-make cannot simply be added here:** the break window would
+leave the range unmapped, and for gigapage 0 that range holds the executing
+kernel, its stack, and its page tables. The fix is for the live refinement
+never to happen — carve the arena *before* the MMU is enabled and lay it down
+at 4 KiB granularity from the start, so the tables are complete when
+`enable_mmu_and_vectors` issues its `dsb sy` / `tlbi vmalle1` / `isb`, and make
+the runtime path find an already-fine hierarchy (which then changes no granule
+and needs no invalidation at all).
+
+**Why it is not fixed in the change that found it:** the arena extent is
+derived post-MMU from `build_boot_memory_layout`, which allocates a `Vec` and
+so needs the heap, which needs the cacheable identity map. Removing the live
+refinement therefore requires reading the `/memory` windows pre-MMU into a
+fixed-capacity array and carving the arena from those — with one shared
+`carve_guard_arena` over a slice, so the pre-MMU and post-MMU views cannot
+disagree. That is a boot-discovery restructure, not a barrier.
+
+**riscv64 owes a remote fence.** `publish_mappings` there reasons that "the
+scheduler never runs one space on two harts at once, so no remote fence is
+owed". That holds for a process space and **not** for the kernel/boot root,
+which is active on every hart — so a granule change on it needs an SBI
+`remote_sfence_vma` to the sharing harts, where the port currently issues a
+local `sfence.vma` only. Sv39 additionally permits caching invalid entries, so
+this port cannot lean on aarch64's "a walker never caches an invalid entry"
+reasoning either. The riscv64 QEMU verticals are single-hart, so the matrix
+cannot currently observe this.
+
+**Done when:** no `split_block` call reaches a root that is the active
+translation regime; the arena is laid down fine-grained before the MMU is
+enabled; and riscv64's granule-change maintenance reaches every hart sharing
+the root.
+---
+
+## D83 — on x86_64 only a page fault reaches the fatal-fault report; every other kernel-mode exception still dies mutely (OPEN)
+
+Noticed while closing D13's first defect (the production kernel now installs a
+fatal-fault handler on every port, so a kernel-mode exception reaches
+`kernel_core::fault_dump` and states its syndrome / faulting address /
+faulting instruction). aarch64 and riscv64 fan **every** unhandled exception
+into one tail (`exceptions::fatal_exception` / `trap::fatal_exception`), so
+that install covers all of them. x86_64 does not: `percpu::init` fills every
+IDT slot with the one fail-closed default thunk, and only vector 14 (`#PF`)
+is later replaced with a dedicated, error-code-aware entry that consults the
+installed handler. So a kernel-mode `#GP`, `#UD`, `#DF`, `#SS`, alignment
+check, or machine check reaches
+`interrupts::tairix_arch_x86_64_default_interrupt`, whose whole body is
+`qemu_exit::exit_failure()` — a write to QEMU's `isa-debug-exit` port
+followed by `halt_forever()`. On real hardware that port write does nothing,
+so the machine parks with no diagnosis at all: exactly the mute-death defect
+D13 named, surviving on one port for one class of exception.
+
+Two problems compose:
+
+- **No per-vector stub, so no syndrome to report.** The default thunk is
+  vector-agnostic by construction (`interrupts.s` pushes `SavedRegs` and calls
+  one Rust function), so it cannot say *which* exception fired or read the
+  error code the CPU pushed for the subset of vectors that push one. Routing it
+  to `fault_dump` today would mean fabricating `syndrome`/`fault_addr`, which
+  the record must never do. The honest fix is what the arch crate's own module
+  doc already stages: extend `define_isr!` to emit vector-specific stubs
+  (vector number, and error code where the vector pushes one), then point every
+  exception vector at them and reach the installed handler exactly as the
+  `#PF` entry does.
+- **A test-harness affordance sits in a production fatal path.** The default
+  thunk's `qemu_exit::exit_failure()` writes port `0xf4` on a production
+  kernel. It must park through the port's ordinary halt, with the report
+  written first.
+
+Not fixed in the D13 change: per-vector IDT stubs are a self-contained piece of
+x86_64 work with their own conformance surface, and folding them into the
+fatal-report change would have made neither reviewable. Surfaced here rather
+than left silent.
+
+**Done when:** every kernel-mode exception vector on x86_64 carries a stub
+that names its vector (and error code where one exists), reaches the installed
+`FaultHandlerFn`, and produces one `AuditEvent::KernelFault` record before the
+CPU halts; the default thunk no longer writes a QEMU debug port; and a QEMU
+vertical proves a deliberate kernel-mode `#UD` (or `#GP`) is reported rather
+than parking silently, alongside the existing `#PF` verticals.

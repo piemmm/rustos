@@ -419,6 +419,12 @@ impl AddressSpace {
                 frames.alloc_table().ok_or(MapError::PoolExhausted)?;
             // 2 MiB sub-entries (shift 21) are still *leaves*, one finer level.
             shatter_pte_into(entries, e2, 21);
+            // The child's entries must be observable before the pointer that
+            // reaches them: a table walk is not ordered against these plain
+            // stores, so without the fence a walker may follow the new table
+            // while its high entries still read as the frame's previous
+            // contents, and fault on an address the leaf it replaced covered.
+            publish_table_update();
             self.root[i2] = pte_from_phys(phys, flags::VALID);
         }
 
@@ -438,9 +444,12 @@ impl AddressSpace {
                 frames.alloc_table().ok_or(MapError::PoolExhausted)?;
             // 4 KiB sub-entries (shift 12) are level-0 page leaves.
             shatter_pte_into(entries, e1, 12);
+            // Ordered for the same reason as the child above.
+            publish_table_update();
             l1[i1] = pte_from_phys(phys, flags::VALID);
         }
         // L1 now resolves `vaddr` through a 4 KiB page leaf.
+        publish_table_update();
         Ok(())
     }
 

@@ -404,6 +404,12 @@ impl SchedulerArch for X86_64Arch {
             // contract documents `send_ipi` as callable from process
             // context only (the timer ISR uses
             // `kernel/arch/x86_64::preempt`'s own EOI path).
+            //
+            // The one exception is the fatal-report stop-the-world, which
+            // pokes peers from exception context. It is sound there and
+            // nowhere else: the write pair cannot spin, and an in-flight
+            // ICR it clobbers belongs to a mainline that is never resumed
+            // because the report halts this CPU.
             let mmio = unsafe {
                 crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32)
             };

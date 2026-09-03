@@ -676,6 +676,55 @@ fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
 }
 
 #[test]
+fn refining_a_block_reports_the_granule_change_that_owes_tlb_maintenance() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x10_0000;
+
+    // Two levels of block become tables, so the granule changed and the
+    // whole former block's range owes invalidation — not just this page.
+    assert!(
+        space.refine_to_page(va).expect("refine"),
+        "shattering a 1 GiB block and its 2 MiB child is a granule change"
+    );
+
+    // Already 4 KiB: nothing changed granule, so no invalidation is owed and
+    // a repeated teardown does not flush the machine's TLBs for nothing.
+    assert!(
+        !space.refine_to_page(va).expect("idempotent refine"),
+        "an already-fine hierarchy owes no TLB maintenance"
+    );
+
+    // A sibling page inside the same 2 MiB block is already covered by the
+    // L3 table the first refine installed, so it too owes nothing.
+    assert!(
+        !space
+            .refine_to_page(va + PAGE_SIZE as u64)
+            .expect("sibling refine"),
+        "a sibling page under an existing L3 table owes no maintenance"
+    );
+}
+
+#[test]
+fn refining_a_fresh_2mib_block_reports_a_granule_change() {
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va: u64 = (1u64 << 30) + 0x10_0000;
+    space.refine_to_page(va).expect("first refine");
+
+    // A different 2 MiB block under the same (already-table) L1 slot: the L1
+    // level no longer changes, but this block's does — and that is exactly
+    // the case a Pi 4 fault came from, where the heap shared the shattered
+    // block with a guard page.
+    assert!(
+        space
+            .refine_to_page(va + BLOCK_2MIB)
+            .expect("neighbouring block refine"),
+        "a still-coarse neighbouring block is a granule change"
+    );
+}
+
+#[test]
 fn split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping() {
     static POOL: PageTablePool = PageTablePool::new();
     let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
@@ -1229,5 +1278,31 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     assert_eq!(
         slot, 0,
         "the shared window descriptor was dropped, not walked"
+    );
+}
+
+/// The `PAR_EL1` decoders: the fault bit is bit 0, and a successful result's
+/// physical address is its `PA` field plus the offset within the page.
+///
+/// Pure, so both are pinned on the host even though the `AT` probe that
+/// produces the value only exists on the real PE.
+#[test]
+fn par_decoders_read_the_fault_bit_and_rebuild_the_physical_address() {
+    use super::{par_faulted, par_phys};
+
+    // Bit 0 set = translation faulted; the rest of the word is fault status.
+    assert!(par_faulted(0x9));
+    assert!(par_faulted(1));
+    assert!(!par_faulted(0));
+    assert!(!par_faulted(0x0000_0000_3e40_0000));
+
+    // A success carries the page's PA in [47:12]; the low 12 bits come from
+    // the probed address, so the result addresses the exact byte.
+    let par = 0x0000_0000_3e40_2000;
+    assert_eq!(par_phys(par, 0x0000_0000_3e40_2abc), 0x0000_0000_3e40_2abc);
+    // Attribute bits above the PA field never leak into the address.
+    assert_eq!(
+        par_phys(0xff00_0000_3e40_2000 | 0xf00, 0x10),
+        0x0000_0000_3e40_2010
     );
 }

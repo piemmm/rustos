@@ -103,8 +103,24 @@ the burn-down is complete.
 | Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
 | Memory-tagging profile (§19.10)   |   ✓    | ✓ MTE pend | ✓ unsup | ✓ unsup |
 | Post-mortem capture (`CpuStateCapture`) | ✓ | ✓ | ✓ | ✓ unsup |
+| Fatal report stops the world (`quiesce`) | ✓ | ✓ | ✓ | n/a |
+| Fatal report names the active root | ✓ `CR3` | ✓ `TTBR0` | ✓ `satp` | ✓ unsup |
+| Non-faulting translation probe | ✓ unsup | ✓ `AT` | ✓ unsup | ✓ unsup |
 | Machine takeover (`MachineTakeover`, optional) | ✓ | ✓ | ✓ | n/a |
 | **Arch HAL conformance suite**    |   ✓    |    ✓    |    ✓    |   ✓    |
+
+**Stopping the other cores on a fatal report is not a HAL slice**, and a
+reader looking for one should stop looking: `tairix_arch_api::quiesce` already
+owns the cross-CPU stop protocol arch-neutrally, and its only per-silicon
+halves are `SchedulerArch::send_ipi` (already in the HAL) and each port's
+IPI receive path acknowledging and parking. A panic or fatal-fault report
+drives it through `stop_others_best_effort` — the same latch, poke, and ack as
+the takeover's `quiesce_others`, differing only in patience and in reporting
+rather than failing closed. A second slice would mean two stop protocols
+racing over the same cores. `MachineTakeover` is *not* the mechanism: it is the
+irreversible tear-down that flattens paging, which would pull the ground out
+from under the dump being written. wasm32 is `n/a` because it has no
+`KernelArch` implementation and so no in-guest fatal-report path at all.
 
 `MachineTakeover` (`kernel/arch/api/src/takeover.rs`) is **not** a §17.2
 mandatory primitive — the §17.2 burn-down above stays complete. It is the

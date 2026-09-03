@@ -44,8 +44,10 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_api::backtrace::{
-    walk, CpuStateCapture, StackReader, MAX_FRAMES as BACKTRACE_MAX_FRAMES, MAX_NAMED_REGS,
+    walk, CpuStateCapture, StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES,
+    MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
+use tairix_arch_api::quiesce_stop_others_best_effort;
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
@@ -259,26 +261,41 @@ impl Fatal<'_> {
 const REG_CAP: usize = MAX_NAMED_REGS + 3;
 /// Number of backtrace frames the dump can carry (matches the walker cap).
 const FRAME_CAP: usize = BACKTRACE_MAX_FRAMES;
-/// Total field slots: the four base fields plus the register and frame
-/// blocks.
-const FIELD_CAP: usize = 4 + REG_CAP + FRAME_CAP;
+/// Total field slots: the four base fields, the three that report the
+/// stop-the-world outcome, the six that report the active translation regime,
+/// the translation descriptors, and the register and frame blocks.
+const FIELD_CAP: usize = 13 + MAX_TABLE_LEVELS + REG_CAP + FRAME_CAP;
 
-/// Capture the register snapshot and walk the backtrace into the caller's
-/// stack buffers, returning `(n_regs, n_frames)`.
+/// Stack storage the register and backtrace fields are formatted into.
 ///
-/// Split out of [`panic_dump`] only to keep that function flat; it is
-/// still allocation-free and reads stack memory only through the
-/// bounds-checked [`RawStackReader`] (the walk never faults on a corrupt
-/// chain). The buffers are borrowed from the panic frame so their contents
-/// outlive the assembled field list.
-fn capture_into(
-    bt: &dyn CpuStateCapture,
-    reg_bufs: &mut [[u8; 18]; REG_CAP],
-    reg_names: &mut [&'static str; REG_CAP],
-    frame_bufs: &mut [[u8; 18]; FRAME_CAP],
-    frame_keys: &mut [[u8; 16]; FRAME_CAP],
-    frame_key_lens: &mut [usize; FRAME_CAP],
-) -> (usize, usize) {
+/// Declared in [`dump`]'s frame, like [`CauseBufs`], so the formatted
+/// strings outlive the assembled field list.
+struct CaptureBufs {
+    regs: [[u8; 18]; REG_CAP],
+    reg_names: [&'static str; REG_CAP],
+    frames: [[u8; 18]; FRAME_CAP],
+    frame_keys: [[u8; 16]; FRAME_CAP],
+    frame_key_lens: [usize; FRAME_CAP],
+}
+
+impl CaptureBufs {
+    const fn new() -> Self {
+        Self {
+            regs: [[0; 18]; REG_CAP],
+            reg_names: [""; REG_CAP],
+            frames: [[0; 18]; FRAME_CAP],
+            frame_keys: [[0; 16]; FRAME_CAP],
+            frame_key_lens: [0; FRAME_CAP],
+        }
+    }
+}
+
+/// Capture the register snapshot and walk the backtrace into `bufs`,
+/// returning `(n_regs, n_frames)`.
+///
+/// Allocation-free, and reads stack memory only through the bounds-checked
+/// [`RawStackReader`], so the walk never faults on a corrupt chain.
+fn capture_into(bt: &dyn CpuStateCapture, bufs: &mut CaptureBufs) -> (usize, usize) {
     let snap = bt.capture();
 
     // Explicit unwinder-critical registers first, then the named GP
@@ -286,8 +303,8 @@ fn capture_into(
     let mut n_regs = 0usize;
     let mut push_reg = |name: &'static str, value: u64| {
         if n_regs < REG_CAP {
-            let _ = format_hex_u64(value, &mut reg_bufs[n_regs]);
-            reg_names[n_regs] = name;
+            let _ = format_hex_u64(value, &mut bufs.regs[n_regs]);
+            bufs.reg_names[n_regs] = name;
             n_regs += 1;
         }
     };
@@ -319,8 +336,8 @@ fn capture_into(
 
     // Format each frame address as hex and its `frame_N` key.
     for (i, addr) in frame_addrs.iter().take(n_frames).enumerate() {
-        let _ = format_hex_u64(*addr, &mut frame_bufs[i]);
-        frame_key_lens[i] = format_frame_key(i, &mut frame_keys[i]);
+        let _ = format_hex_u64(*addr, &mut bufs.frames[i]);
+        bufs.frame_key_lens[i] = format_frame_key(i, &mut bufs.frame_keys[i]);
     }
 
     (n_regs, n_frames)
@@ -436,6 +453,209 @@ fn cause_fields<'b>(fatal: &Fatal<'b>, bufs: &'b mut CauseBufs) -> [Field<'b>; 3
     }
 }
 
+/// Take the display surface back from a graphical session that holds a seat.
+///
+/// Done once, ahead of the re-entrancy guard, so a nested terse record is
+/// visible too. Deliberately *not* repeated after the world is stopped: a
+/// repaint can fault (a scan-out the active root does not map), and nothing
+/// that can fault may sit between capturing this core's state and writing the
+/// record — losing the screen copy of a report is a far smaller failure than
+/// losing the report.
+fn reclaim_surfaces(consoles: &[crate::console::ConsoleDevice]) {
+    for device in consoles {
+        device.reclaim_surface();
+    }
+}
+
+/// Regime fields a fault report can carry: the active root, the re-probe
+/// verdict and its raw result, the hole extent, and the post-flush verdict
+/// and its raw result.
+const REGIME_FIELDS: usize = 6;
+
+/// Stack storage for the active-translation-regime fields.
+struct RegimeBufs {
+    root: [u8; 18],
+    detail: [u8; 18],
+    flushed: [u8; 18],
+}
+
+impl RegimeBufs {
+    const fn new() -> Self {
+        Self {
+            root: [0; 18],
+            detail: [0; 18],
+            flushed: [0; 18],
+        }
+    }
+}
+
+/// Coarsest granule containing an unmapped address that still translates.
+///
+/// A translation fault says an address is absent; it does not say *how much*
+/// is absent, and that is the difference between two unrelated defects — a
+/// leaf someone unmapped versus a region never mapped at all. Probing the
+/// containing 2 MiB and 1 GiB bases separates them without dereferencing
+/// anything.
+const HOLE_GRANULES: [(u64, &str); 2] = [(1 << 21, "block"), (1 << 30, "gigapage")];
+
+/// Describe how much around `addr` is unmapped, by probing its containing
+/// granules with the port's non-faulting probe.
+///
+/// `"page"` when the enclosing 2 MiB block translates (so only finer leaves
+/// are absent), `"block"` when the gigapage translates but that block does
+/// not, `"gigapage"` when neither does, and `"unsupported"` on a port with no
+/// probe.
+fn hole_extent(bt: &dyn CpuStateCapture, addr: u64) -> &'static str {
+    let mut absent = "page";
+    for (size, name) in HOLE_GRANULES {
+        match bt.translation(addr & !(size - 1), true) {
+            Translation::Mapped(_) => return absent,
+            Translation::Unmapped { .. } => absent = name,
+            Translation::Unsupported => return "unsupported",
+        }
+    }
+    absent
+}
+
+/// Describe the translation regime the report is running under: which root
+/// is active, and — for a fault — how its faulting address translates *now*.
+///
+/// Whether an address translates is a property of the active root, not of the
+/// machine, so a fault report that names only the address cannot say which
+/// address space refused it. The re-probe additionally separates a
+/// persistently unmapped address from one that translates again by the time
+/// the report runs, which says the mapping changed under the faulting access.
+fn regime_fields<'b>(
+    fatal: &Fatal<'_>,
+    bt: Option<&dyn CpuStateCapture>,
+    bufs: &'b mut RegimeBufs,
+    want_descs: &mut bool,
+) -> ([Field<'b>; REGIME_FIELDS], usize) {
+    let mut fields = [Field {
+        key: "",
+        value: FieldValue::Str(""),
+    }; REGIME_FIELDS];
+    let Some(bt) = bt else {
+        return (fields, 0);
+    };
+    let mut n = 0usize;
+    if let Some(root) = bt.active_root() {
+        fields[n] = Field {
+            key: "root",
+            value: FieldValue::Str(format_hex_u64(root, &mut bufs.root)),
+        };
+        n += 1;
+    }
+    if let Fatal::Fault(fault) = fatal {
+        // A data abort's syndrome says whether it was a write; re-probing the
+        // same access kind is what makes the answer comparable to the fault.
+        let (verdict, detail) = match bt.translation(fault.address, true) {
+            Translation::Unsupported => ("unsupported", None),
+            Translation::Mapped(phys) => ("yes", Some(phys)),
+            Translation::Unmapped { status } => ("no", Some(status)),
+        };
+        fields[n] = Field {
+            key: "fault_maps",
+            value: FieldValue::Str(verdict),
+        };
+        n += 1;
+        if let Some(detail) = detail {
+            fields[n] = Field {
+                key: "fault_par",
+                value: FieldValue::Str(format_hex_u64(detail, &mut bufs.detail)),
+            };
+            n += 1;
+        }
+        if verdict == "no" {
+            fields[n] = Field {
+                key: "fault_hole",
+                value: FieldValue::Str(hole_extent(bt, fault.address)),
+            };
+            n += 1;
+            // An address the tables map but the TLB refuses is a maintenance
+            // defect, and it is indistinguishable from a clobbered table
+            // until the cached translations are discarded and the address
+            // re-probed. `yes` here means the tables were right all along.
+            match bt.translation_after_tlb_flush(fault.address, true) {
+                Translation::Unsupported => {}
+                Translation::Mapped(phys) => {
+                    fields[n] = Field {
+                        key: "maps_after_tlbi",
+                        value: FieldValue::Str("yes"),
+                    };
+                    n += 1;
+                    fields[n] = Field {
+                        key: "par_after_tlbi",
+                        value: FieldValue::Str(format_hex_u64(phys, &mut bufs.flushed)),
+                    };
+                    n += 1;
+                }
+                Translation::Unmapped { status } => {
+                    fields[n] = Field {
+                        key: "maps_after_tlbi",
+                        value: FieldValue::Str("no"),
+                    };
+                    n += 1;
+                    fields[n] = Field {
+                        key: "par_after_tlbi",
+                        value: FieldValue::Str(format_hex_u64(status, &mut bufs.flushed)),
+                    };
+                    n += 1;
+                }
+            }
+        }
+        *want_descs = verdict == "no";
+    }
+    (fields, n)
+}
+
+/// Stack storage for the translation-descriptor fields.
+struct DescBufs {
+    values: [[u8; 18]; MAX_TABLE_LEVELS],
+    keys: [[u8; 16]; MAX_TABLE_LEVELS],
+    key_lens: [usize; MAX_TABLE_LEVELS],
+}
+
+impl DescBufs {
+    const fn new() -> Self {
+        Self {
+            values: [[0; 18]; MAX_TABLE_LEVELS],
+            keys: [[0; 16]; MAX_TABLE_LEVELS],
+            key_lens: [0; MAX_TABLE_LEVELS],
+        }
+    }
+}
+
+/// Format the active regime's raw translation descriptors for `addr`,
+/// root-downward, as `desc_0..`.
+///
+/// Only worth emitting for an address that did not translate, where they say
+/// whether the hierarchy is intact with an absent entry or the table page
+/// itself is arbitrary data — a page-table use-after-free.
+fn desc_fields<'b>(
+    bt: &dyn CpuStateCapture,
+    addr: u64,
+    bufs: &'b mut DescBufs,
+) -> ([Field<'b>; MAX_TABLE_LEVELS], usize) {
+    let mut descs = [0u64; MAX_TABLE_LEVELS];
+    let read = bt.table_path(addr, &mut descs).min(MAX_TABLE_LEVELS);
+    for (i, desc) in descs.iter().enumerate().take(read) {
+        let _ = format_hex_u64(*desc, &mut bufs.values[i]);
+        bufs.key_lens[i] = format_desc_key(i, &mut bufs.keys[i]);
+    }
+    let mut fields = [Field {
+        key: "",
+        value: FieldValue::Str(""),
+    }; MAX_TABLE_LEVELS];
+    for (i, field) in fields.iter_mut().enumerate().take(read) {
+        *field = Field {
+            key: core::str::from_utf8(&bufs.keys[i][..bufs.key_lens[i]]).unwrap_or("desc_?"),
+            value: FieldValue::Str(core::str::from_utf8(&bufs.values[i]).unwrap_or("0x?")),
+        };
+    }
+    (fields, read)
+}
+
 /// Emit the terse record for a report re-entered while one was already
 /// being written, under the re-entering cause's own event id.
 fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
@@ -455,21 +675,63 @@ fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
     );
 }
 
+/// The record's field list, accumulated in a stack array.
+///
+/// Bounded by [`FIELD_CAP`] by construction: a `push` past the end is
+/// dropped rather than overflowing, so a port that grows its register set
+/// beyond the cap loses a field instead of corrupting the panic frame.
+struct Fields<'b> {
+    slots: [Field<'b>; FIELD_CAP],
+    len: usize,
+}
+
+impl<'b> Fields<'b> {
+    fn new() -> Self {
+        Self {
+            slots: [Field {
+                key: "",
+                value: FieldValue::Str(""),
+            }; FIELD_CAP],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, key: &'b str, value: &'b str) {
+        if self.len < FIELD_CAP {
+            self.slots[self.len] = Field {
+                key,
+                value: FieldValue::Str(value),
+            };
+            self.len += 1;
+        }
+    }
+
+    fn extend(&mut self, fields: &[Field<'b>]) {
+        for field in fields {
+            if self.len < FIELD_CAP {
+                self.slots[self.len] = *field;
+                self.len += 1;
+            }
+        }
+    }
+
+    fn as_slice(&self) -> &[Field<'b>] {
+        &self.slots[..self.len]
+    }
+}
+
 /// The one fatal-report body: reclaim the display, guard against
 /// re-entry, emit a single audit record describing `fatal` with a register
 /// snapshot and a bounded backtrace, then halt.
 fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let cpu = ctx.arch.current_cpu();
 
-    // Take the display surface back before anything is written. A graphical
-    // session holding a seat owns the scan-out, and the text console hands it
-    // over rather than drawing on the composited frame — but a panic must
-    // never be invisible, so the report gets the screen whatever was on it.
-    // Best-effort and idempotent, and ahead of the re-entrancy guard so a
-    // nested panic's terse record is visible too.
-    for device in ctx.consoles {
-        device.reclaim_surface();
-    }
+    // A graphical session holding a seat owns the scan-out, and the text
+    // console hands it over rather than drawing on the composited frame — but
+    // a panic must never be invisible, so the report takes the screen back
+    // whatever was on it. Done ahead of the re-entrancy guard so a nested
+    // panic's terse record is visible too.
+    reclaim_surfaces(ctx.consoles);
 
     // Re-entrancy guard: a panic taken *inside* this handler (e.g. the
     // sink or a register read faulting) must not recurse into the walk.
@@ -485,71 +747,81 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // the panic (the OOM case).
     let mut cpu_buf = [0u8; 11];
     let mut cause_bufs = CauseBufs::new();
+    let mut regime_bufs = RegimeBufs::new();
 
     let cpu_str = format_u32(cpu, &mut cpu_buf);
     let cause = cause_fields(fatal, &mut cause_bufs);
 
-    // --- Register snapshot + bounded backtrace (when the port published a
-    // handle). Everything below is stack-buffered and allocation-free.
-    //
-    // Registers are emitted as `pc`/`sp`/`fp` plus each named GP register,
-    // each a fixed 18-byte `0x`-prefixed 64-bit hex string. The backtrace
-    // is emitted as `frame_0` (the captured program counter) followed by
-    // `frame_1..` (the return addresses the frame-pointer walk recovers),
-    // each a hex string. Kernel addresses are deliberately printed here: a
-    // kernel panic is fatal, non-recoverable, and halting, so its dump
-    // carries the addresses a post-mortem needs (resolved offline against
-    // the unstripped kernel ELF with addr2line — see the panic-diagnostics
-    // doc). This is distinct from `AuditEvent::TaskFaultKilled`, which
-    // still omits the raw *user* faulting address (no ASLR/layout leak from
-    // a survivable, per-task event).
-    let mut reg_bufs = [[0u8; 18]; REG_CAP];
-    let mut reg_names = [""; REG_CAP];
-    let mut frame_bufs = [[0u8; 18]; FRAME_CAP];
-    let mut frame_keys = [[0u8; 16]; FRAME_CAP];
-    let mut frame_key_lens = [0usize; FRAME_CAP];
-    let (n_regs, n_frames) = match ctx.backtrace {
-        Some(bt) => capture_into(
-            bt,
-            &mut reg_bufs,
-            &mut reg_names,
-            &mut frame_bufs,
-            &mut frame_keys,
-            &mut frame_key_lens,
+    // Stop the world *before* anything about the machine is read: a kernel
+    // invariant is already broken and this core cannot resume, so peers left
+    // running either deadlock on a guard it abandoned or proceed over
+    // half-updated state. It also has to precede the translation readings
+    // below, which interrogate memory a peer can still be editing — a probe
+    // and a table walk taken either side of a concurrent page-table update
+    // describe two different machines and contradict each other, which is
+    // worse than no reading at all. Best effort: it names an unresponsive
+    // peer rather than waiting behind one, so a reader compares
+    // `peers_stopped` against `peers_asked` to know how much of the machine
+    // the readings actually held still.
+    let stop = quiesce_stop_others_best_effort(cpu, |peer| {
+        crate::sched::SchedulerArch::send_ipi(ctx.arch, peer);
+    });
+    let mut asked_buf = [0u8; 11];
+    let mut stopped_buf = [0u8; 11];
+    let mut unresponsive_buf = [0u8; 11];
+    let asked_str = format_u32(stop.asked, &mut asked_buf);
+    let stopped_str = format_u32(stop.stopped, &mut stopped_buf);
+    let unresponsive_str = stop
+        .unresponsive
+        .map(|peer| format_u32(peer, &mut unresponsive_buf));
+
+    let mut want_descs = false;
+    let (regime, n_regime) = regime_fields(fatal, ctx.backtrace, &mut regime_bufs, &mut want_descs);
+    // The raw descriptors only inform an address that failed to translate.
+    let mut desc_bufs = DescBufs::new();
+    let (descs, n_descs) = match (want_descs, ctx.backtrace, fatal) {
+        (true, Some(bt), Fatal::Fault(fault)) => desc_fields(bt, fault.address, &mut desc_bufs),
+        _ => (
+            [Field {
+                key: "",
+                value: FieldValue::Str(""),
+            }; MAX_TABLE_LEVELS],
+            0,
         ),
+    };
+
+    // A port that published no post-mortem handle gets the base record
+    // rather than a faked backtrace.
+    let mut capture = CaptureBufs::new();
+    let (n_regs, n_frames) = match ctx.backtrace {
+        Some(bt) => capture_into(bt, &mut capture),
         None => (0, 0),
     };
 
-    // Assemble the single record's field list. Every referenced buffer
-    // (`reg_bufs`, `reg_names`, `frame_bufs`, `frame_keys`) is a local
-    // declared above and so outlives `fields`; the borrows below are
-    // ordinary shared borrows, no lifetime laundering needed.
-    let mut fields = [Field {
-        key: "cpu",
-        value: FieldValue::Str(cpu_str),
-    }; FIELD_CAP];
-    fields[0] = Field {
-        key: "cpu",
-        value: FieldValue::Str(cpu_str),
-    };
-    fields[1..4].copy_from_slice(&cause);
-    let mut n = 4usize;
+    // Assemble the one record. Every buffer the fields borrow is a local
+    // declared above, so all of them outlive the list.
+    let mut fields = Fields::new();
+    fields.push("cpu", cpu_str);
+    fields.extend(&cause);
+    fields.extend(&regime[..n_regime]);
+    fields.extend(&descs[..n_descs]);
+    fields.push("peers_asked", asked_str);
+    fields.push("peers_stopped", stopped_str);
+    if let Some(peer) = unresponsive_str {
+        fields.push("peer_unresponsive", peer);
+    }
     for i in 0..n_regs {
-        let value = core::str::from_utf8(&reg_bufs[i]).unwrap_or("0x?");
-        fields[n] = Field {
-            key: reg_names[i],
-            value: FieldValue::Str(value),
-        };
-        n += 1;
+        fields.push(
+            capture.reg_names[i],
+            core::str::from_utf8(&capture.regs[i]).unwrap_or("0x?"),
+        );
     }
     for i in 0..n_frames {
-        let key = core::str::from_utf8(&frame_keys[i][..frame_key_lens[i]]).unwrap_or("frame_?");
-        let value = core::str::from_utf8(&frame_bufs[i]).unwrap_or("0x?");
-        fields[n] = Field {
-            key,
-            value: FieldValue::Str(value),
-        };
-        n += 1;
+        let key = &capture.frame_keys[i][..capture.frame_key_lens[i]];
+        fields.push(
+            core::str::from_utf8(key).unwrap_or("frame_?"),
+            core::str::from_utf8(&capture.frames[i]).unwrap_or("0x?"),
+        );
     }
 
     let event = fatal.event();
@@ -559,9 +831,15 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
             level: Level::Error,
             id: event.id(),
             message: event.message(),
-            fields: &fields[..n],
+            fields: fields.as_slice(),
         },
     );
+
+    // Wait for the record to reach the device. On a port whose console is a
+    // buffered ring this is the difference between a report and a silent
+    // machine: the stop above left no dispatch loop to pump the queue, no
+    // transmit interrupt will be serviced, and the halt below never returns.
+    ctx.arch.flush_console_blocking();
 
     ctx.arch.halt();
 }
@@ -612,23 +890,32 @@ fn format_hex_u64(value: u64, buf: &mut [u8; 18]) -> &str {
     core::str::from_utf8(&buf[..]).unwrap_or("0x0000000000000000")
 }
 
-/// Format the backtrace field key `frame_<index>` into `buf` and return
-/// its byte length.
+/// Format an indexed field key `<prefix><index>` into `buf` and return its
+/// byte length.
 ///
-/// Allocation-free; `buf` must be at least 16 bytes (`"frame_"` plus the
-/// decimal index — the index is capped at
-/// [`BACKTRACE_MAX_FRAMES`], so at most two digits). Used only by the
-/// panic path.
-fn format_frame_key(index: usize, buf: &mut [u8; 16]) -> usize {
-    const PREFIX: &[u8] = b"frame_";
-    buf[..PREFIX.len()].copy_from_slice(PREFIX);
+/// Allocation-free. `buf` must hold the prefix plus the decimal index; both
+/// callers' indices are capped well below three digits, and a prefix that
+/// would not fit is truncated rather than panicking (the report never
+/// panics).
+fn format_indexed_key(prefix: &[u8], index: usize, buf: &mut [u8; 16]) -> usize {
+    let head = prefix.len().min(buf.len());
+    buf[..head].copy_from_slice(&prefix[..head]);
     let mut num_buf = [0u8; 11];
-    // `index` is bounded by the frame cap; the cast is lossless.
     let num = format_u32(u32::try_from(index).unwrap_or(u32::MAX), &mut num_buf);
     let num_bytes = num.as_bytes();
-    let end = PREFIX.len() + num_bytes.len();
-    buf[PREFIX.len()..end].copy_from_slice(num_bytes);
+    let end = (head + num_bytes.len()).min(buf.len());
+    buf[head..end].copy_from_slice(&num_bytes[..end - head]);
     end
+}
+
+/// The backtrace field key `frame_<index>`.
+fn format_frame_key(index: usize, buf: &mut [u8; 16]) -> usize {
+    format_indexed_key(b"frame_", index, buf)
+}
+
+/// The translation-descriptor field key `desc_<index>`.
+fn format_desc_key(index: usize, buf: &mut [u8; 16]) -> usize {
+    format_indexed_key(b"desc_", index, buf)
 }
 
 #[cfg(test)]
@@ -639,6 +926,7 @@ mod tests {
     use alloc::boxed::Box;
     use alloc::string::String;
     use core::panic::Location;
+    use core::sync::atomic::AtomicU64;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tairix_arch_api::backtrace::{
         Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
@@ -1142,5 +1430,732 @@ mod tests {
             out,
             "syndrome=0x0000000096000045 fault_addr=0xffff0000deadbeef fault_pc=0x0000000080101234"
         );
+    }
+
+    /// The world is stopped *before* the record is written, and the record
+    /// says what the stop achieved.
+    ///
+    /// Ordering matters twice over: peers left running while the report is
+    /// assembled can deadlock on a guard the dying core abandoned, and a peer
+    /// still writing contends the console queue the report needs. The sink
+    /// observes the latched stop request to prove the stop came first.
+    ///
+    /// One published table serves the whole process (the slot is set-once) and
+    /// marks *no* CPU online, so nothing is ever poked and no wait ever spins.
+    /// That is what keeps this test order-independent: every panic-driving
+    /// test in this process reports `peers_asked=0` whether it ran before or
+    /// after this one, and none of them is charged another's spin budget.
+    #[test]
+    fn the_world_is_stopped_before_the_record_is_written() {
+        struct OrderSink {
+            stopped_before_report: AtomicBool,
+            reported: AtomicBool,
+        }
+
+        impl Sink for OrderSink {
+            fn write_event(&self, _event: &Event<'_>) {
+                // Asked as a *peer* (cpu 1), never as the reporter: the
+                // reporter is deliberately exempt from its own request.
+                self.stopped_before_report
+                    .store(tairix_arch_api::quiesce_stop_requested(1), Ordering::SeqCst);
+                self.reported.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        // A one-entry liveness table with nothing online: publishing it is what
+        // lets the stop latch its request at all, while leaving no peer to
+        // poke or wait for.
+        let online: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
+        let ack: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
+        // Set-once per process; this is its only publisher in this crate.
+        let _ = tairix_arch_api::quiesce_publish_tables(online, ack);
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static OrderSink = Box::leak(Box::new(OrderSink {
+            stopped_before_report: AtomicBool::new(false),
+            reported: AtomicBool::new(false),
+        }));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            fault_dump(
+                KernelFault {
+                    syndrome: 1,
+                    address: 2,
+                    pc: 3,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        assert!(
+            sink.reported.load(Ordering::SeqCst),
+            "the record was written"
+        );
+        assert!(
+            sink.stopped_before_report.load(Ordering::SeqCst),
+            "the stop request must be latched before the record is written"
+        );
+        // No CPU is online, so nobody was poked and nothing was waited on.
+        assert_eq!(arch.ipi_count(), 0);
+        reset_panic_guard();
+    }
+
+    /// The translation readings are taken *after* the stop, so they describe
+    /// one machine rather than two.
+    ///
+    /// `fault_par` and `desc_0..` interrogate memory a running peer can still
+    /// be editing. A probe and a table walk taken either side of a concurrent
+    /// page-table update disagree, and the disagreement reads as a defect in
+    /// the tables rather than in the reading — a Pi 4 capture whose probe said
+    /// "absent" and whose walk then produced a valid descriptor for the same
+    /// address cost a diagnosis this way.
+    ///
+    /// This reporter is cpu 2 — no other test in this process reports as
+    /// anything but cpu 0 — and `quiesce_stop_requested(2)` is false only once
+    /// *this* stop has latched itself as the requester. That keeps the
+    /// assertion honest whatever order the process ran its panics in: the
+    /// stop request itself is a set-once global, so merely observing it
+    /// latched would pass vacuously after any earlier panic test.
+    #[test]
+    fn the_translation_readings_are_taken_after_the_stop() {
+        /// Records, at each reading, whether this reporter had already
+        /// latched the stop.
+        struct WhenRead {
+            probe_after_stop: AtomicBool,
+            walk_after_stop: AtomicBool,
+        }
+
+        /// The reporter's cpu, unique to this test among the process's panics.
+        const REPORTER: u32 = 2;
+
+        /// Any other cpu, used to read the request itself apart from who owns
+        /// it.
+        const PEER: u32 = 1;
+
+        /// `true` once [`REPORTER`] is the CPU holding the stop request.
+        ///
+        /// The request is a set-once global, so "is it latched" alone would
+        /// pass vacuously after any earlier panic test in this process, and
+        /// "should REPORTER stop" alone passes vacuously before any. Read
+        /// together they name the owner: latched, and exempting REPORTER.
+        fn reporter_holds_the_stop() -> bool {
+            tairix_arch_api::quiesce_stop_requested(PEER)
+                && !tairix_arch_api::quiesce_stop_requested(REPORTER)
+        }
+
+        impl CpuStateCapture for WhenRead {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn active_root(&self) -> Option<u64> {
+                Some(0x0454_0000)
+            }
+            fn translation(&self, _addr: u64, _write: bool) -> Translation {
+                self.probe_after_stop
+                    .store(reporter_holds_the_stop(), Ordering::SeqCst);
+                Translation::Unmapped { status: 0x080d }
+            }
+            fn table_path(&self, _addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+                self.walk_after_stop
+                    .store(reporter_holds_the_stop(), Ordering::SeqCst);
+                out[0] = 0x0454_1003;
+                1
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        // Publishing is what lets the stop latch a requester at all. The slot
+        // is set-once per process, so this is idempotent with the other
+        // publisher here and leaves no peer online to poke or wait for.
+        let online: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
+        let ack: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
+        let _ = tairix_arch_api::quiesce_publish_tables(online, ack);
+
+        let arch = TestArch::with_cpus(4);
+        arch.set_current_cpu(REPORTER);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let read: &'static WhenRead = Box::leak(Box::new(WhenRead {
+            probe_after_stop: AtomicBool::new(false),
+            walk_after_stop: AtomicBool::new(false),
+        }));
+        let handle: &dyn CpuStateCapture = read;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0046,
+                    address: 0x3e40_2000,
+                    pc: 0x002e_0db8,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        // Both readings ran, and both saw this reporter already holding the
+        // stop request.
+        let ev = &sink.snapshot()[0];
+        assert!(
+            ev.fields.iter().any(|(k, _)| k == "fault_par"),
+            "the probe reading reached the record"
+        );
+        assert!(
+            ev.fields.iter().any(|(k, _)| k == "desc_0"),
+            "the descriptor walk reached the record"
+        );
+        assert!(
+            read.probe_after_stop.load(Ordering::SeqCst),
+            "the faulting-address probe must run after the stop"
+        );
+        assert!(
+            read.walk_after_stop.load(Ordering::SeqCst),
+            "the descriptor walk must run after the stop"
+        );
+        reset_panic_guard();
+    }
+
+    /// With no peers to stop, the record still states so rather than leaving
+    /// a reader guessing whether the machine was stopped.
+    #[test]
+    fn a_report_states_the_stop_outcome_even_with_no_peers() {
+        let (_arch, sink) = drive_panic_dump(caller_location);
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("peers_asked"), Some("0"));
+        assert_eq!(field("peers_stopped"), Some("0"));
+        // Nothing was unresponsive, so the field is absent rather than "none".
+        assert_eq!(field("peer_unresponsive"), None);
+    }
+
+    /// A fault report names the active translation root and re-probes the
+    /// faulting address, so a reader learns *which* address space refused it.
+    #[test]
+    fn a_fault_report_names_the_active_regime() {
+        /// A capture handle that reports a root and an unmapped probe, as a
+        /// port with a non-faulting probe does.
+        struct Probing;
+
+        impl CpuStateCapture for Probing {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn active_root(&self) -> Option<u64> {
+                Some(0x0000_0000_0004_1000)
+            }
+            fn translation(&self, _addr: u64, _write: bool) -> Translation {
+                Translation::Unmapped { status: 0x9 }
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let probe: &dyn CpuStateCapture = &Probing;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0046,
+                    address: 0x3e40_2000,
+                    pc: 0x002e_05b8,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        let ev = &events[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("root"), Some("0x0000000000041000"));
+        assert_eq!(field("fault_maps"), Some("no"));
+        assert_eq!(field("fault_par"), Some("0x0000000000000009"));
+    }
+
+    /// An address the tables map but the TLB refuses is reported as such,
+    /// because it is otherwise indistinguishable from a clobbered table.
+    ///
+    /// A Pi 4 fault at a *varying* low-RAM address whose descriptors read back
+    /// as a valid block is the case this separates: with a coherent walker and
+    /// correct tables, a refused translation is a maintenance defect, and
+    /// `maps_after_tlbi=yes` is what says so.
+    #[test]
+    fn a_fault_the_tlb_refuses_but_the_tables_map_is_named() {
+        /// Refuses the plain probe and answers the post-flush one, as a port
+        /// whose TLB held a stale entry does.
+        struct StaleTlb;
+
+        impl CpuStateCapture for StaleTlb {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn active_root(&self) -> Option<u64> {
+                Some(0x0454_0000)
+            }
+            fn translation(&self, addr: u64, _write: bool) -> Translation {
+                // The gigapage base translates and the faulting 2 MiB block
+                // does not, which is the reported `fault_hole=block`.
+                if addr == 0 {
+                    Translation::Mapped(0)
+                } else {
+                    Translation::Unmapped { status: 0x080d }
+                }
+            }
+            fn translation_after_tlb_flush(&self, _addr: u64, _write: bool) -> Translation {
+                Translation::Mapped(0x02a7_cb38)
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let probe: &dyn CpuStateCapture = &StaleTlb;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0046,
+                    address: 0x02a7_cb38,
+                    pc: 0x002c_e0a4,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("fault_maps"), Some("no"));
+        assert_eq!(field("fault_hole"), Some("block"));
+        assert_eq!(field("maps_after_tlbi"), Some("yes"));
+        assert_eq!(field("par_after_tlbi"), Some("0x0000000002a7cb38"));
+        reset_panic_guard();
+    }
+
+    /// A port with no probe reports no post-flush verdict, rather than one it
+    /// cannot support.
+    #[test]
+    fn a_port_without_a_probe_reports_no_post_flush_verdict() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0046,
+                    address: 0x02a7_cb38,
+                    pc: 0x002c_e0a4,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let ev = &sink.snapshot()[0];
+        assert!(ev.fields.iter().all(|(k, _)| k != "maps_after_tlbi"));
+        assert!(ev.fields.iter().all(|(k, _)| k != "par_after_tlbi"));
+        reset_panic_guard();
+    }
+
+    /// A *panic* has no faulting address, so it names the root and stops —
+    /// no probe verdict is fabricated for it.
+    #[test]
+    fn a_panic_report_names_the_root_but_probes_nothing() {
+        struct RootOnly;
+
+        impl CpuStateCapture for RootOnly {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn active_root(&self) -> Option<u64> {
+                Some(0x2000)
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let probe: &dyn CpuStateCapture = &RootOnly;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+            panic_dump(None, &ctx);
+        }));
+        assert!(result.is_err());
+
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("root"), Some("0x0000000000002000"));
+        assert_eq!(field("fault_maps"), None);
+        assert_eq!(field("fault_par"), None);
+    }
+
+    /// The report drains its own record to the device *after* writing it and
+    /// before halting.
+    ///
+    /// This is the regression guard for a real metal failure: stopping the
+    /// world leaves no dispatch loop to pump a buffered console queue and no
+    /// transmit interrupt that will ever be serviced, so a report that halts
+    /// without waiting for its own bytes truncates mid-record and the machine
+    /// looks like it died in silence — the exact failure the report exists to
+    /// prevent. The sink samples the flush count as it is written, so the
+    /// ordering is asserted, not just the call.
+    #[test]
+    fn the_record_is_flushed_to_the_device_after_it_is_written() {
+        struct FlushOrderSink {
+            arch: &'static TestArch,
+            flushes_at_write: AtomicU64,
+            reported: AtomicBool,
+        }
+
+        impl Sink for FlushOrderSink {
+            fn write_event(&self, _event: &Event<'_>) {
+                self.flushes_at_write
+                    .store(self.arch.console_flush_count(), Ordering::SeqCst);
+                self.reported.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let sink: &'static FlushOrderSink = Box::leak(Box::new(FlushOrderSink {
+            arch,
+            flushes_at_write: AtomicU64::new(u64::MAX),
+            reported: AtomicBool::new(false),
+        }));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(arch, sink);
+            fault_dump(
+                KernelFault {
+                    syndrome: 1,
+                    address: 2,
+                    pc: 3,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err(), "the report must halt");
+
+        assert!(
+            sink.reported.load(Ordering::SeqCst),
+            "the record was written"
+        );
+        assert_eq!(
+            sink.flushes_at_write.load(Ordering::SeqCst),
+            0,
+            "the flush must come after the record, not before it"
+        );
+        assert!(
+            arch.console_flush_count() >= 1,
+            "the report must drain its own record before halting"
+        );
+        assert_eq!(arch.halt_count(), 1);
+    }
+
+    /// The hole probe says how much around the faulting address is absent,
+    /// which separates "a leaf was unmapped" from "a region was never
+    /// mapped" — unrelated defects the syndrome alone cannot tell apart.
+    #[test]
+    fn the_report_characterises_the_size_of_the_unmapped_hole() {
+        /// A probe whose only unmapped range is `[hole, hole + span)`.
+        struct Holed {
+            hole: u64,
+            span: u64,
+        }
+
+        impl CpuStateCapture for Holed {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn translation(&self, addr: u64, _write: bool) -> Translation {
+                if addr >= self.hole && addr < self.hole + self.span {
+                    Translation::Unmapped { status: 0xd }
+                } else {
+                    Translation::Mapped(addr)
+                }
+            }
+        }
+
+        /// Drive one fault at `addr` against a probe holed at
+        /// `[hole, hole + span)` and return the record's `fault_hole`.
+        fn hole_field(addr: u64, hole: u64, span: u64) -> alloc::string::String {
+            reset_panic_guard();
+            let arch = TestArch::with_cpus(1);
+            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let probe: &dyn CpuStateCapture = Box::leak(Box::new(Holed { hole, span }));
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+                fault_dump(
+                    KernelFault {
+                        syndrome: 0,
+                        address: addr,
+                        pc: 0,
+                    },
+                    &ctx,
+                );
+            }));
+            let ev = &sink.snapshot()[0];
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == "fault_hole")
+                .map(|(_, v)| alloc::string::String::from(v.as_str()))
+                .unwrap_or_default()
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // One 4 KiB page absent inside a mapped 2 MiB block.
+        assert_eq!(hole_field(0x3e40_2000, 0x3e40_2000, 0x1000), "page");
+        // The whole 2 MiB block absent, its gigapage otherwise mapped.
+        assert_eq!(hole_field(0x3e40_2000, 0x3e40_0000, 1 << 21), "block");
+        // The whole gigapage absent.
+        assert_eq!(hole_field(0x3e40_2000, 0, 1 << 30), "gigapage");
+        reset_panic_guard();
+    }
+
+    /// An unmapped fault carries the raw translation descriptors, which say
+    /// whether the hierarchy is intact with an absent entry or the table
+    /// page itself is arbitrary data — a page-table use-after-free.
+    #[test]
+    fn an_unmapped_fault_carries_the_raw_translation_descriptors() {
+        struct Walked;
+
+        impl CpuStateCapture for Walked {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn translation(&self, _addr: u64, _write: bool) -> Translation {
+                Translation::Unmapped { status: 0xd }
+            }
+            fn table_path(&self, _addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+                // A valid table descriptor, then an invalid leaf: an intact
+                // hierarchy whose entry is genuinely absent.
+                out[0] = 0x0000_0000_0454_1003;
+                out[1] = 0;
+                2
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let probe: &dyn CpuStateCapture = &Walked;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0046,
+                    address: 0x3e40_2000,
+                    pc: 0,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("desc_0"), Some("0x0000000004541003"));
+        assert_eq!(field("desc_1"), Some("0x0000000000000000"));
+        // Only what the port read is emitted; nothing is invented.
+        assert_eq!(field("desc_2"), None);
+        reset_panic_guard();
+    }
+
+    /// A *mapped* address carries no descriptors: they exist to explain an
+    /// absence, and a port with no walk emits none either.
+    #[test]
+    fn a_mapped_fault_and_a_walkless_port_carry_no_descriptors() {
+        struct Mapped;
+
+        impl CpuStateCapture for Mapped {
+            fn profile(&self) -> BacktraceProfile {
+                BacktraceProfile {
+                    register_capture: Backtrace::Supported,
+                    frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+                }
+            }
+            fn capture(&self) -> RegisterSnapshot {
+                RegisterSnapshot::new(0, 0, 0)
+            }
+            fn frame_layout(&self) -> Option<FrameLayout> {
+                None
+            }
+            fn stack_bounds(&self) -> Option<StackBounds> {
+                None
+            }
+            fn translation(&self, addr: u64, _write: bool) -> Translation {
+                Translation::Mapped(addr)
+            }
+            fn table_path(&self, _addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+                out[0] = 0xdead_beef;
+                1
+            }
+        }
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let probe: &dyn CpuStateCapture = &Mapped;
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0,
+                    address: 0x1000,
+                    pc: 0,
+                },
+                &ctx,
+            );
+        }));
+
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("fault_maps"), Some("yes"));
+        assert_eq!(field("desc_0"), None, "descriptors explain an absence only");
+        assert_eq!(field("fault_hole"), None);
+        reset_panic_guard();
     }
 }

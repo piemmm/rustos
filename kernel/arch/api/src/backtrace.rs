@@ -416,6 +416,89 @@ pub trait CpuStateCapture: Send + Sync {
     /// captured `sp` is on a stack it cannot identify it returns `None`
     /// rather than guessing (fail closed).
     fn stack_bounds(&self) -> Option<StackBounds>;
+
+    /// The active translation root, when the port can name it.
+    ///
+    /// A fatal report on a kernel fault needs to know *which* address space
+    /// was in force, because whether a given address translates is a
+    /// property of the active root and not of the machine (`TTBR0_EL1`,
+    /// `CR3`, `satp`). `None` from a port that cannot read it.
+    fn active_root(&self) -> Option<u64> {
+        None
+    }
+
+    /// Probe how `addr` translates under the **active** regime, without
+    /// accessing it.
+    ///
+    /// Reported alongside a fault's syndrome so a post-mortem can tell a
+    /// persistently unmapped address from one that translates again by the
+    /// time the report runs — the second says the mapping changed under the
+    /// faulting access (a racing map/unmap, or missing break-before-make),
+    /// which the syndrome alone cannot distinguish.
+    ///
+    /// A port implements this **only** with a probe that cannot itself fault
+    /// (aarch64's `AT`); otherwise it returns the honest
+    /// [`Translation::Unsupported`] rather than risk faulting inside the
+    /// fault handler.
+    fn translation(&self, addr: u64, write: bool) -> Translation {
+        let _ = (addr, write);
+        Translation::Unsupported
+    }
+
+    /// Re-probe `addr` after discarding this CPU's cached translations.
+    ///
+    /// Separates two causes a fault syndrome and [`Self::translation`] alone
+    /// cannot: the tables genuinely do not map the address, or they *do* and
+    /// the TLB disagrees. The second is a maintenance defect — a translation
+    /// changed without the invalidation it owed, or a granule change made
+    /// without break-before-make — and it presents as a fault at an address
+    /// whose descriptors read back perfectly valid, which is otherwise
+    /// indistinguishable from a clobbered table.
+    ///
+    /// Only meaningful once [`Self::translation`] has reported the address
+    /// unmapped, and only for a port whose probe cannot fault; others return
+    /// [`Translation::Unsupported`]. Discarding cached translations is safe on
+    /// this path precisely because the report has already read the tables it
+    /// is about to re-walk.
+    fn translation_after_tlb_flush(&self, addr: u64, write: bool) -> Translation {
+        let _ = (addr, write);
+        Translation::Unsupported
+    }
+
+    /// Read the raw translation descriptors the active regime holds for
+    /// `addr`, root-downward, into `out`; returns how many were read.
+    ///
+    /// A fault says an entry is absent. It does not say whether the
+    /// hierarchy holding it is *intact*, and that is the difference between
+    /// a mapping never made and a table page that has been clobbered or
+    /// reused — the second being a page-table use-after-free. A port
+    /// implements this only if it can prove each table translatable before
+    /// reading it; otherwise it reads nothing (`0`).
+    fn table_path(&self, addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+        let _ = (addr, out);
+        0
+    }
+}
+
+/// Translation levels a port can report through
+/// [`CpuStateCapture::table_path`] — enough for a four-level walk.
+pub const MAX_TABLE_LEVELS: usize = 4;
+
+/// How an address translates under the active regime, as a fatal report's
+/// non-faulting probe found it.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Translation {
+    /// The port has no probe it can run without risking a fault of its own.
+    Unsupported,
+    /// It translates, to this physical address.
+    Mapped(u64),
+    /// It does not translate.
+    Unmapped {
+        /// The port's raw fault status — on aarch64 `PAR_EL1`, whose `FST`
+        /// field names the level that failed — read against that port's
+        /// manual, like a fault syndrome.
+        status: u64,
+    },
 }
 
 /// Walk the frame-pointer chain, emitting each return address, and always
@@ -526,7 +609,9 @@ fn offset_addr(fp: u64, offset: i16) -> Option<u64> {
 /// end-to-end QEMU panic vertical proves the *real* on-target capture is
 /// non-trivial.
 pub mod conformance {
-    use super::{walk, Backtrace, CpuStateCapture, StackBounds, StackReader, MAX_FRAMES};
+    use super::{
+        walk, Backtrace, CpuStateCapture, StackBounds, StackReader, Translation, MAX_FRAMES,
+    };
 
     /// Number of 64-bit words in the [`MockStack`] backing store. Large
     /// enough for the synthetic chain the layout check plants; fixed so
@@ -568,12 +653,63 @@ pub mod conformance {
     /// the profile fails [`super::BacktraceProfile::validate`], the profile
     /// and the `frame_layout`/`capture` methods disagree, `capture` is not
     /// total, or the declared frame layout does not drive the neutral
-    /// walker to recover a synthetic chain.
+    /// walker to recover a synthetic chain, or either translation probe is
+    /// not total.
     pub fn run_all<C: CpuStateCapture + ?Sized>(port: &C) {
         profile_is_honest(port);
         profile_matches_methods(port);
         capture_is_total(port);
         layout_drives_the_walker(port);
+        translation_probe_is_total(port);
+        tlb_flush_reprobe_is_total(port);
+    }
+
+    /// The translation probe answers for any address, either access kind,
+    /// without panicking — including the degenerate addresses a corrupt
+    /// fault would hand it.
+    ///
+    /// It is a *fault-report* probe, so being total is the whole contract: a
+    /// port that cannot answer says [`Translation::Unsupported`] rather than
+    /// guessing, and one that can must not panic on an address no mapping
+    /// could ever cover.
+    fn translation_probe_is_total<C: CpuStateCapture + ?Sized>(port: &C) {
+        for addr in [0u64, 1, u64::MAX, !0xfffu64, 0xffff_0000_dead_beef] {
+            for write in [false, true] {
+                match port.translation(addr, write) {
+                    // A port must not claim address 0 maps to a real
+                    // translation it invented; any concrete answer is its
+                    // own hardware's, which the suite cannot second-guess.
+                    Translation::Unsupported
+                    | Translation::Mapped(_)
+                    | Translation::Unmapped { .. } => {}
+                }
+            }
+        }
+        // `active_root` is likewise total; a port that cannot read it says
+        // so with `None`.
+        let _ = port.active_root();
+    }
+
+    /// The post-flush re-probe is total on the same addresses, and a port that
+    /// answers [`Translation::Unsupported`] for the plain probe answers it
+    /// here too.
+    ///
+    /// The pairing matters: the field only means "the tables were right and
+    /// the TLB was not" if it comes from the same probe mechanism. A port that
+    /// could flush but not probe would otherwise report a verdict it cannot
+    /// support.
+    fn tlb_flush_reprobe_is_total<C: CpuStateCapture + ?Sized>(port: &C) {
+        for addr in [0u64, 1, u64::MAX, !0xfffu64, 0xffff_0000_dead_beef] {
+            for write in [false, true] {
+                let flushed = port.translation_after_tlb_flush(addr, write);
+                if matches!(port.translation(addr, write), Translation::Unsupported) {
+                    assert!(
+                        matches!(flushed, Translation::Unsupported),
+                        "a port with no translation probe cannot report a post-flush verdict"
+                    );
+                }
+            }
+        }
     }
 
     /// The profile validates and every `Unsupported` slot is justified.

@@ -18,6 +18,25 @@ the backtracer, the console list, the pre-init console line) is one
 `plans/OPEN-DEFECTS.md` D13 for why it was missing and D79 for the one port
 still only partly covered.
 
+**The report owns its own flush.** Stopping the world removes the very thing
+that used to drain a buffered console: `pump_console_tx` is called by the
+dispatch loop, and there is no dispatch loop left. A report that halted
+without waiting truncated mid-record on metal — the machine looked as though
+it had died in silence, the exact failure the report exists to prevent. So the
+report ends with `KernelArch::flush_console_blocking` (a defaulted no-op for
+the synchronous SBI/COM1 consoles, the PL011 queue's blocking drain on
+aarch64) *after* the record and before the halt. Nothing that can itself fault
+may sit between capturing this core's state and writing the record either,
+which is why the display-surface reclaim happens once, ahead of the
+re-entrancy guard, and is not repeated after the stop.
+
+Both causes now **stop the world** before the record is written, so one
+core's fatal fault can no longer become an undiagnosed system-wide deadlock
+behind the guard it abandoned. It reuses the existing cross-CPU stop protocol
+(`tairix_arch_api::quiesce`) through a second, best-effort initiator rather
+than a new HAL slice — see `plans/OPEN-DEFECTS.md` D13 for that decision and
+for why `MachineTakeover` is not the mechanism.
+
 Design note (divergence from the original sketch below, per the "redo it
 correctly" mandate): the arch slice exposes register `capture()` plus a
 pure `FrameLayout` (saved-fp / return-addr offsets) and `stack_bounds()`,

@@ -36,6 +36,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::hwtree::FramebufferMemory;
+/// Named only by the surface-extent page arithmetic, which the host build
+/// carries for its tests alone.
+#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
+use tairix_abi::PAGE_SIZE;
 /// The framebuffer console's character cell, re-exported so the boot caller
 /// can size and blank the grid buffers it leaks into [`attach_console`]
 /// without naming `tairix_fbcon` directly.
@@ -157,6 +161,25 @@ pub fn bring_up(transport: &mut dyn MailboxTransport) -> Option<ConfiguredFrameb
 
 // --- Global console state ---------------------------------------------------
 
+/// First and last 4 KiB page base spanned by the `pixel_count`-pixel surface
+/// at `fb_base`, or `None` for an empty or unrepresentable extent.
+///
+/// Pure, so the boundary the reachability check walks is host-tested rather
+/// than only exercised on a board: a last page left out of the range would
+/// leave a hole at the end of the surface invisible until a write landed in
+/// it, which is the whole failure the check exists to catch.
+/// Its only consumer is the target-only reachability check, so the host build
+/// carries it for the tests alone.
+#[cfg(any(all(target_arch = "aarch64", target_os = "none"), test))]
+#[must_use]
+pub(crate) fn surface_page_range(fb_base: usize, pixel_count: usize) -> Option<(u64, u64)> {
+    let base = fb_base as u64;
+    let len = (pixel_count as u64).checked_mul(4)?;
+    let last = base.checked_add(len.checked_sub(1)?)?;
+    let page = PAGE_SIZE as u64;
+    Some((base & !(page - 1), last & !(page - 1)))
+}
+
 /// Whether a video console is configured and rendering.
 ///
 /// Written once (release) by the boot CPU after `configure_from_fdt`
@@ -248,12 +271,13 @@ pub fn active_framebuffer_extent() -> Option<(u64, u64)> {
 }
 
 /// Host stand-in for the freestanding `attach_console`: no surface exists on
-/// the host, so attaching the cell grids is inert.
+/// the host, so there is nothing to attach and no console is taken.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub fn attach_console(
     _main: &'static mut [tairix_fbcon::Cell],
     _alt: &'static mut [tairix_fbcon::Cell],
-) {
+) -> bool {
+    false
 }
 
 /// Host stand-in for the freestanding `set_surface`: no surface exists on the
@@ -596,18 +620,26 @@ mod metal {
     /// caller leaks `main`/`alt` from the heap, unusable pre-MMU). The caller
     /// sizes each grid to [`text_cell_count`]. A call with no discovered
     /// surface is a no-op (UART keeps the console, fail closed).
-    pub fn attach_console(main: &'static mut [Cell], alt: &'static mut [Cell]) {
+    pub fn attach_console(main: &'static mut [Cell], alt: &'static mut [Cell]) -> bool {
         let _guard = RENDER_LOCK.lock();
         // SAFETY: post-MMU, render lock held; `VIDEO` was written pre-MMU by
         // the single-threaded boot CPU and is not yet published active.
         let Some(state) = (unsafe { (*VIDEO.0.get()).as_mut() }) else {
-            return;
+            return false;
         };
         let (fb_base, pixel_count, geometry) = (state.fb_base, state.pixel_count, state.geometry);
+        if !surface_translates(fb_base, pixel_count) {
+            // No console is taken, so every paint entry point stays
+            // unreachable and the UART keeps the console. Painting a surface
+            // the active root does not cover would fault inside the renderer
+            // with the render lock held, taking the machine down instead of
+            // losing a screen.
+            return false;
+        }
         let mut console = TextConsole::new(geometry, main, alt);
-        // SAFETY: `fb_base`/`pixel_count` describe the surface validated in
-        // `publish_console`, identity-mapped RAM; the render lock makes this
-        // the only live reference.
+        // SAFETY: every page of the extent translated for an EL1 write just
+        // above, `pixel_count` is the surface length `publish_console`
+        // validated, and the render lock makes this the only live reference.
         let pixels = unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) };
         let dirty = console.clear(pixels);
         if let Some((row_start, row_end)) = dirty {
@@ -619,6 +651,28 @@ mod metal {
         }
         state.console = Some(console);
         VIDEO_ACTIVE.store(true, Ordering::Release);
+        true
+    }
+
+    /// `true` when every 4 KiB page of the `pixel_count`-pixel surface at
+    /// `fb_base` translates for an EL1 write under the active root.
+    ///
+    /// Whether the scan-out is reachable is a property of the active
+    /// translation regime, not of the surface: the boot identity map is what
+    /// covers it, and the paint entry points are reachable from contexts that
+    /// did not establish that map. Probing every page rather than the
+    /// extremities is what makes the answer total — a hole anywhere inside
+    /// would otherwise stay invisible until a write landed in it.
+    fn surface_translates(fb_base: usize, pixel_count: usize) -> bool {
+        let Some((first, last)) = super::surface_page_range(fb_base, pixel_count) else {
+            return false;
+        };
+        for page in (first..=last).step_by(crate::paging::PAGE_SIZE) {
+            if crate::paging::par_faulted(crate::paging::translate_el1(page, true)) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Render `bytes` onto the configured surface and clean the touched
@@ -691,12 +745,22 @@ mod metal {
         let Some(console) = state.console.as_mut() else {
             return;
         };
-        // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
-        // validated at configure time, identity-mapped RAM; the render lock
-        // makes this the only live reference. A console giving the surface up
-        // is handed an empty slice instead, so no reference into it is formed
-        // while a graphical session owns it.
         let pixels: &mut [u32] = if surface.paints() {
+            // Re-proved here rather than inherited from the attach-time
+            // proof: this is the path a fatal report takes to get the screen
+            // back, where a fault would cost the machine the one diagnosis it
+            // was about to emit. Refusing leaves the console's disposition
+            // untouched and paints nothing; a non-painting disposition needs
+            // no surface and is applied regardless.
+            if !surface_translates(fb_base, pixel_count) {
+                return;
+            }
+            // SAFETY: every page of the extent translated for an EL1 write
+            // just above, `pixel_count` is the surface length
+            // `publish_console` validated, and the render lock makes this the
+            // only live reference. A console giving the surface up is handed
+            // an empty slice instead, so no reference into it is formed while
+            // a graphical session owns it.
             unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
         } else {
             &mut []
@@ -775,9 +839,12 @@ mod metal {
         // A blanked console does paint: a program's write is what takes the
         // surface back.
         let pixels: &mut [u32] = if console.surface().paints() {
-            // SAFETY: `fb_base`/`pixel_count` describe the firmware surface
-            // validated at configure time, identity-mapped RAM; the render
-            // lock makes this the only live reference.
+            // SAFETY: a console exists only because `attach_console` proved
+            // every page of this extent translates for an EL1 write, and the
+            // identity map that covers it is only ever refined thereafter,
+            // never withdrawn; `pixel_count` is the surface length
+            // `publish_console` validated, and the render lock makes this the
+            // only live reference.
             unsafe { core::slice::from_raw_parts_mut(fb_base as *mut u32, pixel_count) }
         } else {
             &mut []
@@ -856,6 +923,39 @@ mod tests {
     use tairix_vcmailbox::mock::MockFirmware;
 
     use super::*;
+
+    // --- Surface reachability ----------------------------------------
+
+    #[test]
+    fn a_page_aligned_surface_of_one_page_spans_exactly_that_page() {
+        assert_eq!(surface_page_range(0x1000, 1024), Some((0x1000, 0x1000)));
+    }
+
+    #[test]
+    fn an_unaligned_surface_spans_every_page_it_touches() {
+        // 16 bytes from 0x1ffc end at 0x200b, so the extent straddles the
+        // boundary and both pages must be probed.
+        assert_eq!(surface_page_range(0x1ffc, 4), Some((0x1000, 0x2000)));
+    }
+
+    #[test]
+    fn the_last_page_of_a_surface_is_inside_the_range() {
+        // The Pi 4 scan-out a metal capture reported: 0x7f8000 bytes from
+        // 0x3e402000, ending at 0x3ebf9fff. The final page must be covered,
+        // or a hole at the end of the surface stays invisible.
+        let (first, last) = surface_page_range(0x3e40_2000, 0x7f_8000 / 4).expect("real extent");
+        assert_eq!(first, 0x3e40_2000);
+        assert_eq!(last, 0x3ebf_9000);
+        assert!(last + (PAGE_SIZE as u64) > 0x3e40_2000 + 0x7f_8000 - 1);
+    }
+
+    #[test]
+    fn an_empty_or_unrepresentable_surface_has_no_range() {
+        // Nothing to prove reachable, so the caller refuses rather than
+        // treating a zero-length extent as trivially fine.
+        assert_eq!(surface_page_range(0x1000, 0), None);
+        assert_eq!(surface_page_range(0x1000, usize::MAX), None);
+    }
 
     // --- Mailbox discovery -------------------------------------------
 

@@ -192,28 +192,7 @@ const MAX_BACKTRACE_WALK: usize = 64;
     feature = "watchdog-diagnostics"
 ))]
 unsafe fn el1_readable(addr: u64) -> bool {
-    let par: u64;
-    // SAFETY: `AT S1E1R` performs a stage-1 EL1 read translation of `addr`
-    // and records the outcome in PAR_EL1; it does not access the memory at
-    // `addr` and cannot fault. The `ISB` is the context-synchronization
-    // event the architecture requires before the AT result is guaranteed
-    // visible to the following `MRS PAR_EL1`. We snapshot PAR_EL1 first and
-    // restore it last, so this probe leaves the register as the interrupted
-    // context left it.
-    unsafe {
-        core::arch::asm!(
-            "mrs {saved}, par_el1",
-            "at s1e1r, {addr}",
-            "isb",
-            "mrs {par}, par_el1",
-            "msr par_el1, {saved}",
-            saved = out(reg) _,
-            addr = in(reg) addr,
-            par = out(reg) par,
-            options(nostack, preserves_flags),
-        );
-    }
-    (par & 1) == 0
+    !crate::paging::par_faulted(crate::paging::translate_el1(addr, false))
 }
 
 /// The pure frame-pointer walk shared by [`capture_sample_backtrace`] and

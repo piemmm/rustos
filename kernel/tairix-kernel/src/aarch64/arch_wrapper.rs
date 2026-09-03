@@ -267,6 +267,17 @@ impl KernelArch for Aarch64BinArch {
         }
     }
 
+    fn flush_console_blocking(&self) {
+        // The PL011 queue is drained by the dispatch loop's `pump_console_tx`
+        // and by the transmit interrupt, and a fatal report has stopped every
+        // other CPU and is about to park this one — so neither will run again
+        // and the report would die in the ring. This waits for it instead.
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            serial::flush_serial_blocking();
+        }
+    }
+
     fn set_device_irqs(&self, enabled: bool) {
         // Toggle this CPU's PE-level IRQ taking (`DAIF.I`) so the dispatch
         // loop runs in-kernel tasks/kthreads with device interrupts enabled

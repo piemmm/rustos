@@ -699,10 +699,13 @@ const fn is_kernel_window_slot(index: usize) -> bool {
 /// Publish a translation-table store to the MMU's table walker before
 /// the next access depends on it: `dsb ishst` orders the store for the
 /// walker, `isb` discards any fetch-ahead made under the old tables.
-/// Used by [`AddressSpace::ensure_identity_gigapage`]'s invalid→valid
-/// L1 update, which needs no TLB invalidation (a walker never caches an
-/// invalid entry). Host builds walk no hardware tables, so this is a
-/// no-op there.
+///
+/// Used by [`AddressSpace::ensure_identity_gigapage`]'s invalid→valid L1
+/// update, which needs no TLB invalidation (a walker never caches an invalid
+/// entry), and by [`AddressSpace::split_block`] to order a child table's
+/// contents ahead of the descriptor that publishes them. Neither is a
+/// substitute for the TLB maintenance a *withdrawn* translation needs. Host
+/// builds walk no hardware tables, so this is a no-op there.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn publish_table_update() {
     // SAFETY: barrier-only instruction sequence — no memory or register
@@ -1307,16 +1310,27 @@ impl AddressSpace {
     /// of 512 × 4 KiB pages — leaving every address translating
     /// identically but now at 4 KiB granularity.
     ///
-    /// The split is **break-before-make-free for the running region**: it
-    /// only ever *adds* table levels that reproduce the existing
-    /// translation, never invalidating a live address, so it is safe to
-    /// run against the active translation regime (the resulting tables map
-    /// the same physical frames with the same permissions). It is
-    /// idempotent — a level that is already a table is left untouched — so
-    /// re-splitting an already-fine region succeeds without allocating.
-    /// The caller is responsible for any TLB maintenance after a
-    /// subsequent [`MmuAddressSpace::unmap`]; the split itself changes no
-    /// translation result and so needs none.
+    /// Replacing a valid block leaf with a table descriptor changes the
+    /// *granule* every address the block covered translates at, even though
+    /// the output address and permissions are identical, and a TLB holding
+    /// both granules for one address is CONSTRAINED UNPREDICTABLE — it may
+    /// fault the walk. **So a split invalidates the whole regime on every
+    /// PE**, not the single page the caller came for: the stale coarse
+    /// entries belong to the block's *other* addresses, which is precisely
+    /// what a per-page flush leaves behind.
+    ///
+    /// Break-before-make is what the architecture asks for and is impossible
+    /// for a block covering the executing kernel — the break window would
+    /// unmap the running code — so the remaining exposure is the few
+    /// instructions between publishing the table and completing the
+    /// invalidation. Refining a root *before* anything translates through it
+    /// avoids even that, and is what `plans/OPEN-DEFECTS.md` D82 tracks.
+    ///
+    /// It is idempotent — a level that is already a table is left untouched —
+    /// so re-splitting an already-fine region succeeds without allocating,
+    /// and pays no invalidation. The caller is still responsible for the TLB
+    /// maintenance a subsequent [`MmuAddressSpace::unmap`] owes, which
+    /// withdraws a translation rather than refining one.
     ///
     /// # Errors
     ///
@@ -1329,11 +1343,36 @@ impl AddressSpace {
     /// so the address space is never left describing a *different*
     /// mapping (fail closed, never corrupt).
     pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
+        if self.refine_to_page(vaddr)? {
+            // A block that became a table changed the *granule* every
+            // address it covered translates at, so every TLB holding a
+            // coarse entry for any of them now conflicts with the finer
+            // walk and may fault it. The maintenance owed is therefore the
+            // whole former block's range on every PE, not the one page the
+            // caller came for — invalidating just that page leaves the rest
+            // of the block refusing translations the tables plainly hold.
+            // Over-invalidating the regime once is cheaper than a `tlbi` per
+            // leaf of a gigapage and this is never a hot path.
+            invalidate_all_inner_shareable();
+        }
+        Ok(())
+    }
+
+    /// Re-express the leaf covering `vaddr` at 4 KiB granularity, reporting
+    /// whether any level's granule actually changed.
+    ///
+    /// Split out so the decision that drives TLB maintenance is host-testable
+    /// on its own: the invalidation itself is a bare instruction with no
+    /// observable effect off-target, while "did a block become a table" is
+    /// pure table arithmetic. An already-fine hierarchy reports `false` and
+    /// costs no invalidation.
+    fn refine_to_page(&mut self, vaddr: u64) -> Result<bool, MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
         let frames = self.frames;
         let i1 = table_index(vaddr, 1);
+        let mut refined = false;
 
         // --- Level 1: a 1 GiB block becomes a table of 512 × 2 MiB blocks.
         let e1 = self.root[i1];
@@ -1345,6 +1384,15 @@ impl AddressSpace {
                 frames.alloc_table().ok_or(MapError::PoolExhausted)?;
             // 2 MiB sub-entries (shift 21) are still *blocks*, not pages.
             shatter_block_into(entries, e1, 21, false);
+            refined = true;
+            // The child's 512 entries must be observable before the
+            // descriptor that points at them. Both are plain stores to
+            // Normal memory, so without this barrier a table walker — this
+            // CPU's after activation, or a peer's if the root is live — may
+            // follow the new table while its high entries still read as the
+            // frame's previous contents, and fault on an address the block it
+            // replaced covered.
+            publish_table_update();
             self.root[i1] = table_descriptor(phys);
         }
 
@@ -1365,10 +1413,14 @@ impl AddressSpace {
                 frames.alloc_table().ok_or(MapError::PoolExhausted)?;
             // 4 KiB sub-entries (shift 12) are L3 *pages* (`TABLE_OR_PAGE`).
             shatter_block_into(entries, e2, 12, true);
+            // Ordered for the same reason as the L1 child above.
+            publish_table_update();
             l2[i2] = table_descriptor(phys);
+            refined = true;
         }
         // L2 now resolves `vaddr` through a 4 KiB page leaf.
-        Ok(())
+        publish_table_update();
+        Ok(refined)
     }
 
     /// Re-express every coarse block covering the arena
@@ -1381,11 +1433,10 @@ impl AddressSpace {
     /// arena spans: a guard-page arena that the boot path laid down inside
     /// the coarse identity gigapages has no per-4 KiB leaf to clear, so the
     /// whole arena is split up-front, at boot, while it holds no running
-    /// context. Because `split_block` only ever *adds* table levels that
-    /// reproduce the existing translation, preparing the arena changes no
-    /// address's mapping and needs no TLB maintenance — it is safe against
-    /// the active translation regime and is idempotent (a re-prepare of an
-    /// already-fine arena allocates nothing).
+    /// context. It inherits `split_block`'s precondition — **the root must
+    /// not be the active regime**, because refining a block changes the
+    /// granule an address translates at — and is idempotent (a re-prepare of
+    /// an already-fine arena allocates nothing).
     ///
     /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
     /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
@@ -2055,7 +2106,7 @@ pub(crate) fn invalidate_range_inner_shareable(start_vaddr: u64, pages: usize) {
 /// issuing a barrier-bracketed `tlbi` for every 4 KiB leaf. Over-invalidation
 /// is safe, while the single broadcast keeps the range visible to every PE
 /// before execution continues.
-fn invalidate_all_inner_shareable() {
+pub(crate) fn invalidate_all_inner_shareable() {
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
         // SAFETY: `tlbi vmalle1is` invalidates all stage-1 EL1&0
@@ -2273,6 +2324,112 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 pub unsafe fn activate_user_root(root_phys: u64) {
     let _ = root_phys;
+}
+
+/// Translate `addr` as an EL1 stage-1 access under the **active** regime and
+/// return the raw `PAR_EL1` result (`bit 0`: `0` = translated, `1` = fault).
+///
+/// `AT` only *translates*; it never accesses the memory and cannot fault, so
+/// this is safe to run from a fault handler or an interrupt over an address
+/// that may be unmapped, misaligned, or wild. `PAR_EL1` is saved and restored
+/// so a translation the interrupted context had in flight is never clobbered.
+///
+/// The one `AT` probe in the port: the watchdog's stack-link check and the
+/// fatal report's faulting-address probe are both this, so their fail-closed
+/// reading of `PAR_EL1` cannot diverge.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn translate_el1(addr: u64, write: bool) -> u64 {
+    let par: u64;
+    // SAFETY: as the rustdoc above states — `AT S1E1R`/`AT S1E1W` record the
+    // outcome of translating `addr` in `PAR_EL1` without accessing it, so
+    // neither can fault. The `ISB` is the context-synchronization event the
+    // architecture requires before the result is guaranteed visible to the
+    // following `MRS`. `PAR_EL1` is snapshotted first and restored last.
+    unsafe {
+        if write {
+            core::arch::asm!(
+                "mrs {saved}, par_el1",
+                "at s1e1w, {addr}",
+                "isb",
+                "mrs {par}, par_el1",
+                "msr par_el1, {saved}",
+                saved = out(reg) _,
+                addr = in(reg) addr,
+                par = out(reg) par,
+                options(nostack, preserves_flags),
+            );
+        } else {
+            core::arch::asm!(
+                "mrs {saved}, par_el1",
+                "at s1e1r, {addr}",
+                "isb",
+                "mrs {par}, par_el1",
+                "msr par_el1, {saved}",
+                saved = out(reg) _,
+                addr = in(reg) addr,
+                par = out(reg) par,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+    par
+}
+
+/// Read the raw translation descriptors the active root holds for `addr`,
+/// root-downward, into `out`, returning how many were read.
+///
+/// For a fatal report only. A translation fault says an entry is absent; it
+/// does not say whether the hierarchy that holds it is *intact*. A
+/// well-formed table descriptor pointing at a plausible table, with one
+/// invalid leaf, is a mapping that was never made or was removed; a
+/// descriptor that is arbitrary data means the table page itself has been
+/// clobbered or reused, which is a different and worse defect.
+///
+/// Every table page is proved translatable with the non-faulting probe
+/// before it is read, so a clobbered or unmapped table ends the walk instead
+/// of faulting inside the fault handler. The walk also stops at an invalid
+/// entry or a leaf, neither of which names a further table.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn table_path(root: u64, addr: u64, out: &mut [u64]) -> usize {
+    let mut table = root & ADDR_MASK;
+    let mut read = 0usize;
+    for level in 1..=3usize {
+        if read >= out.len() {
+            break;
+        }
+        if par_faulted(translate_el1(table, false)) {
+            break;
+        }
+        let slot = table + (table_index(addr, level) as u64) * 8;
+        // SAFETY: the probe above proved `table` translates for an EL1 read,
+        // and `table_index` masks to the 512-entry table, so `slot` addresses
+        // one in-range word of a live table page. Volatile so the read is not
+        // reordered or elided on the report path.
+        let entry = unsafe { core::ptr::read_volatile(slot as *const u64) };
+        out[read] = entry;
+        read += 1;
+        if (entry & attrs::VALID) == 0 || is_block(entry) {
+            break;
+        }
+        table = entry & ADDR_MASK;
+    }
+    read
+}
+
+/// The physical address a successful `PAR_EL1` translation result names: the
+/// `PA` field combined with the offset within the page. Pure, so the decode
+/// is host-tested independently of the probe that produces it.
+#[must_use]
+pub const fn par_phys(par: u64, addr: u64) -> u64 {
+    (par & 0x0000_FFFF_FFFF_F000) | (addr & 0xFFF)
+}
+
+/// `true` when a `PAR_EL1` translation result reports a fault (its `F` bit).
+/// Pure, and the one reading of that bit the port shares.
+#[must_use]
+pub const fn par_faulted(par: u64) -> bool {
+    (par & 1) != 0
 }
 
 /// Populate the freshly-allocated table `child` with 512 descriptors that

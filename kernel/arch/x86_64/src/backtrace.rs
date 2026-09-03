@@ -186,7 +186,23 @@ impl CpuStateCapture for Backtracer {
     fn stack_bounds(&self) -> Option<StackBounds> {
         None
     }
+
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    fn active_root(&self) -> Option<u64> {
+        let cr3: u64;
+        // SAFETY: reading `CR3` into an output operand has no side effects
+        // and cannot fault in ring 0.
+        unsafe {
+            core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+        }
+        Some(cr3)
+    }
 }
+
+// `translation` keeps the trait's honest `Unsupported`: x86_64 has no
+// non-faulting address-translation instruction, so probing an address would
+// mean walking the tables by hand — dereferencing the very memory a fault
+// report cannot vouch for.
 
 #[cfg(test)]
 mod tests {

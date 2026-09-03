@@ -461,14 +461,21 @@ impl<P: PageTable> AddressSpace<P> {
     ///
     /// This is the kernel-stack guard-page teardown (`plans/PI.md` G1–G3)
     /// applied to a *live* root: the page is re-expressed at 4 KiB
-    /// granularity ([`HalAddressSpace::split_block`], which only adds table
-    /// levels reproducing the existing translation and so disturbs no live
-    /// address) and then unmapped. Unlike [`Self::unmap`] it does not name
-    /// the freed frame — the guard page's frame belongs to the stack arena,
-    /// not to this space — and it is **idempotent**: a page already unmapped
-    /// (an arena region handed back and re-handed inside the same root) is
-    /// success, since the post-condition "this page does not translate" is
-    /// already met.
+    /// granularity ([`HalAddressSpace::split_block`]) and then unmapped.
+    /// Unlike [`Self::unmap`] it does not name the freed frame — the guard
+    /// page's frame belongs to the stack arena, not to this space — and it is
+    /// **idempotent**: a page already unmapped (an arena region handed back
+    /// and re-handed inside the same root) is success, since the
+    /// post-condition "this page does not translate" is already met.
+    ///
+    /// The `flush_page` below covers the *unmap*. It deliberately
+    /// does not cover the split: refining a block changes the granule every
+    /// address that block covered translates at, so the port's `split_block`
+    /// owns that invalidation and performs it over the whole range. Flushing
+    /// only this page would leave the block's other addresses holding stale
+    /// coarse entries that conflict with the finer walk — observed on a Pi 4
+    /// as a kernel-heap access faulting at an address whose descriptors read
+    /// back perfectly valid.
     ///
     /// # Errors
     ///
