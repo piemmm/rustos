@@ -5,9 +5,14 @@
 //!
 //! `kernel_core::kernel_main` emits `AuditEvent::BootCompleted`
 //! (`EventId(4004)`) once every init phase has succeeded. This binary
-//! observes the audit sink and, on the boot-completed record, writes
-//! the `SiFive` Test PASS finisher (`qemu_exit::exit_success`). The
-//! host-side `tools/qemu::Runner` then registers `Outcome::Pass`.
+//! observes the audit sink and, on the boot-completed record, exercises
+//! the growable kernel heap, requires the production boot to have
+//! installed the fatal fault handler — with that slot empty an S-mode
+//! trap parks the hart with interrupts masked and prints nothing, so the
+//! machine dies mutely and deadlocks every peer waiting on a lock the
+//! parked hart still holds (`plans/OPEN-DEFECTS.md` D13) — and then
+//! writes the `SiFive` Test PASS finisher (`qemu_exit::exit_success`).
+//! The host-side `tools/qemu::Runner` then registers `Outcome::Pass`.
 //!
 //! ## How it differs from a production kernel
 //!
@@ -76,6 +81,14 @@ mod kernel {
                 if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
                     qemu_exit::exit_failure(FAIL_KHEAP_GROWTH);
                 }
+                // A booted kernel must be able to say why it died. With the
+                // fatal-fault slot empty an S-mode trap parks the hart with
+                // interrupts masked and prints nothing, so the machine goes
+                // silent — and deadlocks every peer waiting on a lock the
+                // parked hart still holds.
+                if tairix_arch_riscv64::fault::fault_handler().is_none() {
+                    qemu_exit::exit_failure(FAIL_NO_FAULT_HANDLER);
+                }
                 qemu_exit::exit_success();
             }
         }
@@ -83,6 +96,10 @@ mod kernel {
 
     /// Failure finisher code for a growth-path fault.
     const FAIL_KHEAP_GROWTH: NonZeroU16 = fail_point!(1);
+
+    /// Failure finisher code for a boot that left the fatal-fault slot
+    /// empty, so a kernel-mode trap would park the hart mutely.
+    const FAIL_NO_FAULT_HANDLER: NonZeroU16 = fail_point!(2);
 
     static AUDIT_SINK: BootCompletedExitSink = BootCompletedExitSink;
 

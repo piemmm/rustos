@@ -402,14 +402,6 @@ fn run_round_trip() -> ! {
         );
     }
 
-    // The dedicated `#PF` entry the production boot installed routes to this
-    // observer (fail-closed if none). Install it before any
-    // user mapping can fault.
-    if fault::set_fault_handler(on_fault).is_err() {
-        note(TEST_FAIL, "mem_map test: fault observer already installed");
-        qemu_exit::exit_failure();
-    }
-
     // Fresh address space (low 32 MiB identity + higher-half kernel window) and
     // activate it before any user mapping is added.
     let Some(arch) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
@@ -494,6 +486,16 @@ fn run_round_trip() -> ! {
 /// The symbol the arch crate's boot trampoline calls.
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
+    // Claim the set-once fatal-fault slot before `boot` publishes the
+    // production reporter into it: this vertical *is* the observer of its
+    // own deliberate post-unmap fault, so it owns the machine's fatal
+    // policy for this image and must be first. `on_fault` fail-closes on
+    // any fault outside the mapped-then-unmapped region, so owning the
+    // slot from here never hides an unexpected one.
+    if fault::set_fault_handler(on_fault).is_err() {
+        note(TEST_FAIL, "mem_map test: fault observer already installed");
+        qemu_exit::exit_failure();
+    }
     boot(
         multiboot_info,
         &ALLOCATOR,

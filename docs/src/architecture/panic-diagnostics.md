@@ -8,6 +8,12 @@ page describes what a panic record contains, which images produce which
 parts, the deliberate address-leak policy, and how to resolve raw
 addresses offline.
 
+Two things end a kernel this way: a Rust `panic!`, and a **CPU exception
+taken in kernel mode** that the port's vector has no fix-up for. Both go
+through the one report path (`kernel_core::panic_dump` /
+`kernel_core::fault_dump`), so both carry the same register block and
+backtrace; only the cause fields and the audit event id differ.
+
 ## What a panic record contains
 
 The panic handler emits exactly one `AuditEvent::Panic` record through the
@@ -23,11 +29,44 @@ audit sink, then halts. Its fields:
 | `frame_0`       | The captured program counter — the top of the call chain.      |
 | `frame_1..`     | The return addresses recovered by walking the frame-pointer chain, in caller order. |
 
-A panic taken *inside* the panic handler (a re-entrant panic) is caught by
-a per-boot guard: it emits a single terse record
-(`kernel panic (nested — re-entered panic handler)`) and halts immediately,
+A panic taken *inside* the report path (a re-entrant panic, or a fault
+raised while a report is being written) is caught by a per-boot guard: it
+emits a single terse record naming its own cause and halts immediately,
 without re-entering the register/backtrace machinery — a corrupt walk can
-never fault the fault handler.
+never fault the fault handler. The guard is shared by both causes, so a
+fault during a panic dump cannot recurse either.
+
+## What a kernel-fault record contains
+
+The production boot installs the fatal-fault handler on the boot CPU as
+soon as its exception vector is live, so a kernel-mode exception reaches
+the same report rather than parking the CPU in silence. Its record is
+`AuditEvent::KernelFault` (`4011`):
+
+| Field        | Meaning                                                     |
+| ------------ | ----------------------------------------------------------- |
+| `cpu`        | Decimal id of the CPU that faulted.                         |
+| `syndrome`   | 64-bit hex of the port's exception syndrome — `ESR_EL1`, the `#PF` error code, `scause`. |
+| `fault_addr` | 64-bit hex of the address the access could not reach — `FAR_EL1`, `CR2`, `stval`. |
+| `fault_pc`   | 64-bit hex of the faulting instruction — `ELR_EL1`, `RIP`, `sepc`. |
+
+followed by the same register and `frame_N` blocks as a panic. `fault_pc`
+is the *interrupted* instruction; the register block's `pc` is where the
+handler shim itself was captured, so the two are deliberately distinct
+keys. A fault carries no `file`/`line`/`column`, and a panic carries no
+syndrome — neither is fabricated for the other, which is why the two are
+distinct event ids rather than one record with optional halves.
+
+Coverage per port follows each port's fatal tail. aarch64 and riscv64 fan
+*every* unhandled synchronous exception (plus FIQ / `SError` / AArch32
+entries on aarch64) into one tail, so every kernel-mode exception is
+reported. On x86_64 only the dedicated page-fault entry reaches the
+handler today: the other exception vectors still point at the fail-closed
+default IDT thunk, which has no per-vector stub and so cannot name a
+syndrome — tracked as an open defect in `plans/OPEN-DEFECTS.md`.
+
+Reporting a fault does **not** make it survivable. The report ends in
+`KernelArch::halt`, exactly as a panic does.
 
 ## Which images produce which parts
 
@@ -97,6 +136,16 @@ different situation from `AuditEvent::TaskFaultKilled`, a *survivable*,
 per-task event, which continues to omit the raw *user* faulting address so
 a running process cannot probe kernel/user layout through repeated faults.
 Panic dumps carry kernel addresses; user-fault kills still do not.
+
+A kernel-fault record's `fault_addr` / `fault_pc` follow the same rule for
+the same reason: they are on the halting path, so there is no repeatable
+oracle to probe. They are whatever the CPU reported. One edge is worth
+naming: a *lower*-EL (user) exception that cannot be attributed to any
+running task — no current task, or no published user kthread — is a
+kernel-level failure by construction, and falls through to this fatal tail
+carrying the user address the CPU latched. A running user task always has
+a current task and so always takes the survivable `TaskFaultKilled` path
+instead, which still omits its address.
 
 ## Resolving addresses offline
 

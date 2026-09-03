@@ -336,7 +336,19 @@ balances on release (depth counts true nesting) and simply stops recording the
 excess (fail-safe — no growth, no fault). The buddy's report renders the
 innermost entry as `k_lock=<file>`, `k_lock_line=<n>`, and `k_lock_state`
 (`acquiring` = still spinning, contended/deadlocked; `held` = wedged inside the
-critical section). Because the value is a source string, no runtime address —
+critical section), plus `k_lock_owner=<cpu>` — **which core holds the lock
+against a spinner**. Each `SpinLock` stamps its owning CPU on acquire and
+clears it before releasing the lock word; a spinner republishes what it reads
+there each failed CAS round, so the report pairs a wedged waiter with its
+holder instead of leaving that to be inferred. It also settles the question a
+lone `held` record cannot: when the spinner names the core whose own record
+claims `held`, that record is live rather than a stale leftover. The CPU-id
+resolver is a single seam in `lib/sync` (`lockwatch::install_cpu_id`), read
+both by the locks that stamp an owner and by the kernel observer that picks
+the per-CPU slot, so the two can never name different cores. Hold *age* is not
+stamped separately: the report already carries the wedged CPU's `stalled_ms`,
+and reading a clock on every acquire would cost the kernel's hottest path to
+restate it. Because the value is a source string, no runtime address —
 and so no KASLR base — is disclosed even though `lock_site` is a pointer
 internally; `k_lock` is omitted when the core holds no recorded lock.
 Host-tested in both feature states: the lockwatch no-op-without-observer and

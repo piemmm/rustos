@@ -579,6 +579,21 @@ pub fn bring_up_bsp(
     // defect and refuses the boot (fail closed).
     tairix_arch_x86_64::uaccess::install().map_err(|_| BootError::PageFaultIsrInstall)?;
 
+    // 1b-ii. Route a fatal supervisor exception into the one fatal-report
+    //     path, now that the dedicated `#PF` entry above can deliver one
+    //     and before any further bring-up can fault. With the slot empty
+    //     that entry preserves the fail-closed default — park the CPU with
+    //     interrupts masked, print nothing — so a kernel fault becomes a
+    //     mute machine, and one taken inside a lock's critical section a
+    //     system-wide deadlock behind the guard it never dropped.
+    //
+    //     The slot is set-once and this call never overrides an occupant: a
+    //     QEMU vertical that observes its own deliberate faults publishes
+    //     its handler ahead of `boot` and keeps it, asserting its own
+    //     install succeeded. Either way the machine has exactly one fatal
+    //     policy.
+    let _ = crate::x86_64::panic_ctx::install_kernel_fault_handler();
+
     // 1c. Enable `IA32_EFER.NXE` so the W^X No-Execute leaf bit the
     //     process-image builder sets on a ring-3 program's data/rodata
     //     pages and its stack is honoured. Without it,

@@ -279,6 +279,13 @@ pub(crate) struct CpuState {
     /// `held` — turning a contended lock into a phantom wedge.
     #[cfg(feature = "watchdog-diagnostics")]
     pub(crate) lock_acquiring: AtomicU32,
+    /// Per-entry owner stamp of a *contended* lock: `0` when unknown or
+    /// unheld, else the holding CPU's dense id plus one, as published by the
+    /// lock and read by this CPU while spinning. This is what pairs a wedged
+    /// spinner with its holder, and what shows a holder's own `held` record
+    /// to be live rather than a stale leftover.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) lock_owner: [AtomicU32; LOCK_STACK_MAX],
 }
 
 impl CpuState {
@@ -317,6 +324,8 @@ impl CpuState {
             lock_depth: AtomicUsize::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring: AtomicU32::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            lock_owner: [const { AtomicU32::new(0) }; LOCK_STACK_MAX],
         }
     }
 }

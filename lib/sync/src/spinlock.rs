@@ -53,6 +53,12 @@ use crate::loom_compat::{spin_loop, AtomicBool, Ordering, SyncUnsafeCell};
 /// See the [module docs](self) for use cases, ordering, and IRQ guarantees.
 pub struct SpinLock<T: ?Sized> {
     locked: AtomicBool,
+    /// Owner stamp for the lockup watchdog: `0` while unheld, else the
+    /// holding CPU's dense id plus one. A spinner publishes what it reads
+    /// here, so a wedged core's report names the core holding the lock
+    /// against it instead of leaving the pairing to be guessed.
+    #[cfg(feature = "lock-diagnostics")]
+    owner: core::sync::atomic::AtomicU32,
     data: SyncUnsafeCell<T>,
 }
 
@@ -73,6 +79,8 @@ impl<T> SpinLock<T> {
         Self {
             locked: AtomicBool::new(false),
             data: SyncUnsafeCell::new(value),
+            #[cfg(feature = "lock-diagnostics")]
+            owner: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -83,6 +91,8 @@ impl<T> SpinLock<T> {
         Self {
             locked: AtomicBool::new(false),
             data: SyncUnsafeCell::new(value),
+            #[cfg(feature = "lock-diagnostics")]
+            owner: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -113,6 +123,9 @@ impl<T: ?Sized> SpinLock<T> {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
+            #[cfg(feature = "lock-diagnostics")]
+            self.owner
+                .store(crate::lockwatch::owner_stamp(), Ordering::Relaxed);
             Some(SpinLockGuard { lock: self })
         } else {
             None
@@ -152,6 +165,10 @@ impl<T: ?Sized> SpinLock<T> {
                 crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
                 return guard;
             }
+            // Republish the holder each round so a core that wedges here
+            // names whoever is actually holding the lock against it.
+            #[cfg(feature = "lock-diagnostics")]
+            crate::lockwatch::note_contended(site, self.owner.load(Ordering::Relaxed));
             // Test-and-test-and-set: spin reading until the lock looks
             // free, then retry the CAS. This avoids hammering the cache
             // line with RMW operations.
@@ -224,6 +241,10 @@ impl<T: ?Sized> DerefMut for SpinLockGuard<'_, T> {
 
 impl<T: ?Sized> Drop for SpinLockGuard<'_, T> {
     fn drop(&mut self) {
+        // Cleared before the lock bit, so no window shows the lock free but
+        // still stamped with a stale owner.
+        #[cfg(feature = "lock-diagnostics")]
+        self.lock.owner.store(0, Ordering::Relaxed);
         // Release pairs with the next Acquire CAS, publishing every
         // write performed in the critical section.
         self.lock.locked.store(false, Ordering::Release);

@@ -891,6 +891,20 @@ pub fn boot(
     // if it fires before a callback is installed, so pin it before any
     // user thread can run.
     let mmu_on = enable_mmu_and_vectors();
+
+    // Route a fatal S-mode (kernel-mode) trap into the one fatal-report
+    // path, now that `stvec` above can deliver one and before any further
+    // work can fault. With the slot empty the trap handler parks the hart
+    // with interrupts masked and prints nothing, so a kernel fault becomes
+    // a mute machine — and, if it lands inside a lock's critical section, a
+    // system-wide deadlock behind the guard it never dropped.
+    //
+    // The slot is set-once and this call never overrides an occupant: a
+    // QEMU vertical that observes its own deliberate faults publishes its
+    // handler ahead of `boot` and keeps it, asserting its own install
+    // succeeded. Either way the machine has exactly one fatal policy.
+    let _ = crate::riscv64::panic_ctx::install_kernel_fault_handler();
+
     syscall_entry::set_dispatch_callback(production_dispatch);
     // Demand-paged file mappings resolve their U-mode data page faults
     // through the same resident hook; install the resolver beside the

@@ -20,6 +20,7 @@
 //! | --------------- | --------------------------------------------------------------------------------- |
 //! | [`kalloc`]      | Freeing (coalescing free-list) `GlobalAlloc` impl shared by every bin.        |
 //! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
+//! | `fatal_bridge` | The one panic/kernel-fault bridge into `kernel_core`'s fatal-report path.         |
 //! | `spawn_layout` | Shared user-space layout constants for every port's spawn seam/producer. |
 //! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `virtio_boot`, `driver_host`, `panic_ctx`, `serial_sink`. |
 //! | `aarch64`       | The aarch64 (Raspberry Pi 4) port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
@@ -89,6 +90,14 @@ pub mod kalloc;
 // `kernel/*` + `lib/abi` deps, so it compiles on every target and the CI
 // host, where its unit tests run.
 pub mod dispatch_core;
+
+// The one bridge from a port's fatal entry points — its `#[panic_handler]`
+// and the `extern "C"` shim its synchronous-exception vector calls — to
+// `kernel_core`'s single fatal-report path. Holds the whole policy (which
+// sink, which handle, what the pre-init window does); a port supplies only
+// its four values by implementing `FatalReport`. Un-gated: it names only
+// `kernel/core`, the Arch HAL, and `lib/log`.
+pub mod fatal_bridge;
 
 // The production root-volume unlock + users-database load composition
 // (`plans/PI.md` §3 P11 root-mount increment, Chunk A): turns the on-FAT

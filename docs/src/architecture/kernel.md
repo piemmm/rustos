@@ -154,8 +154,18 @@ arch port documents it there.
 | `line`   | Decimal `info.location().line()` or `"0"`.           |
 | `column` | Decimal `info.location().column()` or `"0"`.         |
 
-The handler performs **no allocation**: every formatting buffer is
-stack-resident, so the panic path survives a wedged heap.
+A fatal CPU exception taken in **kernel** mode enters the same body through
+`fault_dump`, carrying the arch-neutral `KernelFault { syndrome, address,
+pc }` triple in place of the source position and recorded as `KERNEL_FAULT`
+(`EventId(4011)`) with `syndrome` / `fault_addr` / `fault_pc`. The port's
+synchronous-exception vector reaches it through the `extern "C"` shim
+`tairix_kernel::fatal_bridge` installs at boot; with the slot empty that
+vector parks the CPU with interrupts masked and prints nothing. Both causes
+share the register snapshot, the bounded backtrace, and the re-entrancy
+guard — see `docs/src/architecture/panic-diagnostics.md`.
+
+Neither handler allocates: every formatting buffer is stack-resident, so
+both paths survive a wedged heap.
 
 ## `BootInfo` schema
 
@@ -196,6 +206,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
 | 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`  | log    |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
+| 4011 | Error | `KERNEL_FAULT`          | audit  |
 | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
 | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT`   | audit  |
 | 4030 | Info  | `PROCESS_SPAWNED`            | audit  |

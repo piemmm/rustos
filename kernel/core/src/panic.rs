@@ -24,6 +24,13 @@
 //! **never** silently resets — the `!` return type and the `halt`
 //! contract together encode that.
 //!
+//! A fatal CPU exception taken in kernel mode enters the same reporting
+//! path through [`fault_dump`], carrying a [`KernelFault`] instead of a
+//! source location: the port's synchronous-exception vector has no fix-up
+//! for it, so it is as fatal as a `panic!` and deserves the same register
+//! snapshot and backtrace. Only the three cause fields and the audit event
+//! id differ, so there is one dump, not two.
+//!
 //! # Testability
 //!
 //! `core::panic::PanicInfo` has no public constructor on stable Rust,
@@ -189,6 +196,64 @@ pub fn handle_panic<A: KernelArch>(info: &PanicInfo<'_>, ctx: &PanicContext<'_, 
     panic_dump(info.location(), ctx)
 }
 
+/// A fatal CPU exception taken in **kernel** mode, as the port's
+/// synchronous-exception vector saw it.
+///
+/// The same three words on every port, spelled differently per
+/// architecture: `ESR_EL1` / `FAR_EL1` / `ELR_EL1` on aarch64, the `#PF`
+/// error code / faulting linear address / `RIP` on x86_64, and `scause` /
+/// `stval` / `sepc` on riscv64. The port's shim names them; everything
+/// above it reads the neutral triple.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct KernelFault {
+    /// The port's exception syndrome — why the CPU trapped.
+    pub syndrome: u64,
+    /// The address the faulting access could not reach.
+    pub address: u64,
+    /// The faulting instruction.
+    pub pc: u64,
+}
+
+impl core::fmt::Display for KernelFault {
+    /// One line, hex, in the field order the audit record uses, so the
+    /// pre-init console path and the structured dump read alike.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "syndrome={:#018x} fault_addr={:#018x} fault_pc={:#018x}",
+            self.syndrome, self.address, self.pc
+        )
+    }
+}
+
+/// What brought the kernel down — the only thing that differs between the
+/// two entries into [`dump`].
+enum Fatal<'a> {
+    /// A Rust `panic!`, with its source location when one is available.
+    Panic(Option<&'a core::panic::Location<'a>>),
+    /// A fatal kernel-mode CPU exception.
+    Fault(KernelFault),
+}
+
+impl Fatal<'_> {
+    /// The audit event this cause is recorded under.
+    fn event(&self) -> AuditEvent {
+        match self {
+            Self::Panic(_) => AuditEvent::Panic,
+            Self::Fault(_) => AuditEvent::KernelFault,
+        }
+    }
+
+    /// The terse message the re-entrancy guard emits, naming the cause so a
+    /// re-entered report is still attributable.
+    fn nested_message(&self) -> &'static str {
+        match self {
+            Self::Panic(_) => "kernel panic (nested — re-entered the fatal-report path)",
+            Self::Fault(_) => "fatal kernel fault (nested — re-entered the fatal-report path)",
+        }
+    }
+}
+
 /// Number of register fields the dump can carry: `pc`/`sp`/`fp` plus the
 /// port's named general-purpose registers.
 const REG_CAP: usize = MAX_NAMED_REGS + 3;
@@ -271,6 +336,129 @@ pub fn panic_dump<A: KernelArch>(
     location: Option<&core::panic::Location<'_>>,
     ctx: &PanicContext<'_, A>,
 ) -> ! {
+    dump(&Fatal::Panic(location), ctx)
+}
+
+/// Dump a fatal **kernel-mode CPU exception** and halt the CPU.
+///
+/// The port's synchronous-exception vector reaches this through its
+/// `extern "C"` shim for an exception it has no fix-up for — a same-EL
+/// abort, a supervisor page fault, an illegal instruction. Resuming would
+/// re-trap forever, so it is exactly as fatal as a `panic!` and takes the
+/// same path: the same register snapshot, the same bounded backtrace, the
+/// same re-entrancy guard, the same halt. Only the three cause fields and
+/// the audit event id differ.
+///
+/// # Emitted fields
+///
+/// | Key          | Value                                                  |
+/// | ------------ | ------------------------------------------------------ |
+/// | `cpu`        | Decimal CPU id returned by `arch.current_cpu()`.       |
+/// | `syndrome`   | 64-bit hex of the port's exception syndrome.           |
+/// | `fault_addr` | 64-bit hex of the address the access could not reach.  |
+/// | `fault_pc`   | 64-bit hex of the faulting instruction.                |
+///
+/// followed by the register and `frame_N` blocks [`panic_dump`] documents.
+/// `fault_pc` is the *interrupted* instruction; the register block's `pc`
+/// is where the shim itself was captured, so the two are deliberately
+/// distinct keys.
+pub fn fault_dump<A: KernelArch>(fault: KernelFault, ctx: &PanicContext<'_, A>) -> ! {
+    dump(&Fatal::Fault(fault), ctx)
+}
+
+/// Stack storage the three cause-specific fields are formatted into.
+///
+/// Declared in [`dump`]'s frame so the formatted strings outlive the
+/// assembled field list; a panic report allocates nothing.
+struct CauseBufs {
+    line: [u8; 11],
+    column: [u8; 11],
+    syndrome: [u8; 18],
+    address: [u8; 18],
+    pc: [u8; 18],
+}
+
+impl CauseBufs {
+    const fn new() -> Self {
+        Self {
+            line: [0; 11],
+            column: [0; 11],
+            syndrome: [0; 18],
+            address: [0; 18],
+            pc: [0; 18],
+        }
+    }
+}
+
+/// Format the three cause-specific fields: a panic's source position, or
+/// the hardware syndrome of a kernel-mode fault. Never both, and neither is
+/// fabricated for the other.
+fn cause_fields<'b>(fatal: &Fatal<'b>, bufs: &'b mut CauseBufs) -> [Field<'b>; 3] {
+    match *fatal {
+        Fatal::Panic(location) => {
+            let (file_str, line_str, col_str) = match location {
+                Some(loc) => (
+                    loc.file(),
+                    format_u32(loc.line(), &mut bufs.line),
+                    format_u32(loc.column(), &mut bufs.column),
+                ),
+                None => ("<unknown>", "0", "0"),
+            };
+            [
+                Field {
+                    key: "file",
+                    value: FieldValue::Str(file_str),
+                },
+                Field {
+                    key: "line",
+                    value: FieldValue::Str(line_str),
+                },
+                Field {
+                    key: "column",
+                    value: FieldValue::Str(col_str),
+                },
+            ]
+        }
+        Fatal::Fault(fault) => [
+            Field {
+                key: "syndrome",
+                value: FieldValue::Str(format_hex_u64(fault.syndrome, &mut bufs.syndrome)),
+            },
+            Field {
+                key: "fault_addr",
+                value: FieldValue::Str(format_hex_u64(fault.address, &mut bufs.address)),
+            },
+            Field {
+                key: "fault_pc",
+                value: FieldValue::Str(format_hex_u64(fault.pc, &mut bufs.pc)),
+            },
+        ],
+    }
+}
+
+/// Emit the terse record for a report re-entered while one was already
+/// being written, under the re-entering cause's own event id.
+fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
+    let mut cpu_buf = [0u8; 11];
+    let fields = [Field {
+        key: "cpu",
+        value: FieldValue::Str(format_u32(cpu, &mut cpu_buf)),
+    }];
+    log(
+        sink,
+        &Event {
+            level: Level::Error,
+            id: fatal.event().id(),
+            message: fatal.nested_message(),
+            fields: &fields,
+        },
+    );
+}
+
+/// The one fatal-report body: reclaim the display, guard against
+/// re-entry, emit a single audit record describing `fatal` with a register
+/// snapshot and a bounded backtrace, then halt.
+fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let cpu = ctx.arch.current_cpu();
 
     // Take the display surface back before anything is written. A graphical
@@ -288,21 +476,7 @@ pub fn panic_dump<A: KernelArch>(
     // The first entry does the full dump; any re-entry emits one terse
     // record and halts immediately.
     if PANICKING.swap(true, Ordering::AcqRel) {
-        let mut cpu_buf = [0u8; 11];
-        let cpu_str = format_u32(cpu, &mut cpu_buf);
-        let fields = [Field {
-            key: "cpu",
-            value: FieldValue::Str(cpu_str),
-        }];
-        log(
-            ctx.audit_sink,
-            &Event {
-                level: Level::Error,
-                id: AuditEvent::Panic.id(),
-                message: "kernel panic (nested — re-entered panic handler)",
-                fields: &fields,
-            },
-        );
+        report_nested(fatal, cpu, ctx.audit_sink);
         ctx.arch.halt();
     }
 
@@ -310,18 +484,10 @@ pub fn panic_dump<A: KernelArch>(
     // it must not depend on the heap, which may itself be the source of
     // the panic (the OOM case).
     let mut cpu_buf = [0u8; 11];
-    let mut line_buf = [0u8; 11];
-    let mut col_buf = [0u8; 11];
+    let mut cause_bufs = CauseBufs::new();
 
     let cpu_str = format_u32(cpu, &mut cpu_buf);
-    let (file_str, line_str, col_str) = match location {
-        Some(loc) => (
-            loc.file(),
-            format_u32(loc.line(), &mut line_buf),
-            format_u32(loc.column(), &mut col_buf),
-        ),
-        None => ("<unknown>", "0", "0"),
-    };
+    let cause = cause_fields(fatal, &mut cause_bufs);
 
     // --- Register snapshot + bounded backtrace (when the port published a
     // handle). Everything below is stack-buffered and allocation-free.
@@ -354,9 +520,9 @@ pub fn panic_dump<A: KernelArch>(
         None => (0, 0),
     };
 
-    // Assemble the single Panic record's field list. Every referenced
-    // buffer (`reg_bufs`, `reg_names`, `frame_bufs`, `frame_keys`) is a
-    // local declared above and so outlives `fields`; the borrows below are
+    // Assemble the single record's field list. Every referenced buffer
+    // (`reg_bufs`, `reg_names`, `frame_bufs`, `frame_keys`) is a local
+    // declared above and so outlives `fields`; the borrows below are
     // ordinary shared borrows, no lifetime laundering needed.
     let mut fields = [Field {
         key: "cpu",
@@ -366,18 +532,7 @@ pub fn panic_dump<A: KernelArch>(
         key: "cpu",
         value: FieldValue::Str(cpu_str),
     };
-    fields[1] = Field {
-        key: "file",
-        value: FieldValue::Str(file_str),
-    };
-    fields[2] = Field {
-        key: "line",
-        value: FieldValue::Str(line_str),
-    };
-    fields[3] = Field {
-        key: "column",
-        value: FieldValue::Str(col_str),
-    };
+    fields[1..4].copy_from_slice(&cause);
     let mut n = 4usize;
     for i in 0..n_regs {
         let value = core::str::from_utf8(&reg_bufs[i]).unwrap_or("0x?");
@@ -397,12 +552,13 @@ pub fn panic_dump<A: KernelArch>(
         n += 1;
     }
 
+    let event = fatal.event();
     log(
         ctx.audit_sink,
         &Event {
             level: Level::Error,
-            id: AuditEvent::Panic.id(),
-            message: AuditEvent::Panic.message(),
+            id: event.id(),
+            message: event.message(),
             fields: &fields[..n],
         },
     );
@@ -819,5 +975,172 @@ mod tests {
         );
         assert_eq!(arch.halt_count(), 1);
         reset_panic_guard();
+    }
+
+    /// The three cause fields of a kernel-mode fault, and the absence of a
+    /// source position it does not have.
+    #[test]
+    fn fault_dump_emits_one_kernel_fault_record_with_documented_fields() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let arch = TestArch::with_cpus(4);
+        arch.set_current_cpu(3);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0045,
+                    address: 0xffff_0000_dead_beef,
+                    pc: 0x0000_0000_8010_1234,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err(), "the fault path must halt");
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1, "expected exactly one fault record");
+        let ev = &events[0];
+        assert_eq!(ev.id, AuditEvent::KernelFault.id());
+        assert_eq!(ev.level, Level::Error);
+        assert_eq!(ev.message, AuditEvent::KernelFault.message());
+
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("cpu"), Some("3"));
+        assert_eq!(field("syndrome"), Some("0x0000000096000045"));
+        assert_eq!(field("fault_addr"), Some("0xffff0000deadbeef"));
+        assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
+        // A fault has no source position, and none is fabricated for it.
+        assert_eq!(field("file"), None);
+        assert_eq!(field("line"), None);
+        assert_eq!(field("column"), None);
+
+        assert_eq!(arch.halt_count(), 1);
+    }
+
+    /// A fault report carries the same register snapshot and bounded
+    /// backtrace a panic does — one dump, two causes — and keeps the
+    /// faulting instruction distinct from the captured `pc`.
+    #[test]
+    fn fault_dump_carries_the_shared_register_and_backtrace_block() {
+        const RET1: u64 = 0xffff_8000_0000_1111;
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 2];
+        let base = stack.as_ptr() as u64;
+        stack[0] = 0; // caller fp terminates the walk
+        stack[1] = RET1;
+        let cap = HostCapture {
+            pc: 0xffff_8000_0000_0000,
+            sp: base,
+            fp: base,
+            bounds: StackBounds::new(base, base + 16),
+        };
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let cap_ref: &dyn CpuStateCapture = &cap;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
+            fault_dump(
+                KernelFault {
+                    syndrome: 0x9600_0045,
+                    address: 0xffff_0000_dead_beef,
+                    pc: 0x0000_0000_8010_1234,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(ev.id, AuditEvent::KernelFault.id());
+        assert_eq!(field("pc"), Some("0xffff800000000000"));
+        assert_eq!(field("rax"), Some("0x0000000000001234"));
+        assert_eq!(field("frame_0"), Some("0xffff800000000000"));
+        assert_eq!(field("frame_1"), Some("0xffff800000001111"));
+        // The faulting instruction is not the shim's captured `pc`.
+        assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
+    }
+
+    /// The re-entrancy guard is shared by both causes — a fault taken while
+    /// a report is already being written emits one terse record under its
+    /// own event id, never recursing into the walk.
+    #[test]
+    fn a_nested_fault_emits_one_terse_kernel_fault_record() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+        PANICKING.store(true, Ordering::Release);
+
+        let arch = TestArch::with_cpus(1);
+        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            fault_dump(
+                KernelFault {
+                    syndrome: 1,
+                    address: 2,
+                    pc: 3,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, AuditEvent::KernelFault.id());
+        assert!(
+            events[0].message.contains("nested"),
+            "nested fault must be terse: {}",
+            events[0].message
+        );
+        assert_eq!(events[0].fields.len(), 1, "cpu only");
+        assert_eq!(arch.halt_count(), 1);
+        reset_panic_guard();
+    }
+
+    /// The pre-init console line the port's bridge prints when no arch
+    /// handle is published yet uses the same field names and hex width the
+    /// structured record does.
+    #[test]
+    fn kernel_fault_displays_as_one_hex_line() {
+        use core::fmt::Write as _;
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "{}",
+            KernelFault {
+                syndrome: 0x9600_0045,
+                address: 0xffff_0000_dead_beef,
+                pc: 0x8010_1234,
+            }
+        );
+        assert_eq!(
+            out,
+            "syndrome=0x0000000096000045 fault_addr=0xffff0000deadbeef fault_pc=0x0000000080101234"
+        );
     }
 }

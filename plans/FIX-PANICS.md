@@ -6,6 +6,18 @@ collapsed onto the one arch-neutral `kernel_core::panic_dump`; on-target
 symbolication (a compiled-in symbol table) remains the one deliberately
 staged follow-up (offline `addr2line` is the complete story today).
 
+A fatal **kernel-mode CPU exception** now enters the same path through
+`kernel_core::fault_dump`, carrying the arch-neutral
+`KernelFault { syndrome, address, pc }` triple in place of a source location
+and recorded as `AuditEvent::KernelFault` (`4011`); everything below it —
+the register block, the bounded walk, the re-entrancy guard, the halt — is
+the one shared body. The per-port glue (the published arch handle, the sink,
+the backtracer, the console list, the pre-init console line) is one
+`tairix_kernel::fatal_bridge::FatalReport` impl per port, shared by the
+`#[panic_handler]` and the `extern "C"` fault shim. See
+`plans/OPEN-DEFECTS.md` D13 for why it was missing and D79 for the one port
+still only partly covered.
+
 Design note (divergence from the original sketch below, per the "redo it
 correctly" mandate): the arch slice exposes register `capture()` plus a
 pure `FrameLayout` (saved-fp / return-addr offsets) and `stack_bounds()`,

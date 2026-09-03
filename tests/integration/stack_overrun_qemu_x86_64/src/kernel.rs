@@ -250,13 +250,6 @@ fn run_overrun_test() -> ! {
     let arena = arena_phys();
     let guard = guard_page();
 
-    // Install the fault observer before any access can fault. The production
-    // boot already installed the dedicated, error-code-aware `#PF` entry;
-    // this routes it here (fail-closed if already taken).
-    if fault::set_fault_handler(on_fault).is_err() {
-        fail("fault observer already installed");
-    }
-
     // Build a 4 GiB-identity space (low identity + higher-half kernel
     // window) so the running RIP / stack / per-CPU TLS, the heap, and the
     // arena's low-identity alias all stay mapped across the CR3 switch.
@@ -397,6 +390,15 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 /// The symbol the arch crate's boot trampoline calls.
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
+    // Claim the set-once fatal-fault slot before `boot` publishes the
+    // production reporter into it: this vertical *is* the observer of its
+    // own deliberate stack-overrun fault, so it owns the machine's fatal
+    // policy for this image and must be first. `on_fault` fail-closes on
+    // any fault before the guard is unmapped, so owning the slot from here
+    // never hides an unexpected one.
+    if fault::set_fault_handler(on_fault).is_err() {
+        fail("fault observer already installed");
+    }
     boot(
         multiboot_info,
         &ALLOCATOR,
