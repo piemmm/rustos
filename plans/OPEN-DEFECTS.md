@@ -97,7 +97,7 @@ The open items, in priority order:
   mapping turned one of them into an I/O error — DONE.** Every distinguishable
   filesystem conflict now has its own driver value, so the VFS no longer
   disambiguates by which mapper the call site picked.
-- **D67 — the sleeping mutex released the lock word after deciding nobody was
+- **D84 — the sleeping mutex released the lock word after deciding nobody was
   waiting, so a contender that published in that window slept for ever —
   DONE.** The `stress_qemu_aarch64` early-boot silence recorded under D13 as a
   masked-section wedge. It is not one: every core is idle. Detail below.
@@ -1979,11 +1979,13 @@ registry knows about is interrupt-safe too.
   masking is correct defence-in-depth; the layer below needs the same
   treatment only if an ISR ever allocates from an EL1-interrupting context.
 
-**Done when:** the near-every-boot Pi 4 boot wedge no longer reproduces on
-metal with the interrupt-safe allocator lock, and `stress --cpu 20` no longer
-wedges on metal. (The QEMU stress vertical's own early-boot silence was D67,
-a different defect entirely, and is fixed. The FIQ and EDPCSR samplers remain
-the standing masked-section observers for any *future* wedge.)
+**Done when:** `stress --cpu 20` no longer wedges on metal. The Pi 4 *boot*
+wedge this defect also chased was D81 — a block split invalidating one page
+instead of the whole block's range — and is fixed and confirmed on metal; only
+the `--cpu 20` stress wedge remains here. (The QEMU stress vertical's own
+early-boot silence was D84, a different defect entirely, and is fixed. The FIQ
+and EDPCSR samplers remain the standing masked-section observers for any
+*future* wedge.)
 
 **The next metal boot decided it: see D81.** The fault theory was right. A
 same-EL *write* to an untranslated scan-out page, inside
@@ -4136,7 +4138,7 @@ budget, and now guarded by a test — but it is sized by `MAX_BLOCK_SIZE`, so it
 **B1**, which widens the filesystem block size, must move that staging off the
 stack in the same change; recorded in that item.
 
-## D67 — the sleeping mutex lost a contender that published after its release scanned the queue — DONE
+## D84 — the sleeping mutex lost a contender that published after its release scanned the queue — DONE
 
 **Symptom.** `stress_qemu_aarch64` fell silent for its whole 300 s inactivity
 budget, its transcript ending at `id=4139 root-unlock: users database
@@ -4915,12 +4917,12 @@ and re-decodes nothing).
 
 ---
 
-## D81 — a block split invalidated one page instead of the block's whole range, so a stale coarse TLB entry faulted unrelated addresses (FIXED, awaiting metal confirmation)
+## D81 — a block split invalidated one page instead of the block's whole range, so a stale coarse TLB entry faulted unrelated addresses (FIXED)
 
-**This is the Pi 4 boot wedge D13 chased**, and the fatal-fault reporting D13
-closed is what made it legible. The mechanism is proved from metal, and the fix
-is landed; it reproduced in roughly 1 boot in 20, so a clean run is weak
-evidence and confirmation needs several boots.
+**This was the Pi 4 boot wedge D13 chased**, and the fatal-fault reporting D13
+closed is what made it legible. The mechanism was proved from metal and the fix
+confirmed there: it reproduced in roughly 1 boot in 20 and has not recurred in
+over 40 boots.
 
 ### The mechanism
 
@@ -5025,10 +5027,11 @@ kernel's gigapage it is the only thing that maps it, and `widen_ram_gigapages`
 merges rather than replaces. A second, finer-grained mapping path would add
 machinery with no case where it helps.
 
-**Done when:** several consecutive Pi 4 boots clear the window the fault used
-to land in, and a QEMU vertical repaints the framebuffer console post-MMU so a
-scan-out the active root does not cover is caught in the matrix rather than on
-metal.
+**Remaining, tracked elsewhere:** the break-before-make window the fix bounds
+rather than removes is D82. A QEMU vertical that repaints the framebuffer
+console post-MMU is still owed, so a scan-out the active root does not cover
+would be caught in the matrix rather than on metal — the console now refuses
+such a surface, so this proves the refusal rather than the fault.
 
 ## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN)
 
@@ -5079,6 +5082,7 @@ cannot currently observe this.
 translation regime; the arena is laid down fine-grained before the MMU is
 enabled; and riscv64's granule-change maintenance reaches every hart sharing
 the root.
+
 ---
 
 ## D83 — on x86_64 only a page fault reaches the fatal-fault report; every other kernel-mode exception still dies mutely (OPEN)
