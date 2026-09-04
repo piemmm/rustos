@@ -22,9 +22,9 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
+use tairix_itest_harness::pie::PieArch;
 
 /// Busy-loop iterations the spinner runs before it exits. Smaller than the
 /// sibling timer vertical's count: this test proves the *single* SGI-driven
@@ -33,8 +33,8 @@ use std::process::Command;
 /// complete promptly under QEMU TCG.
 const SPINS: u64 = 20_000_000;
 
-/// Rust target triple of the freestanding aarch64 build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -44,19 +44,11 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
 
-    let program_dir = format!("{manifest_dir}/../el0_spinner_program");
-    println!("cargo:rerun-if-changed={program_dir}/src/main.rs");
-    println!(
-        "cargo:rerun-if-changed={}",
-        tairix_itest_harness::program_fixture::PROGRAM_LD
-    );
-    println!("cargo:rerun-if-changed={program_dir}/Cargo.toml");
-
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
     let dtb_path = PathBuf::from(&out_dir).join("dtb_fixture.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == AARCH64_TARGET {
+    if target == ARCH.target_triple() {
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={linker}");
         println!("cargo:rustc-link-arg=-T{linker}");
@@ -66,65 +58,20 @@ fn main() {
         let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
-        let rxe = build_and_convert_program(manifest_dir, &out_dir);
+        let rxe = tairix_itest_harness::program_fixture::GuestBuild {
+            manifest_dir,
+            out_dir: &out_dir,
+            arch: ARCH,
+            package: "tairix-test-el0-spinner",
+            variant: None,
+            env: &[("TAIRIX_EL0_SPINS", SPINS.to_string())],
+        }
+        .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
         write_program_fixture(&rxe_path, &rxe);
     } else {
         write_dtb_fixture(&dtb_path, &[]);
         write_program_fixture(&rxe_path, &[]);
     }
-}
-
-/// Compile the EL0 spinner program PIE for the freestanding aarch64 target and
-/// convert the linked ELF into an `rxe` blob.
-fn build_and_convert_program(manifest_dir: &str, out_dir: &str) -> Vec<u8> {
-    let program_ld = tairix_itest_harness::program_fixture::PROGRAM_LD;
-    let target_dir = format!("{out_dir}/el0-spinner-target");
-
-    // Cargo fingerprints the RUSTFLAGS string (which names the linker script by
-    // path) but not the script's content, so wipe the private target dir to
-    // force a clean relink against the current script.
-    let _ = fs::remove_dir_all(&target_dir);
-
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(manifest_dir)
-        // Clear the outer build's flags so the target-scoped PIE recipe wins
-        // and applies only to the aarch64 program crates.
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        // Pin the program's busy-loop count (the single source of truth).
-        .env("TAIRIX_EL0_SPINS", SPINS.to_string())
-        .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
-        )
-        .args([
-            "build",
-            "-p",
-            "tairix-test-el0-spinner",
-            "--target",
-            AARCH64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            &target_dir,
-        ])
-        .status()
-        .expect("spawn cargo to build the el0-spinner fixture program");
-    assert!(
-        status.success(),
-        "building the el0-spinner fixture program failed"
-    );
-
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-el0-spinner");
-    let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
-
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        tairix_itest_harness::USER_IMAGE_BIAS,
-    )
-    .expect("convert the el0-spinner fixture program ELF into an rxe image")
 }
 
 /// Emit `PROGRAM_RXE` and `USER_BIAS` as a Rust source the test includes.

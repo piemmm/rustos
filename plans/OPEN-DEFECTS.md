@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 19 open, 69 closed, 88 total.
+table normalises all three to **closed**. 18 open, 70 closed, 88 total.
 
 ### Open (18)
 
@@ -45,9 +45,8 @@ table normalises all three to **closed**. 19 open, 69 closed, 88 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D88 | an EL0 fixture's `rxe` is not rebuilt when a *dependency* of its program changes | 43 verticals; a stale blob is silently tested |
 
-### Closed (69)
+### Closed (70)
 
 | ID | Subject |
 |---|---|
@@ -120,6 +119,7 @@ table normalises all three to **closed**. 19 open, 69 closed, 88 total.
 | D42 | an x86_64 ring-3 wild jump halted the CPU instead of the task |
 | D86 | on x86_64 a ring-3 exception other than a page fault killed the machine |
 | D87 | an instruction-side fault kill is audited against the task's *data* mappings |
+| D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
 
 ## Scope
 
@@ -5290,44 +5290,67 @@ uninstalled vector and observes the record.
 
 ---
 
-## D88 — an EL0 fixture's `rxe` is not rebuilt when a dependency of its program changes (OPEN)
+## D88 — an EL0 fixture's `rxe` was not rebuilt when a dependency of its program changed — FIXED
 
-Noticed while landing `plans/COLLECTIONS.md` C0. Every vertical that builds a
-separately-linked EL0 program compiles it through a nested `cargo` in its own
-`build.rs` and declares `cargo:rerun-if-changed` on the *program crate's own*
-sources only — `src/main.rs`, its `Cargo.toml`, the linker script, and
-`build.rs` itself. A change to a crate the program **depends on** —
-`lib/rt`, `lib/abi`, `lib/abi-trap` — matches none of those, so the build
-script does not rerun, the nested build is not re-driven, and the vertical
-runs the previously converted blob.
+**Root cause: 43 fixtures each hand-kept the list of sources their nested
+build depended on.** Every vertical that spawns a separately-linked EL0
+program compiles it through a nested `cargo` in its own `build.rs`, and each
+declared `cargo:rerun-if-changed` on the *program crate's own* files only —
+`src/main.rs`, its `Cargo.toml`, and the linker script. A change to a crate
+the program **depends on** (`lib/rt`, `lib/abi`, `lib/abi-trap`) matched none
+of those, so the build script did not rerun, the nested build was not
+re-driven, and the vertical ran the previously converted blob. The failure
+mode is the dangerous one — the vertical *passes*, against code that has left
+the tree — and it stayed hidden because a clean tree (the CI runners, and the
+documented `cargo clean` before a gate) builds every blob fresh.
 
-The failure mode is the dangerous one: the vertical *passes*, against code
-that is no longer in the tree. It bit exactly that way here — an edit to
-`lib/rt`'s `_start` was reverted, and the affected verticals kept failing
-locally against the stale blob until the fixtures' `build.rs` files were
-touched by hand. A green incremental run is therefore not evidence about the
-current tree for any of these 43 crates.
+**Fix: one recipe, and the closure comes from the compiler.**
+`program_fixture::GuestBuild` is the single nested cross-compile every such
+fixture now drives. A vertical names the package, the `pie::PieArch`, the
+constants it pins into the guest through the environment, and — where one
+package is built twice — the variant, which needs its own target directory
+because one directory holds one artefact per package. It returns the converted
+`rxe` (`program_rxe`) or the position-independent archive a C object links
+against (`static_archive`). The ~60 lines each fixture carried are gone, and
+with them the last copies of the target triple: a fixture names
+`PieArch::Aarch64`, never `"aarch64-unknown-none"`.
 
-`cargo xtask ci` is not affected when run from a clean tree, which is why this
-has survived: the CI runners and the documented `cargo clean` before a gate
-build every blob fresh. It is a developer-loop defect and a trap that costs an
-hour each time.
+Freshness is derived, not enumerated. `dep_info::emit_dep_info_reruns` reads
+the dep-info rustc wrote beside the artefact and registers every source the
+compilation read — the whole dependency closure — plus each source's owning
+`Cargo.toml` (rustc records the files it *read*, so a manifest edit would
+otherwise be invisible) and the workspace lockfile. Prerequisites inside the
+private target directory are dropped: they are that build's outputs, the
+recipe may wipe them, and cargo reruns a build script forever once a
+registered path is missing.
 
-The harness already has the right mechanism and nothing uses it:
-`tairix_itest_harness::dep_info` reads the nested build's dep-info file and
-emits one `cargo:rerun-if-changed` per recorded source, which covers the
-program's whole dependency closure. It has **no consumer** in the tree.
+**The two inputs cargo cannot see are stamped rather than wiped away.** The
+old per-fixture recipe wiped its private target directory on *every*
+build-script run, which was only cheap because the script almost never reran
+— the defect itself. With the closure wired, an unconditional wipe would turn
+any `lib/rt` edit into 43 clean `-Z build-std` rebuilds, so
+`pie::wipe_target_dir_on_stamp_change` records a stamp beside the directory
+and wipes only when it moves. The stamp holds the linker script's *content*
+(`RUSTFLAGS` carries only its path) and the pinned environment (cargo tracks
+that only where the guest crate itself declared
+`cargo:rerun-if-env-changed`), length-framed so two different sets cannot
+render the same bytes; an unreadable input yields no stamp and forces the
+rebuild. The guard is shared with the image pipeline's `Run`-binary builds,
+which carried a second copy of it.
 
-**The fix.** Drive every program-building fixture's `build.rs` through
-`dep_info` after its nested build, replacing the hand-maintained
-`rerun-if-changed` list, so the closure is derived rather than enumerated.
-The 43 crates share one recipe, so the change belongs in the shared
-`program_fixture` helper rather than copied per fixture.
-
-**Done when:** no program-building fixture enumerates its program's sources
-by hand; editing a crate the program depends on rebuilds the blob; and a
-regression test drives that (edit a dependency, confirm the converted `rxe`
-changes).
+**Regression cover.**
+`no_fixture_build_script_enumerates_its_guest_inputs_by_hand` scans every
+`tests/integration/*/build.rs` and fails on any non-comment line naming a
+guest's `src/main.rs`, `src/lib.rs`, or `Cargo.toml`; it listed all 86
+offending lines before the fix. Beside it: the closure computation (a
+transitive dependency's source and manifest and the lockfile in, the build's
+own outputs out), the stamp's framing and its fail-safe on an unreadable
+script, the per-variant target directory, the dep-info name for both artefact
+shapes, and the wipe guard's keep/wipe/fail-safe decisions. Confirmed end to
+end on the aarch64 heap and preempt-EL0 verticals: an `ARENA_BASE` edit in
+`lib/rt` changes the embedded blob, and so do a pinned `SPINS` constant and a
+`program.ld` base-address change, each returning to the original bytes when
+reverted — the second and third rebuilds incremental, not clean.
 
 ---
 

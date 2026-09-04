@@ -16,11 +16,10 @@
 //!    for the freestanding aarch64 target (the shared `program.ld` roots
 //!    `tairix-rt`'s `_start`), into a private target directory under
 //!    `OUT_DIR`.
-//! 3. Convert the linked PIE ELF to an `rxe` blob with
-//!    [`tairix_itest_harness::elf2rxe::elf_to_rxe`], baking relocations for the
-//!    [`USER_BIAS`] the production spawn producer maps every child image at and
-//!    stamping the kernel's compiled-in syscall CFI tag
-//!    (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
+//! 3. Convert the linked PIE ELF to an `rxe` blob, baking relocations for the
+//!    [`tairix_itest_harness::USER_IMAGE_BIAS`] the production spawn producer
+//!    maps every child image at and stamping the kernel's compiled-in syscall
+//!    CFI tag (`tairix_kernel_syscall::SYSCALL_TABLE_HASH`) so
 //!    [`tairix_abi::rxe::LoadImage::parse`] accepts it; emit the
 //!    bytes and the bias as a Rust source the test `include!`s.
 //!
@@ -33,20 +32,12 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
-/// Virtual base the stub program image is mapped at: the production aarch64
-/// spawn producer's image bias (the image builder passes it to
-/// `build_process_image`, so the `rxe`'s baked relocations must target the
-/// same value). It is the shared [`tairix_itest_harness::USER_IMAGE_BIAS`]
-/// definition; the test kernel asserts it agrees with the
-/// producer's `SHELL_USER_BIAS` at runtime and fails closed on a mismatch.
-use tairix_itest_harness::USER_IMAGE_BIAS as USER_BIAS;
+use tairix_itest_harness::pie::PieArch;
 
-/// Rust target triple of the freestanding aarch64 build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -56,20 +47,12 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
 
-    let program_dir = format!("{manifest_dir}/../driver_register_program");
-    println!("cargo:rerun-if-changed={program_dir}/src/main.rs");
-    println!(
-        "cargo:rerun-if-changed={}",
-        tairix_itest_harness::program_fixture::PROGRAM_LD
-    );
-    println!("cargo:rerun-if-changed={program_dir}/Cargo.toml");
-
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
     let dtb_path = PathBuf::from(&out_dir).join("dtb_fixture.rs");
     let image_path = PathBuf::from(&out_dir).join("driver_image.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == AARCH64_TARGET {
+    if target == ARCH.target_triple() {
         // The test kernel itself links with the aarch64 `virt` script the
         // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
@@ -81,7 +64,15 @@ fn main() {
         let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_dtb_fixture(&dtb_path, &dtb);
 
-        let rxe = build_and_convert_program(manifest_dir, &out_dir);
+        let rxe = tairix_itest_harness::program_fixture::GuestBuild {
+            manifest_dir,
+            out_dir: &out_dir,
+            arch: ARCH,
+            package: "tairix-test-driver-register-program",
+            variant: None,
+            env: &[],
+        }
+        .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
         write_bias_fixture(&rxe_path);
         write_driver_image_fixture(&image_path, &rxe);
     } else {
@@ -159,75 +150,6 @@ fn write_driver_image_fixture(path: &std::path::Path, rxe: &[u8]) {
     }
     out.push_str("\n];\n");
     tairix_itest_harness::program_fixture::write_fixture(path, &out);
-}
-
-/// Compile the driver-stub fixture program PIE for the freestanding aarch64
-/// target and convert the linked ELF into an `rxe` blob.
-fn build_and_convert_program(manifest_dir: &str, out_dir: &str) -> Vec<u8> {
-    let program_ld = tairix_itest_harness::program_fixture::PROGRAM_LD;
-    let target_dir = format!("{out_dir}/driver-register-target");
-
-    // Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
-    // by path) but not the script's *content*, so a `program.ld` edit would not
-    // by itself trigger a relink and the converter could read a stale ELF.
-    // `build.rs` only reruns when its `rerun-if-changed` inputs (including
-    // `program.ld`) actually change, so wiping the private target directory
-    // here forces a clean rebuild against the current script without churning
-    // ordinary incremental builds.
-    let _ = fs::remove_dir_all(&target_dir);
-
-    // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
-    // position-independent. Scope the PIE link flags to the
-    // aarch64 target so the program's own host build script is unaffected, and
-    // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
-    // `#[global_allocator]` (its `mem_map`-backed heap), so the program names
-    // `alloc`; omitting it would pull `alloc` from the prebuilt sysroot while
-    // `core` is built fresh, a duplicate-lang-item link error.
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(manifest_dir)
-        // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS` into
-        // this build script's environment; both outrank the target-scoped var
-        // below, so a nested cargo would inherit the outer kernel's flags and
-        // drop the PIE link recipe. Clear them so the target-scoped flags win
-        // and apply only to the aarch64 program crates (not the program's own
-        // host build script).
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
-        )
-        .args([
-            "build",
-            "-p",
-            "tairix-test-driver-register-program",
-            "--target",
-            AARCH64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            &target_dir,
-        ])
-        .status()
-        .expect("spawn cargo to build the driver-register fixture program");
-    assert!(
-        status.success(),
-        "building the driver-register fixture program failed"
-    );
-
-    let elf_path =
-        format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-driver-register-program");
-    let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
-
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        USER_BIAS,
-    )
-    .expect("convert the driver-register fixture program ELF into an rxe image")
 }
 
 /// Emit `USER_BIAS` as a Rust source the test includes.

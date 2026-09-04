@@ -2,11 +2,12 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+use tairix_itest_harness::pie::PieArch;
+
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -15,18 +16,10 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
     let manifest_dir = manifest_dir.trim_end_matches('/');
-    let program_dir = format!("{manifest_dir}/../syscall_resume_program");
-    for path in [
-        format!("{program_dir}/src/main.rs"),
-        format!("{program_dir}/Cargo.toml"),
-        String::from(tairix_itest_harness::program_fixture::PROGRAM_LD),
-    ] {
-        println!("cargo:rerun-if-changed={path}");
-    }
 
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
     let dtb_path = PathBuf::from(&out_dir).join("dtb_fixture.rs");
-    if env::var("TARGET").unwrap_or_default() == AARCH64_TARGET {
+    if env::var("TARGET").unwrap_or_default() == ARCH.target_triple() {
         let kernel_linker =
             format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
         println!("cargo:rerun-if-changed={kernel_linker}");
@@ -34,51 +27,20 @@ fn main() {
         let out_dir_os = std::ffi::OsString::from(&out_dir);
         let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, 1);
         write_bytes(&dtb_path, "DTB_BLOB", &dtb);
-        let rxe = build_program(manifest_dir, &out_dir, &program_dir);
+        let rxe = tairix_itest_harness::program_fixture::GuestBuild {
+            manifest_dir,
+            out_dir: &out_dir,
+            arch: ARCH,
+            package: "tairix-test-syscall-resume-program",
+            variant: None,
+            env: &[],
+        }
+        .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
         write_program(&rxe_path, &rxe);
     } else {
         write_bytes(&dtb_path, "DTB_BLOB", &[]);
         write_program(&rxe_path, &[]);
     }
-}
-
-fn build_program(manifest_dir: &str, out_dir: &str, program_dir: &str) -> Vec<u8> {
-    let linker = tairix_itest_harness::program_fixture::PROGRAM_LD;
-    let target_dir = format!("{out_dir}/syscall-resume-target");
-    let _ = fs::remove_dir_all(&target_dir);
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(manifest_dir)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{linker}"),
-        )
-        .args([
-            "build",
-            "-p",
-            "tairix-test-syscall-resume-program",
-            "--target",
-            AARCH64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            &target_dir,
-        ])
-        .status()
-        .expect("spawn syscall-resume fixture build");
-    assert!(status.success(), "building syscall-resume fixture failed");
-    let elf_path =
-        format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-syscall-resume-program");
-    let elf = fs::read(&elf_path).unwrap_or_else(|error| panic!("read {elf_path}: {error}"));
-    let _ = program_dir;
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        tairix_itest_harness::USER_IMAGE_BIAS,
-    )
-    .expect("convert syscall-resume fixture to rxe")
 }
 
 fn write_program(path: &Path, bytes: &[u8]) {

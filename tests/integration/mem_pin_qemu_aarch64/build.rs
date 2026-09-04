@@ -31,12 +31,12 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
-/// Rust target triple of the freestanding aarch64 build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+use tairix_itest_harness::pie::PieArch;
+
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -52,19 +52,11 @@ fn main() {
         println!("cargo:rustc-cfg=migration_smp");
     }
 
-    let program_dir = format!("{manifest_dir}/../mem_pin_program");
-    println!("cargo:rerun-if-changed={program_dir}/src/main.rs");
-    println!(
-        "cargo:rerun-if-changed={}",
-        tairix_itest_harness::program_fixture::PROGRAM_LD
-    );
-    println!("cargo:rerun-if-changed={program_dir}/Cargo.toml");
-
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
     let dtb_path = PathBuf::from(&out_dir).join("dtb_fixture.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == AARCH64_TARGET {
+    if target == ARCH.target_triple() {
         // The test kernel itself links with the aarch64 `virt` script the
         // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");
@@ -76,7 +68,15 @@ fn main() {
         let dtb = tairix_itest_harness::dump_aarch64_virt_dtb(&out_dir_os, cpu_count);
         write_dtb_fixture(&dtb_path, &dtb);
 
-        let rxe = build_and_convert_program(manifest_dir, &out_dir);
+        let rxe = tairix_itest_harness::program_fixture::GuestBuild {
+            manifest_dir,
+            out_dir: &out_dir,
+            arch: ARCH,
+            package: "tairix-test-mem-pin",
+            variant: None,
+            env: &[],
+        }
+        .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
         write_program_fixture(&rxe_path, &rxe);
     } else {
         // Inert stubs for host / other targets; the kernel body that uses
@@ -84,73 +84,6 @@ fn main() {
         write_dtb_fixture(&dtb_path, &[]);
         write_program_fixture(&rxe_path, &[]);
     }
-}
-
-/// Compile the EL0 fixture program PIE for the freestanding aarch64 target
-/// and convert the linked ELF into an `rxe` blob.
-fn build_and_convert_program(manifest_dir: &str, out_dir: &str) -> Vec<u8> {
-    let program_ld = tairix_itest_harness::program_fixture::PROGRAM_LD;
-    let target_dir = format!("{out_dir}/mem-pin-target");
-
-    // Cargo fingerprints the RUSTFLAGS *string* (which names the linker
-    // script by path) but not the script's *content*, so a `program.ld` edit
-    // would not by itself trigger a relink and the converter could read a
-    // stale ELF. Wiping the private target directory here forces a clean
-    // rebuild against the current script without churning ordinary
-    // incremental builds.
-    let _ = fs::remove_dir_all(&target_dir);
-
-    // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
-    // position-independent. Scope the PIE link flags to the aarch64 target
-    // so the program's own host build script is unaffected, and build
-    // `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
-    // `#[global_allocator]`, so the program names `alloc`.
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(cargo);
-    command
-        .current_dir(manifest_dir)
-        // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS`
-        // into this build script's environment; both outrank the
-        // target-scoped var below, so a nested cargo would inherit the outer
-        // kernel's flags and drop the PIE link recipe. Clear them so the
-        // target-scoped flags win and apply only to the aarch64 program
-        // crates.
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        .env(
-            "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
-        )
-        .args([
-            "build",
-            "-p",
-            "tairix-test-mem-pin",
-            "--target",
-            AARCH64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            &target_dir,
-        ]);
-    let status = command
-        .status()
-        .expect("spawn cargo to build the mem-pin fixture program");
-    assert!(
-        status.success(),
-        "building the mem-pin fixture program failed"
-    );
-
-    let elf_path = format!("{target_dir}/{AARCH64_TARGET}/debug/tairix-test-mem-pin");
-    let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
-
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        tairix_itest_harness::USER_IMAGE_BIAS,
-    )
-    .unwrap_or_else(|_| panic!("convert the mem-pin fixture program ELF into an rxe image"))
 }
 
 /// Emit `PROGRAM_RXE` and `USER_BIAS` as a Rust source the test includes.

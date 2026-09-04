@@ -17,20 +17,16 @@
 //!
 //! Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
 //! by path) but not the script's *content*, so a `Run.ld` edit alone would
-//! not trigger a relink and a converter could read a stale ELF. A sidecar
-//! copy of the script is kept beside the private target directory; the
-//! directory is wiped — forcing a clean rebuild against the current script
-//! — only when the content actually changed (or on first build / an
-//! unreadable script, which compares as different: fail safe, never
-//! silently stale). An unchanged script leaves the directory intact so the
-//! nested `cargo` no-ops incrementally instead of rebuilding `build-std`
-//! on every invocation.
+//! not trigger a relink and a converter could read a stale ELF. The shared
+//! `wipe_target_dir_on_stamp_change` guard — the same one the QEMU fixtures'
+//! nested builds use — takes the script's content as the stamp, so the
+//! private target directory is wiped only when it actually changed and an
+//! unchanged script leaves the directory for cargo to build incrementally.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tairix_itest_harness::pie::PieArch;
+use tairix_itest_harness::pie::{self, PieArch};
 use tairix_mkimage::ImageProfile;
 
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
@@ -81,7 +77,7 @@ pub fn cross_compile_pie_elf(
         ));
     }
     let target_dir = ctx.target_dir().join(group).join(triple);
-    wipe_target_dir_on_linker_change(&run_ld, &target_dir);
+    pie::wipe_target_dir_on_stamp_change(&target_dir, std::fs::read(&run_ld).ok().as_deref());
 
     // Every bundle the pipeline cross-compiles is part of the generic per-arch
     // user-space, so it builds against that image's CPU floor — the identical
@@ -144,35 +140,4 @@ pub fn cross_compile_pie_elf(
         .join(bin);
     std::fs::read(&elf_path)
         .map_err(|e| format!("image: cannot read program ELF {}: {e}", elf_path.display()))
-}
-
-/// Wipe `target_dir` — forcing a clean relink — when the `run_ld` content
-/// has changed since the last build, and otherwise leave it intact so the
-/// nested `cargo` builds incrementally. A sidecar copy of the script is
-/// kept beside the target directory; an unreadable script compares as
-/// different and forces the (correct, safe) clean rebuild.
-fn wipe_target_dir_on_linker_change(run_ld: &Path, target_dir: &Path) {
-    let current = std::fs::read(run_ld).ok();
-    let sidecar = sidecar_path(target_dir);
-    let previous = std::fs::read(&sidecar).ok();
-    if current.is_none() || current != previous {
-        let _ = std::fs::remove_dir_all(target_dir);
-        if let Some(bytes) = &current {
-            if let Some(parent) = sidecar.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&sidecar, bytes);
-        }
-    }
-}
-
-/// The sidecar file recording the `Run.ld` content the private target
-/// directory was last linked against.
-fn sidecar_path(target_dir: &Path) -> PathBuf {
-    let mut name = target_dir
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_default();
-    name.push(".run_ld");
-    target_dir.with_file_name(name)
 }

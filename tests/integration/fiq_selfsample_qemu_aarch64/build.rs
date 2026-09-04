@@ -26,8 +26,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
+use tairix_itest_harness::pie::PieArch;
+
 /// Rust target triple of the freestanding aarch64 build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Aarch64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -40,7 +43,7 @@ fn main() {
     let dtb_path = PathBuf::from(&out_dir).join("dtb_fixture.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == AARCH64_TARGET {
+    if target == ARCH.target_triple() {
         // The test kernel links with the aarch64 `virt` script the
         // architecture port owns (the single per-board script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/aarch64/link/aarch64-virt.ld");

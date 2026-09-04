@@ -14,6 +14,14 @@
 //! the link flags and the converter reads a stale or wrongly-linked ELF. This
 //! type is the one definition every builder draws from, so the arch selection
 //! cannot drift between them.
+//!
+//! [`wipe_target_dir_on_stamp_change`](crate::pie::wipe_target_dir_on_stamp_change)
+//! is the other fact every such build needs: the guard that keeps a private
+//! target directory honest about the inputs cargo does not fingerprint.
+
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// The one PIE link script every pure-Rust `Run` program links against,
 /// as a path relative to the workspace root.
@@ -110,6 +118,60 @@ impl PieArch {
     }
 }
 
+/// Wipe `target_dir` when an input cargo cannot fingerprint has changed
+/// since the nested build that last used it, and otherwise leave it for that
+/// build to extend incrementally.
+///
+/// Cargo fingerprints the `RUSTFLAGS` *string* — which names a linker script
+/// by path — but not that script's *content*, so a script edit alone can
+/// change while every fingerprint cargo keeps stays equal, leaving the
+/// previous artefact looking fresh. A caller passes such an input as `stamp`
+/// and it is recorded in a sidecar beside the directory. `None` means a stamp
+/// input could not be read; it compares as different, so the clean rebuild
+/// happens rather than a silently stale artefact.
+///
+/// The sidecar is written before the build runs, which is safe because it
+/// gates only the *wipe*: a wiped directory rebuilds from scratch whether or
+/// not the build that follows succeeds. A wipe that could not be carried out
+/// leaves the sidecar alone, so the next build retries it instead of reading
+/// the stale directory as current.
+pub fn wipe_target_dir_on_stamp_change(target_dir: &Path, stamp: Option<&[u8]>) {
+    let sidecar = stamp_sidecar(target_dir);
+    let previous = fs::read(&sidecar).ok();
+    if stamp.is_none() || stamp != previous.as_deref() {
+        if !wipe(target_dir) {
+            return;
+        }
+        if let Some(bytes) = stamp {
+            if let Some(parent) = sidecar.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&sidecar, bytes);
+        }
+    }
+}
+
+/// Remove `target_dir` and everything in it, reporting whether it is now
+/// gone. A directory that was never there counts as removed — that is the
+/// first build.
+fn wipe(target_dir: &Path) -> bool {
+    match fs::remove_dir_all(target_dir) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// The sidecar recording the stamp `target_dir` was last built against. It
+/// sits *beside* the directory, not inside it, so a wipe cannot take it.
+fn stamp_sidecar(target_dir: &Path) -> PathBuf {
+    let mut name = target_dir
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".stamp");
+    target_dir.with_file_name(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +240,71 @@ mod tests {
             );
             assert!(arch.index() < PieArch::COUNT);
         }
+    }
+
+    #[test]
+    fn the_stamp_sidecar_sits_beside_the_target_directory() {
+        assert_eq!(
+            stamp_sidecar(Path::new("/out/guest-target")),
+            Path::new("/out/guest-target.stamp"),
+        );
+    }
+
+    /// A stamp that moved clears the directory; an unchanged one leaves it
+    /// for cargo to build incrementally; an unreadable one clears it every
+    /// time rather than certifying a stale artefact.
+    #[test]
+    fn a_moved_stamp_wipes_the_target_directory() {
+        let root =
+            std::env::temp_dir().join(format!("tairix-pie-stamp-wipe-{}", std::process::id()));
+        let target = root.join("guest-target");
+        let witness = target.join("witness");
+        let _ = fs::remove_dir_all(&root);
+        let plant = || {
+            fs::create_dir_all(&target).expect("create the private target dir");
+            fs::write(&witness, b"artefact").expect("plant the artefact witness");
+        };
+
+        plant();
+        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
+        assert!(!witness.exists(), "no recorded stamp must force a wipe");
+
+        plant();
+        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
+        assert!(witness.exists(), "an unchanged stamp must keep the dir");
+
+        wipe_target_dir_on_stamp_change(&target, Some(b"second"));
+        assert!(!witness.exists(), "a changed stamp must wipe the dir");
+
+        for _ in 0..2 {
+            plant();
+            wipe_target_dir_on_stamp_change(&target, None);
+            assert!(!witness.exists(), "an unreadable stamp must wipe the dir");
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A wipe that could not be carried out must not record the stamp: doing
+    /// so would let the next build read the directory it failed to clear as
+    /// current. A regular file standing where the directory belongs is a
+    /// removal error that is not "already absent".
+    #[test]
+    fn a_refused_wipe_records_no_stamp() {
+        let root =
+            std::env::temp_dir().join(format!("tairix-pie-stamp-refused-{}", std::process::id()));
+        let target = root.join("guest-target");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create the enclosing dir");
+        fs::write(&target, b"not a directory").expect("plant a file where the dir belongs");
+
+        wipe_target_dir_on_stamp_change(&target, Some(b"first"));
+
+        assert!(
+            !stamp_sidecar(&target).exists(),
+            "a refused wipe must leave the next build to retry it"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

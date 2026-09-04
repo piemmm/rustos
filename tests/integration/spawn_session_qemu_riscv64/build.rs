@@ -33,9 +33,9 @@
 
 use std::env;
 use std::fmt::Write as _;
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+
+use tairix_itest_harness::pie::PieArch;
 
 /// How many times each role yields before exiting. The single source of truth:
 /// passed to both program builds via `TAIRIX_SPAWN_YIELDS` *and* emitted as the
@@ -45,8 +45,8 @@ use std::process::Command;
 /// harness budget.
 const YIELDS_PER_TASK: u32 = 8;
 
-/// Rust target triple of the freestanding riscv64 build.
-const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::Riscv64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
@@ -57,18 +57,12 @@ fn main() {
     let manifest_dir = manifest_dir.trim_end_matches('/');
 
     let program_dir = format!("{manifest_dir}/../spawn_session_program");
-    println!("cargo:rerun-if-changed={program_dir}/src/main.rs");
-    println!(
-        "cargo:rerun-if-changed={}",
-        tairix_itest_harness::program_fixture::PROGRAM_LD
-    );
-    println!("cargo:rerun-if-changed={program_dir}/Cargo.toml");
     println!("cargo:rerun-if-changed={program_dir}/build.rs");
 
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == RISCV64_TARGET {
+    if target == ARCH.target_triple() {
         // The test kernel itself links with the riscv64 `virt` script the
         // architecture port owns (the single per-arch script).
         let linker = format!("{manifest_dir}/../../../kernel/arch/riscv64/link/riscv64-virt.ld");
@@ -89,75 +83,18 @@ fn main() {
 /// target in the given `role` (`"parent"` or `"child"`) and convert the linked
 /// ELF into an `rxe` blob.
 fn build_and_convert_program(manifest_dir: &str, out_dir: &str, role: &str) -> Vec<u8> {
-    let program_ld = tairix_itest_harness::program_fixture::PROGRAM_LD;
-    let target_dir = format!("{out_dir}/spawn-session-{role}-target");
-
-    // Cargo fingerprints the RUSTFLAGS *string* (which names the linker script
-    // by path) but not the script's *content*, so a `program.ld` edit would not
-    // by itself trigger a relink and the converter could read a stale ELF.
-    // `build.rs` only reruns when its `rerun-if-changed` inputs (including
-    // `program.ld`) actually change, so wiping the private target directory
-    // here forces a clean rebuild against the current script without churning
-    // ordinary incremental builds.
-    let _ = fs::remove_dir_all(&target_dir);
-
-    // The program links no architecture crate, so `program.ld`'s
-    // `ENTRY(_start)` roots `tairix-rt`'s trampoline; it is built
-    // position-independent. Scope the PIE link flags to the
-    // riscv64 target so the program's own host build script is unaffected, and
-    // build `core` / `alloc` / `compiler_builtins` as PIC alongside it
-    // (`-Z build-std`). `alloc` is required because `tairix-rt` registers a
-    // `#[global_allocator]`, so the program names `alloc`; omitting it would
-    // pull `alloc` from the prebuilt sysroot while `core` is built fresh, a
-    // duplicate-lang-item link error.
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .current_dir(manifest_dir)
-        // The outer build exports `CARGO_ENCODED_RUSTFLAGS` / `RUSTFLAGS` into
-        // this build script's environment; both outrank the target-scoped var
-        // below, so a nested cargo would inherit the outer kernel's flags and
-        // drop the PIE link recipe. Clear them so the target-scoped flags win
-        // and apply only to the riscv64 program crates (not the program's own
-        // host build script).
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("RUSTFLAGS")
-        // Select the role and pin the yield count (the single source of
-        // truth). Both halves of the fixture read these.
-        .env("TAIRIX_SPAWN_ROLE", role)
-        .env("TAIRIX_SPAWN_YIELDS", YIELDS_PER_TASK.to_string())
-        .env(
-            "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS",
-            format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{program_ld}"),
-        )
-        .args([
-            "build",
-            "-p",
-            "tairix-test-spawn-session-program",
-            "--target",
-            RISCV64_TARGET,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            &target_dir,
-        ])
-        .status()
-        .expect("spawn cargo to build the spawn-session fixture program");
-    assert!(
-        status.success(),
-        "building the spawn-session fixture program ({role}) failed"
-    );
-
-    let elf_path = format!("{target_dir}/{RISCV64_TARGET}/debug/tairix-test-spawn-session-program");
-    let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
-
-    tairix_itest_harness::elf2rxe::elf_to_rxe(
-        &elf,
-        &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        tairix_itest_harness::USER_IMAGE_BIAS,
-    )
-    .unwrap_or_else(|e| {
-        panic!("convert the spawn-session fixture program ({role}) ELF into an rxe image: {e:?}")
-    })
+    tairix_itest_harness::program_fixture::GuestBuild {
+        manifest_dir,
+        out_dir,
+        arch: ARCH,
+        package: "tairix-test-spawn-session-program",
+        variant: Some(role),
+        env: &[
+            ("TAIRIX_SPAWN_ROLE", role.to_string()),
+            ("TAIRIX_SPAWN_YIELDS", YIELDS_PER_TASK.to_string()),
+        ],
+    }
+    .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH)
 }
 
 /// Emit `PARENT_RXE`, `CHILD_RXE`, `USER_BIAS`, and `YIELDS_PER_TASK` as a Rust

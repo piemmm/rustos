@@ -437,6 +437,25 @@ source each vertical `include!`s. The bias they emit is the one
 `USER_IMAGE_BIAS` every `rxe` converter bakes relocations for, rendered as
 a grouped hex literal because generated source is linted like any other.
 
+The nested cross-compile that produces those bytes is one definition too,
+`program_fixture::GuestBuild`: a vertical names the package, the
+`pie::PieArch` to build for, and any constants it pins into the guest
+through the environment, and gets back either the converted `rxe` or the
+static archive a C object links against. It is what keeps a green vertical
+*meaningful*. The freshness of the embedded blob is derived from the
+compiler's own dep-info record (`dep_info`) — every source in the guest's
+dependency closure, each one's manifest, and the lockfile — because a
+hand-kept `rerun-if-changed` list naming only the guest's `src/main.rs`
+matches nothing when a `lib/*` crate it links is edited, so the build
+script never reruns and the vertical passes against code that has left the
+tree. Two inputs cargo's own fingerprint cannot see — the linker script's
+content, which `RUSTFLAGS` carries only as a path, and the pinned
+environment — are recorded in a sidecar stamp, and the private target
+directory is wiped only when that stamp moves
+(`pie::wipe_target_dir_on_stamp_change`, shared with the image pipeline's
+`Run`-binary builds), so an ordinary edit rebuilds incrementally instead of
+recompiling `-Z build-std` from scratch.
+
 That harness is a *build* dependency, so nothing it holds can be linked
 by a running test kernel. Logic the kernel bodies themselves share needs
 a second crate, `tests/integration/finisher`

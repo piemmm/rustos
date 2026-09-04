@@ -18,15 +18,18 @@
 
 use std::env;
 
+use tairix_itest_harness::pie::PieArch;
+
 /// Rust target triple of the freestanding x86_64 build.
-const X86_64_TARGET: &str = "x86_64-unknown-none";
+/// Freestanding target this vertical cross-compiles for.
+const ARCH: PieArch = PieArch::X86_64;
 
 fn main() {
     tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
     let target = env::var("TARGET").unwrap_or_default();
-    if target == X86_64_TARGET {
+    if target == ARCH.target_triple() {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
         let manifest_dir = manifest_dir.trim_end_matches('/');
         // The single per-arch script the architecture port owns;
