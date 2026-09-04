@@ -1246,7 +1246,9 @@ fn filter_tab_point(sb: &Switchboard, b: Rect, theme: &Theme, tab: usize) -> (i3
     let x = strip.left() + to_i32(each * u32::try_from(tab).unwrap_or(0) + each / 2);
     let y = strip.top() + to_i32(strip.height / 2);
     assert_eq!(
-        sb.tasks.filters.tab_at(strip, Point::new(x, y)),
+        sb.tasks
+            .filters
+            .tab_at(strip, Scale::ONE, theme, Point::new(x, y)),
         Some(tab),
         "the point aims at the tab the strip drew there"
     );

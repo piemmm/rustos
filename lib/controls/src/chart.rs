@@ -1,5 +1,6 @@
-//! The [`Chart`] control: one bounded history series, plotted as a line over
-//! the box it is given (`plans/GUI-CONTROLS-DESIGN.md` §11.35).
+//! The [`Chart`] control: one bounded history series — optionally two
+//! opposing ones — plotted as a line over the box it is given
+//! (`plans/GUI-CONTROLS-DESIGN.md` §11.35).
 //!
 //! A chart is a read-only instrument like [`Progress`](crate::Progress) and a
 //! [`MetricTile`](crate::MetricTile)'s embedded proportional track: it carries
@@ -12,6 +13,13 @@
 //! are, which is a graph that cannot report its own data. The chart therefore
 //! claims the whole rectangle its owner lays out for it, and its readings map
 //! across that full height.
+//!
+//! A read/write or receive/send rate is *one* reading with two directions, so
+//! a chart takes an optional opposing series
+//! ([`with_opposing`](Chart::with_opposing)): the box splits at a drawn axis,
+//! the primary series rises above it and the opposing one mirrors below,
+//! tinted by its own resource. Two stacked charts would lose the comparison
+//! that matters.
 //!
 //! Like a track, the trace is tinted by the resource's own semantic rail
 //! colour rather than the accent, so a CPU trace reads as the compute colour
@@ -29,7 +37,9 @@ use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::Theme;
 
-use crate::paint::{clamp_permille, seam_thickness, signal_color, surface_rect, FULL};
+use crate::paint::{
+    clamp_permille, plate_border, seam_thickness, signal_color, surface_rect, FULL,
+};
 use crate::state::PressureKind;
 
 /// The most samples a [`Chart`] may hold.
@@ -49,6 +59,13 @@ pub const MAX_CHART_SAMPLES: usize = 64;
 /// drawn behind the chart still shows through.
 const AREA_ALPHA: u8 = 64;
 
+/// A chart's second, mirrored series and the resource it reads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Opposing {
+    kind: PressureKind,
+    samples: Vec<u16>,
+}
+
 /// One bounded, oldest-to-newest history series, plotted as a line with a
 /// quiet filled area beneath it, tinted by its resource's semantic rail colour
 /// (spec §11.35).
@@ -61,6 +78,7 @@ const AREA_ALPHA: u8 = 64;
 pub struct Chart {
     kind: PressureKind,
     samples: Vec<u16>,
+    opposing: Option<Opposing>,
 }
 
 impl Chart {
@@ -71,6 +89,7 @@ impl Chart {
         Self {
             kind,
             samples: Vec::new(),
+            opposing: None,
         }
     }
 
@@ -80,26 +99,50 @@ impl Chart {
     /// first.
     #[must_use]
     pub fn with_samples(mut self, samples: impl IntoIterator<Item = u16>) -> Self {
-        let mut buf: Vec<u16> = samples.into_iter().map(clamp_permille).collect();
-        if buf.len() > MAX_CHART_SAMPLES {
-            let drop = buf.len() - MAX_CHART_SAMPLES;
-            buf.drain(..drop);
-        }
-        self.samples = buf;
+        self.samples = bounded(samples);
         self
     }
 
-    /// Whether the chart holds no readings, and so plots nothing.
+    /// This chart with a second series for resource `kind`, plotted mirrored
+    /// below a drawn axis and tinted by that resource's own rail colour; the
+    /// primary series then rises above the axis instead of filling the box.
+    ///
+    /// The series is bounded and clamped exactly as
+    /// [`with_samples`](Self::with_samples)'s is. Adding one asserts that the
+    /// opposing direction is *measured*: a direction with no reading behind it
+    /// is left off, so the chart stays a single-series trend over the whole box
+    /// rather than showing an empty half as a quiet nothing.
+    #[must_use]
+    pub fn with_opposing(
+        mut self,
+        kind: PressureKind,
+        samples: impl IntoIterator<Item = u16>,
+    ) -> Self {
+        self.opposing = Some(Opposing {
+            kind,
+            samples: bounded(samples),
+        });
+        self
+    }
+
+    /// Whether the chart holds no readings in either series, and so plots
+    /// nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
+            && self
+                .opposing
+                .as_ref()
+                .is_none_or(|opposing| opposing.samples.is_empty())
     }
 
     /// Paint the chart into `surface` at `bounds` for the active theme.
     ///
-    /// The trace occupies the full height of `bounds`: a reading of zero sits
-    /// on the floor and a reading of full capacity on the ceiling, both inset
-    /// by half the line's weight so the stroke stays inside its own box.
+    /// A single-series trace occupies the full height of `bounds`: a reading of
+    /// zero sits on the floor and a reading of full capacity on the ceiling,
+    /// both inset by half the line's weight so the stroke stays inside its own
+    /// box. A chart with an opposing series splits that height at its axis and
+    /// each series claims one half, mirrored.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let Some(plot_box) = surface_rect(bounds) else {
             return;
@@ -118,80 +161,198 @@ impl Chart {
             Color::from(theme.palette().scroll_track),
         );
 
-        let weight = trace_weight(theme, scale, height);
-        let Some(points) = self.plot(plot_box, weight) else {
-            // No readings: the quiet plate alone, never a fabricated floor.
+        let Some(opposing) = &self.opposing else {
+            let weight = trace_weight(theme, scale, height);
+            let band = Band {
+                box_px: plot_box,
+                rising_up: true,
+            };
+            paint_series(surface, &self.samples, &band, weight, self.kind, theme);
             return;
         };
-        let color = signal_color(theme, self.kind);
 
-        // The area first, so the line reads over its own body rather than
-        // under it.
-        let floor = sub(top.saturating_add(height));
-        let mut area: Vec<(i32, i32)> = Vec::with_capacity(points.len() + 2);
-        area.push((points[0].0, floor));
-        area.extend_from_slice(&points);
-        area.push((points[points.len() - 1].0, floor));
-        surface.fill_polygon_subpixel(
-            &area,
-            Color {
-                a: AREA_ALPHA,
-                ..color
-            },
+        // Nothing recorded in either direction: the quiet plate alone, so an
+        // axis is never mistaken for a measured nought.
+        if self.is_empty() {
+            return;
+        }
+        let Some(split) = Split::resolve(plot_box, scale, theme) else {
+            return;
+        };
+        let (ax, ay, aw, ah) = split.axis;
+        surface.fill_rect(ax, ay, aw, ah, Color::from(theme.palette().rim));
+        paint_series(
+            surface,
+            &self.samples,
+            &split.upper,
+            split.weight,
+            self.kind,
+            theme,
         );
-
-        surface.stroke_polyline(&points, weight, color);
-    }
-
-    /// The trace's vertices, in device sub-pixel units, for the pixel box
-    /// `plot_box` and a trace `weight` sub-pixel units wide; `None` when there
-    /// is nothing to plot.
-    ///
-    /// A single reading is a real measurement, so it plots as a flat line
-    /// across the box at its own height rather than as an invisible point.
-    fn plot(&self, plot_box: (u32, u32, u32, u32), weight: i32) -> Option<Vec<(i32, i32)>> {
-        let count = self.samples.len();
-        if count == 0 {
-            return None;
-        }
-        let (left_px, top_px, width, height) = plot_box;
-        let inset = weight / 2;
-        // The band the trace's own centre may occupy: the box less the room the
-        // stroke needs on each side, so a full-scale reading draws inside its
-        // rectangle instead of half outside it.
-        let span_x = sub(width).saturating_sub(weight);
-        let span_y = sub(height).saturating_sub(weight);
-        let left = sub(left_px).saturating_add(inset);
-        let top = sub(top_px).saturating_add(inset);
-
-        let last = count.saturating_sub(1);
-        let mut points = Vec::with_capacity(count.max(2));
-        for (i, &permille) in self.samples.iter().enumerate() {
-            let along = if last == 0 {
-                0
-            } else {
-                let i = i32::try_from(i).unwrap_or(i32::MAX);
-                let last = i32::try_from(last).unwrap_or(1);
-                span_x.saturating_mul(i) / last
-            };
-            let rise =
-                span_y.saturating_mul(i32::from(clamp_permille(permille))) / i32::from(FULL).max(1);
-            points.push((
-                left.saturating_add(along),
-                top.saturating_add(span_y).saturating_sub(rise),
-            ));
-        }
-        if last == 0 {
-            // One reading: hold it across the whole box.
-            let (_, only) = points[0];
-            points.push((left.saturating_add(span_x), only));
-        }
-        Some(points)
+        paint_series(
+            surface,
+            &opposing.samples,
+            &split.lower,
+            split.weight,
+            opposing.kind,
+            theme,
+        );
     }
 }
 
+/// `samples` clamped fail closed and capped to the most recent
+/// [`MAX_CHART_SAMPLES`], oldest dropped first — the one admission rule both
+/// of a chart's series pass through.
+fn bounded(samples: impl IntoIterator<Item = u16>) -> Vec<u16> {
+    let mut buf: Vec<u16> = samples.into_iter().map(clamp_permille).collect();
+    if buf.len() > MAX_CHART_SAMPLES {
+        let drop = buf.len() - MAX_CHART_SAMPLES;
+        buf.drain(..drop);
+    }
+    buf
+}
+
+/// One series' own half of a chart: the pixel box its readings map into, and
+/// which way a rising reading grows.
+///
+/// A single-series chart is the whole box rising up; an opposing series is the
+/// lower half growing down. One band definition serves both, so the mirrored
+/// series is the same plot arithmetic rather than a second recipe.
+struct Band {
+    box_px: (u32, u32, u32, u32),
+    rising_up: bool,
+}
+
+/// The two bands and the axis rule a duplex chart's box splits into.
+struct Split {
+    upper: Band,
+    lower: Band,
+    /// The axis's pixel rect, drawn between the bands as the zero line both
+    /// series read against.
+    axis: (u32, u32, u32, u32),
+    /// One trace weight for both bands, so the pair reads as one instrument
+    /// even when the rounding remainder makes the halves differ by a pixel.
+    weight: i32,
+}
+
+impl Split {
+    /// Split `box_px` into an upper band, an axis, and a lower band, or `None`
+    /// when the box is too short to seat all three — where the honest outcome
+    /// is the quiet plate rather than a half-drawn pair.
+    fn resolve(box_px: (u32, u32, u32, u32), scale: Scale, theme: &Theme) -> Option<Self> {
+        let (left, top, width, height) = box_px;
+        let axis_h = plate_border(theme, scale);
+        let bands_h = height.checked_sub(axis_h)?;
+        if bands_h < 2 {
+            return None;
+        }
+        let upper_h = bands_h / 2;
+        let lower_h = bands_h - upper_h;
+        let axis_top = top.saturating_add(upper_h);
+        Some(Self {
+            upper: Band {
+                box_px: (left, top, width, upper_h),
+                rising_up: true,
+            },
+            lower: Band {
+                box_px: (left, axis_top.saturating_add(axis_h), width, lower_h),
+                rising_up: false,
+            },
+            axis: (left, axis_top, width, axis_h),
+            weight: trace_weight(theme, scale, upper_h.min(lower_h)),
+        })
+    }
+}
+
+/// Plot `samples` into `band` — the filled area first, then the line over its
+/// own body — tinted by `kind`'s rail colour. An empty series draws nothing.
+fn paint_series(
+    surface: &mut Surface,
+    samples: &[u16],
+    band: &Band,
+    weight: i32,
+    kind: PressureKind,
+    theme: &Theme,
+) {
+    let Some((points, close)) = plot(samples, band, weight) else {
+        return;
+    };
+    let color = signal_color(theme, kind);
+    let mut area: Vec<(i32, i32)> = Vec::with_capacity(points.len() + 2);
+    area.push((points[0].0, close));
+    area.extend_from_slice(&points);
+    area.push((points[points.len() - 1].0, close));
+    surface.fill_polygon_subpixel(
+        &area,
+        Color {
+            a: AREA_ALPHA,
+            ..color
+        },
+    );
+    surface.stroke_polyline(&points, weight, color);
+}
+
+/// `samples`' trace vertices in device sub-pixel units, and the y its filled
+/// area closes on — the band's own edge against the zero line, so a
+/// single-series chart still fills to its floor. `None` when there is nothing
+/// to plot.
+///
+/// A single reading is a real measurement, so it plots as a flat line across
+/// the band at its own height rather than as an invisible point.
+fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<(Vec<(i32, i32)>, i32)> {
+    let count = samples.len();
+    if count == 0 {
+        return None;
+    }
+    let (left_px, top_px, width, height) = band.box_px;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let inset = weight / 2;
+    // The band the trace's own centre may occupy: the box less the room the
+    // stroke needs on each side, so a full-scale reading draws inside its
+    // rectangle instead of half outside it.
+    let span_x = sub(width).saturating_sub(weight);
+    let span_y = sub(height).saturating_sub(weight);
+    let left = sub(left_px).saturating_add(inset);
+    let top = sub(top_px).saturating_add(inset);
+    let (zero, rise_sign, close) = if band.rising_up {
+        (
+            top.saturating_add(span_y),
+            -1,
+            sub(top_px.saturating_add(height)),
+        )
+    } else {
+        (top, 1, sub(top_px))
+    };
+
+    let last = count.saturating_sub(1);
+    let mut points = Vec::with_capacity(count.max(2));
+    for (i, &permille) in samples.iter().enumerate() {
+        let along = if last == 0 {
+            0
+        } else {
+            let i = i32::try_from(i).unwrap_or(i32::MAX);
+            let last = i32::try_from(last).unwrap_or(1);
+            span_x.saturating_mul(i) / last
+        };
+        let rise =
+            span_y.saturating_mul(i32::from(clamp_permille(permille))) / i32::from(FULL).max(1);
+        points.push((
+            left.saturating_add(along),
+            zero.saturating_add(rise.saturating_mul(rise_sign)),
+        ));
+    }
+    if last == 0 {
+        // One reading: hold it across the whole band.
+        let (_, only) = points[0];
+        points.push((left.saturating_add(span_x), only));
+    }
+    Some((points, close))
+}
+
 /// The trace's line weight in sub-pixel units: the theme's instrument-seam
-/// thickness, never thicker than a third of the box (so a short chart keeps
+/// thickness, never thicker than a third of the band (so a short chart keeps
 /// room to show a shape) and never thinner than one whole pixel.
 fn trace_weight(theme: &Theme, scale: Scale, h: u32) -> i32 {
     let seam = seam_thickness(theme, scale).min(h / 3).max(1);

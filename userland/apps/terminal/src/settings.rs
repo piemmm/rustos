@@ -154,6 +154,31 @@ pub struct Settings {
     last_pointer: Point,
 }
 
+/// The theme, scale and face one interaction with the sheet is resolved
+/// against.
+///
+/// The three always travel together down the input-routing chain — a control's
+/// own layout needs all of them, and the tab strip needs the theme to say
+/// where its own entries are — so a routing path carries one parameter rather
+/// than three, exactly as the wallpaper chooser's own style bundle does.
+#[derive(Copy, Clone)]
+struct Style<'a> {
+    scale: Scale,
+    theme: &'a Theme,
+    font: BitmapFont,
+}
+
+impl<'a> Style<'a> {
+    /// The style the sheet draws and routes with for `theme` at `scale`.
+    fn new(scale: Scale, theme: &'a Theme) -> Self {
+        Self {
+            scale,
+            theme,
+            font: BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
+        }
+    }
+}
+
 /// Where the sheet draws each of its parts, resolved once per routing pass.
 ///
 /// A report is only worth anything if it names the rectangle the control was
@@ -260,7 +285,11 @@ impl Settings {
             last_pointer: Point::ORIGIN,
         };
         sheet.sync_channel_sliders();
-        sheet.sync_focus(&Layout::nowhere(), &mut damage::sink());
+        sheet.sync_focus(
+            &Layout::nowhere(),
+            Style::new(Scale::ONE, &Theme::dark()),
+            &mut damage::sink(),
+        );
         sheet
     }
 
@@ -324,7 +353,7 @@ impl Settings {
         theme: &Theme,
         damage: &mut Region,
     ) -> SheetOutcome {
-        match self.route_pointer(event, viewport, scale, theme, damage) {
+        match self.route_pointer(event, viewport, Style::new(scale, theme), damage) {
             SheetOutcome::Changed if damage.is_empty() => SheetOutcome::Ignored,
             settled => settled,
         }
@@ -336,16 +365,13 @@ impl Settings {
         &mut self,
         event: &InputEvent,
         viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
-        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-
         if let InputEvent::PointerMoved { to } = event {
             self.last_pointer = *to;
         }
-        let bounds = panel_bounds(viewport, scale);
+        let bounds = panel_bounds(viewport, style.scale);
 
         // A primary press outside the whole panel dismisses the sheet: it is
         // modal, so nothing outside it is reachable while it is open. This is
@@ -361,14 +387,16 @@ impl Settings {
             return SheetOutcome::Dismissed;
         }
 
-        let Some(layout) = self.layout(viewport, scale, theme, font) else {
+        let Some(layout) = self.layout(viewport, style.scale, style.theme, style.font) else {
             return SheetOutcome::Ignored;
         };
 
         if let Some(rect) = layout.tabs {
-            if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, rect, damage)
+            if let Some(TabsAction::Selected { index }) =
+                self.tabs
+                    .on_pointer(event, rect, style.scale, style.theme, damage)
             {
-                self.select_tab(index, &layout, damage);
+                self.select_tab(index, &layout, style, damage);
                 return SheetOutcome::Changed;
             }
         }
@@ -376,7 +404,7 @@ impl Settings {
         if layout.body.is_some() {
             if let outcome
             @ (SheetOutcome::Changed | SheetOutcome::Edited | SheetOutcome::Settled) =
-                self.route_body_pointer(event, &layout, scale, font, damage)
+                self.route_body_pointer(event, &layout, style, damage)
             {
                 return outcome;
             }
@@ -389,16 +417,16 @@ impl Settings {
             // they have all moved and the body is the scope.
             if self
                 .scroll
-                .on_pointer(event, rect, scale, theme, damage)
+                .on_pointer(event, rect, style.scale, style.theme, damage)
                 .is_some()
             {
                 damage.add(layout.body.unwrap_or(Rect::EMPTY));
-                self.focus_on(Focus::Scroll, &layout, damage);
+                self.focus_on(Focus::Scroll, &layout, style, damage);
                 return SheetOutcome::Changed;
             }
         }
 
-        if let Some(outcome) = self.route_footer_pointer(event, &layout, damage) {
+        if let Some(outcome) = self.route_footer_pointer(event, &layout, style, damage) {
             return outcome;
         }
 
@@ -422,22 +450,22 @@ impl Settings {
         theme: &Theme,
         damage: &mut Region,
     ) -> SheetOutcome {
-        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+        let style = Style::new(scale, theme);
 
         // Keyboard reach never depends on a row's rectangle, so a viewport too
         // small to lay the body out still dismisses, moves focus, and edits;
         // a layout that seats nothing simply reports nothing.
         let layout = self
-            .layout(viewport, scale, theme, font)
+            .layout(viewport, style.scale, style.theme, style.font)
             .unwrap_or_else(Layout::nowhere);
         if key == Key::Named(NamedKey::Escape) {
             return SheetOutcome::Dismissed;
         }
         if key == Key::Named(NamedKey::Tab) {
-            self.focus_on(self.next_focus(!modifiers.shift), &layout, damage);
+            self.focus_on(self.next_focus(!modifiers.shift), &layout, style, damage);
             return SheetOutcome::Changed;
         }
-        self.dispatch_key(key, &layout, scale, font, damage)
+        self.dispatch_key(key, &layout, style, damage)
     }
 }
 
@@ -567,7 +595,7 @@ impl Settings {
     /// names are exactly the elements whose ring changed, which is why the
     /// per-control writes in [`sync_focus`](Self::sync_focus) need none of
     /// their own.
-    fn focus_on(&mut self, next: Focus, layout: &Layout, damage: &mut Region) {
+    fn focus_on(&mut self, next: Focus, layout: &Layout, style: Style<'_>, damage: &mut Region) {
         damage::move_mark(
             Some(self.focus),
             Some(next),
@@ -575,7 +603,7 @@ impl Settings {
             damage,
         );
         self.focus = next;
-        self.sync_focus(layout, damage);
+        self.sync_focus(layout, style, damage);
     }
 
     /// Set exactly the focused control's own focus flag, clearing every
@@ -586,7 +614,7 @@ impl Settings {
     /// on one of its own tabs and nothing else can name that rectangle. The
     /// rings are the caller's to report, through
     /// [`focus_on`](Self::focus_on).
-    fn sync_focus(&mut self, layout: &Layout, damage: &mut Region) {
+    fn sync_focus(&mut self, layout: &Layout, style: Style<'_>, damage: &mut Region) {
         for (index, radio) in self.scheme_radios.iter_mut().enumerate() {
             radio.set_focused(self.focus == Focus::Scheme(index));
         }
@@ -604,6 +632,8 @@ impl Settings {
         self.tabs.set_current(
             (self.focus == Focus::Tabs).then_some(cursor),
             layout.tabs.unwrap_or(Rect::EMPTY),
+            style.scale,
+            style.theme,
             damage,
         );
     }
@@ -614,12 +644,17 @@ impl Settings {
     /// beneath it is now a different control drawn by the sheet itself, and
     /// the bar beside them is re-clamped against the new tab's own extent, so
     /// those two bands are the scope.
-    fn select_tab(&mut self, index: usize, layout: &Layout, damage: &mut Region) {
-        self.tabs
-            .set_selected(index, layout.tabs.unwrap_or(Rect::EMPTY), damage);
+    fn select_tab(&mut self, index: usize, layout: &Layout, style: Style<'_>, damage: &mut Region) {
+        self.tabs.set_selected(
+            index,
+            layout.tabs.unwrap_or(Rect::EMPTY),
+            style.scale,
+            style.theme,
+            damage,
+        );
         damage.add(layout.body.unwrap_or(Rect::EMPTY));
         damage.add(layout.scrollbar.unwrap_or(Rect::EMPTY));
-        self.focus_on(Focus::Tabs, layout, damage);
+        self.focus_on(Focus::Tabs, layout, style, damage);
     }
 
     /// Copy the currently selected swatch well's channels into the three
@@ -954,12 +989,11 @@ impl Settings {
         &mut self,
         event: &InputEvent,
         layout: &Layout,
-        scale: Scale,
-        font: BitmapFont,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
         for &(row, _) in &layout.rows {
-            let outcome = self.route_row_pointer(event, row, layout, scale, font, damage);
+            let outcome = self.route_row_pointer(event, row, layout, style, damage);
             if outcome != SheetOutcome::Ignored {
                 return outcome;
             }
@@ -973,8 +1007,7 @@ impl Settings {
         event: &InputEvent,
         row: Focus,
         layout: &Layout,
-        scale: Scale,
-        font: BitmapFont,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
         let rect = layout.rect_of(row);
@@ -985,7 +1018,7 @@ impl Settings {
                 };
                 match radio.on_pointer(event, rect, damage) {
                     Some(SelectorAction::Set { on: true }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_scheme(index, layout, damage);
                         SheetOutcome::Settled
                     }
@@ -993,37 +1026,35 @@ impl Settings {
                 }
             }
             Focus::TextSize => {
-                let (_, control) = split_row(rect, scale);
+                let (_, control) = split_row(rect, style.scale);
                 match self.text_size.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_font_size_permille(permille, rect, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_font_size_permille(permille, rect, damage);
                         SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
                 }
             }
-            Focus::Swatches => {
-                self.route_swatches_pointer(event, rect, layout, scale, font, damage)
-            }
+            Focus::Swatches => self.route_swatches_pointer(event, rect, layout, style, damage),
             Focus::Channel(index) => {
-                let (_, control) = split_row(rect, scale);
+                let (_, control) = split_row(rect, style.scale);
                 let Some(slider) = self.channel_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
                 match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_channel_permille(index, permille, layout, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_channel_permille(index, permille, layout, damage);
                         SheetOutcome::Settled
                     }
@@ -1031,18 +1062,18 @@ impl Settings {
                 }
             }
             Focus::Effect(index) => {
-                let (_, control) = split_row(rect, scale);
+                let (_, control) = split_row(rect, style.scale);
                 let Some(slider) = self.effect_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
                 match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_effect_permille(index, permille, rect, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, damage);
+                        self.focus_on(row, layout, style, damage);
                         self.set_effect_permille(index, permille, rect, damage);
                         SheetOutcome::Settled
                     }
@@ -1059,14 +1090,13 @@ impl Settings {
         event: &InputEvent,
         rect: Rect,
         layout: &Layout,
-        scale: Scale,
-        font: BitmapFont,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
-        let (_, grid_rect) = swatch_caption_split(rect, scale, font);
+        let (_, grid_rect) = swatch_caption_split(rect, style.scale, style.font);
         match self.swatches.on_pointer(event, grid_rect, damage) {
             Some(SwatchAction::Selected { .. }) => {
-                self.focus_on(Focus::Swatches, layout, damage);
+                self.focus_on(Focus::Swatches, layout, style, damage);
                 self.adopt_selected_well(layout, damage);
                 SheetOutcome::Changed
             }
@@ -1079,17 +1109,18 @@ impl Settings {
         &mut self,
         event: &InputEvent,
         layout: &Layout,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> Option<SheetOutcome> {
         if let Some(rect) = layout.restore {
             if let Some(ButtonAction::Activated) = self.restore.on_pointer(event, rect, damage) {
-                self.focus_on(Focus::Restore, layout, damage);
+                self.focus_on(Focus::Restore, layout, style, damage);
                 return Some(SheetOutcome::Restore);
             }
         }
         if let Some(rect) = layout.done {
             if let Some(ButtonAction::Activated) = self.done.on_pointer(event, rect, damage) {
-                self.focus_on(Focus::Done, layout, damage);
+                self.focus_on(Focus::Done, layout, style, damage);
                 return Some(SheetOutcome::Dismissed);
             }
         }
@@ -1105,8 +1136,7 @@ impl Settings {
         &mut self,
         key: Key,
         layout: &Layout,
-        scale: Scale,
-        font: BitmapFont,
+        style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
         let focus = self.focus;
@@ -1114,12 +1144,15 @@ impl Settings {
         // A slider is drawn in the trailing half of its row, so that is the
         // rectangle it is keyed against — the same split the renderer and the
         // pointer path use.
-        let slider = split_row(row, scale).1;
+        let slider = split_row(row, style.scale).1;
         let tabs = layout.tabs.unwrap_or(Rect::EMPTY);
         match focus {
             Focus::Tabs => {
-                if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key, tabs, damage) {
-                    self.select_tab(index, layout, damage);
+                if let Some(TabsAction::Selected { index }) =
+                    self.tabs
+                        .on_key(key, tabs, style.scale, style.theme, damage)
+                {
+                    self.select_tab(index, layout, style, damage);
                 }
                 SheetOutcome::Changed
             }
@@ -1142,7 +1175,7 @@ impl Settings {
                 None => SheetOutcome::Changed,
             },
             Focus::Swatches => {
-                let (_, grid) = swatch_caption_split(row, scale, font);
+                let (_, grid) = swatch_caption_split(row, style.scale, style.font);
                 match self.swatches.on_key(key, grid, damage) {
                     Some(SwatchAction::Selected { .. }) => {
                         self.adopt_selected_well(layout, damage);

@@ -201,19 +201,118 @@ fn track_thickness(theme: &Theme, scale: Scale, logical: u32) -> u32 {
         .saturating_add(u32::from(heavy_contrast(theme)))
 }
 
+/// A measured track's own band, resolved within the slot its owner gave it.
+///
+/// The band is the geometry every measured reading in the crate shares — a
+/// [`MetricTile`](crate::metric::MetricTile)'s embedded track and a
+/// [`CompositionBar`](crate::metric::CompositionBar)'s segments both resolve
+/// one and fill into it — so the groove's thickness, radius, and proportional
+/// arithmetic have exactly one home.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TrackBand {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    radius: u32,
+}
+
+impl TrackBand {
+    /// Resolve the band within `slot` (`(x, y, w, avail_h)`) and paint its
+    /// quiet groove, or `None` when the slot cannot seat one.
+    ///
+    /// The band's own thickness is the theme's progress thickness capped by
+    /// `avail_h`, never the whole of it, so a tall slot still draws an
+    /// instrument line rather than a block.
+    pub(crate) fn groove(
+        surface: &mut Surface,
+        slot: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Self> {
+        let (x, y, w, avail_h) = slot;
+        let h = progress_thickness(theme, scale).min(avail_h);
+        if h == 0 || w == 0 {
+            return None;
+        }
+        let band = Self {
+            x,
+            y,
+            w,
+            h,
+            radius: h / 2,
+        };
+        band.fill_to(surface, band.w, Color::from(theme.palette().scroll_track));
+        Some(band)
+    }
+
+    /// A band of exactly `rect` (`(x, y, w, h)`) with no groove painted, for a
+    /// caller drawing a fixed-size chip of the same shape rather than a
+    /// reading within a slot.
+    pub(crate) fn chip(rect: (u32, u32, u32, u32)) -> Option<Self> {
+        let (x, y, w, h) = rect;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some(Self {
+            x,
+            y,
+            w,
+            h,
+            radius: h / 2,
+        })
+    }
+
+    /// The band's own height in physical pixels.
+    pub(crate) fn height(self) -> u32 {
+        self.h
+    }
+
+    /// Fill `permille` of the band from its leading edge in `tint`.
+    ///
+    /// A non-zero reading too small to cover the band's own thickness still
+    /// draws that much, so a sliver is visible rather than rounded away; a
+    /// composition whose parts are all that small therefore separates no
+    /// further than one such mark, which is as far as the pixels go.
+    pub(crate) fn fill(self, surface: &mut Surface, permille: u16, tint: Color) {
+        self.fill_to(
+            surface,
+            proportional(self.w, permille).max(self.h.min(self.w)),
+            tint,
+        );
+    }
+
+    /// Rule a `thickness`-wide line across the band at `permille` of its
+    /// width, for a join between two parts of a composition.
+    ///
+    /// The rule stays inside the band, so a join at either end never draws
+    /// past the groove it divides.
+    pub(crate) fn rule(self, surface: &mut Surface, permille: u16, thickness: u32, tint: Color) {
+        if thickness == 0 || thickness > self.w {
+            return;
+        }
+        let at = proportional(self.w, permille).min(self.w - thickness);
+        surface.fill_rect(self.x.saturating_add(at), self.y, thickness, self.h, tint);
+    }
+
+    /// Fill the leading `width` physical pixels of the band in `tint`.
+    fn fill_to(self, surface: &mut Surface, width: u32, tint: Color) {
+        surface.fill_round_rect(self.x, self.y, width.min(self.w), self.h, self.radius, tint);
+    }
+
+    /// Outline the whole band in `tint` for a pressure emphasis.
+    fn emphasise(self, surface: &mut Surface, tint: Color, scale: Scale, theme: &Theme) {
+        let thickness = rail_thickness(theme, scale).min(self.h / 2).max(1);
+        draw_outline(surface, self.x, self.y, self.w, self.h, thickness, tint);
+    }
+}
+
 /// Paint a measured track band: the quiet groove, then — when `fill` is
 /// `Some` — the tinted proportional fill, then a pressure-emphasis outline
 /// when `emphasised`.
 ///
-/// This is the one "rounded groove with a proportional tinted fill and an
-/// optional pressure-emphasis outline" recipe a
-/// [`MetricTile`](crate::metric::MetricTile)'s embedded track draws through,
-/// so the groove/fill/outline geometry has exactly one home. `band` is
-/// `(x, y, w, avail_h)`; the band's own thickness is the theme's progress
-/// thickness capped by `avail_h`, never the whole of it, so a tall slot
-/// still draws an instrument line rather than a block. `fill` is `None` for
-/// an honestly unmeasured reading: the groove alone, never a fabricated
-/// fill.
+/// `fill` is `None` for an honestly unmeasured reading: the groove alone,
+/// never a fabricated fill.
 pub(crate) fn paint_measured_track(
     surface: &mut Surface,
     band: (u32, u32, u32, u32),
@@ -223,25 +322,68 @@ pub(crate) fn paint_measured_track(
     scale: Scale,
     theme: &Theme,
 ) {
-    let (x, y, w, avail_h) = band;
-    let band_h = progress_thickness(theme, scale).min(avail_h);
-    if band_h == 0 || w == 0 {
+    let Some(band) = TrackBand::groove(surface, band, scale, theme) else {
         return;
-    }
-    let palette = theme.palette();
-    let radius = band_h / 2;
-    surface.fill_round_rect(x, y, w, band_h, radius, Color::from(palette.scroll_track));
-
+    };
     let Some(permille) = fill else {
         return;
     };
-    let fill_w = proportional(w, permille).max(band_h.min(w));
-    surface.fill_round_rect(x, y, fill_w, band_h, radius, tint);
-
+    band.fill(surface, permille, tint);
     if emphasised {
-        let thickness = rail_thickness(theme, scale).min(band_h / 2).max(1);
-        draw_outline(surface, x, y, w, band_h, thickness, tint);
+        band.emphasise(surface, tint, scale, theme);
     }
+}
+
+/// The fixed rotation a composition's parts take their hues from, after the
+/// bar's own resource leads them and is then skipped.
+///
+/// A composition's parts are *categories*, not degrees, so they separate by
+/// hue rather than by weight; the order keeps neighbouring parts far apart on
+/// the wheel (violet, blue, orange, amber, lime, salmon). The bar's own
+/// resource is lifted to the front, so a memory composition still reads as
+/// memory where it starts.
+const COMPOSITION_HUES: [PressureKind; 6] = [
+    PressureKind::Memory,
+    PressureKind::Network,
+    PressureKind::Cpu,
+    PressureKind::Disk,
+    PressureKind::Power,
+    PressureKind::Thermal,
+];
+
+/// How many parts of a composition can be told apart by hue — the length of
+/// [`COMPOSITION_HUES`].
+pub(crate) const COMPOSITION_HUE_COUNT: usize = COMPOSITION_HUES.len();
+
+/// The `index`-th used part's tint in a composition of resource `kind`.
+///
+/// `index` past the rotation wraps, which is why
+/// [`CompositionBar`](crate::metric::CompositionBar) refuses more used parts
+/// than [`COMPOSITION_HUE_COUNT`]: a part wearing another's hue is not a part
+/// a reader can find.
+#[must_use]
+pub(crate) fn composition_tint(theme: &Theme, kind: PressureKind, index: usize) -> Color {
+    if index == 0 {
+        return signal_color(theme, kind);
+    }
+    let hue = COMPOSITION_HUES
+        .iter()
+        .filter(|candidate| **candidate != kind)
+        .cycle()
+        .nth(index.saturating_sub(1))
+        .copied()
+        .unwrap_or(kind);
+    signal_color(theme, hue)
+}
+
+/// The tint of a composition's *remainder* — the part of the whole that is not
+/// in use at all.
+///
+/// The track family's own quiet neutral, so an unused part reads as unused
+/// against the groove while still having a swatch the key can name.
+#[must_use]
+pub(crate) fn composition_remainder_tint(theme: &Theme) -> Color {
+    Color::from(theme.palette().scroll_thumb)
 }
 
 /// `extent` scaled by `permille / 1000`, rounded down and never exceeding

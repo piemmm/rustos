@@ -1,6 +1,8 @@
 //! The metric-readout family: [`MetricTile`], the at-a-glance card that
-//! reports one resource, and [`StatusPill`], the compact capsule that names a
-//! state (`plans/GUI-CONTROLS-DESIGN.md`'s System overview resource cards).
+//! reports one resource; [`StatusPill`], the compact capsule that names a
+//! state; and [`CompositionBar`], the split of a measured whole into its
+//! named parts (`plans/GUI-CONTROLS-DESIGN.md`'s System overview resource
+//! cards).
 //!
 //! A metric tile is what a resource becomes when it needs its own bounded
 //! card rather than a row in a shared header band: an optional leading icon
@@ -28,6 +30,16 @@
 //! several readings can share one plate without nesting a second one inside
 //! it.
 //!
+//! A composition bar answers a question neither of the other two can: *where
+//! did it go*. A track says how much of a resource is in use and a chart says
+//! what it has been doing, but neither splits that use into the parts it is
+//! made of. The bar draws those parts as one proportional row through the same
+//! measured-track geometry a track uses, tinted down one ladder of the
+//! resource's own hue so they separate by weight rather than by a second
+//! colour vocabulary, and names each one with its amount in a key beneath.
+//! Parts that do not sum to the whole are a construction error: a composition
+//! that does not account for everything is not one.
+//!
 //! A status pill fills a gap neither instrument covers: naming a condition —
 //! "Healthy", "Denied", "Recovering" — in a compact capsule with no action of
 //! its own, for a surface that needs to badge a state without offering a
@@ -44,6 +56,7 @@
 //! so neither control here carries its own copy of that geometry.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -53,9 +66,10 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::paint::{
-    heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
-    plate_border, progress_thickness, role_font, signal_color, surface_rect, to_i32, PlateStyle,
-    FULL_COLOUR,
+    clamp_permille, composition_remainder_tint, composition_tint, heavy_contrast, inset,
+    paint_icon_slot, paint_measured_track, paint_plate, paint_text_line, plate_border,
+    progress_thickness, role_font, signal_color, surface_rect, to_i32, PlateStyle, TrackBand,
+    COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -740,4 +754,359 @@ impl StatusPill {
         let text_y = y.saturating_add(h.saturating_sub(line_h) / 2);
         font.draw_text(surface, to_i32(text_x), to_i32(text_y), fitted, label_color);
     }
+}
+
+/// The most *used* parts one [`CompositionBar`] may separate.
+///
+/// One per hue the composition ladder offers: a part wearing another part's
+/// hue is not a part a reader can find in the bar. A composition's own
+/// remainder does not count against this, because it takes the neutral rather
+/// than a hue. This is a validation bound on the composition, not a capacity
+/// that should grow with the machine.
+pub const MAX_COMPOSITION_SEGMENTS: usize = COMPOSITION_HUE_COUNT;
+
+/// Why a [`CompositionBar`] could not be built.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CompositionError {
+    /// The segments' shares do not account for the whole: they sum to
+    /// `total_permille` rather than to all of it. A silently short bar would
+    /// under-report where the resource went, so this fails construction.
+    Incomplete {
+        /// What the shares actually sum to, in permille.
+        total_permille: u32,
+    },
+    /// More used parts than the ladder can tell apart — see
+    /// [`MAX_COMPOSITION_SEGMENTS`].
+    TooManySegments {
+        /// How many used parts were offered.
+        used: usize,
+    },
+    /// A remainder was not the last part, or there was more than one.
+    ///
+    /// The remainder is the share of the whole that is *not* in use, so it
+    /// reads as the unfilled tail of the bar. Anywhere else it would read as a
+    /// gap the composition failed to account for, which is the opposite of
+    /// what it says.
+    MisplacedRemainder,
+}
+
+/// One named part of a [`CompositionBar`]'s measured whole.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompositionSegment {
+    label: String,
+    amount: String,
+    share: u16,
+    remainder: bool,
+}
+
+impl CompositionSegment {
+    /// A part in use, labelled `label`, holding `share` permille of the whole,
+    /// whose own measured quantity reads `amount`.
+    ///
+    /// `share` is clamped fail closed, so an out-of-range share surfaces as
+    /// [`CompositionError::Incomplete`] from [`CompositionBar::new`] rather
+    /// than as a bar drawn past its own end.
+    #[must_use]
+    pub fn new(label: impl Into<String>, amount: impl Into<String>, share: u16) -> Self {
+        Self {
+            label: label.into(),
+            amount: amount.into(),
+            share: clamp_permille(share),
+            remainder: false,
+        }
+    }
+
+    /// The composition's remainder: the share of the whole that is *not* in
+    /// use, drawn in the track's own quiet neutral so it reads as the unfilled
+    /// tail while the key still names it.
+    ///
+    /// A composition has at most one, and it is the last part.
+    #[must_use]
+    pub fn remainder(label: impl Into<String>, amount: impl Into<String>, share: u16) -> Self {
+        Self {
+            remainder: true,
+            ..Self::new(label, amount, share)
+        }
+    }
+
+    /// The part's label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The part's own measured quantity, as its owner formatted it.
+    #[must_use]
+    pub fn amount(&self) -> &str {
+        &self.amount
+    }
+
+    /// The part's share of the whole, in permille.
+    #[must_use]
+    pub fn share(&self) -> u16 {
+        self.share
+    }
+
+    /// Whether this part is the composition's remainder.
+    #[must_use]
+    pub fn is_remainder(&self) -> bool {
+        self.remainder
+    }
+}
+
+/// A measured whole split into its named parts: one proportional row, then a
+/// key naming each part and its amount.
+///
+/// Like [`MetricTile`] this is an instrument, not an action: it has no pointer
+/// or keyboard handling and reports nothing back to its owner. It draws no
+/// plate of its own, so several readings seated in one
+/// [`Panel`](crate::collection::Panel) share that container's surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompositionBar {
+    kind: PressureKind,
+    segments: Vec<CompositionSegment>,
+}
+
+impl CompositionBar {
+    /// A bar splitting resource `kind` into `segments`, in reading order.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositionError::Incomplete`] unless the shares sum to exactly the
+    /// whole; [`CompositionError::TooManySegments`] past
+    /// [`MAX_COMPOSITION_SEGMENTS`] used parts; and
+    /// [`CompositionError::MisplacedRemainder`] for a remainder that is not
+    /// the one last part.
+    pub fn new(
+        kind: PressureKind,
+        segments: Vec<CompositionSegment>,
+    ) -> Result<Self, CompositionError> {
+        let used = segments.iter().filter(|s| !s.remainder).count();
+        if used > MAX_COMPOSITION_SEGMENTS {
+            return Err(CompositionError::TooManySegments { used });
+        }
+        if segments
+            .iter()
+            .enumerate()
+            .any(|(i, s)| s.remainder && i + 1 != segments.len())
+        {
+            return Err(CompositionError::MisplacedRemainder);
+        }
+        let total: u32 = segments.iter().map(|s| u32::from(s.share)).sum();
+        if total != u32::from(FULL) {
+            return Err(CompositionError::Incomplete {
+                total_permille: total,
+            });
+        }
+        Ok(Self { kind, segments })
+    }
+
+    /// The resource this bar splits.
+    #[must_use]
+    pub fn kind(&self) -> PressureKind {
+        self.kind
+    }
+
+    /// The bar's parts, in reading order.
+    #[must_use]
+    pub fn segments(&self) -> &[CompositionSegment] {
+        &self.segments
+    }
+
+    /// The height, in physical pixels, the bar and its whole key need at
+    /// `scale` within `width`.
+    ///
+    /// The key names *every* part — dropping one would leave a segment of the
+    /// bar nameless — so it wraps onto further rows rather than truncating its
+    /// list, and how many rows that is depends on the width it is given.
+    #[must_use]
+    pub fn measured_height(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let rows = self.key_rows(width, scale, theme);
+        let key = rows
+            .saturating_mul(font.line_height())
+            .saturating_add(rows.saturating_sub(1).saturating_mul(gap));
+        progress_thickness(theme, scale)
+            .saturating_add(gap)
+            .saturating_add(key)
+    }
+
+    /// How many rows the key packs into `width`.
+    #[must_use]
+    fn key_rows(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        self.key_layout(width, scale, theme)
+            .last()
+            .map_or(0, |entry| entry.row.saturating_add(1))
+    }
+
+    /// Paint the bar and its key into `surface` at `bounds` for the active
+    /// theme.
+    ///
+    /// A `bounds` too short for the whole key drops the key rows that do not
+    /// fit rather than overlapping them or drawing past its own edge, and one
+    /// too short to seat the bar itself draws nothing at all (fail closed).
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        let Some((x, y, w, h)) = surface_rect(bounds) else {
+            return;
+        };
+        let Some(band) = TrackBand::groove(surface, (x, y, w, h), scale, theme) else {
+            return;
+        };
+        self.paint_segments(surface, band, scale, theme);
+        self.paint_key(surface, (x, y, w, h), band.height(), scale, theme);
+    }
+
+    /// The tint part `index` wears: its own step of the hue rotation, or the
+    /// track's quiet neutral for the composition's remainder.
+    fn tint(&self, index: usize, theme: &Theme) -> Color {
+        match self.segments.get(index) {
+            Some(segment) if segment.remainder => composition_remainder_tint(theme),
+            _ => composition_tint(theme, self.kind, index),
+        }
+    }
+
+    /// Fill the bar's parts into `band`, last part first, then rule the joins
+    /// between them.
+    ///
+    /// Each part is filled to its *cumulative* share, so the part drawn over it
+    /// covers the rounded end of the one before: the bar's own two ends round
+    /// and the parts butt cleanly, all from the one shared band fill rather
+    /// than a second segment geometry. The joins are then ruled in the surface
+    /// colour, so the parts stay countable where hue carries nothing — on the
+    /// monochrome-safe path, and for a reader who cannot separate two of them.
+    fn paint_segments(&self, surface: &mut Surface, band: TrackBand, scale: Scale, theme: &Theme) {
+        let mut ends = Vec::with_capacity(self.segments.len());
+        let mut running = 0u16;
+        for segment in &self.segments {
+            running = running.saturating_add(segment.share);
+            ends.push(clamp_permille(running));
+        }
+        for (index, end) in ends.iter().enumerate().rev() {
+            band.fill(surface, *end, self.tint(index, theme));
+        }
+        let rule = plate_border(theme, scale);
+        for end in ends.iter().take(ends.len().saturating_sub(1)) {
+            band.rule(surface, *end, rule, Color::from(theme.palette().surface));
+        }
+    }
+
+    /// Paint the key beneath the bar: one bead per part in its own tint, then
+    /// the part's label and its amount, packed across the width and wrapped.
+    fn paint_key(
+        &self,
+        surface: &mut Surface,
+        rect: (u32, u32, u32, u32),
+        band_h: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let (x, y, w, h) = rect;
+        let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let bead = scale.scale_length(theme.metrics().bead_size).max(3);
+        let line_h = font.line_height();
+        let bottom = y.saturating_add(h);
+        let top = y.saturating_add(band_h).saturating_add(gap);
+        let palette = theme.palette();
+        for entry in self.key_layout(w, scale, theme) {
+            let row_y = top.saturating_add(entry.row.saturating_mul(line_h.saturating_add(gap)));
+            if row_y.saturating_add(line_h) > bottom {
+                return;
+            }
+            let Some(segment) = self.segments.get(entry.index) else {
+                continue;
+            };
+            let entry_x = x.saturating_add(entry.offset);
+            // A neutral swatch, not a Signal Bead: a key entry names a part of
+            // a reading, it does not raise an alert.
+            if let Some(swatch) = TrackBand::chip((
+                entry_x,
+                row_y.saturating_add(line_h.saturating_sub(bead) / 2),
+                bead,
+                bead,
+            )) {
+                swatch.fill(surface, FULL, self.tint(entry.index, theme));
+            }
+            let text_x = entry_x.saturating_add(bead).saturating_add(gap);
+            let avail = x
+                .saturating_add(w)
+                .saturating_sub(text_x)
+                .min(entry.width.saturating_sub(bead).saturating_sub(gap));
+            let label = font.truncate_to_width(&segment.label, avail);
+            font.draw_text(
+                surface,
+                to_i32(text_x),
+                to_i32(row_y),
+                label,
+                Color::from(palette.on_surface_muted),
+            );
+            let after = text_x
+                .saturating_add(font.text_width(label))
+                .saturating_add(font.advance(' '));
+            let remaining = x
+                .saturating_add(w)
+                .saturating_sub(after.min(x.saturating_add(w)));
+            if remaining == 0 {
+                continue;
+            }
+            let amount = font.truncate_to_width(&segment.amount, remaining);
+            font.draw_text(
+                surface,
+                to_i32(after),
+                to_i32(row_y),
+                amount,
+                Color::from(palette.on_surface),
+            );
+        }
+    }
+
+    /// Where every key entry sits: packed leading to trailing across `width`,
+    /// wrapping to the next row when the next entry would not fit whole.
+    ///
+    /// The one layout both [`measured_height`](Self::measured_height) and
+    /// [`paint_key`](Self::paint_key) read, so the height an owner reserves is
+    /// the height the key draws in.
+    fn key_layout(&self, width: u32, scale: Scale, theme: &Theme) -> Vec<KeyEntry> {
+        let font = role_font(theme, scale, TextRole::Body);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let bead = scale.scale_length(theme.metrics().bead_size).max(3);
+        let mut entries = Vec::with_capacity(self.segments.len());
+        let mut offset = 0u32;
+        let mut row = 0u32;
+        for (index, segment) in self.segments.iter().enumerate() {
+            let entry_w = bead
+                .saturating_add(gap)
+                .saturating_add(font.text_width(&segment.label))
+                .saturating_add(font.advance(' '))
+                .saturating_add(font.text_width(&segment.amount));
+            if offset > 0 && offset.saturating_add(entry_w) > width {
+                row = row.saturating_add(1);
+                offset = 0;
+            }
+            entries.push(KeyEntry {
+                index,
+                offset,
+                row,
+                width: entry_w,
+            });
+            offset = offset
+                .saturating_add(entry_w)
+                .saturating_add(gap.saturating_mul(2));
+        }
+        entries
+    }
+}
+
+/// Where one key entry sits within the key's own packed rows.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct KeyEntry {
+    /// The part this entry names.
+    index: usize,
+    /// The entry's leading edge, from the key's own left.
+    offset: u32,
+    /// Which packed row it landed on.
+    row: u32,
+    /// The width its bead, label and amount want.
+    width: u32,
 }

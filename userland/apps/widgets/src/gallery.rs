@@ -310,7 +310,7 @@ impl Gallery {
 
         if tabs_rect.contains(self.pointer) {
             if let Some(TabsAction::Selected { index }) =
-                self.tabs.on_pointer(event, tabs_rect, damage)
+                self.tabs.on_pointer(event, tabs_rect, scale, theme, damage)
             {
                 return self.select_index(index, tabs_rect, content, scale, theme, damage);
             }
@@ -324,7 +324,7 @@ impl Gallery {
         } = event
         {
             if let Some(idx) = hovered {
-                self.set_focus(Focus::Item(idx), tabs_rect, &rects, damage);
+                self.set_focus(Focus::Item(idx), tabs_rect, &rects, scale, theme, damage);
             }
         }
         // The focused widget captures every event once a press has focused it
@@ -367,13 +367,13 @@ impl Gallery {
         let (tabs_rect, content) = Self::layout(viewport, scale, theme);
         let rects = self.item_rects(content, scale, theme);
         if key == Key::Named(tairix_input::NamedKey::Tab) {
-            self.focus_step(!modifiers.shift, tabs_rect, &rects, damage);
+            self.focus_step(!modifiers.shift, tabs_rect, &rects, scale, theme, damage);
             return true;
         }
         match self.focus {
             Focus::Tabs => {
                 if let Some(TabsAction::Selected { index }) =
-                    self.tabs.on_key(key, tabs_rect, damage)
+                    self.tabs.on_key(key, tabs_rect, scale, theme, damage)
                 {
                     return self.select_index(index, tabs_rect, content, scale, theme, damage);
                 }
@@ -417,10 +417,10 @@ impl Gallery {
             return false;
         }
         self.current = tab;
-        self.tabs.set_selected(index, tabs, damage);
+        self.tabs.set_selected(index, tabs, scale, theme, damage);
         damage.add(content);
         let rects = self.item_rects(content, scale, theme);
-        self.set_focus(Focus::Tabs, tabs, &rects, damage);
+        self.set_focus(Focus::Tabs, tabs, &rects, scale, theme, damage);
         true
     }
 
@@ -431,7 +431,15 @@ impl Gallery {
     /// Every widget's mark is a function of [`Self::focus`], so the ring can only
     /// move between the item it left and the item it arrives on: those are what
     /// the ring costs, and the strip reports its own cell when focus lands there.
-    fn set_focus(&mut self, focus: Focus, tabs: Rect, rects: &[Rect], damage: &mut Region) {
+    fn set_focus(
+        &mut self,
+        focus: Focus,
+        tabs: Rect,
+        rects: &[Rect],
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
         damage::move_mark(
             Self::focused_item(self.focus),
             Self::focused_item(focus),
@@ -442,12 +450,13 @@ impl Gallery {
             let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
             item.widget.set_focused(false, rect, damage);
         }
-        self.tabs.set_current(None, tabs, damage);
+        self.tabs.set_current(None, tabs, scale, theme, damage);
         self.focus = focus;
         match focus {
-            Focus::Tabs => self
-                .tabs
-                .set_current(Some(self.current.index()), tabs, damage),
+            Focus::Tabs => {
+                self.tabs
+                    .set_current(Some(self.current.index()), tabs, scale, theme, damage);
+            }
             Focus::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
@@ -467,7 +476,15 @@ impl Gallery {
 
     /// Advance keyboard focus forward (`true`) or backward (`false`) through
     /// the tab strip and the panel's interactive widgets, wrapping around.
-    fn focus_step(&mut self, forward: bool, tabs: Rect, rects: &[Rect], damage: &mut Region) {
+    fn focus_step(
+        &mut self,
+        forward: bool,
+        tabs: Rect,
+        rects: &[Rect],
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
         let interactive: Vec<usize> = self.panels[self.current.index()]
             .iter()
             .enumerate()
@@ -493,7 +510,7 @@ impl Gallery {
         } else {
             Focus::Item(interactive[next_pos - 1])
         };
-        self.set_focus(next, tabs, rects, damage);
+        self.set_focus(next, tabs, rects, scale, theme, damage);
     }
 
     /// The on-screen widget rectangle of demo item `index` in the current

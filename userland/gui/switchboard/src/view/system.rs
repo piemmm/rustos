@@ -145,11 +145,19 @@ impl SystemSection {
     /// `sidebar` is where the frame seats the strip, or the empty rectangle
     /// when a frame too narrow for it seats none: drawn nowhere reports
     /// nothing.
-    fn select_page(&mut self, page: SystemPage, sidebar: Rect, damage: &mut Region) {
+    fn select_page(
+        &mut self,
+        page: SystemPage,
+        sidebar: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
         self.page = page;
-        self.sidebar.set_selected(page.index(), sidebar, damage);
         self.sidebar
-            .set_current(Some(page.index()), sidebar, damage);
+            .set_selected(page.index(), sidebar, scale, theme, damage);
+        self.sidebar
+            .set_current(Some(page.index()), sidebar, scale, theme, damage);
         self.compile();
     }
 
@@ -560,7 +568,7 @@ impl SectionView for SystemSection {
         }
         if let Some(page) = SystemPage::from_index(self.focus) {
             let sidebar = ctx.frame.sidebar.unwrap_or(Rect::EMPTY);
-            self.select_page(page, sidebar, damage);
+            self.select_page(page, sidebar, ctx.scale, ctx.theme, damage);
             return None;
         }
         let index = self.focus.checked_sub(SystemPage::ALL.len())?;
@@ -594,11 +602,12 @@ impl SectionView for SystemSection {
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
         if let Some(sidebar) = ctx.frame.sidebar {
-            if let Some(TabsAction::Selected { index }) =
-                self.sidebar.on_pointer(event, sidebar, damage)
+            if let Some(TabsAction::Selected { index }) = self
+                .sidebar
+                .on_pointer(event, sidebar, ctx.scale, ctx.theme, damage)
             {
                 if let Some(page) = SystemPage::from_index(index) {
-                    self.select_page(page, sidebar, damage);
+                    self.select_page(page, sidebar, ctx.scale, ctx.theme, damage);
                     self.focus = index;
                 }
                 return None;
@@ -620,7 +629,8 @@ impl SectionView for SystemSection {
         match sweep.ctx {
             Some(ctx) => {
                 let sidebar = ctx.frame.sidebar.unwrap_or(Rect::EMPTY);
-                self.sidebar.set_current(current, sidebar, sweep.damage);
+                self.sidebar
+                    .set_current(current, sidebar, ctx.scale, ctx.theme, sweep.damage);
             }
             None => self.sidebar.adopt_current(current),
         }

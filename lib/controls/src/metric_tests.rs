@@ -1,5 +1,5 @@
-//! Unit tests for the metric-readout family: [`MetricTile`] and
-//! [`StatusPill`].
+//! Unit tests for the metric-readout family: [`MetricTile`],
+//! [`StatusPill`], and [`CompositionBar`].
 //!
 //! These cover every [`MetricInstrument`] variant (including the honest
 //! unmeasured track and an empty trend), the proportional fill and pressure
@@ -11,6 +11,12 @@
 //! high-contrast fixture — plus the tile's leading icon, its
 //! `MetricLayout::Inline` form, and its `unplated` form, alone and composed
 //! together.
+//!
+//! [`CompositionBar`]'s own coverage is the property it exists for — the parts
+//! account for the whole, in order, at their measured shares — plus its
+//! construction refusals, its tint ladder separating the parts, its key, the
+//! `measured_height` contract, progressive dropping of key lines under
+//! shrinking heights, and fail-closed degenerate bounds.
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -19,7 +25,10 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{SignalRole, Theme};
 
 use crate::chart::Chart;
-use crate::metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
+use crate::metric::{
+    CompositionBar, CompositionError, CompositionSegment, MetricInstrument, MetricLayout,
+    MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
+};
 use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
 use crate::testkit::{control_font, high_contrast};
 
@@ -959,4 +968,450 @@ fn a_pill_in_degenerate_bounds_never_panics() {
             u64::from(w.max(1)) * u64::from(h.max(1))
         );
     }
+}
+
+// --- CompositionBar -------------------------------------------------------
+
+const BAR_W: u32 = 320;
+
+fn parts(shares: &[u16]) -> alloc::vec::Vec<CompositionSegment> {
+    shares
+        .iter()
+        .enumerate()
+        .map(|(i, &share)| CompositionSegment::new(alloc::format!("P{i}"), "1 GB", share))
+        .collect()
+}
+
+fn bar(shares: &[u16]) -> CompositionBar {
+    CompositionBar::new(PressureKind::Memory, parts(shares)).expect("shares account for the whole")
+}
+
+fn bar_surface_of(bar: &CompositionBar, theme: &Theme, w: u32, h: u32) -> Surface {
+    let mut surface = Surface::new(w, h).expect("surface");
+    bar.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, theme);
+    surface
+}
+
+fn bar_surface(bar: &CompositionBar, theme: &Theme) -> Surface {
+    let h = bar.measured_height(BAR_W, Scale::ONE, theme);
+    bar_surface_of(bar, theme, BAR_W, h)
+}
+
+fn band_h(theme: &Theme) -> u32 {
+    crate::paint::progress_thickness(theme, Scale::ONE)
+}
+
+/// The columns, within the bar's own band rows, that carry `want`.
+fn band_columns(surface: &Surface, theme: &Theme, want: Pixel) -> alloc::vec::Vec<u32> {
+    let rows = band_h(theme).min(surface.height());
+    (0..surface.width())
+        .filter(|&x| (0..rows).any(|y| surface.get(x, y) == Some(want)))
+        .collect()
+}
+
+fn hue(theme: &Theme, index: usize) -> Pixel {
+    crate::paint::composition_tint(theme, PressureKind::Memory, index).premultiply()
+}
+
+fn remainder_ink(theme: &Theme) -> Pixel {
+    crate::paint::composition_remainder_tint(theme).premultiply()
+}
+
+#[test]
+fn the_parts_run_in_order_across_the_whole_bar() {
+    // The property the control exists for: a reader sees where the resource
+    // went, in the order the owner named the parts, at their measured shares.
+    let theme = Theme::dark();
+    let composition = bar(&[500, 250, 250]);
+    let surface = bar_surface(&composition, &theme);
+
+    let mut previous_end = 0;
+    for index in 0..3 {
+        let columns = band_columns(&surface, &theme, hue(&theme, index));
+        let first = *columns.first().expect("every part must draw");
+        let last = *columns.last().expect("every part must draw");
+        assert!(
+            first >= previous_end,
+            "part {index} started at {first}, inside the part that ended at {previous_end}"
+        );
+        previous_end = last;
+    }
+    // The last part ends where a bar made of one whole part does, so the
+    // composition accounts for everything rather than stopping short.
+    let whole = bar_surface(&bar(&[1000]), &theme);
+    let full_reach = *band_columns(&whole, &theme, hue(&theme, 0))
+        .last()
+        .expect("a whole bar must draw");
+    assert_eq!(
+        previous_end, full_reach,
+        "the composition stopped short of the whole"
+    );
+}
+
+#[test]
+fn a_larger_share_claims_more_of_the_bar() {
+    let theme = Theme::dark();
+    let reach = |shares: &[u16]| {
+        *band_columns(&bar_surface(&bar(shares), &theme), &theme, hue(&theme, 0))
+            .last()
+            .expect("the leading part must draw")
+    };
+    assert!(reach(&[700, 300]) > reach(&[100, 900]));
+}
+
+#[test]
+fn parts_that_do_not_account_for_the_whole_are_refused() {
+    // A silently short bar would under-report where the resource went.
+    assert_eq!(
+        CompositionBar::new(PressureKind::Memory, parts(&[400, 400])),
+        Err(CompositionError::Incomplete {
+            total_permille: 800
+        })
+    );
+    assert_eq!(
+        CompositionBar::new(PressureKind::Memory, parts(&[600, 600])),
+        Err(CompositionError::Incomplete {
+            total_permille: 1200
+        })
+    );
+    assert_eq!(
+        CompositionBar::new(PressureKind::Memory, alloc::vec::Vec::new()),
+        Err(CompositionError::Incomplete { total_permille: 0 })
+    );
+}
+
+#[test]
+fn an_out_of_range_share_is_clamped_and_then_refused() {
+    // Clamping fail closed means the excess cannot draw past the bar's end;
+    // the composition then simply does not add up, which is the honest report.
+    let segment = CompositionSegment::new("All of it", "16 GB", 4000);
+    assert_eq!(segment.share(), 1000);
+    assert_eq!(
+        CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![segment, CompositionSegment::new("More", "1 GB", 100)]
+        ),
+        Err(CompositionError::Incomplete {
+            total_permille: 1100
+        })
+    );
+}
+
+#[test]
+fn more_used_parts_than_the_ladder_can_separate_are_refused() {
+    let too_many = MAX_COMPOSITION_SEGMENTS + 1;
+    let mut shares = alloc::vec![1u16; too_many];
+    shares[0] = 1000 - u16::try_from(too_many - 1).expect("small");
+    assert_eq!(
+        CompositionBar::new(PressureKind::Memory, parts(&shares)),
+        Err(CompositionError::TooManySegments { used: too_many })
+    );
+
+    // Exactly the bound is fine, and a remainder rides on top of it because it
+    // takes the neutral rather than a hue.
+    let mut shares = alloc::vec![1u16; MAX_COMPOSITION_SEGMENTS];
+    shares[0] = 1000 - u16::try_from(MAX_COMPOSITION_SEGMENTS).expect("small");
+    let mut segments = parts(&shares);
+    segments.push(CompositionSegment::remainder("Free", "1 GB", 1));
+    assert!(CompositionBar::new(PressureKind::Memory, segments).is_ok());
+}
+
+#[test]
+fn a_remainder_anywhere_but_last_is_refused() {
+    // A grey band in the middle of a bar reads as a gap the composition failed
+    // to account for, which is the opposite of what a remainder says.
+    assert_eq!(
+        CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![
+                CompositionSegment::remainder("Free", "8 GB", 500),
+                CompositionSegment::new("Used", "8 GB", 500),
+            ]
+        ),
+        Err(CompositionError::MisplacedRemainder)
+    );
+    assert_eq!(
+        CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![
+                CompositionSegment::remainder("Free", "8 GB", 500),
+                CompositionSegment::remainder("Also free", "8 GB", 500),
+            ]
+        ),
+        Err(CompositionError::MisplacedRemainder)
+    );
+}
+
+#[test]
+fn every_part_carries_a_hue_of_its_own_and_the_first_is_the_resources() {
+    // The parts are categories, so they separate by hue; the bar still reads
+    // as the resource it splits where it starts.
+    let theme = Theme::dark();
+    let count = MAX_COMPOSITION_SEGMENTS;
+    let mut shares = alloc::vec![100u16; count];
+    shares[0] = 1000 - 100 * u16::try_from(count - 1).expect("small");
+    let surface = bar_surface(&bar(&shares), &theme);
+
+    assert_eq!(hue(&theme, 0), premul(theme.palette().memory_pressure));
+    let mut seen = alloc::vec::Vec::new();
+    for index in 0..count {
+        let ink = hue(&theme, index);
+        assert!(has_pixel(&surface, ink), "part {index} did not draw");
+        assert!(
+            !seen.contains(&ink),
+            "part {index} reuses an earlier part's hue"
+        );
+        seen.push(ink);
+    }
+}
+
+#[test]
+fn a_remainder_reads_as_the_unfilled_tail_and_still_has_a_swatch() {
+    let theme = Theme::dark();
+    let composition = CompositionBar::new(
+        PressureKind::Memory,
+        alloc::vec![
+            CompositionSegment::new("Anonymous", "4.1 GB", 400),
+            CompositionSegment::remainder("Free", "7.4 GB", 600),
+        ],
+    )
+    .expect("accounts for the whole");
+    assert!(composition.segments()[1].is_remainder());
+    let surface = bar_surface(&composition, &theme);
+    let neutral = remainder_ink(&theme);
+    let tail = band_columns(&surface, &theme, neutral);
+    let used = band_columns(&surface, &theme, hue(&theme, 0));
+    assert!(
+        !tail.is_empty() && !used.is_empty(),
+        "both the used part and the remainder must draw"
+    );
+    assert!(
+        tail[0] > *used.last().expect("used part"),
+        "the remainder must be the bar's tail"
+    );
+    // The key still names it, so the swatch appears below the bar too.
+    assert!(band_has(
+        &surface,
+        band_h(&theme),
+        surface.height(),
+        neutral
+    ));
+}
+
+#[test]
+fn the_joins_between_parts_are_ruled_so_they_stay_countable_without_hue() {
+    let theme = Theme::dark();
+    let ruled = bar_surface(&bar(&[300, 300, 400]), &theme);
+    let whole = bar_surface(&bar(&[1000]), &theme);
+    let rule = premul(theme.palette().surface);
+    assert!(
+        !band_columns(&ruled, &theme, rule).is_empty(),
+        "a multi-part bar must rule its joins"
+    );
+    assert!(
+        band_columns(&whole, &theme, rule).is_empty(),
+        "a bar with one part has no join to rule"
+    );
+}
+
+#[test]
+fn the_key_names_every_part_and_its_amount() {
+    let theme = Theme::dark();
+    let composition = CompositionBar::new(
+        PressureKind::Memory,
+        alloc::vec![
+            CompositionSegment::new("Anonymous", "4.1 GB", 400),
+            CompositionSegment::new("File cache", "2.6 GB", 200),
+            CompositionSegment::remainder("Free", "7.4 GB", 400),
+        ],
+    )
+    .expect("accounts for the whole");
+    assert_eq!(composition.segments().len(), 3);
+    assert_eq!(composition.segments()[1].label(), "File cache");
+    assert_eq!(composition.segments()[1].amount(), "2.6 GB");
+    assert_eq!(composition.kind(), PressureKind::Memory);
+
+    let surface = bar_surface(&composition, &theme);
+    let key_top = band_h(&theme);
+    // Label ink, amount ink, and every part's own swatch, all beneath the bar.
+    assert!(band_has(
+        &surface,
+        key_top,
+        surface.height(),
+        premul(theme.palette().on_surface)
+    ));
+    assert!(band_has(
+        &surface,
+        key_top,
+        surface.height(),
+        premul(theme.palette().on_surface_muted)
+    ));
+    for index in 0..2 {
+        assert!(
+            band_has(&surface, key_top, surface.height(), hue(&theme, index)),
+            "part {index} has no key swatch"
+        );
+    }
+}
+
+#[test]
+fn the_key_swatches_lead_their_labels() {
+    let theme = Theme::dark();
+    let surface = bar_surface(&bar(&[500, 500]), &theme);
+    let swatch_x = leftmost_column(&surface, hue(&theme, 1)).expect("swatch");
+    let bar_start = leftmost_column(&surface, hue(&theme, 0)).expect("bar");
+    assert!(
+        swatch_x > bar_start,
+        "the second part's key swatch sits along the key row, not at the bar's own start"
+    );
+    let label_x =
+        leftmost_column(&surface, premul(theme.palette().on_surface_muted)).expect("label");
+    assert!(label_x > 0, "the leading swatch precedes the leading label");
+}
+
+#[test]
+fn the_key_wraps_rather_than_dropping_a_part_it_cannot_fit() {
+    // Every part of the bar must be nameable, so a narrow key takes more rows
+    // instead of losing an entry.
+    let theme = Theme::dark();
+    let composition = CompositionBar::new(
+        PressureKind::Memory,
+        alloc::vec![
+            CompositionSegment::new("Anonymous pages", "4.1 GB", 300),
+            CompositionSegment::new("File cache", "2.6 GB", 300),
+            CompositionSegment::remainder("Free", "7.4 GB", 400),
+        ],
+    )
+    .expect("accounts for the whole");
+    let wide = composition.measured_height(600, Scale::ONE, &theme);
+    let narrow = composition.measured_height(140, Scale::ONE, &theme);
+    assert!(
+        narrow > wide,
+        "a narrower key must take more rows, not fewer entries"
+    );
+
+    // Every swatch still draws at the narrow width.
+    let surface = bar_surface_of(&composition, &theme, 140, narrow);
+    for index in 0..2 {
+        assert!(
+            has_pixel(&surface, hue(&theme, index)),
+            "part {index} was dropped from the wrapped key"
+        );
+    }
+    assert!(has_pixel(&surface, remainder_ink(&theme)));
+}
+
+#[test]
+fn measured_height_is_what_render_lays_out() {
+    let theme = Theme::dark();
+    for count in 1..=MAX_COMPOSITION_SEGMENTS {
+        let mut shares = alloc::vec![1u16; count];
+        shares[0] = 1000 - u16::try_from(count - 1).expect("small");
+        let composition = bar(&shares);
+        let wanted = composition.measured_height(BAR_W, Scale::ONE, &theme);
+        let full = bar_surface_of(&composition, &theme, BAR_W, wanted);
+        assert!(
+            band_has(
+                &full,
+                band_h(&theme),
+                wanted,
+                hue(&theme, count.saturating_sub(1))
+            ),
+            "the last of {count} key entries is missing at the measured height"
+        );
+    }
+}
+
+#[test]
+fn a_height_too_short_for_the_key_drops_its_trailing_rows() {
+    let theme = Theme::dark();
+    let composition = CompositionBar::new(
+        PressureKind::Memory,
+        alloc::vec![
+            CompositionSegment::new("Anonymous pages", "4.1 GB", 400),
+            CompositionSegment::new("File cache backing", "2.6 GB", 300),
+            CompositionSegment::remainder("Free", "7.4 GB", 300),
+        ],
+    )
+    .expect("accounts for the whole");
+    let narrow_w = 150;
+    let full_h = composition.measured_height(narrow_w, Scale::ONE, &theme);
+    let gap = Scale::ONE.scale_length(theme.metrics().control_gap).max(1);
+    let one_row_h = band_h(&theme) + gap + font().line_height();
+    assert!(
+        full_h > one_row_h,
+        "the key must wrap at this width for the test to mean anything"
+    );
+
+    // A short bar keeps the reading and the key rows it can seat, and draws
+    // nothing at all past the bounds it was given.
+    let mut surface = Surface::new(narrow_w, full_h).expect("surface");
+    composition.render(
+        &mut surface,
+        Rect::new(0, 0, narrow_w, one_row_h),
+        Scale::ONE,
+        &theme,
+    );
+    assert!(
+        has_pixel(&surface, hue(&theme, 0)),
+        "the bar itself survives"
+    );
+    assert!(
+        band_has(
+            &surface,
+            band_h(&theme),
+            one_row_h,
+            premul(theme.palette().on_surface_muted)
+        ),
+        "the key row it can seat must still draw"
+    );
+    assert!(
+        (one_row_h..full_h)
+            .all(|y| (0..narrow_w).all(|x| surface.get(x, y) == Some(Pixel::TRANSPARENT))),
+        "a key row that does not fit must be dropped, never drawn past the bounds"
+    );
+}
+
+#[test]
+fn a_composition_renders_in_both_themes_and_under_heavy_contrast() {
+    let composition = bar(&[500, 300, 200]);
+    assert_ne!(
+        bar_surface(&composition, &Theme::dark()).pixels(),
+        bar_surface(&composition, &Theme::light()).pixels()
+    );
+
+    let heavy = high_contrast();
+    let surface = bar_surface(&composition, &heavy);
+    for index in 0..3 {
+        assert!(
+            has_pixel(
+                &surface,
+                crate::paint::composition_tint(&heavy, PressureKind::Memory, index).premultiply()
+            ),
+            "part {index} vanished on the heavier-contrast path"
+        );
+    }
+    // The joins are ruled more heavily where contrast is what carries them.
+    let joins = |theme: &Theme| {
+        band_columns(
+            &bar_surface(&composition, theme),
+            theme,
+            premul(theme.palette().surface),
+        )
+        .len()
+    };
+    assert!(joins(&heavy) > joins(&Theme::dark()));
+}
+
+#[test]
+fn a_degenerate_bar_draws_nothing_outside_itself() {
+    let theme = Theme::dark();
+    let composition = bar(&[500, 500]);
+    let mut zero = Surface::new(4, 4).expect("surface");
+    composition.render(&mut zero, Rect::new(0, 0, 0, 0), Scale::ONE, &theme);
+    assert!(zero.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+
+    let mut one = Surface::new(1, 1).expect("surface");
+    composition.render(&mut one, Rect::new(0, 0, 1, 1), Scale::ONE, &theme);
+    assert_eq!(one.pixels().len(), 1);
 }

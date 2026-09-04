@@ -205,18 +205,17 @@ fn tile_rect(chooser: &Chooser, index: usize, style: Style<'_>) -> Rect {
 }
 
 /// The rectangle of category rail entry `index`.
+///
+/// Read off the strip itself rather than derived here: the rail stacks each
+/// entry at its own content height, so a test that arithmetically divided the
+/// column would quietly aim at a different entry than it names.
 fn rail_rect(chooser: &Chooser, index: usize, style: Style<'_>) -> Rect {
     let bounds = chooser.layout(style).categories();
     assert!(!bounds.is_empty(), "the window draws a category rail");
-    let entries = u32::try_from(chooser.rail().len()).unwrap_or(1).max(1);
-    let height = bounds.height / entries;
-    let down = height.saturating_mul(u32::try_from(index).unwrap_or(0));
-    Rect::new(
-        bounds.left(),
-        bounds.top() + to_i32(down),
-        bounds.width,
-        height,
-    )
+    chooser
+        .rail()
+        .tab_area(index, bounds, style.scale(), style.theme())
+        .expect("the rail seats the entry")
 }
 
 /// A point inside row `row` of the open drop-down list of `group`.

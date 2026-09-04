@@ -46,7 +46,7 @@ under the floor and are unchanged.
 | `selector` | `Toggle`, `Checkbox`, `Radio` |
 | `value` | `Slider`, `Progress` |
 | `chart` | `Chart` |
-| `metric` | `MetricTile`, `StatusPill` |
+| `metric` | `MetricTile`, `StatusPill`, `CompositionBar` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
@@ -117,12 +117,33 @@ it, or frame the content that does:
   current level (a `MeterValue`, tinted by the tile's resource kind, whose
   unmeasurable case draws the bare groove rather than a fabricated zero), or a
   `Trend` `Chart` of its recent history, never two instruments for one number.
+  A `Chart` claims the whole box it is given, because a series confined to a
+  track's thickness cannot rise more than a pixel or two whatever it reads. A
+  rate with two *directions* — read/write, receive/send — is one reading, so it
+  takes an optional opposing series: the box splits at a drawn axis, the primary
+  series rising above it and the opposing one mirrored below in its own
+  resource's tint. Adding one asserts that direction is measured; a direction
+  with no reading behind it is left off, so the chart stays a single-series
+  trend over the whole box rather than showing an empty half as a quiet
+  nothing.
   `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
   for a tile with a column of its own, `Inline` puts the label leading and the
   reading trailing so a narrow stack of readings can be scanned down. A tile
   takes no input and reports nothing.
 - `StatusPill` is the compact capsule that names a state in a word, toned by
   its signal role, for a place a full tile would not fit.
+- `CompositionBar` splits a measured whole into its named parts: one
+  proportional row through the very same measured-track geometry a tile's
+  `Track` draws with, then a key naming each part and its amount. The parts
+  separate by *hue* — a fixed rotation of the theme's resource colours led by
+  the bar's own resource — because they are categories rather than degrees, and
+  the joins between them are ruled so they stay countable where hue carries
+  nothing. Shares that do not account for the whole are a `CompositionError` at
+  construction rather than a silently short bar, and the part that is *not* in
+  use is declared as the composition's `remainder`: drawn in the track's quiet
+  neutral as the unfilled tail, last, and still named in the key. The key wraps
+  rather than dropping an entry, so `measured_height` takes the width it will
+  be given.
 - `FactList` is a column of key/value readouts with the values right-aligned
   on one another: the value keeps its room and the label truncates first, so a
   narrow detail pane loses a word of description rather than a digit.
@@ -161,7 +182,20 @@ it, or frame the content that does:
   budget; a column too narrow to seat it omits it rather than overlapping the
   text, and it never moves a column boundary.
 - `TabsOrientation` gives the existing strip a vertical orientation, so a
-  sidebar of pages is the one selection control rather than a second one.
+  sidebar of pages is the one selection control rather than a second one. That
+  vertical form is a *sidebar list*: an entry's label leads with its live
+  reading trailing on the same line, an optional bounded `Chart` trend draws
+  beneath, and a quiet group heading may introduce the entry that starts a
+  group — declared by that entry, so a heading can never point at one that is
+  not there. Entries **stack** at their own content height rather than sharing
+  the column, so one with no rate behind it is visibly shorter than one
+  carrying a trace, and `Tabs::measured_height` states the height the whole
+  list wants: a discovered list longer than its column is the owner's to
+  scroll, never the strip's to squeeze or truncate. A horizontal strip has one
+  row and draws none of the three; a reading belongs in its label there.
+  Because a vertical entry's rectangle depends on the theme's own metrics, the
+  hit test and every damage-reporting entry point take the scale and theme the
+  strip was laid out with, exactly as `ActionRail` does.
 - `Tabs` keeps where the *pointer* rests and where the *keyboard cursor* is as
   two separate records: both lift their tab's plate, and only the keyboard's is
   ringed. A monitoring host re-states where its keyboard is every time its

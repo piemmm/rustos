@@ -1355,7 +1355,8 @@ impl TasksSection {
         match sweep.ctx {
             Some(ctx) => {
                 let (filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
-                self.filters.set_current(index, filters, sweep.damage);
+                self.filters
+                    .set_current(index, filters, ctx.scale, ctx.theme, sweep.damage);
             }
             None => self.filters.adopt_current(index),
         }
@@ -1561,10 +1562,12 @@ impl TasksSection {
         let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         match self.focus {
             STOP_FILTERS => {
-                if let Some(TabsAction::Selected { index }) =
-                    self.filters.on_key(key, filters, damage)
+                if let Some(TabsAction::Selected { index }) = self
+                    .filters
+                    .on_key(key, filters, ctx.scale, ctx.theme, damage)
                 {
-                    self.filters.set_selected(index, filters, damage);
+                    self.filters
+                        .set_selected(index, filters, ctx.scale, ctx.theme, damage);
                     self.arrange();
                 }
                 None
@@ -2004,8 +2007,12 @@ impl SectionView for TasksSection {
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
         let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
-        if let Some(TabsAction::Selected { index }) = self.filters.on_pointer(event, tabs, damage) {
-            self.filters.set_selected(index, tabs, damage);
+        if let Some(TabsAction::Selected { index }) = self
+            .filters
+            .on_pointer(event, tabs, ctx.scale, ctx.theme, damage)
+        {
+            self.filters
+                .set_selected(index, tabs, ctx.scale, ctx.theme, damage);
             self.arrange();
             return None;
         }

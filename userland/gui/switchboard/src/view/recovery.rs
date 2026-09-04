@@ -381,9 +381,15 @@ impl RecoverySection {
         self.page = page;
         if let Some(ctx) = sweep.ctx {
             let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
-            self.pages.set_selected(page.index(), pages, sweep.damage);
             self.pages
-                .set_current(Some(page.index()), pages, sweep.damage);
+                .set_selected(page.index(), pages, ctx.scale, ctx.theme, sweep.damage);
+            self.pages.set_current(
+                Some(page.index()),
+                pages,
+                ctx.scale,
+                ctx.theme,
+                sweep.damage,
+            );
         } else {
             self.pages.adopt_selected(page.index());
             self.pages.adopt_current(Some(page.index()));
@@ -935,7 +941,9 @@ impl SectionView for RecoverySection {
                 // A pane too small to seat the strip draws it nowhere, so
                 // there is no rectangle to report against.
                 let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
-                let TabsAction::Selected { index } = self.pages.on_key(key, pages, damage)?;
+                let TabsAction::Selected { index } = self
+                    .pages
+                    .on_key(key, pages, ctx.scale, ctx.theme, damage)?;
                 let page = FaultPage::from_index(index)?;
                 self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
                 self.action = index;
@@ -995,8 +1003,9 @@ impl SectionView for RecoverySection {
         }
 
         if let Some(pages) = self.pages_rect(ctx) {
-            if let Some(TabsAction::Selected { index }) =
-                self.pages.on_pointer(event, pages, damage)
+            if let Some(TabsAction::Selected { index }) = self
+                .pages
+                .on_pointer(event, pages, ctx.scale, ctx.theme, damage)
             {
                 if let Some(page) = FaultPage::from_index(index) {
                     self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
@@ -1029,7 +1038,8 @@ impl SectionView for RecoverySection {
         match sweep.ctx {
             Some(ctx) => {
                 let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
-                self.pages.set_current(current, pages, sweep.damage);
+                self.pages
+                    .set_current(current, pages, ctx.scale, ctx.theme, sweep.damage);
             }
             None => self.pages.adopt_current(current),
         }

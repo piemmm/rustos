@@ -5,6 +5,11 @@
 //! zero series its floor — plus the bounded series (empty, one, many, capped,
 //! clamped), oldest-to-newest ordering, each [`PressureKind`]'s own rail
 //! colour, dark/light coverage, and fail-closed behaviour in a degenerate box.
+//!
+//! The opposing series has the same coverage on its own terms: the axis splits
+//! the box, each direction stays in its own half, the mirrored series grows the
+//! other way, the two carry their own tints, and a box too short to seat both
+//! halves degrades to the quiet plate.
 
 use alloc::vec::Vec;
 
@@ -263,6 +268,178 @@ fn every_reading_plots_at_every_width() {
             );
         }
     }
+}
+
+// --- The opposing series --------------------------------------------------
+
+fn network(theme: &Theme) -> Pixel {
+    premul(theme.palette().network_activity)
+}
+
+/// The bottom-most row carrying `want` anywhere, if any.
+fn bottommost(surface: &Surface, want: Pixel) -> Option<u32> {
+    (0..surface.height())
+        .rev()
+        .find(|&y| row_has(surface, y, want))
+}
+
+#[test]
+fn each_direction_keeps_to_its_own_half_of_the_box() {
+    // The comparison the control exists for: receive above the axis, send
+    // below it, so one glance says which way the traffic is going.
+    let theme = Theme::dark();
+    let duplex = Chart::new(PressureKind::Network)
+        .with_samples([1000; 8])
+        .with_opposing(PressureKind::Disk, [1000; 8]);
+    let surface = chart_surface(&duplex, &theme);
+
+    let up = network(&theme);
+    let down = premul(theme.palette().disk_pressure);
+    let up_low = bottommost(&surface, up).expect("the primary series must plot");
+    let down_high = topmost(&surface, down).expect("the opposing series must plot");
+    assert!(
+        up_low < down_high,
+        "the two directions overlapped: primary reached row {up_low}, opposing row {down_high}"
+    );
+}
+
+#[test]
+fn the_opposing_series_grows_the_other_way() {
+    // Mirrored, not merely relocated: a rising opposing reading moves *down*
+    // the surface, away from the axis.
+    let theme = Theme::dark();
+    let ink = premul(theme.palette().disk_pressure);
+    let quiet = Chart::new(PressureKind::Network)
+        .with_samples([0; 6])
+        .with_opposing(PressureKind::Disk, [100; 6]);
+    let busy = Chart::new(PressureKind::Network)
+        .with_samples([0; 6])
+        .with_opposing(PressureKind::Disk, [1000; 6]);
+
+    let quiet_reach = bottommost(&chart_surface(&quiet, &theme), ink).expect("quiet plots");
+    let busy_reach = bottommost(&chart_surface(&busy, &theme), ink).expect("busy plots");
+    assert!(
+        busy_reach > quiet_reach,
+        "a larger opposing reading must reach further down: {busy_reach} vs {quiet_reach}"
+    );
+}
+
+#[test]
+fn a_duplex_chart_draws_its_axis() {
+    let theme = Theme::dark();
+    let rim = premul(theme.palette().rim);
+    let duplex = Chart::new(PressureKind::Network)
+        .with_samples([400; 4])
+        .with_opposing(PressureKind::Disk, [400; 4]);
+    assert!(
+        has_pixel(&chart_surface(&duplex, &theme), rim),
+        "the zero line both series read against must be drawn"
+    );
+    // A single-series chart has no second direction, so no axis.
+    let single = Chart::new(PressureKind::Network).with_samples([400; 4]);
+    assert!(!has_pixel(&chart_surface(&single, &theme), rim));
+}
+
+#[test]
+fn an_axis_is_never_drawn_where_there_is_no_reading() {
+    // An empty duplex chart is the quiet plate alone: a rule across the middle
+    // of an empty box would read as a measured nought.
+    let theme = Theme::dark();
+    let empty = Chart::new(PressureKind::Network).with_opposing(PressureKind::Disk, []);
+    assert!(empty.is_empty());
+    assert!(!has_pixel(
+        &chart_surface(&empty, &theme),
+        premul(theme.palette().rim)
+    ));
+}
+
+#[test]
+fn one_measured_direction_still_plots_and_states_its_axis() {
+    // An interface that receives and never sends has a measured zero send,
+    // which is a reading: the axis and the primary trace both draw.
+    let theme = Theme::dark();
+    let half = Chart::new(PressureKind::Network)
+        .with_samples([700; 5])
+        .with_opposing(PressureKind::Disk, []);
+    assert!(!half.is_empty());
+    let surface = chart_surface(&half, &theme);
+    assert!(has_pixel(&surface, network(&theme)));
+    assert!(has_pixel(&surface, premul(theme.palette().rim)));
+    assert!(!has_pixel(&surface, premul(theme.palette().disk_pressure)));
+}
+
+#[test]
+fn the_opposing_series_is_bounded_and_clamped_like_the_primary() {
+    let theme = Theme::dark();
+    let over = Chart::new(PressureKind::Network)
+        .with_samples([500])
+        .with_opposing(PressureKind::Disk, [5000, 5000]);
+    let clamped = Chart::new(PressureKind::Network)
+        .with_samples([500])
+        .with_opposing(PressureKind::Disk, [1000, 1000]);
+    assert_eq!(
+        chart_surface(&over, &theme).pixels(),
+        chart_surface(&clamped, &theme).pixels()
+    );
+
+    let capped = Chart::new(PressureKind::Network)
+        .with_samples([500])
+        .with_opposing(
+            PressureKind::Disk,
+            (0..MAX_CHART_SAMPLES + 4).map(|i| u16::try_from(i % 1000).unwrap_or(0)),
+        );
+    let recent = Chart::new(PressureKind::Network)
+        .with_samples([500])
+        .with_opposing(
+            PressureKind::Disk,
+            (4..MAX_CHART_SAMPLES + 4).map(|i| u16::try_from(i % 1000).unwrap_or(0)),
+        );
+    assert_eq!(
+        chart_surface(&capped, &theme).pixels(),
+        chart_surface(&recent, &theme).pixels()
+    );
+}
+
+#[test]
+fn a_box_too_short_to_seat_both_halves_keeps_the_quiet_plate() {
+    // Fail closed: half a duplex reading is worse than none, so a box that
+    // cannot hold an axis and two bands draws no trace at all.
+    let theme = Theme::dark();
+    let duplex = Chart::new(PressureKind::Network)
+        .with_samples([1000; 4])
+        .with_opposing(PressureKind::Disk, [1000; 4]);
+    let surface = chart_surface_of(&duplex, &theme, W, 2);
+    assert!(!has_pixel(&surface, network(&theme)));
+    assert!(!has_pixel(&surface, premul(theme.palette().disk_pressure)));
+    // The groove is still there: the instrument is present, just unreadable
+    // at that height.
+    assert!(has_pixel(&surface, premul(theme.palette().scroll_track)));
+}
+
+#[test]
+fn a_duplex_chart_renders_in_both_themes() {
+    let duplex = Chart::new(PressureKind::Network)
+        .with_samples([200, 800, 400])
+        .with_opposing(PressureKind::Disk, [600, 100, 900]);
+    assert_ne!(
+        chart_surface(&duplex, &Theme::dark()).pixels(),
+        chart_surface(&duplex, &Theme::light()).pixels()
+    );
+}
+
+#[test]
+fn a_duplex_chart_draws_a_heavier_axis_under_heavy_contrast() {
+    let duplex = Chart::new(PressureKind::Network)
+        .with_samples([300; 4])
+        .with_opposing(PressureKind::Disk, [300; 4]);
+    let normal = chart_surface(&duplex, &Theme::dark());
+    let heavy = chart_surface(&duplex, &crate::testkit::high_contrast());
+    let rim = premul(Theme::dark().palette().rim);
+    let rows = |s: &Surface| (0..s.height()).filter(|&y| row_has(s, y, rim)).count();
+    assert!(
+        rows(&heavy) > rows(&normal),
+        "the heavier-contrast axis must be thicker"
+    );
 }
 
 // --- Fail-closed ----------------------------------------------------------

@@ -13,6 +13,7 @@
 //! was drawn, the extent each orientation measures, overflow omitting whole
 //! tabs, degenerate bounds, and the heavier-contrast path.
 
+use alloc::string::String;
 use alloc::vec;
 
 use tairix_geometry::{Point, Rect, Scale};
@@ -20,10 +21,11 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, Theme};
 
+use crate::chart::Chart;
 use crate::damage::sink;
-use crate::state::{ActivityState, ControlState, SelectionState, ValidationState};
+use crate::state::{ActivityState, ControlState, PressureKind, SelectionState, ValidationState};
 use crate::tabs::{Tab, Tabs, TabsAction, TabsOrientation};
-use crate::testkit::high_contrast;
+use crate::testkit::{control_font, high_contrast};
 
 const W: u32 = 240;
 const H: u32 = 28;
@@ -190,14 +192,44 @@ fn error_tab_shows_a_recovery_or_warning_bead() {
 fn left_and_right_move_the_current_tab_and_wrap() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
-    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    tabs.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(2));
-    tabs.on_key(Key::Named(NamedKey::Right), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Right),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::Left), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Left),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(2));
 }
 
@@ -207,11 +239,23 @@ fn enter_selects_the_current_tab() {
     let bounds = Rect::new(0, 0, W, H);
     tabs.adopt_current(Some(2));
     assert_eq!(
-        tabs.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
+        tabs.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         Some(TabsAction::Selected { index: 2 })
     );
     assert_eq!(
-        tabs.on_key(Key::Char(' '), bounds, &mut sink()),
+        tabs.on_key(
+            Key::Char(' '),
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         Some(TabsAction::Selected { index: 2 })
     );
 }
@@ -221,9 +265,21 @@ fn home_and_end_jump_to_the_ends() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     tabs.adopt_current(Some(1));
-    tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Home),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(0));
-    tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(2));
 }
 
@@ -235,7 +291,16 @@ fn hover_lifts_a_tab_and_click_selects_it() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     let x = xi(EACH + EACH / 2);
-    assert_eq!(tabs.on_pointer(&moved(x, 14), bounds, &mut sink()), None);
+    assert_eq!(
+        tabs.on_pointer(
+            &moved(x, 14),
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
+        None
+    );
     assert_eq!(
         render(&tabs, &theme).get(EACH + 2, 2),
         Some(premul(theme.palette().surface_raised)),
@@ -246,9 +311,12 @@ fn hover_lifts_a_tab_and_click_selects_it() {
         None,
         "and the keyboard cursor stays where the keyboard left it"
     );
-    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
+        tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(TabsAction::Selected { index: 1 })
     );
 }
@@ -257,10 +325,25 @@ fn hover_lifts_a_tab_and_click_selects_it() {
 fn release_outside_the_pressed_tab_does_not_select() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH / 2), 14), bounds, &mut sink());
-    tabs.on_pointer(&PRESS, bounds, &mut sink());
-    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds, &mut sink());
-    assert_eq!(tabs.on_pointer(&RELEASE, bounds, &mut sink()), None);
+    tabs.on_pointer(
+        &moved(xi(EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink());
+    tabs.on_pointer(
+        &moved(xi(2 * EACH + EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -268,7 +351,13 @@ fn re_stating_the_keyboard_cursor_leaves_the_hover_where_it_is() {
     let theme = Theme::dark();
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
+    tabs.on_pointer(
+        &moved(xi(EACH + EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     let hovered = render(&tabs, &theme);
     assert_eq!(
         hovered.get(EACH + 2, 2),
@@ -291,7 +380,13 @@ fn only_the_keyboard_cursor_wears_the_focus_ring() {
     let ring = premul(theme.palette().rim_active);
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
+    tabs.on_pointer(
+        &moved(xi(EACH + EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert!(
         !has_pixel(&render(&tabs, &theme), ring),
         "a hover lifts a tab without claiming the keyboard"
@@ -308,7 +403,13 @@ fn the_pointer_and_the_keyboard_cursor_light_their_own_tabs() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     tabs.adopt_current(Some(0));
-    tabs.on_pointer(&moved(xi(2 * EACH + EACH / 2), 14), bounds, &mut sink());
+    tabs.on_pointer(
+        &moved(xi(2 * EACH + EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
 
     let surface = render(&tabs, &theme);
     let raised = premul(theme.palette().surface_raised);
@@ -331,15 +432,24 @@ fn re_labelling_keeps_the_selection_and_a_click_in_flight() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     tabs.adopt_selected(2);
-    tabs.on_pointer(&moved(xi(EACH + EACH / 2), 14), bounds, &mut sink());
-    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
+    tabs.on_pointer(
+        &moved(xi(EACH + EACH / 2), 14),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    assert_eq!(
+        tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
 
     for (tab, label) in tabs.tabs_mut().iter_mut().zip(["One 4", "Two 9", "Tri 0"]) {
         tab.set_label(label);
     }
 
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
+        tabs.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(TabsAction::Selected { index: 1 }),
         "a live reading changing mid-click cannot swallow it"
     );
@@ -358,6 +468,8 @@ fn disabled_tab_never_selects() {
         tabs.on_key(
             Key::Named(NamedKey::Enter),
             Rect::new(0, 0, W, H),
+            Scale::ONE,
+            &Theme::dark(),
             &mut sink()
         ),
         None
@@ -368,12 +480,23 @@ fn disabled_tab_never_selects() {
 fn tab_at_maps_points_to_tabs() {
     let tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    assert_eq!(tabs.tab_at(bounds, Point::new(5, 14)), Some(0));
     assert_eq!(
-        tabs.tab_at(bounds, Point::new(xi(2 * EACH + 5), 14)),
+        tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(5, 14)),
+        Some(0)
+    );
+    assert_eq!(
+        tabs.tab_at(
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            Point::new(xi(2 * EACH + 5), 14)
+        ),
         Some(2)
     );
-    assert_eq!(tabs.tab_at(bounds, Point::new(5, 999)), None);
+    assert_eq!(
+        tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(5, 999)),
+        None
+    );
 }
 
 // --- Theme switching and scale -----------------------------------------
@@ -415,8 +538,20 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
     // Two samples clear of the strip, so only the recorded coordinate differs.
     let mut a = three_tabs();
     let mut b = a.clone();
-    a.on_pointer(&moved(xi(W) + 40, xi(H) + 40), bounds, &mut sink());
-    b.on_pointer(&moved(xi(W) + 90, xi(H) + 12), bounds, &mut sink());
+    a.on_pointer(
+        &moved(xi(W) + 40, xi(H) + 40),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    b.on_pointer(
+        &moved(xi(W) + 90, xi(H) + 12),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(
         a, b,
         "a coordinate clear of the strip is not a drawn property"
@@ -431,10 +566,22 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
     // and which tab a release would choose is not drawn.
     let over_selected = moved(xi(EACH) / 2, xi(H) / 2);
     let mut latched = three_tabs();
-    latched.on_pointer(&over_selected, bounds, &mut sink());
-    latched.on_pointer(&PRESS, bounds, &mut sink());
+    latched.on_pointer(
+        &over_selected,
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    latched.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink());
     let mut hovered = three_tabs();
-    hovered.on_pointer(&over_selected, bounds, &mut sink());
+    hovered.on_pointer(
+        &over_selected,
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(latched, hovered, "the armed tab is not a drawn property");
     assert_eq!(
         render(&latched, &theme).pixels(),
@@ -445,11 +592,18 @@ fn hit_test_bookkeeping_is_invisible_to_a_tab_strip() {
 
 // --- Orientation: the vertical (sidebar) strip (spec §11.12) --------------
 
-/// A tall, narrow strip: three tabs of `VEACH` stacked down `VW` pixels of
-/// width, so every tab spans the full width and its labels align.
+/// A tall, narrow strip: three entries stacked down `VW` pixels of width, so
+/// every entry spans the full width and its labels align. `VH` is generous —
+/// a vertical strip stacks rather than splits, so the entries claim only
+/// [`veach`] each and the rest of the column stays the owner's.
 const VW: u32 = 96;
 const VH: u32 = 240;
-const VEACH: u32 = VH / 3;
+
+/// The height one plain vertical entry claims: the shared one-line plate
+/// height a strip stacks its entries at.
+fn veach() -> u32 {
+    crate::paint::text_plate_height(&Theme::dark(), Scale::ONE, tairix_theme::TextRole::Body)
+}
 
 fn vertical_three() -> Tabs {
     three_tabs().with_orientation(TabsOrientation::Vertical)
@@ -509,19 +663,38 @@ fn vertical_tabs_stack_down_the_side_and_span_the_full_width() {
     let tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
     for (index, y) in [
-        (0_usize, VEACH / 2),
-        (1, VEACH + VEACH / 2),
-        (2, 2 * VEACH + VEACH / 2),
+        (0_usize, veach() / 2),
+        (1, veach() + veach() / 2),
+        (2, 2 * veach() + veach() / 2),
     ] {
-        assert_eq!(tabs.tab_at(bounds, Point::new(0, xi(y))), Some(index));
         assert_eq!(
-            tabs.tab_at(bounds, Point::new(xi(VW - 1), xi(y))),
+            tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(0, xi(y))),
+            Some(index)
+        );
+        assert_eq!(
+            tabs.tab_at(
+                bounds,
+                Scale::ONE,
+                &Theme::dark(),
+                Point::new(xi(VW - 1), xi(y))
+            ),
             Some(index),
             "a vertical tab spans the whole width so its label aligns with the others"
         );
     }
-    assert_eq!(tabs.tab_at(bounds, Point::new(xi(VW), xi(VEACH / 2))), None);
-    assert_eq!(tabs.tab_at(bounds, Point::new(0, xi(VH))), None);
+    assert_eq!(
+        tabs.tab_at(
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            Point::new(xi(VW), xi(veach() / 2))
+        ),
+        None
+    );
+    assert_eq!(
+        tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(0, xi(VH))),
+        None
+    );
 }
 
 #[test]
@@ -535,25 +708,25 @@ fn vertical_selection_seam_runs_down_the_leading_edge() {
     assert!(region_has(
         &surface,
         (0, 1),
-        (VEACH + 4, 2 * VEACH - 4),
+        (veach() + 4, 2 * veach() - 4),
         accent
     ));
     // A column carries no lower seam: that is the horizontal strip's edge.
     assert!(!region_has(
         &surface,
         (4, VW),
-        (2 * VEACH - 2, 2 * VEACH),
+        (2 * veach() - 2, 2 * veach()),
         accent
     ));
     // Nor does it carry a trailing one.
     assert!(!region_has(
         &surface,
         (VW - 1, VW),
-        (VEACH + 4, 2 * VEACH - 4),
+        (veach() + 4, 2 * veach() - 4),
         accent
     ));
     // Tab 0 is neither selected nor loading, so it carries no seam at all.
-    assert!(!region_has(&surface, (0, VW), (4, VEACH - 4), accent));
+    assert!(!region_has(&surface, (0, VW), (4, veach() - 4), accent));
 }
 
 #[test]
@@ -566,7 +739,7 @@ fn vertical_loading_tab_shows_a_leading_heat_seam() {
     ])
     .with_orientation(TabsOrientation::Vertical);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
-    let each = VH / 2;
+    let each = veach();
     assert!(region_has(
         &surface,
         (0, 1),
@@ -585,7 +758,7 @@ fn a_vertical_tab_still_shows_its_modified_and_error_beads() {
     ])
     .with_orientation(TabsOrientation::Vertical);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
-    let each = VH / 2;
+    let each = veach();
     // Each bead sits at the top-trailing corner of its own full-width band.
     assert!(region_has(
         &surface,
@@ -629,7 +802,13 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
     let mut horizontal = three_tabs();
     horizontal.adopt_current(Some(1));
     assert_eq!(
-        horizontal.on_key(Key::Named(NamedKey::Down), across, &mut sink()),
+        horizontal.on_key(
+            Key::Named(NamedKey::Down),
+            across,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(
@@ -638,17 +817,35 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
         "a row must not answer to a column's arrows"
     );
     assert_eq!(
-        horizontal.on_key(Key::Named(NamedKey::Up), across, &mut sink()),
+        horizontal.on_key(
+            Key::Named(NamedKey::Up),
+            across,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(horizontal.current(), Some(1));
-    horizontal.on_key(Key::Named(NamedKey::Right), across, &mut sink());
+    horizontal.on_key(
+        Key::Named(NamedKey::Right),
+        across,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(horizontal.current(), Some(2));
 
     let mut vertical = vertical_three();
     vertical.adopt_current(Some(1));
     assert_eq!(
-        vertical.on_key(Key::Named(NamedKey::Left), down, &mut sink()),
+        vertical.on_key(
+            Key::Named(NamedKey::Left),
+            down,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(
@@ -657,15 +854,39 @@ fn only_the_strip_own_axis_arrows_move_the_current_tab() {
         "a column must not answer to a row's arrows"
     );
     assert_eq!(
-        vertical.on_key(Key::Named(NamedKey::Right), down, &mut sink()),
+        vertical.on_key(
+            Key::Named(NamedKey::Right),
+            down,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(vertical.current(), Some(1));
-    vertical.on_key(Key::Named(NamedKey::Down), down, &mut sink());
+    vertical.on_key(
+        Key::Named(NamedKey::Down),
+        down,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(vertical.current(), Some(2));
-    vertical.on_key(Key::Named(NamedKey::Down), down, &mut sink());
+    vertical.on_key(
+        Key::Named(NamedKey::Down),
+        down,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(vertical.current(), Some(0), "…and wraps along its own axis");
-    vertical.on_key(Key::Named(NamedKey::Up), down, &mut sink());
+    vertical.on_key(
+        Key::Named(NamedKey::Up),
+        down,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(vertical.current(), Some(2));
 }
 
@@ -674,12 +895,30 @@ fn home_and_end_jump_to_the_ends_of_a_vertical_strip_too() {
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
     tabs.adopt_current(Some(1));
-    tabs.on_key(Key::Named(NamedKey::End), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(2));
-    tabs.on_key(Key::Named(NamedKey::Home), bounds, &mut sink());
+    tabs.on_key(
+        Key::Named(NamedKey::Home),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
     assert_eq!(tabs.current(), Some(0));
     assert_eq!(
-        tabs.on_key(Key::Named(NamedKey::Enter), bounds, &mut sink()),
+        tabs.on_key(
+            Key::Named(NamedKey::Enter),
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         Some(TabsAction::Selected { index: 0 })
     );
 }
@@ -689,16 +928,28 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     let theme = Theme::dark();
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
-    let over_band_one = moved(xi(VW / 2), xi(VEACH + VEACH / 2));
-    assert_eq!(tabs.on_pointer(&over_band_one, bounds, &mut sink()), None);
+    let over_band_one = moved(xi(VW / 2), xi(veach() + veach() / 2));
     assert_eq!(
-        render_in(&tabs, &theme, Scale::ONE, VW, VH).get(VW - 2, VEACH + 4),
+        tabs.on_pointer(
+            &over_band_one,
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
+        None
+    );
+    assert_eq!(
+        render_in(&tabs, &theme, Scale::ONE, VW, VH).get(VW - 2, veach() + 4),
         Some(premul(theme.palette().surface_raised)),
         "the band under the pointer lifts"
     );
-    assert_eq!(tabs.on_pointer(&PRESS, bounds, &mut sink()), None);
     assert_eq!(
-        tabs.on_pointer(&RELEASE, bounds, &mut sink()),
+        tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(TabsAction::Selected { index: 1 })
     );
     // The owner commits the selection, and the band the press chose is the one
@@ -706,7 +957,7 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     tabs.adopt_selected(1);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
     assert_eq!(
-        surface.get(VW - 2, VEACH + 4),
+        surface.get(VW - 2, veach() + 4),
         Some(premul(theme.palette().surface))
     );
     assert_eq!(
@@ -719,44 +970,88 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
 fn a_release_off_the_pressed_band_does_not_select_it() {
     let mut tabs = vertical_three();
     let bounds = Rect::new(0, 0, VW, VH);
-    tabs.on_pointer(&moved(xi(VW / 2), xi(VEACH / 2)), bounds, &mut sink());
-    tabs.on_pointer(&PRESS, bounds, &mut sink());
     tabs.on_pointer(
-        &moved(xi(VW / 2), xi(2 * VEACH + VEACH / 2)),
+        &moved(xi(VW / 2), xi(veach() / 2)),
         bounds,
+        Scale::ONE,
+        &Theme::dark(),
         &mut sink(),
     );
-    assert_eq!(tabs.on_pointer(&RELEASE, bounds, &mut sink()), None);
+    tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink());
+    tabs.on_pointer(
+        &moved(xi(VW / 2), xi(2 * veach() + veach() / 2)),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
 }
 
 #[test]
-fn an_axis_too_short_for_every_tab_omits_them_all() {
+fn a_horizontal_axis_too_short_for_every_tab_omits_them_all() {
     let theme = Theme::dark();
-    let bounds = Rect::new(0, 0, VW, VH);
-    let crowded = Tabs::new(vec![Tab::new("x"); 300]).with_orientation(TabsOrientation::Vertical);
-    let surface = render_in(&crowded, &theme, Scale::ONE, VW, VH);
+    let bounds = Rect::new(0, 0, W, H);
+    let crowded = Tabs::new(vec![Tab::new("x"); 300]);
+    let surface = render_in(&crowded, &theme, Scale::ONE, W, H);
     assert!(
         is_blank(&surface),
         "a tab that cannot have a whole band of its own is omitted, never drawn partially"
     );
     // Hit-testing agrees: nothing was drawn, so nothing can be pressed.
-    assert!((0..VH).all(|y| crowded
-        .tab_at(bounds, Point::new(xi(VW / 2), xi(y)))
+    assert!((0..W).all(|x| crowded
+        .tab_at(
+            bounds,
+            Scale::ONE,
+            &Theme::dark(),
+            Point::new(xi(x), xi(H / 2))
+        )
         .is_none()));
+}
 
-    // The same strip with bands it can afford draws them all, and every band
-    // hit-tests to the tab that was drawn there.
-    let roomy = Tabs::new(vec![Tab::new("x"); 12]).with_orientation(TabsOrientation::Vertical);
-    assert!(!is_blank(&render_in(&roomy, &theme, Scale::ONE, VW, VH)));
-    let band = VH / 12;
-    for index in 0..12_usize {
+#[test]
+fn a_vertical_strip_seats_the_entries_it_can_and_leaves_the_rest_to_its_owner() {
+    // A discovered list — a hundred cores, a dozen volumes — must scroll, not
+    // truncate and not squeeze: the strip stacks whole entries at their own
+    // height and states the height it wants, which is what an owner scrolls.
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, VW, VH);
+    let long = Tabs::new(vec![Tab::new("x"); 300]).with_orientation(TabsOrientation::Vertical);
+    let each = veach();
+    let seated = usize::try_from(VH / each).expect("count fits");
+
+    assert!(
+        long.measured_height(Scale::ONE, &theme) > VH,
+        "the strip must state the height its whole list wants"
+    );
+    for index in 0..seated {
         let step = u32::try_from(index).expect("index fits");
-        let y = step * band + band / 2;
+        let y = step * each + each / 2;
         assert_eq!(
-            roomy.tab_at(bounds, Point::new(xi(VW / 2), xi(y))),
-            Some(index)
+            long.tab_at(
+                bounds,
+                Scale::ONE,
+                &Theme::dark(),
+                Point::new(xi(VW / 2), xi(y))
+            ),
+            Some(index),
+            "entry {index} must be seated at its own stacked height"
         );
     }
+    // An entry past the column is not drawn and cannot be pressed.
+    assert_eq!(long.tab_area(seated + 1, bounds, Scale::ONE, &theme), None);
+
+    // A list the column can hold seats every entry and nothing beyond it.
+    let short = Tabs::new(vec![Tab::new("x"); 3]).with_orientation(TabsOrientation::Vertical);
+    assert_eq!(short.measured_height(Scale::ONE, &theme), each * 3);
+    let surface = render_in(&short, &theme, Scale::ONE, VW, VH);
+    assert!(
+        (each * 3..VH).all(|y| (0..VW).all(|x| surface.get(x, y) == Some(Pixel::TRANSPARENT))),
+        "a vertical strip stacks its entries; it does not stretch them to fill the column"
+    );
 }
 
 #[test]
@@ -785,14 +1080,20 @@ fn degenerate_bounds_paint_nothing_in_either_orientation() {
             let mut surface = Surface::new(VW, VH).expect("surface");
             tabs.render(&mut surface, bounds, Scale::ONE, &theme);
             assert!(is_blank(&surface));
-            assert_eq!(tabs.tab_at(bounds, Point::new(0, 0)), None);
+            assert_eq!(
+                tabs.tab_at(bounds, Scale::ONE, &Theme::dark(), Point::new(0, 0)),
+                None
+            );
         }
         // An off-surface origin is refused rather than wrapped into the surface.
         let off = Rect::new(-4, -4, VW, VH);
         let mut surface = Surface::new(VW, VH).expect("surface");
         tabs.render(&mut surface, off, Scale::ONE, &theme);
         assert!(is_blank(&surface));
-        assert_eq!(tabs.tab_at(off, Point::new(0, 0)), None);
+        assert_eq!(
+            tabs.tab_at(off, Scale::ONE, &Theme::dark(), Point::new(0, 0)),
+            None
+        );
         // A bounds smaller than the surface leaves the rest of it untouched.
         let mut surface = Surface::new(VW, VH).expect("surface");
         tabs.render(
@@ -816,7 +1117,7 @@ fn a_vertical_strip_reads_in_both_themes_and_under_heavy_contrast() {
             region_has(
                 &surface,
                 (0, 1),
-                (VEACH + 4, 2 * VEACH - 4),
+                (veach() + 4, 2 * veach() - 4),
                 premul(theme.palette().accent)
             ),
             "the leading seam must read in every theme"
@@ -835,7 +1136,7 @@ fn a_vertical_strip_reads_in_both_themes_and_under_heavy_contrast() {
         tabs.adopt_selected(1);
         let surface = render_in(&tabs, theme, Scale::ONE, VW, VH);
         (0..VW)
-            .take_while(|&x| surface.get(x, VEACH + 4) == Some(accent))
+            .take_while(|&x| surface.get(x, veach() + 4) == Some(accent))
             .count()
     };
     assert!(seam_run(&high_contrast()) > seam_run(&Theme::dark()));
@@ -848,10 +1149,10 @@ fn a_hover_crossing_tabs_reports_the_two_tabs() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
     let centre = |i: u32| moved(i32::try_from(i * EACH + EACH / 2).expect("fits"), 4);
-    tabs.on_pointer(&centre(0), bounds, &mut sink());
+    tabs.on_pointer(&centre(0), bounds, Scale::ONE, &Theme::dark(), &mut sink());
 
     let mut damage = sink();
-    tabs.on_pointer(&centre(1), bounds, &mut damage);
+    tabs.on_pointer(&centre(1), bounds, Scale::ONE, &Theme::dark(), &mut damage);
     assert!(
         damage.bounds().width < W,
         "two tabs, not the whole strip: {:?}",
@@ -876,10 +1177,22 @@ fn a_hover_crossing_tabs_reports_the_two_tabs() {
 fn motion_within_one_tab_reports_nothing() {
     let mut tabs = three_tabs();
     let bounds = Rect::new(0, 0, W, H);
-    tabs.on_pointer(&moved(4, 4), bounds, &mut sink());
+    tabs.on_pointer(
+        &moved(4, 4),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
 
     let mut damage = sink();
-    tabs.on_pointer(&moved(9, 6), bounds, &mut damage);
+    tabs.on_pointer(
+        &moved(9, 6),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut damage,
+    );
     assert!(damage.is_empty(), "the same tab stays lifted");
 }
 
@@ -892,7 +1205,7 @@ fn moving_the_selection_reports_the_two_plates_that_change() {
     tabs.adopt_selected(0);
 
     let mut damage = sink();
-    tabs.set_selected(1, bounds, &mut damage);
+    tabs.set_selected(1, bounds, Scale::ONE, &Theme::dark(), &mut damage);
 
     assert_eq!(tabs.selected(), Some(1));
     // The two plates are adjacent, so the canonical region holds them as one
@@ -911,7 +1224,7 @@ fn re_stating_the_selection_reports_nothing() {
     tabs.adopt_selected(1);
 
     let mut damage = sink();
-    tabs.set_selected(1, bounds, &mut damage);
+    tabs.set_selected(1, bounds, Scale::ONE, &Theme::dark(), &mut damage);
 
     assert!(
         damage.is_empty(),
@@ -926,7 +1239,7 @@ fn moving_the_keyboard_cursor_reports_the_two_tabs_it_moves_between() {
     tabs.adopt_current(Some(0));
 
     let mut damage = sink();
-    tabs.set_current(Some(2), bounds, &mut damage);
+    tabs.set_current(Some(2), bounds, Scale::ONE, &Theme::dark(), &mut damage);
 
     assert_eq!(tabs.current(), Some(2));
     assert_eq!(
@@ -939,7 +1252,7 @@ fn moving_the_keyboard_cursor_reports_the_two_tabs_it_moves_between() {
 
     // Taking the cursor off the strip costs only the tab it was on.
     let mut off = sink();
-    tabs.set_current(None, bounds, &mut off);
+    tabs.set_current(None, bounds, Scale::ONE, &Theme::dark(), &mut off);
     assert_eq!(tabs.current(), None);
     assert_eq!(off.rects(), &[Rect::new(xi(EACH * 2), 0, EACH, H)]);
 }
@@ -951,7 +1264,7 @@ fn an_out_of_range_cursor_reports_only_the_tab_it_clears() {
     tabs.adopt_current(Some(1));
 
     let mut damage = sink();
-    tabs.set_current(Some(9), bounds, &mut damage);
+    tabs.set_current(Some(9), bounds, Scale::ONE, &Theme::dark(), &mut damage);
 
     assert_eq!(tabs.current(), None, "an out-of-range index takes it off");
     assert_eq!(damage.rects(), &[Rect::new(xi(EACH), 0, EACH, H)]);
@@ -966,7 +1279,7 @@ fn adopting_reports_nothing_and_admits_what_setting_admits() {
 
     for index in [Some(1), Some(9), None] {
         adopted.adopt_current(index);
-        reported.set_current(index, bounds, &mut damage);
+        reported.set_current(index, bounds, Scale::ONE, &Theme::dark(), &mut damage);
         assert_eq!(
             adopted.current(),
             reported.current(),
@@ -979,7 +1292,272 @@ fn adopting_reports_nothing_and_admits_what_setting_admits() {
     assert!(selection.is_empty());
     assert_eq!(adopted.selected(), Some(2));
     // The reporting sibling agrees on the state, differing only in the report.
-    reported.set_selected(2, bounds, &mut selection);
+    reported.set_selected(2, bounds, Scale::ONE, &Theme::dark(), &mut selection);
     assert_eq!(reported.selected(), Some(2));
     assert!(!selection.is_empty());
+}
+
+// --- The sidebar list's own anatomy: groups, readings, trends -------------
+
+/// A device-rail-shaped strip: two groups, each entry carrying a reading, and
+/// only the first group's entries carrying a trend.
+fn device_rail() -> Tabs {
+    Tabs::new(vec![
+        Tab::new("CPU")
+            .with_group("Resources")
+            .with_reading("18%")
+            .with_trend(Chart::new(PressureKind::Cpu).with_samples([200, 600, 400])),
+        Tab::new("Memory")
+            .with_reading("53%")
+            .with_trend(Chart::new(PressureKind::Memory).with_samples([500, 520, 530])),
+        Tab::new("Identity & uptime")
+            .with_group("Machine")
+            .with_reading("2h 12m"),
+    ])
+    .with_orientation(TabsOrientation::Vertical)
+}
+
+fn heading_band(theme: &Theme) -> u32 {
+    let font = control_font(theme, Scale::ONE);
+    let gap = Scale::ONE.scale_length(theme.metrics().control_gap).max(1);
+    font.line_height() + gap * 2
+}
+
+fn trend_band(theme: &Theme) -> u32 {
+    Scale::ONE.scale_length(theme.metrics().chart_height).max(1)
+}
+
+#[test]
+fn builders_and_readers_agree_on_the_sidebar_anatomy() {
+    let rail = device_rail();
+    let cpu = &rail.tabs()[0];
+    assert_eq!(cpu.group(), Some("Resources"));
+    assert_eq!(cpu.reading(), Some("18%"));
+    assert!(cpu.trend().is_some());
+    assert_eq!(rail.tabs()[1].group(), None);
+    assert_eq!(rail.tabs()[2].trend(), None);
+}
+
+#[test]
+fn a_group_heading_claims_its_own_band_above_the_entry_that_starts_the_group() {
+    // A heading is not an entry: it selects nothing, and the entries below it
+    // shift down by exactly the band it claims.
+    let theme = Theme::dark();
+    let rail = device_rail();
+    let bounds = Rect::new(0, 0, VW, VH);
+    let heading = heading_band(&theme);
+    let entry = veach();
+    let with_trend = entry + trend_band(&theme);
+
+    let cpu = rail
+        .tab_area(0, bounds, Scale::ONE, &theme)
+        .expect("the first entry is seated");
+    assert_eq!(cpu.top(), xi(heading), "the heading precedes its own group");
+    assert_eq!(cpu.height, with_trend);
+
+    let memory = rail
+        .tab_area(1, bounds, Scale::ONE, &theme)
+        .expect("the second entry is seated");
+    assert_eq!(memory.top(), cpu.top() + xi(with_trend));
+
+    // The Machine group's heading pushes its entry down again, and that entry
+    // carries no trend, so it is shorter.
+    let machine = rail
+        .tab_area(2, bounds, Scale::ONE, &theme)
+        .expect("the third entry is seated");
+    assert_eq!(machine.top(), memory.top() + xi(with_trend) + xi(heading));
+    assert_eq!(
+        machine.height, entry,
+        "an entry with no rate behind it claims no room for a trace"
+    );
+
+    // A press on either heading selects nothing.
+    for y in [
+        heading / 2,
+        u32::try_from(memory.bottom()).expect("fits") + 1,
+    ] {
+        assert_eq!(
+            rail.tab_at(bounds, Scale::ONE, &theme, Point::new(xi(VW / 2), xi(y))),
+            None,
+            "a heading is not selectable"
+        );
+    }
+}
+
+#[test]
+fn measured_height_counts_every_heading_and_every_entry() {
+    let theme = Theme::dark();
+    let rail = device_rail();
+    let wanted = heading_band(&theme) * 2 + (veach() + trend_band(&theme)) * 2 + veach();
+    assert_eq!(rail.measured_height(Scale::ONE, &theme), wanted);
+}
+
+#[test]
+fn a_heading_never_draws_without_at_least_its_own_first_entry() {
+    // Room for the heading but not the entry beneath it would leave a group
+    // label introducing nothing.
+    let theme = Theme::dark();
+    let heading = heading_band(&theme);
+    let short = heading + veach() / 2;
+    let rail = device_rail();
+    let surface = render_in(&rail, &theme, Scale::ONE, VW, short);
+    assert!(
+        is_blank(&surface),
+        "a group whose first entry cannot be seated is not drawn at all"
+    );
+}
+
+#[test]
+fn a_reading_draws_trailing_and_the_label_leading() {
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("CPU")]).with_orientation(TabsOrientation::Vertical);
+    let read = Tabs::new(vec![Tab::new("CPU").with_reading("18%")])
+        .with_orientation(TabsOrientation::Vertical);
+    let height = veach();
+    let with_reading = render_in(&read, &theme, Scale::ONE, VW, height);
+    let without = render_in(&plain, &theme, Scale::ONE, VW, height);
+    assert_ne!(with_reading.pixels(), without.pixels());
+
+    // The reading is quiet and trails; the label is the plain foreground and
+    // leads.
+    let muted = premul(theme.palette().on_surface_muted);
+    let reading_x = (0..VW)
+        .rev()
+        .find(|&x| (0..height).any(|y| with_reading.get(x, y) == Some(muted)))
+        .expect("the reading draws");
+    let label_x = (0..VW)
+        .find(|&x| {
+            (0..height).any(|y| with_reading.get(x, y) == Some(premul(theme.palette().on_surface)))
+        })
+        .expect("the label draws");
+    assert!(
+        label_x < reading_x,
+        "the label leads and the reading trails on the same line"
+    );
+}
+
+#[test]
+fn a_narrow_entry_truncates_its_label_before_its_reading() {
+    // The reading is what the reader came for, so the name is what gives way.
+    let theme = Theme::dark();
+    let entry = Tabs::new(vec![
+        Tab::new("A very long device name indeed").with_reading("18%")
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    let height = veach();
+    let narrow = 64;
+    let surface = render_in(&entry, &theme, Scale::ONE, narrow, height);
+    assert!(
+        has_pixel(&surface, premul(theme.palette().on_surface_muted)),
+        "the reading keeps its room"
+    );
+    assert!(
+        untouched_outside(&surface, narrow, height),
+        "neither the label nor the reading may run past the entry"
+    );
+}
+
+#[test]
+fn an_entrys_trend_draws_beneath_its_label_in_the_resources_own_colour() {
+    let theme = Theme::dark();
+    let rail = device_rail();
+    let height = rail.measured_height(Scale::ONE, &theme);
+    let surface = render_in(&rail, &theme, Scale::ONE, VW, height);
+    assert!(has_pixel(&surface, premul(theme.palette().cpu_pressure)));
+    assert!(has_pixel(&surface, premul(theme.palette().memory_pressure)));
+
+    // The CPU trace sits below that entry's own label row, inside its band.
+    let heading = heading_band(&theme);
+    let label_row = veach();
+    let cpu = premul(theme.palette().cpu_pressure);
+    assert!(
+        !region_has(&surface, (0, VW), (heading, heading + label_row), cpu),
+        "a trace never draws over its own label row"
+    );
+    assert!(region_has(
+        &surface,
+        (0, VW),
+        (
+            heading + label_row,
+            heading + label_row + trend_band(&theme)
+        ),
+        cpu
+    ));
+}
+
+#[test]
+fn a_live_reading_and_trend_are_re_stated_in_place() {
+    // A fresh sample re-states the entries' readings without rebuilding the
+    // strip, so the pointer's and the keyboard's places survive it.
+    let mut rail = device_rail();
+    let bounds = Rect::new(0, 0, VW, VH);
+    rail.on_pointer(
+        &moved(xi(VW / 2), xi(heading_band(&Theme::dark()) + 2)),
+        bounds,
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    rail.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink());
+
+    rail.tabs_mut()[0].set_reading(Some(String::from("94%")));
+    rail.tabs_mut()[0].set_trend(Some(
+        Chart::new(PressureKind::Cpu).with_samples([900, 940, 960]),
+    ));
+    assert_eq!(rail.tabs()[0].reading(), Some("94%"));
+
+    assert_eq!(
+        rail.on_pointer(&RELEASE, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
+        Some(TabsAction::Selected { index: 0 }),
+        "a live reading changing mid-click cannot swallow it"
+    );
+
+    rail.tabs_mut()[0].set_reading(None);
+    rail.tabs_mut()[0].set_trend(None);
+    assert_eq!(rail.tabs()[0].reading(), None);
+    assert_eq!(rail.tabs()[0].trend(), None);
+}
+
+#[test]
+fn a_horizontal_strip_draws_neither_a_reading_a_trend_nor_a_heading() {
+    // One row has no line for either, and a reading belongs in a horizontal
+    // tab's label — so the strip draws the same pixels with or without them
+    // rather than crowding its own label.
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("All"), Tab::new("Mine")]);
+    let dressed = Tabs::new(vec![
+        Tab::new("All")
+            .with_group("Filters")
+            .with_reading("12")
+            .with_trend(Chart::new(PressureKind::Cpu).with_samples([500])),
+        Tab::new("Mine").with_reading("3"),
+    ]);
+    assert_eq!(
+        render(&plain, &theme).pixels(),
+        render(&dressed, &theme).pixels()
+    );
+}
+
+#[test]
+fn the_sidebar_anatomy_reads_in_both_themes_and_under_heavy_contrast() {
+    let rail = device_rail();
+    let dark = Theme::dark();
+    let height = rail.measured_height(Scale::ONE, &dark);
+    let in_dark = render_in(&rail, &dark, Scale::ONE, VW, height);
+    let in_light = render_in(&rail, &Theme::light(), Scale::ONE, VW, height);
+    assert_ne!(in_dark.pixels(), in_light.pixels());
+
+    for theme in [Theme::light(), high_contrast()] {
+        let height = rail.measured_height(Scale::ONE, &theme);
+        let surface = render_in(&rail, &theme, Scale::ONE, VW, height);
+        assert!(
+            has_pixel(&surface, premul(theme.palette().on_surface_muted)),
+            "the headings and readings must read in every theme"
+        );
+        assert!(
+            has_pixel(&surface, premul(theme.palette().cpu_pressure)),
+            "an entry's trace must read in every theme"
+        );
+        assert!(untouched_outside(&surface, VW, height));
+    }
 }

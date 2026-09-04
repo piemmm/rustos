@@ -104,7 +104,12 @@
 //! plots a bounded oldest-to-newest series as a line across the whole box it
 //! is given — a trend needs vertical room, and a series confined to a
 //! [`MetricTile`]'s proportional-track instrument cannot rise more than a
-//! pixel or two whatever its values are. The owner's [`PressureState`] still
+//! pixel or two whatever its values are. A rate with two directions —
+//! read/write, receive/send — is one reading, so a chart takes an optional
+//! *opposing* series: the box splits at a drawn axis, the primary series rises
+//! above it and the opposing one mirrors below in its own resource's tint,
+//! because two stacked charts would lose the comparison that matters. The
+//! owner's [`PressureState`] still
 //! drives the shared Pressure Rail emphasis exactly as it does for [`Card`] —
 //! the resource tint is the instrument's fixed identity, the pressure state
 //! is its transient severity.
@@ -222,8 +227,14 @@
 //! can be scanned down a narrow column; an unplated tile draws no plate of its
 //! own, so a stack of them shares one container's surface instead of nesting
 //! plates. A [`StatusPill`] is the compact capsule that names a state, toned by
-//! the theme's own signal roles. Both are read-only instruments: they report,
-//! and offer nothing to press.
+//! the theme's own signal roles. A [`CompositionBar`] splits a measured whole
+//! into its named parts — one proportional row through that very same
+//! measured-track geometry, tinted down a ladder of the resource's own hue so
+//! the parts separate by weight and survive the monochrome-safe path, with a
+//! key naming each part and its amount beneath; parts that do not account for
+//! the whole are a [`CompositionError`] at construction rather than a silently
+//! short bar. All three are read-only instruments: they report, and offer
+//! nothing to press.
 //!
 //! The [`record`] module is the record-list family — [`FactList`] with
 //! [`Fact`], and [`Timeline`] with [`TimelineEvent`]. A fact list reports what
@@ -291,7 +302,10 @@ pub use menu::{
     plate_rect, ChainChild, ChainModel, ChainRow, Menu, MenuAction, MenuItem, MenuMark,
     PlatePlacement, PlateSide, INFO_ROW_LABEL,
 };
-pub use metric::{MetricInstrument, MetricLayout, MetricTile, StatusPill};
+pub use metric::{
+    CompositionBar, CompositionError, CompositionSegment, MetricInstrument, MetricLayout,
+    MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
+};
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};
 pub use rail::{ActionRail, RailAction};

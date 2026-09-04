@@ -840,6 +840,43 @@ Tabs use a lower seam for selected state.
   rebuilt: a fresh strip knows neither record, nor which tab a press is
   waiting on.
 
+**The vertical strip is a sidebar list, not a column of tab shapes.** Its
+selection, focus, keyboard and action model are the horizontal strip's, whole;
+what differs is the anatomy an entry needs to name a *destination* rather than
+a page:
+
+- **An entry's label leads and its reading trails on that same line**, and an
+  optional bounded trend (§11.35) draws beneath — so a rail of devices is a
+  live summary of everything it selects between, not just a list of names. The
+  reading keeps the room it needs and the label truncates first, exactly as a
+  MetricTile's inline layout does (§11.33).
+- **Entries may carry a quiet group heading.** A heading is declared by the
+  entry that *starts* the group, so it can never point at an entry that is not
+  there. It draws with no plate, selects nothing, and hit-tests to nothing; a
+  group whose first entry cannot be seated is not drawn at all, because a
+  heading introducing nothing is worse than a group the owner scrolls to.
+- **A vertical strip stacks; it does not split.** Each entry claims its own
+  content height — so an entry with no rate behind it is visibly shorter than
+  one carrying a trace, and the absence of the instrument is what says so —
+  and the strip states the height its whole list wants. A list longer than the
+  column shows the entries it can seat whole and its **owner scrolls it**: a
+  discovered list (a hundred cores, a dozen volumes) must never be squeezed
+  below the height an entry needs to draw its own label, nor truncated.
+- **A horizontal strip draws none of the three.** One row has no line for a
+  reading beneath a label and no room for an instrument, and a heading has no
+  meaning across a row; a horizontal tab's reading belongs in its label. The
+  strip therefore draws identically with or without them rather than crowding
+  its own label with anatomy it cannot seat.
+- **Damage.** A moved selection or keyboard cursor reports the two entries it
+  moved between, never the strip; an entry that was not seated reports
+  nothing. Because a vertical entry's rectangle depends on the theme's own
+  metrics, the hit test and every damage-reporting entry point take the scale
+  and theme the strip was laid out with — the same shape ActionRail (§11.38)
+  already has, so a press can never select an entry drawn at another span.
+- **Settle point.** A strip has none of its own: selection is a discrete
+  commit (`TabsAction::Selected`) the owner applies, and re-stating a reading
+  or a trend is a repaint, never a durable action.
+
 ### 11.13 ListRow and TableRow
 
 Rows are controls. They can be selected, focused, inspected, dragged, or linked to actions.
@@ -1337,6 +1374,30 @@ that plots one bounded oldest-to-newest series of readings as a line.
 - Out-of-range readings are clamped fail closed, and a box too small to plot in
   degrades to nothing rather than drawing outside itself.
 
+**A rate with two directions is one reading, so a chart takes an optional
+opposing series.** Read/write and receive/send are the cases; drawing them as
+two stacked charts loses the comparison the reader is there for.
+
+- The box splits at a drawn **axis** — the zero line both series read against —
+  the primary series rising above it and the opposing one **mirrored** below,
+  so a rising reading in either direction grows *away* from the axis.
+- The opposing series is tinted by its own resource, through the same rail
+  colour every trace uses, and is bounded and clamped by the same rule as the
+  primary one. There is one chart control and one plot path: a second
+  duplex control beside this one is forbidden.
+- **Adding an opposing series asserts that the direction is measured.** A
+  direction with no reading behind it is left off, so the chart stays a
+  single-series trend over the whole box rather than showing an empty half as a
+  quiet nothing. A measured zero *is* a reading and plots flat on the axis.
+- An axis is drawn only where something is plotted: a duplex chart with no
+  readings in either direction is the quiet plate alone, so a rule across an
+  empty box can never read as a measured nought.
+- A box too short to seat an axis and both halves degrades to the quiet plate.
+  Half a duplex reading is worse than none, so it is not drawn.
+- **Damage and settle point.** A chart is read-only: it has no settle point,
+  and its pixels are its owner's to report when the series it was handed
+  changes.
+
 #### Icon views and the space a line has left over
 
 An icon view lays its tiles out on a wrapped grid. **Only whole tiles are laid
@@ -1561,6 +1622,52 @@ draws. §5 already binds `Breadcrumb::set_focus` and
 `TableHeader::set_focus`/`set_sort` as the interactive entry points, each
 reporting the cells its ring or indicator moves between so a host repaints
 exactly those.
+
+### 11.40 CompositionBar
+
+A composition bar answers a question no other instrument in the language can:
+*where did it go*. A track (§11.33) says how much of a resource is in use and a
+Chart (§11.35) says what it has been doing, but neither splits that use into
+the parts it is made of. The bar is a read-only instrument, like both of them.
+
+- **The parts account for the whole, or there is no bar.** Shares that do not
+  sum to all of it are a *construction* error, not a silently short bar: a
+  composition that does not account for everything is not a composition. An
+  out-of-range share is clamped fail closed first, so the excess can never
+  draw past the bar's own end and surfaces as the sum not adding up.
+- **One proportional row, through the one measured-track geometry.** The
+  groove, its thickness, its rounding and its proportional arithmetic are the
+  ones a MetricTile's track draws with (§11.33); the parts are filled to their
+  *cumulative* shares so the bar's two ends round and the parts butt cleanly
+  without a second segment recipe.
+- **The parts separate by hue, because they are categories rather than
+  degrees.** The sequence is the theme's own resource hues in a fixed rotation
+  that keeps neighbours far apart on the wheel, led by the bar's own resource
+  so a memory composition still reads as memory where it starts. More used
+  parts than the rotation can tell apart is a construction error: a part
+  wearing another's hue is not a part a reader can find.
+- **The joins are ruled**, so the parts stay countable where hue carries
+  nothing — the monochrome-safe path, and a reader who cannot separate two of
+  them. The rule thickens under heavier contrast exactly as `plate_border`
+  does.
+- **The part that is *not* in use is the remainder**, drawn in the track
+  family's own quiet neutral so it reads as the unfilled tail while the key
+  still names it. A composition has at most one, and it is the last part: a
+  neutral band anywhere else would read as a gap the composition failed to
+  account for, which is the opposite of what it says.
+- **The key names every part and its amount**, beneath the bar, each entry led
+  by a swatch in its part's own tint — a neutral swatch, never a Signal Bead:
+  a key entry names a part of a reading, it does not raise an alert. The key
+  **wraps** rather than dropping an entry, because a part of the bar the key
+  cannot name is a segment with no meaning; the height it needs therefore
+  depends on the width it is given, and the bar states it for that width.
+- A height too short for the whole key drops the rows it cannot seat and keeps
+  the reading: the bar outranks its own key. A box too small to seat the bar at
+  all draws nothing rather than outside itself.
+- **The bar draws no plate of its own**, so several readings seated in one
+  Panel share that container's surface (§10's plate seating).
+- **Damage and settle point.** Read-only: it has no settle point, and its
+  pixels are its owner's to report when the composition it was handed changes.
 ---
 
 ## 12. Reactive State Patterns

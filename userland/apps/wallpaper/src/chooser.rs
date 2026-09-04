@@ -594,7 +594,7 @@ impl Chooser {
         }
         changed |= apply_changed | close_changed;
 
-        changed |= self.rail_pointer(event, &layout, damage);
+        changed |= self.rail_pointer(event, &layout, style, damage);
         changed |= self.scroll_pointer(event, &layout, style, damage);
         changed |= self.gallery_pointer(event, &layout, damage);
         ChooserAction::changed(changed)
@@ -640,7 +640,9 @@ impl Chooser {
             }
             Key::Named(NamedKey::Escape) => ChooserAction::Close,
             _ => match self.focus {
-                Focus::Categories => ChooserAction::changed(self.rail_key(key, &layout, damage)),
+                Focus::Categories => {
+                    ChooserAction::changed(self.rail_key(key, &layout, style, damage))
+                }
                 Focus::Gallery => self.gallery_key(key, &layout, damage),
                 Focus::Setting(group) => ChooserAction::changed(
                     self.field_key(group, key, &layout, style, damage).is_some(),
@@ -856,36 +858,52 @@ impl Chooser {
     /// hover, so its damage is collected here and forwarded: a hover that
     /// moved between two entries is a change, an idle sample over the one it
     /// is already on is not.
-    fn rail_pointer(&mut self, event: &InputEvent, layout: &Layout, damage: &mut Region) -> bool {
+    fn rail_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> bool {
         let bounds = layout.categories();
         if bounds.is_empty() {
             return false;
         }
         let mut reported = damage::sink();
-        let action = self.rail.on_pointer(event, bounds, &mut reported);
+        let action =
+            self.rail
+                .on_pointer(event, bounds, style.scale(), style.theme(), &mut reported);
         let mut changed = !reported.is_empty();
         for rect in reported.rects() {
             damage.add(*rect);
         }
         if let Some(TabsAction::Selected { index }) = action {
             self.focus = Focus::Categories;
-            changed |= self.select_category(index, layout, damage);
+            changed |= self.select_category(index, layout, style, damage);
         }
         changed
     }
 
     /// Route a key press to the category rail: the arrows move its cursor,
     /// Enter or Space narrows the gallery to the entry the cursor is on.
-    fn rail_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> bool {
+    fn rail_key(
+        &mut self,
+        key: Key,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> bool {
         let bounds = layout.categories();
         if bounds.is_empty() {
             return false;
         }
         let before = damage.rects().len();
-        let action = self.rail.on_key(key, bounds, damage);
+        let action = self
+            .rail
+            .on_key(key, bounds, style.scale(), style.theme(), damage);
         let mut changed = damage.rects().len() != before;
         if let Some(TabsAction::Selected { index }) = action {
-            changed |= self.select_category(index, layout, damage);
+            changed |= self.select_category(index, layout, style, damage);
         }
         changed
     }
@@ -898,12 +916,24 @@ impl Chooser {
     /// even while a category that does not hold it is being browsed. The
     /// gallery returns to its top, because the rows it was scrolled to belong
     /// to the entry being left.
-    fn select_category(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> bool {
+    fn select_category(
+        &mut self,
+        index: usize,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> bool {
         if index >= self.rail.len() || index == self.active {
             return false;
         }
         self.active = index;
-        self.rail.set_selected(index, layout.categories(), damage);
+        self.rail.set_selected(
+            index,
+            layout.categories(),
+            style.scale(),
+            style.theme(),
+            damage,
+        );
         let category = category_at(&self.categories, index);
         self.visible = visible_indices(&self.candidates, category);
         self.scroll_to(0, layout, damage);

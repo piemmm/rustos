@@ -23,9 +23,9 @@ lie about.
 |---|---|---|---|---|
 | **A1** | `Section` and wire `CommandSection` carry exactly `Tasks`, `Resources`, `Recovery`; discriminants renumbered with no reserved gap; `map_section` and its exhaustive table shrink | — | S4 | planned |
 | **F1** | Resources' `SectionAnatomy`: the device rail as `sidebar`, the pane as `primary`, and the shed route replacing the rail with a band `ComboBox` | A1 | S3 | planned |
-| **C1** | `chart::Chart` gains an optional opposing series, mirrored below a drawn midline and tinted by its own `PressureKind` | — | S7 | planned |
-| **C2** | `metric::CompositionBar` — named proportional segments of a measured whole, with its key; segments that do not sum to the whole are a construction error | — | S7 | planned |
-| **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | planned |
+| **C1** | `chart::Chart` gains an optional opposing series, mirrored below a drawn midline and tinted by its own `PressureKind` | — | S7 | done |
+| **C2** | `metric::CompositionBar` — named proportional segments of a measured whole, with its key; segments that do not sum to the whole are a construction error | — | S7 | done |
+| **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | done |
 | **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | planned |
 | **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | planned |
 | **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | planned |
@@ -49,7 +49,7 @@ lie about.
 | **X3** | Re-point `view/tasks.rs`'s three board citations at `plans/switchboard/01-tasks.png` | V9 | S10 | planned |
 | **X4** | Rewrite `docs/src/desktop/switchboard.md` — it describes the section set | V1–V10 | S10 | planned |
 | **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | planned |
-| **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | planned |
+| **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | done |
 | **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | planned |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
@@ -568,28 +568,48 @@ column-width model, reporting a sort the owner commits); and
 `tabs::TabsOrientation` (a vertical orientation of the existing strip, so a
 sidebar is not a second selection control).
 
-**The three additions this plan needs — planned.** Everything else the
-surface composes from the above.
+**The three additions this plan needed — done.** Everything else the surface
+composes from the above. Each is specified with its settle-point and damage
+obligations in `plans/GUI-CONTROLS-DESIGN.md` (§11.35, §11.40, §11.12).
 
-- **`chart::Chart` gains an opposing series.** A read/write or receive/send
-  rate is one reading with two directions, and drawing it as two stacked
-  charts loses the comparison that matters. `Chart` takes an optional second
-  series, plotted mirrored below the midline and tinted by its own
-  `PressureKind`, with the midline drawn as the axis. One chart control and one
-  paint path, not a second `DuplexChart` beside the first — the bounded
-  `MAX_CHART_SAMPLES` window, the empty-series groove and the area treatment
-  are already right and are not restated.
-- **`metric::CompositionBar`** — named proportional segments of a measured
-  whole, with a key naming each segment and its amount. Answers *where did it
-  go* for memory composition and for capacity by class. Segments that do not
-  sum to the whole are a construction error, not a silently short bar: a
-  composition that does not account for everything is not a composition. It
-  draws through the one measured-track geometry in `controls::paint`.
-- **`tabs::Tabs` (vertical) gains group headings and per-item readings.** The
-  device rail is a sidebar, and a sidebar is not a second selection control.
-  Vertical `Tabs` takes optional group headings between items, and each item
-  takes an optional reading string and an optional bounded `Chart` trend. The
-  existing selection, focus and keyboard behaviour is reused whole.
+- **`chart::Chart` has an opposing series.** A read/write or receive/send rate
+  is one reading with two directions, and drawing it as two stacked charts
+  loses the comparison that matters. `with_opposing` takes a second series,
+  plotted mirrored below a drawn axis and tinted by its own `PressureKind`.
+  One chart control and one plot path, not a second `DuplexChart` beside the
+  first — the bounded `MAX_CHART_SAMPLES` window, the empty-series groove and
+  the area treatment are reused whole. Adding a series *asserts the direction
+  is measured*: a direction with no reading behind it is left off, so the
+  chart stays a single-series trend over the whole box; an axis is drawn only
+  where something is plotted, and a box too short for both halves degrades to
+  the quiet plate rather than half a reading.
+- **`metric::CompositionBar`** — named proportional parts of a measured whole,
+  with a key naming each part and its amount. Answers *where did it go* for
+  memory composition and for capacity by class. Shares that do not sum to the
+  whole are a `CompositionError` at construction, not a silently short bar.
+  The parts separate by *hue* — a fixed rotation of the theme's own resource
+  colours, led by the bar's own resource — because they are categories rather
+  than degrees, and the joins are ruled so they stay countable on the
+  monochrome-safe path. The part that is *not* in use is declared as the
+  composition's `remainder`: the track's quiet neutral, last, still named in
+  the key. It draws through the one measured-track geometry (`TrackBand`) in
+  `controls::paint`, which `MetricTile`'s `Track` now shares. The key wraps
+  rather than dropping a part, so `measured_height` takes the width it will be
+  given.
+- **`tabs::Tabs` (vertical) is a sidebar list.** The device rail is a sidebar,
+  and a sidebar is not a second selection control. An entry's label leads with
+  its live reading trailing on the same line, an optional bounded `Chart`
+  trend draws beneath, and a quiet group heading may introduce the entry that
+  *starts* a group — declared by that entry, so a heading can never point at
+  one that is not there. Selection, focus and keyboard behaviour are reused
+  whole. Entries **stack** at their own content height rather than sharing the
+  column, which is what makes V1's discovered rail scroll rather than squeeze:
+  `Tabs::measured_height` states the height the whole list wants. Because a
+  vertical entry's rectangle depends on the theme's metrics, the hit test and
+  every damage-reporting entry point take the scale and theme the strip was
+  laid out with — the shape `ActionRail` already had; `Tabs::tab_area` is the
+  forward mirror of `tab_at`, so a caller (or a pointer-driven test) aims at
+  the rectangle `render` painted.
 
 The measured-track geometry — groove, proportional tinted fill, pressure
 outline — keeps its one definition in `controls::paint`, which `MetricTile`'s
