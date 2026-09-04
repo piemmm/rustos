@@ -5438,6 +5438,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-wild-fault"
+version = "0.0.0"
+dependencies = [
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-test-wild-fault-qemu-x86_64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-x86_64",
+ "tairix-caps",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-ipc",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-api",
+ "tairix-kernel-sched-cfq",
+ "tairix-kernel-sec",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-sync",
+]
+
+[[package]]
 name = "tairix-theme"
 version = "0.0.0"
 dependencies = [

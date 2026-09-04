@@ -588,6 +588,15 @@ macro_rules! exception_isr_body {
                 "movq 120(%rsp), %rsi",
                 "movq 128(%rsp), %rdx",
                 "movq 136(%rsp), %rcx",
+                // %r8 <- &SavedRegs (the base of the 15-GPR block, = %rsp
+                // before the alignment below), %r9 <- the interrupted %rsp
+                // from the CPU frame, so the dispatcher can build the
+                // faulting register frame a ring-3 termination records its
+                // crash backtrace from. Long mode pushes SS:RSP for every
+                // delivery, so the slot is the interrupted stack pointer
+                // whichever ring the exception came from.
+                "movq %rsp, %r8",
+                "movq 152(%rsp), %r9",
                 // Read every stack operand before disturbing %rsp.
                 //
                 // A ring-0 -> ring-0 delivery performs no stack switch, so
@@ -613,7 +622,8 @@ macro_rules! exception_isr_body {
 }
 
 /// Emit a vector-specific exception stub that reaches a diverging Rust
-/// dispatcher with `(vector, error_code, rip, cs)`.
+/// dispatcher with `(vector, error_code, rip, cs, &SavedRegs,
+/// interrupted rsp)`.
 ///
 /// ```text
 /// define_exception_isr!(isr_gp => dispatch, vector = 13, error_code);
@@ -623,7 +633,8 @@ macro_rules! exception_isr_body {
 /// The `error_code` marker is written for the vectors the CPU pushes one
 /// for (`8`, `10`–`14`, `17`, `21` — Intel SDM Vol 3A §6.13); a stub
 /// without it pushes a synthetic zero so the frame layout is uniform. The
-/// dispatcher must be `extern "C" fn(u64, u64, u64, u64) -> !`; this is
+/// dispatcher must be
+/// `extern "C" fn(u64, u64, u64, u64, *const SavedRegs, u64) -> !`; this is
 /// the exception counterpart of [`crate::define_isr`], whose stubs resume
 /// through `iretq` and therefore cannot carry an error code.
 #[macro_export]

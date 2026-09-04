@@ -368,6 +368,8 @@ members = [
     "tests/integration/stack_grow_qemu_aarch64",
     "tests/integration/stack_grow_qemu_riscv64",
     "tests/integration/stack_grow_qemu_x86_64",
+    "tests/integration/wild_fault_program",
+    "tests/integration/wild_fault_qemu_x86_64",
     "tests/integration/wait_qemu_aarch64",
     "tests/integration/wait_qemu_x86_64",
     "tests/integration/wait_qemu_riscv64",

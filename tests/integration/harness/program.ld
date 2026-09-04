@@ -1,0 +1,86 @@
+/* The shared PIE link script every freestanding fixture *program* under
+ * `tests/integration/` links with.
+ *
+ * A fixture program is a position-independent **pure-Rust** (or C-ABI)
+ * executable whose entry point is the userland runtime's `_start`. It links no
+ * architecture crate, so nothing in the default object graph references
+ * `_start`; this script makes `_start` the entry GC root and lays the loadable
+ * sections out at a fixed, non-zero base so the consuming test maps the image
+ * at its link addresses with the chosen relocation bias (the image is
+ * genuinely PIE; the tests exercise it at a high virtual base). One script
+ * serves every native target: it only names architecture-neutral section
+ * classes, and it lives here — beside the build glue that emits each
+ * fixture's target cfg and converts its ELF to an `rxe` — so the layout has a
+ * single definition rather than a copy per fixture.
+ *
+ * Every loadable segment is page-aligned in both file offset and virtual
+ * address: the kernel `rxe` loader maps whole pages with per-segment
+ * permissions, so a `PT_LOAD` whose virtual address is not a multiple of the
+ * page size is refused (W^X page granularity). The explicit
+ * `. = ALIGN(CONSTANT(MAXPAGESIZE))` between permission groups — together with
+ * naming the PIE metadata sections so no orphan lands mid-page — is what keeps
+ * each segment on its own page boundary. */
+
+ENTRY(_start)
+
+SECTIONS
+{
+    /* A page-aligned, non-zero base keeps the null page unmapped and gives the
+     * loader clean page boundaries to map at. */
+    . = 0x10000;
+
+    /* Executable code (R+X). */
+    .text :
+    {
+        KEEP(*(.text._start))
+        *(.text .text.*)
+    }
+
+    /* Read-only data and the PIE dynamic-linking metadata (R). Page-align the
+     * start so this becomes its own R-only PT_LOAD rather than sharing the
+     * code page. The dynamic sections are named explicitly so the linker does
+     * not place them as orphans at a non-page-aligned address. */
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    .rodata :
+    {
+        *(.rodata .rodata.*)
+        *(.srodata .srodata.*)
+    }
+    .gnu.hash       : { *(.gnu.hash) }
+    .hash           : { *(.hash) }
+    .dynsym         : { *(.dynsym) }
+    .dynstr         : { *(.dynstr) }
+    .gnu.version    : { *(.gnu.version) }
+    .gnu.version_r  : { *(.gnu.version_r) }
+    .rela.dyn       : { *(.rela.dyn) }
+
+    /* Writable data, the GOT, and the dynamic table (R+W). */
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    .data :
+    {
+        *(.data .data.*)
+        *(.sdata .sdata.*)
+        *(.got .got.*)
+        *(.got.plt)
+    }
+    .dynamic : { *(.dynamic) }
+
+    /* Zero-initialised data (R+W, not file-backed). */
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+    .bss (NOLOAD) :
+    {
+        *(.bss .bss.*)
+        *(.sbss .sbss.*)
+        *(COMMON)
+    }
+
+    /* Metadata that never loads into the running image. */
+    /DISCARD/ :
+    {
+        *(.eh_frame .eh_frame_hdr)
+        *(.comment)
+        *(.note .note.*)
+        *(.riscv.attributes)
+        *(.ARM.attributes)
+    }
+}

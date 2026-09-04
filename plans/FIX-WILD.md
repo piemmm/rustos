@@ -27,8 +27,9 @@ Stage 2/3 wiring — validated integration map (design, not yet coded):
   base the trap handler holds — no assembly change, fp-backtrace lights up
   immediately. riscv64's `trap::TrapFrame` was extended to save the
   callee-saved set too (`s0`/x8 = fp included, offset asserts updated), so its
-  fp-backtrace is live as well. x86_64 needs the same check on its interrupt
-  stub.
+  fp-backtrace is live as well. x86_64's `#PF` stub and its per-vector
+  exception stubs both marshal the saved GPR block and the interrupted `rsp`,
+  so its fp-backtrace covers a data fault and an instruction-side kill alike.
 - **User-stack walk** reuses the shared `tairix_arch_api::backtrace::walk`
   (never a copy) over a `copy_in`-backed fallible `StackReader`; kernel-core
   reaches the faulting task's space+physmap via
@@ -67,11 +68,12 @@ Stage 2 implementation notes — validated against the code (coded next):
     `sepc`/`sstatus`/`user_sp` — the full-GPR save on trap entry Linux's
     `pt_regs` does, pinned by the `offset_of!` asserts against `trap.s`. `s0`
     is the fp, `sepc` the pc, `user_sp` the sp; `fp_valid = true`.
-  - *x86_64:* the `#PF` stub calls `tairix_arch_x86_64_page_fault_dispatch(
-    err, cr2, rip, rip_slot)` — it must also pass `*const
-    interrupts::SavedRegs` (r8, = `%rsp` before the `subq $8`, giving `rbp`
-    =fp and the full GPR set) and the user `rsp` (r9, from the CPU iret
-    frame at `152(%rsp)`); `rip` is the pc, `fp_valid = true`.
+  - *x86_64:* the `#PF` stub passes `*const interrupts::SavedRegs` (r8, =
+    `%rsp` before the `subq $8`, giving `rbp`=fp and the full GPR set) and
+    the user `rsp` (r9, from the CPU iret frame at `152(%rsp)`); `rip` is the
+    pc, `fp_valid = true`. `exception_isr_body!` marshals the same pair from
+    the same offsets, reading them before its `andq $-16` alignment, so the
+    ring-3 terminator every other vector reaches gets the same frame.
 - **PIE load base source.** `kernel_mem::spawn::build_process_image`
   relocates each segment via `segment.relocated_vaddr(bias)`; the load base
   is the lowest relocated segment vaddr. Return it in `ProcessImage`, thread

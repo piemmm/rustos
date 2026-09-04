@@ -2537,6 +2537,37 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/OPEN-DEFECTS.md` D42 + D86: a ring-3 exception the kernel
+    // cannot resolve kills the faulting task and leaves the CPU running.
+    // Boots the **production** bring-up (which installs the user-fault
+    // terminator beside the resolver) and drives three faulting children
+    // through production spawn + wait: a call into the program's own
+    // No-Execute data image (the instruction-fetch `#PF` the resolver's
+    // data-only gate never saw), the always-invalid opcode (`#UD`, no
+    // hardware error code), and a privileged instruction (`#GP`, with one —
+    // the other exception-stub shape). The parent reaping all three is the
+    // proof no fault took the CPU with it. A 90-second budget: four spawned
+    // processes and three fault kills under TCG, ahead of the 60s
+    // boot-then-fixed-work x86_64 tests but well inside the loaded matrix.
+    QemuTest {
+        package: "tairix-test-wild-fault-qemu-x86_64",
+        binary: "tairix-test-wild-fault-qemu-x86_64",
+        target: "x86_64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(90),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/OPEN-DEFECTS.md` D82, riscv64: the sibling of
     // `tairix-test-stack-overrun-qemu-aarch64`. It reserves the kernel remap
     // window, builds an Sv39 identity `AddressSpace` (which installs the

@@ -150,6 +150,48 @@ pub extern "C" fn production_user_fault(
 const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFaultResolveFn =
     production_user_fault;
 
+/// Production user-fault **terminator** callback installed beside the
+/// resolver before user space is entered.
+///
+/// The exception entries call this for a ring-3 exception the port can
+/// neither treat as a syscall nor resolve as a demand-paged fault — an
+/// instruction-fetch `#PF` (a wild jump), an invalid opcode (`#UD`), a
+/// general-protection violation (`#GP`), an alignment check
+/// (`tairix_arch_x86_64::fault::UserFaultTerminateFn`). The arch-neutral
+/// terminate sequence lives in
+/// [`crate::dispatch_core::terminate_user_fault_via_slot`]: no resolution
+/// is attempted (retrying the instruction would re-take the exception
+/// forever), so it records the crash exit, reclaims the task, and suspends
+/// it with an exit action — the call never returns for the killed task, so
+/// the offending task dies and the CPU stays alive. `false` means the
+/// exception could not be attributed to a running task, sending the entry
+/// to its fatal path (fail closed).
+///
+/// `fault_pc` is the interrupted `rip`; `regs` is the faulting ring-3
+/// register frame the entry captured (or null), forwarded for the
+/// post-mortem crash record.
+#[must_use = "the verdict decides whether the entry parks or the killed task's suspension carried the CPU away"]
+// The callback must stay a bare safe `extern "C" fn` to match the arch
+// port's `UserFaultTerminateFn` type; the raw-pointer deref happens only
+// inside the guarded `unsafe` block below, whose SAFETY note carries the
+// entry-upheld contract.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn production_user_fault_terminate(
+    fault_pc: u64,
+    regs: *const tairix_arch_api::backtrace::UserRegisterFrame,
+) -> bool {
+    // SAFETY: the exception entry builds the frame on its own kernel stack
+    // and holds it live across this call, or passes null; the slot helper
+    // narrows the pointer with `as_ref` and never dereferences null.
+    unsafe { crate::dispatch_core::terminate_user_fault_via_slot(&DISPATCH_SLOT, fault_pc, regs) }
+}
+
+// SAFETY-INVARIANT: [`production_user_fault_terminate`] is a valid
+// [`tairix_arch_x86_64::fault::UserFaultTerminateFn`]. The compile-time
+// coercion fails to type-check if the ABI or signature ever drifts.
+const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFaultTerminateFn =
+    production_user_fault_terminate;
+
 /// Halt the CPU forever.
 ///
 /// Wrapped behind a non-test indirection so host tests can replace

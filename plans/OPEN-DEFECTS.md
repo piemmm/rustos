@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 20 open, 66 closed, 86 total.
+table normalises all three to **closed**. 19 open, 68 closed, 87 total.
 
-### Open (20)
+### Open (19)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -35,7 +35,6 @@ table normalises all three to **closed**. 20 open, 66 closed, 86 total.
 | D26 | a mouse scroll produces no input event at all | functional gap, not a lockup |
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
-| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | the `#PF` half of the missing terminator; D86 is the other half, one fix closes both |
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
@@ -46,9 +45,9 @@ table normalises all three to **closed**. 20 open, 66 closed, 86 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | the non-`#PF` half of the missing terminator; D42 is the other half |
+| D87 | an instruction-side fault kill is audited against the task's *data* mappings | raised while closing D42/D86; shared, pre-existing on every port |
 
-### Closed (66)
+### Closed (68)
 
 | ID | Subject |
 |---|---|
@@ -118,6 +117,8 @@ table normalises all three to **closed**. 20 open, 66 closed, 86 total.
 | D82 | refining a live translation was a break-before-make violation |
 | D83 | on x86_64 only a page fault reached the fatal-fault report |
 | D84 | the sleeping mutex lost a contender that published after its release scan |
+| D42 | an x86_64 ring-3 wild jump halted the CPU instead of the task |
+| D86 | on x86_64 a ring-3 exception other than a page fault killed the machine |
 
 ## Scope
 
@@ -217,10 +218,11 @@ The open items, in priority order:
   no record, and a spurious LAPIC interrupt is treated as fatal — OPEN.** The
   D83 shape surviving for vectors `32..=255`, which still share one
   vector-agnostic thunk.
-- **D86 — on x86_64 a ring-3 exception other than a page fault kills the
-  machine instead of the task — OPEN.** The other ports route a
-  lower-privilege fault to a user-fault terminator; this port has no such
-  slot, so any process can end the machine with `ud2`.
+- **D86 — on x86_64 a ring-3 exception other than a page fault killed the
+  machine instead of the task — FIXED.** The port now has the sibling
+  ports' terminator slot, and which vectors may be charged to a ring-3 task
+  is a declared column of the one exception-vector table (the `#NMI`/`#DF`
+  IST routes never are). D42 is the `#PF` half; one change closed both.
 - **D54 — a desktop worker thread issues ~2500 file opens at session start,
   starving every concurrent reader — OPEN.** It is the measured whole of the
   read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
@@ -871,12 +873,13 @@ The open items, in priority order:
   now publishes only its own region's pages. Reading the same class found two
   more: a file-backed fault re-froze per page (O(N²) to read an N-page
   mapping) and stack growth re-froze a range it had just computed.
-- **D42 — an x86_64 ring-3 wild jump halts the CPU instead of the task
-  (OPEN).** Found by inspection while fixing D39's sibling half. That port
-  has no `user_fault_terminator`, and its `#PF` dispatcher offers a ring-3
-  fault to the resolver only for *data* accesses, so an instruction-fetch
-  fault parks the CPU for one task's mistake. Mirror the aarch64/riscv64
-  slot; also settle which exception vectors that port installs at all.
+- **D42 — an x86_64 ring-3 wild jump halted the CPU instead of the task —
+  FIXED.** Found by inspection while fixing D39's sibling half: the `#PF`
+  dispatcher offered a ring-3 fault to the resolver only for *data*
+  accesses, so an instruction fetch reached no resolver and parked the CPU.
+  The ring-3 arm now splits by who owns the fault rather than by whether it
+  can be resolved, and charges everything the resolver does not own to the
+  D86 terminator.
 - **D43 — a riscv64 U-mode task could steer the kernel onto another hart's
   per-CPU state — DONE.** Found by inspection while designing per-thread
   thread-local storage. `tp` (x4) is both the psABI thread pointer U-mode
@@ -925,8 +928,9 @@ tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
 reported — D22 was an unbounded in-kernel virtio completion wait that
 parked the boot task inside a disk request while holding that disk's lock
 (fixed), D23 was an observer-perturbs-the-observed defect the debug
-watchdog's own non-maskable sample exposed (fixed), D42 is the x86_64 half
-of the fatal-user-exception routing D39 closed for riscv64 (open), D24 was a
+watchdog's own non-maskable sample exposed (fixed), D42/D86 were the x86_64
+halves of the fatal-user-exception routing D39 closed for riscv64 (fixed),
+D24 was a
 missing in-kernel preemption boundary — a fairness defect, not a wedge — that
 let a burst of never-waiting device operations withhold a core (fixed), D25
 was a process-wide test clock that made a host suite's exact-instant assertions
@@ -3192,34 +3196,48 @@ cost time before the transcript was read. Both emitters
 say the guest fell silent for its whole *inactivity* budget and point at the
 transcript's last line as the stall point.
 
-## D42 — an x86_64 ring-3 wild jump halts the CPU instead of the task (OPEN)
+## D42 — an x86_64 ring-3 wild jump halted the CPU instead of the task — FIXED
 
-**Symptom (found by inspection while fixing D39, not yet observed).** The
-x86_64 port has no `user_fault_terminator` equivalent, and its `#PF`
-dispatcher offers a ring-3 fault to the resolver only when
-`fault::is_user_data_fault(error_code)` holds — which is
-`is_user(error_code) && error_code & PF_ERR_INSTR == 0`, i.e. **data**
-accesses only. A ring-3 *instruction-fetch* page fault (a wild jump, exactly
-the shape that made D39 fatal on riscv64) is therefore never offered to any
-resolver and takes the fatal path, parking the CPU for what is one task's
-fault. Unprivileged, trivially reachable, and the same defect class D39's
-second half closed for riscv64 and aarch64 already closes.
+**Root cause: the resolver's gate was data-only, and the fatal tail had
+nowhere else to go.** The dedicated `#PF` entry offered a ring-3 fault to
+the `UserFaultResolveFn` only when `fault::is_user_data_fault(error_code)`
+held — `is_user(code) && code & PF_ERR_INSTR == 0`, i.e. **data** accesses.
+A ring-3 *instruction-fetch* fault (a wild jump) therefore reached no
+resolver and took the fatal path, parking the CPU for one task's mistake.
+The gate itself was right — an instruction fetch is never file backing, so
+it is not *resolvable* — but "not resolvable" is not "not attributable",
+and the port had no terminator to attribute it to. Reachable from any
+unprivileged program, and only on the production configuration:
+`IA32_EFER.NXE` is what makes the CPU set the error code's I/D bit
+(Intel SDM Vol 3A §4.7), so with NXE off the same fault read as data and
+was killed correctly all along.
 
-**Fix shape.** Mirror the sibling ports: add the `UserFaultTerminateFn` slot
-to `kernel/arch/x86_64/src/fault.rs`, install
-`production_user_fault_terminate` beside the resolver in that port's boot,
-and route the fatal tail of the `#PF` dispatcher (and of any other ring-3
-exception the port dispatches) through it — reusing the arch-neutral
-`dispatch_core::terminate_user_fault_via_slot`, never a second copy.
+**Fix.** The ring-3 arm of `tairix_arch_x86_64_page_fault_dispatch` now
+splits by *who owns the fault*, not by whether it can be resolved: a data
+access goes to the resolver and its verdict is final, and every other
+ring-3 `#PF` — an instruction fetch, or a data fault with no resolver
+installed — goes to the new `fault::UserFaultTerminateFn`, which kills the
+task and never returns for it. The kernel's fatal report is reached only
+when neither callback could attribute the fault to a running task, so a
+missing install still fails closed. D86 is the same slot's other consumer;
+one change closed both. Detail of the slot and its wiring is under D86.
 
-**Also to establish.** Which architectural exception vectors that port
-actually installs beyond `#PF`/`#NMI`/`#DF`: a ring-3 `#UD` or `#GP` with no
-IDT entry would be worse than a halt, and this entry should not be closed
-without reading `interrupts.rs`'s base IDT to settle it.
+Deliberately *not* offered to the terminator: a `#PF` the resolver already
+consulted and refused. A `false` from `resolve_user_fault_via_slot` means
+the fault was unattributable (or the reclaimed task had no kthread to
+suspend), so a second offer would re-record a crash exit for a task the
+resolver had already reclaimed. The sibling ports do double-offer here;
+that path ends in a machine halt either way, so the difference is a tidier
+record, not a behaviour change.
 
-**Regression cover (lands with the fix, §7).** A host test for the slot's
-set-once round-trip, and a QEMU vertical in which a ring-3 task jumps to a
-non-executable page and only that task dies.
+**Regression cover.** `tests/integration/wild_fault_qemu_x86_64`'s `jump`
+role calls a function pointer built from the address of one of its own
+`static`s: the image builder maps data pages No-Execute, so the call is a
+ring-3 instruction fetch. Confirmed to fail without the fix, with the
+vertical's own fatal observer naming it exactly — `vector=14 from_user=true
+error_code=21` (`PRESENT|USER|INSTR`), `faulting_addr == rip`. Host-side,
+`fault::tests::an_instruction_fetch_is_a_user_fault_the_resolver_never_sees`
+pins the classifier relationship the split rests on.
 
 ## D43 — a riscv64 U-mode task could steer the kernel onto another hart's per-CPU state — DONE
 
@@ -5223,12 +5241,11 @@ already exercise.
 
 ### Residue, recorded not buried
 
-- **A ring-3 exception other than `#PF` still ends the machine.** aarch64
-  and riscv64 hand a lower-privilege fault to a `user_fault_terminator`,
-  which kills the task and leaves the CPU running; x86_64 has no such slot
-  (its `#PF` path folds the kill into the resolver). The stub reports the
-  ring-3 origin honestly in the syndrome rather than claiming a kernel
-  fault, but wiring the terminator is D86.
+- **A ring-3 exception other than `#PF` ended the machine.** The stub
+  reported the ring-3 origin honestly in the syndrome rather than claiming
+  a kernel fault, but there was no terminator to route it to. Closed as
+  D86, which added the slot and made the chargeable-vector set a declared
+  column of this module's own table.
 - **A delivery at an uninstalled vector `>= 32` parks without a record**,
   because one shared thunk serves them all and cannot name its vector. That
   includes the LAPIC spurious vector (`0xFF`), which is not an error at all
@@ -5272,38 +5289,113 @@ uninstalled vector and observes the record.
 
 ---
 
-## D86 — on x86_64 a ring-3 exception other than a page fault kills the machine instead of the task (OPEN)
+## D86 — on x86_64 a ring-3 exception other than a page fault killed the machine instead of the task — FIXED
 
-Noticed while closing D83. aarch64 and riscv64 route a lower-privilege
-unhandled exception to an installed user-fault terminator
-(`fault::user_fault_terminator`, wired by each port's boot path): it records
-the crash exit, reclaims the task, and suspends it with an exit action, so
-the CPU carries on running other work. The comment on aarch64's
-`fatal_exception` records why — parking the whole CPU for one task's bad
-instruction "escalated a one-task fault into a system-wide hard lockup (the
-Cortex-A72 boot wedge)".
+**Root cause: the port had no user-fault terminator slot at all.** aarch64
+and riscv64 route a lower-privilege unhandled exception to an installed
+`fault::user_fault_terminator`, which records the crash exit, reclaims the
+task, and suspends it with an exit action so the CPU carries on. x86_64 had
+no such slot: its `#PF` entry folded the kill into the `UserFaultResolveFn`,
+whose signature is page-fault-shaped (`(faulting_addr, write, regs)`), so it
+could not serve `#UD`, `#GP`, `#AC` or any other vector. A ring-3 `ud2`
+therefore reached the same fatal report a kernel fault does and ended the
+machine — an unprivileged denial of service from any process. D83's
+per-vector stubs made the record *honest* about the ring-3 origin but had
+nothing to route to.
 
-x86_64 has no such slot. Its `#PF` entry folds the task kill into the
-`UserFaultResolveFn`, whose signature is page-fault-shaped
-(`(faulting_addr, write, frame)`), so it cannot serve `#UD`, `#GP`, `#AC` or
-any other vector. A ring-3 `ud2` therefore reaches the same fatal report a
-kernel fault does and ends the machine — an unprivileged denial of service
-from any process.
+**Fix.** `kernel/arch/x86_64/src/fault.rs` gains the set-once
+`UserFaultTerminateFn` slot in the aarch64/riscv64 shape, and
+`kernel/tairix-kernel/src/x86_64/dispatch.rs` the
+`production_user_fault_terminate` callback over the already-shared
+arch-neutral `dispatch_core::terminate_user_fault_via_slot` — no second
+copy of the terminate sequence. `bring_up_bsp` installs it beside the
+resolver, refusing the boot on a second occupant
+(`BootError::UserFaultTerminatorInstall`), so the slot is filled before
+user space exists.
 
-D83's stubs make the record *honest* about it (the packed syndrome sets the
-ring-3 bit, so nothing claims a kernel fault happened) but do not fix it:
-the terminator does not exist on this port to route to.
+**Which vectors may be charged to a task is now a declared per-vector
+fact.** "Any ring-3 exception" would have been wrong twice over, so
+`exceptions::Origin` is a third column of the one `exception_vectors!`
+table, beside each vector's stub name and error-code shape — a vector is
+written once with all its facts and they cannot drift:
 
-**The fix.** Add the `UserFaultTerminateFn` slot to
-`kernel/arch/x86_64/src/fault.rs` mirroring the aarch64/riscv64 shape, wire
-the production terminator from `kernel/tairix-kernel/src/x86_64/` (the
-arch-neutral half already exists — the other two ports' `dispatch.rs`
-shims), and have `exceptions::fatal_exception` offer a ring-3 exception to
-it before the fatal path, exactly as aarch64's tail does. Read
-`plans/FIX-WILD.md` first: the crash record, the register snapshot and the
-user-stack backtrace are its staged work and this is the entry point they
-hang off.
+- `Origin::Task` is a fault or trap the executing instruction itself
+  raised (Intel SDM Vol 3A Table 6-1). A ring-3 delivery is the running
+  task's own and kills only that task.
+- `Origin::Machine` covers `#NMI` (an external interrupt, not an
+  exception), `#DF` (an abort whose saved state the SDM calls unreliable),
+  `#MC` (an imprecise machine-level abort), vector 9 (unused since the
+  i386), and the reserved vectors. None is the interrupted task's doing, so
+  charging one to a task would be a fabrication. **`#NMI` and `#DF` are
+  also the two `percpu::ist_for_vector` routes to a shared per-CPU IST
+  stack** — the terminator reschedules, and abandoning that stack
+  mid-suspension would corrupt the next delivery on it, so the
+  classification is load-bearing beyond honesty. A vector the module does
+  not own resolves to `Machine` (fail closed).
 
-**Done when:** a ring-3 `#UD` or `#GP` kills the faulting task with a crash
-record and leaves the CPU running; a QEMU vertical proves it on x86_64
-alongside the existing aarch64/riscv64 user-fault verticals.
+**The stub had to carry two more operands.** A crash record needs the
+faulting register frame, so `exception_isr_body!` now also marshals
+`&SavedRegs` and the interrupted `rsp` — read before the `andq $-16, %rsp`
+alignment, which rounds *down* and so cannot disturb the GPR block above
+it. Long mode pushes `SS:RSP` for every delivery, so the slot is the
+interrupted stack pointer whichever ring it came from.
+
+**One GS bracket, not two.** Both callbacks are now invoked through
+`fault::with_ring3_context`, which performs the `swapgs` pair an interrupt
+gate taken from ring 3 does not (a callback may reschedule, which needs the
+kernel GS base) and builds the register frame. The `#PF` entry's open-coded
+bracket is gone, so the convention has one definition.
+
+**Regression cover.** `tests/integration/wild_fault_qemu_x86_64` boots the
+production bring-up and drives three faulting children through production
+spawn + wait: `ud` executes `ud2` (vector 6, no error code), `gp` executes
+`hlt` (vector 13, *with* an error code — the other stub shape), and `jump`
+covers D42. Each must be reaped at exit 139, and the parent reaping a third
+child is the proof that none of the first two took the CPU with it. It also
+claims the fatal slot, so a regression names the vector and the ring rather
+than wedging the run; confirmed to fail without the fix
+(`vector=6 from_user=true error_code=0`), and confirmed for the error-code
+shape by temporarily reclassifying vector 13 as `Machine`
+(`vector=13 from_user=true error_code=0`, non-zero `rip`). Host-side:
+the slot's set-once round-trip, the `Origin` table against the SDM, and
+`no_ist_routed_vector_is_ever_charged_to_a_task`, which reads
+`percpu::ist_for_vector` rather than a second copy of the vector numbers.
+
+---
+
+## D87 — an instruction-side fault kill is audited against the task's *data* mappings (OPEN)
+
+Raised while closing D42/D86, in shared code that predates both.
+`DispatchHook::terminate_user_fault` passes the offending **program
+counter** as `record_fault_exit`'s `fault_va`, and that function's whole
+job is to describe a *data* address's relationship to the task's mappings:
+`fault_class` asks whether the address is in stack growth room, a file
+region or an anonymous region, and `classify_fault_locality` measures its
+distance from the stack reserve base or the nearest region end.
+
+A code address has no such relationship, so the record fabricates one. The
+D42/D86 vertical shows it plainly: all three children — a wild jump, a
+`ud2`, a `hlt` — are audited `fault_class=wild fault_offset=below_stack_guard
+region_offset=40400`, i.e. "a stack overrun 40 KB below the guard", because
+the program's text happens to sit that far below its stack. The kill itself
+is correct (right exit status, resources reclaimed, backtrace recorded from
+the real `pc`); only the class/bucket/offset fields lie, and they lie in a
+security-relevant audit record.
+
+Pre-existing on every port — aarch64 and riscv64 have had the terminator
+since D39 — so x86_64 has not made it worse, only more visible.
+
+**The fix.** `record_fault_exit` must know whether it is describing a data
+access or an instruction-side kill, and emit an honest instruction-side
+class/bucket for the latter instead of a data-relative one. That reaches
+the `FaultLocality` / `CrashFaultClass` / `CrashFaultBucket` vocabulary —
+`lib/abi` crash-record types, so the generated C headers regenerate and
+`abi-check` gates it — plus `crash_cause_codes`, the three production
+callers, and the existing host tests that pin the current buckets. Larger
+than the defect it was found under, and it belongs with the crash-record
+work in `plans/FIX-WILD.md`; it is recorded here rather than folded in.
+
+**Done when:** an instruction-side fault kill's audit and crash records
+name an instruction-side cause and carry no fabricated data-relative
+offset; the sibling ports get the same record from the one shared path; and
+a host test pins the distinction for both sides.

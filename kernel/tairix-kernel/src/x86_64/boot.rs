@@ -72,7 +72,9 @@ use tairix_arch_x86_64::irqmask::RflagsIrqControl;
 use tairix_arch_x86_64::serial::SERIAL_SINK;
 
 use crate::x86_64::arch_wrapper::BinArch;
-use crate::x86_64::dispatch::{production_dispatch, production_user_fault, DISPATCH_SLOT};
+use crate::x86_64::dispatch::{
+    production_dispatch, production_user_fault, production_user_fault_terminate, DISPATCH_SLOT,
+};
 use crate::x86_64::init_spawn::X86_64_INIT_SPAWN;
 use crate::x86_64::ioapic_controller::IoApicController;
 use crate::x86_64::serial_sink::COM1_CONSOLES;
@@ -247,6 +249,13 @@ pub enum BootError {
     /// resolver before booting — and the boot refuses rather than running
     /// with an unpredictable fault path.
     UserFaultResolverInstall,
+    /// [`fault::set_user_fault_terminator`] refused the production
+    /// user-fault terminator (one was already installed). Same
+    /// single-publish contract as the resolver above: without a terminator
+    /// a ring-3 exception the port cannot resolve would park the CPU
+    /// instead of killing the offending task, so the boot refuses rather
+    /// than running with an unpredictable fault path.
+    UserFaultTerminatorInstall,
     /// More than one CPU was about to be brought up on a part whose
     /// CPUID does not advertise an Invariant TSC. `RDTSC` is the
     /// x86_64 monotonic clock source, and without the invariant
@@ -294,6 +303,7 @@ impl BootError {
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
+            Self::UserFaultTerminatorInstall => "user_fault_terminator_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
             Self::IdentityWindowWiden => "identity_window_widen_failed",
         }
@@ -695,6 +705,16 @@ pub fn bring_up_bsp(
     // cause rather than running with an unpredictable fault path.
     if fault::set_user_fault_resolver(production_user_fault).is_err() {
         return Err(BootError::UserFaultResolverInstall);
+    }
+    // Beside the resolver, install the terminator the exception entries use
+    // for a ring-3 exception they cannot resolve (a wild jump's
+    // instruction-fetch `#PF`, an invalid opcode, a general-protection
+    // violation): it kills the offending task and keeps the CPU alive, so
+    // one task's bad instruction can never park a core. Installed once,
+    // before user space; a second occupant refuses the boot rather than
+    // running with an unpredictable fault path.
+    if fault::set_user_fault_terminator(production_user_fault_terminate).is_err() {
+        return Err(BootError::UserFaultTerminatorInstall);
     }
 
     // 7b. Publish the caller-owned per-CPU syscall-TLS arena before

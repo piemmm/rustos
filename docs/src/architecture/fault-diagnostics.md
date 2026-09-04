@@ -130,7 +130,10 @@ exception frame, x86_64 from the `#PF` saved-GPR block plus the interrupt
 frame's user `rsp`, riscv64 from the trap frame — whose vector was extended
 to persist the callee-saved set, including the `s0` frame pointer, so its
 backtrace works too) and threads it, by shared reference, through the
-architecture-neutral user-fault resolver ABI.
+architecture-neutral user-fault resolver ABI. The user-fault *terminator*
+ABI — the one an unresolvable ring-3 exception (a wild jump, an illegal
+instruction) reaches — threads the same frame, so a task killed by a bad
+instruction carries the same record as one killed by a bad access.
 
 ### Offline symbolication
 

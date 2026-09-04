@@ -1,0 +1,24 @@
+[package]
+name = "tairix-test-wild-fault"
+description = "Ring-3 wild-fault fixture (plans/OPEN-DEFECTS.md D42, D86): a minimal, separately-linked pure-Rust user program built once and driven in four argv-selected roles. jump calls a function pointer into its own No-Execute data image, taking a ring-3 instruction-fetch page fault; ud executes the always-invalid opcode, taking a ring-3 #UD (no hardware error code); gp executes a privileged instruction, taking a ring-3 #GP (with an error code). Each must be fault-killed with exit 139 while the CPU keeps running; surviving is a distinct non-zero exit. The parent role spawns and reaps all three through the production spawn + wait syscalls, so its own survival proves no child's exception parked the core. Built PIE for the freestanding x86_64 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-wild-fault"
+path = "src/main.rs"
+
+# The program is a pure-Rust TAIRiX program, so it links the pure-Rust
+# userland runtime `tairix-rt` — never the C ABI (`crt0` + `abi-sys`), which
+# exists solely for non-Rust programs. Only on the native bare-metal targets
+# (`target_os = "none"`); on the host it is an inert stub so
+# `cargo build --workspace` / clippy still cover it.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -16,7 +16,7 @@
 //! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
 //! `tairix_arch_riscv64::fault`) and aarch64
 //! (`tairix_arch_aarch64::fault`) synchronous-fault hooks, with the same
-//! two-tier posture:
+//! three-tier posture:
 //!
 //! * A **resolvable ring-3 data fault**
 //!   ([`crate::fault::is_resolvable_user_fault`]) is offered to the
@@ -24,7 +24,14 @@
 //!   demand-paged file-mapping path. A resolved fault returns through the
 //!   entry's full GPR restore and `iretq`, retrying the faulting
 //!   instruction against the now-resident page.
-//! * Every other synchronous exception remains unrecoverable in this
+//! * Any **other ring-3 fault** — an instruction-fetch `#PF` (a wild
+//!   jump), or a data fault with no resolver installed — is the running
+//!   task's own and is charged to it through the installed
+//!   [`crate::fault::UserFaultTerminateFn`], which kills the task and
+//!   leaves the CPU running other work. The same slot serves the ring-3
+//!   tail of every other exception vector ([`crate::exceptions`]), so one
+//!   task's bad instruction can never park a core.
+//! * Everything left is the **kernel's own** and unrecoverable in this
 //!   kernel slice, so the default posture is to fail closed (never
 //!   silently reset). A single fault handler may be installed through
 //!   [`crate::fault::set_fault_handler`] before any fault can fire; the
@@ -322,6 +329,77 @@ fn clear_user_fault_resolver_for_tests() {
     USER_FAULT_RESOLVER.store(0, Ordering::Release);
 }
 
+/// Signature of the user-fault **terminator** an exception entry calls for
+/// a ring-3 exception it can neither treat as a syscall nor resolve as a
+/// demand-paged fault — an instruction-fetch `#PF` (a wild jump), an
+/// invalid opcode (`#UD`), a general-protection violation (`#GP`), an
+/// alignment check (`#AC`), and the like.
+///
+/// Unlike [`UserFaultResolveFn`] this never resolves and the entry never
+/// retries: the faulting instruction is genuinely unrecoverable, so the
+/// callback records the task's crash exit and reclaims it, then suspends it
+/// into the scheduler with an exit action — the call never completes on
+/// that stack, exactly like the fatal branch of a resolver. That keeps a
+/// user task's own bad instruction from parking the whole CPU. A `false`
+/// return means the exception could not be attributed to a running task
+/// (none current, or no published user kthread), so the entry falls through
+/// to its fatal [`FaultHandlerFn`]/park path — a genuine kernel-level
+/// failure, not a user one.
+///
+/// `fault_pc` is the interrupted `rip` (the offending instruction), and
+/// `regs` the captured ring-3 register frame (or null), threaded so the
+/// termination can record a post-mortem crash record with a backtrace. Like
+/// every trap-path callback it is a bare `extern "C" fn` with no captured
+/// environment.
+pub type UserFaultTerminateFn =
+    extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
+
+/// Slot holding the installed user-fault terminator as a raw function
+/// pointer (`0` = none installed).
+static USER_FAULT_TERMINATOR: AtomicUsize = AtomicUsize::new(0);
+
+/// Install the user-fault terminator.
+///
+/// Must be called once, on the boot CPU, before user space is entered
+/// (beside [`set_user_fault_resolver`]). Without one installed an
+/// unrecoverable ring-3 exception takes the fatal path (park) — fail
+/// closed, exactly as before this path existed, so the omission can never
+/// silently continue running a task over an unhandled exception.
+///
+/// # Errors
+///
+/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
+pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
+    let raw = cb as usize;
+    USER_FAULT_TERMINATOR
+        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+}
+
+/// Read back the installed user-fault terminator, if any. The exception
+/// entries call this for an unrecoverable ring-3 exception; also a
+/// test/diagnostic observer.
+#[must_use]
+pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
+    let raw = USER_FAULT_TERMINATOR.load(Ordering::Acquire);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every value stored into the slot round-trips a valid
+        // `UserFaultTerminateFn` through `set_user_fault_terminator`;
+        // function pointers are `usize`-sized so the transmute is lossless.
+        Some(unsafe { core::mem::transmute::<usize, UserFaultTerminateFn>(raw) })
+    }
+}
+
+#[cfg(test)]
+fn clear_user_fault_terminator_for_tests() {
+    // Test-only: lets back-to-back host tests reinstall a terminator.
+    // Production code never clears the slot.
+    USER_FAULT_TERMINATOR.store(0, Ordering::Release);
+}
+
 // --- Freestanding dedicated `#PF` entry ----------------------------
 
 /// Linear address of the dedicated `#PF` ISR stub, for
@@ -452,18 +530,23 @@ pub unsafe extern "C" fn page_fault_isr() {
 /// now resident (reads only — a write is never resolved, the resolver
 /// kills the faulting task instead), and this function returns so the
 /// stub restores the GPRs and `iretq`s into a retry of
-/// the faulting instruction. The resolver call is bracketed by the same
-/// `swapgs` pair the LAPIC-timer ring-3 preemption path uses: an
-/// interrupt gate taken from ring 3 does *not* swap GS, and the resolver
-/// may reschedule (park on filesystem I/O, or suspend a task-fatal
-/// caller with an exit action), which requires the in-handler GS
-/// convention.
+/// the faulting instruction.
 ///
-/// Every other case is fatal and **never returns**: the installed
-/// [`FaultHandlerFn`] observes it, or, with none installed, the
-/// fail-closed default halts the binary through
+/// Every **other** ring-3 fault goes to the installed
+/// [`UserFaultTerminateFn`], which kills the task and never returns for
+/// it: an instruction-fetch `#PF` is never file backing (a file mapping is
+/// never executable), so a wild jump is unrecoverable but is still one
+/// task's mistake — parking the CPU for it would turn a process fault into
+/// a machine-wide denial of service. A ring-3 data fault with no resolver
+/// installed reaches the terminator on the same grounds.
+///
+/// Only the kernel's own failures are fatal, and those **never return**:
+/// the installed [`FaultHandlerFn`] observes them, or, with none
+/// installed, the fail-closed default halts the binary through
 /// [`crate::qemu_exit::exit_failure`] — exactly the posture the
-/// non-resumable entry had.
+/// non-resumable entry had. A ring-3 fault reaches it only when the
+/// resolver or terminator could not attribute the fault to a running task
+/// at all.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
@@ -474,54 +557,52 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
     saved: *const crate::interrupts::SavedRegs,
     user_rsp: u64,
 ) {
-    if !is_user(error_code) {
-        if let Some(fixup) = crate::uaccess::kernel_fixup_for(rip) {
-            // A kernel-mode page fault inside the guarded user-copy
-            // window: the validated copy's software proof was violated
-            // underneath it. Rewrite the frame's RIP so the stub's
-            // `iretq` resumes at the copy's fix-up and the copy returns
-            // an error to its caller instead of taking the CPU down.
-            // SAFETY: `rip_slot` is the stub-provided address of the
-            // live interrupt frame's RIP word; the fix-up address is a
-            // real instruction in this image.
-            unsafe {
-                *rip_slot = fixup;
-            }
-            return;
-        }
-    } else if is_user_data_fault(error_code) {
-        if let Some(resolver) = user_fault_resolver() {
-            // SAFETY: `swapgs` is privileged and runs in ring 0 here; it
-            // touches only the GS-base/`KERNEL_GS_BASE` swap, no memory
-            // or flags. The fault came from ring 3 (`is_user` in the
-            // gate), where the interrupt gate performed no swap, so the
-            // pair brackets exactly one resolver call on this task's own
-            // trap control flow. If the resolver suspends a task-fatal
-            // caller (never returning here), the park machinery owns the
-            // GS convention from that point, exactly as on the
-            // LAPIC-timer preemption path.
-            unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
-            }
-            // Build the faulting user register frame from the saved GPR
-            // block, the faulting `rip`, and the interrupt frame's user
-            // `rsp`, so the resolver can record a post-mortem crash record
-            // with a backtrace. The frame lives on this kernel stack across
-            // the resolver call.
-            // SAFETY: `saved` is the stub-provided address of the live
-            // 15-GPR `SavedRegs` block on this kernel stack; it is valid for
-            // the duration of the call.
-            let user_frame = unsafe { user_register_frame(saved, rip, user_rsp) };
-            let resolved = resolver(faulting_addr, is_write(error_code), &raw const user_frame);
-            // SAFETY: as above — the matching swap restoring the user GS
-            // the `iretq` (or the fatal path) proceeds under.
-            unsafe {
-                core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
-            }
-            if resolved {
-                return;
+    if is_user(error_code) {
+        // A *data* access may be demand-paged, so it goes to the resolver,
+        // whose verdict is then final: a `false` means the fault was not
+        // attributable to a running task at all, which is the kernel's own
+        // failure and not a second thing to charge the task for. Every
+        // other ring-3 fault is charged straight to the task, which the
+        // terminator kills without returning.
+        let resolver = if is_user_data_fault(error_code) {
+            user_fault_resolver()
+        } else {
+            None
+        };
+        // SAFETY: `saved` is the stub-provided address of the live 15-GPR
+        // `SavedRegs` block on this kernel stack, and the gate above proved
+        // the fault came from ring 3, so the callback runs on this task's
+        // own trap control flow under the in-handler GS convention.
+        unsafe {
+            match resolver {
+                Some(resolve) => {
+                    if with_ring3_context(saved, rip, user_rsp, |regs| {
+                        resolve(faulting_addr, is_write(error_code), regs)
+                    }) {
+                        return;
+                    }
+                }
+                None => {
+                    if let Some(terminate) = user_fault_terminator() {
+                        let _ =
+                            with_ring3_context(saved, rip, user_rsp, |regs| terminate(rip, regs));
+                    }
+                }
             }
         }
+    } else if let Some(fixup) = crate::uaccess::kernel_fixup_for(rip) {
+        // A kernel-mode page fault inside the guarded user-copy window: the
+        // validated copy's software proof was violated underneath it.
+        // Rewrite the frame's RIP so the stub's `iretq` resumes at the
+        // copy's fix-up and the copy returns an error to its caller instead
+        // of taking the CPU down.
+        // SAFETY: `rip_slot` is the stub-provided address of the live
+        // interrupt frame's RIP word; the fix-up address is a real
+        // instruction in this image.
+        unsafe {
+            *rip_slot = fixup;
+        }
+        return;
     }
     match fault_handler() {
         Some(handler) => handler(
@@ -531,6 +612,54 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         ),
         None => crate::qemu_exit::exit_failure(),
     }
+}
+
+/// Run `call` on the faulting ring-3 register frame under the in-handler
+/// GS convention — the one bracket every user-fault callback is invoked
+/// through, from the dedicated `#PF` entry and from the ring-3 tail of
+/// every other exception vector ([`crate::exceptions`]).
+///
+/// An interrupt gate taken from ring 3 does *not* swap GS, and every
+/// user-fault callback may reschedule (park on filesystem I/O, or suspend a
+/// killed task with an exit action), which requires the kernel GS base — so
+/// the pair brackets exactly one call. A callback that suspends the task
+/// never returns here and the park machinery owns the convention from that
+/// point, exactly as on the LAPIC-timer preemption path; otherwise the user
+/// GS is restored, so the `iretq` or the fatal tail proceeds under the same
+/// GS it would have without a callback.
+///
+/// The register frame is built from the saved GPR block, the faulting
+/// `rip`, and the interrupt frame's user `rsp`, and lives on this kernel
+/// stack for the duration of the call, so the callback can record a
+/// post-mortem crash record with a backtrace.
+///
+/// # Safety
+///
+/// * `saved` must point to the live 15-GPR
+///   [`crate::interrupts::SavedRegs`] block the exception stub persisted on
+///   this kernel stack.
+/// * The exception must have been taken from ring 3, so each `swapgs` is
+///   balanced against the gate that performed none.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) unsafe fn with_ring3_context<R>(
+    saved: *const crate::interrupts::SavedRegs,
+    rip: u64,
+    user_rsp: u64,
+    call: impl FnOnce(*const UserRegisterFrame) -> R,
+) -> R {
+    // SAFETY: `swapgs` is privileged and runs in ring 0 here; it touches
+    // only the GS-base/`KERNEL_GS_BASE` swap, no memory or flags.
+    unsafe {
+        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+    }
+    // SAFETY: the caller guarantees `saved` addresses the live saved block.
+    let frame = unsafe { user_register_frame(saved, rip, user_rsp) };
+    let out = call(&raw const frame);
+    // SAFETY: as above — the matching swap restoring the user GS.
+    unsafe {
+        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+    }
+    out
 }
 
 /// Build the faulting user register frame from the saved GPR block, the
@@ -700,6 +829,43 @@ mod tests {
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_user_fault_resolver_for_tests();
+    }
+
+    extern "C" fn host_user_fault_terminator(
+        _fault_pc: u64,
+        _regs: *const UserRegisterFrame,
+    ) -> bool {
+        false
+    }
+
+    #[test]
+    fn user_fault_terminator_slot_is_set_once_and_round_trips() {
+        clear_user_fault_terminator_for_tests();
+        assert!(user_fault_terminator().is_none());
+        set_user_fault_terminator(host_user_fault_terminator).expect("first install");
+        assert_eq!(
+            user_fault_terminator().map(|f| f as usize),
+            Some(host_user_fault_terminator as UserFaultTerminateFn as usize)
+        );
+        assert_eq!(
+            set_user_fault_terminator(host_user_fault_terminator),
+            Err(SetFaultHandlerError::AlreadyInstalled)
+        );
+        clear_user_fault_terminator_for_tests();
+    }
+
+    /// The terminator, not the resolver, owns a ring-3 instruction-fetch
+    /// `#PF`: a wild jump is never file backing, so offering it to the
+    /// resolver would leave it on the fatal path and park the CPU for one
+    /// task's mistake.
+    #[test]
+    fn an_instruction_fetch_is_a_user_fault_the_resolver_never_sees() {
+        let wild_jump = PF_ERR_USER | PF_ERR_INSTR;
+        assert!(is_user(wild_jump));
+        assert!(!is_user_data_fault(wild_jump));
+        assert!(!is_resolvable_user_fault(wild_jump));
+        // Kernel-mode instruction fetches stay the kernel's own.
+        assert!(!is_user(PF_ERR_INSTR));
     }
 
     #[test]
