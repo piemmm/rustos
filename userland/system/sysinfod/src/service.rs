@@ -957,57 +957,33 @@ mod tests {
         CapabilityId, Errno, LimitKind, Origin, ProcId, ResourceLimit, SchedPriority, TrustDomain,
         ORIGIN_WIRE_LEN,
     };
-    use tairix_log::{Event, Level, Sink};
+    use tairix_collections::ArrayVec;
+    use tairix_log::{Event, EventId, Level, Sink};
 
     /// The capabilities a test caller's attested origin should summarise.
     struct Caps(&'static [CapabilityId]);
 
     /// Records every event it receives so tests can assert on audit output.
+    ///
+    /// Bounded so the fixture needs no allocator; a test that overran the
+    /// bound would silently lose records, so an over-long run is refused
+    /// loudly instead.
     struct RecordingSink {
-        events: RefCell<heapless_vec::Vec>,
+        events: RefCell<ArrayVec<(Level, EventId), 8>>,
     }
     impl RecordingSink {
         fn new() -> Self {
             Self {
-                events: RefCell::new(heapless_vec::Vec::new()),
+                events: RefCell::new(ArrayVec::new()),
             }
         }
     }
     impl Sink for RecordingSink {
         fn write_event(&self, event: &Event<'_>) {
-            self.events.borrow_mut().push((event.level, event.id));
-        }
-    }
-
-    /// Tiny fixed-capacity vector so the test sink needs no allocator.
-    mod heapless_vec {
-        use tairix_log::{EventId, Level};
-
-        pub struct Vec {
-            buf: [(Level, EventId); 8],
-            len: usize,
-        }
-        impl Default for Vec {
-            fn default() -> Self {
-                Self {
-                    buf: [(Level::Trace, EventId(0)); 8],
-                    len: 0,
-                }
-            }
-        }
-        impl Vec {
-            pub fn new() -> Self {
-                Self::default()
-            }
-            pub fn push(&mut self, item: (Level, EventId)) {
-                if self.len < self.buf.len() {
-                    self.buf[self.len] = item;
-                    self.len += 1;
-                }
-            }
-            pub fn as_slice(&self) -> &[(Level, EventId)] {
-                &self.buf[..self.len]
-            }
+            self.events
+                .borrow_mut()
+                .try_push((event.level, event.id))
+                .expect("the recording sink's bound holds for every fixture");
         }
     }
 

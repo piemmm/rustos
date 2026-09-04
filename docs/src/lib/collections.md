@@ -6,11 +6,12 @@ for. `alloc` already supplies `Vec`, `String`, `BTreeMap`, `BTreeSet`,
 container with no caller in the tree is not added. `plans/COLLECTIONS.md` is
 the ledger of what has landed and what is still to come.
 
-`HashSet` is the one type here with no in-tree caller yet: every remaining
-`BTreeSet` is either order-load-bearing (`kernel/sec`'s per-process thread set
-fans signals out in ascending id order) or small enough that the ordered set is
-the cheaper structure. Its first consumer arrives with the recency and
-concurrent tiers.
+`HashSet` and `SmallVec` are the two types here without an in-tree caller yet.
+Every remaining `BTreeSet` is either order-load-bearing (`kernel/sec`'s
+per-process thread set fans signals out in ascending id order) or small enough
+that the ordered set is the cheaper structure; `SmallVec`'s first consumer is a
+compositor damage list, which is measured rather than assumed. Both arrive with
+a later tier.
 
 ## Inventory
 
@@ -18,6 +19,11 @@ concurrent tiers.
 |---|---|---|
 | `HashMap<K, V, S>` | expected O(1) lookup, insert, and remove; one control byte and one `(K, V)` slot per bucket, no per-entry node | a `BTreeMap` used where the key order was never wanted |
 | `HashSet<T, S>` | the same, over a zero-sized value | a `BTreeSet` used as an unordered set |
+| `ArrayVec<T, N>` | up to `N` elements inline, allocating nothing | an ad-hoc `[T; N]` paired with a length field |
+| `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
+| `ArrayString<N>` | up to `N` bytes inline, the UTF-8 invariant held by construction | an ad-hoc `[u8; N]` plus length, with the invariant assumed |
+| `RingBuf<T, N>` | a fixed-capacity circular queue, constant time at both ends | every hand-rolled type-ahead buffer, diagnostic tail, and driver hand-off ring |
+| `SecretRing<T, N>` | the same, scrubbing each slot it vacates | a ring a credential transits, zeroed by hand at each call site |
 | `BitSet256` | a fixed 256-bit set: constant-time membership, allocation-free | a process's capability membership (`lib/caps`) |
 
 ## The rules every container obeys
@@ -29,7 +35,9 @@ concurrent tiers.
 2. **No allocation on a read path.** Lookup, iteration, and removal allocate
    nothing; growth is amortised and off the hot path.
 3. **No fixed capacity ceiling.** A heap-backed container grows on demand and
-   fails closed only on genuine exhaustion.
+   fails closed only on genuine exhaustion. A const-generic capacity appears
+   only where the container is deliberately allocation-free and the bound is
+   the caller's own, chosen at the use site.
 4. **Order is unspecified unless the container says otherwise.** A hash
    container's iteration order varies with the hash key, the insertion
    history, and the capacity, so anything compared, logged, paged, or
@@ -38,7 +46,58 @@ concurrent tiers.
    it frees — reuse inside one address space is not a security boundary — so a
    holder of a key, credential, or capability token stores a value type that
    zeroes itself on drop, exactly as the userland heap in `lib/rt` already
-   requires.
+   requires. A value that merely *transits* a long-lived kernel buffer is the
+   one exception, and it has its own type: see `SecretRing` below.
+6. **A capacity fault answers with `Result`, an index fault with `Option`, and
+   no operation carries both.** That is why the fixed-capacity vectors offer no
+   positional insert: its two failure modes — no room, and an index past the
+   end — are unrelated, and no single error spells them honestly.
+
+## The sequence tier
+
+`ArrayVec` is the inline slot array the tier is built on: `[MaybeUninit<T>; N]`
+and a length, dropping exactly its live prefix. `ArrayString` is not built on it
+— a string's bytes are always initialised, so it holds a plain `[u8; N]`, which
+costs no `unsafe` and lets it be `Copy`, and a record carrying one can be lifted
+out from under a lock. `SmallVec` is an enum over an `ArrayVec` and a `Vec`,
+which is why its spill needs no `unsafe` of its own: the transition is an
+ordinary move through `ArrayVec`'s owning iterator. It never returns inline,
+because re-inlining would trade a branch on every later operation for a saving
+the growth pattern that caused the spill is unlikely to want.
+
+`RingBuf` keeps its own `[MaybeUninit<T>; N]`, since a ring's occupied region
+wraps and an `ArrayVec`'s is a contiguous prefix. Its bulk paths for `Copy`
+elements — `push_slice`, `pop_slice`, `peek_slice` — copy in at most two
+`copy_from_slice` runs either side of the wrap, where each of the rings it
+replaced moved one byte per iteration. `peek_slice` is what lets a
+variable-length frame read its header, decide, and only then consume, so a
+drainer that cannot accept a record leaves it queued: that is `lib/log`'s
+early-boot ring, which is now record framing and eviction-loss accounting over
+this one byte ring rather than a second ring of its own.
+
+### `SecretRing`, and why it is a type
+
+A typed password crosses a console's type-ahead queue between the keyboard
+driver and the login that reads it; a key event carrying one crosses the
+desktop's input channel. Without a scrub the cleartext would sit in a
+long-lived kernel buffer for the rest of the boot, well after its reader took
+it. `SecretRing` writes a blank over each slot as the element leaves, over the
+whole store when its holder changes, and over the whole store again as it is
+dropped — zero-on-free for memory that held a credential.
+
+Each scrub is a **volatile** store followed by a compiler fence. A plain
+assignment to memory nothing reads again is precisely the store an optimiser may
+discard, and discarding it would leave the cleartext in place; the scrub has to
+be un-elidable to be real.
+
+It is a type rather than a convention for two reasons. There is no `DerefMut`,
+so the plain ring's non-scrubbing pops are out of reach and no later edit can
+bypass the scrub by accident — reads reach through `Deref` unchanged. And
+because every slot is initialised from construction onward, and a `Copy` element
+has no way to un-initialise one, `backing_store` can hand out the whole store,
+vacated slots included. That is what lets a holder's own test prove the scrub
+left nothing behind, which is not observable through a container's safe API at
+all.
 
 ## Choosing a hasher
 
@@ -147,8 +206,20 @@ survivor still reachable and the footprint still bounded, and one drop per
 value ever inserted across growth, overwrite, removal, retention, and an
 abandoned owning iterator.
 
+The sequence tier's tests hold each container to the same bar: one drop per
+element ever taken, across a bulk push, a wrapped drain, an eviction and a
+spill; a footprint that is the elements plus their indices and no heap block;
+and — for `ArrayVec::retain`, the one operation that moves elements out and back
+— that a predicate which unwinds leaves the vector describing exactly what it
+has written back, so the unswept tail leaks where a double drop would be
+unsound.
+
 `tests/fuzz_collections.rs` drives the map against a plain association list
-over deliberately colliding key streams under `cargo xtask fuzz`, and
+over deliberately colliding key streams, `tests/fuzz_sequences.rs` drives the
+sequence tier against naive models over arbitrary lengths and text — the
+lengths are attacker-influenced by design, since a boot audit line carries
+caller-controlled text into an `ArrayString` and a console ring takes whatever
+a keyboard produces — both under `cargo xtask fuzz`, and
 `cargo xtask miri` interprets the whole suite under the undefined-behaviour
 oracle — the table's `unsafe` core is why that stage exists. A test suite says
 what the code computes; only an interpreter says whether a raw pointer stayed

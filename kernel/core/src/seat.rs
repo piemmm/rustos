@@ -43,6 +43,7 @@ use tairix_abi::seat::{ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::{DriverError, Errno};
+use tairix_collections::SecretRing;
 use tairix_fbcon::Surface;
 use tairix_keymap::{encode_key_input, MAX_KEY_BYTES};
 use tairix_log::Field;
@@ -76,51 +77,19 @@ pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 /// blocks and never grows kernel memory.
 pub const POINTER_CHANNEL_CAPACITY: usize = 256;
 
-/// The fixed-capacity record ring behind a desktop input channel:
-/// `CAP` records of `REC` bytes each.
-struct ChannelRing<const CAP: usize, const REC: usize> {
-    buf: [[u8; REC]; CAP],
-    /// Index of the next record to drain.
-    head: usize,
-    /// Number of records currently queued.
-    len: usize,
-}
-
-impl<const CAP: usize, const REC: usize> ChannelRing<CAP, REC> {
-    const fn new() -> Self {
-        Self {
-            buf: [[0u8; REC]; CAP],
-            head: 0,
-            len: 0,
-        }
-    }
-}
-
-impl<const CAP: usize, const REC: usize> Drop for ChannelRing<CAP, REC> {
-    fn drop(&mut self) {
-        // A destroyed seat's ring may still hold undrained records (a typed
-        // character — possibly a password keystroke — transits the keyboard
-        // ring), so the whole backing store is wiped before the memory is
-        // freed: zero-on-free for memory that held a credential. The
-        // pointer ring shares the one ring definition, so it inherits the
-        // wipe at no extra code.
-        self.buf.zeroize();
-    }
-}
-
 /// A bounded, lock-protected channel of fixed-width input records the seat
 /// routes to the desktop while it is held, drained one record at a time by
 /// the seat owner (`keyboard_read` / `pointer_read`).
 ///
-/// The one ring definition behind both desktop input channels; only the
-/// capacity and record width differ. Each drained record is **zeroed in
-/// place** as it leaves the ring: a key event can carry a typed character
-/// (a password keystroke transits the keyboard channel between the driver
-/// and the desktop), so the buffer must not retain it after the consumer
-/// has taken it (zero-on-free for memory that held a credential — secret
-/// hygiene).
+/// Behind both desktop input channels; only the capacity and record width
+/// differ. The queue is a [`SecretRing`] because a key event can carry a typed
+/// character — a password keystroke transits the keyboard channel between the
+/// driver and the desktop — so every slot it vacates is blanked as the record
+/// leaves and the buffer retains no copy once the consumer has taken it. That
+/// also covers a destroyed seat: an undrained record is gone before the memory
+/// is freed.
 struct InputChannel<const CAP: usize, const REC: usize> {
-    ring: SpinLock<ChannelRing<CAP, REC>>,
+    ring: SpinLock<SecretRing<[u8; REC], CAP>>,
 }
 
 /// The desktop keyboard channel: [`KeyInput`] records, drained by
@@ -134,7 +103,7 @@ type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { PointerInput::WIR
 impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     const fn new() -> Self {
         Self {
-            ring: SpinLock::new(ChannelRing::new()),
+            ring: SpinLock::new(SecretRing::new([0u8; REC])),
         }
     }
 
@@ -142,24 +111,23 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     /// producer never blocks).
     fn push(&self, record: &[u8; REC]) {
         let mut ring = self.ring.lock();
-        if ring.len == CAP {
+        if ring.is_full() {
             // Drop the oldest record to make room — a stale record is
-            // preferable to unbounded growth or refusing the live one.
-            let head = ring.head;
-            ring.buf[head].zeroize();
-            ring.head = (head + 1) % CAP;
-            ring.len -= 1;
+            // preferable to unbounded growth or refusing the live one. It is
+            // discarded rather than handed back, so no copy of it reaches a
+            // caller's stack.
+            ring.discard_front(1);
         }
-        let idx = (ring.head + ring.len) % CAP;
-        ring.buf[idx] = *record;
-        ring.len += 1;
+        // Room was just made, so the push cannot be refused; a refusal is
+        // dropped rather than asserted so no path here can panic.
+        let _ = ring.try_push_back(*record);
     }
 
     /// Whether the channel currently holds at least one undrained record
     /// (the `SeatInput` wait-set readiness probe; a peek — nothing is
     /// consumed).
     fn pending(&self) -> bool {
-        self.ring.lock().len > 0
+        !self.ring.lock().is_empty()
     }
 
     /// Discard every queued record, zeroing the whole backing store.
@@ -171,10 +139,7 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     /// incoming owner must never be able to read a record it did not
     /// produce, whatever path ended the previous lease.
     fn purge(&self) {
-        let mut ring = self.ring.lock();
-        ring.buf.zeroize();
-        ring.head = 0;
-        ring.len = 0;
+        self.ring.lock().purge();
     }
 
     /// Drain one record into `out`, zeroing the drained slot, and return the
@@ -183,15 +148,14 @@ impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     /// `out` is assumed to be at least `REC` bytes (the caller checks the
     /// bound first).
     fn drain_one(&self, out: &mut [u8]) -> usize {
-        let mut ring = self.ring.lock();
-        if ring.len == 0 {
+        let Some(mut record) = self.ring.lock().pop_front() else {
             return 0;
-        }
-        let idx = ring.head;
-        out[..REC].copy_from_slice(&ring.buf[idx]);
-        ring.buf[idx].zeroize();
-        ring.head = (ring.head + 1) % CAP;
-        ring.len -= 1;
+        };
+        out[..REC].copy_from_slice(&record);
+        // The record left the ring by value, so the copy the pop handed back
+        // is itself a place a typed character can sit; it is wiped before the
+        // frame goes, leaving the cleartext only in the caller's buffer.
+        record.zeroize();
         REC
     }
 }

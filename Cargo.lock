@@ -2092,6 +2092,7 @@ name = "tairix-log"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-crypto",
  "tairix-fuzzseed",
  "zeroize",
@@ -2682,6 +2683,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
  "tairix-log",
  "tairix-rt",
 ]

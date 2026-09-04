@@ -20,6 +20,9 @@ tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # (`Time64`/`Duration64`, the kernel error code, and the capability id) so a
 # logged value and its ABI form cannot drift apart (no duplication).
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The early-boot ring's byte FIFO and its wrap arithmetic: this crate supplies
+# the record framing and the eviction-loss accounting, not a second ring.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The log-attestation key is a secret: it is scrubbed from memory on drop with
 # the audited `zeroize` crate (zero-on-free; no hand-rolled
 # wiping, and `zeroize`'s volatile writes are not elided by the optimiser).

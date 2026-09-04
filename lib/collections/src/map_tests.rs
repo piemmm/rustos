@@ -3,14 +3,13 @@
 
 extern crate std;
 
-use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::cell::Cell;
 
 use tairix_hash::{BuildFastHash, BuildSipHash13, HashSeed};
 
 use crate::group::GROUP_LEN;
+use crate::test_support::Counted;
 use crate::{HashMap, HashSet, TryReserveError};
 
 /// A keyed builder for tests, so the maps under test hash the way a
@@ -195,17 +194,10 @@ fn owning_iteration_yields_every_entry() {
 /// yielded, exactly once each.
 #[test]
 fn abandoning_an_owning_iterator_drops_what_is_left() {
-    struct Counted(Rc<Cell<usize>>);
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
-
-    let drops = Rc::new(Cell::new(0));
+    let drops = Counted::counter();
     let mut partial: HashMap<u64, Counted, BuildSipHash13> = HashMap::with_hasher(keyed());
     for key in 0..100u64 {
-        assert!(partial.try_insert(key, Counted(Rc::clone(&drops))).is_ok());
+        assert!(partial.try_insert(key, Counted::new(&drops)).is_ok());
     }
     let mut drain = partial.into_iter();
     for _ in 0..10 {
@@ -256,23 +248,16 @@ fn clear_drops_the_entries_and_keeps_the_allocation() {
 /// dropped, cleared, overwritten, removed from, or rebuilt by growth.
 #[test]
 fn every_value_is_dropped_exactly_once() {
-    struct Counted(Rc<Cell<usize>>);
-    impl Drop for Counted {
-        fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
-        }
-    }
-
     let entries = sweep(500);
-    let drops = Rc::new(Cell::new(0));
+    let drops = Counted::counter();
     {
         let mut map: HashMap<u64, Counted, BuildSipHash13> = HashMap::with_hasher(keyed());
         for key in 0..entries {
-            assert!(map.try_insert(key, Counted(Rc::clone(&drops))).is_ok());
+            assert!(map.try_insert(key, Counted::new(&drops)).is_ok());
         }
         assert_eq!(drops.get(), 0, "growth must move values, never drop them");
 
-        assert!(map.try_insert(0, Counted(Rc::clone(&drops))).is_ok());
+        assert!(map.try_insert(0, Counted::new(&drops)).is_ok());
         assert_eq!(drops.get(), 1, "an overwrite drops the value it replaced");
 
         drop(map.remove(&1));

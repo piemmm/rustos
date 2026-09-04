@@ -164,26 +164,21 @@ fn one_round(rng: &mut tairix_fuzzseed::Lcg) {
 
     // Occasionally import an early-boot ring, which may report a loss.
     if rng.next_u64() & 1 == 0 {
-        let mut ring_buf = [0u8; 256];
-        if let Ok(mut ring) = BootRing::new(
-            &mut ring_buf,
-            u32::try_from(rng.next_u64() % 4).unwrap_or(0),
-        ) {
-            let pushes = rng.next_u64() % 60;
-            for seq in 0..pushes {
-                let _ = ring.push(
-                    seq,
-                    Duration64::from_secs(i64::try_from(seq).unwrap_or(0)),
-                    b"early boot line",
-                );
-            }
-            let _ = journal.import_boot(
-                &mut ring,
-                Duration64::from_secs(100),
-                WallClockReading::new(Time64::from_secs(1_700_000_000), WallTimeState::Trusted),
-                scratch,
+        let mut boot: BootRing<256> = BootRing::new(u32::try_from(rng.next_u64() % 4).unwrap_or(0));
+        let pushes = rng.next_u64() % 60;
+        for seq in 0..pushes {
+            let _ = boot.push(
+                seq,
+                Duration64::from_secs(i64::try_from(seq).unwrap_or(0)),
+                b"early boot line",
             );
         }
+        let _ = journal.import_boot(
+            &mut boot,
+            Duration64::from_secs(100),
+            WallClockReading::new(Time64::from_secs(1_700_000_000), WallTimeState::Trusted),
+            scratch,
+        );
     }
 
     // Flushing closes every open segment; a full flush must succeed with the

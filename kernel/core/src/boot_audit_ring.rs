@@ -60,6 +60,7 @@
 //! no input can make a read panic.
 
 use tairix_abi::Duration64;
+use tairix_collections::{ArrayString, RingBuf};
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_sync::irq::{InterruptControl, NopInterruptControl};
 use tairix_sync::IrqSafeSpinLock;
@@ -125,9 +126,10 @@ fn stamp_from(monotonic_ns: Option<u64>) -> Duration64 {
 
 /// One record copied out of a [`BootAuditRing`] for display.
 ///
-/// `Copy` and self-contained (the message lives in an inline buffer), so a
-/// viewer takes it out from under the ring lock and renders it afterwards
-/// without holding the lock.
+/// `Copy` and self-contained (the message lives inline), so a viewer takes it
+/// out from under the ring lock and renders it afterwards without holding the
+/// lock. It is also the stored form: the ring keeps these records directly,
+/// with no second layout to convert between.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TailRecord {
     /// The record's strictly-increasing global sequence number.
@@ -138,139 +140,63 @@ pub struct TailRecord {
     pub id: EventId,
     /// The monotonic time the record was produced.
     pub monotonic: Duration64,
-    /// The message bytes, always valid UTF-8 (see [`TailRecord::message`]).
-    msg: [u8; TAIL_MESSAGE_MAX],
-    /// Number of valid bytes in `msg`.
-    msg_len: u16,
+    /// The message, truncated on a character boundary when stored so no input
+    /// can leave a partial character behind.
+    msg: ArrayString<TAIL_MESSAGE_MAX>,
 }
 
 impl TailRecord {
     /// The record's message.
-    ///
-    /// Always valid UTF-8: the ring truncates on a character boundary when
-    /// storing, so this never fails; the fail-safe empty string is returned
-    /// only if a byte slice were somehow invalid, which cannot happen.
     #[must_use]
     pub fn message(&self) -> &str {
-        let len = self.msg_len as usize;
-        core::str::from_utf8(&self.msg[..len]).unwrap_or("")
+        self.msg.as_str()
     }
 }
 
 /// The interior, lock-guarded ring state.
 ///
-/// `slots` is a physical ring: `head` is the index of the oldest retained
-/// record and `count` the number retained. `next_seq` is the sequence the
-/// next pushed record will take, so the newest retained record's sequence is
-/// `next_seq - 1` and the oldest retained record's is `next_seq - count`.
+/// `next_seq` is the sequence the next pushed record will take, so it also
+/// counts every record ever written, including those since evicted.
 struct RingState<const N: usize> {
-    slots: [Slot; N],
-    head: usize,
-    count: usize,
+    ring: RingBuf<TailRecord, N>,
     next_seq: u64,
-}
-
-/// One stored record. A plain POD so an array of them is `Copy`/`Send` and can
-/// live in a `static` with no initialiser code.
-#[derive(Copy, Clone)]
-struct Slot {
-    seq: u64,
-    level: u8,
-    id: u32,
-    monotonic: Duration64,
-    msg: [u8; TAIL_MESSAGE_MAX],
-    msg_len: u16,
-}
-
-impl Slot {
-    const EMPTY: Self = Self {
-        seq: 0,
-        level: 0,
-        id: 0,
-        monotonic: Duration64::ZERO,
-        msg: [0u8; TAIL_MESSAGE_MAX],
-        msg_len: 0,
-    };
 }
 
 impl<const N: usize> RingState<N> {
     const fn new() -> Self {
         Self {
-            slots: [Slot::EMPTY; N],
-            head: 0,
-            count: 0,
+            ring: RingBuf::new(),
             next_seq: 0,
         }
     }
 
-    /// Append one record, overwriting the oldest when the ring is full.
+    /// Append one record, displacing the oldest when the ring is full.
+    ///
+    /// A zero-capacity ring stores nothing and still advances the sequence, so
+    /// the total stays meaningful.
     fn push(&mut self, level: Level, id: EventId, monotonic: Duration64, message: &str) {
-        // `N == 0` is a degenerate configuration: there is nowhere to store a
-        // record, so drop it (still advancing the sequence keeps the counter
-        // meaningful). A real ring has `N >= 1`.
-        if N == 0 {
-            self.next_seq = self.next_seq.wrapping_add(1);
-            return;
-        }
-
-        let pos = if self.count == N {
-            // Full: overwrite the oldest and advance the head past it.
-            let oldest = self.head;
-            self.head = wrap_index(self.head + 1, N);
-            oldest
-        } else {
-            let tail = wrap_index(self.head + self.count, N);
-            self.count += 1;
-            tail
-        };
-
-        let truncated = truncate_on_char_boundary(message, TAIL_MESSAGE_MAX);
-        let bytes = truncated.as_bytes();
-        let slot = &mut self.slots[pos];
-        slot.seq = self.next_seq;
-        slot.level = level.as_u8();
-        slot.id = id.0;
-        slot.monotonic = monotonic;
-        slot.msg[..bytes.len()].copy_from_slice(bytes);
-        // `bytes.len() <= TAIL_MESSAGE_MAX <= u16::MAX`, so this cannot lose
-        // data; the fallback keeps the store fail-safe.
-        slot.msg_len = u16::try_from(bytes.len()).unwrap_or(0);
-
+        self.ring.push_back_overwrite(TailRecord {
+            seq: self.next_seq,
+            level,
+            id,
+            monotonic,
+            msg: ArrayString::from_str_truncating(message),
+        });
         self.next_seq = self.next_seq.wrapping_add(1);
     }
 
     /// The `(oldest, newest)` retained sequence numbers, or `None` when empty.
     fn seq_range(&self) -> Option<(u64, u64)> {
-        if self.count == 0 {
-            return None;
-        }
-        let newest = self.next_seq - 1;
-        let oldest = self.next_seq - self.count as u64;
-        Some((oldest, newest))
+        Some((self.ring.front()?.seq, self.ring.back()?.seq))
     }
 
     /// Copy out the record with sequence `seq`, or `None` if it is not (or no
     /// longer) retained.
     fn record(&self, seq: u64) -> Option<TailRecord> {
-        let (oldest, newest) = self.seq_range()?;
-        if seq < oldest || seq > newest {
-            return None;
-        }
-        // `seq - oldest < count <= N`, so it always fits a `usize`; the
-        // checked form keeps a read fail-safe rather than truncating.
-        let offset = usize::try_from(seq - oldest).ok()?;
-        let pos = wrap_index(self.head + offset, N);
-        let slot = &self.slots[pos];
-        Some(TailRecord {
-            seq: slot.seq,
-            // A stored level byte always came from `Level::as_u8`, so it is a
-            // valid discriminant; the fail-safe keeps a read from panicking.
-            level: Level::from_u8(slot.level).unwrap_or(Level::Info),
-            id: EventId(slot.id),
-            monotonic: slot.monotonic,
-            msg: slot.msg,
-            msg_len: slot.msg_len,
-        })
+        // Sequences are assigned one per push, so a retained range is
+        // contiguous and the offset from the oldest is the ring position.
+        let offset = seq.checked_sub(self.seq_range()?.0)?;
+        self.ring.get(usize::try_from(offset).ok()?).copied()
     }
 }
 
@@ -304,7 +230,7 @@ impl<const N: usize, I: InterruptControl> BootAuditRing<N, I> {
     /// Number of records currently retained (at most `N`).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.lock().count
+        self.state.lock().ring.len()
     }
 
     /// Whether the ring currently retains no records.
@@ -348,32 +274,6 @@ impl<const N: usize, I: InterruptControl> Sink for BootAuditRing<N, I> {
             .lock()
             .push(event.level, event.id, monotonic, event.message);
     }
-}
-
-/// Reduce a logical (possibly one-past-the-end) index into `0..cap`.
-///
-/// `index` is always `< 2 * cap` at every call site, so a single subtraction
-/// suffices and the ring stays division-free.
-const fn wrap_index(index: usize, cap: usize) -> usize {
-    if index >= cap {
-        index - cap
-    } else {
-        index
-    }
-}
-
-/// The largest prefix of `s` that fits in `max` bytes and ends on a UTF-8
-/// character boundary.
-fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    // `end` is a valid char boundary (0 always is), so slicing cannot panic.
-    &s[..end]
 }
 
 #[cfg(test)]

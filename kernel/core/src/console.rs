@@ -30,6 +30,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_abi::{Errno, InputMode, TerminalSize};
+use tairix_collections::SecretRing;
 use tairix_fbcon::Surface;
 use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sec::ProcessId;
@@ -412,25 +413,6 @@ pub static NULL_CONSOLE_INPUT: NullConsoleInput = NullConsoleInput;
 /// dropped surplus keystroke is preferable to unbounded growth.
 pub const CONSOLE_INPUT_QUEUE_CAPACITY: usize = 256;
 
-/// The fixed-capacity byte ring behind a [`ConsoleInputQueue`].
-struct InputRing {
-    buf: [u8; CONSOLE_INPUT_QUEUE_CAPACITY],
-    /// Index of the next byte to drain.
-    head: usize,
-    /// Number of bytes currently queued.
-    len: usize,
-}
-
-impl InputRing {
-    const fn new() -> Self {
-        Self {
-            buf: [0; CONSOLE_INPUT_QUEUE_CAPACITY],
-            head: 0,
-            len: 0,
-        }
-    }
-}
-
 /// A bounded, lock-protected type-ahead queue that is both the
 /// [`ConsoleRead`] half (drained by `stream_read`) and the
 /// [`ConsoleInput`] half (the seat registry's text sink) of a
@@ -454,12 +436,12 @@ impl InputRing {
 /// [`BlockingConsoleRead`].
 ///
 /// A drained byte is **zeroed in place** as it leaves the ring: a typed
-/// password transits this queue between the keyboard driver and login,
-/// so the buffer must not retain the cleartext after the consumer has
-/// taken it (zero-on-free for memory that held a
-/// credential; — secret hygiene).
+/// password transits this queue between the keyboard driver and login, so the
+/// buffer must not retain the cleartext once the consumer has taken it. That
+/// is [`SecretRing`]'s job, and it reaches the whole backing store on a purge
+/// and again on drop, so nothing survives a change of holder.
 pub struct ConsoleInputQueue {
-    ring: SpinLock<InputRing>,
+    ring: SpinLock<SecretRing<u8, CONSOLE_INPUT_QUEUE_CAPACITY>>,
 }
 
 impl Default for ConsoleInputQueue {
@@ -474,7 +456,7 @@ impl ConsoleInputQueue {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            ring: SpinLock::new(InputRing::new()),
+            ring: SpinLock::new(SecretRing::new(0)),
         }
     }
 
@@ -493,17 +475,7 @@ impl ConsoleInputQueue {
     /// cannot widen it.
     fn drain(&self, buf: &mut [u8]) -> usize {
         let mut ring = self.ring.lock();
-        tairix_tty::read_bounded(buf, || {
-            if ring.len == 0 {
-                return None;
-            }
-            let idx = ring.head % CONSOLE_INPUT_QUEUE_CAPACITY;
-            let byte = ring.buf[idx];
-            ring.buf[idx] = 0;
-            ring.head = (ring.head + 1) % CONSOLE_INPUT_QUEUE_CAPACITY;
-            ring.len -= 1;
-            Some(byte)
-        })
+        tairix_tty::read_bounded(buf, || ring.pop_front())
     }
 
     /// Free space, in bytes, currently available in the ring.
@@ -517,26 +489,14 @@ impl ConsoleInputQueue {
     /// space can only grow, so a producer that trusts this never overfills.
     #[must_use]
     pub fn free_capacity(&self) -> usize {
-        let ring = self.ring.lock();
-        CONSOLE_INPUT_QUEUE_CAPACITY - ring.len
+        self.ring.lock().remaining_capacity()
     }
 
     /// Enqueue as many of `bytes` as fit, returning the number accepted
     /// (a short push when the ring fills; the producer retries the
     /// remainder and never blocks).
     fn enqueue(&self, bytes: &[u8]) -> usize {
-        let mut ring = self.ring.lock();
-        let mut pushed = 0;
-        for &byte in bytes {
-            if ring.len == CONSOLE_INPUT_QUEUE_CAPACITY {
-                break;
-            }
-            let idx = (ring.head + ring.len) % CONSOLE_INPUT_QUEUE_CAPACITY;
-            ring.buf[idx] = byte;
-            ring.len += 1;
-            pushed += 1;
-        }
-        pushed
+        self.ring.lock().push_slice(bytes)
     }
 }
 
@@ -549,10 +509,10 @@ impl ConsoleRead for ConsoleInputQueue {
     }
 
     fn purge(&self) {
-        // Re-initialising the whole ring zeroes every slot, so a credential
-        // typed ahead of the reader leaves nothing behind, and no drain bound
-        // (`read` stops at a line delimiter) can leave a byte queued.
-        *self.ring.lock() = InputRing::new();
+        // Blanking every slot, not just the queued ones, so a credential typed
+        // ahead of the reader leaves nothing behind — no drain bound (`read`
+        // stops at a line delimiter) can leave a byte queued either.
+        self.ring.lock().purge();
     }
 }
 
@@ -2342,7 +2302,7 @@ mod tests {
         assert_eq!(queue.read(&mut buf), Ok(7));
         let ring = queue.ring.lock();
         assert!(
-            ring.buf[..7].iter().all(|&byte| byte == 0),
+            ring.backing_store()[..7].iter().all(|&byte| byte == 0),
             "every drained slot is zeroed as it leaves the ring"
         );
     }
@@ -2480,7 +2440,12 @@ mod tests {
 
         assert_eq!(drain(queue), b"");
         assert!(
-            queue.ring.lock().buf.iter().all(|&byte| byte == 0),
+            queue
+                .ring
+                .lock()
+                .backing_store()
+                .iter()
+                .all(|&byte| byte == 0),
             "the ring holds no copy of what was typed"
         );
         // The emptied queue still works for whoever comes next.

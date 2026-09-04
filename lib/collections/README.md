@@ -8,13 +8,19 @@ for. `alloc` already supplies `Vec`, `String`, `BTreeMap`, `BTreeSet`,
 |---|---|
 | `HashMap<K, V, S>` | expected O(1) lookup / insert / remove, one control byte + one `(K, V)` slot per bucket, no per-entry node |
 | `HashSet<T, S>` | the same, over a zero-sized value |
+| `ArrayVec<T, N>` | up to `N` elements inline, allocating nothing |
+| `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
+| `ArrayString<N>` | up to `N` bytes inline, the UTF-8 invariant held by construction |
+| `RingBuf<T, N>` | a fixed-capacity circular queue, constant time at both ends |
+| `SecretRing<T, N>` | the same, scrubbing each slot it vacates |
 | `BitSet256` | a fixed 256-bit set: constant-time membership, allocation-free |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed and what is still to
-come. `HashSet` is the one type here with no in-tree caller yet: every
-remaining `BTreeSet` is either order-load-bearing or small enough that the
-ordered set is the cheaper structure, so its first consumer arrives with the
-recency and concurrent tiers.
+come. `HashSet` and `SmallVec` are the two types here with no in-tree caller
+yet: every remaining `BTreeSet` is either order-load-bearing or small enough
+that the ordered set is the cheaper structure, and `SmallVec`'s first consumer
+is a compositor damage list that is measured rather than assumed. Both arrive
+with a later tier.
 
 ## The rules every container here obeys
 
@@ -25,7 +31,8 @@ recency and concurrent tiers.
    nothing; growth is amortised.
 3. **No fixed capacity ceiling.** A heap-backed container grows on demand and
    fails closed only on genuine exhaustion. A const-generic capacity appears
-   only where the container is deliberately allocation-free (`BitSet256`).
+   only where the container is deliberately allocation-free and the bound is
+   the caller's own, chosen at the use site.
 4. **Order is unspecified unless the container says otherwise.** A hash
    container's iteration order varies with the hash key and the insertion
    history; anything compared, logged, or reproduced wants an ordered
@@ -33,7 +40,15 @@ recency and concurrent tiers.
 5. **Secret hygiene is the holder's job.** A container does not scrub the slots
    it frees — reuse inside one address space is not a security boundary — so a
    holder of a key, credential, or capability token stores a value type that
-   zeroes itself on drop, exactly as `lib/rt`'s heap already requires.
+   zeroes itself on drop, exactly as `lib/rt`'s heap already requires. A value
+   that merely *transits* a long-lived kernel buffer is the one exception, and
+   it has its own type: `SecretRing` scrubs every slot it vacates with a
+   volatile store, so the write cannot be optimised away, and offers no
+   `DerefMut` so the plain ring's non-scrubbing pops stay out of reach.
+6. **A capacity fault answers with `Result`, an index fault with `Option`, and
+   no operation carries both.** Hence no positional insert on the
+   fixed-capacity vectors: its two failure modes are unrelated and no single
+   error spells them honestly.
 
 ## Choosing a hasher
 
@@ -94,10 +109,17 @@ tombstones with every survivor still reachable and the footprint still bounded;
 and one drop per value ever inserted, across growth, overwrite, removal,
 retention, and an abandoned owning iterator.
 
+The sequence tier is held to the same bar: one drop per element ever taken
+across a bulk push, a wrapped drain, an eviction and a spill; a footprint that
+is the elements plus their indices and no heap block; and a `retain` predicate
+that unwinds leaving the vector describing exactly what it wrote back.
+
 `tests/fuzz_collections.rs` drives the map against a plain association list
-over deliberately colliding key streams under `cargo xtask fuzz`, and
-`cargo xtask miri` interprets the whole suite under the undefined-behaviour
-oracle — the table's `unsafe` core is the reason that stage exists.
+over deliberately colliding key streams and `tests/fuzz_sequences.rs` drives
+the sequence tier against naive models over arbitrary lengths and text, both
+under `cargo xtask fuzz`; `cargo xtask miri` interprets the whole suite under
+the undefined-behaviour oracle — the inline slot arrays are the reason that
+stage exists.
 
 ## Stability
 

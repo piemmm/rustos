@@ -51,3 +51,8 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+
+[dev-dependencies]
+# The shared fixed-capacity vector the test audit sink records into, so the
+# fixture needs no allocator and no hand-rolled container.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }

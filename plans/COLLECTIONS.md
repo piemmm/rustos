@@ -1,7 +1,7 @@
 # COLLECTIONS — The shared container and hashing libraries
 
-Status: **in progress** — C0 and C1 landed; the remaining containers are still
-to come. The ledger below is the authoritative record of what is left.
+Status: **in progress** — C0, C1 and C2 landed; the remaining containers are
+still to come. The ledger below is the authoritative record of what is left.
 
 ## The ledger
 
@@ -20,7 +20,7 @@ detail becomes its done-state summary — nothing is appended, here or there.
 |---|---|---|---|---|
 | C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **done** |
 | C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **done** |
-| C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf` | — | **planned** |
+| C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf`, `SecretRing` | — | **done** |
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **planned** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict | C1, C3 | **planned** |
 | C5 | Intervals | `RangeMap`, `RangeSet` | — | **planned** |
@@ -59,11 +59,6 @@ today:
   its own overlap arithmetic: `kernel/mem/src/anon_window.rs`,
   `kernel/mem/src/mmio.rs`, `kernel/core/src/aspace.rs` (twice — file and
   anonymous regions), and `drivers/filesystem/arxfs/src/runs.rs`.
-* **Four hand-rolled fixed-capacity rings**: `kernel/core/src/seat.rs`,
-  `kernel/core/src/console.rs`, `kernel/core/src/boot_audit_ring.rs`,
-  `lib/log/src/bootring.rs`.
-* **A hand-rolled fixed-capacity `Vec`** inlined as a private module,
-  `userland/system/sysinfod/src/service.rs`'s `heapless_vec`.
 * **Monotonic `next_id` counters** standing in for identifier allocation in
   `kernel/core/src/sharedreg.rs` and all three schedulers, with no reuse and
   no generation — so a recycled identifier aliases a dead object rather than
@@ -153,9 +148,14 @@ one is not done.
    already states; there is not a second one.
 6. **Every `unsafe` block carries its invariant and a test that exercises
    it**, and no `unsafe` escapes the crate's safe API. The unsafe surface is
-   confined to four places — the open-addressing table, the intrusive list,
-   the small-vector spill, and the concurrent tier — and each is covered by
-   proptest models, and by loom for the concurrent tier.
+   confined to four places — the open-addressing table, the inline slot arrays
+   (`ArrayVec`, `RingBuf` and its `SecretRing` scrub), the intrusive list, and
+   the concurrent tier — and each is covered by proptest models, and by loom
+   for the concurrent tier. `SmallVec`'s spill needs none of its own: it is an
+   enum over `ArrayVec` and `Vec`, so the transition is an ordinary move
+   through the owning iterator. `ArrayString` needs none either: a string's
+   bytes are always initialised, so it holds a plain `[u8; N]`, which is also
+   what lets it be `Copy` and be lifted out from under a lock inside a record.
 7. **Untrusted keys are a threat surface.** Every container that accepts
    attacker-influenced keys or lengths gets a fuzz harness in the per-PR
    `--quick` set and the nightly soak.
@@ -252,14 +252,39 @@ apologising for.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
-| `ArrayVec<T, N>` | fixed capacity, zero allocation, usable in interrupt context | `sysinfod`'s private `heapless_vec` |
+| `ArrayVec<T, N>` | fixed capacity, zero allocation, usable in interrupt context | `sysinfod`'s private `heapless_vec`, and the inline slot array the rest of the tier is built on |
 | `SmallVec<T, N>` | inline until `N`, then spills to the heap | hot paths that hold 1–4 items and allocate anyway |
-| `ArrayString<N>` | `ArrayVec<u8, N>` with the UTF-8 invariant | ad-hoc `[u8; N]` + length pairs |
+| `ArrayString<N>` | `[u8; N]` + length with the UTF-8 invariant held by construction, and `Copy` | ad-hoc `[u8; N]` + length pairs |
 | `RingBuf<T, N>` | fixed-capacity circular queue, O(1) both ends | the four hand-rolled rings listed at the top of this plan |
 
 `alloc::VecDeque` already covers the heap-backed ring, so `RingBuf` is
 array-backed only. `Vec` and `String` stay `alloc`'s; there is no reason to
 re-implement them and doing so would be bloat.
+
+`SecretRing<T, N>` is `RingBuf` for a queue a credential *transits* — a typed
+password crossing a console's type-ahead buffer, a key event crossing the
+desktop's input channel. It blanks each slot it vacates with a **volatile**
+store (a plain assignment to memory nothing reads again is exactly what an
+optimiser may discard), blanks the whole store on a change of holder and again
+on drop, and offers no `DerefMut`, so the plain ring's non-scrubbing pops
+cannot be reached by accident. Because every slot is initialised from
+construction and a `Copy` element cannot un-initialise one, `backing_store`
+safely reports the whole store — which is how a holder's own test proves the
+scrub, an observation a container's safe API otherwise cannot offer.
+
+**`SmallVec` has no in-tree caller yet.** It landed with C2 by decision, with
+its debt recorded here exactly as `HashSet`'s is: its intended first consumer
+is `lib/geometry`'s `Region` damage list, whose `rects`/`scratch` `Vec<Rect>`
+allocate for the one-to-four-rectangle case a compositor damage region almost
+always is. That migration belongs with the measurement `plans/FIX-DESKTOP-SPEEDUP.md`'s
+damage work will take, not ahead of it. C10 either lands that caller or deletes
+the type.
+
+The fixed-capacity vectors deliberately offer **no positional insert**: its two
+failure modes — no room, and an index past the end — are unrelated, and no
+single error spells both honestly. The tier's rule instead is that a capacity
+fault answers with `Result` and an index fault with `Option`, and no operation
+carries both.
 
 ### 4.3 Indexed and keyed
 
@@ -400,7 +425,7 @@ counter gates, its rustdoc, and its `docs/src/lib/` page.
 |---|---|
 | C0 | **done.** Six hand-rolled hashes: the FNV-1a folds in `lib/pagezero`'s self-verify fingerprint, `lib/net/src/iface.rs`'s and `lib/net/src/stack.rs`'s multicast revision counters, `kernel/tairix-kernel`'s build-provenance id, and `lib/fontface`'s rasterisation golden; and the unkeyed Fibonacci mixer in `kernel/core/src/futex.rs`'s bucket index |
 | C1 | **done.** `kernel/mem/src/dma.rs`'s `allocations` `BTreeMap`, whose only iteration collected keys purely to avoid mutating while iterating, is now a `HashMap` under `BuildFastHash` — the keys are that allocator's own page-aligned window addresses and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. The carve reserves the record slot beside `ensure_slots`, before any frame is taken, so a bookkeeping refusal fails with nothing to roll back. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
-| C2 | `sysinfod`'s `heapless_vec`; the rings in `kernel/core/src/seat.rs`, `kernel/core/src/console.rs`, `kernel/core/src/boot_audit_ring.rs`, `lib/log/src/bootring.rs` |
+| C2 | **done.** All five: `sysinfod`'s `heapless_vec` (an `ArrayVec` whose bound now refuses an over-long fixture loudly instead of silently dropping records); `seat.rs`'s `ChannelRing` and `console.rs`'s `InputRing`, both now `SecretRing`, which also gives the console the drop-time scrub it never had and makes both scrubs volatile where the console's were plain; `boot_audit_ring.rs`'s `RingState`, where `Slot` and `TailRecord` collapsed into one type over an `ArrayString` — deleting the `[u8; 120]`+length pair, the `Level::from_u8` and `u16::try_from` fail-safes the round trip needed, `wrap_index`, and `truncate_on_char_boundary`; and `lib/log`'s `BootRing`, now record framing and eviction-loss accounting over a `RingBuf<u8, N>`, with its byte-at-a-time copies replaced by at most two `copy_from_slice` runs and its borrowed arena by a caller-chosen `N` — so `BufferTooSmall` at construction became a build error and the ring is `const`-constructible for a pre-allocator `static` |
 | C3 | the per-site intrusive-link handling it subsumes |
 | C4 | all six LRUs: `block_cache`, `transform_cache`, `launch_cache`, `fscache`, `arxfs/dedupe`, and the index inside `lib/reclaim/src/cache.rs`; **and the O(n) `lib/net/src/neigh.rs` scan** |
 | C5 | `kernel/mem/src/anon_window.rs`, `kernel/mem/src/mmio.rs`, both maps in `kernel/core/src/aspace.rs`, `drivers/filesystem/arxfs/src/runs.rs` |

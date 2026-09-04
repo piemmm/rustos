@@ -14,6 +14,13 @@
 //!   record naming it; and
 //! * the ring never panics on any operation ordering.
 //!
+//! The ring's byte capacity is a compile-time bound, so the harness runs the
+//! same random operation stream at each of a deliberately chosen set of
+//! capacities rather than at a drawn one: the smallest legal ring, capacities
+//! that are and are not multiples of the frame size, and one holding several
+//! frames — which puts a frame at every interesting offset relative to the
+//! wrap, and does so reproducibly.
+//!
 //! Seed selection, the start-of-test seed log, and the smoke / soak loop are
 //! the shared `tairix_fuzzseed` seam (one definition).
 
@@ -33,7 +40,11 @@ struct Shadow {
     body: Vec<u8>,
 }
 
-fn drain_and_check(ring: &mut BootRing<'_>, model: &mut VecDeque<Shadow>, scratch: &mut [u8]) {
+fn drain_and_check<const N: usize>(
+    ring: &mut BootRing<N>,
+    model: &mut VecDeque<Shadow>,
+    scratch: &mut [u8],
+) {
     match ring
         .pop_oldest(scratch)
         .expect("pop never errors with a large scratch")
@@ -58,7 +69,7 @@ fn drain_and_check(ring: &mut BootRing<'_>, model: &mut VecDeque<Shadow>, scratc
     }
 }
 
-fn apply_loss(ring: &mut BootRing<'_>, model: &mut VecDeque<Shadow>) {
+fn apply_loss<const N: usize>(ring: &mut BootRing<N>, model: &mut VecDeque<Shadow>) {
     if let Some(loss) = ring.take_loss() {
         assert_eq!(
             loss.last_seq - loss.first_seq + 1,
@@ -82,6 +93,52 @@ fn apply_loss(ring: &mut BootRing<'_>, model: &mut VecDeque<Shadow>) {
     }
 }
 
+/// One run: a random stream of pushes and pops against a fresh `N`-byte ring,
+/// with the shadow model predicting every outcome.
+fn run<const N: usize>(prng: &mut tairix_fuzzseed::Lcg, scratch: &mut [u8]) {
+    let cpu_id = u32::try_from(prng.next_u64() & 0xff).expect("masked to a byte");
+    let mut ring: BootRing<N> = BootRing::new(cpu_id);
+    let mut model: VecDeque<Shadow> = VecDeque::new();
+    let mut next_seq = 0u64;
+
+    let ops = prng.next_u64() % 64;
+    for _ in 0..ops {
+        if prng.next_u64().is_multiple_of(3) {
+            drain_and_check(&mut ring, &mut model, scratch);
+        } else {
+            // Body up to a little larger than the ring can hold, so the
+            // "never fits" fail-closed path is exercised too.
+            let len = usize::try_from(prng.next_u64() % (N as u64 + 4))
+                .expect("a value below N+4 fits usize");
+            let mut body = vec![0u8; len];
+            prng.fill(&mut body);
+            let secs = i64::try_from(next_seq).expect("seq fits i64") * 2;
+            // A rejected push (body too big to ever fit) leaves the ring
+            // unchanged, so the model is left unchanged too.
+            if ring
+                .push(next_seq, Duration64::from_secs(secs), &body)
+                .is_ok()
+            {
+                apply_loss(&mut ring, &mut model);
+                model.push_back(Shadow {
+                    seq: next_seq,
+                    secs,
+                    body,
+                });
+                next_seq += 1;
+            }
+        }
+        assert_eq!(ring.len(), model.len(), "retained count diverged");
+    }
+
+    // Fully drain and confirm the tail matches, including any final loss.
+    apply_loss(&mut ring, &mut model);
+    while !ring.is_empty() {
+        drain_and_check(&mut ring, &mut model, scratch);
+    }
+    assert!(model.is_empty(), "model retained records the ring did not");
+}
+
 #[test]
 fn boot_ring_matches_a_shadow_model_and_never_panics() {
     let mut prng = tairix_fuzzseed::Lcg::new(tairix_fuzzseed::start(
@@ -93,51 +150,16 @@ fn boot_ring_matches_a_shadow_model_and_never_panics() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
-            // A small ring so eviction is frequent, but big enough for a few
-            // frames. Capacity is drawn per run.
-            let cap = FRAME_HEADER_LEN + 8 + (prng.next_u64() % 200) as usize;
-            let mut buf = vec![0u8; cap];
-            let cpu_id = (prng.next_u64() & 0xff) as u32;
-            let mut ring = BootRing::new(&mut buf, cpu_id).expect("cap holds a frame");
-            let mut model: VecDeque<Shadow> = VecDeque::new();
-            let mut next_seq = 0u64;
-
-            let ops = prng.next_u64() % 64;
-            for _ in 0..ops {
-                if prng.next_u64().is_multiple_of(3) {
-                    drain_and_check(&mut ring, &mut model, &mut scratch);
-                } else {
-                    // Body up to a little larger than the ring can hold, so the
-                    // "never fits" fail-closed path is exercised too.
-                    let len = usize::try_from(prng.next_u64() % (cap as u64 + 4))
-                        .expect("a value below cap+4 fits usize");
-                    let mut body = vec![0u8; len];
-                    prng.fill(&mut body);
-                    let secs = i64::try_from(next_seq).expect("seq fits i64") * 2;
-                    // A rejected push (body too big to ever fit) leaves the ring
-                    // unchanged, so the model is left unchanged too.
-                    if ring
-                        .push(next_seq, Duration64::from_secs(secs), &body)
-                        .is_ok()
-                    {
-                        apply_loss(&mut ring, &mut model);
-                        model.push_back(Shadow {
-                            seq: next_seq,
-                            secs,
-                            body,
-                        });
-                        next_seq += 1;
-                    }
-                }
-                assert_eq!(ring.len(), model.len(), "retained count diverged");
+            // Small rings so eviction is frequent, at capacities that put the
+            // frame boundary at every offset relative to the wrap.
+            match prng.next_u64() % 6 {
+                0 => run::<FRAME_HEADER_LEN>(&mut prng, &mut scratch),
+                1 => run::<{ FRAME_HEADER_LEN + 1 }>(&mut prng, &mut scratch),
+                2 => run::<{ FRAME_HEADER_LEN + 9 }>(&mut prng, &mut scratch),
+                3 => run::<{ 2 * FRAME_HEADER_LEN }>(&mut prng, &mut scratch),
+                4 => run::<{ 3 * FRAME_HEADER_LEN + 7 }>(&mut prng, &mut scratch),
+                _ => run::<200>(&mut prng, &mut scratch),
             }
-
-            // Fully drain and confirm the tail matches, including any final loss.
-            apply_loss(&mut ring, &mut model);
-            while !ring.is_empty() {
-                drain_and_check(&mut ring, &mut model, &mut scratch);
-            }
-            assert!(model.is_empty(), "model retained records the ring did not");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

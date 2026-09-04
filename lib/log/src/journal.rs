@@ -378,9 +378,9 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
     /// [`JournalError::Encode`] if a drained body does not fit `scratch`,
     /// [`JournalError::Segment`] if a body cannot fit a fresh boot segment, or
     /// [`JournalError::Store`] if persisting a rotated segment fails.
-    pub fn import_boot(
+    pub fn import_boot<const N: usize>(
         &mut self,
-        ring: &mut BootRing<'_>,
+        ring: &mut BootRing<N>,
         monotonic: Duration64,
         wall: WallClockReading,
         scratch: &mut [u8],
@@ -1267,8 +1267,7 @@ mod tests {
     fn boot_import_stores_records_and_emits_a_loss_record_on_eviction() {
         let scratch = &mut [0u8; 8192];
         // A ring small enough that pushing many records evicts the oldest.
-        let mut ring_buf = [0u8; 256];
-        let mut ring = BootRing::new(&mut ring_buf, 3).expect("ring");
+        let mut ring: BootRing<256> = BootRing::new(3);
         // Pushing far more than the ring holds evicts the oldest, so import
         // must see a pending loss range and author exactly one loss record.
         for seq in 0..80u64 {
