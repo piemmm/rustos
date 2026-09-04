@@ -114,10 +114,7 @@ impl SwitchboardTray {
             return TaskbarRepaint::NONE;
         }
         self.monogram = monogram;
-        TaskbarRepaint {
-            bar: true,
-            ..TaskbarRepaint::NONE
-        }
+        TaskbarRepaint::BAR
     }
 
     /// The account's circular identity picture for an icon square of `side`,
@@ -270,11 +267,13 @@ impl SwitchboardTray {
         let interaction = self.signal.state();
         let next = derive_signal(self.summary.as_ref(), self.unresponsive)
             .into_signal(interaction.pointer, interaction.focus);
-        let parts = TaskbarRepaint {
-            bar: !self.signal.draws_same_capsule(&next),
-            readout: next.is_expanded() && self.signal != next,
-            ..TaskbarRepaint::NONE
-        };
+        let mut parts = TaskbarRepaint::NONE;
+        if !self.signal.draws_same_capsule(&next) {
+            parts |= TaskbarRepaint::BAR;
+        }
+        if next.is_expanded() && self.signal != next {
+            parts |= TaskbarRepaint::READOUT;
+        }
         self.signal = next;
         parts
     }

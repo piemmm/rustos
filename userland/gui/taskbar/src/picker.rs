@@ -29,6 +29,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_controls::damage;
 use tairix_controls::{
     plate_border, ControlState, PointerState, ScrollAction, ScrollBar, ScrollModel,
     ScrollOrientation, ScrollRange, WindowPreview,
@@ -273,10 +274,17 @@ impl WindowPicker {
         was_open
     }
 
-    /// Track the hovered cell, reporting whether the visual state changed.
-    pub(crate) fn set_hover(&mut self, hover: Option<usize>) -> bool {
+    /// Track the hovered cell, reporting the cell the hover left and the cell
+    /// it arrived on — `cells` being the grid's screen rectangles in cell
+    /// order — and answering whether it moved.
+    pub(crate) fn set_hover(
+        &mut self,
+        hover: Option<usize>,
+        cells: &[Rect],
+        damage: &mut Region,
+    ) -> bool {
         let hover = hover.filter(|&index| index < self.entries.len());
-        if self.hover == hover {
+        if !damage::move_mark(self.hover, hover, |index| cells.get(index).copied(), damage) {
             return false;
         }
         self.hover = hover;

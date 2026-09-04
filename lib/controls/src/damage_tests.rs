@@ -10,10 +10,11 @@ use alloc::vec;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, PointerButton};
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent, IconButton, SplitButton};
-use crate::damage::{set, sink};
+use crate::damage::{paint_parts, set, sink, Repaint};
 use crate::rail::ActionRail;
 use crate::shell::TraySignal;
 use crate::state::{ControlRole, PointerState};
@@ -282,6 +283,131 @@ fn a_degraded_container_report_still_covers_every_child() {
     for rect in [first, last] {
         for corner in corners(&rect) {
             assert!(damage.contains(corner));
+        }
+    }
+}
+
+// ---- Repaint ----------------------------------------------------------
+
+#[test]
+fn a_clean_account_owes_nothing_and_one_rectangle_makes_it_owe_that() {
+    let mut owed = Repaint::clean();
+    assert!(owed.is_clean());
+    assert_eq!(owed, Repaint::default());
+
+    owed.add(Rect::new(4, 6, 10, 12));
+    assert!(!owed.is_clean());
+    assert_eq!(owed.area(64, 48), Region::from(Rect::new(4, 6, 10, 12)));
+}
+
+#[test]
+fn a_whole_account_absorbs_every_rectangle_and_resolves_to_the_surface() {
+    let mut owed = Repaint::Whole;
+    owed.add(Rect::new(0, 0, 2, 2));
+    assert_eq!(owed, Repaint::Whole, "nothing is owed beyond everything");
+    assert!(!owed.is_clean());
+    assert_eq!(owed.area(64, 48), Region::from(Rect::new(0, 0, 64, 48)));
+}
+
+#[test]
+fn merging_keeps_both_sides_and_whole_outranks_parts_either_way() {
+    let mut parts = Repaint::clean();
+    parts.add(Rect::new(0, 0, 4, 4));
+    let mut more = Repaint::clean();
+    more.add(Rect::new(20, 20, 4, 4));
+
+    let mut merged = parts.clone();
+    merged.merge(more.clone());
+    let mut both = Region::new();
+    both.add(Rect::new(0, 0, 4, 4));
+    both.add(Rect::new(20, 20, 4, 4));
+    assert_eq!(merged.area(64, 64), both);
+
+    let mut whole_first = Repaint::Whole;
+    whole_first.merge(parts.clone());
+    assert_eq!(whole_first, Repaint::Whole);
+
+    let mut parts_first = parts;
+    parts_first.merge(Repaint::Whole);
+    assert_eq!(parts_first, Repaint::Whole);
+}
+
+#[test]
+fn painting_parts_writes_inside_them_and_nowhere_else() {
+    let mut surface = Surface::new(8, 8).expect("a small surface");
+    let ink = Color::rgb(255, 0, 0);
+    paint_parts(&mut surface, &[Rect::new(2, 2, 3, 3)], |surface| {
+        surface.fill(ink);
+    });
+    for y in 0..8 {
+        for x in 0..8 {
+            let inside = (2..5).contains(&x) && (2..5).contains(&y);
+            let pixel = surface.get(x, y).expect("in bounds");
+            assert_eq!(
+                pixel.unpremultiply() == ink,
+                inside,
+                "({x}, {y}): only the named rectangle is written"
+            );
+        }
+    }
+}
+
+#[test]
+fn painting_a_part_twice_lands_what_painting_the_whole_surface_lands() {
+    // The rule a scoped chrome repaint rests on: re-deriving a rectangle over
+    // pixels a previous paint left is idempotent, because a plate lays its
+    // colour down rather than compositing it.
+    let theme = Theme::dark().floating();
+    let whole = Rect::new(0, 0, 40, 24);
+    let recipe = |surface: &mut Surface| {
+        let _ = crate::paint_surface_plate(
+            surface,
+            (0, 0, 40, 24),
+            (6, crate::plate_border(&theme, Scale::ONE)),
+            &theme,
+            (theme.palette().surface_raised, crate::ChromeLayer::Ground),
+        );
+    };
+
+    let mut once = Surface::new(40, 24).expect("a small surface");
+    paint_parts(&mut once, &[whole], recipe);
+
+    let mut twice = Surface::new(40, 24).expect("a small surface");
+    paint_parts(&mut twice, &[whole], recipe);
+    // Over a corner as well as the interior: a rounded plate's arc pixels are
+    // coverage-blended, so laying the colour again would only mix them further
+    // toward it.
+    paint_parts(
+        &mut twice,
+        &[Rect::new(0, 0, 8, 8), Rect::new(8, 4, 10, 10)],
+        recipe,
+    );
+
+    for y in 0..24 {
+        for x in 0..40 {
+            assert_eq!(
+                once.get(x, y),
+                twice.get(x, y),
+                "({x}, {y}): a repainted part is the pixel a whole paint laid"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_rectangle_before_the_surfaces_own_origin_is_skipped_not_moved() {
+    let mut surface = Surface::new(4, 4).expect("a small surface");
+    let ink = Color::rgb(0, 255, 0);
+    paint_parts(&mut surface, &[Rect::new(-2, 0, 2, 2)], |surface| {
+        surface.fill(ink);
+    });
+    for y in 0..4 {
+        for x in 0..4 {
+            assert_ne!(
+                surface.get(x, y).map(Pixel::unpremultiply),
+                Some(ink),
+                "({x}, {y}): an unaddressable rectangle paints nowhere"
+            );
         }
     }
 }

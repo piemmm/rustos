@@ -621,6 +621,30 @@ Each is the guarded write and nothing more, so being told twice reports
 nothing, and each damages exactly what it unlit. The desktop's input seat is
 what calls them — see [the session](../desktop/session.md#routing-one-seats-input-to-the-taskbar-and-the-window-manager).
 
+## The repaint account a host carries between reporting and painting
+
+A control reports its own repainted bounds into a damage sink; the host has to
+carry that answer from the input round to the paint. `damage::Repaint` is that
+account, one per host-composed surface: `Whole` — every pixel, which is what a
+change to the *model* owes, because a rebuilt list or a new label has no
+rectangle smaller than the surface — or `Parts(region)`, the rectangles owed in
+the surface's own pixels, an empty one meaning the surface on screen is current.
+`merge` composes two accounts (everything outranks a rectangle either way) and
+`area(w, h)` resolves one into the region a paint runs over, so "whole" is
+turned into a rectangle in exactly one place.
+
+It lives here rather than beside either consumer because it is the same account
+for every host-composed surface: the desktop's menu plates and the icon bar's
+five surfaces read one definition. `damage::paint_parts(surface, rects, paint)`
+is the other half — it lays the host's whole recipe under each rectangle as a
+clip, so a scoped repaint lands exactly the pixels a whole paint would have laid
+there and no second "paint just this control" recipe exists to disagree with the
+first. That holds because a plate *lays its colour down* rather than compositing
+it (see [Surface ground](#surface-ground-opaque-or-floating-chrome)), which
+makes re-deriving a rectangle idempotent; a rectangle whose corner is not
+addressable names no pixel of the surface and is skipped rather than painted
+somewhere else.
+
 ## Where it sits
 
 `#![no_std]`, and `#![forbid(unsafe_code)]`. The crate depends only on other

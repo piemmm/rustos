@@ -1,6 +1,6 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done**, **B done**, **C done** (less C.7, which A.4 found), **D
+Status: **A done**, **B done**, **C done**, **D
 done** (D.5 approved, comparison first), **E done**, **H, I, J done**. **F.0
 and F.1 done**, and F.1 closed F.3's item 5 and settled that items 4 and 6 need
 intrinsics rather than a source shape; F.2's candidates are unstarted and
@@ -51,14 +51,15 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E are done. What remains is **C.7** — the whole-bar hover repaint the
-A.4 gate found on its first run, which is the one open per-control damage gap
-and the reason A.4's damage bound sits where it does — **Stage F.2**'s packed
-candidates, which F.1's measurements narrow to the blur window and the resample
-row filter and which are aarch64-only until Stage G, **D.5**'s approved
-half-resolution blur (visual comparison first), and
-**Stage G**, still behind a User decision. `plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed
-independently of this schedule.
+Stages A–E are done. What remains is **Stage F.2**'s packed candidates, which
+F.1's measurements narrow to the blur window and the resample row filter and
+which are aarch64-only until Stage G, **D.5**'s approved half-resolution blur
+(visual comparison first), and **Stage G**, still behind a User decision.
+`plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed independently of this
+schedule.
+
+One per-control damage gap is deliberately left, and C.7 states it: the
+program-library popup owes its whole panel for every change.
 
 Closed: **the A.4 hover gate's frost bound is now normalised against the
 damage it serves.** `judge` normalises every other bound against what varies —
@@ -228,18 +229,20 @@ the two samples. This is the regression gate every later stage tightens.
 - **Bounds, all derived from the screen extent** so they hold on any board:
   frames ≥ `MIN_SWEEP_FRAMES` (an empty difference must not pass by measuring
   nothing), mean damage per frame ≤ `screen/8`, blends ≤ 4 per damaged pixel,
-  frost work ≤ `screen/4` (a handful of one-off frosts, never one per frame),
-  no re-rendered furniture, and presents ≤ rectangles + frames.
-- **Measured baseline** (two runs, 32-move sweep, `virt` board at 1024×768):
-  delta frames 36 / 50, damaged 863 951 / 860 876 px (mean 23 999 / 17 218,
-  against a bound of 98 304), blended 1.05 per damaged pixel, frost 40 560 px
-  in both, dirty rects 31 / 30, presents 25 / 23, chrome misses 0.
+  frost work ≤ one recomputed pixel per damaged pixel, no re-rendered
+  furniture, and presents ≤ rectangles + frames.
+- **Measured** (32-move sweep, `virt` board at 1024×768): delta frames 33,
+  damaged 1 248 257 px (mean 37 826 against a bound of 98 304), blended
+  1 384 927, blur 134 352, dirty rects 50, presents 33, chrome misses 0.
 - **`PointerPen::hover`** emits the run of motion samples; the enrolled-script
   invariant test covers the new script unchanged, because it still ends on the
   click its guest exits on.
-- **What the gate found on its first run** is C.7 below: a bar hover repaints
-  the whole bar. That is the one open per-control damage gap, and the reason
-  this stage's damage bound sits where it does.
+- **What the gate found on its first run** was C.7 below — a bar hover
+  repainting the whole bar — now fixed. What measuring the fix then found is
+  that **this bracket is not a hover measurement**: the two launches that
+  bracket the sweep dominate what it recomposes, so its mean is a bound on the
+  launch path and stays at `screen/8`. C.7 carries the numbers either side and
+  the deterministic host gate the per-control claim is held to.
 
 ---
 
@@ -306,9 +309,9 @@ Compositor-local: no ABI change, no app change.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window  **[done, less C.7]**
+## Stage C — Repaint the control that changed, not the window  **[done]**
 
-**[C.0–C.3, C.4b, C.4c, C.5 done; C.4a withdrawn]**
+**[C.0–C.3, C.4b, C.4c, C.5, C.7 done; C.4a withdrawn]**
 
 ### C.0 One region type, in one place  **[done]**
 `tairix_geometry::Region` (`lib/geometry/src/region.rs`) is the one region type;
@@ -573,49 +576,171 @@ a whole present asserted for a resize, a theme change, or a round that reported
 nothing (`files`: `sidebar_tests.rs` + `listing_tests.rs`; `switchboard`:
 `view/mod_tests.rs` + `panel_tests.rs`).
 
-**Acceptance:** the A.4 hover vertical's damaged-pixel counter drops from
-window-area to control-area; every existing control and WM test still passes
-unchanged.
+**Acceptance:** a gesture's damaged-pixel counter drops from window-area to
+control-area, asserted on deterministic counters rather than on the guest
+bracket's mean (C.7 measures both and says why); every existing control and WM
+test still passes unchanged.
 
-### C.7 A bar hover repaints the whole bar — found by A.4, **not yet fixed**
+### C.7 A bar hover repaints the control, not the bar  **[done]**
 
-The gate's first run found it, and it is why A.4's damage bound sits at
-`screen/8` rather than near a control's cost. Escalated rather than folded into
-A.4 (§15.7, §2.18): the fix reshapes the session's chrome present path and the
-compositor's surface-update seam for session-owned windows, and interacts with
-Stage D's frost-invalidation invariants, so it is its own change with its own
-measurement and gate run.
+A.4's first run found the bar escalating *any* hover change to a whole-surface
+repaint — 1014 × 40 = 40 560 screen pixels for a control about 40 × 40 — and it
+is why A.4's damage bound sits where it does. Both halves of the mechanism are
+gone.
 
-The mechanism, read from the code and confirmed by arithmetic:
+**The account is per control, not per surface.** `TaskbarRepaint` no longer
+carries five booleans; it carries five `tairix_controls::damage::Repaint`
+accounts, each either `Whole` or `Parts(region)` in that surface's own pixels.
+`Repaint` is the same type the menu chain already owed its plates, hoisted out
+of `userland/gui/session/src/menu.rs` into `lib/controls`'s damage module beside
+the sink the rectangles come from, so the desktop's two host-composed surface
+families read one definition (§2.2) and `paint_parts` — the clip-per-rectangle
+walk both paint through — lives there too.
 
-1. `Taskbar::track_hover` escalates *any* library-button or app-slot hover
-   change to the whole-surface `TaskbarRepaint::BAR` flag. (The tray capsule
-   already does the right thing — it reports fine rectangles into the `damage`
-   region it is handed.)
-2. `Presenter::present_bar` then hands the compositor a **fresh** surface via
-   `Compositor::set_surface`.
-3. `set_surface` goes through `Compositor::mutate`, which marks the window's
-   *whole bounds* dirty.
+`Whole` is what a change to the *model* owes, because a new clock label or a
+rebuilt application strip has no rectangle smaller than the surface. A change a
+*control* reports owes its own rectangles: `track_hover` reports the library
+button through the shared guarded write and the application strip through
+`damage::move_mark` (the slot the hover left and the slot it arrived on), the
+capsule reports its own slot as it always did, and the picker's cell hover joins
+them. The reported rectangles are screen rectangles, so each input site routes
+them onto the surfaces its controls draw on and restates them in that surface's
+pixels — `track_hover` and the capsule's click path to the bar and the readout,
+the picker's to its panel. Which surface a report belongs to is answered by the
+code that laid the control out, never guessed from geometry; a rectangle outside
+the surface names none of its pixels, so a collapsed readout (`Rect::EMPTY`)
+owes nothing. An expansion that *flips* still owes the readout whole: a window
+appearing or being taken down is not a rectangle on one.
 
-So one hover step costs 1014 × 40 = 40 560 screen pixels where the control that
-changed is about 40 × 40 — roughly 25× the pixels the change can be seen in.
-A.4's measured delta is about fifteen whole-bar repaints. The finer path
-already exists but only for **client** windows: the pixel-comparing convert
-marks only what genuinely changed. The session's own chrome surfaces do not use
-it.
+**The present updates the buffer instead of replacing it.** `TaskbarPresenter`
+goes through `Compositor::repaint_window` — the seam `present_menu_chain`
+already used for a menu plate — so the compositor marks the rectangles painted
+rather than the window's whole bounds, which `set_surface` → `mutate` could
+never do (a replaced surface is always assumed changed; comparing two whole
+buffers costs more than recompositing). One path for all five surfaces, with the
+fresh-window branch the only place a surface is allocated. `TaskbarRenderer`'s
+five `render_*` entry points became `paint_*`, taking the destination surface
+and the rectangles to paint, and laying the whole recipe under each as a clip:
+only the writes are withheld, so a scoped repaint lands exactly the pixels a
+whole paint would.
 
-The fix is to give the chrome present path that same treatment — update the
-window's existing buffer and mark only the changed rectangle — for the bar and
-every other chrome surface (popup, menu, picker, notifications, readout). With
-it, A.4's damage bound should drop to about `screen/64`, and the drop is the
-acceptance evidence.
+**That exactness needed one thing the review caught.** A plate *lays* its
+colour rather than compositing it, so an interior pixel is replaced either way
+— but a rounded plate's arc pixels are blended by their coverage, and laying
+the colour over a pixel that already carries it only mixes it further toward
+it, so a corner repainted twice opacifies (measured: α90 → α140 on the second
+paint). `damage::paint_parts` therefore clears each rectangle before running
+the recipe, which puts it in the state a fresh buffer would be in and makes
+re-deriving it the first paint again. `MenuChain`'s own `lay_plate` had been
+clearing for exactly this reason; the clear now lives once, in the walk both
+paint through, and its plate-level drift is pinned by a `lib/controls` test
+that fails without it. Both are asserted by painting the same recipe both ways
+and comparing every pixel.
 
-What remains here is **input-driven** only. The one repaint that fired on a
-cadence rather than on a gesture — the Switchboard tray republishing a reading
-every couple of seconds, of which a calm desktop's only moving part is a value
-line the bar does not draw — no longer latches `bar` at all: the capsule is
-gated on `TraySignal::draws_same_capsule` (`docs/src/desktop/taskbar.md`), so
-measuring this stage no longer has a 0.5 Hz whole-bar repaint underneath it.
+Stage D's invariants are untouched: `repaint_window` marks through
+`mark_layer`, so a scoped chrome repaint drops the frosts of the windows
+stacked *above* it exactly as a whole-surface one did, and the bar's own
+retained frost is reused rather than recomputed (`compose_plan` promotes only a
+blurred window whose frost must be rebuilt, so a repaint inside one costs its
+own rectangles).
+
+**A refused present keeps what the surface owes.** The presenter holds the
+account and takes it per present, putting back whatever it could not draw, so a
+heap that refuses a surface's pixels leaves the screen alone *and* is asked
+again — where before the latch had already been drained and the surface stayed
+stale until something else moved. A window whose extent no longer matches the
+layout is repainted whole into a buffer of the new size, since a buffer of the
+wrong size has nothing for a partial paint to keep.
+
+#### The measurement
+
+**The gesture, host-side and deterministic** — the same sweep A.4 injects
+(launcher to capsule along the bar's centre line, 32 moves), run against a real
+`Compositor` at 1920 × 1080 where the bar is 1910 × 48 = 91 680 px, measured
+either side of this change on one tree:
+
+| | before | after |
+|---|---|---|
+| frames composed | 33 | 33 |
+| damaged px | 436 822 | 83 268 |
+| mean px/frame | 13 237 | **2 523** |
+| a sample that moves a hover | 91 840 / 92 000 / 92 000 | **2 584 / 5 007 / 3 351** |
+| a sample that moves nothing | 1 856 | 1 856 |
+| worst frame (the capsule's readout appearing) | 107 158 | 18 502 |
+
+A sample that changes a control costs 18–35× less, which is the 25× the
+arithmetic predicted; a sample that changes nothing costs the cursor's two
+rectangles either way, unchanged. This is the gate: a host test asserts no
+frame of the gesture recomposes a whole bar's worth of pixels and that the mean
+stays under an eighth of one. It fails on the tree before this change with
+`sample 0 recomposed 91840 px, a whole bar being 91680`.
+
+**A.4's guest bracket, same board, `virt` at 1024 × 768** (bar 40 560 px),
+before and after, both `held`:
+
+| | before | after |
+|---|---|---|
+| delta frames | 34 | 33 |
+| damaged px | 1 386 975 | 1 248 257 |
+| mean px/frame | 40 793 | 37 826 |
+| blended px | 1 523 937 | 1 384 927 |
+| blur px | 134 352 | 134 352 |
+| dirty rects | 47 | 50 |
+| present calls | 34 | 33 |
+| chrome misses | 0 | 0 |
+
+**A.4's damage bound therefore stays at `screen/8`, and the earlier prediction
+that it would fall to about `screen/64` was wrong about what that bound
+measures.** The bracket is not a hover measurement: the two launches that
+bracket the sweep each open a launcher popup, click a row and close it, and
+that churn is most of the 1.25 M px the window recomposes. The gesture's own
+saving is the whole of the 138 718 px difference between the two columns —
+consistent with the host figure scaled by the smaller bar — but it moves the
+*mean* by 7%, because the churn it is averaged against did not change (the
+identical `blur_px` is the same fact from the other side: the frosts recomputed
+are the popups' own, one per showing, and never the bar's). Tightening the
+divisor onto 37 826 would gate the launch path with the hover's cost lost
+inside it, and would be load-dependent besides — the churn is fixed and the
+frame count is not — which is the defect the frost bound was reshaped to avoid.
+So the per-control claim is gated where it is deterministic, host-side, and
+A.4 keeps its job of catching a gesture that starts repainting a window or the
+screen.
+
+#### Tests
+
+- `lib/controls`: `Repaint`'s clean/whole/add/merge/`area` semantics;
+  `paint_parts` writing inside its rectangles and nowhere else, skipping a
+  rectangle whose corner is not addressable, and a part repainted over an
+  earlier paint — a corner among them — landing the pixel a whole paint laid.
+  The menu chain's own partial-repaint equivalence test now drives the shared
+  walk rather than a hand-rolled copy of it.
+- `userland/gui/taskbar`: a hover crossing two slots owing exactly those two;
+  a capsule hover owing its own slot on the bar and the readout whole; a bar
+  repaint scoped to a hovered control — one over the bar's rounded corner and
+  one clear of it — compared pixel for pixel against a whole paint; and the
+  seven existing hover assertions rewritten from `TaskbarRepaint::BAR` to the
+  controls they name.
+- `userland/gui/session`: an account owing one control repainting in place
+  (same window id) and marking only that control; a refused present keeping
+  what its surface owed; and the host sweep above.
+
+#### What is deliberately left
+
+The **library popup** owes its whole panel for every change. Its
+`PopupOutcome::Changed` reports only "the popup's pixels moved", and the
+changes behind it are not alike — a moved row highlight is two rows, while a
+scroll moves every row and a filter edit rebuilds the list, and neither the
+scrollbar nor the search field reports anything for those. Per-row damage there
+means every site inside the popup reporting its own rectangles, which is a
+change of its own with its own tests; the popup does get the scoped *present*
+path, so it costs a paint rather than a paint plus an allocation. Worth doing
+when a measurement says a popup hover matters.
+
+The one repaint that fired on a cadence rather than on a gesture — the
+Switchboard tray republishing a reading every couple of seconds, of which a
+calm desktop's only moving part is a value line the bar does not draw — was
+already gone before this change: the capsule is gated on
+`TraySignal::draws_same_capsule` (`docs/src/desktop/taskbar.md`).
 
 ---
 

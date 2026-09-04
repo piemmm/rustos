@@ -1,7 +1,8 @@
 //! Painting the taskbar's regions into a pixel [`Surface`].
 //!
-//! [`TaskbarRenderer::render`] turns the taskbar's computed [`BarLayout`] and
-//! live state into a premultiplied-alpha [`Surface`] sized to the bar. The
+//! [`TaskbarRenderer::paint`] lays the taskbar's computed [`BarLayout`] and
+//! live state into the caller's premultiplied-alpha [`Surface`], over the
+//! rectangles of it the caller names. The
 //! two permanent leading launchers are the shared `lib/controls`
 //! [`IconButton`](tairix_controls::IconButton)s the model owns, painted with
 //! their live hover/pressed state; every running application is one shared
@@ -22,7 +23,7 @@
 //! silhouette instead of squaring off across the cut. Placing the surface
 //! stays the window manager's job.
 //!
-//! [`TaskbarRenderer::render_library`] paints the open program-library popup:
+//! [`TaskbarRenderer::paint_library`] paints the open program-library popup:
 //! the shared [`Panel`](tairix_controls::Panel) chrome anchored back at the
 //! Library button, the search field, one shared list row per folder or
 //! entry, the scrollbar when the rows overflow, and the calm placeholder when
@@ -30,18 +31,23 @@
 //! ([`Taskbar::theme`]), so the geometry the input router hit-tests and the
 //! pixels painted here can never come from two different themes.
 //!
-//! [`TaskbarRenderer::render_notifications`] paints the notification popover:
+//! [`TaskbarRenderer::paint_notifications`] paints the notification popover:
 //! the shared `lib/controls` [`Panel`](tairix_controls::Panel) chrome anchored
 //! back at the notification region, and one shared [`Notification`] card per
 //! raised notification (severity mapped to the card's composed state),
 //! presented by the window manager as its own small window above the bar.
 //!
-//! [`TaskbarRenderer::render_tray_readout`] paints the account capsule's
+//! [`TaskbarRenderer::paint_tray_readout`] paints the account capsule's
 //! expanded readout: the shared [`TraySignal`](tairix_controls::TraySignal)
 //! draws its own elevated plate at the geometry
 //! [`Taskbar::tray_readout_layout`] computed, presented by the window
 //! manager as its own small window beside the capsule (the capsule itself is
-//! painted on the bar by [`render`](TaskbarRenderer::render)).
+//! painted on the bar by [`paint`](TaskbarRenderer::paint)).
+//!
+//! Every painter takes the surface's own rectangles to paint and lays the
+//! whole recipe under each as a clip, so a repaint scoped to one hovered slot
+//! lands exactly the pixels a whole paint would have laid there and there is
+//! no second "paint just this control" recipe to disagree with the first.
 //!
 //! Region rectangles are in screen space; each is translated into the
 //! surface's local space by subtracting the surface's origin. The translation
@@ -52,6 +58,7 @@
 //! glyph resolved from the signal's kind, rasterised to the slot size and
 //! composited through `lib/raster`'s single blit path.
 
+use tairix_controls::damage;
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState};
@@ -63,7 +70,7 @@ use tairix_raster::{Color, Surface};
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
 use tairix_theme::{Palette, TextRole};
 
-use crate::layout::BarLayout;
+use crate::layout::{local_rect, BarLayout};
 use crate::library::{chrome_panel, list_row, popup_font, LibraryFocus};
 use crate::notifications::{NotificationArea, NotifySeverity, TransientNotification};
 use crate::taskbar::Taskbar;
@@ -259,17 +266,31 @@ impl TaskbarRenderer {
     /// rule, every seam and bead) is drawn solid so it reads against whatever
     /// wallpaper is behind.
     ///
-    /// Returns `None` only if the bar's pixel dimensions cannot be allocated
-    /// (a surface that could never exist), so the caller fails closed rather
-    /// than panicking. The window manager presents the
-    /// returned surface and rounds it with [`BarLayout::corner_radius`].
-    #[must_use]
-    pub fn render(
+    /// `rects` are the surface's own rectangles to paint, each drawn under its
+    /// own clip through the one shared recipe, so a bar repainted for one
+    /// hovered slot lands exactly the pixels a whole paint would have there.
+    /// A whole paint is the surface's own rectangle.
+    pub fn paint(
         &mut self,
         taskbar: &Taskbar,
         scale: Scale,
         artwork: &mut dyn IconArtwork,
-    ) -> Option<Surface> {
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            self.paint_bar(taskbar, scale, artwork, surface);
+        });
+    }
+
+    /// The bar's whole recipe, laid across the surface in its own pixels.
+    fn paint_bar(
+        &mut self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        artwork: &mut dyn IconArtwork,
+        surface: &mut Surface,
+    ) {
         let theme = taskbar.theme();
         let layout = taskbar.layout(scale);
         let mut icons = IconContext {
@@ -277,7 +298,6 @@ impl TaskbarRenderer {
             set: &self.icon_set,
             generation: self.icon_generation,
         };
-        let mut surface = Surface::new(layout.bar.width, layout.bar.height)?;
         let origin = layout.bar.origin;
         // The clock is a de-emphasised annotation, set a step smaller like
         // every other caption on the desktop.
@@ -286,7 +306,7 @@ impl TaskbarRenderer {
         // The bar wears the same plate as the popups it opens; its regions are
         // laid out in screen space, so the interior the plate reports is moot.
         let _ = paint_surface_plate(
-            &mut surface,
+            surface,
             (0, 0, layout.bar.width, layout.bar.height),
             (layout.corner_radius, plate_border(theme, scale)),
             theme,
@@ -297,7 +317,7 @@ impl TaskbarRenderer {
             let bounds = local_rect(layout.library, origin);
             let side = button.icon_side(bounds, scale, theme);
             let art = artwork.artwork(IconRequest::kind(IconKind::Library), side);
-            button.render(&mut surface, bounds, scale, theme, art);
+            button.render(surface, bounds, scale, theme, art);
         }
 
         surface.fill_rect(
@@ -322,11 +342,11 @@ impl TaskbarRenderer {
             let bounds = local_rect(*slot, origin);
             let side = item.icon_side(bounds, scale, theme);
             let art = slot_artwork(app.artwork(), app.icon(), side, artwork);
-            item.render(&mut surface, bounds, scale, theme, art);
+            item.render(surface, bounds, scale, theme, art);
         }
 
         paint_trailing(
-            &mut surface,
+            surface,
             &layout,
             taskbar.notifications(),
             taskbar.clock().label(),
@@ -344,9 +364,8 @@ impl TaskbarRenderer {
             // disc outranks anything the shipped-artwork lookup holds.
             let disc = tray.identity_disc(side, scale, theme);
             let art = slot_artwork(disc.as_ref(), signal.icon(), side, artwork);
-            signal.render(&mut surface, bounds, scale, theme, art);
+            signal.render(surface, bounds, scale, theme, art);
         }
-        Some(surface)
     }
 
     /// Paint the open window picker into a [`Surface`] using the taskbar's
@@ -355,180 +374,214 @@ impl TaskbarRenderer {
     /// Each cell draws the thumbnail the embedder supplied for that window,
     /// falling back to the application's own glyph when it has none, so a
     /// cell always states something; a grid with more rows than the panel
-    /// shows draws the scrollbar that reaches the rest. Returns `None` when
-    /// the picker is closed or its dimensions cannot be allocated (fail
-    /// closed).
-    #[must_use]
-    pub fn render_picker(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
-        let layout = taskbar.picker_layout(scale)?;
-        let theme = taskbar.theme();
-        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-        let origin = layout.panel.origin;
-        let _ = paint_surface_plate(
-            &mut surface,
-            (0, 0, layout.panel.width, layout.panel.height),
-            (layout.corner_radius, plate_border(theme, scale)),
-            theme,
-            (theme.palette().surface_raised, ChromeLayer::Ground),
-        );
-        let picker = taskbar.picker();
-        for (index, cell) in layout.cells.iter().enumerate() {
-            if cell.is_empty() {
-                continue;
-            }
-            let (Some(preview), Some(entry)) = (picker.preview(index), picker.entries().get(index))
-            else {
-                continue;
-            };
-            // The picker holds no icon cache of its own, and this fallback is
-            // the transient case of a window whose first frame has not
-            // arrived: a popup that opens on a gesture, not a surface being
-            // scrolled, so the glyph is drawn inline here.
-            preview.render(
-                &mut surface,
-                local_rect(*cell, origin),
-                scale,
-                theme,
-                entry.thumbnail(),
-                None,
-            );
-        }
-        if let Some(scrollbar) = layout.scrollbar {
-            picker
-                .scrollbar()
-                .render(&mut surface, local_rect(scrollbar, origin), scale, theme);
-        }
-        Some(surface)
+    /// shows draws the scrollbar that reaches the rest. `rects` are the
+    /// surface's own rectangles to paint; a closed picker paints nothing.
+    pub fn paint_picker(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            paint_picker_panel(taskbar, scale, surface);
+        });
     }
 
     /// Paint the open program-library popup into a [`Surface`] using the
     /// taskbar's own theme.
     ///
-    /// Returns `None` when the popup is closed (there is nothing to draw) or
-    /// when its pixel dimensions cannot be allocated, so the caller fails
-    /// closed rather than panicking. The window manager places the returned
-    /// surface above the bar and rounds it with
+    /// `rects` are the surface's own rectangles to paint; a closed popup
+    /// paints nothing. The window manager places the surface above the bar and
+    /// rounds it with
     /// [`LibraryLayout::corner_radius`](crate::library::LibraryLayout::corner_radius),
     /// exactly as it rounds the bar.
-    #[must_use]
-    pub fn render_library(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
-        let popup = taskbar.library();
-        if !popup.is_open() {
-            return None;
-        }
-        let theme = taskbar.theme();
-        let layout = taskbar.library_layout(scale);
-        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-        let origin = layout.panel.origin;
-        let font = popup_font(theme, scale);
-        let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
-
-        chrome_panel(local_point(layout.anchor, origin)).render(
-            &mut surface,
-            local_bounds,
-            scale,
-            theme,
-        );
-        popup.search_field().render(
-            &mut surface,
-            local_rect(layout.search, origin),
-            scale,
-            theme,
-        );
-
-        let row_focus = popup.focus() == LibraryFocus::Rows;
-        for &(index, rect) in &layout.rows {
-            let Some(row) = popup.rows().get(index) else {
-                continue;
-            };
-            let current = popup.current() == Some(index);
-            let hovered = popup.hover() == Some(index);
-            list_row(row, current, hovered, row_focus).render(
-                &mut surface,
-                local_rect(rect, origin),
-                scale,
-                theme,
-                popup.row_artwork(index).map(IconPicture::Artwork),
-            );
-        }
-
-        if let Some(placeholder) = popup.placeholder() {
-            draw_label(
-                &mut surface,
-                origin,
-                layout.viewport,
-                placeholder,
-                theme.palette().on_surface_muted.into(),
-                font,
-            );
-        }
-
-        if let Some(scrollbar) = layout.scrollbar {
-            popup
-                .scrollbar()
-                .render(&mut surface, local_rect(scrollbar, origin), scale, theme);
-        }
-        Some(surface)
+    pub fn paint_library(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            paint_library_panel(taskbar, scale, surface);
+        });
     }
 
     /// Paint the notification popover into a [`Surface`] using the taskbar's
     /// own theme.
     ///
-    /// Returns `None` when no notification is raised (there is nothing to
-    /// draw) or when the surface cannot be allocated, so the caller fails
-    /// closed rather than panicking. The window manager places the returned
+    /// `rects` are the surface's own rectangles to paint; a popover with no
+    /// notification raised paints nothing. The window manager places the
     /// surface above the bar and rounds it with
     /// [`NotificationsLayout::corner_radius`](crate::NotificationsLayout::corner_radius),
     /// exactly as it rounds the bar and the library popup. Each card is the
     /// shared [`Notification`] control, so the popover restates no chrome and
     /// no colour algebra of its own.
-    #[must_use]
-    pub fn render_notifications(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
-        let layout = taskbar.notifications_layout(scale)?;
-        let theme = taskbar.theme();
-        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-        let origin = layout.panel.origin;
-        let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
-
-        crate::layout::notif_panel(local_point(layout.anchor, origin)).render(
-            &mut surface,
-            local_bounds,
-            scale,
-            theme,
-        );
-
-        let notifications = taskbar.notifications();
-        for placed in &layout.cards {
-            let Some(note) = notifications.notification(placed.index) else {
-                continue;
-            };
-            card_control(note).render(&mut surface, local_rect(placed.card, origin), scale, theme);
-        }
-        Some(surface)
+    pub fn paint_notifications(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            paint_notifications_panel(taskbar, scale, surface);
+        });
     }
 
     /// Paint the Switchboard capsule's expanded readout into a [`Surface`]
     /// using the taskbar's own theme.
     ///
-    /// Returns `None` while the readout is collapsed (there is nothing to
-    /// draw) or when the surface cannot be allocated, so the caller fails
-    /// closed rather than panicking. The window manager places the returned
-    /// surface beside the capsule and rounds it with
+    /// `rects` are the surface's own rectangles to paint; a collapsed readout
+    /// paints nothing. The window manager places the surface beside the
+    /// capsule and rounds it with
     /// [`TrayReadoutLayout::corner_radius`](crate::TrayReadoutLayout::corner_radius)
     /// — the same popup radius the readout plate draws for itself, kept in
     /// step by construction.
-    #[must_use]
-    pub fn render_tray_readout(&self, taskbar: &Taskbar, scale: Scale) -> Option<Surface> {
-        let layout = taskbar.tray_readout_layout(scale)?;
-        let theme = taskbar.theme();
-        let mut surface = Surface::new(layout.panel.width, layout.panel.height)?;
-        let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
-        taskbar
-            .tray()
-            .signal()
-            .render_readout(&mut surface, local, scale, theme);
-        Some(surface)
+    pub fn paint_tray_readout(
+        &self,
+        taskbar: &Taskbar,
+        scale: Scale,
+        surface: &mut Surface,
+        rects: &[Rect],
+    ) {
+        damage::paint_parts(surface, rects, |surface| {
+            paint_readout_panel(taskbar, scale, surface);
+        });
     }
+}
+
+/// The picker's whole recipe, laid across the surface in its own pixels.
+fn paint_picker_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
+    let Some(layout) = taskbar.picker_layout(scale) else {
+        return;
+    };
+    let theme = taskbar.theme();
+    let origin = layout.panel.origin;
+    let _ = paint_surface_plate(
+        surface,
+        (0, 0, layout.panel.width, layout.panel.height),
+        (layout.corner_radius, plate_border(theme, scale)),
+        theme,
+        (theme.palette().surface_raised, ChromeLayer::Ground),
+    );
+    let picker = taskbar.picker();
+    for (index, cell) in layout.cells.iter().enumerate() {
+        if cell.is_empty() {
+            continue;
+        }
+        let (Some(preview), Some(entry)) = (picker.preview(index), picker.entries().get(index))
+        else {
+            continue;
+        };
+        // The picker holds no icon cache of its own, and this fallback is
+        // the transient case of a window whose first frame has not
+        // arrived: a popup that opens on a gesture, not a surface being
+        // scrolled, so the glyph is drawn inline here.
+        preview.render(
+            surface,
+            local_rect(*cell, origin),
+            scale,
+            theme,
+            entry.thumbnail(),
+            None,
+        );
+    }
+    if let Some(scrollbar) = layout.scrollbar {
+        picker
+            .scrollbar()
+            .render(surface, local_rect(scrollbar, origin), scale, theme);
+    }
+}
+
+/// The popup's whole recipe, laid across the surface in its own pixels.
+fn paint_library_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
+    let popup = taskbar.library();
+    if !popup.is_open() {
+        return;
+    }
+    let theme = taskbar.theme();
+    let layout = taskbar.library_layout(scale);
+    let origin = layout.panel.origin;
+    let font = popup_font(theme, scale);
+    let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+
+    chrome_panel(local_point(layout.anchor, origin)).render(surface, local_bounds, scale, theme);
+    popup
+        .search_field()
+        .render(surface, local_rect(layout.search, origin), scale, theme);
+
+    let row_focus = popup.focus() == LibraryFocus::Rows;
+    for &(index, rect) in &layout.rows {
+        let Some(row) = popup.rows().get(index) else {
+            continue;
+        };
+        let current = popup.current() == Some(index);
+        let hovered = popup.hover() == Some(index);
+        list_row(row, current, hovered, row_focus).render(
+            surface,
+            local_rect(rect, origin),
+            scale,
+            theme,
+            popup.row_artwork(index).map(IconPicture::Artwork),
+        );
+    }
+
+    if let Some(placeholder) = popup.placeholder() {
+        draw_label(
+            surface,
+            origin,
+            layout.viewport,
+            placeholder,
+            theme.palette().on_surface_muted.into(),
+            font,
+        );
+    }
+
+    if let Some(scrollbar) = layout.scrollbar {
+        popup
+            .scrollbar()
+            .render(surface, local_rect(scrollbar, origin), scale, theme);
+    }
+}
+
+/// The popover's whole recipe, laid across the surface in its own pixels.
+fn paint_notifications_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
+    let Some(layout) = taskbar.notifications_layout(scale) else {
+        return;
+    };
+    let theme = taskbar.theme();
+    let origin = layout.panel.origin;
+    let local_bounds = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+
+    crate::layout::notif_panel(local_point(layout.anchor, origin)).render(
+        surface,
+        local_bounds,
+        scale,
+        theme,
+    );
+
+    let notifications = taskbar.notifications();
+    for placed in &layout.cards {
+        let Some(note) = notifications.notification(placed.index) else {
+            continue;
+        };
+        card_control(note).render(surface, local_rect(placed.card, origin), scale, theme);
+    }
+}
+
+/// The readout's whole recipe, laid across the surface in its own pixels.
+fn paint_readout_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
+    let Some(layout) = taskbar.tray_readout_layout(scale) else {
+        return;
+    };
+    let theme = taskbar.theme();
+    let local = Rect::new(0, 0, layout.panel.width, layout.panel.height);
+    taskbar
+        .tray()
+        .signal()
+        .render_readout(surface, local, scale, theme);
 }
 
 /// The shared notification card for `note`, its role and composed state mapping
@@ -685,16 +738,6 @@ fn slot_artwork<'a>(
         Some(surface) => Some(IconPicture::Artwork(surface)),
         None => artwork.artwork(IconRequest::kind(kind), side),
     }
-}
-
-/// Translate a screen-space rectangle into surface-local space.
-fn local_rect(rect: Rect, origin: Point) -> Rect {
-    Rect::new(
-        rect.left().saturating_sub(origin.x),
-        rect.top().saturating_sub(origin.y),
-        rect.width,
-        rect.height,
-    )
 }
 
 /// Translate a screen-space point into surface-local space.

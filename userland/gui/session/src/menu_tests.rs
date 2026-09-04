@@ -15,9 +15,10 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_theme::Theme;
 use tairix_wm::{InputEvent, Key, NamedKey, PointerButton};
 
+use tairix_controls::damage::Repaint;
+
 use crate::menu::{
-    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, ModelRefused, Repaint,
-    SurfaceKind,
+    ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, ModelRefused, SurfaceKind,
 };
 
 const SCREEN: Rect = Rect::new(0, 0, 1280, 800);
@@ -1251,15 +1252,11 @@ fn repainting_a_plates_damaged_rows_lands_what_a_whole_paint_would() {
             panic!("a plate on screen owes rectangles, not all of itself");
         };
         assert!(!parts.is_empty(), "settling on row {row} moved the mark");
-        for rect in parts.rects() {
-            retained.with_clip(
-                rect.left().unsigned_abs(),
-                rect.top().unsigned_abs(),
-                rect.width,
-                rect.height,
-                |surface| partial.render_surface(SurfaceKind::Plate(0), surface, &g),
-            );
-        }
+        // Through the shared clip-and-clear walk the session paints with, so
+        // this is the production path rather than a second copy of it.
+        tairix_controls::damage::paint_parts(&mut retained, parts.rects(), |surface| {
+            partial.render_surface(SurfaceKind::Plate(0), surface, &g);
+        });
         present_all(&mut partial);
         assert_eq!(
             retained,

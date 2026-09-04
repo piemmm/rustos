@@ -70,12 +70,20 @@ pub const MIN_SWEEP_FRAMES: u64 = 8;
 /// third of the screen) or the screen itself, so it catches a gesture that
 /// starts repainting either.
 ///
-/// The baseline it is set from is a real one, and it is *not* the cost of a
-/// control: the bar escalates every hover change to a whole-bar repaint, which
-/// is 25 times the pixels the change can be seen in. That is a known defect
-/// recorded in `plans/FIX-DESKTOP-SPEEDUP.md`, not a cost this bound endorses
-/// — the bound is where a gate can sit *today* without failing on the desktop
-/// as it stands, and the plan states the far tighter one the fix admits.
+/// **It is deliberately not tightened onto the per-control cost, because this
+/// bracket does not measure one.** The two launches that bracket the sweep
+/// each open a launcher popup, click a row, and close it, and that churn is
+/// most of what the window recomposes: measured either side of the per-control
+/// chrome repaint, the mean moved 40 793 → 37 826 px per frame while the
+/// gesture's *own* saving was the whole of the 138 718 px difference. So a
+/// tighter divisor here would be a bound on the launch path with the hover's
+/// cost lost in it — and a load-dependent one, since the churn is fixed and
+/// the frame count is not (the recorded brackets run from 33 to 119 frames),
+/// which is precisely the defect [`MAX_BLUR_PX_PER_DAMAGED_PX`] was reshaped
+/// to avoid. The per-control claim is gated where it is deterministic: the
+/// host-side sweep in `userland/gui/session` asserts that no frame of the
+/// gesture recomposes a whole bar's worth of pixels and that the mean stays
+/// under an eighth of one (`plans/FIX-DESKTOP-SPEEDUP.md` C.7).
 pub const SWEEP_DAMAGE_DIVISOR: u64 = 8;
 
 /// Recomputed frost pixels one damaged pixel in the bracketed window may

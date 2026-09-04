@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::window_ipc::AppMenuItemId;
+use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
     ControlRole, IconButton, PlatePlacement, PlateSeating, PointerState, TaskbarItem,
     TraySignalAction,
@@ -37,7 +38,7 @@ use crate::clock::Clock;
 use crate::clock_menu::ClockPermits;
 use crate::edge::Edge;
 use crate::input::TaskbarResponse;
-use crate::layout::{BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
+use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, TrayReadoutLayout};
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
 use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
@@ -409,8 +410,9 @@ impl Taskbar {
     /// and most readings move nothing the bar draws.
     pub fn set_tray_summary(&mut self, summary: Option<TraySummary>) -> bool {
         let parts = self.tray.set_summary(summary);
+        let latched = parts.any();
         self.repaint |= parts;
-        parts.any()
+        latched
     }
 
     /// Adopt the session's count of unresponsive applications, latching a
@@ -418,8 +420,9 @@ impl Taskbar {
     /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
     pub fn set_tray_unresponsive(&mut self, count: u16) -> bool {
         let parts = self.tray.set_unresponsive(count);
+        let latched = parts.any();
         self.repaint |= parts;
-        parts.any()
+        latched
     }
 
     /// Adopt the signed-in account's name, from which the trailing capsule's
@@ -427,8 +430,9 @@ impl Taskbar {
     /// [`set_tray_summary`](Self::set_tray_summary) for what is returned.
     pub fn set_account(&mut self, name: &str) -> bool {
         let parts = self.tray.set_account(name);
+        let latched = parts.any();
         self.repaint |= parts;
-        parts.any()
+        latched
     }
 
     /// Adopt the session's attestation that its console has a
@@ -476,18 +480,22 @@ impl Taskbar {
         &mut self,
         event: &InputEvent,
         scale: Scale,
-        damage: &mut Region,
     ) -> Option<TraySignalAction> {
-        let capsule = self.layout(scale).switchboard;
+        let layout = self.layout(scale);
         let readout = self
             .tray_readout_layout(scale)
             .map_or(Rect::EMPTY, |readout| readout.panel);
-        let (changed, action) =
-            self.tray
-                .on_pointer(event, capsule, readout, scale, &self.theme, damage);
-        if changed {
-            self.repaint |= TaskbarRepaint::BAR | TaskbarRepaint::READOUT;
-        }
+        let mut reported = damage::sink();
+        let (_, action) = self.tray.on_pointer(
+            event,
+            layout.switchboard,
+            readout,
+            scale,
+            &self.theme,
+            &mut reported,
+        );
+        owe(&mut self.repaint.bar, &reported, layout.bar);
+        owe(&mut self.repaint.readout, &reported, readout);
         action
     }
 
@@ -789,14 +797,18 @@ impl Taskbar {
         event: &InputEvent,
         pointer: Point,
         scale: Scale,
-        damage: &mut Region,
     ) -> bool {
         let Some(layout) = self.picker_layout(scale) else {
             return false;
         };
+        // The grid's scrollbar takes a damage sink and what it reports is not
+        // what the picker owes: a moved thumb reports where the bar is, while
+        // the scroll it drove moves every cell. So the panel is owed whole and
+        // the sink ends here.
+        let mut reported = damage::sink();
         if self
             .picker
-            .on_pointer(event, &layout, pointer, (scale, &self.theme), damage)
+            .on_pointer(event, &layout, pointer, (scale, &self.theme), &mut reported)
         {
             self.repaint |= TaskbarRepaint::PICKER;
             return true;
@@ -804,12 +816,12 @@ impl Taskbar {
         false
     }
 
-    /// Track the hovered picker cell, latching the picker's own repaint when
-    /// the highlight moves.
-    pub(crate) fn track_picker_hover(&mut self, cell: Option<usize>) {
-        if self.picker.set_hover(cell) {
-            self.repaint |= TaskbarRepaint::PICKER;
-        }
+    /// Track the hovered picker cell, owing the panel the cell the highlight
+    /// left and the cell it arrived on.
+    pub(crate) fn track_picker_hover(&mut self, cell: Option<usize>, layout: &PickerLayout) {
+        let mut reported = damage::sink();
+        self.picker.set_hover(cell, &layout.cells, &mut reported);
+        owe(&mut self.repaint.picker, &reported, layout.panel);
     }
 
     /// Show the window picker over the application at `app`, with one cell
@@ -965,11 +977,19 @@ impl Taskbar {
     ///
     /// While the popup is open the Library button stays visually pressed (it
     /// is "held open"). Every hover target tracked here paints on the bar
-    /// itself, so a change latches only [`bar`](TaskbarRepaint::bar) — except
-    /// the Switchboard capsule, whose hover can also expand or collapse its
-    /// readout.
-    pub(crate) fn track_hover(&mut self, point: Option<Point>, scale: Scale, damage: &mut Region) {
+    /// itself, so a change owes the bar the moved control's own rectangles
+    /// and nothing more — a hover crossing the strip costs the slot it left
+    /// and the slot it arrived on, not the full-width bar. The Switchboard
+    /// capsule is the one target that also owns a second surface: its hover
+    /// expands or collapses the readout, which is a window to place or take
+    /// down rather than a rectangle to repaint.
+    pub(crate) fn track_hover(&mut self, point: Option<Point>, scale: Scale) {
         let layout = self.layout(scale);
+        let readout = self
+            .tray_readout_layout(scale)
+            .map_or(Rect::EMPTY, |readout| readout.panel);
+        let mut reported = damage::sink();
+
         let over = |rect: Rect| point.is_some_and(|at| rect.contains(at));
         let library_pointer = if self.library.is_open() {
             PointerState::Pressed
@@ -978,41 +998,72 @@ impl Taskbar {
         } else {
             PointerState::None
         };
-        let mut bar_changed = set_pointer(&mut self.library_button, library_pointer);
+        set_pointer(
+            &mut self.library_button,
+            library_pointer,
+            layout.library,
+            &mut reported,
+        );
         let app_hover = point.and_then(|at| layout.apps.iter().position(|slot| slot.contains(at)));
-        bar_changed |= self.apps.set_hover(app_hover);
-        if bar_changed {
-            self.repaint |= TaskbarRepaint::BAR;
-        }
+        self.apps.set_hover(app_hover, &layout.apps, &mut reported);
 
         let was_expanded = self.tray.is_expanded();
-        let readout = self
-            .tray_readout_layout(scale)
-            .map_or(Rect::EMPTY, |readout| readout.panel);
         // The capsule's expansion rule is the shared control's, so both
         // directions are asked of it rather than re-derived here.
-        let tray_changed = match point {
-            Some(at) => {
-                self.tray
-                    .track(at, layout.switchboard, readout, scale, &self.theme, damage)
-            }
-            None => self.tray.pointer_left(layout.switchboard, readout, damage),
+        match point {
+            Some(at) => self.tray.track(
+                at,
+                layout.switchboard,
+                readout,
+                scale,
+                &self.theme,
+                &mut reported,
+            ),
+            None => self
+                .tray
+                .pointer_left(layout.switchboard, readout, &mut reported),
         };
-        if tray_changed {
-            self.repaint |= TaskbarRepaint::BAR;
-            if was_expanded || self.tray.is_expanded() {
-                self.repaint |= TaskbarRepaint::READOUT;
-            }
+        if self.tray.is_expanded() != was_expanded {
+            self.repaint |= TaskbarRepaint::READOUT;
         }
+        owe(&mut self.repaint.bar, &reported, layout.bar);
+        owe(&mut self.repaint.readout, &reported, readout);
     }
 }
 
-/// Set `button`'s pointer state, reporting whether it changed.
-fn set_pointer(button: &mut IconButton, pointer: PointerState) -> bool {
-    let state = button.state();
-    if state.pointer == pointer {
+/// Set `button`'s pointer state, reporting the bounds it is drawn at when that
+/// changed it, and answering whether it did.
+///
+/// The comparison is the shared guarded write's, applied to a copy of the
+/// state because the field lives inside the control.
+fn set_pointer(
+    button: &mut IconButton,
+    pointer: PointerState,
+    bounds: Rect,
+    damage: &mut Region,
+) -> bool {
+    let mut state = button.state();
+    if !damage::set(&mut state.pointer, pointer, bounds, damage) {
         return false;
     }
-    button.set_state(state.with_pointer(pointer));
+    button.set_state(state);
     true
+}
+
+/// Fold the screen-space rectangles `reported` into what the surface occupying
+/// `surface` owes, restated in that surface's own pixels.
+///
+/// A control is laid out in screen space and reports the rectangle it was laid
+/// out at; a repaint is asked for in the surface's own pixels. Which surface a
+/// report belongs to is answered by the code that laid the control out, not by
+/// geometry, so this is told the surface rather than searching for it: a
+/// reported rectangle outside `surface` names none of its pixels, and a
+/// collapsed surface is [`Rect::EMPTY`] and owes nothing.
+fn owe(owed: &mut Repaint, reported: &Region, surface: Rect) {
+    for rect in reported.rects() {
+        let part = rect.intersection(&surface);
+        if !part.is_empty() {
+            owed.add(local_rect(part, surface.origin));
+        }
+    }
 }

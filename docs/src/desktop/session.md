@@ -1012,24 +1012,39 @@ because each is drawn on the session's floating ground — as is every surface o
 an open menu chain, which `DesktopShell::present_menu_chain` reconciles rather
 than the presenter ([menus](menus.md)).
 
-`present` repaints **only the surfaces the taskbar latched as changed**. It
-takes the `tairix_taskbar::TaskbarRepaint` that `DesktopShell::present`
-drains from the model, and each of the five surfaces above is re-rendered
-and re-pushed only when its flag is set. This is what makes hovering cheap:
-each surface costs a full re-render and marks its whole window rectangle
-dirty, so a pointer crossing one small open menu must repaint that menu
-alone. Two things override an empty latch — a surface that has no window yet
-is always painted, so the first frame puts everything on screen, and a
-change of desktop density repaints everything, because the scale belongs to
-the output rather than to the taskbar model the latch tracks.
+`present` repaints **only what the taskbar owes**. It takes the
+`tairix_taskbar::TaskbarRepaint` that `DesktopShell::present` drains from the
+model, which carries one `Repaint` account per surface, and brings each surface
+up to date with what its account names. Two things override an empty account —
+a surface that has no window yet is always painted, so the first frame puts
+everything on screen, and a change of desktop density repaints everything,
+because every rectangle owed was measured at the old density and the scale
+belongs to the output rather than to the taskbar model.
+
+**A surface already on screen keeps its pixels and is repainted only where it
+owes them.** The presenter hands the compositor a *paint* over the window's
+retained buffer (`Compositor::repaint_window`) rather than a freshly rendered
+surface, so the compositor marks the rectangles that were painted instead of
+the window's whole bounds — the same treatment `present_menu_chain` gives a
+menu plate. That is the difference between a 40 × 40 slot taking the pointer's
+wash costing its own 1600 pixels and costing the bar's 40 560, over a frosted
+backdrop that must then be re-blurred. The renderer re-derives its whole recipe
+under each rectangle as a clip (`tairix_controls::damage::paint_parts`), so a
+scoped repaint lands exactly the pixels a whole paint would have laid there and
+there is no second "paint just this control" recipe to disagree with the first;
+a window whose extent no longer matches the layout is repainted whole into a
+buffer of the new size, since a buffer of the wrong size has nothing for a
+partial paint to keep.
 
 The presenter owns only the compositor `WindowId` tokens it minted — the
 taskbar model, the renderer, and the compositor are the embedder's, so the
 session composes the GUI crates without owning the window-manager handle. It is
-total and fails closed (`AGENTS.md` §2.9): a render that cannot allocate its
-surface leaves the on-screen window untouched rather than blanking the bar, a
-window the compositor no longer knows is re-created on the next present, and
-`teardown` removes every window so a session shutdown leaves nothing orphaned.
+total and fails closed (`AGENTS.md` §2.9): a paint whose pixels cannot be
+allocated leaves the on-screen window untouched rather than blanking the bar
+*and keeps what that surface owed*, so a refusal can never report a stale
+surface as current; a window the compositor no longer knows is re-created on
+the next present; and `teardown` removes every window so a session shutdown
+leaves nothing orphaned.
 
 ## Fading the desktop in and out
 

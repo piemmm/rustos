@@ -21,6 +21,7 @@ use tairix_abi::{
     AppInfoHeader, DriverError, Errno, ProcId, ABI_VERSION_CURRENT, APPINFO_MAGIC, BUNDLE_ID_MAX,
     BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
 };
+use tairix_controls::damage::Repaint;
 use tairix_controls::{ChainModel, Fact, FactList, PointerState};
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
@@ -657,10 +658,7 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
         &mut comp,
         &mut renderer,
         session.taskbar(),
-        TaskbarRepaint {
-            library: true,
-            ..TaskbarRepaint::NONE
-        },
+        TaskbarRepaint::LIBRARY,
         &mut NoArtwork,
     );
 
@@ -668,6 +666,173 @@ fn presenting_one_latched_surface_leaves_the_others_alone() {
         comp.composite().bounds(),
         popup_rect,
         "only the popup was repainted; the bar keeps its pixels"
+    );
+}
+
+#[test]
+fn an_account_owing_one_control_repaints_it_in_place_and_marks_nothing_wider() {
+    let session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut presenter = TaskbarPresenter::new();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+    comp.composite();
+    let bar = presenter.bar_window().expect("the bar is presented");
+    let bar_rect = window_rect(&comp, bar);
+
+    // What a hover over the Library button owes: that button's rectangle, in
+    // the bar surface's own pixels.
+    let button = session.taskbar().layout(comp.scale()).library;
+    let mut owed = Repaint::clean();
+    owed.add(tairix_wm::Rect::new(
+        button.left() - bar_rect.left(),
+        button.top() - bar_rect.top(),
+        button.width,
+        button.height,
+    ));
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint {
+            bar: owed,
+            ..TaskbarRepaint::NONE
+        },
+        &mut NoArtwork,
+    );
+
+    assert_eq!(
+        presenter.bar_window(),
+        Some(bar),
+        "the bar's pixels were updated in place, not replaced"
+    );
+    assert_eq!(
+        comp.composite().bounds(),
+        button,
+        "the named button is the whole of what the frame recomposes"
+    );
+    assert!(
+        button.width * button.height * 8 < bar_rect.width * bar_rect.height,
+        "and that is a small fraction of the bar it sits on"
+    );
+}
+
+/// A pointer sweeping the length of the icon bar repaints the controls it
+/// crosses and never the strip they sit on.
+///
+/// The host-side twin of the A.4 hover vertical, and the deterministic one:
+/// the samples are injected singly and every bound is over counted pixels, so
+/// the reading is the same on any machine under any load, where the guest's own
+/// bracket also carries two launcher popups opening and closing.
+#[test]
+fn sweeping_the_bar_repaints_the_controls_crossed_and_never_the_strip() {
+    const MOVES: i32 = 32;
+
+    let mut shell = shell();
+    let mut comp = compositor();
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .set_apps(alloc::vec![tairix_taskbar::AppSlot::new(
+            "Files",
+            IconKind::AppBundle
+        )]);
+    shell.present(&mut comp);
+    comp.composite();
+
+    // The bar's own centre line, launcher to account capsule: one pass
+    // between them crosses every control the bar draws.
+    let layout = shell.session().taskbar().layout(comp.scale());
+    let start = centre(layout.library);
+    let end = centre(layout.switchboard);
+    let bar_px = u64::from(layout.bar.width) * u64::from(layout.bar.height);
+
+    let mut frames = 0u64;
+    let mut damaged = 0u64;
+    for step in 0..=MOVES {
+        let x = start.x + (end.x - start.x) * step / MOVES;
+        shell.handle(moved(x, start.y), &mut comp, 0);
+        if comp.composite().is_empty() {
+            continue;
+        }
+        frames += 1;
+        let frame = comp.frame_stats().damaged_px;
+        damaged += frame;
+        assert!(
+            frame < bar_px,
+            "sample {step} recomposed {frame} px, a whole bar being {bar_px}"
+        );
+    }
+
+    assert!(
+        frames > 0,
+        "the sweep composed nothing, so it measured nothing"
+    );
+    let mean = damaged / frames;
+    assert!(
+        mean <= bar_px / 8,
+        "the sweep averaged {mean} px per frame against a bar of {bar_px}"
+    );
+}
+
+#[test]
+fn a_present_the_heap_refuses_keeps_what_the_surface_still_owes() {
+    let mut session = session();
+    let mut comp = compositor();
+    let mut renderer = TaskbarRenderer::new(test_icon_cache());
+    let mut presenter = TaskbarPresenter::new();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::ALL,
+        &mut NoArtwork,
+    );
+    comp.composite();
+    let bar = presenter.bar_window().expect("the bar is presented");
+
+    // An output no buffer can cover: the bar's pixels are refused, so the
+    // window on screen keeps the ones it has.
+    session
+        .taskbar_mut()
+        .set_config(TaskbarConfig::bottom_bar(u32::MAX, 1080));
+    let owed = session.taskbar_mut().take_repaint();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        owed,
+        &mut NoArtwork,
+    );
+    assert_eq!(
+        presenter.bar_window(),
+        Some(bar),
+        "a refusal leaves what is on screen alone"
+    );
+    comp.composite();
+
+    // Back to an output that fits, latching nothing new: the presenter still
+    // owes the bar, so it is drawn rather than left stale for ever.
+    session
+        .taskbar_mut()
+        .set_config(TaskbarConfig::bottom_bar(1920, 1080));
+    let _ = session.taskbar_mut().take_repaint();
+    presenter.present(
+        &mut comp,
+        &mut renderer,
+        session.taskbar(),
+        TaskbarRepaint::NONE,
+        &mut NoArtwork,
+    );
+    assert!(
+        comp.has_damage(),
+        "the surface the heap refused was still owed, and was drawn"
     );
 }
 
@@ -1927,7 +2092,7 @@ fn desktop_state(
     (
         shell.router().pointer(),
         shell.router().focused(),
-        *shell.presenter(),
+        shell.presenter().clone(),
         comp.window_count(),
         format!("{:?}", shell.session().taskbar()),
     )
@@ -2510,11 +2675,29 @@ fn motion_is_ignored_and_repaints_only_when_the_hover_changes() {
         shell.session().taskbar().library_button().state().pointer,
         PointerState::Hover
     );
-    let damage = comp.composite().bounds();
-    assert_eq!(
-        damage.union(&bar_rect),
-        damage,
-        "the hover change repainted the whole bar"
+    // The button the pointer arrived on is repainted, and the rest of the bar
+    // keeps its pixels: a hover costs the control it changed, not the strip.
+    let mut damage = comp.composite();
+    let button = shell.session().taskbar().layout(Scale::ONE).library;
+    assert!(
+        damage.bounds().union(&button) == damage.bounds(),
+        "the button that took the hover was repainted"
+    );
+    damage.clip(bar_rect);
+    let on_bar: u64 = damage
+        .rects()
+        .iter()
+        .map(|rect| u64::from(rect.width) * u64::from(rect.height))
+        .sum();
+    let bar_area = u64::from(bar_rect.width) * u64::from(bar_rect.height);
+    let button_area = u64::from(button.width) * u64::from(button.height);
+    assert!(
+        on_bar < bar_area / 8,
+        "a hover repaints a control, not the bar: {on_bar} of {bar_area} px"
+    );
+    assert!(
+        on_bar >= button_area,
+        "and it does repaint the whole of that control: {on_bar} px"
     );
 }
 

@@ -606,6 +606,20 @@ fn slots(placer: &Placer, base: u32, extent: u32, count: usize, lo: u32, hi: u32
     out
 }
 
+/// Translate a screen-space rectangle into the local space of a surface whose
+/// top-left pixel sits at `origin`.
+///
+/// The bar's regions are laid out in screen space and every surface is painted
+/// and repainted in its own, so this is the one conversion between them.
+pub(crate) fn local_rect(rect: Rect, origin: Point) -> Rect {
+    Rect::new(
+        rect.left().saturating_sub(origin.x),
+        rect.top().saturating_sub(origin.y),
+        rect.width,
+        rect.height,
+    )
+}
+
 /// The index of the first slot containing `point`, ignoring empty slots.
 fn index_of(rects: &[Rect], point: Point) -> Option<usize> {
     rects.iter().position(|rect| rect.contains(point))

@@ -91,7 +91,7 @@ use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::window_ipc::{AppBarClick, AppMenuItemId};
 use tairix_abi::PowerAction;
 use tairix_controls::{damage, TraySignalAction};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton, PointerFocus};
 use tairix_proglib::EntryId;
 use tairix_theme::Appearance;
@@ -365,11 +365,10 @@ impl TaskbarInput {
     /// something else vanished is a popover nobody asked for. The next real
     /// motion opens one if the pointer is still there.
     pub fn set_pointer_focus(&mut self, focus: PointerFocus, taskbar: &mut Taskbar, scale: Scale) {
-        let mut damage = damage::sink();
         match focus {
             PointerFocus::Entered { at } => {
                 self.pointer = at;
-                taskbar.track_hover(Some(at), scale, &mut damage);
+                taskbar.track_hover(Some(at), scale);
                 if matches!(self.picker_timer, Some(PickerTimer::Close { .. }))
                     && self.over_picker(taskbar, scale)
                 {
@@ -377,7 +376,7 @@ impl TaskbarInput {
                 }
             }
             PointerFocus::Left => {
-                taskbar.track_hover(None, scale, &mut damage);
+                taskbar.track_hover(None, scale);
                 if taskbar.picker().is_open() {
                     self.picker_timer = Some(PickerTimer::Close {
                         due_ns: self.now_ns.saturating_add(PICKER_CLOSE_GRACE_NS),
@@ -406,16 +405,13 @@ impl TaskbarInput {
         scale: Scale,
         now_ns: u64,
     ) -> TaskbarResponse {
-        // One sink for the whole round: every control this event reaches
-        // reports its own repainted bounds into the same region.
-        let mut damage = damage::sink();
         self.now_ns = now_ns;
         if let InputEvent::PointerMoved { to } = event {
             // A delivered motion is an enter: the seat resolves which surface
             // the pointer rests on before it delivers, so a motion arriving
             // here says the bar holds the pointer and says where.
             self.pointer = to;
-            taskbar.track_hover(Some(to), scale, &mut damage);
+            taskbar.track_hover(Some(to), scale);
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
             }
@@ -427,7 +423,7 @@ impl TaskbarInput {
             if !taskbar.library().is_open() {
                 // A grid drag in progress belongs to the scrollbar, not to
                 // the cell the pointer happens to be over.
-                if taskbar.scroll_picker(&event, self.pointer, scale, &mut damage) {
+                if taskbar.scroll_picker(&event, self.pointer, scale) {
                     return TaskbarResponse::Ignored;
                 }
                 if let Some(response) = self.track_picker(taskbar, scale, now_ns) {
@@ -436,7 +432,7 @@ impl TaskbarInput {
             }
         }
         if taskbar.library().is_open() {
-            return self.route_to_popup(event, taskbar, scale, &mut damage);
+            return self.route_to_popup(event, taskbar, scale);
         }
         // The picker is non-modal too, and takes a press that lands on it
         // before the bar beneath does: choosing a window is what a press on
@@ -449,7 +445,7 @@ impl TaskbarInput {
             } | InputEvent::PointerReleased {
                 button: PointerButton::Primary
             } | InputEvent::PointerScrolled { .. }
-        ) && taskbar.scroll_picker(&event, self.pointer, scale, &mut damage)
+        ) && taskbar.scroll_picker(&event, self.pointer, scale)
         {
             return TaskbarResponse::Ignored;
         }
@@ -492,7 +488,7 @@ impl TaskbarInput {
                 // re-laid out from under is abandoned here rather than left
                 // armed to resolve on some later release.
                 self.capsule_press = None;
-                return match taskbar.tray_pointer(&event, scale, &mut damage) {
+                return match taskbar.tray_pointer(&event, scale) {
                     Some(TraySignalAction::Activated) => TaskbarResponse::OpenSwitchboard {
                         section: CommandSection::Tasks,
                     },
@@ -769,7 +765,7 @@ impl TaskbarInput {
         if let Some(layout) = taskbar.picker_layout(scale) {
             if layout.panel.contains(self.pointer) {
                 let cell = taskbar.picker().cell_at(&layout, self.pointer);
-                taskbar.track_picker_hover(cell);
+                taskbar.track_picker_hover(cell, &layout);
                 self.picker_timer = None;
                 return None;
             }
@@ -985,7 +981,6 @@ impl TaskbarInput {
         event: InputEvent,
         taskbar: &mut Taskbar,
         scale: Scale,
-        damage: &mut Region,
     ) -> TaskbarResponse {
         if matches!(
             event,
@@ -1010,20 +1005,27 @@ impl TaskbarInput {
 
         let layout = taskbar.library_layout(scale);
         let theme = taskbar.theme().clone();
-        let outcome = match event {
-            InputEvent::KeyPressed { key, modifiers } => taskbar
-                .library_routing_mut()
-                .route_key(key, modifiers, &layout, damage),
-            InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
-            ref pointer_event => taskbar.library_routing_mut().route_pointer(
-                pointer_event,
-                self.pointer,
-                &layout,
-                &theme,
-                scale,
-                damage,
-            ),
-        };
+        // The popup's own controls take a damage sink; what they report is not
+        // what the popup owes, because the outcome below cannot tell a moved
+        // row highlight from a rebuilt row list, and a scroll moves every row
+        // while its scrollbar reports only the thumb. So the popup owes its
+        // whole panel and the sink ends here (`plans/FIX-DESKTOP-SPEEDUP.md`).
+        let mut reported = damage::sink();
+        let outcome =
+            match event {
+                InputEvent::KeyPressed { key, modifiers } => taskbar
+                    .library_routing_mut()
+                    .route_key(key, modifiers, &layout, &mut reported),
+                InputEvent::KeyReleased { .. } => PopupOutcome::Ignored,
+                ref pointer_event => taskbar.library_routing_mut().route_pointer(
+                    pointer_event,
+                    self.pointer,
+                    &layout,
+                    &theme,
+                    scale,
+                    &mut reported,
+                ),
+            };
         match outcome {
             PopupOutcome::Ignored => TaskbarResponse::Ignored,
             PopupOutcome::Changed => {

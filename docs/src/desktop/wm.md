@@ -542,7 +542,9 @@ repaint no pixel; they still return `true`, because `false` means only
 those calls every frame, and each spurious mark would recomposite a whole
 window for nothing. A replaced *surface* (`set_surface`) is always
 assumed changed: comparing two whole buffers costs more than
-recompositing the window.
+recompositing the window — which is why a surface that is repainted rather
+than replaced goes through `repaint_window` below and marks only what it
+painted.
 
 **A blurred window is always repainted whole.** A frosted window's pixels
 are a function of the *entire* backdrop under its rectangle, so
@@ -571,7 +573,9 @@ beforehand would repaint pixels that never moved.
 **An embedder-painted window declares its own damage.**
 `Compositor::repaint_window(id, size, area, paint)` is the window-content
 mirror of `repaint_desktop`, for the surfaces the session paints itself — a
-menu plate, a session panel. The window keeps the buffer it already has and
+menu plate, and every surface of the desktop's icon bar (the strip, its
+program-library popup, its window picker, its notification popover, and the
+Switchboard readout). The window keeps the buffer it already has and
 `paint` receives it with the rectangles of `area` clipped to it, in the
 surface's own local pixels; only those are marked. The damage is declared
 rather than discovered because an embedder painting its own model knows what
@@ -580,13 +584,16 @@ absent or is not `size` is given a fresh buffer and painted whole, and its
 geometry follows that size; an unknown window, or a heap that will not give a
 buffer back, changes and damages nothing.
 
-The painter's obligation is the same as the desktop layer's, with one extra
-edge: it must lay its own background over each rectangle, and where that
-background is *translucent* and *rounded* it must clear first. A laid colour
-replaces a pixel the shape fully covers but mixes an arc pixel toward it by
-that pixel's coverage, so a corner would otherwise keep a tint of whatever the
-previous paint left there. `MenuChain::render_surface` does exactly that, which
-is what makes a plate's partial repaint land the pixels a whole one would.
+The painter's obligation is the same as the desktop layer's: it must lay its own
+background over each rectangle. Its one extra edge is handled for it — the
+shared clip walk (`tairix_controls::damage::paint_parts`, which both
+`MenuChain::render_surface` and the icon bar's painters go through) *clears*
+each rectangle first, so a repaint starts from the state a fresh buffer would
+be in. That matters where the background is translucent and rounded: a laid
+colour replaces a pixel the shape fully covers but mixes an arc pixel toward it
+by that pixel's coverage, so a corner repainted twice would otherwise opacify.
+Both are asserted by painting the same recipe both ways and comparing every
+pixel.
 
 **A window cannot be dragged smaller than its own furniture, or than its
 application declared.** `Compositor::window_min_outer_size` is the greater

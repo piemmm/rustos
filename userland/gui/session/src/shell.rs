@@ -42,6 +42,7 @@ use tairix_abi::notify_ipc::NotifyRequest;
 use tairix_abi::switchboard_ipc::TraySummary;
 use tairix_abi::Errno;
 use tairix_browse::{DirectorySource, GridView};
+use tairix_controls::damage::{self, Repaint};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_geometry::Region;
 use tairix_icon::{
@@ -67,7 +68,7 @@ use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumb
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
 use crate::input::{SessionInputResponse, SessionInputRouter};
-use crate::menu::{ChainGeometry, MenuChain, Repaint, SurfaceKind};
+use crate::menu::{MenuChain, SurfaceKind};
 use crate::presenter::{chrome_blur, TaskbarPresenter};
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
@@ -1082,7 +1083,9 @@ impl DesktopShell {
                 };
                 compositor
                     .repaint_window(id, size, &area, |surface, rects| {
-                        paint_chain_area(chain, placed.kind, surface, rects, &geom);
+                        damage::paint_parts(surface, rects, |surface| {
+                            chain.render_surface(placed.kind, surface, &geom);
+                        });
                     })
                     .then_some(id)
             } else {
@@ -1787,32 +1790,6 @@ impl DesktopShell {
         compositor.teardown_chrome();
         compositor.teardown_frost();
         compositor.teardown_content();
-    }
-}
-
-/// Paint the rectangles `rects` of the chain surface `kind`, each confined to
-/// its own clip so nothing outside what the compositor marked is written.
-///
-/// The whole surface is re-derived under each clip rather than a second
-/// "paint just this row" recipe existing beside the first: only the writes are
-/// withheld, so a partial repaint lands the pixels a whole one would have.
-fn paint_chain_area(
-    chain: &MenuChain,
-    kind: SurfaceKind,
-    surface: &mut Surface,
-    rects: &[Rect],
-    geom: &ChainGeometry<'_>,
-) {
-    for rect in rects {
-        // Already clipped to the surface, so a corner that is not addressable
-        // cannot be one of these; skipping keeps that so rather than painting
-        // it somewhere else.
-        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
-            continue;
-        };
-        surface.with_clip(x, y, rect.width, rect.height, |surface| {
-            chain.render_surface(kind, surface, geom);
-        });
     }
 }
 

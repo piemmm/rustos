@@ -327,7 +327,7 @@ impl LibraryPopup {
     }
 
     /// The owner-resolved icon artwork for the row at `index`, if any — what
-    /// [`render`](crate::TaskbarRenderer::render_library) blits in place of
+    /// [`paint_library`](crate::TaskbarRenderer::paint_library) blits in place of
     /// the row's built-in glyph.
     #[must_use]
     pub fn row_artwork(&self, index: usize) -> Option<&Surface> {

@@ -22,9 +22,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal};
+use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
-    damage, plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement,
-    TitleBar, TitleBarCommands, TitleBarEvent,
+    plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TitleBar,
+    TitleBarCommands, TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -95,41 +96,6 @@ pub struct ChainSurface {
     pub kind: SurfaceKind,
     /// What of it the session has still to paint.
     pub repaint: Repaint,
-}
-
-/// What of a chain surface has still to be painted.
-///
-/// A surface is born whole and thereafter only the two rows a highlight moves
-/// between change, so a pointer crossing a plate costs those rows rather than
-/// the plate — and on a frosted surface that is the difference between
-/// re-blending two rows and re-blending, then re-blurring behind, all of it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Repaint {
-    /// Every pixel: the surface is new, or the rows on it were rebuilt, so
-    /// nothing of what is on screen can be kept.
-    Whole,
-    /// Only these rectangles, in the surface's own local pixels. Empty is a
-    /// surface whose pixels on screen are already current.
-    Parts(Region),
-}
-
-impl Repaint {
-    /// A surface whose pixels on screen are current.
-    ///
-    /// Budgeted like any control's damage: past a handful of rectangles a
-    /// repaint costs more to describe than to widen, so the region degrades
-    /// to its bounding box rather than growing without bound.
-    fn clean() -> Self {
-        Self::Parts(damage::sink())
-    }
-
-    /// Fold in a rectangle that changed. A surface already owing every pixel
-    /// owes no more for it.
-    fn add(&mut self, rect: Rect) {
-        if let Self::Parts(parts) = self {
-            parts.add(rect);
-        }
-    }
 }
 
 /// Which of the chain's surfaces a rectangle is.
@@ -1184,15 +1150,13 @@ fn plate_for(
 /// Lay the shared floating-plate ground over a `size` surface: the recipe
 /// every chain surface stands on, plate and information panel alike.
 ///
-/// It clears first, because a plate is translucent and its corners are
-/// anti-aliased: laying the ground *replaces* a pixel the shape fully covers
-/// but mixes an arc pixel toward it by that pixel's coverage, so what an arc
-/// pixel already held would tint the corner. Starting from nothing is what a
-/// whole paint into a fresh buffer does, and it is what lets a repaint of part
-/// of a retained plate land the same pixels.
+/// The rectangle it lands on has been cleared by
+/// [`tairix_controls::damage::paint_parts`], which is what
+/// lets a repaint of part of a retained plate land the same pixels: a
+/// translucent plate's arc pixels are blended by coverage, so laying the ground
+/// over what one already held would tint the corner.
 fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &ChainGeometry<'_>) {
     let (width, height) = size;
-    surface.fill_rect(0, 0, width, height, tairix_raster::Color::TRANSPARENT);
     let _ = tairix_controls::paint_surface_plate(
         surface,
         (0, 0, width, height),

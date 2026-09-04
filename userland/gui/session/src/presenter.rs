@@ -18,17 +18,24 @@
 //! on each [`present`](TaskbarPresenter::present) so the session crate composes
 //! the GUI crates without owning the window-manager handle (composing `userland/gui/*` crates is the permitted edge).
 //!
-//! It is **total and fails closed**: a render that cannot
-//! allocate its surface leaves whatever is already on screen untouched rather
-//! than blanking the bar or panicking, and the popup and picker windows are
+//! A surface already on screen keeps its pixels: the presenter paints what it
+//! owes into the buffer the window holds ([`Compositor::repaint_window`]),
+//! so the compositor marks the control that changed rather than the window's
+//! whole bounds — the same treatment the desktop's menu plates get.
+//!
+//! It is **total and fails closed**: a paint whose pixels cannot be
+//! allocated leaves whatever is already on screen untouched rather
+//! than blanking the bar or panicking, and keeps what that surface owed so it
+//! is drawn on a later present; the popup and picker windows are
 //! removed from the compositor the moment each closes. If a presented window
 //! has disappeared from the compositor (an embedder removed it), the next
 //! present re-creates it rather than silently doing nothing.
 
+use tairix_controls::damage::Repaint;
 use tairix_icon::IconArtwork;
 use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
 use tairix_theme::Theme;
-use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
+use tairix_wm::{Compositor, Corners, Point, Rect, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its hover window picker,
 /// the notification popover, and the Switchboard capsule's instrument readout
@@ -39,7 +46,7 @@ use tairix_wm::{Compositor, Corners, Point, Scale, Surface, WindowId};
 /// changes, naming the surfaces that changed; the presenter creates the bar,
 /// popup, and picker windows on first sight and keeps their surface,
 /// position, and corner radius in step thereafter.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarPresenter {
     bar: Option<WindowId>,
     popup: Option<WindowId>,
@@ -50,6 +57,10 @@ pub struct TaskbarPresenter {
     /// DPI change is caught even though it never touches the taskbar
     /// model that drives the repaint latch.
     presented_scale: Option<Scale>,
+    /// What each surface still owes the screen. A present the heap refuses
+    /// puts back what it could not draw, so a refusal can never leave a
+    /// surface stale with nothing left to say so.
+    owed: TaskbarRepaint,
 }
 
 impl TaskbarPresenter {
@@ -63,6 +74,7 @@ impl TaskbarPresenter {
             notifications: None,
             readout: None,
             presented_scale: None,
+            owed: TaskbarRepaint::NONE,
         }
     }
 
@@ -130,7 +142,7 @@ impl TaskbarPresenter {
     }
 
     /// Bring the compositor up to date with the taskbar's current model and
-    /// its owned theme, repainting only the surfaces `parts` names.
+    /// its owned theme, repainting only what `parts` says each surface owes.
     ///
     /// The bar is repainted and re-placed at [`BarLayout::bar`]'s origin,
     /// rounded with [`BarLayout::corner_radius`]. If the program-library
@@ -139,24 +151,34 @@ impl TaskbarPresenter {
     /// [`LibraryLayout::corner_radius`]; when the popup is closed any popup
     /// window is removed.
     ///
-    /// Repainting only the latched surfaces is what keeps a pointer moving
-    /// over one small open popup cheap: re-rendering every surface and
-    /// pushing them all back into the compositor costs milliseconds and
-    /// damages a window rectangle each, where the popup alone costs a
-    /// fraction of that and damages one. A surface with no window yet is always
-    /// presented, whatever the latch says, so the first paint after startup
-    /// (or after a [`teardown`](Self::teardown)) puts everything on screen.
-    /// A change of desktop density is the one input the taskbar's own latch
-    /// cannot see — the scale belongs to the output, not the model — so a
-    /// scale that differs from the last presented one repaints everything.
+    /// Repainting only what is owed is what keeps a pointer crossing the bar
+    /// cheap, and it is scoped twice over. Naming the *surface* means the
+    /// others are not re-rendered or re-pushed at all: re-rendering every one
+    /// costs milliseconds and damages a window rectangle each, where the
+    /// popover alone costs a fraction of that and damages one. Naming the
+    /// *rectangles* on it means a surface already on screen keeps its pixels
+    /// and only those rectangles are painted into the buffer it holds, so the
+    /// compositor marks the control that changed instead of the window's whole
+    /// bounds — which for a slot taking the pointer's wash is its own 1600
+    /// pixels rather than the bar's 40 560, over a frosted backdrop that would
+    /// otherwise be re-blurred.
+    ///
+    /// A surface with no window yet is always presented, whatever it owes, so
+    /// the first paint after startup (or after a [`teardown`](Self::teardown))
+    /// puts everything on screen. A change of desktop density is the one input
+    /// the taskbar's own account cannot see — the scale belongs to the output,
+    /// not the model — and it invalidates every rectangle owed, since each was
+    /// measured at the old density, so it repaints everything.
     ///
     /// `artwork` is the shipped raster-icon lookup the bar draws its
     /// launcher and application icons from; every slot falls back to its
     /// built-in glyph when the lookup has nothing, so a system with no
     /// installed graphics still presents a complete bar.
     ///
-    /// Fails closed: a render whose surface cannot be
-    /// allocated leaves the existing on-screen window untouched.
+    /// Fails closed: a paint whose pixels cannot be allocated leaves the
+    /// existing on-screen window untouched **and keeps what that surface
+    /// owed**, so the next present draws it rather than reporting a stale
+    /// surface as current.
     ///
     /// [`BarLayout::bar`]: tairix_taskbar::BarLayout::bar
     /// [`BarLayout::corner_radius`]: tairix_taskbar::BarLayout::corner_radius
@@ -175,26 +197,44 @@ impl TaskbarPresenter {
         // runtime DPI change re-presents the bar at the new scale with no
         // taskbar state to update.
         let scale = compositor.scale();
-        let parts = if self.presented_scale == Some(scale) {
-            parts
-        } else {
-            TaskbarRepaint::ALL
-        };
+        self.owed |= parts;
+        if self.presented_scale != Some(scale) {
+            // Every rectangle owed was measured at the old density, so none of
+            // them describes a pixel of the surfaces about to be laid out.
+            self.owed |= TaskbarRepaint::ALL;
+        }
         self.presented_scale = Some(scale);
-        if parts.bar || self.bar.is_none() {
-            self.present_bar(compositor, renderer, taskbar, scale, artwork);
+        let owed = core::mem::take(&mut self.owed);
+        if due(&owed.bar, self.bar)
+            && !self.present_bar(compositor, renderer, taskbar, scale, artwork, &owed.bar)
+        {
+            self.owed.bar.merge(owed.bar);
         }
-        if parts.library || self.popup.is_none() {
-            self.present_popup(compositor, renderer, taskbar, scale);
+        if due(&owed.library, self.popup)
+            && !self.present_popup(compositor, renderer, taskbar, scale, &owed.library)
+        {
+            self.owed.library.merge(owed.library);
         }
-        if parts.picker || self.picker.is_none() {
-            self.present_picker(compositor, renderer, taskbar, scale);
+        if due(&owed.picker, self.picker)
+            && !self.present_picker(compositor, renderer, taskbar, scale, &owed.picker)
+        {
+            self.owed.picker.merge(owed.picker);
         }
-        if parts.notifications || self.notifications.is_none() {
-            self.present_notifications(compositor, renderer, taskbar, scale);
+        if due(&owed.notifications, self.notifications)
+            && !self.present_notifications(
+                compositor,
+                renderer,
+                taskbar,
+                scale,
+                &owed.notifications,
+            )
+        {
+            self.owed.notifications.merge(owed.notifications);
         }
-        if parts.readout || self.readout.is_none() {
-            self.present_readout(compositor, renderer, taskbar, scale);
+        if due(&owed.readout, self.readout)
+            && !self.present_readout(compositor, renderer, taskbar, scale, &owed.readout)
+        {
+            self.owed.readout.merge(owed.readout);
         }
     }
 
@@ -203,6 +243,7 @@ impl TaskbarPresenter {
     /// Tearing the desktop session down leaves no orphaned windows behind.
     pub fn teardown(&mut self, compositor: &mut Compositor) {
         self.presented_scale = None;
+        self.owed = TaskbarRepaint::NONE;
         if let Some(id) = self.readout.take() {
             compositor.remove(id);
         }
@@ -220,8 +261,9 @@ impl TaskbarPresenter {
         }
     }
 
-    /// Repaint the bar and present it, leaving the existing window untouched if
-    /// the surface cannot be allocated.
+    /// Repaint what the bar owes and present it, leaving the existing window
+    /// untouched if the pixels cannot be allocated. Reports whether it was
+    /// drawn.
     fn present_bar(
         &mut self,
         compositor: &mut Compositor,
@@ -229,19 +271,22 @@ impl TaskbarPresenter {
         taskbar: &Taskbar,
         scale: Scale,
         artwork: &mut dyn IconArtwork,
-    ) {
-        let Some(surface) = renderer.render(taskbar, scale, artwork) else {
-            return;
-        };
+        owed: &Repaint,
+    ) -> bool {
         let layout = taskbar.layout(scale);
         let corners = Corners::from_radius(layout.corner_radius);
-        self.bar = Some(place(
+        let placed = place(
             compositor,
             self.bar,
-            layout.bar.origin,
-            surface,
+            (layout.bar.origin, (layout.bar.width, layout.bar.height)),
+            owed,
             (corners, chrome_blur(taskbar.theme())),
-        ));
+            |surface, rects| renderer.paint(taskbar, scale, artwork, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.bar = Some(id);
+        }
+        placed.is_some()
     }
 
     /// Present the program-library popup while it is open, or remove it once
@@ -252,25 +297,31 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         scale: Scale,
-    ) {
+        owed: &Repaint,
+    ) -> bool {
         if !taskbar.library().is_open() {
             if let Some(id) = self.popup.take() {
                 compositor.remove(id);
             }
-            return;
+            return true;
         }
-        let Some(surface) = renderer.render_library(taskbar, scale) else {
-            return;
-        };
         let layout = taskbar.library_layout(scale);
         let corners = Corners::from_radius(layout.corner_radius);
-        self.popup = Some(place(
+        let placed = place(
             compositor,
             self.popup,
-            layout.panel.origin,
-            surface,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
             (corners, chrome_blur(taskbar.theme())),
-        ));
+            |surface, rects| renderer.paint_library(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.popup = Some(id);
+        }
+        placed.is_some()
     }
 
     /// Present the hover window picker while it is open, or remove it once
@@ -290,24 +341,30 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         scale: Scale,
-    ) {
+        owed: &Repaint,
+    ) -> bool {
         let Some(layout) = taskbar.picker_layout(scale) else {
             if let Some(id) = self.picker.take() {
                 compositor.remove(id);
             }
-            return;
-        };
-        let Some(surface) = renderer.render_picker(taskbar, scale) else {
-            return;
+            return true;
         };
         let corners = Corners::from_radius(layout.corner_radius);
-        self.picker = Some(place(
+        let placed = place(
             compositor,
             self.picker,
-            layout.panel.origin,
-            surface,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
             (corners, chrome_blur(taskbar.theme())),
-        ));
+            |surface, rects| renderer.paint_picker(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.picker = Some(id);
+        }
+        placed.is_some()
     }
 
     /// Present the notification popover while any notification is raised, or
@@ -327,24 +384,30 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         scale: Scale,
-    ) {
+        owed: &Repaint,
+    ) -> bool {
         let Some(layout) = taskbar.notifications_layout(scale) else {
             if let Some(id) = self.notifications.take() {
                 compositor.remove(id);
             }
-            return;
-        };
-        let Some(surface) = renderer.render_notifications(taskbar, scale) else {
-            return;
+            return true;
         };
         let corners = Corners::from_radius(layout.corner_radius);
-        self.notifications = Some(place(
+        let placed = place(
             compositor,
             self.notifications,
-            layout.panel.origin,
-            surface,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
             (corners, chrome_blur(taskbar.theme())),
-        ));
+            |surface, rects| renderer.paint_notifications(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.notifications = Some(id);
+        }
+        placed.is_some()
     }
 
     /// Present the Switchboard capsule's instrument readout while it is
@@ -364,25 +427,42 @@ impl TaskbarPresenter {
         renderer: &mut TaskbarRenderer,
         taskbar: &Taskbar,
         scale: Scale,
-    ) {
+        owed: &Repaint,
+    ) -> bool {
         let Some(layout) = taskbar.tray_readout_layout(scale) else {
             if let Some(id) = self.readout.take() {
                 compositor.remove(id);
             }
-            return;
-        };
-        let Some(surface) = renderer.render_tray_readout(taskbar, scale) else {
-            return;
+            return true;
         };
         let corners = Corners::from_radius(layout.corner_radius);
-        self.readout = Some(place(
+        let placed = place(
             compositor,
             self.readout,
-            layout.panel.origin,
-            surface,
+            (
+                layout.panel.origin,
+                (layout.panel.width, layout.panel.height),
+            ),
+            owed,
             (corners, chrome_blur(taskbar.theme())),
-        ));
+            |surface, rects| renderer.paint_tray_readout(taskbar, scale, surface, rects),
+        );
+        if let Some(id) = placed {
+            self.readout = Some(id);
+        }
+        placed.is_some()
     }
+}
+
+/// Whether a chrome surface is due a present: it owes pixels, or it has no
+/// window yet.
+///
+/// A surface with nothing on screen is presented whatever its account says, so
+/// the first paint after startup (or after a [`teardown`]) puts everything up.
+///
+/// [`teardown`]: TaskbarPresenter::teardown
+fn due(owed: &Repaint, window: Option<WindowId>) -> bool {
+    !owed.is_clean() || window.is_none()
 }
 
 /// How far the backdrop behind the desktop's floating chrome is blurred, in
@@ -396,13 +476,26 @@ pub(crate) fn chrome_blur(theme: &Theme) -> u16 {
     u16::try_from(theme.metrics().chrome_backdrop_blur).unwrap_or(u16::MAX)
 }
 
-/// Update an existing compositor window in place, or add a new one, and give
-/// it the `(corners, backdrop blur)` look it is placed with. Returns the
-/// window's id.
+/// Repaint what a chrome surface owes into the compositor window it already
+/// has, or add a new one painted whole, and give it the `(corners, backdrop
+/// blur)` look it is placed with. Returns the window's id, or `None` when the
+/// pixels could not be allocated.
+///
+/// **A surface already on screen keeps its pixels and is repainted only where
+/// it owes them.** That is the whole of this change's cost model: handing the
+/// compositor a freshly rendered surface instead would allocate one, paint all
+/// of it, and mark the window's entire bounds for recomposition — 1014 × 40
+/// screen pixels for a 40 × 40 slot taking the pointer's wash, over a frosted
+/// backdrop. `paint` receives the rectangles already clipped to the surface
+/// and disjoint, in its own local pixels, and writes inside them and nowhere
+/// else.
 ///
 /// An `existing` id that the compositor no longer knows (the embedder removed
 /// the window) is treated as absent, so the window is re-created rather than
-/// the update being silently dropped.
+/// the update being silently dropped. A window whose extent no longer matches
+/// the layout is repainted whole into a buffer of the new size, however little
+/// was owed — a buffer of the wrong size has nothing for a partial paint to
+/// keep.
 ///
 /// The blur is in logical pixels, `0` for a surface that covers what is behind
 /// it. A caller states it here rather than after placing, so a surface can
@@ -410,22 +503,27 @@ pub(crate) fn chrome_blur(theme: &Theme) -> u16 {
 fn place(
     compositor: &mut Compositor,
     existing: Option<WindowId>,
-    origin: Point,
-    surface: Surface,
+    placement: (Point, (u32, u32)),
+    owed: &Repaint,
     look: (Corners, u16),
-) -> WindowId {
+    paint: impl FnOnce(&mut Surface, &[Rect]),
+) -> Option<WindowId> {
+    let (origin, (width, height)) = placement;
     let (corners, blur_px) = look;
-    if let Some(id) = existing {
-        if compositor.window(id).is_some() {
-            compositor.set_surface(id, surface);
-            compositor.move_window(id, origin);
-            compositor.set_corners(id, corners);
-            compositor.set_backdrop_blur(id, blur_px);
-            return id;
+    let id = if let Some(id) = existing.filter(|id| compositor.window(*id).is_some()) {
+        // Moved before it is painted, so the rectangles the repaint marks are
+        // the ones the surface now occupies.
+        compositor.move_window(id, origin);
+        if !compositor.repaint_window(id, (width, height), &owed.area(width, height), paint) {
+            return None;
         }
-    }
-    let id = compositor.add_window(origin, surface);
+        id
+    } else {
+        let mut pixels = Surface::new(width, height)?;
+        paint(&mut pixels, &[Rect::new(0, 0, width, height)]);
+        compositor.add_window(origin, pixels)
+    };
     compositor.set_corners(id, corners);
     compositor.set_backdrop_blur(id, blur_px);
-    id
+    Some(id)
 }

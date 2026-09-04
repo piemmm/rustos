@@ -239,20 +239,47 @@ switch) set a **repaint latch**, and the embedder drains it with
 present per visual change, no per-frame busy repainting (`AGENTS.md` §2.16).
 
 The latch is a `TaskbarRepaint`, and it names **each rendered surface
-separately** rather than carrying one "something changed" bit:
+separately** rather than carrying one "something changed" bit — and for each it
+carries *what of it* is owed, as the shared `tairix_controls::damage::Repaint`
+account:
 
-| Flag            | Surface                                              |
-| --------------- | ---------------------------------------------------- |
-| `bar`           | the bar strip itself                                  |
-| `library`       | the program-library popup                             |
-| `picker`        | the hover window picker                                |
-| `notifications` | the notification popover                              |
-| `readout`       | the Switchboard capsule's expanded instrument readout |
+| Surface         | What it is                                            |
+| --------------- | ----------------------------------------------------- |
+| `bar`           | the bar strip itself                                   |
+| `library`       | the program-library popup                              |
+| `picker`        | the hover window picker                                 |
+| `notifications` | the notification popover                               |
+| `readout`       | the Switchboard capsule's expanded instrument readout  |
+
+Each account is either `Whole` — every pixel, which is what a change to the
+*model* owes, because a new clock label or a rebuilt application strip has no
+rectangle smaller than the surface — or `Parts(region)`, the rectangles a
+*control* reported it repainted, in that surface's own pixels. An empty
+`Parts` is a surface whose pixels on screen are already current.
 
 `TaskbarRepaint::NONE` and `::ALL` are the two extremes, one constant names
-each single surface, `any()` asks whether anything is pending, and `|` / `|=`
-compose latches, so a mutator touching two surfaces latches both in one
+each single surface whole, `any()` asks whether anything is pending, and `|` /
+`|=` compose latches, so a mutator touching two surfaces latches both in one
 expression.
+
+**Where a `Parts` account comes from.** A control reports its own repainted
+bounds into the shared damage sink (`tairix_controls::damage`), in the *screen*
+coordinates its layout put it at. The bar's input sites then route what came
+back onto the surfaces those controls draw on, restated in each surface's own
+pixels: `track_hover` routes to the bar and to the readout, the capsule's
+click path to the same two, the picker's cell hover to the picker's panel.
+Which surface a report belongs to is answered by the code that laid the control
+out, never guessed from geometry — and a reported rectangle that lands outside
+the surface names none of its pixels, so a collapsed readout (`Rect::EMPTY`)
+owes nothing.
+
+The one surface that stays whole-account by construction is the **library
+popup**: its outcome type reports only "the popup's pixels changed", and the
+changes behind it are not alike — a moved row highlight is two rows, while a
+scroll moves every row and a filter edit rebuilds the list, both of which its
+scrollbar and search field report nothing for. Making it per-row means having
+every site in the popup report its own rectangles, which is a change of its own
+with its own tests (`plans/FIX-DESKTOP-SPEEDUP.md`).
 
 **Why per surface.** The surfaces are wildly unequal in cost: measured on the
 host in release, rendering the bar takes 1655 µs and the library popup 1001 µs,
@@ -264,7 +291,8 @@ rectangle, when a hundred microseconds and one small rectangle was the whole of
 the change. That is a pointer moving over a popover, among the most frequent
 interactions the desktop has, and it is why the desktop felt laggy. Naming the
 surface lets the presenter repaint the cheap one and leave the others exactly as
-the compositor already has them.
+the compositor already has them; naming the *rectangles* on it lets a hover cost
+the control it moved rather than the strip that control sits on.
 
 A menu is **not** among them: every menu is the desktop's own chain, so the bar
 has no menu pixels to latch.
@@ -322,7 +350,7 @@ everything.
 
 ## Rendering
 
-`TaskbarRenderer::render` paints the taskbar into a `tairix-raster` `Surface`
+`TaskbarRenderer::paint` paints the taskbar into a `tairix-raster` `Surface`
 sized to the bar using the taskbar's own theme, filling each region with a
 colour role from the `Palette`. Its last argument is the caller's
 `tairix_icon::IconArtwork` lookup — the session's decoded artwork, or
@@ -374,7 +402,7 @@ colour role from the `Palette`. Its last argument is the caller's
   drawn in its slot — its shipped `switchboard` artwork (the built-in mixer
   glyph where the system ships none) with its live badge, seam, rail, and
   beads, bar-seated like every other icon on the strip, so it carries no
-  outline of its own — and `TaskbarRenderer::render_tray_readout` paints the
+  outline of its own — and `TaskbarRenderer::paint_tray_readout` paints the
   expanded instrument readout as its own popover surface, rounded by the window
   manager with `TrayReadoutLayout::corner_radius`.
 
@@ -403,7 +431,7 @@ glyphs across frames, built by `icon_cache` from the shared
 `tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
 bounded by a budget derived from the real framebuffer byte size, dropped
 under memory pressure, and wiped on release. The renderer is the right home
-for that state: the `Taskbar` model stays pure data. `render_library` (the
+for that state: the `Taskbar` model stays pure data. `paint_library` (the
 popup painter) needs no cache of its own, so it stays a `&self` method.
 
 ## Floating chrome
@@ -538,7 +566,7 @@ an empty list all change nothing (`AGENTS.md` §2.9).
 
 ### Rendering
 
-`TaskbarRenderer::render_library` paints the open popup: the `Panel` chrome
+`TaskbarRenderer::paint_library` paints the open popup: the `Panel` chrome
 (anchored back at the Library button), the search field, the visible rows —
 a folder row carries the open/closed folder glyph, its label, and a trailing
 entry count; an entry row is indented beneath its folder and draws **the
@@ -563,7 +591,7 @@ draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
   asks only for the rows that just came into view.
 - `set_row_artwork(row, artwork)` files an answer; an out-of-range index is
   ignored rather than mis-filed.
-- `row_artwork(row)` is what `render_library` blits.
+- `row_artwork(row)` is what `paint_library` blits.
 
 Any rebuild of the row list (a new catalog, a changed filter, a folder folded
 or expanded) clears the filed artwork, so a stale index can never draw one

@@ -21,7 +21,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppBarClick, AppMenu};
+use tairix_controls::damage;
 use tairix_controls::{ControlState, PointerState, TaskbarItem};
+use tairix_geometry::{Rect, Region};
 use tairix_icon::IconKind;
 use tairix_raster::Surface;
 
@@ -210,10 +212,21 @@ impl AppStrip {
         self.hover
     }
 
-    /// Track the hovered slot, reporting whether the visual state changed.
-    pub(crate) fn set_hover(&mut self, hover: Option<usize>) -> bool {
+    /// Track the hovered slot, reporting the slot the hover left and the slot
+    /// it arrived on — `slots` being the strip's screen rectangles in slot
+    /// order — and answering whether it moved.
+    ///
+    /// A hover is drawn on one slot at a time, so those two rectangles are the
+    /// whole of what a crossing changes; the shared mark-move rule reports
+    /// them, so the strip cannot grow its own idea of what a hover costs.
+    pub(crate) fn set_hover(
+        &mut self,
+        hover: Option<usize>,
+        slots: &[Rect],
+        damage: &mut Region,
+    ) -> bool {
         let hover = hover.filter(|&index| index < self.apps.len());
-        if self.hover == hover {
+        if !damage::move_mark(self.hover, hover, |index| slots.get(index).copied(), damage) {
             return false;
         }
         self.hover = hover;
