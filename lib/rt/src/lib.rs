@@ -2761,6 +2761,36 @@ pub fn hw_tree_wait(last_generation: u64, timeout_ns: u64) -> i64 {
     ret as i64
 }
 
+/// This process's hash key, drawn from the platform CSPRNG on first use and
+/// published for the program's lifetime.
+///
+/// One key per process, so a container's bucket layout in one process is not
+/// probeable from another. Every hash in a program over input an attacker can
+/// choose takes its key from here rather than drawing its own, so a program
+/// has exactly one.
+///
+/// Drawn on demand rather than at `_start`: most programs never hash
+/// attacker-chosen input, and a syscall in every program's entry path to
+/// serve the ones that do is a cost the whole system pays for a few. The key
+/// is still unpredictable and still published exactly once — only the moment
+/// it is drawn is the first time it is wanted.
+///
+/// `None` when the platform CSPRNG has no key to give (a port whose entropy
+/// source could not seed the reserve). The draw is non-blocking, so a program
+/// never parks here. Two threads racing the first call may both draw; one
+/// publication wins and both see it.
+#[must_use]
+pub fn hash_seed() -> Option<tairix_hash::HashSeed> {
+    if let Some(key) = tairix_hash::published() {
+        return Some(key);
+    }
+    let mut key = Wiped::<{ tairix_hash::HashSeed::LEN }>::new();
+    if random_get(&mut key[..], RandomFlags::NON_BLOCKING).unwrap_or(0) == key.len() {
+        let _ = tairix_hash::publish(tairix_hash::HashSeed::from_bytes(*key));
+    }
+    tairix_hash::published()
+}
+
 /// Fill `buf` with cryptographically secure random bytes from the kernel random
 /// subsystem (`SyscallNumber::RANDOM_GET`), returning the number of bytes
 /// written.
@@ -6435,6 +6465,29 @@ mod tests {
         let (_, _) = capture(9999, || {
             assert_eq!(random_get(&mut buf, RandomFlags::empty()), Ok(16));
         });
+    }
+
+    /// The process hash key is drawn once, on demand, and never re-drawn.
+    ///
+    /// One test owns the whole lifecycle because the publication cell is
+    /// process-global: splitting it would race. The armed seam leaves the
+    /// buffer untouched, so the published key's *value* is not what is under
+    /// test here — that it is drawn exactly once, and only when a caller
+    /// wants it, is.
+    #[test]
+    fn the_process_hash_key_is_drawn_once_on_demand() {
+        // A refused draw publishes nothing, so a consumer over untrusted keys
+        // sees "no key" rather than a predictable one.
+        seam::arm(refusal(Errno::EntropyNotReady));
+        assert_eq!(hash_seed(), None);
+
+        seam::arm(u64::try_from(tairix_hash::HashSeed::LEN).expect("fits"));
+        let key = hash_seed().expect("a full draw publishes a key");
+
+        // A second call must not trap again: arm a refusal and confirm the
+        // published key still comes back.
+        seam::arm(refusal(Errno::EntropyNotReady));
+        assert_eq!(hash_seed(), Some(key));
     }
 
     #[test]

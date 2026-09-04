@@ -39,10 +39,13 @@ and a compromise of one process does not reveal another's table layout.
 - The kernel publishes immediately after the CSPRNG output reserve is seeded,
   from the same reserve and at the same point as the per-boot identifier, and
   audits the result (`HashKeyPublished` / `HashKeyUnavailable`).
-- A userland program publishes in `tairix-rt`'s `_start` driver, from a
-  non-blocking `random_get`, before any program code runs. The draw is
-  non-blocking because a program must not park at start-up waiting for
-  entropy.
+- A userland program publishes through `tairix_rt::hash_seed()`, which draws
+  from a non-blocking `random_get` the first time a caller wants the key.
+  Drawing at `_start` instead would put a syscall in *every* program's entry
+  path to serve the few that hash attacker-chosen input — and every EL0 test
+  fixture's syscall allow-list would have to carry it. The key is still
+  unpredictable and still published exactly once; only the moment it is drawn
+  differs. The draw is non-blocking, so a program never parks for entropy.
 
 The crate never draws the key itself: it is injected. That keeps it free of
 external dependencies and host-testable, and leaves the boot path to decide

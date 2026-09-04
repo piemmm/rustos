@@ -176,14 +176,21 @@ attack; a fixed key does not.
 * The key is 128 bits drawn from the kernel CSPRNG output reserve, published
   **once** per boot in the kernel (beside the per-boot identifier, from the
   same reserve, audited as `HashKeyPublished` / `HashKeyUnavailable`) and
-  **once per process** in `lib/rt`'s `_start` driver from a non-blocking
-  `random_get`, so no cross-process collision oracle exists and a compromise
-  of one process does not hand an attacker another's table layout.
-* Publication happens before any program code runs, and in the kernel before
-  userland exists to reach a syscall that hashes. `published()` reports
-  whether a key exists. A container constructed unseeded is usable for
-  kernel-assigned keys and refuses construction for the untrusted-key case
-  rather than silently using a predictable key — fail closed.
+  **once per process** through `tairix_rt::hash_seed()`, so no cross-process
+  collision oracle exists and a compromise of one process does not hand an
+  attacker another's table layout.
+* The per-process draw is **on demand, not at `_start`**. Drawing eagerly puts
+  a syscall in every program's entry path to serve the few programs that hash
+  attacker-chosen input, and every EL0 test fixture's syscall allow-list has
+  to carry it — 22 QEMU verticals failed on exactly that. The key is still
+  unpredictable and still published exactly once; only the moment it is drawn
+  moves to the first time it is wanted. The kernel's draw stays eager: it is
+  once per boot, not once per process, and must precede the first syscall
+  that hashes.
+* `published()` reports whether a key exists, without drawing one. A container
+  constructed unseeded is usable for kernel-assigned keys and refuses
+  construction for the untrusted-key case rather than silently using a
+  predictable key — fail closed.
 * A consumer that is *not* an authority decision and must keep working on a
   platform whose CSPRNG never seeded (`riscv64` and `wasm32` expose no
   entropy source yet) names `HashSeed::UNKEYED`, so the fallback is a

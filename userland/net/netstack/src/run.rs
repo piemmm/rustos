@@ -895,18 +895,16 @@ mod program {
         Ok(())
     }
 
-    /// The key a bond's transmit flow hash is taken under: the one key the
-    /// runtime drew for this process at start-up, so the flow hash and any
-    /// other hash over untrusted input here share it rather than each
-    /// drawing its own.
+    /// The key a bond's transmit flow hash is taken under: this process's one
+    /// hash key, so the flow hash and any other hash here over input a peer
+    /// chooses share it rather than each drawing its own.
     ///
-    /// A platform whose CSPRNG could not be seeded published none. Bond
-    /// balancing is not the service's primary purpose, so it degrades to a
-    /// predictable hash rather than refusing to serve the network — and says
-    /// so, because a silently predictable flow hash is one a remote peer can
-    /// steer.
+    /// A platform whose CSPRNG could not be seeded has none. Bond balancing
+    /// is not the service's primary purpose, so it degrades to a predictable
+    /// hash rather than refusing to serve the network — and says so, because
+    /// a silently predictable flow hash is one a remote peer can steer.
     fn flow_key() -> HashSeed {
-        if let Some(key) = tairix_hash::published() {
+        if let Some(key) = tairix_rt::hash_seed() {
             return key;
         }
         let mut err = tairix_rt::io::Stderr;
