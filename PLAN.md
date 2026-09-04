@@ -8655,3 +8655,48 @@ space so no passphrase reaches ring 0, NS-6 delete the hardcode.
 
 NS-1 is independent of the rest and closes the duplicate-mount reporting on
 its own.
+
+## COLLECTIONS — the shared container and hashing libraries (`plans/COLLECTIONS.md`)  **[PLANNED, NOT STARTED]**
+
+**Dependencies:** none blocking. `lib/cpuops` (the group-scan ops table),
+`lib/rng` (the per-boot hash key), `lib/sync` (the concurrent tier's atomics
+and epoch), and `lib/reclaim` (the pressure model cache-shaped containers
+report through) all already exist. Touches `plans/ARXFS-WRITEBACK.md` (the
+dirty-set sweep gains the tagged radix index it needs), `plans/FIX-IO.md`
+(per-request deadlines gain the timing wheel), and `plans/NETWORK.md` (the
+neighbour table's per-packet linear scan).
+
+**The defect it closes.** The workspace has `alloc` plus one 256-bit bitset
+and nothing else — no hash map anywhere, so `no_std` code substitutes
+`BTreeMap` and says so in comments. The containers a kernel runs on do not
+exist, so each subsystem grew its own: six independent LRU caches (four with
+an identical `evict_until` over a `BTreeMap` recency index, one of them —
+`lib/net/src/neigh.rs` — an O(n) scan per transmitted packet), four
+hand-rolled address-range maps, four hand-rolled rings, a private
+fixed-capacity `Vec` inlined in `sysinfod`, monotonic `next_id` counters with
+no reuse and no generation, and a `BTreeMap` per futex bucket. That is the
+duplication the charter forbids and, in several places, the O(n)
+load-bearing scan §27 names.
+
+**Shape.** A new zero-dependency `lib/hash` (keyed SipHash-1-3 as the default
+`BuildHasher`, a fast mixer for kernel-assigned keys, and the per-boot /
+per-process seed seam) plus a filled-out `lib/collections` in five tiers:
+hash, sequence, indexed, ordered, and concurrent. Every container has a
+fallible allocating form and no panicking index, allocates nothing on a read
+path, carries no fixed capacity ceiling unless deliberately allocation-free,
+and reports through the existing pressure model rather than a second one.
+Speed is gated by deterministic work counters (probes, comparisons, node
+reach, rehashes, resident bytes per entry, allocations per operation), with
+`cargo xtask bench` producing wall-clock evidence and never a threshold.
+
+**Increments.** C0 `lib/hash`; C1 `HashMap`/`HashSet` on a `lib/cpuops`
+group-scan ops table, plus a new `cargo xtask miri` stage over the unsafe
+cores; C2 `ArrayVec`/`SmallVec`/`ArrayString`/`RingBuf`; C3 `IntrusiveList`;
+C4 O(1) `LruMap`; C5 `RangeMap`/`RangeSet`; C6 `SlotMap`/`IdAllocator`/
+`BitVec`; C7 tagged `RadixTree`; C8 `IndexedHeap`/`TimerWheel`; C9 the
+concurrent tier (`SpscRing`, `MpscQueue`, `ConcurrentMap`) with loom models;
+C10 the closing docs, stability tiers, and a `deps-check` rule against
+re-rolling a container outside `lib/collections`. Each increment lands its
+engine, migrates its callers, and deletes the copies it replaces in the same
+change — an increment that leaves both is not done. C0–C3 are prerequisites;
+C4–C9 are mutually independent once C3 lands.

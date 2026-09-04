@@ -583,7 +583,8 @@ tairix/
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy.
-│   ├── collections/     # no_std collections not in core/alloc.
+│   ├── collections/     # no_std collections not in core/alloc: the hash,
+│   │                    #   sequence, indexed, ordered, and concurrent tiers.
 │   ├── complete/        # Shared filename-completion engine.
 │   ├── compress/        # First-party LZ codec.
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
@@ -611,6 +612,7 @@ tairix/
 │   ├── geometry/        # Shared screen geometry + desktop DPI/UI scale.
 │   ├── glob/            # Shared filename-glob matcher.
 │   ├── greeter/         # Shared screen-authentication surface (login/lock).
+│   ├── hash/            # Keyed SipHash-1-3 + fast mixer + the per-boot seed.
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
 │   ├── i2c/             # I2C register-transaction protocol over the transfer seam.
@@ -1515,6 +1517,7 @@ You are not exempt from any rule above. In addition:
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
+    | Shared containers and hashing: the hash/sequence/indexed/ordered/concurrent tiers in `lib/collections`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
 
