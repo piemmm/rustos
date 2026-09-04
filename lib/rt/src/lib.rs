@@ -91,6 +91,8 @@ pub mod sync;
 
 pub mod thread;
 
+pub mod work;
+
 pub use startup::{arg, arg_count, args, cpu_features, env, env_count, env_var};
 
 // The `mem_map`-backed global allocator. Compiled for the native targets that

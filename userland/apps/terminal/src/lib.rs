@@ -124,7 +124,7 @@ pub use grid::Grid;
 pub use layout::{COLS, ROWS};
 pub use menu::Command;
 pub use parser::Parser;
-pub use profile::Profile;
+pub use profile::{Invalidation, Profile};
 pub use publish::{Publication, PublishJob, Published};
 pub use render::Screen;
 pub use scheme::{ColorScheme, Painted, Scheme};

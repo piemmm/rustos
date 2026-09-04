@@ -841,17 +841,18 @@ pub trait EventSource {
     /// Park the task until something the app waits on is ready — a delivered
     /// event, or whatever else the implementation's wait-set carries.
     ///
-    /// A wake is not a promise of an event: the caller drains again and parks
-    /// afresh if the mailbox is still empty.
+    /// A wake is not a promise of an event, so the answer says whether the
+    /// caller must regain control ([`Parked::Interrupted`]) or the source
+    /// handled it and the wait should go round again ([`Parked::Served`]).
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the wait surfaces; the app treats it as the channel
     /// ending.
-    fn park(&mut self) -> Result<(), Errno>;
+    fn park(&mut self) -> Result<Parked, Errno>;
 
     /// Fill `event` with the next delivered event frame, parking the task
-    /// until one arrives.
+    /// until one arrives or a park interrupts the wait.
     ///
     /// Defaulted as drain-then-park, so an implementation states its two
     /// halves once and no app carries its own spelling of the loop between
@@ -860,14 +861,34 @@ pub trait EventSource {
     /// # Errors
     ///
     /// Any [`Errno`] either half surfaces.
-    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+    fn next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
         loop {
             if self.try_next(event)? {
-                return Ok(());
+                return Ok(true);
             }
-            self.park()?;
+            if self.park()? == Parked::Interrupted {
+                return Ok(false);
+            }
         }
     }
+}
+
+/// What a [`park`](EventSource::park) woke for.
+///
+/// A loop with a worker parks on that worker's wake alongside its event
+/// mailbox, and the answer is the loop's to adopt — it must therefore be able
+/// to leave the wait without an event. Reporting every wake as "no event yet"
+/// instead would park again on a wake source that is *still* ready, which is
+/// a spin, not a wait.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Parked {
+    /// The source dealt with the wake itself — a memory-pressure trim, a
+    /// reaped child. Nothing is owed to the loop, so the wait continues.
+    Served,
+    /// Something the loop owns woke it, and the source has consumed the
+    /// readiness that reported it. The wait ends with no event so the loop can
+    /// act on whatever landed.
+    Interrupted,
 }
 
 /// The app's typed event wait over an [`EventSource`].
@@ -913,15 +934,17 @@ impl<S: EventSource> WindowEvents<S> {
     pub fn wait<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
-    ) -> Result<WindowEvent, Errno> {
+    ) -> Result<Option<WindowEvent>, Errno> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         if let Some(held) = self.read_ahead.take() {
             frame = held;
-        } else {
-            self.source.next(&mut frame)?;
+        } else if !self.source.next(&mut frame)? {
+            // A park the loop owns interrupted the wait; it has something of
+            // its own to do and no event to handle.
+            return Ok(None);
         }
         self.fold_resizes(&mut frame)?;
-        decode_delivered(client, &frame)
+        decode_delivered(client, &frame).map(Some)
     }
 
     /// The queued event if one is waiting, and `None` at once when the mailbox

@@ -270,6 +270,7 @@ fn paint_footer(surface: &mut Surface, chooser: &Chooser, layout: &Layout, style
     if let (false, Some(outcome)) = (status.is_empty(), chooser.apply_outcome()) {
         let palette = style.theme().palette();
         let (text, ink): (&str, Color) = match outcome {
+            ApplyOutcome::Applying => ("Applying…", palette.on_surface_muted.into()),
             ApplyOutcome::Applied => ("Applied.", palette.success.into()),
             ApplyOutcome::Refused(reason) => (reason.as_str(), palette.danger.into()),
             ApplyOutcome::NoDesktop => ("No desktop session is listening.", palette.warning.into()),

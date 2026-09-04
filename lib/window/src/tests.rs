@@ -26,8 +26,8 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, EventSource, Repaint, WindowClient, WindowEvents,
-    WindowTransport,
+    damage_in, pointer_point, present_damage, EventSource, Parked, Repaint, WindowClient,
+    WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -465,10 +465,50 @@ impl EventSource for QueueSource {
         Ok(true)
     }
 
-    fn park(&mut self) -> Result<(), Errno> {
+    fn park(&mut self) -> Result<Parked, Errno> {
         self.parked += 1;
         Err(Errno::WouldBlock)
     }
+}
+
+/// A source whose park is interrupted by something the loop owns — a worker's
+/// answer — rather than by an event.
+struct InterruptingSource {
+    /// How many times the source has been parked.
+    parked: usize,
+}
+
+impl EventSource for InterruptingSource {
+    fn try_next(&mut self, _event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        Ok(false)
+    }
+
+    fn park(&mut self) -> Result<Parked, Errno> {
+        self.parked += 1;
+        Ok(Parked::Interrupted)
+    }
+}
+
+/// The regression the answer type exists for. A worker's wake is level-
+/// triggered, so a wait that treated it as "no event yet" would park again on
+/// a source that is *still* ready — a spin, not a wait, and the answer would
+/// never reach the loop. One interrupted park ends the wait with no event.
+#[test]
+fn an_interrupted_park_ends_the_wait_without_an_event() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut waiter = WindowEvents::new(InterruptingSource { parked: 0 });
+    assert_eq!(waiter.wait(&mut client), Ok(None));
+}
+
+/// And it parks exactly once: the wait returns to the loop rather than
+/// spinning round the drain-park pair.
+#[test]
+fn an_interrupted_wait_parks_once_rather_than_spinning() {
+    let mut source = InterruptingSource { parked: 0 };
+    let mut frame = [0u8; WindowEvent::WIRE_LEN];
+    assert_eq!(source.next(&mut frame), Ok(false), "no event was delivered");
+    assert_eq!(source.parked, 1);
 }
 
 /// Full damage over SURFACE.
@@ -746,7 +786,7 @@ fn a_below_minimum_resize_is_not_answered_with_a_resize_of_the_client_s_own() {
         height_px: 1,
     };
     let mut waiter = WindowEvents::new(QueueSource::new([under.to_le_bytes()]));
-    assert_eq!(waiter.wait(&mut client), Ok(under));
+    assert_eq!(waiter.wait(&mut client), Ok(Some(under)));
 
     let inner = loopback.borrow();
     assert!(
@@ -1427,18 +1467,18 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
     let mut waiter = WindowEvents::new(QueueSource::new(queue));
     assert_eq!(
         waiter.wait(&mut client),
-        Ok(WindowEvent::Focus {
+        Ok(Some(WindowEvent::Focus {
             window_id: a,
             focused: true
-        })
+        }))
     );
     assert_eq!(
         waiter.wait(&mut client),
-        Ok(WindowEvent::Key { window_id: a, key })
+        Ok(Some(WindowEvent::Key { window_id: a, key }))
     );
     assert_eq!(
         waiter.wait(&mut client),
-        Ok(WindowEvent::CloseRequested { window_id: a })
+        Ok(Some(WindowEvent::CloseRequested { window_id: a }))
     );
     // An empty queue surfaces the source's wait condition, never a
     // fabricated event.
@@ -1458,7 +1498,7 @@ fn the_parked_wait_drains_before_it_parks() {
     let mut source = QueueSource::new([queued.to_le_bytes()]);
 
     let mut frame = [0u8; WindowEvent::WIRE_LEN];
-    assert_eq!(source.next(&mut frame), Ok(()));
+    assert_eq!(source.next(&mut frame), Ok(true));
     assert_eq!(WindowEvent::from_bytes(&frame), Ok(queued));
     assert_eq!(source.parked, 0, "a queued event must not cost a park");
 
@@ -1598,7 +1638,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
     let mut waiter = WindowEvents::new(redraw_source(window));
     assert_eq!(
         waiter.wait(&mut client),
-        Ok(WindowEvent::RedrawRequested { window_id: window })
+        Ok(Some(WindowEvent::RedrawRequested { window_id: window }))
     );
     assert!(loopback.borrow().host.presented.is_empty());
 
@@ -1618,7 +1658,7 @@ fn a_redraw_request_re_presents_the_last_frame_without_the_app_acting() {
     let mut waiter = WindowEvents::new(redraw_source(window));
     assert_eq!(
         waiter.wait(&mut client),
-        Ok(WindowEvent::RedrawRequested { window_id: window })
+        Ok(Some(WindowEvent::RedrawRequested { window_id: window }))
     );
     {
         let inner = loopback.borrow();

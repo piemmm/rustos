@@ -9,7 +9,9 @@ use tairix_appdata::Settings;
 use crate::effects::{Effects, FULL, MIN_OPACITY};
 use crate::scheme::{Rgb, Scheme, ANSI_COLORS};
 
-use super::{Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
+use super::{
+    Invalidation, Profile, ProfileKey, DEFAULT_FONT_SIZE_PX, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX,
+};
 
 /// The command word the terminal's bundle is installed under.
 const OWN_WORD: &str = "terminal";
@@ -410,4 +412,165 @@ fn enlarge_and_reduce_respect_their_bounds_and_never_wrap() {
     profile.font_size_px = MIN_FONT_SIZE_PX + 1;
     profile.reduce();
     assert_eq!(profile.font_size_px, MIN_FONT_SIZE_PX);
+}
+
+// --- What a change makes stale ------------------------------------------------
+
+/// The reported defect, stated directly: dragging the transparency slider must
+/// not re-fit the face, re-derive the grid, or resize the hosted shell. It
+/// changed one alpha.
+#[test]
+fn a_transparency_change_stales_only_the_colours() {
+    let was = Profile::default();
+    let now = Profile {
+        effects: Effects {
+            opacity: was.effects.opacity - 100,
+            ..was.effects
+        },
+        ..was
+    };
+    let changed = Invalidation::between(&was, &now);
+    assert!(
+        changed.painted(),
+        "the background alpha is a painted colour"
+    );
+    assert!(!changed.metrics(), "the cell geometry did not move");
+    assert!(!changed.passes(), "no post-processing pass changed");
+}
+
+/// A blur the compositor would round to the width it is already showing costs
+/// nothing at all — neither a message to the compositor nor a pixel here. A
+/// thousand-step slider maps onto a couple of dozen radii, so most samples of a
+/// blur drag land here.
+#[test]
+fn a_blur_change_too_fine_to_see_stales_nothing() {
+    let was = Profile::default();
+    let now = Profile {
+        effects: Effects {
+            blur: was.effects.blur + 1,
+            ..was.effects
+        },
+        ..was
+    };
+    assert_eq!(
+        was.effects.blur_radius_px(),
+        now.effects.blur_radius_px(),
+        "the fixture must not straddle a radius step"
+    );
+    assert!(!Invalidation::between(&was, &now).any());
+}
+
+/// A blur change the compositor *can* show is one message to it and no pixels
+/// of ours: the blur is drawn behind a window whose own picture is unchanged.
+#[test]
+fn a_visible_blur_change_repaints_nothing_here() {
+    let was = Profile::default();
+    let now = Profile {
+        effects: Effects {
+            blur: 0,
+            ..was.effects
+        },
+        ..was
+    };
+    assert_ne!(was.effects.blur_radius_px(), now.effects.blur_radius_px());
+    let changed = Invalidation::between(&was, &now);
+    assert!(changed.blur());
+    assert!(
+        !changed.repaints(),
+        "the window's own pixels are unaffected"
+    );
+}
+
+/// An opaque window asks for no blur however far the slider is pushed, so
+/// going fully opaque withdraws the blur as well as restyling the background.
+#[test]
+fn going_fully_opaque_withdraws_the_blur_too() {
+    let was = Profile::default();
+    let now = Profile {
+        effects: Effects {
+            opacity: FULL,
+            ..was.effects
+        },
+        ..was
+    };
+    let changed = Invalidation::between(&was, &now);
+    assert!(changed.painted());
+    assert!(changed.blur(), "an opaque window's blur is withdrawn");
+}
+
+/// Only a size change moves the grid, which is the one kind that must reach
+/// the hosted shell.
+#[test]
+fn only_a_size_change_stales_the_metrics() {
+    let was = Profile::default();
+    let now = Profile {
+        font_size_px: was.font_size_px + 2,
+        ..was
+    };
+    let changed = Invalidation::between(&was, &now);
+    assert!(changed.metrics());
+    assert!(!changed.painted());
+    assert!(!changed.passes());
+    assert!(!changed.blur());
+}
+
+/// A post-processing effect changes how the finished frame is filtered, not
+/// the cells under it, so the grid and the shell are left alone.
+#[test]
+fn an_effect_strength_stales_only_the_passes() {
+    let was = Profile::default();
+    for now in [
+        Effects {
+            scanlines: 400,
+            ..was.effects
+        },
+        Effects {
+            glow: 400,
+            ..was.effects
+        },
+        Effects {
+            fuzz: 400,
+            ..was.effects
+        },
+        Effects {
+            phosphor: 400,
+            ..was.effects
+        },
+        Effects {
+            wobble: 400,
+            ..was.effects
+        },
+    ] {
+        let changed = Invalidation::between(
+            &was,
+            &Profile {
+                effects: now,
+                ..was
+            },
+        );
+        assert!(changed.passes(), "{now:?} changes the pipeline");
+        assert!(changed.repaints(), "{now:?} needs the frame built again");
+        assert!(!changed.metrics(), "{now:?} must not resize the shell");
+        assert!(!changed.painted(), "{now:?} must not restyle the cells");
+    }
+}
+
+/// A colour scheme restyles every pixel but moves nothing.
+#[test]
+fn a_scheme_change_stales_only_the_colours() {
+    let was = Profile::default();
+    let now = Profile {
+        scheme: Scheme::Custom,
+        ..was
+    };
+    let changed = Invalidation::between(&was, &now);
+    assert!(changed.painted());
+    assert!(!changed.metrics());
+}
+
+/// An unchanged profile stales nothing, so a re-delivered sample costs no work.
+#[test]
+fn an_unchanged_profile_stales_nothing() {
+    let profile = Profile::default();
+    assert!(!Invalidation::between(&profile, &profile).any());
 }

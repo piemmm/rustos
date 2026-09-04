@@ -529,6 +529,12 @@ impl Focus {
 /// document (`plans/PINBOARD.md` §6).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApplyOutcome {
+    /// The request is with the session and no answer has come back yet.
+    ///
+    /// The chooser shows this rather than the previous attempt's answer, so a
+    /// footer can never report a result the store has not given: the apply is
+    /// carried out on a worker and the window keeps drawing meanwhile.
+    Applying,
     /// The session adopted and persisted the change.
     Applied,
     /// The session refused the request, with the reason it gave.

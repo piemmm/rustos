@@ -67,7 +67,7 @@ mod program {
         WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_window::{
-        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Repaint,
+        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Parked, Repaint,
         WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
@@ -190,7 +190,7 @@ mod program {
             }
         }
 
-        fn park(&mut self) -> Result<(), Errno> {
+        fn park(&mut self) -> Result<Parked, Errno> {
             let mut token = 0u64;
             if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                 return Err(Errno::NotFound);
@@ -198,7 +198,7 @@ mod program {
             if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
                 tairix_font::trim_glyph_cache();
             }
-            Ok(())
+            Ok(Parked::Served)
         }
     }
 
@@ -818,10 +818,14 @@ mod program {
     ) -> i32 {
         loop {
             let event = match events.wait(&mut surface.client) {
-                Ok(event) => event,
-                // A malformed frame from the authenticated session is
-                // refused and the app keeps waiting (never guessed at).
-                Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
+                Ok(Some(event)) => event,
+                // A wait that ended without an event cannot arise here (this
+                // app parks on nothing of its own), and a malformed frame from
+                // the authenticated session is refused rather than guessed at.
+                // Either way the app keeps waiting.
+                Ok(None) | Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => {
+                    continue
+                }
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
 

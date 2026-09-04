@@ -3437,22 +3437,35 @@ interface creep): those rules forbid **speculative** surface, they do
 
 ---
 
-## 28. Interactive Surfaces Never Wait on I/O
+## 28. Interactive Surfaces Answer Within a Frame
 
 An **interactive surface** — the desktop session's compositor/serve loop, an
 application's window event loop, a TUI's key loop, the compositor itself — is
-there to answer the user inside a frame. It therefore performs **no blocking
-I/O**: not in response to input, not while painting, and never as a
-consequence of a control's value changing. I/O belongs on a worker; the loop
-*requests* and *collects*. This is binding and as non-negotiable as §2. It
-states, once and for all, the rule §2.16, §2.23, §26.1 and §26.2 imply and
-that `plans/FIX-DESKTOP.md` was re-deriving each time a freeze was found.
+there to answer the user inside a frame. Two things stop it answering:
+**waiting**, and **working**. So it performs no blocking I/O — not in response
+to input, not while painting, and never as a consequence of a control's value
+changing — *and* it does no unbounded work per input event. I/O belongs on a
+worker: the loop *requests* and *collects*. Painting belongs after the input is
+drained: the loop *marks* and *paints once*. This is binding and as
+non-negotiable as §2. It states, once and for all, the rule §2.16, §2.23, §26.1
+and §26.2 imply and that `plans/FIX-DESKTOP.md` was re-deriving each time a
+freeze was found.
 
-The motivating defect class: a slider whose value was wired straight to a
-settings write, so **every pointer-motion sample of a drag** cost an IPC round
-trip to the configuration service and a disk commit, and the window froze for
-the whole drag. A design that only stays responsive on an idle machine with a
-fast local disk is defective (§26), even when it compiles and its tests pass.
+Both defect classes were found on the same settings slider, one behind the
+other:
+
+- **Waiting.** The slider's value was wired straight to a settings write, so
+  **every pointer-motion sample of a drag** cost an IPC round trip to the
+  configuration service and a disk commit. The window froze for the whole drag.
+- **Working.** With the write removed, the same slider still re-derived
+  *everything* per sample: it discarded the retained screen, re-ran the whole
+  post-processing pipeline over every pixel, reallocated a screen-sized buffer,
+  resized the hosted pty, and reset the animation history — for a change to one
+  field that none of it depended on. Nothing waited on a device, and the drag
+  was still not smooth.
+
+A design that stays responsive only on an idle machine with a fast local disk
+and a small window is defective (§26), even when it compiles and its tests pass.
 
 1. **No blocking I/O on an interactive loop.** No syscall or IPC round trip
    that waits on a device, a filesystem, or another service runs on a loop
@@ -3488,17 +3501,46 @@ fast local disk is defective (§26), even when it compiles and its tests pass.
    beside one of them (§2.2). Where the machine grants no worker the work
    falls back to the requesting thread — slower under load, never wrong, and
    never a silently dropped request.
-7. **The bounded exceptions, and nothing else.** In-memory work, work already
-   dequeued, and the frame-present the display protocol serialises are not
-   I/O. That list is exhaustive; reaching for it to excuse a store write, a
+7. **The bounded I/O exceptions, and nothing else.** In-memory work, work
+   already dequeued, and the frame-present the display protocol serialises are
+   not I/O. That list is exhaustive; reaching for it to excuse a store write, a
    file read, or a directory walk on the loop is the defect.
-8. **Reviewed under §23.** A surface that stalls on I/O, a control wired to a
-   write, or a paint that reads is a §23.2 defect and a review blocker,
-   however small the file it sits in and however fast the developer's disk.
+8. **Input updates state; the frame is produced from state.** An event handler
+   records what changed and asks for a paint; it does not paint. The paint
+   happens once, after the available input is drained, from the state those
+   events left behind. A handler that presents inline hands the frame rate to
+   the input device, which is not its to set.
+9. **A burst of input produces one paint, not one per event.** Pointer motion,
+   wheel deltas, key repeats and resize samples all arrive faster than a screen
+   can show them, and a frame the user never sees is work spent for nothing at
+   any cost. Drain, then paint. A surface that genuinely cannot drain first
+   paints at most once per present the display protocol serialises.
+10. **A repaint rebuilds only what the change invalidates.** Re-deriving the
+    whole surface because *something* changed is the defect, however cheap it
+    looks in the file it sits in: the cost then scales with the surface rather
+    than with the edit, so it is worst exactly where the surface is largest and
+    the machine slowest. Scope the work to what changed — the damage the
+    controls reported, the caches the change actually stales. A change that
+    genuinely restyles or reshapes the whole surface (a re-theme, a resize, a
+    scale change) repaints it whole: that *is* its scope, not an exception to
+    having one.
+11. **A change never reaches state it does not name.** A control's value
+    touches what that value means and nothing else. Re-deriving unrelated state
+    in passing is not merely wasted work, it is wrong behaviour — a discarded
+    animation history, a spurious resize delivered to a hosted process, a warm
+    cache dropped and rebuilt — and it is a defect at any cost, including none.
+12. **Reviewed under §23.** A surface that stalls on I/O, a control wired to a
+    write, a paint that reads, a handler that paints inline, an uncoalesced
+    burst, or a repaint scoped wider than its change is a §23.2 defect and a
+    review blocker, however small the file it sits in and however fast the
+    developer's disk and screen.
 
 The staged enforcement across the desktop is `plans/FIX-DESKTOP.md`; the
-control-side obligation (a continuous control reporting its settle point) is
-specified with the control families in `plans/GUI-CONTROLS-DESIGN.md`.
+control-side obligations — a continuous control reporting its settle point, and
+the damage it reports so a repaint can be scoped — are specified with the
+control families in `plans/GUI-CONTROLS-DESIGN.md`; the compositor-side damage,
+present-batching and frame-pacing machinery a scoped repaint is built on is
+`plans/FIX-DESKTOP-SPEEDUP.md`.
 
 ---
 

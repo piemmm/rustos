@@ -210,6 +210,15 @@ the fit, backdrop, arrangement, and sort, and applies by sending the
 rendered document to the session. A refusal is reported in its own window;
 it never fabricates success and never exits over one.
 
+**Apply does not block the window.** The session answers only once its own
+publisher has written the store, so the click encodes the document (in memory,
+and refusable on the spot) and hands the round trip to a worker
+(`tairix_rt::work`). The footer reads `Applying…` meanwhile — never the
+previous attempt's answer, so it cannot report a result the store has not
+given — and the gallery, the preview and the controls stay live throughout. The
+answer replaces it the moment it lands. A machine that grants no worker makes
+the call on the loop, exactly as it used to: slower under load, never wrong.
+
 The window is a large preview beside the four settings, then the category
 rail and a scrolling gallery of the shipped wallpapers, and the two actions
 in the footer:

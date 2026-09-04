@@ -41,7 +41,7 @@ pub mod server;
 pub use appbar::{declaration, info_and_quit, is_quit, DESKTOP_ROLE_SWITCH, QUIT_ROW};
 pub use client::{
     damage_in, event_endpoint_for, key_input_event, pointer_input_events, pointer_point,
-    present_damage, EventSource, Repaint, WindowClient, WindowEvents, WindowTransport,
+    present_damage, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowTransport,
     EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;

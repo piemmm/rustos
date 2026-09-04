@@ -427,6 +427,109 @@ fn render_ansi(ansi: &[Rgb; ANSI_COLORS]) -> String {
     text
 }
 
+/// What replacing one [`Profile`] with another makes stale — the whole of it,
+/// and no more.
+///
+/// A drag delivers one profile change per pointer-motion sample, so a surface
+/// that re-derived everything on each would make one slider cost a screenful
+/// per sample. Comparing the two profiles says which kinds of work the change
+/// actually implies, and the surface does only those.
+///
+/// A set rather than a record of flags: the kinds are combined and tested, not
+/// assigned, so no caller can build one positionally and get two of them the
+/// wrong way round.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Invalidation(u8);
+
+impl Invalidation {
+    /// The cell geometry: re-fit the face, re-derive the grid, and tell the
+    /// hosted shell its new size.
+    const METRICS: u8 = 1 << 0;
+    /// The resolved colours: every retained pixel is stale.
+    const PAINTED: u8 = 1 << 1;
+    /// The effect pipeline: the same cells post-process differently, so the
+    /// frame must be built again.
+    const PASSES: u8 = 1 << 2;
+    /// The backdrop-blur radius: tell the compositor. The surface's own pixels
+    /// are unaffected, because the blur is behind them.
+    const BLUR: u8 = 1 << 3;
+
+    /// What replacing `was` with `now` makes stale.
+    #[must_use]
+    pub fn between(was: &Profile, now: &Profile) -> Self {
+        let mut stale = 0;
+        if was.font_size_px != now.font_size_px {
+            stale |= Self::METRICS;
+        }
+        if was.scheme != now.scheme
+            || was.custom != now.custom
+            || was.effects.opacity != now.effects.opacity
+        {
+            stale |= Self::PAINTED;
+        }
+        if was.effects.scanlines != now.effects.scanlines
+            || was.effects.glow != now.effects.glow
+            || was.effects.fuzz != now.effects.fuzz
+            || was.effects.phosphor != now.effects.phosphor
+            || was.effects.wobble != now.effects.wobble
+        {
+            stale |= Self::PASSES;
+        }
+        // The radius rather than the strength: it is a quantised handful of
+        // pixel widths, so most samples of a blur drag ask for what the
+        // compositor already shows and need not be sent at all. It also folds
+        // in the opacity an opaque window zeroes the blur by.
+        if was.effects.blur_radius_px() != now.effects.blur_radius_px() {
+            stale |= Self::BLUR;
+        }
+        Self(stale)
+    }
+
+    /// Whether anything at all is stale.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    /// Whether the cell geometry moved.
+    #[must_use]
+    pub const fn metrics(self) -> bool {
+        self.0 & Self::METRICS != 0
+    }
+
+    /// Whether the resolved colours changed.
+    #[must_use]
+    pub const fn painted(self) -> bool {
+        self.0 & Self::PAINTED != 0
+    }
+
+    /// Whether the effect pipeline changed.
+    ///
+    /// Deliberately *not* one of the kinds that forgets what the stateful
+    /// passes remember: turning an effect up or down leaves what was lit still
+    /// true, and dropping the trail there would flicker the persistence away
+    /// on every sample of its own slider.
+    #[must_use]
+    pub const fn passes(self) -> bool {
+        self.0 & Self::PASSES != 0
+    }
+
+    /// Whether the backdrop-blur radius changed.
+    #[must_use]
+    pub const fn blur(self) -> bool {
+        self.0 & Self::BLUR != 0
+    }
+
+    /// Whether the surface's own pixels must be built again.
+    ///
+    /// A blur-only change is the one that need not be: the compositor draws it
+    /// behind a window whose picture is unchanged.
+    #[must_use]
+    pub const fn repaints(self) -> bool {
+        self.0 & (Self::METRICS | Self::PAINTED | Self::PASSES) != 0
+    }
+}
+
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod tests;

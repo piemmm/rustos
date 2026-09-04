@@ -179,3 +179,81 @@ fn the_answers_warnings_reach_the_caller() {
     assert!(warnings[0].contains(ProfileKey::Scheme.name()));
     assert!(warnings[0].ends_with("using its default\n"));
 }
+
+// --- What the screen still owes -----------------------------------------------
+
+/// The compute half of the same regression: a burst of previews between two
+/// paints costs **one** paint, because what is owed is measured against the
+/// screen rather than against each edit.
+#[test]
+fn a_burst_of_previews_owes_the_screen_one_paint() {
+    let mut publication = Publication::new(Profile::default());
+    for size in 1..=8 {
+        publication.preview(Profile {
+            font_size_px: Profile::default().font_size_px + size,
+            ..Profile::default()
+        });
+    }
+    assert!(
+        publication.take_pending().metrics(),
+        "the folded burst still owes the size change"
+    );
+    assert!(
+        !publication.take_pending().any(),
+        "and owes nothing once drawn"
+    );
+}
+
+/// A preview the surface never drew stays owed. Measuring against each edit
+/// instead would let a change slip through whenever the outcome that carried
+/// it lost to another.
+#[test]
+fn an_undrawn_preview_stays_owed_until_it_is_drawn() {
+    let mut publication = Publication::new(Profile::default());
+    publication.preview(larger());
+    publication.preview(Profile::default());
+    assert!(
+        !publication.take_pending().any(),
+        "a preview returned to what the screen already shows owes nothing"
+    );
+    publication.preview(larger());
+    assert!(publication.take_pending().metrics(), "but a real one does");
+}
+
+/// Adopting the store's answer leaves the screen owing the difference from
+/// what it is *showing*, not from what the widget last asked for.
+#[test]
+fn adopting_owes_the_difference_from_the_screen() {
+    let mut publication = Publication::new(Profile::default());
+    publication.preview(larger());
+    let _ = publication.take_pending();
+    let mut warnings = Vec::new();
+    let changed = publication.adopt(
+        Ok(Published {
+            profile: largest(),
+            warnings: Vec::new(),
+        }),
+        &mut warnings,
+    );
+    assert!(changed, "the store's answer differs from what was asked");
+    assert!(
+        publication.take_pending().metrics(),
+        "and the screen owes the difference from the size it is showing"
+    );
+}
+
+/// A refused write reverts the preview, and the screen owes that revert —
+/// otherwise a window keeps showing a look the next start would not restore.
+#[test]
+fn a_refused_write_owes_the_revert() {
+    let mut publication = Publication::new(Profile::default());
+    publication.preview(larger());
+    let _ = publication.take_pending();
+    let mut warnings = Vec::new();
+    let changed = publication.adopt(Err(Errno::PermissionDenied), &mut warnings);
+    assert!(changed, "the live profile snapped back");
+    assert!(
+        publication.take_pending().metrics(),
+        "and the screen owes the size it snapped back to"
+    );
+}

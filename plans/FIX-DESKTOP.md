@@ -7,10 +7,11 @@ band-aid), and stages the identical fix for every other interactive
 loop that inherits the same defect.
 
 The rule this plan enforces is now stated outright in the charter (`§28`,
-"Interactive Surfaces Never Wait on I/O"): an interactive surface performs no
-blocking I/O — not in response to input, not while painting, and never because a
-control's value changed. This plan is that rule's staged enforcement across the
-desktop; it is no longer where the rule is derived.
+"Interactive Surfaces Answer Within a Frame"): an interactive surface neither
+waits nor works unboundedly per event — it performs no blocking I/O, and it
+updates state on input and paints once from that state, scoped to what changed.
+This plan is that rule's staged enforcement across the desktop; it is no longer
+where the rule is derived.
 
 ---
 
@@ -60,7 +61,10 @@ event loop** inherits the freeze:
 | Desktop icon artwork | `userland/gui/session/src/run.rs` (every icon surface resolving through `tairix_icon::ArtworkCache` *inside* its paint) | Compositor loop frozen for a bounded read plus a sandbox round trip, per icon, the first time each is drawn at a given pixel side. Worst on bring-up and on opening the launcher. Fixed in DESK-8. |
 | Desktop program catalog | `userland/gui/session/src/run.rs` (`refresh_library` + `desktop_associations`, on the `OpenLibrary` arm and after a re-list) | Compositor loop frozen while the two catalog documents and then **one `AppInfo` per catalogued application** are read — on the very click that opens the launcher. Fixed in DESK-9. |
 | Desktop settings publish | `userland/gui/session/src/run.rs` (`adopt_pinboard_settings` → `persist_pinboard`) | Compositor loop frozen for a store open + publish + reload, *deliberately before* the change was adopted. Fixed in DESK-10. |
-| Terminal settings sheet | `userland/apps/terminal/src/{settings,run}.rs` | One store read + publish + reload **per pointer-motion sample of a slider drag**, on the terminal's own loop. The reported defect; fixed in DESK-10. |
+| Terminal settings sheet — the write | `userland/apps/terminal/src/{settings,run}.rs` | One store read + publish + reload **per pointer-motion sample of a slider drag**, on the terminal's own loop. Fixed in DESK-10. |
+| Terminal settings sheet — the redraw | `userland/apps/terminal/src/run.rs` (`redraw_windows`) | With the write gone, **every sample still re-derived the whole look**: it discarded the retained screen, re-ran the effect pipeline over every pixel, reallocated the scratch surface, resized the pty, and reset the persistence trail — whichever field moved. Fixed in DESK-13. |
+| Wallpaper chooser *Apply* | `userland/apps/wallpaper/src/run.rs` (`apply`) | A synchronous `PINBOARD_ENDPOINT` `ipc_call` on the chooser's loop, answered only once the session's publisher has written the store: the window froze for a disk commit. Fixed in DESK-14. |
+| File manager reader wake | `userland/apps/files/src/run.rs` (`RtEventSource::park`) | The reader's wake was added to the wait-set but never drained, and `park` reported it as "no event yet". A wait-set stream member is a **level** peek, so after every answered listing the park spun at 100% until the next input event happened to break it. Found by DESK-14; fixed there. |
 | File manager listings | `userland/apps/files/src/run.rs` (`LiveSource`) | Window frozen for every directory read: navigation, reload, and the bring-up open. Fixed in DESK-11. |
 | File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | `open_dir` + `read` + `close` per newly-visible folder, while painting. Fixed in DESK-11. |
 | File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
@@ -791,6 +795,85 @@ Each stage is independently reviewable and must leave the whole-project
   pair, the store's answer winning, a refusal reverting), and the `defer` suite
   (`lib/util/src/defer_tests.rs`).
 
+### DESK-13 — Redraws scoped to what changed (the reported slider, again)
+- **Done.** A control's value no longer drives an unscoped rebuild. DESK-10 took
+  the *write* off the drag; this takes the *work* off it.
+  - **`Invalidation`** (`userland/apps/terminal/src/profile.rs`) is the set of
+    kinds one profile change makes stale — cell metrics, resolved colours,
+    effect passes, backdrop-blur radius — derived by comparing the profile in
+    force with the one replacing it. It is a set rather than four bools so no
+    caller can build one positionally and transpose two kinds.
+  - **`Publication` measures what the screen owes**, not what each edit asked
+    for: it holds the profile it last *rendered* beside the live and adopted
+    ones, and `take_pending` answers the difference and records the catch-up.
+    Diffing against the screen is what makes a burst of previews cost one
+    paint, and is why no preview can be stranded by an outcome that lost.
+  - **The terminal does only the stale work.** Blur is one bounded message to
+    the compositor and no pixels of its own; a size change is the only one that
+    re-fits the face, re-derives the grid, and resizes the pty; colours and
+    metrics are the only ones that discard the retained screen and the
+    persistence trail. The trail surviving an effect slider is a correctness
+    fix, not only a speed one — resetting it flickered the persistence away on
+    every sample of its own slider. The blur diff is taken on the **radius**,
+    so the thousand-step slider's samples that land on a width the compositor
+    already shows send nothing at all.
+  - **The sheet's own pixels are a separate question** (`Sheets`), because the
+    knob moves at a permille the window cannot see: answering only the window's
+    would freeze the slider under the pointer.
+  - **The loop paints from state.** An unsettled edit folds into the drain and
+    concludes it once; `apply_outcome` then brings the screen up to date with
+    whatever an outcome previewed and did not draw. A settle still concludes
+    the drain at once — it is one event per gesture and it owes a write.
+  - **`DesktopChanged` collapsed onto `restyle_windows`**, the whole-surface
+    path a re-theme or scale change genuinely needs, removing a near-copy that
+    had also been failing to re-present an open sheet at the new scale.
+- Tests: the `Invalidation` suite (`profile_tests.rs`) — a transparency change
+  staling only the colours, a blur too fine to see staling nothing, a visible
+  blur repainting nothing here, going opaque withdrawing the blur, only a size
+  change reaching the metrics, each effect strength staling only the passes;
+  and the owed-paint suite (`publish_tests.rs`) — a burst owing one paint, an
+  undrawn preview staying owed, adopt and a refusal owing the difference from
+  the screen.
+
+### DESK-14 — The wallpaper chooser's *Apply* off its loop
+- **Done.** The chooser's click no longer waits on the session's store write,
+  and the arrangement that takes such work is now one shared thing rather than
+  a copy per app.
+  - **`tairix_rt::work`** is the runtime half of `tairix_util::defer`: the
+    `JobDesk` supplies the bookkeeping, and `Worker` supplies the exclusion,
+    the parked thread, the wake, and the fall-back. The work is a plain
+    `fn(&Req) -> Ans`, so the worker thread and the fall-back path cannot be
+    given two that disagree, and nothing is boxed. The terminal's `Publisher`
+    is now a type alias over it — the local copy is gone, not duplicated.
+  - **The fall-back is one path, not a second one.** A refused wake pipe or
+    thread leaves the desk stopped, which makes a later `submit` carry the job
+    out on the caller's thread and leave the answer where `collect` looks,
+    answering `true` so the caller collects at once. `NoWorker` says which
+    refusal it was, so each app words its own message.
+  - **The chooser** encodes the document on the loop (in memory, refusable on
+    the spot) and submits only the round trip. `ApplyOutcome::Applying` is what
+    the footer shows meanwhile, so it can never report a result the store has
+    not given.
+- **A wait can now end without an event.** `EventSource::park` answers
+  `Parked::{Served, Interrupted}` and `WindowEvents::wait` answers
+  `Option<WindowEvent>`. This is what a worker's answer needs: a wait-set
+  stream member reports **buffered bytes, not an edge**, so a wake the source
+  treats as "no event yet" is a source that is *still* ready — the park then
+  spins rather than waits, and the answer never reaches the loop.
+  - **This closed a live busy-spin in the file manager.** Its reader wake was
+    on the wait-set but never drained, and `park` reported it as nothing, so
+    every answered listing spun a core until the next input event happened to
+    break it. Tests masked it because a vertical's next keystroke always
+    arrived. It drains and interrupts now, like the chooser.
+  - The three apps that park on nothing of their own (`viewer`, `widgets`,
+    `datetime`) answer `Parked::Served` and go round again.
+- Tests: the `work` suite (`lib/rt/src/work.rs`) — a stopped worker running the
+  job on its caller and leaving the answer to collect, a running one deferring
+  it, the guard stopping what it holds, and a start with no wake leaving the
+  work on the caller; and the interrupted-park pair
+  (`lib/window/src/tests.rs`) — a wait ending with no event, and parking once
+  rather than spinning.
+
 ### DESK-11 — The file manager's reads off its loop
 - **Done.** Every unbounded read the file manager makes now runs on one reader
   thread, and the window keeps drawing throughout. The three kinds share a
@@ -1024,6 +1107,13 @@ Each stage is independently reviewable and must leave the whole-project
   folder cues, and the "Open With…" bundle scan — runs on one reader thread.
 - **DESK-12 — planned.** The file manager's icon decode is still pumped on its
   event loop, one bounded read plus one sandbox round trip per turn.
+- **DESK-13 — done.** A profile change costs only the work the field that moved
+  implies; the terminal is the last surface off the shared damage discipline
+  and was the only one with this coupling.
+- **DESK-14 — done.** The wallpaper chooser's *Apply* runs on a worker; the
+  desk-plus-worker arrangement is one shared `lib/rt::work`; and the wait a
+  worker's answer arrives on can end without an event, which also closed a
+  busy-spin in the file manager.
 - **DESK-5 … DESK-7 — planned.**
 
 ---

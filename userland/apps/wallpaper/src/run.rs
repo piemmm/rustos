@@ -78,7 +78,7 @@ mod program {
     };
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventSource,
-        Repaint, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
+        Parked, Repaint, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// Exit code when the shared frame region could not be created or
@@ -113,6 +113,11 @@ mod program {
     /// is starved.
     const PRESSURE_TOKEN: u64 = 2;
 
+    /// The wait-set token of the applier's wake pipe: readable exactly when
+    /// the desktop session has answered an apply, so the footer is written
+    /// through the park the loop is already in rather than by waiting for it.
+    const APPLY_TOKEN: u64 = 3;
+
     /// The window title the desktop lists this app under.
     const TITLE: &str = "Wallpaper";
 
@@ -145,13 +150,17 @@ mod program {
     /// events whose kernel-attested sender is the desktop session named by
     /// the create reply — anything else is dropped (fail closed), so no
     /// other process can feed the app forged input.
-    struct RtEventSource {
+    struct RtEventSource<'a> {
         /// The app's event-mailbox endpoint id.
         endpoint: u64,
         /// The wait-set handle the app parks on.
         set: u64,
         /// The only sender whose events are accepted.
         server: ProcId,
+        /// The applier's wake, drained on an [`APPLY_TOKEN`] wake. Its
+        /// readiness is a level peek, so leaving it undrained would report
+        /// ready for ever and turn the park into a spin.
+        applier: &'a Applier,
     }
 
     /// Whether a received mailbox frame is a genuine event from the desktop
@@ -162,7 +171,7 @@ mod program {
             && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
     }
 
-    impl EventSource for RtEventSource {
+    impl EventSource for RtEventSource<'_> {
         fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
             loop {
                 let mut sender = [0u8; ORIGIN_WIRE_LEN];
@@ -178,15 +187,22 @@ mod program {
             }
         }
 
-        fn park(&mut self) -> Result<(), Errno> {
+        fn park(&mut self) -> Result<Parked, Errno> {
             let mut token = 0u64;
             if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
                 return Err(Errno::NotFound);
             }
+            // The session answered the apply. Draining is the whole of
+            // noticing it, and the answer is the loop's to show, so the wait
+            // ends here rather than parking again on a source still ready.
+            if token == APPLY_TOKEN {
+                self.applier.wake().drain();
+                return Ok(Parked::Interrupted);
+            }
             if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
                 tairix_font::trim_glyph_cache();
             }
-            Ok(())
+            Ok(Parked::Served)
         }
     }
 
@@ -441,11 +457,11 @@ mod program {
     /// Nothing is reported as applied that the session did not accept: a
     /// document this program cannot even encode, an unanswered rendezvous,
     /// and a typed refusal are three distinct outcomes.
-    fn apply(document: &str) -> ApplyOutcome {
-        let Ok(carried) = PinboardDocument::new(document) else {
-            return ApplyOutcome::Refused(String::from("settings document out of range"));
-        };
-        let request = PinboardRequest::Apply { document: carried }.to_le_bytes();
+    fn send_apply(document: &PinboardDocument) -> ApplyOutcome {
+        let request = PinboardRequest::Apply {
+            document: *document,
+        }
+        .to_le_bytes();
         let mut reply = [0u8; STATUS_REPLY_LEN];
         let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &request, &mut reply) else {
             return ApplyOutcome::NoDesktop;
@@ -455,6 +471,15 @@ mod program {
             Err(err) => ApplyOutcome::Refused(alloc::format!("{err:?}")),
         }
     }
+
+    /// The chooser's applier: the session round trip an *Apply* costs, carried
+    /// out on a worker thread.
+    ///
+    /// The session answers only once its own publisher has written the store,
+    /// so making the click wait for it would freeze the window for a disk
+    /// commit. The loop encodes the document (in memory, and refusable on the
+    /// spot), submits, and shows the answer on the wake it nudges.
+    type Applier = tairix_rt::work::Worker<PinboardDocument, ApplyOutcome>;
 
     /// A `width_px` × `height_px` RGBA window mode, one frame's worth per
     /// row. The one place the chooser's mode is shaped, so the create and
@@ -752,6 +777,37 @@ mod program {
             Err(code) => return code,
         };
 
+        // --- The applier. The session answers an *Apply* only once it has
+        // written the store, so the click hands the round trip here and the
+        // window keeps drawing. A kernel that grants no thread, or refuses the
+        // pipe, leaves the call on this task — where it used to be, and stated
+        // once.
+        let applier = alloc::sync::Arc::new(Applier::new(
+            send_apply,
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if let Err(reason) = Applier::start(&applier) {
+            report(&alloc::format!(
+                "no apply worker ({reason:?}); the desktop is asked on the event loop"
+            ));
+        }
+        let _applier_guard = tairix_rt::work::WorkerGuard::new(&applier);
+        // A refused add is fatal rather than tolerated: an apply whose answer
+        // nobody collects would leave the footer claiming a state the session
+        // may never have adopted.
+        if let Some(read) = applier.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                APPLY_TOKEN,
+            ) != 0
+            {
+                return fail(EXIT_NO_EVENTS, "apply wake refused");
+            }
+        }
+
         // --- Open the window (resizable: the grid re-lays out to each new
         // client size, down to the floor the window manager is told to hold)
         // and paint the first frame.
@@ -794,6 +850,7 @@ mod program {
             endpoint: event_endpoint,
             set,
             server,
+            applier: &applier,
         });
         loop {
             // Queued input first, then one outstanding render, and a park only
@@ -803,8 +860,22 @@ mod program {
             // whole gallery's worth. Nothing here spins — an idle chooser with
             // every visible tile rendered parks on its wait-set.
             let mut damage = tairix_controls::damage::sink();
+            // What the session said about the last apply, shown the moment it
+            // lands rather than at whatever later input happens to arrive.
+            if let Some(outcome) = applier.collect() {
+                chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
+                if let Some(damage) = present_damage(&surface.mode, Repaint::Reported, &damage) {
+                    if surface
+                        .present(&mut chooser, theme, &desktop, damage)
+                        .is_err()
+                    {
+                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                    }
+                }
+                continue;
+            }
             let delivered = match events.try_wait(&mut surface.client) {
-                Ok(Some(event)) => Ok(event),
+                Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
                     if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage)
                     {
@@ -830,10 +901,14 @@ mod program {
                 Err(err) => Err(err),
             };
             let event = match delivered {
-                Ok(event) => event,
-                // A malformed frame from the authenticated session is
-                // refused and the app keeps waiting (never guessed at).
-                Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
+                Ok(Some(event)) => event,
+                // A park the applier interrupted has no event — the collect at
+                // the head of the next turn is what shows the answer — and a
+                // malformed frame from the authenticated session is refused
+                // rather than guessed at. Either way the loop goes round.
+                Ok(None) | Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => {
+                    continue
+                }
                 Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
 
@@ -961,7 +1036,22 @@ mod program {
                 ChooserAction::None => Repaint::Nothing,
                 ChooserAction::Changed => Repaint::Reported,
                 ChooserAction::Apply => {
-                    let outcome = apply(&chooser.settings_document());
+                    // Encoding is in-memory and refusable on the spot; only
+                    // the session round trip goes to the worker.
+                    let outcome = match PinboardDocument::new(&chooser.settings_document()) {
+                        Ok(document) => {
+                            if applier.submit(document) {
+                                // No worker: the call was made on this thread
+                                // and its answer is already on the desk.
+                                applier.collect().unwrap_or(ApplyOutcome::Applying)
+                            } else {
+                                ApplyOutcome::Applying
+                            }
+                        }
+                        Err(_) => {
+                            ApplyOutcome::Refused(String::from("settings document out of range"))
+                        }
+                    };
                     chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
                     Repaint::Reported
                 }

@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 
-use crate::profile::{Profile, ProfileKey};
+use crate::profile::{Invalidation, Profile, ProfileKey};
 
 /// What the settings worker is asked to do.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +60,7 @@ pub struct Published {
 pub struct Publication {
     adopted: Profile,
     live: Profile,
+    rendered: Profile,
 }
 
 impl Publication {
@@ -69,6 +70,7 @@ impl Publication {
         Self {
             adopted: profile,
             live: profile,
+            rendered: profile,
         }
     }
 
@@ -88,8 +90,26 @@ impl Publication {
     /// Show `profile` without writing anything — one sample of a drag still
     /// under the pointer, or a settled edit whose write is asked for
     /// separately.
+    ///
+    /// What the surface must draw to catch up is asked for separately, by
+    /// [`take_pending`](Self::take_pending), so any number of previews between
+    /// two paints cost one paint.
     pub fn preview(&mut self, profile: Profile) {
         self.live = profile;
+    }
+
+    /// What the surface has yet to draw: the difference between the profile in
+    /// force and the one it last rendered. Taking it records the live profile
+    /// as rendered.
+    ///
+    /// Diffing against what is *on screen* rather than against each individual
+    /// edit is what makes a burst of them cost one repaint, and is why no
+    /// change can be lost on the way: a preview that is never drawn stays in
+    /// the difference until one is.
+    pub fn take_pending(&mut self) -> Invalidation {
+        let changed = Invalidation::between(&self.rendered, &self.live);
+        self.rendered = self.live;
+        changed
     }
 
     /// Ask for what is on screen to be written, because the interaction that
@@ -118,10 +138,12 @@ impl Publication {
     /// store actually holds.
     ///
     /// `warnings` receives whatever the caller should print. Answers whether
-    /// the profile in force changed, so every window re-derives its look and
-    /// repaints and the open sheet is re-seeded — the sheet holds its own copy
-    /// of what it is editing, and a store answer that differs from what it
-    /// asked for leaves that copy describing settings nothing is using.
+    /// the profile in force changed, so the open sheet is re-seeded — the
+    /// sheet holds its own copy of what it is editing, and a store answer that
+    /// differs from what it asked for leaves that copy describing settings
+    /// nothing is using. What must be *drawn* is
+    /// [`take_pending`](Self::take_pending)'s answer, which is measured against
+    /// the screen rather than against this call.
     pub fn adopt(&mut self, answer: Result<Published, Errno>, warnings: &mut Vec<String>) -> bool {
         let before = self.live;
         match answer {

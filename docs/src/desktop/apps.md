@@ -1802,9 +1802,13 @@ blits, a couple of cells copied into the shared frame, and a two-cell
 damage rectangle for the session to recomposite — rather than re-rendering,
 re-converting, and re-presenting the whole window for one character. A wake
 that changed nothing presents nothing at all. Two equal cells paint
-identically only under the same colours and the same face, so a profile,
-theme, or scale change calls `Screen::invalidate` and the next paint covers
-the window. A resize needs no such call: the present step reconciles the
+identically only under the same colours and the same face, so a theme or
+scale change calls `Screen::invalidate` and the next paint covers the window.
+A *profile* change calls it only when it moved one of those two: a backdrop
+blur the compositor draws behind the window, or a post-processing pass over
+the finished frame, leaves every retained cell still true, so a drag of
+either of those sliders keeps the diff rather than throwing a screenful away
+per sample. A resize needs no such call: the present step reconciles the
 picture to the display mode describing the shared frame region, so the two
 can never disagree, and reshaping invalidates implicitly.
 A damaged block is widened to whole glyphs before it is drawn, so

@@ -85,6 +85,7 @@
   - [`tairix-resref`](./lib/resref.md)
   - [`tairix-rng`](./lib/rng.md)
   - [`tairix-rt` I/O](./lib/rt-io.md)
+  - [`tairix-rt` work](./lib/rt-work.md)
   - [`tairix-sandbox`](./lib/sandbox.md)
   - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)

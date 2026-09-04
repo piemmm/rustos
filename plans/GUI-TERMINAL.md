@@ -440,9 +440,13 @@ the work to the damage removes the cliff rather than hiding it by snapping
 the slider.
 
 **What the diff may assume, and what it may not.** Two equal cells paint
-identically *only* under the same colours and the same face, so a profile,
-theme, or scale change calls `Screen::invalidate`, and so does a session
-redraw request. A resize needs no such call: `present_frame` reconciles the
+identically *only* under the same colours and the same face, so a theme or
+scale change calls `Screen::invalidate`, and so does a session redraw request.
+A *profile* change invalidates only when it moved one of those two — new
+colours or a new size. A backdrop blur the compositor draws behind the window,
+or a post-processing pass over the finished frame, leaves every retained cell
+still true, and discarding them for it would make each sample of those sliders
+cost a whole screen (`plans/FIX-DESKTOP.md` DESK-13). A resize needs no such call: `present_frame` reconciles the
 picture to the `DisplayMode` describing the frame region, so a surface and a
 region of different shapes cannot arise however a resize half-fails, and
 reshaping invalidates implicitly. The cursor block is tracked beside the

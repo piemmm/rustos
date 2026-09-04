@@ -156,7 +156,7 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Repaint,
+        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Parked, Repaint,
         WindowClient, WindowEvents, WindowFrames, WindowTransport,
     };
 
@@ -1642,6 +1642,9 @@ mod program {
     /// ([`PRESSURE_TOKEN`]): a band change wakes the park and the retained
     /// artwork is trimmed there and then, so memory goes back when the machine
     /// asks for it rather than at whatever later moment the user next types.
+    /// The reader's wake ([`READS_TOKEN`]) is the one member the source cannot
+    /// serve itself: the answer is the loop's to adopt, so the wake is drained
+    /// here and the wait ends without an event.
     struct RtEventSource<'a> {
         /// The app's event-mailbox endpoint id.
         endpoint: u64,
@@ -1655,6 +1658,10 @@ mod program {
         /// The grid's artwork pipeline, trimmed on a [`PRESSURE_TOKEN`] wake,
         /// shared with the present path that draws through it.
         icons: &'a RefCell<Icons>,
+        /// The reader's wake, drained on a [`READS_TOKEN`] wake. Its readiness
+        /// is a level peek, so leaving it undrained would report ready for
+        /// ever and turn the park into a spin.
+        reads: &'a Reads,
     }
 
     /// Whether a received mailbox frame is a genuine event from the desktop
@@ -1680,7 +1687,7 @@ mod program {
             }
         }
 
-        fn park(&mut self) -> Result<(), Errno> {
+        fn park(&mut self) -> Result<Parked, Errno> {
             // Park until the session's next delivery — or a launched bundle's
             // exit — wakes the wait-set, never a spin. A cache-report change
             // the rate limiter is holding back only ever *tightens* the park
@@ -1697,7 +1704,14 @@ mod program {
                 // source and acting on it would reap or trim for nothing. The
                 // held-back report is the only bounded wait here.
                 tairix_rt::cachereport::publish_if_due();
-                return Ok(());
+                return Ok(Parked::Served);
+            }
+            // The reader answered. Draining is the whole of noticing it, and
+            // the answer is the loop's to adopt, so the wait ends here rather
+            // than parking again on a source that is still ready.
+            if token == READS_TOKEN {
+                self.reads.wake.drain();
+                return Ok(Parked::Interrupted);
             }
             // A child-exit wake reaps the exited bundle(s) in place, so a
             // launched app is never left a zombie and the ready child member
@@ -1715,7 +1729,7 @@ mod program {
                 self.icons.borrow_mut().trim();
                 tairix_font::trim_glyph_cache();
             }
-            Ok(())
+            Ok(Parked::Served)
         }
     }
 
@@ -5329,6 +5343,7 @@ mod program {
             server,
             launcher: &launcher,
             icons: &icons,
+            reads: &reads,
         });
         loop {
             // Report what the icon cache holds at the head of the turn: this
@@ -5472,7 +5487,7 @@ mod program {
             // decode, rather than the whole grid's worth the paint used to
             // perform inside itself.
             let delivered = match events.try_wait(&mut client) {
-                Ok(Some(event)) => Ok(event),
+                Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
                     // A bundle scan the reader has answered opens the
                     // chooser the click asked for. Collected before the
@@ -5537,6 +5552,13 @@ mod program {
                     }
                     events.wait(&mut client)
                 }
+                Err(err) => Err(err),
+            };
+            // A park the reader interrupted has no event; the collect at the
+            // top of the next turn is what adopts what it woke for.
+            let delivered = match delivered {
+                Ok(None) => continue,
+                Ok(Some(event)) => Ok(event),
                 Err(err) => Err(err),
             };
             let event = match delivered {

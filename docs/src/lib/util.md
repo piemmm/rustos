@@ -94,9 +94,13 @@ and panic-free throughout.
   answered. An answer a newer submission superseded is dropped rather than
   delivered, and what a submission *displaced* is handed back, so a caller
   waiting on the displaced request can be told it was superseded instead of
-  left waiting for an answer that will never come. Consumed by the terminal's
-  and the desktop session's settings publishers, the session's
-  program-catalogue scan, and the file manager's bundle scan.
+  left waiting for an answer that will never come. The desk is only the
+  bookkeeping; the exclusion, the parked worker thread, and the wake that
+  reaches a loop's wait-set are `tairix_rt::work`, which every app-side
+  consumer drives it through. Consumed by the terminal's settings publisher and
+  the wallpaper chooser's applier (both via `tairix_rt::work`), the desktop
+  session's settings publisher, the session's program-catalogue scan, and the
+  file manager's bundle scan.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`
   retain only the trailing N units of a stream, so `head`'s `-c -N` /
