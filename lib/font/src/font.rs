@@ -565,6 +565,7 @@ impl BitmapFont {
     ) -> i32 {
         let sources = coverage_sources(color);
         let mut pen = x;
+        client.warm(text, self.family, self.pixel_height, self.weight);
         match self.monospace_advance_on(client) {
             Some(cell) => {
                 for ch in text.chars() {

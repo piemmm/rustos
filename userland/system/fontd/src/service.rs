@@ -46,9 +46,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    encode_families_reply, encode_glyph_error_reply, encode_glyph_reply, encode_metrics_reply,
-    FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontRequest, FontWeight, FONT_FAMILY_KEY_LEN,
-    FONT_METRICS_REPLY_LEN,
+    encode_families_reply, encode_glyph_error_reply, encode_metrics_reply, FamilyEntry, FamilyKey,
+    FamilyKind, FontMetrics, FontRequest, FontWeight, GlyphBatchWriter, GlyphCoverage, GlyphRun,
+    FONT_FAMILY_KEY_LEN, FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
@@ -480,7 +480,7 @@ impl<'a> FontService<'a> {
         None
     }
 
-    /// Resolve `scalar` for a [`FontRequest::Glyph`] naming `family_index`:
+    /// Resolve `scalar` for a [`FontRequest::Glyphs`] naming `family_index`:
     /// the family's own faces, then its fallback family's faces, then
     /// U+FFFD from the family's primary face.
     ///
@@ -618,36 +618,68 @@ impl<'a> FontService<'a> {
         encode_families_reply(reply, Ok(&entries))
     }
 
-    /// Resolve, rasterise (or fetch cached), and frame `scalar` from
-    /// `family` at `pixel_height` in `weight` as a successful glyph reply.
+    /// Resolve, rasterise (or fetch cached), and frame as many of `run` from
+    /// `family` at `pixel_height` in `weight` as the reply frame holds.
     ///
-    /// A scalar the grid draws as geometry is computed here and served
-    /// without touching the cache: it is arithmetic over one cell, not a
-    /// rasterisation, and retaining it would evict a real glyph to hold
-    /// something cheaper to recompute than to look up.
-    fn glyph_reply(
+    /// The batch answers a prefix and says how long it is, so the client asks
+    /// again for the remainder. It stops at the first scalar the frame cannot
+    /// hold or the faces cannot yield — a truncated batch is the client's cue
+    /// to come back, and only a failure on the *first* scalar has nothing to
+    /// report and is refused outright.
+    fn glyphs_reply(
         &mut self,
         family: FamilyKey,
-        scalar: char,
+        run: &GlyphRun,
         pixel_height: u32,
         weight: FontWeight,
         reply: &mut [u8],
     ) -> Result<usize, Errno> {
         let family_index = self.index_of(family).ok_or(Errno::NotFound)?;
+        // Resolved once for the whole run: the family and its line geometry
+        // are what the run shares, so a per-scalar re-derivation would be
+        // paid for nothing.
         let geometry = self.primary_geometry(family_index, pixel_height)?;
+        let mut writer = GlyphBatchWriter::new(reply)?;
+        for &scalar in run.scalars() {
+            let pushed =
+                self.push_glyph(family, family_index, &geometry, scalar, weight, &mut writer);
+            let fitted = match pushed {
+                Ok(fitted) => fitted,
+                Err(err) if writer.count() == 0 => return Err(err),
+                Err(_) => false,
+            };
+            if !fitted {
+                break;
+            }
+        }
+        writer.finish()
+    }
+
+    /// Append `scalar`'s record to `writer`, reporting whether it fitted.
+    ///
+    /// A scalar the grid draws as geometry is computed here and served
+    /// without touching the cache: it is arithmetic over one cell, not a
+    /// rasterisation, and retaining it would evict a real glyph to hold
+    /// something cheaper to recompute than to look up.
+    fn push_glyph(
+        &mut self,
+        family: FamilyKey,
+        family_index: usize,
+        geometry: &FamilyGeometry,
+        scalar: char,
+        weight: FontWeight,
+        writer: &mut GlyphBatchWriter<'_>,
+    ) -> Result<bool, Errno> {
         let cell = geometry.cell(scalar);
         if let Some(cell) = cell {
             if let Some(drawn) = cell.line_art(scalar, geometry.height) {
-                return encode_glyph_reply(
-                    reply,
-                    &tairix_abi::font_ipc::GlyphCoverage {
-                        width: cell.width,
-                        height: geometry.height,
-                        advance: cell.advance(),
-                        left: 0,
-                        coverage: &samples(&drawn),
-                    },
-                );
+                return writer.push(&GlyphCoverage {
+                    width: cell.width,
+                    height: geometry.height,
+                    advance: cell.advance(),
+                    left: 0,
+                    coverage: &samples(&drawn),
+                });
             }
         }
         let source = self.resolve(family_index, scalar)?;
@@ -656,7 +688,7 @@ impl<'a> FontService<'a> {
             resolved: source.resolved_family_key.to_wire(),
             face: u32::try_from(source.face_index).unwrap_or(u32::MAX),
             glyph: u32::from(source.glyph),
-            pixel_height,
+            pixel_height: geometry.height,
             cells: cell.map_or(0, |cell| cell.cells),
             weight: weight.to_wire(),
         };
@@ -665,19 +697,16 @@ impl<'a> FontService<'a> {
         } = self;
         let served = cache
             .get_or_build(&(), key, || {
-                build_glyph(families, &source, &geometry, cell, weight)
+                build_glyph(families, &source, geometry, cell, weight)
             })
             .ok_or(Errno::NotFound)?;
-        encode_glyph_reply(
-            reply,
-            &tairix_abi::font_ipc::GlyphCoverage {
-                width: served.width,
-                height: served.height,
-                advance: served.advance,
-                left: served.left,
-                coverage: &served.data,
-            },
-        )
+        writer.push(&GlyphCoverage {
+            width: served.width,
+            height: served.height,
+            advance: served.advance,
+            left: served.left,
+            coverage: &served.data,
+        })
     }
 
     /// Handle one request frame, writing the reply into `reply` and
@@ -691,12 +720,12 @@ impl<'a> FontService<'a> {
     /// drops the reply, so the client fails closed on decode.
     pub fn handle(&mut self, request: &[u8], reply: &mut [u8]) -> usize {
         match FontRequest::from_bytes(request) {
-            Ok(FontRequest::Glyph {
+            Ok(FontRequest::Glyphs {
                 family,
-                scalar,
+                scalars,
                 pixel_height,
                 weight,
-            }) => match self.glyph_reply(family, scalar, pixel_height, weight, reply) {
+            }) => match self.glyphs_reply(family, &scalars, pixel_height, weight, reply) {
                 Ok(len) => len,
                 Err(err) => error_frame(reply, err),
             },

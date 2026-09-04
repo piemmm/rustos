@@ -14,8 +14,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    decode_glyph_reply, decode_metrics_reply, FamilyKey, FontRequest, FontWeight,
-    FONT_MAX_GLYPH_REPLY, FONT_MAX_PIXEL_HEIGHT, FONT_MIN_PIXEL_HEIGHT,
+    decode_glyphs_reply, decode_metrics_reply, FamilyKey, FontRequest, FontWeight, GlyphRun,
+    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_MAX_PIXEL_HEIGHT, FONT_MIN_PIXEL_HEIGHT,
 };
 use tairix_abi::Errno;
 use tairix_fontface::{AxisSetting, Face};
@@ -75,26 +75,47 @@ fn mono_only_store(mono: &[u8]) -> MemoryStore<'_> {
     }
 }
 
-fn request_glyph(
+/// One glyph record: the geometry and the coverage bytes.
+type Rendered = (u32, u32, u32, i32, Vec<u8>);
+
+/// Ask for a run and return every record the batch answered.
+fn request_glyphs(
     svc: &mut FontService<'_>,
     family: FamilyKey,
-    scalar: char,
+    scalars: &[char],
     pixel_height: u32,
     weight: FontWeight,
-) -> Result<(u32, u32, u32, i32, Vec<u8>), Errno> {
+) -> Result<Vec<Rendered>, Errno> {
     let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
     let n = svc.handle(
-        &FontRequest::Glyph {
+        &FontRequest::Glyphs {
             family,
-            scalar,
+            scalars: GlyphRun::new(scalars).expect("a well-formed run"),
             pixel_height,
             weight,
         }
         .to_le_bytes(),
         &mut reply,
     );
-    decode_glyph_reply(&reply[..n])
-        .map(|g| (g.width, g.height, g.advance, g.left, g.coverage.to_vec()))
+    decode_glyphs_reply(&reply[..n]).map(|batch| {
+        batch
+            .glyphs()
+            .iter()
+            .map(|g| (g.width, g.height, g.advance, g.left, g.coverage.to_vec()))
+            .collect()
+    })
+}
+
+/// Ask for one scalar, as a run of one.
+fn request_glyph(
+    svc: &mut FontService<'_>,
+    family: FamilyKey,
+    scalar: char,
+    pixel_height: u32,
+    weight: FontWeight,
+) -> Result<Rendered, Errno> {
+    let batch = request_glyphs(svc, family, &[scalar], pixel_height, weight)?;
+    batch.into_iter().next().ok_or(Errno::NotFound)
 }
 
 #[test]
@@ -480,9 +501,9 @@ fn a_size_outside_the_permitted_range_is_refused() {
     ] {
         let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
         let n = svc.handle(
-            &FontRequest::Glyph {
+            &FontRequest::Glyphs {
                 family: key,
-                scalar: 'A',
+                scalars: GlyphRun::new(&['A']).expect("a well-formed run"),
                 pixel_height: height,
                 weight: FontWeight::Regular,
             }
@@ -490,8 +511,8 @@ fn a_size_outside_the_permitted_range_is_refused() {
             &mut reply,
         );
         assert_eq!(
-            decode_glyph_reply(&reply[..n]),
-            Err(Errno::LengthOutOfRange),
+            decode_glyphs_reply(&reply[..n]).err(),
+            Some(Errno::LengthOutOfRange),
             "pixel height {height} must stay refused"
         );
     }
@@ -556,9 +577,9 @@ fn a_malformed_request_fails_closed_with_an_error_frame() {
     let mut store = mono_only_store(&mono);
     let mut svc = discover_roomy(&mut store);
     let key = FamilyKey::new("mono").expect("key");
-    let mut request = FontRequest::Glyph {
+    let mut request = FontRequest::Glyphs {
         family: key,
-        scalar: 'A',
+        scalars: GlyphRun::new(&['A']).expect("a well-formed run"),
         pixel_height: 28,
         weight: FontWeight::Regular,
     }
@@ -566,7 +587,81 @@ fn a_malformed_request_fails_closed_with_an_error_frame() {
     request[0] ^= 0xFF;
     let mut reply = vec![0u8; FONT_MAX_GLYPH_REPLY];
     let n = svc.handle(&request, &mut reply);
-    assert_eq!(decode_glyph_reply(&reply[..n]), Err(Errno::BadMagic));
+    assert_eq!(
+        decode_glyphs_reply(&reply[..n]).err(),
+        Some(Errno::BadMagic)
+    );
+}
+
+#[test]
+fn a_run_is_answered_whole_and_in_order_at_a_desktop_size() {
+    // The measured burst this batching removes: a window opening asked for
+    // 32 glyphs one call at a time. At the sizes a desktop draws text the
+    // whole run fits one reply, and it comes back in the order it was asked
+    // for — which is what lets the client pair the records with its run.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+
+    let scalars: Vec<char> = ('A'..='Z').chain('0'..='5').collect();
+    assert_eq!(scalars.len(), FONT_MAX_GLYPH_RUN);
+    let batch = request_glyphs(&mut svc, key, &scalars, 28, FontWeight::Regular).expect("a batch");
+    assert_eq!(
+        batch.len(),
+        FONT_MAX_GLYPH_RUN,
+        "the longest permitted run fits one reply at a desktop size"
+    );
+    for (scalar, record) in scalars.iter().zip(&batch) {
+        let alone =
+            request_glyph(&mut svc, key, *scalar, 28, FontWeight::Regular).expect("one glyph");
+        assert_eq!(
+            *record, alone,
+            "{scalar:?} must be the same glyph asked for in a run or alone"
+        );
+    }
+}
+
+#[test]
+fn a_run_too_large_for_one_frame_is_answered_as_a_prefix() {
+    // A glyph at the tallest permitted size is a large fraction of the reply
+    // frame, so the batch answers what fits and says how many; the client
+    // asks again for the remainder. It always answers at least one, or the
+    // client could never make progress.
+    let mono = asset("mono/Inconsolata-EX.ttf");
+    let mut store = mono_only_store(&mono);
+    let mut svc = discover_roomy(&mut store);
+    let key = FamilyKey::new("mono").expect("key");
+
+    let scalars: Vec<char> = ('A'..='Z').collect();
+    let batch = request_glyphs(
+        &mut svc,
+        key,
+        &scalars,
+        FONT_MAX_PIXEL_HEIGHT,
+        FontWeight::Regular,
+    )
+    .expect("a batch");
+    assert!(!batch.is_empty(), "a successful batch answers at least one");
+    assert!(
+        batch.len() < scalars.len(),
+        "{} records of {} cannot all fit one frame at the tallest size",
+        batch.len(),
+        scalars.len()
+    );
+    // The prefix is the head of the run, so the remainder the client asks
+    // for again starts exactly where this stopped.
+    for (scalar, record) in scalars.iter().zip(&batch) {
+        let alone = request_glyph(
+            &mut svc,
+            key,
+            *scalar,
+            FONT_MAX_PIXEL_HEIGHT,
+            FontWeight::Regular,
+        )
+        .expect("one glyph");
+        assert_eq!(*record, alone, "{scalar:?} must be the run's own prefix");
+    }
 }
 
 /// A monospace family's cell width at `pixel_height`: the advance every

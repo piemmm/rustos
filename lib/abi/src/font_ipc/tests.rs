@@ -4,12 +4,13 @@
 extern crate alloc;
 
 use super::{
-    decode_families_reply, decode_glyph_reply, decode_metrics_reply, encode_families_reply,
-    encode_glyph_error_reply, encode_glyph_reply, encode_metrics_reply, FamilyEntry, FamilyKey,
-    FamilyKind, FontMetrics, FontRequest, FontWeight, GlyphCoverage, FONT_ENDPOINT,
+    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, encode_families_reply,
+    encode_glyph_error_reply, encode_metrics_reply, FamilyEntry, FamilyKey, FamilyKind,
+    FontMetrics, FontRequest, FontWeight, GlyphBatchWriter, GlyphCoverage, GlyphRun, FONT_ENDPOINT,
     FONT_FAMILIES_REPLY_HEADER_LEN, FONT_FAMILY_ENTRY_LEN, FONT_FAMILY_KEY_LEN,
-    FONT_FAMILY_LABEL_LEN, FONT_GLYPH_REPLY_HEADER_LEN, FONT_MAX_FAMILIES, FONT_MAX_FAMILIES_REPLY,
-    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_WIDTH, FONT_MAX_PIXEL_HEIGHT, FONT_METRICS_REPLY_LEN,
+    FONT_FAMILY_LABEL_LEN, FONT_GLYPHS_REPLY_HEADER_LEN, FONT_GLYPH_RECORD_HEADER_LEN,
+    FONT_MAX_COVERAGE_LEN, FONT_MAX_FAMILIES, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY,
+    FONT_MAX_GLYPH_RUN, FONT_MAX_GLYPH_WIDTH, FONT_MAX_PIXEL_HEIGHT, FONT_METRICS_REPLY_LEN,
     FONT_MIN_PIXEL_HEIGHT, FONT_REQUEST_MAGIC,
 };
 use crate::Errno;
@@ -19,6 +20,11 @@ use alloc::vec::Vec;
 /// A well-formed key for the tests that are not about key spelling.
 fn key(name: &str) -> FamilyKey {
     FamilyKey::new(name).expect("a well-formed family key")
+}
+
+/// A well-formed run for the tests that are not about run framing.
+fn run(scalars: &[char]) -> GlyphRun {
+    GlyphRun::new(scalars).expect("a well-formed glyph run")
 }
 
 #[test]
@@ -77,24 +83,35 @@ fn family_key_round_trips_and_refuses_a_dirty_pad() {
 
 #[test]
 fn requests_round_trip() {
+    let longest: Vec<char> = (0..FONT_MAX_GLYPH_RUN)
+        .map(|index| char::from(b'a' + u8::try_from(index).expect("the run bound fits a u8")))
+        .collect();
     for request in [
-        FontRequest::Glyph {
+        FontRequest::Glyphs {
             family: key("inter"),
-            scalar: 'A',
+            scalars: run(&['A']),
             pixel_height: 28,
             weight: FontWeight::Regular,
         },
-        FontRequest::Glyph {
+        FontRequest::Glyphs {
             family: key("mono"),
-            scalar: '\u{FFFD}',
+            // U+0000 is a legal scalar, so a run of it must survive the
+            // padding rule that zeroes every unasked-for slot.
+            scalars: run(&['\0', '\u{FFFD}']),
             pixel_height: FONT_MIN_PIXEL_HEIGHT,
             weight: FontWeight::Medium,
         },
-        FontRequest::Glyph {
+        FontRequest::Glyphs {
             family: key("noto-serif"),
-            scalar: '\u{10FFFF}',
+            scalars: run(&['\u{10FFFF}']),
             pixel_height: FONT_MAX_PIXEL_HEIGHT,
             weight: FontWeight::Bold,
+        },
+        FontRequest::Glyphs {
+            family: key("inter"),
+            scalars: run(&longest),
+            pixel_height: 16,
+            weight: FontWeight::Regular,
         },
         FontRequest::Metrics {
             family: key("inter"),
@@ -109,10 +126,22 @@ fn requests_round_trip() {
 }
 
 #[test]
+fn glyph_run_admits_only_a_bounded_non_empty_sequence() {
+    assert_eq!(run(&['a', 'b']).scalars(), &['a', 'b']);
+    assert_eq!(GlyphRun::new(&[]), Err(Errno::LengthOutOfRange));
+    let too_long = vec!['x'; FONT_MAX_GLYPH_RUN + 1];
+    assert_eq!(GlyphRun::new(&too_long), Err(Errno::LengthOutOfRange));
+    // Two runs with the same scalars are the same run however they were
+    // built, so the unasked-for slots can never make them differ.
+    assert_eq!(run(&['a']), run(&['a']));
+    assert_ne!(run(&['a']), run(&['a', 'b']));
+}
+
+#[test]
 fn request_decode_fails_closed_on_malformed_framing() {
-    let good = FontRequest::Glyph {
+    let good = FontRequest::Glyphs {
         family: key("inter"),
-        scalar: 'x',
+        scalars: run(&['x']),
         pixel_height: 20,
         weight: FontWeight::Regular,
     }
@@ -153,16 +182,23 @@ fn request_decode_fails_closed_on_malformed_framing() {
 
 #[test]
 fn request_decode_refuses_fields_an_operation_does_not_use() {
-    let mut metrics = FontRequest::Metrics {
-        family: key("mono"),
-        pixel_height: 20,
-        weight: FontWeight::Regular,
+    // The run length and every run slot belong to `Glyphs` alone.
+    for dirty in [16usize, 36, FontRequest::WIRE_LEN - 1] {
+        let mut metrics = FontRequest::Metrics {
+            family: key("mono"),
+            pixel_height: 20,
+            weight: FontWeight::Regular,
+        }
+        .to_le_bytes();
+        metrics[dirty] = 1;
+        assert_eq!(
+            FontRequest::from_bytes(&metrics),
+            Err(Errno::BadMagic),
+            "byte {dirty} must not be smuggled into a Metrics request"
+        );
     }
-    .to_le_bytes();
-    metrics[16] = 1;
-    assert_eq!(FontRequest::from_bytes(&metrics), Err(Errno::BadMagic));
 
-    for dirty in [8usize, 12, 16, 20] {
+    for dirty in [8usize, 12, 16, 20, 36, FontRequest::WIRE_LEN - 1] {
         let mut families = FontRequest::Families.to_le_bytes();
         families[dirty] = 1;
         assert_eq!(
@@ -174,32 +210,67 @@ fn request_decode_refuses_fields_an_operation_does_not_use() {
 }
 
 #[test]
-fn request_decode_rejects_a_non_scalar_and_a_bad_pixel_height() {
-    // A UTF-16 surrogate (U+D800) is not a Unicode scalar value.
-    let mut surrogate = FontRequest::Glyph {
+fn request_decode_bounds_the_run_length_and_refuses_a_dirty_run_pad() {
+    let good = FontRequest::Glyphs {
         family: key("inter"),
-        scalar: 'A',
+        scalars: run(&['a', 'b']),
         pixel_height: 20,
         weight: FontWeight::Regular,
     }
     .to_le_bytes();
-    surrogate[16..20].copy_from_slice(&0xD800u32.to_le_bytes());
-    assert_eq!(FontRequest::from_bytes(&surrogate), Err(Errno::OutOfRange));
 
-    let mut past_max = surrogate;
-    past_max[16..20].copy_from_slice(&0x11_0000u32.to_le_bytes());
-    assert_eq!(FontRequest::from_bytes(&past_max), Err(Errno::OutOfRange));
+    // A run that asks for nothing is malformed: a reply must always answer
+    // at least one glyph for the client to make progress.
+    for count in [0u32, 33, u32::MAX] {
+        let mut bad = good;
+        bad[16..20].copy_from_slice(&count.to_le_bytes());
+        assert_eq!(
+            FontRequest::from_bytes(&bad),
+            Err(Errno::LengthOutOfRange),
+            "a run length of {count} must be refused"
+        );
+    }
+
+    // A scalar beyond the run length is a smuggled field, never ignored.
+    let mut smuggled = good;
+    smuggled[44..48].copy_from_slice(&u32::from('z').to_le_bytes());
+    assert_eq!(FontRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
+}
+
+#[test]
+fn request_decode_rejects_a_non_scalar_and_a_bad_pixel_height() {
+    let good = FontRequest::Glyphs {
+        family: key("inter"),
+        scalars: run(&['A', 'B']),
+        pixel_height: 20,
+        weight: FontWeight::Regular,
+    }
+    .to_le_bytes();
+
+    // A UTF-16 surrogate (U+D800) is not a Unicode scalar value, and neither
+    // slot of the run may carry one.
+    for slot in [36usize, 40] {
+        for wire in [0xD800u32, 0x11_0000, u32::MAX] {
+            let mut bad = good;
+            bad[slot..slot + 4].copy_from_slice(&wire.to_le_bytes());
+            assert_eq!(
+                FontRequest::from_bytes(&bad),
+                Err(Errno::OutOfRange),
+                "{wire:#x} in run slot at byte {slot} must be refused"
+            );
+        }
+    }
 
     for op in [
-        FontRequest::Glyph {
+        FontRequest::Glyphs {
             family: key("inter"),
-            scalar: 'A',
+            scalars: run(&['A']),
             pixel_height: FONT_MIN_PIXEL_HEIGHT - 1,
             weight: FontWeight::Regular,
         },
-        FontRequest::Glyph {
+        FontRequest::Glyphs {
             family: key("inter"),
-            scalar: 'A',
+            scalars: run(&['A']),
             pixel_height: FONT_MAX_PIXEL_HEIGHT + 1,
             weight: FontWeight::Bold,
         },
@@ -242,7 +313,7 @@ fn family_kind_wire_is_a_closed_set() {
     }
 }
 
-/// A glyph reply carrying `width * height` distinguishable coverage bytes.
+/// A glyph record carrying `width * height` distinguishable coverage bytes.
 fn glyph(width: u32, height: u32, advance: u32, left: i32, coverage: &[u8]) -> GlyphCoverage<'_> {
     GlyphCoverage {
         width,
@@ -253,38 +324,47 @@ fn glyph(width: u32, height: u32, advance: u32, left: i32, coverage: &[u8]) -> G
     }
 }
 
-#[test]
-fn glyph_reply_round_trips_including_bearings_and_inkless_glyphs() {
-    let width = 6u32;
-    let height = 12u32;
-    let coverage: Vec<u8> = (0..width * height)
-        .map(|i| u8::try_from(i % 256).expect("a value modulo 256 fits a u8"))
-        .collect();
-    let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
-
-    // A glyph that reaches back over the preceding one keeps its negative
-    // bearing across the wire.
-    let sent = glyph(width, height, 7, -2, &coverage);
-    let n = encode_glyph_reply(&mut buf, &sent).expect("encodes");
-    assert_eq!(n, FONT_GLYPH_REPLY_HEADER_LEN + coverage.len());
-    assert_eq!(decode_glyph_reply(&buf[..n]), Ok(sent));
-
-    // A space carries no samples at all: the pen still advances.
-    let space = glyph(0, height, 5, 0, &[]);
-    let n = encode_glyph_reply(&mut buf, &space).expect("encodes");
-    assert_eq!(n, FONT_GLYPH_REPLY_HEADER_LEN);
-    assert_eq!(decode_glyph_reply(&buf[..n]), Ok(space));
-
-    // A combining mark occupies no space of its own.
-    let mark_coverage = vec![9u8; 3 * height as usize];
-    let mark = glyph(3, height, 0, -3, &mark_coverage);
-    let n = encode_glyph_reply(&mut buf, &mark).expect("encodes");
-    assert_eq!(decode_glyph_reply(&buf[..n]), Ok(mark));
+/// Frame `glyphs` as a batch reply in `buf`, returning its length.
+fn encode_batch(buf: &mut [u8], glyphs: &[GlyphCoverage<'_>]) -> Result<usize, Errno> {
+    let mut writer = GlyphBatchWriter::new(buf)?;
+    for glyph in glyphs {
+        assert!(writer.push(glyph)?, "the test frame holds every record");
+    }
+    writer.finish()
 }
 
 #[test]
-fn glyph_reply_encode_rejects_bad_geometry_and_mismatched_coverage() {
+fn glyph_batch_round_trips_in_order_including_bearings_and_inkless_glyphs() {
+    let height = 12u32;
+    let inked: Vec<u8> = (0..6 * height)
+        .map(|i| u8::try_from(i % 256).expect("a value modulo 256 fits a u8"))
+        .collect();
+    let mark_coverage = vec![9u8; 3 * height as usize];
+    // A glyph that reaches back over the preceding one, a space with no
+    // samples at all, and a combining mark that occupies no space of its own.
+    let sent = [
+        glyph(6, height, 7, -2, &inked),
+        glyph(0, height, 5, 0, &[]),
+        glyph(3, height, 0, -3, &mark_coverage),
+    ];
+
     let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let n = encode_batch(&mut buf, &sent).expect("encodes");
+    assert_eq!(
+        n,
+        FONT_GLYPHS_REPLY_HEADER_LEN
+            + 3 * FONT_GLYPH_RECORD_HEADER_LEN
+            + inked.len()
+            + mark_coverage.len()
+    );
+    let batch = decode_glyphs_reply(&buf[..n]).expect("decodes");
+    assert_eq!(batch.glyphs(), &sent);
+}
+
+#[test]
+fn glyph_batch_writer_rejects_bad_geometry_and_mismatched_coverage() {
+    let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let mut writer = GlyphBatchWriter::new(&mut buf).expect("the frame holds a header");
     let span = i32::try_from(FONT_MAX_GLYPH_WIDTH).expect("the bound fits an i32");
     for bad in [
         glyph(4, 10, 4, 0, &[0u8; 39]),
@@ -295,52 +375,113 @@ fn glyph_reply_encode_rejects_bad_geometry_and_mismatched_coverage() {
         glyph(4, 10, 4, span + 1, &[]),
         glyph(4, 10, 4, -span - 1, &[]),
     ] {
-        assert_eq!(
-            encode_glyph_reply(&mut buf, &bad),
-            Err(Errno::LengthOutOfRange)
-        );
+        assert_eq!(writer.push(&bad), Err(Errno::LengthOutOfRange));
     }
-    let mut tiny = [0u8; FONT_GLYPH_REPLY_HEADER_LEN + 3];
+    assert_eq!(writer.count(), 0);
     assert_eq!(
-        encode_glyph_reply(&mut tiny, &glyph(2, 8, 2, 0, &[0u8; 16])),
-        Err(Errno::BufferTooSmall)
+        GlyphBatchWriter::new(&mut [0u8; FONT_GLYPHS_REPLY_HEADER_LEN - 1]).err(),
+        Some(Errno::BufferTooSmall)
     );
 }
 
 #[test]
-fn glyph_reply_error_frame_surfaces_its_errno() {
-    let mut buf = [0u8; FONT_GLYPH_REPLY_HEADER_LEN];
+fn glyph_batch_answers_a_prefix_when_the_frame_or_the_run_bound_fills() {
+    // One glyph at the extreme of the coverage bound fills the frame on its
+    // own, which is why a batch is a prefix rather than a whole-run promise.
+    let widest = vec![0x5Au8; FONT_MAX_COVERAGE_LEN];
+    let extreme = glyph(
+        FONT_MAX_GLYPH_WIDTH,
+        FONT_MAX_PIXEL_HEIGHT,
+        FONT_MAX_GLYPH_WIDTH,
+        0,
+        &widest,
+    );
+    let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let mut writer = GlyphBatchWriter::new(&mut buf).expect("the frame holds a header");
+    assert_eq!(writer.push(&extreme), Ok(true));
+    let tiny = glyph(1, 8, 1, 0, &[0u8; 8]);
+    assert_eq!(writer.push(&tiny), Ok(false));
+    let n = writer.finish().expect("one record fitted");
+    assert_eq!(n, FONT_MAX_GLYPH_REPLY);
+    let batch = decode_glyphs_reply(&buf[..n]).expect("decodes");
+    assert_eq!(batch.glyphs(), &[extreme]);
+
+    // The run bound caps the batch even when the frame has room to spare.
+    let mut roomy = vec![0u8; FONT_MAX_GLYPH_REPLY];
+    let mut writer = GlyphBatchWriter::new(&mut roomy).expect("the frame holds a header");
+    for _ in 0..FONT_MAX_GLYPH_RUN {
+        assert_eq!(writer.push(&tiny), Ok(true));
+    }
+    assert_eq!(writer.push(&tiny), Ok(false));
+    let n = writer
+        .finish()
+        .expect("the run bound worth of records fitted");
+    let batch = decode_glyphs_reply(&roomy[..n]).expect("decodes");
+    assert_eq!(batch.glyphs().len(), FONT_MAX_GLYPH_RUN);
+}
+
+#[test]
+fn glyph_batch_never_successfully_answers_nothing() {
+    // A batch that answered nothing would leave a client asking again for a
+    // remainder it can never be told about, so neither side admits one.
+    let mut buf = vec![0u8; FONT_GLYPHS_REPLY_HEADER_LEN + 4];
+    let writer = GlyphBatchWriter::new(&mut buf).expect("the frame holds a header");
+    assert_eq!(writer.finish(), Err(Errno::BufferTooSmall));
+
+    let mut empty = vec![0u8; FONT_GLYPHS_REPLY_HEADER_LEN];
+    empty[4..8].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        decode_glyphs_reply(&empty).err(),
+        Some(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn glyph_batch_error_frame_surfaces_its_errno() {
+    let mut buf = [0u8; FONT_GLYPHS_REPLY_HEADER_LEN];
     let n = encode_glyph_error_reply(&mut buf, Errno::NotFound).expect("encodes");
     assert_eq!(n, 4);
-    assert_eq!(decode_glyph_reply(&buf[..n]), Err(Errno::NotFound));
+    assert_eq!(decode_glyphs_reply(&buf[..n]).err(), Some(Errno::NotFound));
 }
 
 #[test]
-fn glyph_reply_decode_fails_closed() {
-    let width = 4u32;
+fn glyph_batch_decode_fails_closed() {
     let height = 10u32;
-    let coverage = vec![0xABu8; (width * height) as usize];
+    let coverage = vec![0xABu8; 4 * height as usize];
     let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
-    let n =
-        encode_glyph_reply(&mut buf, &glyph(width, height, width, 0, &coverage)).expect("encodes");
+    let sent = [
+        glyph(4, height, 4, 0, &coverage),
+        glyph(0, height, 3, 0, &[]),
+    ];
+    let n = encode_batch(&mut buf, &sent).expect("encodes");
 
-    assert_eq!(decode_glyph_reply(&buf[..3]), Err(Errno::BufferTooSmall));
-    assert_eq!(
-        decode_glyph_reply(&buf[..FONT_GLYPH_REPLY_HEADER_LEN - 1]),
-        Err(Errno::BufferTooSmall)
-    );
-    assert_eq!(
-        decode_glyph_reply(&buf[..n - 1]),
-        Err(Errno::BufferTooSmall)
-    );
+    for truncated in [3usize, FONT_GLYPHS_REPLY_HEADER_LEN - 1, n - 1] {
+        assert_eq!(
+            decode_glyphs_reply(&buf[..truncated]).err(),
+            Some(Errno::BufferTooSmall),
+            "a frame cut to {truncated} bytes must be refused"
+        );
+    }
     let mut bad_status = buf.clone();
     bad_status[0] = 1;
-    assert_eq!(decode_glyph_reply(&bad_status), Err(Errno::OutOfRange));
-    let mut bad_geometry = buf.clone();
-    bad_geometry[8..12].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(
-        decode_glyph_reply(&bad_geometry),
-        Err(Errno::LengthOutOfRange)
+        decode_glyphs_reply(&bad_status).err(),
+        Some(Errno::OutOfRange)
+    );
+    let mut past_bound = buf.clone();
+    past_bound[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_glyphs_reply(&past_bound).err(),
+        Some(Errno::LengthOutOfRange)
+    );
+    // A zero height in the first record's geometry: refused before its
+    // coverage length is believed.
+    let mut bad_geometry = buf.clone();
+    bad_geometry[FONT_GLYPHS_REPLY_HEADER_LEN + 4..FONT_GLYPHS_REPLY_HEADER_LEN + 8]
+        .copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        decode_glyphs_reply(&bad_geometry).err(),
+        Some(Errno::LengthOutOfRange)
     );
 }
 

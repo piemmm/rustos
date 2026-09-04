@@ -38,8 +38,9 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::elevate::{ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN};
 use tairix_abi::font_ipc::{
-    decode_families_reply, decode_glyph_reply, decode_metrics_reply, encode_families_reply,
-    encode_glyph_reply, FamilyKey, FontRequest, FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY,
+    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, encode_families_reply,
+    FamilyKey, FontRequest, GlyphBatchWriter, GlyphRun, FONT_MAX_FAMILIES_REPLY,
+    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN,
 };
 use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
 use tairix_abi::input::{KeyInput, PointerInput};
@@ -476,24 +477,49 @@ fn exercise_display_ipc(bytes: &[u8]) {
 
 /// Drive the font-service protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted font request must round-trip through its
-/// encoder, and the glyph-coverage, metrics, and family-list reply decoders
+/// encoder, and the glyph-batch, metrics, and family-list reply decoders
 /// — untrusted service output a text-drawing client parses — must refuse a
-/// corrupt frame cleanly, never panic. An accepted glyph or family reply
-/// additionally round-trips through its encoder, exercising the
+/// corrupt frame cleanly, never panic. An accepted glyph batch or family
+/// reply additionally round-trips through its encoder, exercising the
 /// variable-length coverage and record framing.
 fn exercise_font_ipc(bytes: &[u8]) {
     if let Ok(request) = FontRequest::from_bytes(bytes) {
-        let redecoded = FontRequest::from_bytes(&request.to_le_bytes())
+        // A request is one fixed width with every unused field and run slot
+        // zero, so an accepted frame is canonical: re-encoding it must
+        // reproduce the very bytes that were accepted.
+        let frame = request.to_le_bytes();
+        assert_eq!(&frame[..], &bytes[..FontRequest::WIRE_LEN]);
+        let redecoded = FontRequest::from_bytes(&frame)
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(request, redecoded);
     }
-    if let Ok(coverage) = decode_glyph_reply(bytes) {
+    if let Ok(batch) = decode_glyphs_reply(bytes) {
         let mut buf = vec![0u8; FONT_MAX_GLYPH_REPLY];
-        let len = encode_glyph_reply(&mut buf, &coverage)
-            .expect("round-trip encode of an accepted glyph reply must succeed");
-        let redecoded = decode_glyph_reply(&buf[..len])
-            .expect("round-trip of an accepted glyph reply must succeed");
-        assert_eq!(coverage, redecoded);
+        let mut writer = GlyphBatchWriter::new(&mut buf)
+            .expect("the protocol's own maximum frame holds a batch header");
+        for glyph in batch.glyphs() {
+            assert_eq!(
+                writer.push(glyph),
+                Ok(true),
+                "every record of an accepted batch must fit the maximum frame again"
+            );
+        }
+        let len = writer
+            .finish()
+            .expect("an accepted batch answers at least one glyph");
+        let redecoded = decode_glyphs_reply(&buf[..len])
+            .expect("round-trip of an accepted glyph batch must succeed");
+        assert_eq!(batch, redecoded);
+    }
+    // A client builds a run from text it was handed, so the run's own length
+    // bound is reachable without a decode.
+    let scalars: Vec<char> = core::str::from_utf8(bytes)
+        .unwrap_or_default()
+        .chars()
+        .take(FONT_MAX_GLYPH_RUN)
+        .collect();
+    if let Ok(run) = GlyphRun::new(&scalars) {
+        assert_eq!(run.scalars(), &scalars[..]);
     }
     if let Ok(list) = decode_families_reply(bytes) {
         let mut buf = vec![0u8; FONT_MAX_FAMILIES_REPLY];

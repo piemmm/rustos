@@ -1,15 +1,27 @@
 //! The font-service IPC protocol (`plans/FONT-SERVICE.md` FS-1): the
 //! reserved rendezvous the sandboxed OS font service (`fontd`) binds, and
 //! the fixed-width, fail-closed requests a text-drawing client presents to
-//! obtain a glyph's coverage bitmap, a family's line metrics, or the set of
-//! installed families.
+//! obtain a run of glyphs' coverage bitmaps, a family's line metrics, or the
+//! set of installed families.
 //!
 //! Text rendering is a single, sandboxed OS resource: no process but `fontd`
 //! holds a font face or an outline rasteriser, and a client draws by asking
-//! this endpoint for the 8-bit coverage of one Unicode scalar at a chosen pixel
-//! height. The transport carries no font bytes and no outlines — only the small
-//! coverage bitmap the client blits — so a malformed face can fault only the
-//! service's sandbox, never the compositor or a terminal.
+//! this endpoint for the 8-bit coverage of a bounded *run* of Unicode scalars
+//! at a chosen pixel height. The transport carries no font bytes and no
+//! outlines — only the small coverage bitmaps the client blits — so a
+//! malformed face can fault only the service's sandbox, never the compositor
+//! or a terminal.
+//!
+//! # A run, not a glyph, because the caller is drawing a frame
+//!
+//! A client asks per *run* of text rather than per character: the surface
+//! that draws a label owes the user a frame, and one round trip per
+//! not-yet-cached character turned a newly-opened window into a burst of
+//! them. A reply answers as many of the run as its frame holds, in order,
+//! and states how many — one glyph at the extreme of the coverage bound
+//! fills a frame on its own, so a batch is a *prefix* and the client asks
+//! again for any remainder. At the sizes a desktop draws, one round trip
+//! covers any realistic run.
 //!
 //! # Proportional and monospace families are one protocol
 //!
@@ -40,7 +52,7 @@ use crate::Errno;
 /// ([`crate::ipc::is_reserved_endpoint`]): a squatter claiming the
 /// rendezvous first would feed forged glyph coverage to the compositor and
 /// every app, so only the trusted `fontd` service may bind it. One endpoint
-/// serves every client — requests carry the family, scalar and pixel height
+/// serves every client — requests carry the family, scalars and pixel height
 /// in-protocol.
 pub const FONT_ENDPOINT: u64 = 0x464E_5400;
 
@@ -77,6 +89,15 @@ pub const FONT_MAX_GLYPH_WIDTH: u32 = 2 * FONT_MAX_PIXEL_HEIGHT;
 /// alpha sample per pixel of the widest, tallest permitted bitmap.
 pub const FONT_MAX_COVERAGE_LEN: usize =
     (FONT_MAX_GLYPH_WIDTH as usize) * (FONT_MAX_PIXEL_HEIGHT as usize);
+
+/// Most Unicode scalars one [`FontRequest::Glyphs`] may name.
+///
+/// A request is one fixed width for every operation, so the run costs its
+/// four bytes a slot whether they are used or not; 32 covers a whole
+/// newly-appeared window's worth of text in a single round trip and leaves
+/// the frame a few hundred bytes. A validation bound, not a capacity: longer
+/// text is drawn as consecutive runs, each its own request.
+pub const FONT_MAX_GLYPH_RUN: usize = 32;
 
 /// Bytes a family key occupies on the wire, NUL-padded.
 pub const FONT_FAMILY_KEY_LEN: usize = 16;
@@ -282,26 +303,74 @@ impl FontWeight {
     }
 }
 
+/// The run of Unicode scalars one [`FontRequest::Glyphs`] asks for: bounded,
+/// non-empty, and a fixed width on the wire.
+///
+/// Holding the scalars as [`char`] makes a surrogate or an out-of-range code
+/// point unrepresentable once decoded. Slots past the run's length are
+/// `'\0'`, and a frame carrying anything else there is refused, so the
+/// padding can never smuggle a scalar the count does not admit — U+0000 is
+/// itself a legal scalar, and the count is what distinguishes one asked for
+/// from the padding.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GlyphRun {
+    /// The run's scalars, `'\0'`-padded to the fixed wire width.
+    scalars: [char; FONT_MAX_GLYPH_RUN],
+    /// How many leading `scalars` the run asks for.
+    len: u32,
+}
+
+impl GlyphRun {
+    /// The run `scalars` spells.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] when `scalars` is empty — a request that
+    /// asks for nothing is malformed, not a no-op, since a reply must always
+    /// answer at least one glyph for the client to make progress — or longer
+    /// than [`FONT_MAX_GLYPH_RUN`].
+    pub fn new(scalars: &[char]) -> Result<Self, Errno> {
+        if scalars.is_empty() || scalars.len() > FONT_MAX_GLYPH_RUN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let len = u32::try_from(scalars.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let mut run = Self {
+            scalars: ['\0'; FONT_MAX_GLYPH_RUN],
+            len,
+        };
+        run.scalars[..scalars.len()].copy_from_slice(scalars);
+        Ok(run)
+    }
+
+    /// The scalars the run asks for, in the order a reply answers them.
+    #[must_use]
+    pub fn scalars(&self) -> &[char] {
+        &self.scalars[..self.len as usize]
+    }
+}
+
 /// One font-service operation (`plans/FONT-SERVICE.md` FS-1).
 ///
-/// Carrying the scalar as a [`char`] and the family as a [`FamilyKey`] makes
+/// Carrying the scalars as [`char`] and the family as a [`FamilyKey`] makes
 /// an illegal request unrepresentable once decoded: a surrogate, an
 /// out-of-range code point, or a key that could escape its directory is
 /// rejected before the request is ever built.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FontRequest {
-    /// Render the coverage of `scalar` from `family`, sized so the line box
-    /// is `pixel_height` pixels tall.
+    /// Render the coverage of every scalar in `scalars` from `family`, sized
+    /// so the line box is `pixel_height` pixels tall.
     ///
-    /// The service resolves the scalar to the covering face and returns the
-    /// 8-bit coverage bitmap with the advance and bearing to draw it by; a
-    /// scalar no face covers renders the U+FFFD replacement glyph rather
-    /// than being refused.
-    Glyph {
+    /// The reply answers a **prefix** of the run — as many as its frame
+    /// holds, in order — and states how many, so a client asks again for any
+    /// remainder. The service resolves each scalar to the covering face and
+    /// returns its 8-bit coverage bitmap with the advance and bearing to draw
+    /// it by; a scalar no face covers renders the U+FFFD replacement glyph
+    /// rather than being refused.
+    Glyphs {
         /// The family to render from.
         family: FamilyKey,
-        /// The Unicode scalar to render.
-        scalar: char,
+        /// The Unicode scalars to render.
+        scalars: GlyphRun,
         /// The line-box height in physical pixels
         /// ([`FONT_MIN_PIXEL_HEIGHT`]..=[`FONT_MAX_PIXEL_HEIGHT`]).
         pixel_height: u32,
@@ -324,8 +393,8 @@ pub enum FontRequest {
     Families,
 }
 
-/// Wire operation discriminant of [`FontRequest::Glyph`].
-const OP_GLYPH: u16 = 1;
+/// Wire operation discriminant of [`FontRequest::Glyphs`].
+const OP_GLYPHS: u16 = 1;
 /// Wire operation discriminant of [`FontRequest::Metrics`].
 const OP_METRICS: u16 = 2;
 /// Wire operation discriminant of [`FontRequest::Families`].
@@ -337,52 +406,71 @@ const REQUEST_WEIGHT: usize = 8;
 const REQUEST_RESERVED: usize = 10;
 /// Offset of the pixel-height field in a request frame.
 const REQUEST_HEIGHT: usize = 12;
-/// Offset of the scalar field in a request frame.
-const REQUEST_SCALAR: usize = 16;
+/// Offset of the run-length field in a request frame.
+const REQUEST_COUNT: usize = 16;
 /// Offset of the family key in a request frame.
 const REQUEST_FAMILY: usize = 20;
+/// Offset of the inline scalar run in a request frame.
+const REQUEST_RUN: usize = REQUEST_FAMILY + FONT_FAMILY_KEY_LEN;
+
+/// Bytes one scalar occupies in a request's run.
+const REQUEST_SCALAR_LEN: usize = 4;
 
 impl FontRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), weight (2),
-    /// a reserved halfword, pixel height (4), scalar (4), and the
-    /// [`FONT_FAMILY_KEY_LEN`]-byte family key. Every field an operation
-    /// does not use is zero.
-    pub const WIRE_LEN: usize = REQUEST_FAMILY + FONT_FAMILY_KEY_LEN;
+    /// a reserved halfword, pixel height (4), run length (4), the
+    /// [`FONT_FAMILY_KEY_LEN`]-byte family key, and the
+    /// [`FONT_MAX_GLYPH_RUN`]-slot inline scalar run. Every field an
+    /// operation does not use is zero.
+    pub const WIRE_LEN: usize = REQUEST_RUN + FONT_MAX_GLYPH_RUN * REQUEST_SCALAR_LEN;
 
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
-        let mut out = [0u8; Self::WIRE_LEN];
-        put_u32(&mut out, 0, FONT_REQUEST_MAGIC);
-        out[4..6].copy_from_slice(&FONT_VERSION_V1.to_le_bytes());
-        let mut write = |op: u16, family: Option<FamilyKey>, height: u32, scalar: u32, weight| {
-            out[6..8].copy_from_slice(&op.to_le_bytes());
-            out[REQUEST_WEIGHT..REQUEST_RESERVED].copy_from_slice(&u16::to_le_bytes(weight));
-            put_u32(&mut out, REQUEST_HEIGHT, height);
-            put_u32(&mut out, REQUEST_SCALAR, scalar);
-            if let Some(family) = family {
-                out[REQUEST_FAMILY..Self::WIRE_LEN].copy_from_slice(&family.to_wire());
-            }
-        };
-        match *self {
-            Self::Glyph {
+        let (op, family, height, weight, run) = match *self {
+            Self::Glyphs {
                 family,
-                scalar,
+                scalars,
                 pixel_height,
                 weight,
-            } => write(
-                OP_GLYPH,
+            } => (
+                OP_GLYPHS,
                 Some(family),
                 pixel_height,
-                scalar as u32,
                 weight.to_wire(),
+                Some(scalars),
             ),
             Self::Metrics {
                 family,
                 pixel_height,
                 weight,
-            } => write(OP_METRICS, Some(family), pixel_height, 0, weight.to_wire()),
-            Self::Families => write(OP_FAMILIES, None, 0, 0, 0),
+            } => (
+                OP_METRICS,
+                Some(family),
+                pixel_height,
+                weight.to_wire(),
+                None,
+            ),
+            Self::Families => (OP_FAMILIES, None, 0, 0, None),
+        };
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, FONT_REQUEST_MAGIC);
+        out[4..6].copy_from_slice(&FONT_VERSION_V1.to_le_bytes());
+        out[6..8].copy_from_slice(&op.to_le_bytes());
+        out[REQUEST_WEIGHT..REQUEST_RESERVED].copy_from_slice(&weight.to_le_bytes());
+        put_u32(&mut out, REQUEST_HEIGHT, height);
+        if let Some(family) = family {
+            out[REQUEST_FAMILY..REQUEST_RUN].copy_from_slice(&family.to_wire());
+        }
+        if let Some(run) = run {
+            put_u32(&mut out, REQUEST_COUNT, run.len);
+            for (index, &scalar) in run.scalars().iter().enumerate() {
+                put_u32(
+                    &mut out,
+                    REQUEST_RUN + index * REQUEST_SCALAR_LEN,
+                    scalar as u32,
+                );
+            }
         }
         out
     }
@@ -390,22 +478,23 @@ impl FontRequest {
     /// Decode a request from `bytes`, failing closed on any malformed input.
     ///
     /// Every bound a decoder can already see — the pixel-height range, the
-    /// scalar's validity, the family key's spelling, and the zeroing of
-    /// every field the operation does not use — is enforced here, so no
-    /// accepted request ever carries a value the service would have to
-    /// re-reject structurally.
+    /// run length, every scalar's validity, the family key's spelling, and
+    /// the zeroing of every field and run slot the operation does not use —
+    /// is enforced here, so no accepted request ever carries a value the
+    /// service would have to re-reject structurally.
     ///
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole request.
-    /// * [`Errno::BadMagic`] — wrong magic, or a non-zero byte in a field
-    ///   the operation does not use.
+    /// * [`Errno::BadMagic`] — wrong magic, or a non-zero byte in a field or
+    ///   run slot the operation does not use.
     /// * [`Errno::AbiVersionUnsupported`] — not `font-v1`.
-    /// * [`Errno::OutOfRange`] — an operation outside the closed set, a
-    ///   `scalar` that is not a Unicode scalar value, or a weight outside
+    /// * [`Errno::OutOfRange`] — an operation outside the closed set, a run
+    ///   slot that is not a Unicode scalar value, or a weight outside
     ///   [`FontWeight`]'s closed set.
     /// * [`Errno::LengthOutOfRange`] — a pixel height outside
-    ///   [`FONT_MIN_PIXEL_HEIGHT`]..=[`FONT_MAX_PIXEL_HEIGHT`].
+    ///   [`FONT_MIN_PIXEL_HEIGHT`]..=[`FONT_MAX_PIXEL_HEIGHT`], or a run
+    ///   length outside `1..=`[`FONT_MAX_GLYPH_RUN`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -424,17 +513,17 @@ impl FontRequest {
         }
         let op = u16::from_le_bytes([bytes[6], bytes[7]]);
         let weight_wire = u16::from_le_bytes([bytes[REQUEST_WEIGHT], bytes[REQUEST_WEIGHT + 1]]);
-        let scalar_wire = read_u32(bytes, REQUEST_SCALAR);
+        let count_wire = read_u32(bytes, REQUEST_COUNT);
         let height_wire = read_u32(bytes, REQUEST_HEIGHT);
         match op {
-            OP_GLYPH => Ok(Self::Glyph {
+            OP_GLYPHS => Ok(Self::Glyphs {
                 family: family_field(bytes)?,
-                scalar: char::from_u32(scalar_wire).ok_or(Errno::OutOfRange)?,
+                scalars: run_field(bytes, count_wire)?,
                 pixel_height: validate_pixel_height(height_wire)?,
                 weight: FontWeight::from_wire(weight_wire)?,
             }),
             OP_METRICS => {
-                if scalar_wire != 0 {
+                if count_wire != 0 || !run_slots_zero(bytes, 0) {
                     return Err(Errno::BadMagic);
                 }
                 Ok(Self::Metrics {
@@ -445,11 +534,10 @@ impl FontRequest {
             }
             OP_FAMILIES => {
                 let unused_zero = weight_wire == 0
-                    && scalar_wire == 0
+                    && count_wire == 0
                     && height_wire == 0
-                    && bytes[REQUEST_FAMILY..Self::WIRE_LEN]
-                        .iter()
-                        .all(|&b| b == 0);
+                    && bytes[REQUEST_FAMILY..REQUEST_RUN].iter().all(|&b| b == 0)
+                    && run_slots_zero(bytes, 0);
                 if unused_zero {
                     Ok(Self::Families)
                 } else {
@@ -464,8 +552,33 @@ impl FontRequest {
 /// The family key a request frame carries.
 fn family_field(bytes: &[u8]) -> Result<FamilyKey, Errno> {
     let mut key = [0u8; FONT_FAMILY_KEY_LEN];
-    key.copy_from_slice(&bytes[REQUEST_FAMILY..FontRequest::WIRE_LEN]);
+    key.copy_from_slice(&bytes[REQUEST_FAMILY..REQUEST_RUN]);
     FamilyKey::from_wire(key)
+}
+
+/// The scalar run a request frame carries, given its wire run length.
+fn run_field(bytes: &[u8], count: u32) -> Result<GlyphRun, Errno> {
+    let count = usize::try_from(count).map_err(|_| Errno::LengthOutOfRange)?;
+    if count == 0 || count > FONT_MAX_GLYPH_RUN {
+        return Err(Errno::LengthOutOfRange);
+    }
+    if !run_slots_zero(bytes, count) {
+        return Err(Errno::BadMagic);
+    }
+    let mut scalars = ['\0'; FONT_MAX_GLYPH_RUN];
+    for (index, slot) in scalars.iter_mut().take(count).enumerate() {
+        let wire = read_u32(bytes, REQUEST_RUN + index * REQUEST_SCALAR_LEN);
+        *slot = char::from_u32(wire).ok_or(Errno::OutOfRange)?;
+    }
+    GlyphRun::new(&scalars[..count])
+}
+
+/// Whether every run slot from `from` onward is zero: the padding no
+/// operation reads, which may never smuggle a scalar the run length excludes.
+fn run_slots_zero(bytes: &[u8], from: usize) -> bool {
+    bytes[REQUEST_RUN + from * REQUEST_SCALAR_LEN..FontRequest::WIRE_LEN]
+        .iter()
+        .all(|&byte| byte == 0)
 }
 
 /// Accept a text height only within
@@ -478,19 +591,31 @@ fn validate_pixel_height(height: u32) -> Result<u32, Errno> {
     }
 }
 
-/// Fixed prefix of a [`FontRequest::Glyph`] reply: a status word (`0` on
-/// success, else the negated [`Errno`] discriminant) followed by the
-/// bitmap's width and height, the pen advance, and the left side bearing,
-/// each a little-endian 32-bit value. The 8-bit coverage samples follow,
-/// `width * height` of them.
-pub const FONT_GLYPH_REPLY_HEADER_LEN: usize = 20;
+/// Fixed prefix of a [`FontRequest::Glyphs`] reply: a status word (`0` on
+/// success, else the negated [`Errno`] discriminant) followed by how many
+/// glyphs of the run the batch answers, each a little-endian 32-bit value.
+/// That many records follow.
+pub const FONT_GLYPHS_REPLY_HEADER_LEN: usize = 8;
 
-/// Largest [`FontRequest::Glyph`] reply, in bytes: the header plus the
-/// widest, tallest permitted coverage bitmap. A client sizes its receive
-/// buffer to this.
-pub const FONT_MAX_GLYPH_REPLY: usize = FONT_GLYPH_REPLY_HEADER_LEN + FONT_MAX_COVERAGE_LEN;
+/// Fixed prefix of one glyph record within a batch: the bitmap's width and
+/// height, the pen advance, and the left side bearing, each a little-endian
+/// 32-bit value. The 8-bit coverage samples follow, `width * height` of them,
+/// so records are walked in sequence rather than indexed.
+pub const FONT_GLYPH_RECORD_HEADER_LEN: usize = 16;
 
-/// A decoded glyph-coverage reply: where the glyph sits relative to the pen,
+/// Largest [`FontRequest::Glyphs`] reply, in bytes: the batch header plus one
+/// widest, tallest permitted record. A client sizes its receive buffer to
+/// this.
+///
+/// It is also why a batch answers a *prefix* of the run rather than all of
+/// it: one glyph at the extreme of [`FONT_MAX_COVERAGE_LEN`] fills the frame
+/// on its own. At the sizes a desktop draws text a glyph is a few hundred
+/// bytes, so one round trip covers any realistic run and the paging exists to
+/// keep the bound honest.
+pub const FONT_MAX_GLYPH_REPLY: usize =
+    FONT_GLYPHS_REPLY_HEADER_LEN + FONT_GLYPH_RECORD_HEADER_LEN + FONT_MAX_COVERAGE_LEN;
+
+/// One decoded glyph record: where the glyph sits relative to the pen,
 /// how far the pen then moves, and a borrowed view of its `width * height`
 /// 8-bit alpha samples, row-major, that the client blits.
 ///
@@ -513,31 +638,99 @@ pub struct GlyphCoverage<'a> {
     pub coverage: &'a [u8],
 }
 
-/// Encode a successful glyph-coverage reply into `buf`, returning the number
-/// of bytes written.
+/// Frames a [`FontRequest::Glyphs`] reply as the service produces it, one
+/// record at a time.
 ///
-/// # Errors
-///
-/// * [`Errno::LengthOutOfRange`] — a geometry outside the permitted bounds
-///   (see [`GlyphCoverage`]), or a `coverage` whose length is not exactly
-///   `width * height`.
-/// * [`Errno::BufferTooSmall`] — `buf` cannot hold the header plus coverage.
-pub fn encode_glyph_reply(buf: &mut [u8], glyph: &GlyphCoverage<'_>) -> Result<usize, Errno> {
-    let len = glyph_coverage_len(glyph.width, glyph.height, glyph.advance, glyph.left)?;
-    if glyph.coverage.len() != len {
-        return Err(Errno::LengthOutOfRange);
+/// The service rasterises from a cache it can borrow only one entry of at a
+/// time, so it appends records rather than handing over a collected batch.
+/// Appending until the next record will not fit is the whole fill rule, and
+/// it lives here beside the decoder that enforces the same bound, so producer
+/// and consumer cannot disagree about what a well-formed batch looks like.
+pub struct GlyphBatchWriter<'a> {
+    /// The reply frame, never longer than the protocol's own maximum, so a
+    /// frame this writer seals is always one the decoder accepts.
+    buf: &'a mut [u8],
+    /// Bytes written, batch header included.
+    at: usize,
+    /// Records appended.
+    count: u32,
+}
+
+impl<'a> GlyphBatchWriter<'a> {
+    /// A writer over `buf`, with the batch header reserved.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] when `buf` cannot hold the header.
+    pub fn new(buf: &'a mut [u8]) -> Result<Self, Errno> {
+        if buf.len() < FONT_GLYPHS_REPLY_HEADER_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let usable = buf.len().min(FONT_MAX_GLYPH_REPLY);
+        Ok(Self {
+            buf: &mut buf[..usable],
+            at: FONT_GLYPHS_REPLY_HEADER_LEN,
+            count: 0,
+        })
     }
-    let total = FONT_GLYPH_REPLY_HEADER_LEN + len;
-    if buf.len() < total {
-        return Err(Errno::BufferTooSmall);
+
+    /// How many records have been appended.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
     }
-    put_i32(buf, 0, 0);
-    put_u32(buf, 4, glyph.width);
-    put_u32(buf, 8, glyph.height);
-    put_u32(buf, 12, glyph.advance);
-    put_i32(buf, 16, glyph.left);
-    buf[FONT_GLYPH_REPLY_HEADER_LEN..total].copy_from_slice(glyph.coverage);
-    Ok(total)
+
+    /// Append `glyph`, reporting `false` when it does not fit or the batch
+    /// already holds the longest run a request may name — the caller stops
+    /// there, and the client asks again for the remainder.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] — a geometry outside the permitted bounds
+    /// (see [`GlyphCoverage`]), or a `coverage` whose length is not exactly
+    /// `width * height`. Checked ahead of the fit, so a malformed record is
+    /// reported however full the batch is.
+    pub fn push(&mut self, glyph: &GlyphCoverage<'_>) -> Result<bool, Errno> {
+        let len = glyph_coverage_len(glyph.width, glyph.height, glyph.advance, glyph.left)?;
+        if glyph.coverage.len() != len {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if self.count as usize >= FONT_MAX_GLYPH_RUN {
+            return Ok(false);
+        }
+        let samples = self.at + FONT_GLYPH_RECORD_HEADER_LEN;
+        let Some(end) = samples
+            .checked_add(len)
+            .filter(|&end| end <= self.buf.len())
+        else {
+            return Ok(false);
+        };
+        put_u32(self.buf, self.at, glyph.width);
+        put_u32(self.buf, self.at + 4, glyph.height);
+        put_u32(self.buf, self.at + 8, glyph.advance);
+        put_i32(self.buf, self.at + 12, glyph.left);
+        self.buf[samples..end].copy_from_slice(glyph.coverage);
+        self.at = end;
+        self.count += 1;
+        Ok(true)
+    }
+
+    /// Seal the batch — the success status and the answered count — and
+    /// return the framed reply's length.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] when no record fitted at all. A batch that
+    /// answers nothing leaves a client with no way forward, so it is never a
+    /// successful reply: the caller frames the refusal instead.
+    pub fn finish(self) -> Result<usize, Errno> {
+        if self.count == 0 {
+            return Err(Errno::BufferTooSmall);
+        }
+        put_i32(self.buf, 0, 0);
+        put_u32(self.buf, 4, self.count);
+        Ok(self.at)
+    }
 }
 
 /// Encode a fail-closed glyph-reply refusal (a status word only) into `buf`.
@@ -554,18 +747,59 @@ pub fn encode_glyph_error_reply(buf: &mut [u8], err: Errno) -> Result<usize, Err
     Ok(4)
 }
 
-/// Decode a glyph-coverage reply, borrowing its coverage bytes from `reply`.
+/// The glyphs a [`FontRequest::Glyphs`] reply answered: a prefix of the
+/// requested run, in order, each record borrowing its coverage from the
+/// frame.
+///
+/// Held inline so decoding one allocates nothing, and validated whole at
+/// decode — every record a batch exposes has already been bounds-checked, so
+/// walking one cannot fail part-way through a drawn run.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GlyphBatch<'a> {
+    glyphs: [GlyphCoverage<'a>; FONT_MAX_GLYPH_RUN],
+    len: usize,
+}
+
+impl<'a> GlyphBatch<'a> {
+    /// The value an unanswered slot holds.
+    ///
+    /// A batch only ever exposes the records it decoded, so this never
+    /// reaches a caller; it exists so the fixed-capacity batch can be built
+    /// without allocating and without an `Option` per slot.
+    const UNSET: GlyphCoverage<'static> = GlyphCoverage {
+        width: 0,
+        height: FONT_MIN_PIXEL_HEIGHT,
+        advance: 0,
+        left: 0,
+        coverage: &[],
+    };
+
+    /// The glyphs the batch answered, in the order the run asked for them.
+    #[must_use]
+    pub fn glyphs(&self) -> &[GlyphCoverage<'a>] {
+        &self.glyphs[..self.len]
+    }
+}
+
+/// Decode a glyph-batch reply, borrowing each record's coverage bytes from
+/// `reply`.
+///
+/// A successful batch always answers at least one glyph, so a client walking
+/// a run always makes progress: a reply claiming none is malformed rather
+/// than an empty answer to ask again for.
 ///
 /// # Errors
 ///
 /// * The carried [`Errno`] when the service refused the request.
 /// * [`Errno::BufferTooSmall`] — `reply` is shorter than the status word, or
-///   shorter than the header plus the coverage its geometry implies (a
-///   truncated frame is refused, never read past its bytes).
+///   shorter than the records its counts and geometries imply (a truncated
+///   frame is refused, never read past its bytes).
 /// * [`Errno::OutOfRange`] — a positive or undefined status word (wire
 ///   corruption — fail closed).
-/// * [`Errno::LengthOutOfRange`] — a geometry outside the permitted bounds.
-pub fn decode_glyph_reply(reply: &[u8]) -> Result<GlyphCoverage<'_>, Errno> {
+/// * [`Errno::LengthOutOfRange`] — a count outside
+///   `1..=`[`FONT_MAX_GLYPH_RUN`], a record geometry outside the permitted
+///   bounds, or a frame longer than [`FONT_MAX_GLYPH_REPLY`].
+pub fn decode_glyphs_reply(reply: &[u8]) -> Result<GlyphBatch<'_>, Errno> {
     if reply.len() < 4 {
         return Err(Errno::BufferTooSmall);
     }
@@ -574,25 +808,45 @@ pub fn decode_glyph_reply(reply: &[u8]) -> Result<GlyphCoverage<'_>, Errno> {
         let errno = Errno::try_from_status(status).ok_or(Errno::OutOfRange)?;
         return Err(errno);
     }
-    if reply.len() < FONT_GLYPH_REPLY_HEADER_LEN {
+    if reply.len() < FONT_GLYPHS_REPLY_HEADER_LEN {
         return Err(Errno::BufferTooSmall);
     }
-    let width = read_u32(reply, 4);
-    let height = read_u32(reply, 8);
-    let advance = read_u32(reply, 12);
-    let left = read_i32(reply, 16);
-    let len = glyph_coverage_len(width, height, advance, left)?;
-    let total = FONT_GLYPH_REPLY_HEADER_LEN + len;
-    if reply.len() < total {
-        return Err(Errno::BufferTooSmall);
+    let count = usize::try_from(read_u32(reply, 4)).map_err(|_| Errno::LengthOutOfRange)?;
+    if count == 0 || count > FONT_MAX_GLYPH_RUN {
+        return Err(Errno::LengthOutOfRange);
     }
-    Ok(GlyphCoverage {
-        width,
-        height,
-        advance,
-        left,
-        coverage: &reply[FONT_GLYPH_REPLY_HEADER_LEN..total],
-    })
+    let mut batch = GlyphBatch {
+        glyphs: [GlyphBatch::UNSET; FONT_MAX_GLYPH_RUN],
+        len: count,
+    };
+    let mut at = FONT_GLYPHS_REPLY_HEADER_LEN;
+    for slot in batch.glyphs.iter_mut().take(count) {
+        let samples = at + FONT_GLYPH_RECORD_HEADER_LEN;
+        if samples > reply.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        let width = read_u32(reply, at);
+        let height = read_u32(reply, at + 4);
+        let advance = read_u32(reply, at + 8);
+        let left = read_i32(reply, at + 12);
+        let len = glyph_coverage_len(width, height, advance, left)?;
+        let end = samples.checked_add(len).ok_or(Errno::LengthOutOfRange)?;
+        if end > FONT_MAX_GLYPH_REPLY {
+            return Err(Errno::LengthOutOfRange);
+        }
+        if end > reply.len() {
+            return Err(Errno::BufferTooSmall);
+        }
+        *slot = GlyphCoverage {
+            width,
+            height,
+            advance,
+            left,
+            coverage: &reply[samples..end],
+        };
+        at = end;
+    }
+    Ok(batch)
 }
 
 /// Validate a glyph geometry and return the coverage length (`width * height`)

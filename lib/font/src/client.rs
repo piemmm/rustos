@@ -60,9 +60,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{
-    decode_families_reply, decode_glyph_reply, decode_metrics_reply, FamilyEntry, FamilyKey,
-    FontMetrics, FontRequest, FontWeight, FONT_FAMILY_KEY_LEN, FONT_MAX_FAMILIES_REPLY,
-    FONT_MAX_GLYPH_REPLY, FONT_METRICS_REPLY_LEN,
+    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, FamilyEntry, FamilyKey,
+    FontMetrics, FontRequest, FontWeight, GlyphRun, FONT_FAMILY_KEY_LEN, FONT_MAX_FAMILIES_REPLY,
+    FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
 use tairix_reclaim::ReclaimCache;
@@ -252,21 +252,23 @@ impl Channel {
         self.transport = Some(transport);
     }
 
-    /// Fetch one glyph's coverage, or `None` when no transport is installed or
-    /// the call or its reply could not be read (fail closed: the caller
-    /// composites nothing).
-    fn glyph(
+    /// Fetch the coverage of a prefix of `scalars`, or an empty batch when no
+    /// transport is installed or the call or its reply could not be read
+    /// (fail closed: the caller composites nothing).
+    fn glyphs(
         &mut self,
-        scalar: char,
+        scalars: &[char],
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Option<CachedGlyph> {
-        let transport = self.transport.as_mut()?;
-        fetch_glyph(
+    ) -> Vec<CachedGlyph> {
+        let Some(transport) = self.transport.as_mut() else {
+            return Vec::new();
+        };
+        fetch_glyphs(
             transport.as_mut(),
             &mut self.reply,
-            scalar,
+            scalars,
             family,
             pixel_height,
             weight,
@@ -313,7 +315,7 @@ impl Channel {
 }
 
 /// The font client: the process's caches, plus the channel reached only
-/// through [`fetch_glyph`](FontClient::fetch_glyph) and its siblings.
+/// through [`fetch_glyphs`](FontClient::fetch_glyphs) and its siblings.
 ///
 /// # The locking discipline this trait exists to express
 ///
@@ -331,14 +333,17 @@ pub(crate) trait FontClient {
     /// The caches, re-acquired if a `fetch_*` released them.
     fn caches(&mut self) -> &mut Caches;
 
-    /// Fetch one glyph over the channel, with the caches released.
-    fn fetch_glyph(
+    /// Fetch a run of glyphs over the channel, with the caches released.
+    ///
+    /// Answers a prefix of `scalars`, in order, so the batch pairs
+    /// positionally with the head of the run and may be shorter than it.
+    fn fetch_glyphs(
         &mut self,
-        scalar: char,
+        scalars: &[char],
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Option<CachedGlyph>;
+    ) -> Vec<CachedGlyph>;
 
     /// Fetch one family's line metrics over the channel, with the caches
     /// released.
@@ -387,12 +392,7 @@ pub(crate) trait FontClient {
         weight: FontWeight,
         f: impl FnOnce(&CachedGlyph) -> R,
     ) -> Option<R> {
-        let key = (
-            scalar as u32,
-            family.to_wire(),
-            pixel_height,
-            weight.to_wire(),
-        );
+        let key = glyph_key(scalar, family, pixel_height, weight);
         if let Some(cache) = self.caches().glyphs.as_mut() {
             // `build` answers `None` on purpose: the lookup is counted here,
             // the value is produced with the lock released, and `retain`
@@ -401,12 +401,119 @@ pub(crate) trait FontClient {
                 return Some(f(&served));
             }
         }
-        let glyph = self.fetch_glyph(scalar, family, pixel_height, weight)?;
+        let glyph = self
+            .fetch_glyphs(&[scalar], family, pixel_height, weight)
+            .into_iter()
+            .next()?;
         let served = f(&glyph);
         if let Some(cache) = self.caches().glyphs.as_mut() {
             cache.retain(&(), key, glyph);
         }
         Some(served)
+    }
+
+    /// Fetch and retain the coverage of every scalar in `text` the glyph
+    /// cache does not already hold, a run at a time.
+    ///
+    /// This is what makes a cold run of text cost one service round trip
+    /// rather than one per character: the surface that draws a label owes the
+    /// user a frame, and a per-glyph miss is a full cross-process call on
+    /// that path. Once the cache holds the run this fetches nothing, so the
+    /// cost converges to zero as a program's text repertoire warms.
+    ///
+    /// The scan itself is one cache probe per character, which is noise
+    /// beside the blit or the round trip it precedes, and it leaves recency
+    /// alone — the counted lookup is the one the draw or the measurement walk
+    /// then makes.
+    ///
+    /// Skipped with no cache installed, and abandoned as soon as a batch's
+    /// results are not retained: warming is speculation on a cache keeping
+    /// what it is given, and a cache that will not keep it would make every
+    /// further batch pure extra traffic on top of the per-glyph path.
+    fn warm(&mut self, text: &str, family: FamilyKey, pixel_height: u32, weight: FontWeight) {
+        if self.caches().glyphs.is_none() {
+            return;
+        }
+        let mut pending = ['\0'; FONT_MAX_GLYPH_RUN];
+        let mut chars = text.chars();
+        loop {
+            let mut len = 0;
+            for scalar in chars.by_ref() {
+                if pending[..len].contains(&scalar)
+                    || self.holds_glyph(scalar, family, pixel_height, weight)
+                {
+                    continue;
+                }
+                pending[len] = scalar;
+                len += 1;
+                if len == FONT_MAX_GLYPH_RUN {
+                    break;
+                }
+            }
+            if len == 0 {
+                return;
+            }
+            // A reply answers as much of the run as its frame holds, so the
+            // remainder is asked for again rather than left to cost a round
+            // trip each on the per-glyph path.
+            let mut from = 0;
+            while from < len {
+                let answered = self.warm_run(&pending[from..len], family, pixel_height, weight);
+                if answered == 0 {
+                    return;
+                }
+                from += answered;
+            }
+        }
+    }
+
+    /// Whether the glyph cache already holds `scalar`'s coverage.
+    ///
+    /// Peeked rather than served, so a warming scan does not disturb the
+    /// recency order eviction takes from.
+    fn holds_glyph(
+        &mut self,
+        scalar: char,
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+    ) -> bool {
+        let key = glyph_key(scalar, family, pixel_height, weight);
+        self.caches()
+            .glyphs
+            .as_ref()
+            .is_some_and(|cache| cache.peek(&(), &key).is_some())
+    }
+
+    /// Fetch `scalars`, retain what comes back, and report how many of the
+    /// run the service answered.
+    ///
+    /// `0` when it answered none, and also when the cache kept none of what
+    /// it did answer — both mean stop warming, since a cache that will not
+    /// keep the coverage leaves every further batch pure extra traffic on top
+    /// of the per-glyph path.
+    fn warm_run(
+        &mut self,
+        scalars: &[char],
+        family: FamilyKey,
+        pixel_height: u32,
+        weight: FontWeight,
+    ) -> usize {
+        let fetched = self.fetch_glyphs(scalars, family, pixel_height, weight);
+        let answered = fetched.len();
+        let mut retained = false;
+        for (&scalar, glyph) in scalars.iter().zip(fetched) {
+            let key = glyph_key(scalar, family, pixel_height, weight);
+            if let Some(cache) = self.caches().glyphs.as_mut() {
+                cache.retain(&(), key, glyph);
+                retained |= cache.peek(&(), &key).is_some();
+            }
+        }
+        if retained {
+            answered
+        } else {
+            0
+        }
     }
 
     /// Serve `text`'s measurement in `(family, pixel_height, weight)` to `f`,
@@ -456,6 +563,7 @@ pub(crate) trait FontClient {
         pixel_height: u32,
         weight: FontWeight,
     ) -> (MeasuredText, bool) {
+        self.warm(text, family, pixel_height, weight);
         measure::measure(text, |scalar| {
             self.with_glyph(scalar, family, pixel_height, weight, |glyph| glyph.advance)
         })
@@ -486,40 +594,64 @@ pub(crate) trait FontClient {
     }
 }
 
-/// Fetch one glyph's coverage over `transport` into the reusable `reply`
+/// Fetch a run of glyphs' coverage over `transport` into the reusable `reply`
 /// buffer.
 ///
-/// Every failure — a refused call, a length the reply buffer cannot hold, a
-/// frame that does not decode — yields `None`, so a caller composites nothing
-/// rather than reading a bitmap the service did not send.
-fn fetch_glyph(
+/// The service answers a prefix of `scalars`, in order, so the returned batch
+/// pairs positionally with the head of the run and may be shorter than it.
+/// Every failure — a run the protocol will not carry, a refused call, a
+/// length the reply buffer cannot hold, a frame that does not decode — yields
+/// an empty batch, so a caller composites nothing rather than reading bitmaps
+/// the service did not send.
+fn fetch_glyphs(
     transport: &mut dyn FontTransport,
     reply: &mut Vec<u8>,
-    scalar: char,
+    scalars: &[char],
     family: FamilyKey,
     pixel_height: u32,
     weight: FontWeight,
-) -> Option<CachedGlyph> {
+) -> Vec<CachedGlyph> {
+    let Ok(run) = GlyphRun::new(scalars) else {
+        return Vec::new();
+    };
     if reply.len() < FONT_MAX_GLYPH_REPLY {
         reply.resize(FONT_MAX_GLYPH_REPLY, 0);
     }
-    let request = FontRequest::Glyph {
+    let request = FontRequest::Glyphs {
         family,
-        scalar,
+        scalars: run,
         pixel_height,
         weight,
     }
     .to_le_bytes();
-    let len = transport.call(&request, reply).ok()?;
-    let frame = reply.get(..len)?;
-    let coverage = decode_glyph_reply(frame).ok()?;
-    Some(CachedGlyph::new(
-        coverage.width,
-        coverage.height,
-        coverage.advance,
-        coverage.left,
-        Box::from(coverage.coverage),
-    ))
+    let Ok(len) = transport.call(&request, reply) else {
+        return Vec::new();
+    };
+    let Some(frame) = reply.get(..len) else {
+        return Vec::new();
+    };
+    let Ok(batch) = decode_glyphs_reply(frame) else {
+        return Vec::new();
+    };
+    // The reply bound admits a batch as long as any run, so only the caller
+    // knows how long *this* run was. A batch that answers more than was asked
+    // for is a corrupt frame, refused whole rather than read down to size.
+    if batch.glyphs().len() > scalars.len() {
+        return Vec::new();
+    }
+    batch
+        .glyphs()
+        .iter()
+        .map(|glyph| {
+            CachedGlyph::new(
+                glyph.width,
+                glyph.height,
+                glyph.advance,
+                glyph.left,
+                Box::from(glyph.coverage),
+            )
+        })
+        .collect()
 }
 
 /// Fetch `family`'s line metrics at `pixel_height` in `weight` over
@@ -547,6 +679,18 @@ fn fetch_metrics(
     let len = transport.call(&request, reply).ok()?;
     let frame = reply.get(..len)?;
     decode_metrics_reply(frame).ok()
+}
+
+/// The key `scalar`'s coverage in `(family, pixel_height, weight)` is
+/// retained under, spelled once for the serve, the warming scan, and the
+/// retention that follows a batch.
+fn glyph_key(scalar: char, family: FamilyKey, pixel_height: u32, weight: FontWeight) -> GlyphKey {
+    (
+        scalar as u32,
+        family.to_wire(),
+        pixel_height,
+        weight.to_wire(),
+    )
 }
 
 /// Scale a compiled-in atlas metric (measured at the atlas's own cell height,
@@ -772,14 +916,14 @@ impl FontClient for LockedClient<'_> {
         self.caches.get_or_insert_with(|| lock.lock())
     }
 
-    fn fetch_glyph(
+    fn fetch_glyphs(
         &mut self,
-        scalar: char,
+        scalars: &[char],
         family: FamilyKey,
         pixel_height: u32,
         weight: FontWeight,
-    ) -> Option<CachedGlyph> {
-        self.with_channel(|channel| channel.glyph(scalar, family, pixel_height, weight))
+    ) -> Vec<CachedGlyph> {
+        self.with_channel(|channel| channel.glyphs(scalars, family, pixel_height, weight))
     }
 
     fn fetch_metrics(
@@ -902,7 +1046,7 @@ impl FontTransport for RtTransport {
 }
 
 /// A deterministic test transport for host tests: it answers every request
-/// operation ([`FontRequest::Glyph`], [`FontRequest::Metrics`],
+/// operation ([`FontRequest::Glyphs`], [`FontRequest::Metrics`],
 /// [`FontRequest::Families`]) without a running `fontd`.
 ///
 /// [`FamilyKey::MONO`] is served as a monospace family (a uniform advance
@@ -925,12 +1069,12 @@ pub struct SolidTestTransport;
 impl FontTransport for SolidTestTransport {
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         match FontRequest::from_bytes(request)? {
-            FontRequest::Glyph {
+            FontRequest::Glyphs {
                 family,
-                scalar,
+                scalars,
                 pixel_height,
                 weight: _,
-            } => test_glyph_reply(reply, family, scalar, pixel_height),
+            } => test_glyphs_reply(reply, family, &scalars, pixel_height),
             FontRequest::Metrics {
                 family,
                 pixel_height,
@@ -969,44 +1113,36 @@ fn test_advance(family: FamilyKey, scalar: char, pixel_height: u32) -> u32 {
     (cell.saturating_mul(6 + 2 * spread) / 10).max(1)
 }
 
-/// Encode a [`FontRequest::Glyph`] reply for [`SolidTestTransport`].
+/// Encode a [`FontRequest::Glyphs`] reply for [`SolidTestTransport`],
+/// answering as much of `scalars` as the frame holds.
 #[cfg(any(test, feature = "test-util"))]
-fn test_glyph_reply(
+fn test_glyphs_reply(
     reply: &mut [u8],
     family: FamilyKey,
-    scalar: char,
+    scalars: &GlyphRun,
     pixel_height: u32,
 ) -> Result<usize, Errno> {
     use alloc::vec;
-    use tairix_abi::font_ipc::{encode_glyph_reply, GlyphCoverage};
+    use tairix_abi::font_ipc::{GlyphBatchWriter, GlyphCoverage};
 
-    let advance = test_advance(family, scalar, pixel_height);
-    // Space is blank, like the real face: no ink, no coverage bytes.
-    if scalar == ' ' {
-        return encode_glyph_reply(
-            reply,
-            &GlyphCoverage {
-                width: 0,
-                height: pixel_height,
-                advance,
-                left: 0,
-                coverage: &[],
-            },
-        );
-    }
-    let width = advance.max(1);
-    let level = 255u8;
-    let coverage = vec![level; (width * pixel_height) as usize];
-    encode_glyph_reply(
-        reply,
-        &GlyphCoverage {
+    let mut writer = GlyphBatchWriter::new(reply)?;
+    for &scalar in scalars.scalars() {
+        let advance = test_advance(family, scalar, pixel_height);
+        // Space is blank, like the real face: no ink, no coverage bytes.
+        let width = if scalar == ' ' { 0 } else { advance.max(1) };
+        let coverage = vec![255u8; (width * pixel_height) as usize];
+        let fitted = writer.push(&GlyphCoverage {
             width,
             height: pixel_height,
             advance,
             left: 0,
             coverage: &coverage,
-        },
-    )
+        })?;
+        if !fitted {
+            break;
+        }
+    }
+    writer.finish()
 }
 
 /// Encode a [`FontRequest::Metrics`] reply for [`SolidTestTransport`].
@@ -1058,6 +1194,7 @@ pub fn install_test_transport() {
 pub(crate) mod tests {
     use super::*;
 
+    use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1092,14 +1229,14 @@ pub(crate) mod tests {
             &mut self.caches
         }
 
-        fn fetch_glyph(
+        fn fetch_glyphs(
             &mut self,
-            scalar: char,
+            scalars: &[char],
             family: FamilyKey,
             pixel_height: u32,
             weight: FontWeight,
-        ) -> Option<CachedGlyph> {
-            self.channel.glyph(scalar, family, pixel_height, weight)
+        ) -> Vec<CachedGlyph> {
+            self.channel.glyphs(scalars, family, pixel_height, weight)
         }
 
         fn fetch_metrics(
@@ -1174,6 +1311,33 @@ pub(crate) mod tests {
     impl FontTransport for Overlong {
         fn call(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             Ok(reply.len() + 1)
+        }
+    }
+
+    /// A transport that answers two glyphs however short the run was. The
+    /// reply bound admits a batch as long as *any* run, so only the client
+    /// knows how long the run it sent was — which makes this the one
+    /// over-answer the decoder cannot catch on its own.
+    struct Overanswering;
+    impl FontTransport for Overanswering {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            use tairix_abi::font_ipc::{GlyphBatchWriter, GlyphCoverage};
+
+            let FontRequest::Glyphs { pixel_height, .. } = FontRequest::from_bytes(request)? else {
+                return SolidTestTransport.call(request, reply);
+            };
+            let coverage = alloc::vec![255u8; pixel_height as usize];
+            let mut writer = GlyphBatchWriter::new(reply)?;
+            for _ in 0..2 {
+                writer.push(&GlyphCoverage {
+                    width: 1,
+                    height: pixel_height,
+                    advance: 1,
+                    left: 0,
+                    coverage: &coverage,
+                })?;
+            }
+            writer.finish()
         }
     }
 
@@ -1356,6 +1520,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_batch_answering_more_than_the_run_fails_closed() {
+        let mut client = client_with(Overanswering);
+        assert!(
+            coverage(&mut client, 'A', FamilyKey::MONO, 20).is_none(),
+            "a batch longer than the run is refused whole, never read down to size"
+        );
+    }
+
+    #[test]
     fn the_byte_budget_bounds_the_cache_however_many_glyphs_are_drawn() {
         let budget = CacheBudget::from_ceiling(64 * 1024);
         let (cache, _gauge) = cache_at(PressureBand::Normal, budget);
@@ -1487,6 +1660,136 @@ pub(crate) mod tests {
             tally.get(),
             distinct,
             "a steady-state repaint must cost nothing beyond the first sight of each scalar"
+        );
+    }
+
+    /// The distinct scalars of `text`, in first-seen order.
+    fn distinct(text: &str) -> Vec<char> {
+        let mut seen: Vec<char> = Vec::new();
+        for scalar in text.chars() {
+            if !seen.contains(&scalar) {
+                seen.push(scalar);
+            }
+        }
+        seen
+    }
+
+    /// The burst this batching exists to remove: a window opening drew text
+    /// whose glyphs the cache did not hold yet, and every one of them was a
+    /// blocking round trip on a loop that owed a frame. One run is now one
+    /// call, and its glyphs are all resident afterwards.
+    #[test]
+    fn a_cold_run_of_text_costs_one_round_trip() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+
+        let run = "Switchboard";
+        let (measured, resolved) = client.measure_text(run, INTER, 28, FontWeight::Regular);
+        assert!(resolved, "every glyph of the run must resolve");
+        assert!(measured.width() > 0);
+        assert_eq!(
+            tally.get(),
+            1,
+            "a cold run must cost one round trip, not one per character"
+        );
+        assert_eq!(
+            client.caches.glyphs.as_ref().expect("installed").len(),
+            distinct(run).len()
+        );
+    }
+
+    /// The run bound is a validation bound, so longer text is consecutive
+    /// runs: two round trips for 40 distinct scalars, never 40.
+    #[test]
+    fn text_past_the_run_bound_is_drawn_as_consecutive_runs() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 30));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+
+        let run: String = ('a'..='z').chain('A'..='N').collect();
+        let scalars = distinct(&run);
+        assert_eq!(scalars.len(), 40);
+        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::Regular);
+        assert!(resolved);
+        assert_eq!(tally.get(), 2, "40 distinct scalars is two bounded runs");
+        assert_eq!(
+            client.caches.glyphs.as_ref().expect("installed").len(),
+            scalars.len()
+        );
+    }
+
+    /// Warming is speculation on a cache keeping what it is handed, so with
+    /// no cache installed it does not happen at all: the run costs exactly
+    /// what the per-glyph path costs, never a batch on top of it.
+    #[test]
+    fn an_uncached_client_pays_no_batch_it_could_not_keep() {
+        let (mut client, tally) = counting_client();
+        let run = "Switchboard";
+        let (_, resolved) = client.measure_text(run, INTER, 28, FontWeight::Regular);
+        assert!(resolved);
+        assert_eq!(
+            tally.get(),
+            run.chars().count(),
+            "with nothing retained, a run costs its own characters and no more"
+        );
+    }
+
+    /// A cache that admits nothing is the defect `plans/FONT-SERVICE.md`
+    /// §3.2 describes, and warming must not make it worse: one batch
+    /// discovers the refusal and the rest of the run is left to the per-glyph
+    /// path rather than paying a batch per bounded run as well.
+    #[test]
+    fn a_refusing_cache_abandons_warming_after_one_batch() {
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(0));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+
+        let run: String = ('a'..='z').chain('A'..='N').collect();
+        assert_eq!(distinct(&run).len(), 40);
+        let (_, resolved) = client.measure_text(&run, INTER, 28, FontWeight::Regular);
+        assert!(resolved);
+        assert_eq!(
+            tally.get(),
+            1 + run.chars().count(),
+            "one batch discovers the refusal; the second bounded run is never asked for"
+        );
+        assert!(client.caches.glyphs.as_ref().expect("installed").is_empty());
+    }
+
+    /// A reply carries at most one glyph at the extreme of the coverage
+    /// bound, so a run at the largest permitted height is answered a piece at
+    /// a time — and the client asks again for the remainder rather than
+    /// dropping it back onto the per-glyph path.
+    #[test]
+    fn a_run_too_large_for_one_frame_is_answered_in_pieces() {
+        // Sized from a machine whose RAM comfortably holds this run's
+        // bitmaps, so what the call count measures is the protocol's paging
+        // and not the cache evicting glyphs a 512-pixel run cannot all hold.
+        let (cache, _gauge) = cache_at(PressureBand::Normal, glyph_cache_budget(1 << 36));
+        let (mut client, tally) = counting_client();
+        client.caches.glyphs = Some(cache);
+
+        let height = tairix_abi::font_ipc::FONT_MAX_PIXEL_HEIGHT;
+        let run = "abcdefgh";
+        let scalars = distinct(run);
+        let (_, resolved) = client.measure_text(run, INTER, height, FontWeight::Regular);
+        assert!(resolved, "every glyph of the run must still resolve");
+        assert!(
+            tally.get() > 1,
+            "a run this large cannot fit one frame: {} call(s)",
+            tally.get()
+        );
+        assert!(
+            tally.get() < scalars.len(),
+            "but it must still batch rather than cost one call a glyph: {} of {}",
+            tally.get(),
+            scalars.len()
+        );
+        assert_eq!(
+            client.caches.glyphs.as_ref().expect("installed").len(),
+            scalars.len(),
+            "the remainder is asked for again, not left unfetched"
         );
     }
 

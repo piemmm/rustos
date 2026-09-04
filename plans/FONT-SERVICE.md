@@ -95,16 +95,17 @@ never baked into the kernel.
   space means even a malformed face faults only this sandbox, never a
   compositor or terminal.
 - **Serves glyph coverage** over the reserved `FONT_ENDPOINT` (§2.2): a
-  [`FontRequest::Glyph { family, scalar, pixel_height, weight }`] reply is the
-  8-bit coverage bitmap the client blits, with the pen advance and left side
-  bearing to place it by. The service resolves the scalar within the named
-  family — its own faces in order, then its fallback family's faces, else
-  U+FFFD — rasterises once at the requested size (4-bit engine coverage scaled
-  ×17 to the protocol's 8-bit samples), and memoises in the byte-budgeted
-  `(family, resolved family, face, glyph, height, cells, weight)` cache of
-  §3.1. The cell count is keyed because how many cells a scalar spans is a
-  property of the scalar, not of the glyph a face maps it to. It also answers
-  [`FontRequest::Metrics`] with the family's line metrics, and
+  [`FontRequest::Glyphs { family, scalars, pixel_height, weight }`] reply is a
+  batch of 8-bit coverage bitmaps the client blits, each with the pen advance
+  and left side bearing to place it by. The service resolves each scalar
+  within the named family — its own faces in order, then its fallback family's
+  faces, else U+FFFD — rasterises once at the requested size (4-bit engine
+  coverage scaled ×17 to the protocol's 8-bit samples), and memoises in the
+  byte-budgeted `(family, resolved family, face, glyph, height, cells,
+  weight)` cache of §3.1. The family and its line geometry are resolved once
+  for the whole run. The cell count is keyed because how many cells a scalar
+  spans is a property of the scalar, not of the glyph a face maps it to. It
+  also answers [`FontRequest::Metrics`] with the family's line metrics, and
   [`FontRequest::Families`] with the installed selectable families so a
   settings surface offers exactly what the store holds.
 
@@ -119,16 +120,49 @@ follows (`cargo xtask c-header`).
 
 - Reserved id `FONT_ENDPOINT` (ASCII-hex-spelled, per the existing
   convention; register with `crate::ipc::is_reserved_endpoint`).
-- Requests: `Glyph { family, scalar, pixel_height, weight }`, `Metrics {
+- Requests: `Glyphs { family, scalars, pixel_height, weight }`, `Metrics {
   family, pixel_height, weight }` returning the line metrics the client lays
   text out with, and `Families` listing the installed selectable families.
-  One fixed request length; every field an operation does not use must be
-  zero, and anything else is refused, fail closed (§5.4).
-- Replies: a glyph `{ width, height, advance, left, bytes[coverage] }`
-  (length-bounded; `width == 0` is an ink-less glyph such as a space), the
-  metrics `{ pixel_height, baseline, line_height, monospace_advance }`, and
-  the family list. `monospace_advance == 0` *is* the statement that a family
-  is proportional, so a caller cannot mistake one for the other.
+  One fixed request length; every field an operation does not use, and every
+  run slot past the run's own length, must be zero, and anything else is
+  refused, fail closed (§5.4).
+- **The glyph request is per *run*, not per glyph** (`plans/FIX-DESKTOP.md`
+  DESK-18): `scalars` is a bounded inline `GlyphRun` of
+  1..=`FONT_MAX_GLYPH_RUN` (32) `char`s, held inline because a fixed request
+  length is what keeps the frame's validation total. Text is drawn on the
+  frame path, so a per-glyph protocol made a newly-opened window a burst of
+  blocking round trips; 32 covers a measured burst exactly and keeps the
+  request a few hundred bytes.
+  A run that asks for nothing is refused — a reply must always answer at
+  least one glyph, or a client could never make progress. U+0000 is itself a
+  legal scalar, so the run *length* is what tells a scalar asked for from the
+  zero padding.
+- Replies: a glyph **batch** `{ count, [{ width, height, advance, left,
+  bytes[coverage] }] }` (length-bounded; `width == 0` is an ink-less glyph
+  such as a space), the metrics `{ pixel_height, baseline, line_height,
+  monospace_advance }`, and the family list. `monospace_advance == 0` *is* the
+  statement that a family is proportional, so a caller cannot mistake one for
+  the other.
+- **A batch answers a *prefix* of the run.** One glyph at the extreme of
+  `FONT_MAX_COVERAGE_LEN` (512 KiB) fills a reply frame alone, so the service
+  appends records until the next will not fit and states how many it
+  answered, in order; the client asks again for the remainder. No bound moves
+  for this (§24.4): `FONT_MAX_GLYPH_REPLY` is re-derived as the batch header
+  plus one widest, tallest record, and the coverage/width/height bounds it
+  rests on are untouched. The fill rule lives once, in `font_ipc`'s
+  `GlyphBatchWriter`, beside the decoder that enforces the same bound. A
+  scalar the faces cannot yield truncates the batch exactly as a full frame
+  does; only a failure on the first scalar is a status-word error frame.
+  - **The work one request can force is still bounded by the reply, not by
+    the run length.** The service stops rasterising the moment a record will
+    not fit, so a request produces at most the frame's worth of coverage plus
+    the one glyph that overflowed it — no more than twice the old per-request
+    ceiling, where a per-glyph protocol let a client ask 32 times for the same
+    total anyway. The run length does not multiply it.
+  - Only the *client* knows how long the run it sent was, since the reply
+    bound admits a batch as long as any run, so the client refuses a batch
+    answering more than it asked for rather than reading it down to size
+    (§5.4).
 - **No new capability** (§5.2): drawing text is not a security boundary, so
   the endpoint is callable by any process (the *action* still validates every
   field and fails closed). The service holds the only privileged thing — the
@@ -145,6 +179,16 @@ follows (`cargo xtask c-header`).
   once per `(family, height, weight)` and cached beside them; with no
   transport installed they fall back to the compiled-in console geometry, so
   a dead service degrades to unrendered text rather than broken layout.
+- **One warm step serves both entry points.** `FontClient::warm` scans a run
+  for the scalars the cache does not hold (peeked, so recency stays the
+  drawing lookup's) and fetches them a bounded run at a time, re-asking for
+  whatever a reply's frame could not carry. Both the measurement walk
+  (`measure_text`, which drives `text_width`, `truncate_to_width` and
+  `elide_to_width`) and `draw_text` go through it, because both missed per
+  glyph. There is no second cache: the coverage fetched while measuring is
+  what the draw then blits. Warming is skipped with no cache installed and
+  abandoned after one batch the cache kept nothing of, so the §3.2 admits-
+  nothing state pays no batch on top of the per-glyph call it already pays.
 - Layout is **per-glyph**: `text_width`, `truncate_to_width`, and
   `draw_text` accumulate each glyph's own advance and place it at its own
   bearing. A monospace family keeps a fast path over its single advance, so
@@ -266,22 +310,25 @@ thin `lib/font` client over `FONT_ENDPOINT`.
 Load-bearing facts a future reader needs:
 
 - **Protocol** (`lib/abi/src/font_ipc.rs`, `FONT_ENDPOINT = 0x464E_5400`,
-  registered in `is_reserved_endpoint` as a privileged bind). A fixed 36-byte
-  `FontRequest` — `Glyph { family, scalar: char, pixel_height, weight }` /
-  `Metrics { family, pixel_height, weight }` / `Families`, the family a
-  validated `FamilyKey` and the scalar a `char` so a stray byte or a surrogate
+  registered in `is_reserved_endpoint` as a privileged bind). A fixed 164-byte
+  `FontRequest` — `Glyphs { family, scalars: GlyphRun, pixel_height, weight }`
+  / `Metrics { family, pixel_height, weight }` / `Families`, the family a
+  validated `FamilyKey` and the scalars `char`s so a stray byte or a surrogate
   is unrepresentable, the weight a closed `FontWeight` decoded from its wire
-  value — and a status-framed reply: a glyph reply (`width`, `height`,
-  `advance`, `left`, then `width*height` 8-bit samples, bounded by
-  `FONT_MAX_GLYPH_REPLY`; `width == 0` is an ink-less glyph), the
-  `FontMetrics { pixel_height, baseline, line_height, monospace_advance }`
-  (where `monospace_advance == 0` *means* proportional), or up to
-  `FONT_MAX_FAMILIES` `FamilyEntry` (key, label, kind) rows. One shared
-  `glyph_coverage_len` bound governs encode and decode. Pixel height is bounded
-  by `FONT_MIN/MAX_PIXEL_HEIGHT` (8..=512) — a validation bound. Not part of the
+  value — and a status-framed reply: a glyph batch (the answered count, then
+  that many `width`, `height`, `advance`, `left`, `width*height` 8-bit-sample
+  records, the whole frame bounded by `FONT_MAX_GLYPH_REPLY`; `width == 0` is
+  an ink-less glyph), the `FontMetrics { pixel_height, baseline, line_height,
+  monospace_advance }` (where `monospace_advance == 0` *means* proportional),
+  or up to `FONT_MAX_FAMILIES` `FamilyEntry` (key, label, kind) rows. One
+  shared `glyph_coverage_len` bound governs encode and decode. Pixel height is
+  bounded by `FONT_MIN/MAX_PIXEL_HEIGHT` (8..=512) and the run by
+  `FONT_MAX_GLYPH_RUN` (32) — validation bounds. `GlyphBatchWriter` is the one
+  fill-until-full rule both sides agree on, and a successful batch answers at
+  least one glyph so a client walking a run always progresses. Not part of the
   curated C-ABI surface, so the generated C headers carry no font view. The
-  request/reply decoders are in the `fuzz_decode` harness; the `lib/fontface`
-  TrueType parser has its own `tests/fuzz_face.rs`.
+  request/reply decoders and `GlyphRun`'s own bound are in the `fuzz_decode`
+  harness; the `lib/fontface` TrueType parser has its own `tests/fuzz_face.rs`.
 - **Console atlas** (`lib/font/src/atlas.rs` + `atlas_coverage.bin`,
   regenerated by `cargo xtask font-atlas --write` from the whole `mono` family,
   §1.1/§2.4). Every face the family lists is compiled in — 23,602 cells in
@@ -335,7 +382,11 @@ Load-bearing facts a future reader needs:
   (routing through `tairix_rt::ipc_call`), host tests install a mock, and with
   no transport a draw fails closed. Its glyph cache (§3.1) is installed
   through the parallel `set_glyph_cache` seam and defaults lazily under `rt`.
-  GUI `Run` images no longer carry the ~10 MB `R` LOAD segment.
+  GUI `Run` images no longer carry the ~10 MB `R` LOAD segment. `warm` (§2.3)
+  is the one fetch step both the measurement walk and `draw_text` reach the
+  service through, so a cold run is one round trip and a warm one is none;
+  `fetch_glyphs` is the only wire fetch, and a single-glyph miss is a run of
+  one.
 - **Image + discovery.** `image_apps::system_font_files` plants every family
   directory under `lib/font/assets/` — its `FontFamily` manifest and exactly
   the faces that manifest names — at `/System/Fonts/<key>/` in the shared

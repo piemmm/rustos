@@ -72,7 +72,7 @@ event loop** inherits the freeze:
 | Statistics reported to `sysinfod` | `lib/rt/src/cachereport.rs`, `userland/gui/session/src/frames.rs` | Up to **eight blocking cross-process round trips a second** on the compositor's own frame path, and on the file manager's and `fontd`'s loops, purely to report counters. `ipc_call` parks the caller off the run queue, so a gesture stuttered four times a second and every app blocked in a window call waited behind it. Fixed in DESK-15. |
 | Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
-| Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache does not hold is a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 40 of them in a 13 s hover run, clustered where new text appears. The cache absorbs the steady state, so this is a cold-cache stall rather than a periodic one; **not fixed, and needs a decision** (§6.1 below). |
+| Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache did not hold was a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 41 of them in a 13 s hover run, clustered where new text appears: 32 inside 41 ms on window-open. The cache absorbs the steady state, so this was a cold-cache stall rather than a periodic one. Fixed in DESK-18. |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_as` / `spawn_with`) | One-time, at login. Minor. |
@@ -967,6 +967,51 @@ Each stage is independently reviewable and must leave the whole-project
   crate that owns each desk, plus one pinning the staleness rule the fix must
   not break (an abandoned answer leaves the *newer* request standing).
 
+### DESK-18 — The font protocol is per run, not per glyph
+
+- **Done.** Text is drawn on the frame path, and a glyph the client cache did
+  not hold was a synchronous `FONT_ENDPOINT` call to `fontd` — 41 of them in a
+  13-second hover run, clustered where new text appeared rather than spread:
+  **32 calls inside 41 ms** on window-open. The client cache absorbs the
+  steady state, so this was the cold-cache stall (a window, a launcher, a new
+  label) rather than a periodic one, but each was a full cross-process round
+  trip on a loop that owed the user a frame.
+- **Why neither cheaper fix works.** It cannot be deferred the way a read can:
+  a paint that draws nothing where a letter belongs is a wrong frame, and the
+  only placeholder for a letter is the console atlas, whose advances differ
+  from a real face — so a placeholder run would visibly reflow when the styled
+  glyphs landed. A same-thread pre-warm is not a fix either: asking before the
+  paint moves the round trip earlier in the *same wake* and removes no stall.
+  The round trip itself is inherent, because sandboxing the rasteriser is what
+  puts the faces in another process. So the goal is one per run, converging to
+  none once warm.
+- **The fix is the protocol.** `FontRequest::Glyph` became `Glyphs`, carrying a
+  bounded inline `GlyphRun` (1..=`FONT_MAX_GLYPH_RUN` = 32, the measured burst
+  exactly) in a request that stays one fixed 164-byte length with every unused
+  field and run slot validated zero. The reply became a batch: the service
+  appends records until the next will not fit and states how many it answered,
+  in order, and the client asks again for the remainder. No bound moved
+  (§24.4) — `FONT_MAX_GLYPH_REPLY` is re-derived as the batch header plus one
+  widest, tallest record, over the same untouched coverage bounds — and a
+  successful batch always answers at least one glyph, so a client walking a run
+  always progresses. The full protocol statement is `plans/FONT-SERVICE.md`
+  §2.2/§2.3.
+- **One warm step serves both entry points.** `FontClient::warm` scans a run
+  for what the cache does not hold and fetches it a bounded run at a time;
+  `measure_text` (which drives `text_width`, `truncate_to_width` and
+  `elide_to_width`) and `draw_text` both go through it, because both missed per
+  glyph. There is no second cache — the coverage fetched while measuring is
+  what the draw blits — and the scan peeks, so recency stays the drawing
+  lookup's. Warming is skipped with no cache installed and abandoned after one
+  batch the cache kept nothing of, so a client whose cache admits nothing
+  (`plans/FONT-SERVICE.md` §3.2) pays no batch on top of the per-glyph call it
+  already pays.
+- Tested as counts, never timings: a cold run is asserted to cost one round
+  trip and 40 distinct scalars two, an uncached client is asserted to pay no
+  batch at all, and a run too large for one frame is asserted to page and
+  still end with every glyph resident. Output is bit-identical — the existing
+  blit-reference tests are unchanged.
+
 ### DESK-11 — The file manager's reads off its loop
 - **Done.** Every unbounded read the file manager makes now runs on one reader
   thread, and the window keeps drawing throughout. The three kinds share a
@@ -1207,6 +1252,9 @@ Each stage is independently reviewable and must leave the whole-project
   scoped to what its controls reported.
 - **DESK-17 — done.** No desk re-runs an answered job; the listing and
   wallpaper workers park instead of looping.
+- **DESK-18 — done.** The font protocol is per run: a cold run of text costs
+  one `FONT_ENDPOINT` round trip rather than one per character, and a warm one
+  costs none.
 - **DESK-13 — done.** A profile change costs only the work the field that moved
   implies; the terminal is the last surface off the shared damage discipline
   and was the only one with this coupling.
@@ -1218,50 +1266,7 @@ Each stage is independently reviewable and must leave the whole-project
 
 ---
 
-## 6. Staged next — the one finding still open
-
-Found by the DESK-15 measurement pass. It is not the periodic stall DESK-15
-removed, nor the runaway DESK-17 removed, and it is deliberately its own change
-rather than folded into those: it evolves a `lib/abi` protocol, so its diff and
-its ABI-hash movement are worth reviewing on their own.
-
-### 6.1 A glyph miss is a blocking round trip on the compositor loop
-
-Text is drawn on the frame path, and a glyph the client cache does not hold is
-a synchronous `FONT_ENDPOINT` call to `fontd` — 40 of them in a 13-second
-hover run, clustered where new text appeared. The client cache absorbs the
-steady state, so this is a cold-cache stall (window open, launcher open, a new
-label) rather than the periodic one, but each is a full cross-process round
-trip on a loop that owes a frame.
-
-It cannot simply be deferred the way a read can: a paint that draws nothing
-where a glyph should be is a wrong frame, and there is no "meaningful
-placeholder" for a letter the way there is for an icon (§10's built-in glyph
-tier) — the console atlas is the only candidate and its advances differ from a
-real face, so a placeholder run would visibly reflow when the styled glyphs
-landed. Nor is a same-thread pre-warm a fix: asking before the paint moves the
-round trip earlier in the same wake and removes no stall.
-
-What *would* fix it is making the protocol **per-run rather than per-glyph**:
-`FontRequest::Glyph` becomes `Glyphs`, carrying a bounded run of scalars; the
-service fills the reply to the existing `FONT_MAX_GLYPH_REPLY` bound and states
-how many it answered, and the client asks again for any remainder. The
-measurement walk (`text_width`, `truncate_to_width`) and `draw_text` both miss
-per-glyph today, so one warm step in `FontClient` serves both. The measured
-32-round-trip, 41 ms burst on window-open becomes one round trip; text stays
-always-correct and output is bit-identical. The round trip itself cannot be
-removed — sandboxing the rasteriser makes it inherent — so the goal is one per
-run, converging to none once the cache is warm.
-
-The work it takes: the request framing and the batched reply in
-`lib/abi/src/font_ipc.rs` with its decoder tests, the fill-until-full serve in
-`userland/system/fontd`, the warm step in `lib/font`'s client, the
-`exercise_font_ipc` fuzz arm, `cargo xtask c-header --write`, and the
-`docs/src/` page.
-
----
-
-## 7. Cross-references
+## 6. Cross-references
 
 - `plans/FIX-SYSCALL.md` — P-5b (syscalls run with IRQs enabled; the
   kernel stays non-preemptible per task) is *why* a long syscall body on

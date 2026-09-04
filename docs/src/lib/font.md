@@ -92,6 +92,21 @@ shared `lib/raster` premultiplied-alpha path. Steady-state redraws issue no IPC
 — each `(family, scalar, pixel height, weight)` reply is memoised client-side
 in a `tairix_reclaim::ReclaimCache`.
 
+A *cold* run costs one round trip, not one per character. Before it measures
+or draws, the client warms: it scans the run for the scalars its cache does
+not hold and fetches them as a batch of up to `FONT_MAX_GLYPH_RUN` (32),
+retaining each. The scan is one cache probe per character — noise beside the
+blit or the call it precedes — and it peeks rather than serves, so the counted
+lookup stays the one the draw or the measurement walk then makes. A reply
+answers as much of the run as its frame holds, so the client asks again for
+the remainder rather than letting it fall back to a call each.
+
+Warming is speculation on the cache keeping what it is handed, so it is
+skipped entirely with no cache installed, and abandoned after one batch if the
+cache kept none of it. Otherwise a client whose cache admits nothing (the
+unpublished-band defect below) would pay a batch on top of the per-glyph call
+it already pays.
+
 ## Proportional and monospace text are one path
 
 A `BitmapFont` names a **family**, a pixel height, and a weight. The family is
@@ -174,7 +189,19 @@ reading is unavailable (a zero total yields a zero budget), every glyph is
 fetched and served without being retained: correct, merely one call per
 glyph.
 
-### One glyph lookup per character
+### One round trip per run, one glyph lookup per character
+
+The service protocol is per *run*, so a run whose glyphs the cache does not
+hold yet costs one round trip rather than one per character. That mattered
+because text is drawn on the frame path: a measured window-open burst was 32
+blocking `FONT_ENDPOINT` calls inside 41 ms, on a loop that owed the user a
+frame. It cannot be deferred the way a directory read can — a paint that draws
+nothing where a letter belongs is a wrong frame, and the only placeholder for
+a letter is the console atlas, whose advances differ from a real face, so a
+placeholder run would visibly reflow when the styled glyphs landed. The round
+trip itself is inherent (sandboxing the rasteriser is what puts the faces in
+another process), so the goal is one per run, converging to none once the
+cache is warm. Text stays always-correct and the pixels are unchanged.
 
 A glyph's coverage reply carries that glyph's own advance, so `draw_text` reads
 the pen step from the very bitmap it is about to composite rather than asking

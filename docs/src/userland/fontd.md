@@ -192,26 +192,52 @@ the same ABI discipline as the syscall table (§9): versioned, hashed, and
 frozen on the first release (mutable now — `abi-v1` is not frozen). It is not
 part of the curated C-ABI surface, so the generated C headers are unchanged.
 
-- A fixed 36-byte `FontRequest` in: `Glyph { family, scalar, pixel_height,
+- A fixed 164-byte `FontRequest` in: `Glyphs { family, scalars, pixel_height,
   weight }`, `Metrics { family, pixel_height, weight }`, or `Families`. The
   family is a validated `FamilyKey` (a `FONT_FAMILY_KEY_LEN`-byte lower-case
   key, so a path separator or a stray byte is unrepresentable in an accepted
-  request); the scalar is carried as a `char`, so a surrogate or out-of-range
-  code point is likewise unrepresentable; the pixel height is bounded by
-  `FONT_MIN_PIXEL_HEIGHT`/`FONT_MAX_PIXEL_HEIGHT` (8..=512) — a validation
-  bound, not a capacity. The `weight` is a closed `FontWeight` (`Regular`,
-  `Medium`, `Bold`) decoded from its wire value, so an unknown weight is
-  refused rather than coerced. Every field an operation does not use, and the
-  reserved halfword, must be zero, so a smuggled field is a decode failure,
-  never silently ignored.
-- A status-framed reply out: a glyph reply is `width`, `height`, `advance`,
-  `left`, and the `width * height` 8-bit coverage samples (bounded by
-  `FONT_MAX_GLYPH_REPLY`; `width == 0` is an ink-less glyph such as a space);
-  a metrics reply is `FontMetrics { pixel_height, baseline, line_height,
-  monospace_advance }`, where a `monospace_advance` of `0` *means*
-  proportional; a families reply is up to `FONT_MAX_FAMILIES` entries of
-  (key, label, kind). One shared `glyph_coverage_len` bounds check governs both
-  encode and decode, so producer and consumer cannot diverge.
+  request); the scalars are a `GlyphRun` of 1..=`FONT_MAX_GLYPH_RUN` (32)
+  `char`s, so a surrogate or out-of-range code point is likewise
+  unrepresentable and a request that asks for nothing is refused; the pixel
+  height is bounded by `FONT_MIN_PIXEL_HEIGHT`/`FONT_MAX_PIXEL_HEIGHT`
+  (8..=512) — a validation bound, not a capacity. The `weight` is a closed
+  `FontWeight` (`Regular`, `Medium`, `Bold`) decoded from its wire value, so
+  an unknown weight is refused rather than coerced. Every field an operation
+  does not use, the reserved halfword, and every run slot past the run's own
+  length must be zero, so a smuggled field is a decode failure, never
+  silently ignored — U+0000 is itself a legal scalar, and the run length is
+  what tells one asked for from the padding.
+- A status-framed reply out: a glyph reply is a **batch** — the answered
+  count, then that many records of `width`, `height`, `advance`, `left`, and
+  the `width * height` 8-bit coverage samples (`width == 0` is an ink-less
+  glyph such as a space); a metrics reply is `FontMetrics { pixel_height,
+  baseline, line_height, monospace_advance }`, where a `monospace_advance` of
+  `0` *means* proportional; a families reply is up to `FONT_MAX_FAMILIES`
+  entries of (key, label, kind). One shared `glyph_coverage_len` bounds check
+  governs both encode and decode, so producer and consumer cannot diverge.
+
+### A batch answers a prefix of the run
+
+One glyph at the extreme of the coverage bound (`FONT_MAX_GLYPH_WIDTH ×
+FONT_MAX_PIXEL_HEIGHT`, 512 KiB) fills a reply frame on its own, so a batch
+cannot promise to answer every scalar it was asked for. The service appends
+records until the next will not fit — the whole fill rule, held in
+`font_ipc`'s `GlyphBatchWriter` beside the decoder that enforces the same
+bound — and states how many it answered; the client asks again for the
+remainder. A successful batch always answers at least one glyph, so a client
+walking a run always makes progress, and a reply claiming none is refused as
+malformed rather than read as an empty answer.
+
+At the sizes a desktop draws text a glyph is a few hundred bytes, so one
+round trip covers any realistic run and the paging exists to keep the bound
+honest rather than because it is normally reached. `FONT_MAX_GLYPH_REPLY` —
+the batch header plus one widest, tallest record — is what a client sizes its
+receive buffer to.
+
+A scalar the faces cannot yield truncates the batch exactly as a full frame
+does, so the client comes back for it and the per-glyph fetch behind
+`with_glyph` reports the refusal. Only a failure on the *first* scalar has
+nothing to report, and that is a status-word error frame.
 
 ## Weights: real where the face has an axis, synthetic where it does not
 
