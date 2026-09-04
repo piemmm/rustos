@@ -69,6 +69,10 @@ event loop** inherits the freeze:
 | File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | `open_dir` + `read` + `close` per newly-visible folder, while painting. Fixed in DESK-11. |
 | File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
 | File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs; **not yet fixed** (DESK-12). |
+| Statistics reported to `sysinfod` | `lib/rt/src/cachereport.rs`, `userland/gui/session/src/frames.rs` | Up to **eight blocking cross-process round trips a second** on the compositor's own frame path, and on the file manager's and `fontd`'s loops, purely to report counters. `ipc_call` parks the caller off the run queue, so a gesture stuttered four times a second and every app blocked in a window call waited behind it. Fixed in DESK-15. |
+| Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
+| Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
+| Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache does not hold is a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 40 of them in a 13 s hover run, clustered where new text appears. The cache absorbs the steady state, so this is a cold-cache stall rather than a periodic one; **not fixed, and needs a decision** (§6.1 below). |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_as` / `spawn_with`) | One-time, at login. Minor. |
@@ -874,6 +878,95 @@ Each stage is independently reviewable and must leave the whole-project
   (`lib/window/src/tests.rs`) — a wait ending with no event, and parking once
   rather than spinning.
 
+### DESK-15 — Statistics are handed over, never awaited
+
+- **Done.** Two rate-limited self-reports to `sysinfod` — the reclaimable-cache
+  ledgers (`lib/rt::cachereport`) and the compositor's cumulative frame
+  accounting (`session::frames`) — were made with `ipc_call`, which parks the
+  calling task off the run queue until the service replies. They sit at the end
+  of the desktop compositor's own wake, and on the file manager's and `fontd`'s
+  loops, so a gesture paid up to eight cross-process round trips a second for
+  counters nobody was waiting on.
+- **What it cost, measured.** The aarch64 hover vertical, instrumented to time
+  each publish and each phase of a wake: the cache report reached **33.6 ms**
+  and the frame report **10.9 ms**, against a typical whole wake of 1.8 ms
+  during the sweep. Seven sysinfo round trips landed inside the one bracketed
+  second of the gesture. The debug guest's serial-logged kernel inflates every
+  absolute figure, so the load-bearing reading is the *shape*: a publish costs
+  multiples of a frame and recurs four times a second per publisher, whatever
+  the machine.
+- **The fix is the asynchronous call ABI, which already existed.**
+  `tairix_rt::submit::Submission` posts the request (`call_post`), the loop
+  carries on, and the verdict is reaped without blocking (`call_reap`) on the
+  pass the rate limiter already armed a wake for. One submission is outstanding
+  at a time and each carries the publisher's own interval as its deadline, so a
+  wedged service costs one restated figure rather than a blocked loop. No new
+  syscall, no ABI change, no worker thread, no capability: `sysinfod` is
+  untouched and the wire request is the one it already served.
+- **The verdict is what decides the figure**, so the gate still only ever
+  believes the service holds what it accepted: a refusal drops the figures it
+  carried and restates them. The **withdrawal** is the one report that still
+  waits, because the kernel drops a posted request whose poster has exited
+  (`CALL_POSTER_VANISHED`) and a lost withdrawal leaves a monitor showing
+  memory nobody holds; it abandons any outstanding report first so nothing it
+  carried can land after and resurrect the rows.
+- The file manager and `fontd` needed no change of their own: both drive
+  `cachereport::publish_if_due`, which is where the shape lives.
+
+### DESK-16 — The settings sheet repaints what its controls reported
+
+- **Done.** The sheet's controls were already reporting the rectangles they
+  change into the shared damage sink; `present_overlay` created the sink,
+  filled it, and dropped it — then allocated a sheet-sized surface, rendered
+  the whole sheet, and presented the whole popup. So the reported slider drag
+  cost the whole sheet per pointer sample, on top of the whole-window
+  recomposite the transparency and blur fields legitimately ask the compositor
+  for.
+- `terminal::sheet::SheetScreen` is the sheet's retained picture, the sibling
+  of `render::Screen` for the grid: the reports accumulate in it across a
+  drained batch, `paint` clips the render to them and answers the rectangle,
+  and `write_frame` and the present carry exactly that. `invalidate` covers the
+  sheet for a change no control could have reported — a re-theme, a new scale,
+  a profile adopted from the store, or a released frame region, which holds
+  none of the pixels a partial present would leave standing.
+- Tested from both ends so neither half can pass by covering everything: a
+  scoped paint is byte-identical to the same band of a whole one, and the
+  effect sliders' own reports are asserted to be a small part of the sheet.
+
+### DESK-17 — A desk hands a job out by taking it, never by copying it
+
+- **Done.** Two hand-rolled desks handed a worker its job by *cloning* the
+  request and leaving it standing: `tairix_browse::ListingDesk` (the desktop's
+  icon column and the trusted file picker) and the session's `WallpaperDesk`.
+  `next_job` set the in-flight flag and returned a clone; `deliver` cleared the
+  flag and stored the answer but left the request — so `has_work()` was true
+  again the instant the job was answered, and the serve loop went straight
+  round and ran the *same* job again. For ever.
+- **What that cost, measured.** In the aarch64 hover vertical the listing
+  worker made **1030 `fs_open` and 1026 `fs_write`** calls and *no other
+  syscall at all* — one directory read of the user's `Desktop` folder every
+  ~6 ms, about 150 a second, each completion nudging the compositor awake to
+  re-check a frame. On a single-core machine that is a core spent, a disk kept
+  busy, and the compositor woken continuously; the wallpaper desk's loop is the
+  same shape but each turn reads, decodes and resamples a whole screen.
+  This is the busy-poll the charter forbids, reached through a worker rather
+  than a `yield` loop.
+- **The fix is the invariant both slots already documented** — "cleared when
+  its answer is stored" — which only `deliver` failed to honour: an accepted
+  answer clears the request it answers. The consumer-side clear in `take` went
+  with it, because that is where the invariant used to be enforced *by
+  accident*: the worker checks `has_work()` long before the consumer ever calls
+  `take`, so the flag has to be right at delivery.
+- **Why only these two.** Every desk that hands out by *taking* was always
+  correct: `tairix_util::defer::JobDesk` (`pending.take()`), `ArtworkDesk` (a
+  `Wanted → Running → Done` state, and only `Wanted` is handed out — which is
+  why the same run decoded exactly 12 icons, each key once), and the file
+  manager's probe desk (`mem::take` of its batch). The defect is precisely the
+  clone-and-leave hand-out.
+- Both fixes carry a regression test that fails before and passes after, in the
+  crate that owns each desk, plus one pinning the staleness rule the fix must
+  not break (an abandoned answer leaves the *newer* request standing).
+
 ### DESK-11 — The file manager's reads off its loop
 - **Done.** Every unbounded read the file manager makes now runs on one reader
   thread, and the window keeps drawing throughout. The three kinds share a
@@ -1107,6 +1200,13 @@ Each stage is independently reviewable and must leave the whole-project
   folder cues, and the "Open With…" bundle scan — runs on one reader thread.
 - **DESK-12 — planned.** The file manager's icon decode is still pumped on its
   event loop, one bounded read plus one sandbox round trip per turn.
+- **DESK-15 — done.** No interactive or serve loop waits on a statistics
+  report; `tairix_rt::submit::Submission` is the one shape both publishers hand
+  them over with.
+- **DESK-16 — done.** The settings sheet's picture is retained and its paint
+  scoped to what its controls reported.
+- **DESK-17 — done.** No desk re-runs an answered job; the listing and
+  wallpaper workers park instead of looping.
 - **DESK-13 — done.** A profile change costs only the work the field that moved
   implies; the terminal is the last surface off the shared damage discipline
   and was the only one with this coupling.
@@ -1118,7 +1218,50 @@ Each stage is independently reviewable and must leave the whole-project
 
 ---
 
-## 6. Cross-references
+## 6. Staged next — the one finding still open
+
+Found by the DESK-15 measurement pass. It is not the periodic stall DESK-15
+removed, nor the runaway DESK-17 removed, and it is deliberately its own change
+rather than folded into those: it evolves a `lib/abi` protocol, so its diff and
+its ABI-hash movement are worth reviewing on their own.
+
+### 6.1 A glyph miss is a blocking round trip on the compositor loop
+
+Text is drawn on the frame path, and a glyph the client cache does not hold is
+a synchronous `FONT_ENDPOINT` call to `fontd` — 40 of them in a 13-second
+hover run, clustered where new text appeared. The client cache absorbs the
+steady state, so this is a cold-cache stall (window open, launcher open, a new
+label) rather than the periodic one, but each is a full cross-process round
+trip on a loop that owes a frame.
+
+It cannot simply be deferred the way a read can: a paint that draws nothing
+where a glyph should be is a wrong frame, and there is no "meaningful
+placeholder" for a letter the way there is for an icon (§10's built-in glyph
+tier) — the console atlas is the only candidate and its advances differ from a
+real face, so a placeholder run would visibly reflow when the styled glyphs
+landed. Nor is a same-thread pre-warm a fix: asking before the paint moves the
+round trip earlier in the same wake and removes no stall.
+
+What *would* fix it is making the protocol **per-run rather than per-glyph**:
+`FontRequest::Glyph` becomes `Glyphs`, carrying a bounded run of scalars; the
+service fills the reply to the existing `FONT_MAX_GLYPH_REPLY` bound and states
+how many it answered, and the client asks again for any remainder. The
+measurement walk (`text_width`, `truncate_to_width`) and `draw_text` both miss
+per-glyph today, so one warm step in `FontClient` serves both. The measured
+32-round-trip, 41 ms burst on window-open becomes one round trip; text stays
+always-correct and output is bit-identical. The round trip itself cannot be
+removed — sandboxing the rasteriser makes it inherent — so the goal is one per
+run, converging to none once the cache is warm.
+
+The work it takes: the request framing and the batched reply in
+`lib/abi/src/font_ipc.rs` with its decoder tests, the fill-until-full serve in
+`userland/system/fontd`, the warm step in `lib/font`'s client, the
+`exercise_font_ipc` fuzz arm, `cargo xtask c-header --write`, and the
+`docs/src/` page.
+
+---
+
+## 7. Cross-references
 
 - `plans/FIX-SYSCALL.md` — P-5b (syscalls run with IRQs enabled; the
   kernel stays non-preemptible per task) is *why* a long syscall body on

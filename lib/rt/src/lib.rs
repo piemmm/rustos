@@ -87,6 +87,8 @@ pub mod pressure;
 
 pub mod shm;
 
+pub mod submit;
+
 pub mod sync;
 
 pub mod thread;

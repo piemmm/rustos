@@ -14,8 +14,16 @@
 //! nothing, reads nothing, and needs no capability. The rate limit is the
 //! whole of the policy — the counters move on every composited frame, and a
 //! reader is served from the retained value rather than by waking the
-//! desktop, so a send per frame would buy a reader nothing and cost the
-//! frame path an IPC round trip.
+//! desktop, so a send per frame would buy a reader nothing.
+//!
+//! # It never waits, because the compositor owes a frame
+//!
+//! The submission is *handed over* and its verdict collected on a later pass
+//! (`tairix_rt::submit::Submission`). A blocking `ipc_call` here parked the
+//! compositor off the run queue for a full cross-process round trip four
+//! times a second — measured at 5–11 ms a time in the aarch64 QEMU vertical,
+//! with every application blocked in a window call behind it — which the user
+//! saw as a stutter through every drag.
 
 use tairix_abi::sysinfo::{
     encode_request, DesktopFrameTotals, SysinfoQueryId, SYSINFO_MAX_REQUEST,
@@ -36,19 +44,25 @@ use crate::switchuser::park_within;
 /// than that stale.
 pub const MIN_FRAME_PUBLISH_INTERVAL_NS: u64 = 250_000_000;
 
-/// Carries one encoded submission to `sysinfod`.
+/// Carries this session's encoded submissions to `sysinfod`, without ever
+/// waiting for one.
 ///
 /// A seam rather than a direct call so the decisions here — what is worth
-/// sending, and when — are host-tested with no kernel. The transport answers
-/// whether the service took the submission; a refusal is the caller's to
-/// interpret, never retried in place.
+/// sending, and when — are host-tested with no kernel. A refusal is the
+/// caller's to interpret, never retried in place.
 pub trait FrameStatsSink {
-    /// Submit `request`, an already-framed `sysinfo-v1` request.
+    /// Hand `request`, an already-framed `sysinfo-v1` request, to the service
+    /// and return at once.
     ///
     /// # Errors
     ///
-    /// Whatever the transport or the service raised, propagated verbatim.
+    /// Whatever the hand-off raised, propagated verbatim — including
+    /// [`Errno::WouldBlock`] when a submission is still outstanding.
     fn submit(&mut self, request: &[u8]) -> Result<(), Errno>;
+
+    /// The service's verdict on the submission handed over earlier, or `None`
+    /// while it is unanswered and when there is none.
+    fn settle(&mut self) -> Option<Result<(), Errno>>;
 }
 
 /// The session's publish gate: what it last told the service, when it last
@@ -70,11 +84,16 @@ pub struct FrameStatsPublisher {
     /// The totals the last *accepted* submission carried, never one merely
     /// attempted: a refused submission is not what the service holds.
     last_sent: Option<DesktopFrameTotals>,
+    /// The totals a handed-over submission carries while its verdict is
+    /// outstanding. They become [`last_sent`](Self::last_sent) once the
+    /// service has accepted them, and are dropped if it refused.
+    in_flight: Option<DesktopFrameTotals>,
     /// When the last attempt was made, successful or not. `None` before the
     /// first attempt, so that attempt is never held back.
     last_attempt_ns: Option<u64>,
-    /// Whether a change is currently held back — suppressed by the limit, or
-    /// attempted and refused. Drives [`Self::park_deadline_ns`].
+    /// Whether anything is still owed — a change suppressed by the limit, a
+    /// refused hand-off, or a submission whose verdict has yet to be
+    /// collected. Drives [`Self::park_deadline_ns`], so each gets one wake.
     pending: bool,
 }
 
@@ -84,6 +103,7 @@ impl FrameStatsPublisher {
     pub const fn new() -> Self {
         Self {
             last_sent: None,
+            in_flight: None,
             last_attempt_ns: None,
             pending: false,
         }
@@ -110,9 +130,21 @@ impl FrameStatsPublisher {
         now_ns: u64,
         sink: &mut dyn FrameStatsSink,
     ) {
+        // What the service made of the last submission decides what it now
+        // holds, so it is collected before fresh totals are compared against
+        // that. A refusal drops the figures it carried rather than adopting
+        // them, leaving the change to be restated.
+        if let Some(outcome) = sink.settle() {
+            let carried = self.in_flight.take();
+            if outcome.is_ok() {
+                self.last_sent = carried;
+            }
+        }
         let totals = compositor.frame_totals();
         if self.last_sent == Some(totals) {
-            self.pending = false;
+            // Nothing new to say, but a submission still outstanding is owed
+            // a collection, and that is what arms the wake for it.
+            self.pending = self.in_flight.is_some();
             return;
         }
         if totals == DesktopFrameTotals::ZERO && self.last_sent.is_none() {
@@ -144,12 +176,11 @@ impl FrameStatsPublisher {
             self.pending = true;
             return;
         };
-        if sink.submit(&request[..len]).is_ok() {
-            self.last_sent = Some(totals);
-            self.pending = false;
-        } else {
-            self.pending = true;
-        }
+        // A handed-over submission is not yet what the service holds, so the
+        // change stays owed until its verdict lands — one wake, which collects
+        // it. A refused hand-off is dropped rather than retried in place.
+        self.in_flight = sink.submit(&request[..len]).is_ok().then_some(totals);
+        self.pending = true;
     }
 
     /// `park_ns` shortened to the moment a held-back change may be published,
@@ -168,7 +199,7 @@ impl FrameStatsPublisher {
             park_ns,
             self.pending.then(|| {
                 // `pending` is only ever set alongside a recorded attempt on
-                // the suppressed and refused paths above. Failing closed to
+                // the suppressed, handed-over and refused paths above. Failing closed to
                 // "due now" if it somehow is not costs one extra pass of a
                 // loop that is already awake, never a missed publish.
                 let elapsed = self
@@ -194,10 +225,20 @@ mod tests {
     use tairix_geometry::Point;
     use tairix_wm::{Compositor, Surface};
 
-    /// A sink that records every submission, or refuses them all.
+    /// A sink that records every submission it takes, refusing the hand-off
+    /// or the submission itself however the test arms it. A taken submission
+    /// is answered on the very next [`FrameStatsSink::settle`], which is the
+    /// ordinary case.
     struct Recorder {
         submissions: Vec<Vec<u8>>,
+        /// Refuse the hand-off itself, as an absent service does.
         refuse: bool,
+        /// Take the hand-off but have the service refuse what it carried.
+        service_refuses: bool,
+        /// Hold the verdict back, as a service that has not answered yet.
+        withhold: bool,
+        /// The verdict a taken submission has yet to give.
+        outstanding: Option<Result<(), Errno>>,
     }
 
     impl Recorder {
@@ -205,6 +246,9 @@ mod tests {
             Self {
                 submissions: Vec::new(),
                 refuse: false,
+                service_refuses: false,
+                withhold: false,
+                outstanding: None,
             }
         }
 
@@ -227,8 +271,23 @@ mod tests {
             if self.refuse {
                 return Err(Errno::NotFound);
             }
+            if self.outstanding.is_some() {
+                return Err(Errno::WouldBlock);
+            }
             self.submissions.push(request.to_vec());
+            self.outstanding = Some(if self.service_refuses {
+                Err(Errno::LengthOutOfRange)
+            } else {
+                Ok(())
+            });
             Ok(())
+        }
+
+        fn settle(&mut self) -> Option<Result<(), Errno>> {
+            if self.withhold {
+                return None;
+            }
+            self.outstanding.take()
         }
     }
 
@@ -357,10 +416,66 @@ mod tests {
         gate.maybe_publish(&comp, 1_000 + MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
         assert_eq!(sink.submissions.len(), 2);
         assert_eq!(sink.totals(1), comp.frame_totals());
+        // The verdict is still owed, so the loop stays armed to collect it;
+        // the pass that does finds nothing more to say and folds the park
+        // back to indefinite.
+        assert!(gate.park_deadline_ns(1_000 + MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX) > 0);
+        gate.maybe_publish(&comp, 1_000 + 2 * MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(sink.submissions.len(), 2);
         assert_eq!(
-            gate.park_deadline_ns(1_000 + MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX),
+            gate.park_deadline_ns(1_000 + 2 * MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn a_submission_the_service_refuses_is_not_adopted_and_is_restated() {
+        let mut comp = crate::tests::compositor();
+        comp.composite();
+        let mut sink = Recorder::new();
+        sink.service_refuses = true;
+        let mut gate = FrameStatsPublisher::new();
+
+        gate.maybe_publish(&comp, 0, &mut sink);
+        assert_eq!(sink.submissions.len(), 1, "the hand-off was taken");
+
+        // The verdict lands on the next pass. The figures it carried are not
+        // what the service holds, so they are restated once the limit allows
+        // rather than assumed recorded.
+        sink.service_refuses = false;
+        gate.maybe_publish(&comp, MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(sink.submissions.len(), 2);
+        assert_eq!(sink.totals(1), comp.frame_totals());
+    }
+
+    #[test]
+    fn a_submission_still_outstanding_is_never_replaced_by_a_second() {
+        let mut comp = crate::tests::compositor();
+        comp.composite();
+        let mut sink = Recorder::new();
+        let mut gate = FrameStatsPublisher::new();
+        gate.maybe_publish(&comp, 0, &mut sink);
+        assert_eq!(sink.submissions.len(), 1);
+
+        // A fresh frame, the interval elapsed, but the service has yet to
+        // answer: the hand-off is refused and the change stays owed. Nothing
+        // waits, and nothing is lost.
+        sink.withhold = true;
+        window(&mut comp, 20, 20);
+        comp.composite();
+        gate.maybe_publish(&comp, MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(
+            sink.submissions.len(),
+            1,
+            "the second is refused, not queued behind the first"
+        );
+        assert!(gate.park_deadline_ns(MIN_FRAME_PUBLISH_INTERVAL_NS, u64::MAX) > 0);
+
+        // Once the service does answer, the withheld change goes out.
+        sink.withhold = false;
+        gate.maybe_publish(&comp, 2 * MIN_FRAME_PUBLISH_INTERVAL_NS, &mut sink);
+        assert_eq!(sink.submissions.len(), 2);
+        assert_eq!(sink.totals(1), comp.frame_totals());
     }
 
     #[test]

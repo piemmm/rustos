@@ -902,8 +902,22 @@ retried in place, and a held-back change tightening the session's own park
 a desktop that goes quiet mid-gesture still publishes its final figures once
 and then arms nothing. A desktop that has composed no frame publishes
 nothing at all: the empty epoch is what the service reads as a withdrawal,
-so sending it before there is an entry to withdraw would spend a round trip
+so sending it before there is an entry to withdraw would spend a hand-off
 to say nothing.
+
+**Neither gate ever waits for the service.** This runs at the end of the
+compositor's own wake, and `ipc_call` parks the calling task off the run queue
+until the far side replies, so a report here was a stall the user saw: the two
+publishers together made up to eight cross-process round trips a second
+through a gesture — measured at 5–39 ms each in the aarch64 hover vertical,
+several whole frames apiece — and every application blocked in a window call
+waited behind them. Both now hand the submission over
+(`tairix_rt::submit::Submission`, `call_post`) and collect its verdict on a
+later pass (`call_reap`), so the figure the service holds is still only ever
+one it accepted, and the wake that collects it is the same one the rate
+limiter already armed. A submission still outstanding when the next is due is
+refused rather than queued, and its deadline retires it, so a wedged
+`sysinfod` costs a restated figure and never a frame.
 
 ## Where a served window opens
 
@@ -1521,6 +1535,15 @@ condition variable the worker parks on with nothing to do, and one byte on a
 pipe whose read end is a wait-set member. So the session learns an answer landed
 through the very loop it already parks in: no new ABI, no second wake mechanism,
 and nothing anywhere spins.
+
+**A desk hands a job out by taking it, never by copying it.** The request and
+the answer are one thing: storing an answer clears the request it answers, so a
+worker that has just delivered finds no work and parks. Leaving the request
+standing is what turns a desk into a busy-poll — the slot becomes workable
+again the instant it is answered and the serve loop runs the same job again for
+ever. Two desks did exactly that, and the desktop's listing worker read one
+folder about 150 times a second, waking the compositor on every completion
+(`plans/FIX-DESKTOP.md` DESK-17).
 
 - **Two listing consumers, named rather than counted.** The icon column and the
   trusted file picker each have their own slot, and the worker serves them

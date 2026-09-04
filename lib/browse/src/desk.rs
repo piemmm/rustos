@@ -131,7 +131,6 @@ impl<C: ListingClient> ListingDesk<C> {
         };
         match slot.done.take() {
             Some(answer) if answer.target == components => {
-                slot.wanted = None;
                 return answer.result.map(Listing::Ready);
             }
             // For somewhere the consumer has since navigated away from: gone.
@@ -185,6 +184,11 @@ impl<C: ListingClient> ListingDesk<C> {
     /// for somewhere else: the read was for a directory nobody is looking at,
     /// so serving it would put stale entries on screen. The caller uses that to
     /// decide whether a wake is owed at all.
+    ///
+    /// An accepted answer **clears the request it answers**. Leaving it standing
+    /// made the slot workable again the instant it was answered, so a worker
+    /// handed itself the same directory forever and woke the embedder on every
+    /// completion — a read loop at whatever rate the disk allowed.
     pub fn deliver(
         &mut self,
         client: C,
@@ -198,6 +202,7 @@ impl<C: ListingClient> ListingDesk<C> {
         if slot.wanted.as_deref() != Some(target.as_slice()) {
             return false;
         }
+        slot.wanted = None;
         slot.done = Some(Answer { target, result });
         true
     }

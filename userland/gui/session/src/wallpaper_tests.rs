@@ -181,3 +181,59 @@ fn the_wanted_source_is_derived_from_the_settings_and_the_screen() {
     // one — this is the path a first login takes.
     assert!(wanted.image_path().is_some());
 }
+
+/// The defect the listing desk had in the same shape: a preparer that hands
+/// itself the same picture for ever.
+///
+/// A hand-out clones the source rather than taking it, so the request outlived
+/// its own answer and the desk became workable again the instant it was
+/// answered. Here each turn round that loop is a whole-screen read, decode and
+/// resample, so it is the more expensive of the two.
+#[test]
+fn an_answered_preparation_is_never_handed_out_again() {
+    let mut desk = WallpaperDesk::new();
+    let wanted = image("/a.png");
+    assert!(matches!(desk.take(&wanted), Prepared::Pending));
+    let job = desk.next_job().expect("a job");
+    let painted = screen(&job);
+    assert!(desk.deliver(job, Ok(painted)));
+
+    assert!(
+        !desk.has_work(),
+        "the answered preparation must not make the desk workable again"
+    );
+    assert!(
+        desk.next_job().is_none(),
+        "a preparer looking for work after answering must find none and park"
+    );
+
+    // And the surface is still there to be installed.
+    assert!(matches!(
+        desk.take(&wanted),
+        Prepared::Ready {
+            surface: Some(_),
+            refusal: None
+        }
+    ));
+}
+
+/// A preparation the desktop has moved on from leaves its *newer* request
+/// standing, so the abandoned picture costs one wasted decode and not a stall.
+#[test]
+fn a_stale_preparation_does_not_clear_the_newer_request() {
+    let mut desk = WallpaperDesk::new();
+    let first = image("/a.png");
+    let second = image("/b.png");
+    assert!(matches!(desk.take(&first), Prepared::Pending));
+    let job = desk.next_job().expect("a job");
+    let painted = screen(&job);
+
+    assert!(matches!(desk.take(&second), Prepared::Pending));
+    assert!(
+        !desk.deliver(job, Ok(painted)),
+        "an abandoned preparation owes no wake"
+    );
+
+    assert!(desk.has_work(), "the newer request is still owed a decode");
+    assert_eq!(desk.next_job(), Some(second));
+}

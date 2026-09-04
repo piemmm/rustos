@@ -211,3 +211,58 @@ fn a_sole_consumer_is_served_on_every_turn() {
         );
     }
 }
+
+/// The defect this desk's whole point is to avoid: a worker that hands itself
+/// the same read for ever.
+///
+/// A hand-out clones the target rather than taking it, so the request outlived
+/// its own answer — the slot became workable again the instant it was answered,
+/// and the serve loop went straight round to read the same directory, waking
+/// the embedder on every completion. Measured on the desktop as ~150 reads a
+/// second of one folder, with nothing else on that thread.
+#[test]
+fn an_answered_read_is_never_handed_out_again() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users", "someone", "Desktop"]);
+    assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+
+    let (client, target) = desk.next_job().expect("a job");
+    assert!(desk.deliver(client, target, Ok(entries(&["notes.txt"]))));
+
+    assert!(
+        !desk.has_work(),
+        "the answered read must not make the slot workable again"
+    );
+    assert!(
+        desk.next_job().is_none(),
+        "a worker looking for work after answering must find none and park"
+    );
+
+    // And the answer is still there to be collected.
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Ready(entries(&["notes.txt"])))
+    );
+}
+
+/// A read the consumer has navigated away from leaves its *newer* request
+/// standing, so the abandoned answer costs one wasted read and not a stall.
+#[test]
+fn a_stale_answer_does_not_clear_the_newer_request() {
+    let mut desk = ListingDesk::new();
+    let first = path(&["Users", "someone", "Desktop"]);
+    let second = path(&["Users", "someone", "Documents"]);
+    assert_eq!(desk.take(Sole::Browser, &first), Ok(Listing::Pending));
+    let (client, target) = desk.next_job().expect("a job");
+
+    // The consumer moves on while the read is in flight.
+    assert_eq!(desk.take(Sole::Browser, &second), Ok(Listing::Pending));
+    assert!(
+        !desk.deliver(client, target, Ok(entries(&["notes.txt"]))),
+        "an abandoned read owes no wake"
+    );
+
+    assert!(desk.has_work(), "the newer request is still owed a read");
+    let (_, target) = desk.next_job().expect("the newer job");
+    assert_eq!(target, second);
+}

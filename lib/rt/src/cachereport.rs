@@ -23,6 +23,15 @@
 //! `session`, `files`, …) reports identically rather than each hand-rolling
 //! the framing, the rate limit, and the change detection.
 //!
+//! # Never on the caller's critical path
+//!
+//! A publisher is a compositor, a file manager, or the font service — each
+//! owing somebody a frame or an answer — so this reports the figures with a
+//! [`crate::submit::Submission`]: posted and collected later, never awaited. A
+//! blocking `ipc_call` here parked the caller off the run queue for a full
+//! cross-process round trip, four times a second, which the desktop showed as
+//! a stutter through every gesture.
+//!
 //! # Event-driven, not polled
 //!
 //! There are no caller-side dirty flags and no background timer. A cache
@@ -66,6 +75,8 @@ use tairix_abi::Errno;
 use tairix_reclaim::CacheLedger;
 use tairix_sync::SpinLock;
 
+use crate::submit::Submission;
+
 /// Minimum time between two publish attempts for the same process.
 ///
 /// A GUI process can churn its cache counters many times a second (every
@@ -91,13 +102,36 @@ trait Clock {
     fn now_ns(&self) -> u64;
 }
 
-/// Carries one framed request/reply round trip to the sysinfo endpoint.
+/// Carries this process's reports to the sysinfo endpoint.
 ///
-/// A seam so the send path is host-testable against a recorder that never
-/// touches a kernel, never a real transport.
+/// A seam so the gate below is host-testable against a recorder that never
+/// touches a kernel, never a real transport. The periodic report is *posted*
+/// and its verdict collected later, because a publisher owes its own callers a
+/// frame; only the withdrawal waits, and [`send`](Self::send) exists for it
+/// alone.
 trait Sender {
-    /// Send `request`, writing the reply into `reply` and returning the
-    /// number of bytes written.
+    /// Hand `request` to the service without waiting for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::WouldBlock`] when a report is already in flight, else whatever
+    /// the hand-off refused.
+    fn post(&mut self, request: &[u8]) -> Result<(), Errno>;
+
+    /// The service's verdict on the report handed over earlier, or `None`
+    /// while it is unanswered and when there is none.
+    fn settle(&mut self) -> Option<Result<(), Errno>>;
+
+    /// Withdraw whatever is in flight, so nothing it carries can be recorded
+    /// after what the caller does next.
+    fn abandon(&mut self);
+
+    /// Send `request` and wait for its answer, writing the reply into `reply`
+    /// and returning the number of bytes written.
+    ///
+    /// The withdrawal alone uses this. The kernel drops a posted request whose
+    /// poster has exited, so a withdrawal that did not wait would be lost
+    /// exactly when it matters — as the program goes.
     ///
     /// # Errors
     ///
@@ -112,17 +146,23 @@ struct Registry {
     /// [`MAX_CACHE_REPORT_ENTRIES`]; a process with more reclaimable caches
     /// than the wire report admits keeps the ones it registered first.
     ledgers: Vec<CacheLedger>,
-    /// The rows the last successful send carried. Compared against a fresh
+    /// The rows the service is known to hold. Compared against a fresh
     /// sample on every [`publish_if_due`] call — this comparison *is* the
     /// change detection, so no caller-side dirty flag is needed.
     last_sent: Vec<CacheLedgerRecord>,
+    /// The rows a posted report carries while its verdict is outstanding.
+    /// They become [`last_sent`](Self::last_sent) once the service has
+    /// accepted them, and are dropped if it refused — so a refused report
+    /// never leaves this gate believing a figure was recorded.
+    in_flight: Vec<CacheLedgerRecord>,
     /// When the last send was attempted, successful or not. `None` before
     /// the first attempt, so that attempt is never held back by the rate
     /// limit.
     last_attempt_ns: Option<u64>,
-    /// Whether a sampled change is currently being held back by the rate
-    /// limiter (a suppressed send, or a send that was attempted and
-    /// failed). Drives [`wait_deadline_ns`].
+    /// Whether this gate still owes something: a sampled change the rate
+    /// limiter is holding back, a hand-off that was refused, or a posted
+    /// report whose verdict has yet to be collected. Drives
+    /// [`wait_deadline_ns`], so each of those gets exactly one wake.
     pending: bool,
 }
 
@@ -131,6 +171,7 @@ impl Registry {
         Self {
             ledgers: Vec::new(),
             last_sent: Vec::new(),
+            in_flight: Vec::new(),
             last_attempt_ns: None,
             pending: false,
         }
@@ -191,9 +232,12 @@ fn register_into(registry: &SpinLock<Registry>, ledger: CacheLedger) {
     registry.lock().register(ledger);
 }
 
-/// Encode `rows` as a [`SysinfoQueryId::CACHE_REPORT`] request and send it
-/// through `sender`, unwrapping the (payload-less) reply frame.
-fn send_report(rows: &[CacheLedgerRecord], sender: &mut dyn Sender) -> Result<(), Errno> {
+/// Encode `rows` as a [`SysinfoQueryId::CACHE_REPORT`] request into
+/// `request`, answering its framed length.
+fn frame_report(
+    rows: &[CacheLedgerRecord],
+    request: &mut [u8; SYSINFO_MAX_REQUEST],
+) -> Result<usize, Errno> {
     let header = CacheReportRequest {
         count: u16::try_from(rows.len()).map_err(|_| Errno::LengthOutOfRange)?,
         flags: 0,
@@ -207,16 +251,27 @@ fn send_report(rows: &[CacheLedgerRecord], sender: &mut dyn Sender) -> Result<()
         payload[offset..end].copy_from_slice(&row.to_le_bytes());
         offset = end;
     }
-
-    let mut request = [0u8; SYSINFO_MAX_REQUEST];
-    let request_len = encode_request(
+    encode_request(
         SysinfoQueryId::CACHE_REPORT,
         &payload[..offset],
-        &mut request,
-    )?;
+        request.as_mut_slice(),
+    )
+}
 
+/// Hand `rows` to the service without waiting for it.
+fn post_report(rows: &[CacheLedgerRecord], sender: &mut dyn Sender) -> Result<(), Errno> {
+    let mut request = [0u8; SYSINFO_MAX_REQUEST];
+    let len = frame_report(rows, &mut request)?;
+    sender.post(&request[..len])
+}
+
+/// Send `rows` and wait for the service's answer, unwrapping the
+/// (payload-less) reply frame. The withdrawal's path alone.
+fn send_report(rows: &[CacheLedgerRecord], sender: &mut dyn Sender) -> Result<(), Errno> {
+    let mut request = [0u8; SYSINFO_MAX_REQUEST];
+    let len = frame_report(rows, &mut request)?;
     let mut reply = [0u8; SYSINFO_MAX_REPLY];
-    let reply_len = sender.send(&request[..request_len], &mut reply)?;
+    let reply_len = sender.send(&request[..len], &mut reply)?;
     decode_reply(&reply[..reply_len])?;
     Ok(())
 }
@@ -232,13 +287,27 @@ enum Action {
 /// The shared logic behind [`publish_if_due`], against an injected registry
 /// and injected seams.
 fn publish_if_due_with(registry: &SpinLock<Registry>, clock: &dyn Clock, sender: &mut dyn Sender) {
+    // What the service made of the last report decides what it now holds, so
+    // it is collected before a fresh sample is compared against that. A
+    // refusal drops the rows it carried rather than adopting them, leaving the
+    // change to be restated.
+    if let Some(outcome) = sender.settle() {
+        let mut state = registry.lock();
+        let carried = core::mem::take(&mut state.in_flight);
+        if outcome.is_ok() {
+            state.last_sent = carried;
+        }
+    }
+
     let sampled = registry.lock().sample();
     let now = clock.now_ns();
 
     let action = {
         let mut state = registry.lock();
         if sampled == state.last_sent {
-            state.pending = false;
+            // Nothing new to say, but a report still in flight is still owed
+            // a collection, and that is what arms the wake for it.
+            state.pending = !state.in_flight.is_empty();
             Action::NoChange
         } else if state
             .last_attempt_ns
@@ -255,22 +324,19 @@ fn publish_if_due_with(registry: &SpinLock<Registry>, clock: &dyn Clock, sender:
         return;
     };
 
-    // A failed send (the service not yet up, a full registry, any `Errno`)
-    // is never retried in a loop: it is recorded as "not sent" so the
-    // change stays pending for the next call, and `last_attempt_ns` still
-    // advances so the rate limiter holds off the next attempt exactly as it
-    // would for a suppressed send. Retrying immediately would turn a dead
-    // or overloaded service into the busy loop this design exists to avoid.
-    if send_report(&sampled, sender).is_ok() {
-        let mut state = registry.lock();
-        state.last_sent = sampled;
-        state.last_attempt_ns = Some(now);
-        state.pending = false;
-    } else {
-        let mut state = registry.lock();
-        state.last_attempt_ns = Some(now);
-        state.pending = true;
-    }
+    // A refused hand-off (the service not yet up, a report still in flight,
+    // any `Errno`) is never retried in a loop: the change stays pending for
+    // the next call, and `last_attempt_ns` advances so the rate limiter holds
+    // off the next attempt exactly as it would for a suppressed one. Retrying
+    // immediately would turn a dead or overloaded service into the busy loop
+    // this design exists to avoid.
+    let posted = post_report(&sampled, sender).is_ok();
+    let mut state = registry.lock();
+    state.last_attempt_ns = Some(now);
+    // A posted report is not yet what the service holds, so the change stays
+    // pending until its verdict lands — one wake, which collects it.
+    state.pending = true;
+    state.in_flight = if posted { sampled } else { Vec::new() };
 }
 
 /// The shared logic behind [`wait_deadline_ns`], against an injected
@@ -293,9 +359,16 @@ fn wait_deadline_ns_with(registry: &SpinLock<Registry>, clock: &dyn Clock) -> u6
 /// The shared logic behind [`withdraw`], against an injected registry and
 /// sender.
 fn withdraw_with(registry: &SpinLock<Registry>, sender: &mut dyn Sender) {
+    // A report posted moments ago would otherwise be recorded *after* this
+    // withdrawal and resurrect the very rows it removes, so it is withdrawn
+    // first and its figures forgotten.
+    sender.abandon();
+    registry.lock().in_flight = Vec::new();
     // Withdrawal is a deliberate, one-shot action a program takes as it
     // tears its caches down, not a background flush, so it always attempts
-    // the send now rather than waiting on the rate limiter.
+    // the send now rather than waiting on the rate limiter — and it is the
+    // one report that waits for its answer, because the kernel drops a
+    // posted request whose poster has exited.
     if send_report(&[], sender).is_ok() {
         let mut state = registry.lock();
         state.ledgers.clear();
@@ -319,7 +392,7 @@ fn withdraw_with(registry: &SpinLock<Registry>, sender: &mut dyn Sender) {
 /// Call this once per iteration of the owning program's event loop, then
 /// pass [`wait_deadline_ns`] as the loop's wait timeout.
 pub fn publish_if_due() {
-    publish_if_due_with(&REGISTRY, &SyscallClock, &mut RtSender);
+    publish_if_due_with(&REGISTRY, &SyscallClock, &mut *CHANNEL.lock());
 }
 
 /// Nanoseconds until a change currently held back by the rate limiter may
@@ -342,7 +415,7 @@ pub fn wait_deadline_ns() -> u64 {
 /// Call this as the owning program tears its caches down, so a monitor
 /// never keeps showing memory nobody holds anymore.
 pub fn withdraw() {
-    withdraw_with(&REGISTRY, &mut RtSender);
+    withdraw_with(&REGISTRY, &mut *CHANNEL.lock());
 }
 
 /// Withdraws this process's reported rows when it drops, so every way out of
@@ -399,14 +472,47 @@ impl Clock for SyscallClock {
     }
 }
 
-/// The production [`Sender`]: one [`crate::ipc_call`] to [`SYSINFO_ENDPOINT`].
-struct RtSender;
+/// The production [`Sender`]: a [`Submission`] to [`SYSINFO_ENDPOINT`] for the
+/// periodic report, and one [`crate::ipc_call`] for the withdrawal.
+struct RtSender {
+    report: Submission,
+}
+
+impl RtSender {
+    const fn new() -> Self {
+        Self {
+            // A report the service has not answered within the interval that
+            // brings the next one due is one it was never going to answer in
+            // time, so it is abandoned rather than blocking the restatement.
+            report: Submission::new(MIN_SEND_INTERVAL_NS),
+        }
+    }
+}
 
 impl Sender for RtSender {
+    fn post(&mut self, request: &[u8]) -> Result<(), Errno> {
+        self.report.post(request)
+    }
+
+    fn settle(&mut self) -> Option<Result<(), Errno>> {
+        self.report.settle()
+    }
+
+    fn abandon(&mut self) {
+        self.report.abandon();
+    }
+
     fn send(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         crate::ipc_call(SYSINFO_ENDPOINT, request, reply).map_err(Errno::from_syscall)
     }
 }
+
+/// The one channel this process's reports go out over.
+///
+/// Separate from [`REGISTRY`] because it holds a *ticket* rather than a
+/// figure, and because the two are locked in this order — never the other —
+/// by the only two callers that take both.
+static CHANNEL: SpinLock<RtSender> = SpinLock::new(RtSender::new());
 
 #[cfg(test)]
 mod tests {
@@ -441,41 +547,96 @@ mod tests {
         }
     }
 
-    /// A sender that records every attempt and answers however the test
-    /// pre-arms it to.
+    /// What a test arranges for one hand-off.
+    #[derive(Clone, Copy)]
+    enum Verdict {
+        /// Taken, and the service records it.
+        Accepted,
+        /// Taken, but the service refuses it.
+        Refused(Errno),
+        /// Not taken at all: the hand-off itself is refused.
+        NotTaken(Errno),
+    }
+
+    /// A channel that records every hand-off and answers however the test
+    /// pre-arms it to. A taken report settles on the very next
+    /// [`Sender::settle`], which is the ordinary case.
     struct RecordingSender {
-        outcomes: Vec<Result<(), Errno>>,
+        verdicts: Vec<Verdict>,
+        /// Hand-offs attempted, taken or not.
         attempts: usize,
+        /// Reports sent the *blocking* way. The periodic report must never
+        /// use it: waiting on the service is the stall this design removes.
+        blocking_sends: usize,
+        /// The verdict a taken report has yet to give.
+        in_flight: Option<Result<(), Errno>>,
     }
 
     impl RecordingSender {
         fn always_ok() -> Self {
             Self {
-                outcomes: Vec::new(),
+                verdicts: Vec::new(),
                 attempts: 0,
+                blocking_sends: 0,
+                in_flight: None,
             }
         }
 
-        fn queue(outcomes: Vec<Result<(), Errno>>) -> Self {
+        fn queue(verdicts: Vec<Verdict>) -> Self {
             Self {
-                outcomes,
-                attempts: 0,
+                verdicts,
+                ..Self::always_ok()
+            }
+        }
+
+        fn next_verdict(&mut self) -> Verdict {
+            if self.verdicts.is_empty() {
+                Verdict::Accepted
+            } else {
+                self.verdicts.remove(0)
             }
         }
     }
 
     impl Sender for RecordingSender {
+        fn post(&mut self, _request: &[u8]) -> Result<(), Errno> {
+            self.attempts += 1;
+            if self.in_flight.is_some() {
+                return Err(Errno::WouldBlock);
+            }
+            match self.next_verdict() {
+                Verdict::Accepted => {
+                    self.in_flight = Some(Ok(()));
+                    Ok(())
+                }
+                Verdict::Refused(errno) => {
+                    self.in_flight = Some(Err(errno));
+                    Ok(())
+                }
+                Verdict::NotTaken(errno) => Err(errno),
+            }
+        }
+
+        fn settle(&mut self) -> Option<Result<(), Errno>> {
+            self.in_flight.take()
+        }
+
+        fn abandon(&mut self) {
+            self.in_flight = None;
+        }
+
         fn send(&mut self, _request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
             self.attempts += 1;
-            let outcome = if self.outcomes.is_empty() {
-                Ok(())
-            } else {
-                self.outcomes.remove(0)
-            };
-            outcome?;
-            // A real reply carries no payload.
-            let n = tairix_abi::sysinfo::encode_reply_ok(&[], reply).expect("reply buffer fits");
-            Ok(n)
+            self.blocking_sends += 1;
+            match self.next_verdict() {
+                Verdict::Accepted => {
+                    // A real reply carries no payload.
+                    let n = tairix_abi::sysinfo::encode_reply_ok(&[], reply)
+                        .expect("reply buffer fits");
+                    Ok(n)
+                }
+                Verdict::Refused(errno) | Verdict::NotTaken(errno) => Err(errno),
+            }
         }
     }
 
@@ -506,11 +667,24 @@ mod tests {
     }
 
     #[test]
-    fn the_first_sample_is_sent() {
+    fn the_first_sample_is_handed_over_and_never_waited_on() {
         let registry = registry();
         register_into(&registry, test_ledger("a"));
         let clock = FakeClock::new();
         let mut sender = RecordingSender::always_ok();
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert_eq!(sender.attempts, 1);
+        assert_eq!(
+            sender.blocking_sends, 0,
+            "the periodic report must never wait on the service"
+        );
+        assert!(
+            wait_deadline_ns_with(&registry, &clock) > 0,
+            "a report in flight is owed a collection, and that arms the wake"
+        );
+
+        // The next pass collects the verdict, adopts the figure, and finds
+        // nothing more owed.
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 1);
         assert_eq!(wait_deadline_ns_with(&registry, &clock), 0);
@@ -571,15 +745,17 @@ mod tests {
         let second = wait_deadline_ns_with(&registry, &clock);
         assert!(second < first, "the deadline shrinks as time passes");
 
-        // Advance past the interval: the next call actually flushes.
+        // Advance past the interval: the next call actually hands it over,
+        // and the one after that collects the verdict.
         clock.advance(MIN_SEND_INTERVAL_NS);
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 2);
+        publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(wait_deadline_ns_with(&registry, &clock), 0);
     }
 
     #[test]
-    fn a_changed_sample_after_the_interval_is_sent_and_clears_the_deadline() {
+    fn a_changed_sample_after_the_interval_is_handed_over_and_clears_the_deadline() {
         let registry = registry();
         let ledger = test_ledger("a");
         register_into(&registry, ledger.clone());
@@ -595,42 +771,117 @@ mod tests {
         clock.advance(MIN_SEND_INTERVAL_NS);
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 2);
+        publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(wait_deadline_ns_with(&registry, &clock), 0);
     }
 
     #[test]
-    fn a_failed_send_leaves_the_change_pending_and_does_not_clear_the_deadline() {
+    fn a_refused_hand_off_leaves_the_change_pending_and_does_not_clear_the_deadline() {
         let registry = registry();
         register_into(&registry, test_ledger("a"));
         let clock = FakeClock::new();
-        let mut sender = RecordingSender::queue(alloc::vec![Err(Errno::NotFound)]);
+        let mut sender = RecordingSender::queue(alloc::vec![Verdict::NotTaken(Errno::NotFound)]);
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 1);
         assert!(
             wait_deadline_ns_with(&registry, &clock) > 0,
-            "a failed send leaves the change pending"
+            "a refused hand-off leaves the change pending"
         );
 
         // Retrying immediately (no time advanced) must not attempt another
-        // send: the rate limiter holds off exactly as it would for a
+        // hand-off: the rate limiter holds off exactly as it would for a
         // suppressed change, so a dead service is never hammered.
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 1);
     }
 
     #[test]
-    fn withdraw_sends_an_empty_report() {
+    fn a_report_the_service_refuses_is_not_adopted_and_is_restated() {
+        let registry = registry();
+        register_into(&registry, test_ledger("a"));
+        let clock = FakeClock::new();
+        let mut sender =
+            RecordingSender::queue(alloc::vec![Verdict::Refused(Errno::LengthOutOfRange)]);
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert_eq!(sender.attempts, 1);
+
+        // The verdict lands on the next pass. The figure it carried is *not*
+        // what the service holds, so it is restated once the interval allows.
+        clock.advance(MIN_SEND_INTERVAL_NS);
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert_eq!(
+            sender.attempts, 2,
+            "a refused report is restated, never assumed recorded"
+        );
+        assert_eq!(sender.blocking_sends, 0);
+    }
+
+    #[test]
+    fn a_report_still_in_flight_is_never_replaced_by_a_second() {
+        let registry = registry();
+        let ledger = test_ledger("a");
+        register_into(&registry, ledger.clone());
+        let clock = FakeClock::new();
+        // A channel that never answers, so the first report stays in flight.
+        let mut sender = RecordingSender::always_ok();
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert_eq!(sender.attempts, 1);
+
+        ledger
+            .accounting()
+            .charge(ReclaimClass::DisposableUi, 4096, 0)
+            .expect("fresh ledger accepts a charge");
+        clock.advance(MIN_SEND_INTERVAL_NS);
+        // The gate hands the fresh figure over; the channel refuses because
+        // the previous report is still outstanding, and the change stays owed
+        // rather than being lost or waited on.
+        sender.in_flight = Some(Ok(()));
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert_eq!(sender.attempts, 2);
+        assert_eq!(sender.blocking_sends, 0);
+        assert!(wait_deadline_ns_with(&registry, &clock) > 0);
+    }
+
+    #[test]
+    fn withdraw_sends_an_empty_report_and_waits_for_it() {
         let registry = registry();
         register_into(&registry, test_ledger("a"));
         let mut sender = RecordingSender::always_ok();
         withdraw_with(&registry, &mut sender);
         assert_eq!(sender.attempts, 1);
+        assert_eq!(
+            sender.blocking_sends, 1,
+            "the withdrawal is the one report that waits: the kernel drops a \
+             posted request whose poster has exited"
+        );
 
         // The registry is empty again: a fresh sample matches the withdrawn
         // (empty) snapshot, so nothing more is sent.
         let clock = FakeClock::new();
         publish_if_due_with(&registry, &clock, &mut sender);
         assert_eq!(sender.attempts, 1);
+    }
+
+    #[test]
+    fn a_withdrawal_abandons_a_report_in_flight_so_it_cannot_land_after() {
+        let registry = registry();
+        let ledger = test_ledger("a");
+        register_into(&registry, ledger.clone());
+        let clock = FakeClock::new();
+        let mut sender = RecordingSender::always_ok();
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert!(sender.in_flight.is_some(), "a report is outstanding");
+
+        withdraw_with(&registry, &mut sender);
+        assert!(
+            sender.in_flight.is_none(),
+            "the outstanding report is withdrawn, not left to resurrect the rows"
+        );
+        assert!(registry.lock().in_flight.is_empty());
+
+        // Nothing the abandoned report carried is ever adopted.
+        publish_if_due_with(&registry, &clock, &mut sender);
+        assert!(registry.lock().last_sent.is_empty());
     }
 
     /// `register`'s label must be `'static`; a fixed table covers every

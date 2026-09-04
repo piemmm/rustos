@@ -82,6 +82,19 @@ The graphical terminal is the first consumer: its settings sheet is a popup
 (`plans/GUI-TERMINAL.md` §9). Its window menu is not — that is the desktop's
 one menu chain ([Menus](menus.md)).
 
+An overlay's picture is **retained between frames**, exactly as the terminal's
+grid picture is, and its paint is scoped to what its controls reported. The
+sheet's `Slider`s, `Toggle`s and rows already report the rectangles they change
+into the shared damage sink ([Controls](../lib/controls.md)); the terminal's
+`SheetScreen` is what those reports are worth something to — it clips the
+render to them and presents only that rectangle. Without it a slider drag cost
+the whole sheet per pointer sample: a screen-sized surface allocated afresh,
+every tab, row, label and swatch re-rendered, and the whole popup presented,
+several dozen times a second, so the knob lagged the pointer. A change no
+control could have reported — a re-theme, a new scale, a profile adopted from
+the store, a frame region the session took back — covers the sheet instead,
+which is that change's true scope (`AGENTS.md` §28).
+
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the

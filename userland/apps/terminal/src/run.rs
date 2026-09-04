@@ -81,7 +81,6 @@ mod program {
     use tairix_abi::{
         Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
     };
-    use tairix_controls::damage;
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
@@ -102,6 +101,7 @@ mod program {
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
+    use tairix_terminal::sheet::SheetScreen;
     use tairix_terminal::{
         shell_env, shell_load_failure, shell_wires, win_sizing, ShellSource, Terminal, TERM,
     };
@@ -304,6 +304,11 @@ mod program {
         /// The sheet itself. Boxed because it dwarfs everything around it,
         /// so the one allocation happens when Settings opens.
         sheet: Box<Settings>,
+        /// The sheet's picture, retained between frames, and the rectangle it
+        /// owes the next paint. Every edit reports into this and repaints only
+        /// what it reported; a drag would otherwise re-derive the whole sheet
+        /// per pointer sample.
+        picture: SheetScreen,
         /// The popup's window-channel id, which its events arrive under.
         window: u64,
         /// The popup's own shared frame region.
@@ -323,6 +328,9 @@ mod program {
         /// controls show what actually applies.
         fn adopt_profile(&mut self, profile: &Profile) {
             self.sheet.adopt(*profile);
+            // Every widget may now show something else, and none of them
+            // reported it: this came from the store, not from the pointer.
+            self.picture.invalidate();
         }
 
         /// The popup-local viewport the overlay occupies.
@@ -474,9 +482,14 @@ mod program {
             return None;
         }
         let mode = mode_for(extent.0, extent.1);
+        let Some(picture) = SheetScreen::new(extent.0, extent.1) else {
+            report("settings sheet picture could not be allocated; not shown");
+            return None;
+        };
         let (window, frames) = open_popup(client, parent, server, event_endpoint, &mode, offset)?;
         let mut overlay = Overlay {
             sheet,
+            picture,
             window,
             frames,
             mode,
@@ -490,21 +503,30 @@ mod program {
         Some(overlay)
     }
 
-    /// Draw `overlay` into its popup's frame and present the whole popup.
+    /// Paint whatever `overlay` owes and present exactly that rectangle.
     ///
-    /// The surface starts fully transparent, so an overlay that does not fill
-    /// its popup (the settings sheet's centred panel) lets the terminal show
-    /// through around it exactly as it did when the sheet was drawn in-window.
+    /// The picture is retained and transparent where the sheet's centred panel
+    /// does not reach, so the terminal shows through around it exactly as it
+    /// did when the sheet was drawn in-window — and an edit costs the
+    /// rectangle its controls reported rather than the whole sheet. A region
+    /// the session released holds none of the pixels a partial present would
+    /// leave standing, so it is drawn whole instead.
     fn present_overlay(
         overlay: &mut Overlay,
         theme: &Theme,
         scale: Scale,
         client: &mut WindowClient<RtWindowTransport>,
     ) -> Result<(), Errno> {
+        if overlay.frames.is_released() {
+            overlay.picture.invalidate();
+        }
         let viewport = overlay.viewport();
-        let mut surface =
-            Surface::new(viewport.width, viewport.height).ok_or(Errno::LengthOutOfRange)?;
-        overlay.sheet.render(&mut surface, viewport, scale, theme);
+        let painted = overlay
+            .picture
+            .paint(&overlay.sheet, viewport, scale, theme);
+        if painted.is_empty() {
+            return Ok(());
+        }
         let frame = client
             .frame_pixels(
                 &mut overlay.frames,
@@ -513,36 +535,37 @@ mod program {
                 &overlay.mode,
             )
             .ok_or(Errno::NotAttached)?;
-        write_frame(&surface, frame, &overlay.mode, viewport)?;
-        client.present(overlay.window, 0, DamageRect::full(&overlay.mode))
+        let Some(damage) = write_frame(overlay.picture.surface(), frame, &overlay.mode, painted)?
+        else {
+            // Nothing of the paint survives the clip, so these pixels were
+            // never shown: cover the sheet next time rather than leave the
+            // picture silently ahead of the screen.
+            overlay.picture.invalidate();
+            return Ok(());
+        };
+        client.present(overlay.window, 0, damage)
     }
 
-    /// Copy `area` of `surface` into the shared `frame` shaped as `mode`.
+    /// Copy `area` of `surface` into the shared `frame` shaped as `mode`,
+    /// answering the rectangle actually written so a present carries exactly
+    /// that, or `None` when nothing of `area` survives the clip.
     ///
-    /// `area` is clipped to the surface first, so a caller may name a
-    /// rectangle the screen has since outgrown; the conversion itself is the
-    /// one shared window-frame codec, on this thread (a terminal presents only
-    /// what its grid changed, so there is nothing here worth another core).
+    /// `area` is clipped through the one shared window-clip rule, so a caller
+    /// may name a rectangle the screen has since outgrown; the conversion
+    /// itself is the one shared window-frame codec, on this thread (a terminal
+    /// presents only what its grid changed, so there is nothing here worth
+    /// another core).
     fn write_frame(
         surface: &Surface,
         frame: &mut [u8],
         mode: &DisplayMode,
         area: Rect,
-    ) -> Result<(), Errno> {
-        let clipped = area.intersection(&Rect::new(0, 0, surface.width(), surface.height()));
-        if clipped.is_empty() {
-            return Ok(());
-        }
-        let (Ok(x), Ok(y)) = (u32::try_from(clipped.left()), u32::try_from(clipped.top())) else {
-            return Err(Errno::OutOfRange);
+    ) -> Result<Option<DamageRect>, Errno> {
+        let Some(damage) = damage_in(mode, area) else {
+            return Ok(None);
         };
-        let damage = DamageRect {
-            x,
-            y,
-            width_px: clipped.width,
-            height_px: clipped.height,
-        };
-        winframe::encode(surface, frame, mode, damage, &SERIAL)
+        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
+        Ok(Some(damage))
     }
 
     /// One window's shell channel: the master end of its own kernel
@@ -1015,8 +1038,7 @@ mod program {
             if damage.is_empty() {
                 return Ok(());
             }
-            write_frame(screen.surface(), frame, mode, damage)?;
-            let Some(rect) = damage_in(mode, damage) else {
+            let Some(rect) = write_frame(screen.surface(), frame, mode, damage)? else {
                 // The damage lies outside the window the session knows about,
                 // so these pixels were never shown: repaint whole next frame
                 // rather than leave the surface silently ahead of the screen.
@@ -1037,7 +1059,7 @@ mod program {
         // A refused buffer costs the effect, never the terminal: present the
         // plain screen rather than exiting over decoration.
         let Some(mut effected) = held else {
-            write_frame(
+            let _ = write_frame(
                 clean,
                 frame,
                 mode,
@@ -1059,7 +1081,7 @@ mod program {
             Rect::new(0, 0, mode.width_px, mode.height_px),
         );
         look.effected = Some(effected);
-        written?;
+        let _ = written?;
         client.present(window, 0, DamageRect::full(mode))
     }
 
@@ -1607,6 +1629,9 @@ mod program {
             open.screen.invalidate();
             open.present(client).map_err(|_| ())?;
             if let Some(held) = open.overlay.as_mut() {
+                // New colours and new metrics leave nothing on the sheet
+                // standing, and no control reported that.
+                held.picture.invalidate();
                 present_overlay(held, theme, scale, client).map_err(|_| ())?;
             }
         }
@@ -2006,10 +2031,10 @@ mod program {
     ) -> OverlayRouting {
         let viewport = overlay.viewport();
         let mut routing = OverlayRouting::Nothing;
-        let mut damage = damage::sink();
-        let sheet = &mut overlay.sheet;
+        let Overlay { sheet, picture, .. } = overlay;
+        let damage = picture.sink();
         for event in pointer_input_events(action, at) {
-            let outcome = sheet.on_pointer(&event, viewport, scale, theme, &mut damage);
+            let outcome = sheet.on_pointer(&event, viewport, scale, theme, damage);
             // Every edit shows at once; only a settled one asks to be written.
             // A drag delivers many samples per gesture, so `Edited` is what
             // keeps the store out of the pointer's path.
@@ -2044,9 +2069,9 @@ mod program {
             return OverlayRouting::Nothing;
         };
         let viewport = overlay.viewport();
-        let mut damage = damage::sink();
-        let sheet = &mut overlay.sheet;
-        let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, &mut damage);
+        let Overlay { sheet, picture, .. } = overlay;
+        let damage = picture.sink();
+        let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, damage);
         if matches!(
             outcome,
             SheetOutcome::Edited | SheetOutcome::Settled | SheetOutcome::Dismissed

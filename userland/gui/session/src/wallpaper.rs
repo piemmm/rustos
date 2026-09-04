@@ -149,7 +149,6 @@ impl WallpaperDesk {
         }
         match self.done.take() {
             Some((prepared, outcome)) if prepared == *source => {
-                self.wanted = None;
                 return match outcome {
                     Ok(surface) => Prepared::Ready {
                         surface: Some(surface),
@@ -189,11 +188,17 @@ impl WallpaperDesk {
     /// Answers `false` — and keeps nothing — when the desktop has since asked
     /// for something else, so an abandoned preparation owes the session no wake
     /// and its pixels are dropped rather than painted.
+    ///
+    /// An accepted answer **clears the request it answers**. Leaving it standing
+    /// made the desk workable again the instant it was answered, so a preparer
+    /// handed itself the same picture forever — a decode loop, and this one
+    /// reads and rasterises a whole screen's worth each time round.
     pub fn deliver(&mut self, source: WallpaperSource, outcome: Result<Surface, String>) -> bool {
         self.preparing = false;
         if self.wanted.as_ref() != Some(&source) {
             return false;
         }
+        self.wanted = None;
         self.done = Some((source, outcome));
         true
     }

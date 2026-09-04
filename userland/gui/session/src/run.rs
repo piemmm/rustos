@@ -97,7 +97,6 @@ mod program {
         SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_REPLY_STATUS_LEN};
     use tairix_abi::window_ipc::{
         MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
@@ -134,8 +133,9 @@ mod program {
         WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
-        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
-        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        MIN_FRAME_PUBLISH_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
+        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
+        WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -1020,27 +1020,44 @@ mod program {
         }
     }
 
-    /// The production [`FrameStatsSink`]: one `ipc_call` to the System
-    /// Information API, whose reply is the framed status word every
-    /// `sysinfo` answer carries.
+    /// The production [`FrameStatsSink`]: a [`tairix_rt::submit::Submission`]
+    /// to the System Information API, handed over on the frame path and
+    /// collected on a later pass.
     ///
-    /// A refused submission is surfaced on `stderr` with the service's own
-    /// reason rather than a guess, and dropped: the accounting it carried is
-    /// cumulative, so the next attempt states a superset of it and nothing is
-    /// lost by not retrying here.
-    struct RtFrameStatsSink;
+    /// It never waits: this sits at the end of the compositor's own wake, so a
+    /// round trip here is a stall the user sees. A refused submission is
+    /// surfaced on `stderr` with the service's own reason rather than a guess,
+    /// and dropped: the accounting it carried is cumulative, so the next
+    /// attempt states a superset of it and nothing is lost by not retrying.
+    struct RtFrameStatsSink {
+        totals: tairix_rt::submit::Submission,
+    }
+
+    impl RtFrameStatsSink {
+        fn new() -> Self {
+            Self {
+                totals: tairix_rt::submit::Submission::new(MIN_FRAME_PUBLISH_INTERVAL_NS),
+            }
+        }
+    }
 
     impl FrameStatsSink for RtFrameStatsSink {
         fn submit(&mut self, request: &[u8]) -> Result<(), Errno> {
-            let mut reply = [0u8; SYSINFO_REPLY_STATUS_LEN];
-            let outcome = tairix_rt::ipc_call(SYSINFO_ENDPOINT, request, &mut reply)
-                .map_err(Errno::from_syscall)
-                .and_then(|len| decode_reply(&reply[..len]).map(|_| ()));
+            match self.totals.post(request) {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    let _ = writeln!(Stderr, "desktop: frame accounting not handed over: {err}");
+                    Err(err)
+                }
+            }
+        }
+
+        fn settle(&mut self) -> Option<Result<(), Errno>> {
+            let outcome = self.totals.settle()?;
             if let Err(err) = outcome {
                 let _ = writeln!(Stderr, "desktop: frame accounting not published: {err}");
-                return Err(err);
             }
-            Ok(())
+            Some(outcome)
         }
     }
 
@@ -2013,6 +2030,9 @@ mod program {
         // rate a reader can follow rather than at frame rate.
         let mut frames = FrameReportGate::new();
         let mut frame_stats = FrameStatsPublisher::new();
+        // The channel that accounting goes out over, held for the life of the
+        // loop because it carries the submission in flight.
+        let mut frame_sink = RtFrameStatsSink::new();
         // The frame deadline. Wakes arrive as fast as a hand can move a
         // mouse, which is several times faster than any screen shows a
         // frame, so damage accumulates in the compositor between deadlines
@@ -2205,7 +2225,7 @@ mod program {
                     now_ns,
                     &mut RtSwitchboardMailbox,
                 );
-                frame_stats.maybe_publish(&compositor, now_ns, &mut RtFrameStatsSink);
+                frame_stats.maybe_publish(&compositor, now_ns, &mut frame_sink);
                 tairix_rt::cachereport::publish_if_due();
                 continue;
             }
@@ -3066,7 +3086,7 @@ mod program {
             // And the same counts to the System Information API, where a
             // reader outside this process — a monitor, a shell, a regression
             // gate — asks for them instead of being pushed them.
-            frame_stats.maybe_publish(&compositor, now_ns, &mut RtFrameStatsSink);
+            frame_stats.maybe_publish(&compositor, now_ns, &mut frame_sink);
             // The wake is fully handled and its frame is on screen: report
             // what the desktop's caches hold now, before parking again. A
             // change made this turn would otherwise wait for the next wake,

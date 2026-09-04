@@ -466,6 +466,54 @@ fn the_opacity_slider_spans_its_own_floor_to_full() {
     assert_eq!(sheet.profile().effects.opacity, FULL);
 }
 
+/// The other half of the reported slider freeze: what the transparency and
+/// blur sliders *report* is a small part of the sheet, so the retained picture
+/// ([`crate::sheet::SheetScreen`]) has something worth scoping a repaint to.
+/// The sheet used to be re-rendered whole into a freshly allocated surface on
+/// every sample of a drag, and the reports below were discarded.
+#[test]
+fn dragging_an_effect_slider_reports_a_small_part_of_the_sheet() {
+    let mut sheet = sheet();
+    select_effects_tab(&mut sheet, CLIENT);
+    // Every effect slider, opacity and blur included: none of them may claim
+    // the sheet.
+    for index in 0..EffectKey::COUNT {
+        let row = visible_row(&sheet, CLIENT, Focus::Effect(index));
+        let mut damage = damage::sink();
+        sheet.on_pointer(
+            &moved(slider_point(row, 0)),
+            CLIENT,
+            SCALE,
+            &theme(),
+            &mut damage,
+        );
+        sheet.on_pointer(&PRESS, CLIENT, SCALE, &theme(), &mut damage);
+        for permille in [200, 400, 600, 800, 1000] {
+            sheet.on_pointer(
+                &moved(slider_point(row, permille)),
+                CLIENT,
+                SCALE,
+                &theme(),
+                &mut damage,
+            );
+        }
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage);
+
+        let reported = damage.bounds();
+        assert!(
+            !reported.is_empty(),
+            "effect slider {index} must report what it changed"
+        );
+        let area = u64::from(reported.width) * u64::from(reported.height);
+        let sheet_area = u64::from(CLIENT.width) * u64::from(CLIENT.height);
+        assert!(
+            area * 4 < sheet_area,
+            "a whole drag of effect slider {index} reported {reported:?}, \
+             which is not a small part of {CLIENT:?}"
+        );
+    }
+}
+
 #[test]
 fn an_effect_slider_reaches_full_at_the_end_of_its_travel() {
     let mut sheet = sheet();

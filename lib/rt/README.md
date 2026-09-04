@@ -201,6 +201,26 @@ way out — a clean return, a fail-loud exit, a panic unwind — so a monitor ne
 shows memory nobody holds. Every publisher holds that one guard rather than its
 own copy of the same three lines.
 
+The report is **handed over, never awaited** (`submit` module, below). Its
+publishers are a desktop compositor, a file manager and the font service, each
+owing somebody a frame or an answer, so a blocking `ipc_call` here parked the
+caller off the run queue for a full cross-process round trip — twice a second
+per publisher — which the desktop showed as a stutter through every gesture.
+The withdrawal is the one report that waits, because the kernel drops a posted
+request whose poster has exited and a withdrawal that did not land would leave
+a monitor showing memory nobody holds.
+
+## Submitting a figure without waiting (`submit` module)
+
+`tairix_rt::submit::Submission` is the one shape for a statement a process
+makes about itself: `call_post` hands the request over and returns, the caller
+carries on, and `call_reap` collects the verdict without blocking on a later
+pass. One submission is outstanding at a time — a restatement of a figure has
+nothing to say until the last one has landed — and each carries a deadline, so
+a wedged or absent service costs one abandoned ticket rather than a blocked
+loop. `cachereport` above and the desktop session's frame accounting both go
+out over it, so neither hand-rolls the ticket bookkeeping.
+
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled

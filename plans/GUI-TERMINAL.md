@@ -463,6 +463,22 @@ grid. The tight direction is pinned separately, or the suite would pass by
 reporting everything: a keystroke reports exactly two cells, a cursor reveal
 exactly one, and an unchanged grid reports nothing and presents nothing.
 
+**The sheet's own picture is retained the same way** (`sheet::SheetScreen`).
+Its controls already reported the rectangles they change — that is what the
+shared damage sink is for — but the popup was re-derived from nothing per
+pointer sample: a sheet-sized surface allocated afresh, every tab, row, label
+and swatch re-rendered, and the whole popup presented. So a drag of the
+transparency or blur slider cost the whole sheet several dozen times a second,
+on top of the whole-window recomposite those two fields legitimately ask the
+compositor for, and the knob lagged the pointer. `SheetScreen::paint` clips the
+render to what was reported and answers that rectangle for `write_frame` and
+the present; `invalidate` covers the sheet for a change no control could have
+reported — a re-theme, a new scale, a profile adopted from the store, or a
+frame region the session took back, which holds none of the pixels a partial
+present would leave standing. A scoped paint is asserted byte-identical to the
+same band of a whole one, and the effect sliders' own reports are asserted to
+be a small part of the sheet, so neither half can pass by covering everything.
+
 ---
 
 ## 14. One process, many windows

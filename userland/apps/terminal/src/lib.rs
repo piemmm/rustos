@@ -113,6 +113,7 @@ pub mod publish;
 pub mod render;
 pub mod scheme;
 pub mod settings;
+pub mod sheet;
 pub mod shell;
 pub mod spawned;
 pub mod swatch;
