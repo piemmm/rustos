@@ -5,9 +5,11 @@
 //! rather than restating it, so a test can never assert against a rectangle
 //! the sheet does not actually draw or hit-test.
 
+use alloc::vec::Vec;
+
 use tairix_controls::damage;
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -144,15 +146,14 @@ fn click_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
 }
 
 /// One unmodified key press.
+/// One key press with no modifiers, reporting into `damage`.
+fn key_into(sheet: &mut Settings, viewport: Rect, key: Key, damage: &mut Region) -> SheetOutcome {
+    sheet.on_key(key, Modifiers::default(), viewport, SCALE, &theme(), damage)
+}
+
+/// One key press with no modifiers, for a test that does not read the report.
 fn key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
-    sheet.on_key(
-        key,
-        Modifiers::default(),
-        viewport,
-        SCALE,
-        &theme(),
-        &mut damage::sink(),
-    )
+    key_into(sheet, viewport, key, &mut damage::sink())
 }
 
 /// One Shift-modified key press.
@@ -394,7 +395,7 @@ fn a_channel_slider_edits_the_selected_well_of_the_custom_scheme() {
 #[test]
 fn selecting_another_well_repoints_the_channel_sliders() {
     let mut sheet = sheet();
-    sheet.swatches.set_selected(1);
+    sheet.swatches.adopt_selected(1);
     sheet.sync_channel_sliders();
 
     focus_on(&mut sheet, CLIENT, Focus::Channel(2));
@@ -742,16 +743,22 @@ fn a_pointer_sample_that_redraws_nothing_asks_for_nothing() {
     }
 }
 
-/// The other half of the rule: a round that *did* report keeps its whole-plate
-/// repaint, because switching tabs replaces the body while the strip is all
-/// the tabs control reports.
+/// The other half of the rule: a round that *did* report says so, and a tab
+/// switch reports the body it replaced.
+///
+/// The strip reports only the two plates whose selection changed, so a sheet
+/// that painted just that left every row of the tab it came from standing —
+/// the Appearance controls stayed on screen under the Effects tab until an
+/// unrelated hover happened to redraw them.
 #[test]
-fn switching_tabs_still_asks_for_a_repaint() {
+fn switching_tabs_reports_the_body_it_replaced() {
     let mut sheet = sheet();
     let mut damage = damage::sink();
     let before = sheet.tabs.selected();
-    let (tabs, ..) = bands(&sheet, CLIENT);
+    let (tabs, body, scrollbar, _) = bands(&sheet, CLIENT);
     let strip = tabs.expect("the tab strip is laid out");
+    let body = body.expect("the body band is laid out");
+    let scrollbar = scrollbar.expect("the scrollbar band is laid out");
     let at = Point::new(
         strip.right() - to_i32(strip.width / 4),
         strip.top() + to_i32(strip.height / 2),
@@ -764,7 +771,234 @@ fn switching_tabs_still_asks_for_a_repaint() {
         SheetOutcome::Changed
     );
     assert_ne!(sheet.tabs.selected(), before, "the tab really changed");
-    assert!(!damage.is_empty());
+    let reported = damage.bounds();
+    assert_eq!(
+        reported.intersection(&body),
+        body,
+        "every row the new tab draws must be repainted"
+    );
+    assert_eq!(
+        reported.intersection(&scrollbar),
+        scrollbar,
+        "the bar is re-clamped against the new tab's extent"
+    );
+}
+
+/// The same rule from the keyboard, which reaches the strip with no rectangle
+/// of its own to hit-test against.
+#[test]
+fn switching_tabs_by_key_reports_the_body_it_replaced() {
+    let mut sheet = sheet();
+    let body = body(&sheet, CLIENT);
+    focus_on(&mut sheet, CLIENT, Focus::Tabs);
+
+    let mut damage = damage::sink();
+    sheet.on_key(
+        Key::Named(NamedKey::Right),
+        Modifiers::default(),
+        CLIENT,
+        SCALE,
+        &theme(),
+        &mut damage,
+    );
+    sheet.on_key(
+        Key::Named(NamedKey::Enter),
+        Modifiers::default(),
+        CLIENT,
+        SCALE,
+        &theme(),
+        &mut damage,
+    );
+    assert_eq!(sheet.tabs.selected(), Some(EFFECTS_TAB));
+    assert_eq!(damage.bounds().intersection(&body), body);
+}
+
+/// A press moves the drawn focus ring, not just the field the keyboard reads.
+///
+/// Nothing synced the ring on this path, so clicking a row left it drawn on
+/// whatever held focus before while every key went to the row just clicked.
+#[test]
+fn a_pressed_row_takes_the_focus_ring() {
+    let mut sheet = sheet();
+    let row = row_rect(&sheet, CLIENT, Focus::Scheme(1)).expect("the second scheme row is seated");
+    let at = Point::new(
+        row.left() + to_i32(row.width / 4),
+        row.top() + to_i32(row.height / 2),
+    );
+
+    let mut damage = damage::sink();
+    sheet.on_pointer(&moved(at), CLIENT, SCALE, &theme(), &mut damage);
+    sheet.on_pointer(&PRESS, CLIENT, SCALE, &theme(), &mut damage);
+    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage);
+
+    assert_eq!(sheet.focus, Focus::Scheme(1));
+    assert!(
+        sheet.scheme_radios[1].state().focus.focused,
+        "the row the keyboard now edits is the row drawing the ring"
+    );
+    assert!(
+        !sheet.scheme_radios[0].state().focus.focused,
+        "and it is the only one"
+    );
+    assert_eq!(
+        damage.bounds().intersection(&row),
+        row,
+        "the ring it arrived on is redrawn"
+    );
+}
+
+/// A value the sheet writes back into a control is drawn twice — as the
+/// control's own state and as the label beside it — so the whole row is the
+/// scope, not the control's rectangle.
+///
+/// Focus is moved before the report is measured, because a focus arrival
+/// reports the row too and would mask the missing report.
+#[test]
+fn a_keyed_edit_reports_the_label_beside_the_control() {
+    let mut sheet = sheet();
+    focus_on(&mut sheet, CLIENT, Focus::TextSize);
+    let row = row_rect(&sheet, CLIENT, Focus::TextSize).expect("the text-size row is seated");
+
+    let mut damage = damage::sink();
+    assert_eq!(
+        key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Home), &mut damage),
+        SheetOutcome::Settled
+    );
+    assert_eq!(sheet.profile().font_size_px, MIN_FONT_SIZE_PX);
+    assert_eq!(
+        damage.bounds().intersection(&row),
+        row,
+        "the label spells the value out, so it is redrawn with the knob"
+    );
+}
+
+/// The same rule for the effects tab, whose labels carry a percentage.
+#[test]
+fn a_keyed_effect_edit_reports_its_label() {
+    let mut sheet = sheet();
+    select_effects_tab(&mut sheet, CLIENT);
+    focus_on(&mut sheet, CLIENT, Focus::Effect(0));
+    let row = row_rect(&sheet, CLIENT, Focus::Effect(0)).expect("the first effect row is seated");
+
+    let mut damage = damage::sink();
+    key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Home), &mut damage);
+    assert_eq!(damage.bounds().intersection(&row), row);
+}
+
+/// Choosing another well re-points all three channel sliders, which is the
+/// sheet's own write into controls it did not touch.
+#[test]
+fn selecting_a_well_reports_the_channel_rows_it_repoints() {
+    let mut sheet = sheet();
+    // The channel rows sit below the swatch grid, so the body is scrolled to
+    // its end to seat them before anything is asserted about their pixels.
+    focus_on(&mut sheet, CLIENT, Focus::Scroll);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    focus_on(&mut sheet, CLIENT, Focus::Swatches);
+    let seated: Vec<Rect> = (0..3)
+        .filter_map(|index| row_rect(&sheet, CLIENT, Focus::Channel(index)))
+        .collect();
+    assert!(!seated.is_empty(), "at least one channel row is on screen");
+
+    let mut damage = damage::sink();
+    key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Right), &mut damage);
+    let reported = damage.bounds();
+    for row in seated {
+        assert_eq!(
+            reported.intersection(&row),
+            row,
+            "a slider now showing another well's channel is redrawn"
+        );
+    }
+}
+
+/// Scrolling moves every row, and the bar reports only its own thumb.
+#[test]
+fn scrolling_reports_the_body_whose_rows_moved() {
+    let mut sheet = sheet();
+    let body = body(&sheet, CLIENT);
+    focus_on(&mut sheet, CLIENT, Focus::Scroll);
+    let before = sheet
+        .scrolled_model(Some(body), SCALE, &theme(), font())
+        .offset();
+
+    let mut damage = damage::sink();
+    key_into(&mut sheet, CLIENT, Key::Named(NamedKey::End), &mut damage);
+    assert_ne!(
+        sheet
+            .scrolled_model(Some(body), SCALE, &theme(), font())
+            .offset(),
+        before,
+        "the body really scrolled"
+    );
+    assert_eq!(damage.bounds().intersection(&body), body);
+}
+
+/// Choosing a scheme from the keyboard moves the dot between two radios, and
+/// neither the radio nor the key path has a rectangle of its own to report.
+#[test]
+fn a_keyed_scheme_choice_reports_both_dots() {
+    let mut sheet = sheet();
+    let (lit, custom) = (scheme_row(&sheet), custom_scheme_row());
+    assert_ne!(lit, custom, "the custom scheme is not the one lit");
+
+    focus_on(&mut sheet, CLIENT, Focus::Scheme(custom));
+    let leaving = row_rect(&sheet, CLIENT, Focus::Scheme(lit)).expect("the lit row is seated");
+    let arriving =
+        row_rect(&sheet, CLIENT, Focus::Scheme(custom)).expect("the custom row is seated");
+
+    let mut damage = damage::sink();
+    assert_eq!(
+        key_into(&mut sheet, CLIENT, Key::Char(' '), &mut damage),
+        SheetOutcome::Settled
+    );
+    assert_eq!(sheet.profile().scheme, Scheme::Custom);
+
+    let reported = damage.bounds();
+    assert_eq!(
+        reported.intersection(&leaving),
+        leaving,
+        "the dot that emptied must be redrawn"
+    );
+    assert_eq!(
+        reported.intersection(&arriving),
+        arriving,
+        "the dot that filled must be redrawn"
+    );
+}
+
+/// The custom editor's caption reads off the same field the radios do, so a
+/// scheme choice redraws it too.
+#[test]
+fn a_keyed_scheme_choice_reports_the_editor_caption() {
+    let mut sheet = sheet();
+    // The editor sits below the radios, so the body is scrolled to seat it;
+    // Tab traversal does not scroll, so the radio stays reachable.
+    focus_on(&mut sheet, CLIENT, Focus::Scroll);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    let caption = row_rect(&sheet, CLIENT, Focus::Swatches).expect("the editor row is seated");
+    focus_on(&mut sheet, CLIENT, Focus::Scheme(custom_scheme_row()));
+
+    let mut damage = damage::sink();
+    key_into(&mut sheet, CLIENT, Key::Char(' '), &mut damage);
+    assert_eq!(sheet.profile().scheme, Scheme::Custom);
+    assert_eq!(damage.bounds().intersection(&caption), caption);
+}
+
+/// The row index of the scheme the sheet's profile currently names.
+fn scheme_row(sheet: &Settings) -> usize {
+    Scheme::ALL
+        .iter()
+        .position(|scheme| *scheme == sheet.profile().scheme)
+        .expect("some scheme is lit")
+}
+
+/// The row index of the custom scheme.
+fn custom_scheme_row() -> usize {
+    Scheme::ALL
+        .iter()
+        .position(|scheme| *scheme == Scheme::Custom)
+        .expect("the custom scheme is offered")
 }
 
 // --- Tabs and scrolling ------------------------------------------------------

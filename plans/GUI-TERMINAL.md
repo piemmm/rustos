@@ -464,20 +464,47 @@ reporting everything: a keystroke reports exactly two cells, a cursor reveal
 exactly one, and an unchanged grid reports nothing and presents nothing.
 
 **The sheet's own picture is retained the same way** (`sheet::SheetScreen`).
-Its controls already reported the rectangles they change — that is what the
-shared damage sink is for — but the popup was re-derived from nothing per
-pointer sample: a sheet-sized surface allocated afresh, every tab, row, label
-and swatch re-rendered, and the whole popup presented. So a drag of the
-transparency or blur slider cost the whole sheet several dozen times a second,
-on top of the whole-window recomposite those two fields legitimately ask the
-compositor for, and the knob lagged the pointer. `SheetScreen::paint` clips the
-render to what was reported and answers that rectangle for `write_frame` and
-the present; `invalidate` covers the sheet for a change no control could have
-reported — a re-theme, a new scale, a profile adopted from the store, or a
-frame region the session took back, which holds none of the pixels a partial
-present would leave standing. A scoped paint is asserted byte-identical to the
-same band of a whole one, and the effect sliders' own reports are asserted to
-be a small part of the sheet, so neither half can pass by covering everything.
+The popup was re-derived from nothing per pointer sample: a sheet-sized
+surface allocated afresh, every tab, row, label and swatch re-rendered, and the
+whole popup presented. So a drag of the transparency or blur slider cost the
+whole sheet several dozen times a second, on top of the whole-window
+recomposite those two fields legitimately ask the compositor for, and the knob
+lagged the pointer. `SheetScreen::paint` clips the render to what was reported
+and answers that rectangle for `write_frame` and the present; `invalidate`
+covers the sheet for a change no control could have reported — a re-theme, a
+new scale, a profile adopted from the store, or a frame region the session took
+back, which holds none of the pixels a partial present would leave standing. A
+scoped paint is asserted byte-identical to the same band of a whole one, and
+the effect sliders' own reports are asserted to be a small part of the sheet,
+so neither half can pass by covering everything.
+
+**A control's own report is not the whole scope, and the sheet reports the
+rest.** The sheet composes state *above* its controls, and a scoped paint shows
+the old state for anything it does not name — the tab strip reports only the
+two plates whose selection changed, so a sheet that painted just that left
+every Appearance row standing under the Effects tab until an unrelated hover
+happened to redraw it. `settings::Layout` resolves where each part is drawn
+**once** per routing pass and every report reads that one resolution, so a
+reported rectangle is always the one the control was hit-tested and drawn in.
+Four kinds of change are the sheet's rather than a control's:
+
+| The sheet's change | Its scope |
+|---|---|
+| A switched tab replaces every row and re-clamps the bar | the body and scrollbar bands |
+| A value written back into a control is also spelled out in the label beside it (`Text size 14px`, `Blur 40%`) | that whole row |
+| A scroll re-lays every row | the body band |
+| A mark of the sheet's own moves — keyboard focus, the scheme dot, the channels the selected well points the sliders at | the elements it moves between, through `damage::move_mark` |
+
+A mark a *container* draws on its own children stays the container's to report,
+because only it can name them: the strip's keyboard cursor (`Tabs::set_current`)
+and the colour grid's selected well (`SwatchGrid::on_pointer`/`on_key`). The
+grid's non-reporting `adopt_selected` is for a caller rebuilding it and
+presenting whole, never for an interactive move.
+
+Both halves are tested. Each report is pinned by a test that fails without it,
+and a press-drag-release at every node of a lattice over the whole sheet
+asserts the retained picture is byte-identical to a whole repaint of the sheet
+that gesture left — the one property that catches a change nothing named.
 
 ---
 

@@ -154,6 +154,54 @@ pub struct Settings {
     last_pointer: Point,
 }
 
+/// Where the sheet draws each of its parts, resolved once per routing pass.
+///
+/// A report is only worth anything if it names the rectangle the control was
+/// actually drawn in, so both input paths resolve this once and every report
+/// they make reads it — hit-testing and damage can then never disagree. A part
+/// with no extent is `None`, and [`Layout::rect_of`] answers [`Rect::EMPTY`]
+/// for anything drawn nowhere.
+#[derive(Debug, Default)]
+struct Layout {
+    tabs: Option<Rect>,
+    body: Option<Rect>,
+    scrollbar: Option<Rect>,
+    restore: Option<Rect>,
+    done: Option<Rect>,
+    /// Every content row the body currently seats, in display order.
+    rows: Vec<(Focus, Rect)>,
+}
+
+impl Layout {
+    /// A layout that draws nothing anywhere, for a sheet being composed or
+    /// rebuilt: it has no rectangles to resolve a report against and is
+    /// presented whole, so a report made against it goes nowhere rather than
+    /// naming a rectangle that was invented.
+    fn nowhere() -> Self {
+        Self::default()
+    }
+
+    /// The rectangle `element` is drawn in, or [`Rect::EMPTY`] where it is
+    /// drawn nowhere — scrolled out of the body, or a part with no extent.
+    ///
+    /// The tab strip answers empty because the keyboard cursor there is a mark
+    /// on one of its own tabs, which only the strip can name.
+    fn rect_of(&self, element: Focus) -> Rect {
+        let rect = match element {
+            Focus::Tabs => return Rect::EMPTY,
+            Focus::Scroll => self.scrollbar,
+            Focus::Restore => self.restore,
+            Focus::Done => self.done,
+            row => self
+                .rows
+                .iter()
+                .find(|(seated, _)| *seated == row)
+                .map(|(_, rect)| *rect),
+        };
+        rect.unwrap_or(Rect::EMPTY)
+    }
+}
+
 impl Settings {
     /// A sheet opened on a copy of `profile`.
     #[must_use]
@@ -212,7 +260,7 @@ impl Settings {
             last_pointer: Point::ORIGIN,
         };
         sheet.sync_channel_sliders();
-        sheet.sync_focus(Rect::EMPTY, &mut damage::sink());
+        sheet.sync_focus(&Layout::nowhere(), &mut damage::sink());
         sheet
     }
 
@@ -267,10 +315,7 @@ impl Settings {
     /// That second case is the pointer resting or drifting inside one control:
     /// its controls report the pixels they redraw, and an event none of them
     /// redrew anything for must not cost the caller a re-render and a
-    /// re-publish of the whole plate. A round that reported *something* is
-    /// [`SheetOutcome::Changed`] whole, because a change the sheet composes
-    /// above its controls — a switched tab's body — is wider than the
-    /// rectangle the control that caused it reports.
+    /// re-publish of the whole plate.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -316,51 +361,45 @@ impl Settings {
             return SheetOutcome::Dismissed;
         }
 
-        let Some(content) = self.panel.content_rect(bounds, scale, theme) else {
+        let Some(layout) = self.layout(viewport, scale, theme, font) else {
             return SheetOutcome::Ignored;
         };
-        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) = self.bands(content, scale, theme);
-        self.scroll
-            .set_model(self.scrolled_model(body_rect, scale, theme, font));
 
-        if let Some(rect) = tabs_rect {
+        if let Some(rect) = layout.tabs {
             if let Some(TabsAction::Selected { index }) = self.tabs.on_pointer(event, rect, damage)
             {
-                self.tabs.set_selected(index, rect, damage);
-                self.focus = Focus::Tabs;
-                self.sync_focus(rect, damage);
+                self.select_tab(index, &layout, damage);
                 return SheetOutcome::Changed;
             }
         }
 
-        if let Some(rect) = body_rect {
+        if layout.body.is_some() {
             if let outcome
             @ (SheetOutcome::Changed | SheetOutcome::Edited | SheetOutcome::Settled) =
-                self.route_body_pointer(event, rect, scale, theme, font, damage)
+                self.route_body_pointer(event, &layout, scale, font, damage)
             {
                 return outcome;
             }
         }
 
-        if let Some(rect) = scrollbar_rect {
+        if let Some(rect) = layout.scrollbar {
             // The bar applies the offset to the model it holds, and that model
             // is the sheet's only scroll position, so there is nothing further
-            // to write back.
+            // to write back. The rows are laid out at that offset, though, so
+            // they have all moved and the body is the scope.
             if self
                 .scroll
                 .on_pointer(event, rect, scale, theme, damage)
                 .is_some()
             {
-                self.focus = Focus::Scroll;
-                self.sync_focus(tabs_rect.unwrap_or(Rect::EMPTY), damage);
+                damage.add(layout.body.unwrap_or(Rect::EMPTY));
+                self.focus_on(Focus::Scroll, &layout, damage);
                 return SheetOutcome::Changed;
             }
         }
 
-        if let Some(rect) = footer_rect {
-            if let Some(outcome) = self.route_footer_pointer(event, rect, scale, damage) {
-                return outcome;
-            }
+        if let Some(outcome) = self.route_footer_pointer(event, &layout, damage) {
+            return outcome;
         }
 
         // A press outside the panel's content but still inside the panel
@@ -386,34 +425,19 @@ impl Settings {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
 
         // Keyboard reach never depends on a row's rectangle, so a viewport too
-        // small to lay the body out still dismisses, moves focus, and edits.
-        // Only scrolling needs the geometry, and an unsizeable body simply
-        // leaves the bar with nothing to move.
-        let bounds = panel_bounds(viewport, scale);
-        let (tabs_rect, body_rect, scrollbar_rect, _) = self
-            .panel
-            .content_rect(bounds, scale, theme)
-            .map_or((None, None, None, None), |content| {
-                self.bands(content, scale, theme)
-            });
-        self.scroll
-            .set_model(self.scrolled_model(body_rect, scale, theme, font));
+        // small to lay the body out still dismisses, moves focus, and edits;
+        // a layout that seats nothing simply reports nothing.
+        let layout = self
+            .layout(viewport, scale, theme, font)
+            .unwrap_or_else(Layout::nowhere);
         if key == Key::Named(NamedKey::Escape) {
             return SheetOutcome::Dismissed;
         }
         if key == Key::Named(NamedKey::Tab) {
-            self.move_focus(!modifiers.shift);
-            self.sync_focus(tabs_rect.unwrap_or(Rect::EMPTY), damage);
+            self.focus_on(self.next_focus(!modifiers.shift), &layout, damage);
             return SheetOutcome::Changed;
         }
-        let slider_rect = self.focused_slider_rect(body_rect, scale, theme, font);
-        self.dispatch_key(
-            key,
-            tabs_rect.unwrap_or(Rect::EMPTY),
-            slider_rect.unwrap_or(Rect::EMPTY),
-            scrollbar_rect.unwrap_or(Rect::EMPTY),
-            damage,
-        )
+        self.dispatch_key(key, &layout, scale, font, damage)
     }
 }
 
@@ -520,29 +544,49 @@ impl Settings {
         order
     }
 
-    /// Move focus to the next (`forward`) or previous element, wrapping.
-    fn move_focus(&mut self, forward: bool) {
+    /// The next (`forward`) or previous element in focus order, wrapping.
+    fn next_focus(&self, forward: bool) -> Focus {
         let order = self.focus_order();
-        if order.is_empty() {
-            return;
-        }
         let current = order.iter().position(|&f| f == self.focus).unwrap_or(0);
-        let next = if forward {
-            (current + 1) % order.len()
+        let step = if forward {
+            1
         } else {
-            (current + order.len() - 1) % order.len()
+            order.len().saturating_sub(1)
         };
-        self.focus = order[next];
+        order
+            .get((current + step) % order.len().max(1))
+            .copied()
+            .unwrap_or(self.focus)
+    }
+
+    /// Move keyboard focus onto `next` and re-derive every control's focus
+    /// flag from it.
+    ///
+    /// The ring is drawn on one element at a time as a function of this one
+    /// field, so the mark move is the whole report: the two rectangles it
+    /// names are exactly the elements whose ring changed, which is why the
+    /// per-control writes in [`sync_focus`](Self::sync_focus) need none of
+    /// their own.
+    fn focus_on(&mut self, next: Focus, layout: &Layout, damage: &mut Region) {
+        damage::move_mark(
+            Some(self.focus),
+            Some(next),
+            |element| Some(layout.rect_of(element)).filter(|rect| !rect.is_empty()),
+            damage,
+        );
+        self.focus = next;
+        self.sync_focus(layout, damage);
     }
 
     /// Set exactly the focused control's own focus flag, clearing every
     /// other one — the one place that maps [`Focus`] onto every control's
     /// composed keyboard-focus state.
     ///
-    /// `tabs` is the strip's own rectangle as the sheet last laid it out, empty
-    /// where the strip is drawn nowhere to report against: a window too small to
-    /// seat it, or a sheet still being composed and presented whole.
-    fn sync_focus(&mut self, tabs: Rect, damage: &mut Region) {
+    /// Only the tab strip reports here, because the cursor it draws is a mark
+    /// on one of its own tabs and nothing else can name that rectangle. The
+    /// rings are the caller's to report, through
+    /// [`focus_on`](Self::focus_on).
+    fn sync_focus(&mut self, layout: &Layout, damage: &mut Region) {
         for (index, radio) in self.scheme_radios.iter_mut().enumerate() {
             radio.set_focused(self.focus == Focus::Scheme(index));
         }
@@ -556,12 +600,26 @@ impl Settings {
         self.scroll.set_focused(self.focus == Focus::Scroll);
         self.restore.set_focused(self.focus == Focus::Restore);
         self.done.set_focused(self.focus == Focus::Done);
-        if self.focus == Focus::Tabs {
-            let index = self.tabs.current().or(self.tabs.selected()).unwrap_or(0);
-            self.tabs.set_current(Some(index), tabs, damage);
-        } else {
-            self.tabs.set_current(None, tabs, damage);
-        }
+        let cursor = self.tabs.current().or(self.tabs.selected()).unwrap_or(0);
+        self.tabs.set_current(
+            (self.focus == Focus::Tabs).then_some(cursor),
+            layout.tabs.unwrap_or(Rect::EMPTY),
+            damage,
+        );
+    }
+
+    /// Choose tab `index`, reporting the body it replaces.
+    ///
+    /// The strip reports the two plates whose selection changed, but every row
+    /// beneath it is now a different control drawn by the sheet itself, and
+    /// the bar beside them is re-clamped against the new tab's own extent, so
+    /// those two bands are the scope.
+    fn select_tab(&mut self, index: usize, layout: &Layout, damage: &mut Region) {
+        self.tabs
+            .set_selected(index, layout.tabs.unwrap_or(Rect::EMPTY), damage);
+        damage.add(layout.body.unwrap_or(Rect::EMPTY));
+        damage.add(layout.scrollbar.unwrap_or(Rect::EMPTY));
+        self.focus_on(Focus::Tabs, layout, damage);
     }
 
     /// Copy the currently selected swatch well's channels into the three
@@ -578,11 +636,24 @@ impl Settings {
     }
 
     /// Mark exactly the radio matching the profile's current scheme as
-    /// selected.
-    fn sync_scheme_radios(&mut self) {
+    /// selected, reporting each dot that actually changed.
+    fn sync_scheme_radios(&mut self, layout: &Layout, damage: &mut Region) {
         for (index, radio) in self.scheme_radios.iter_mut().enumerate() {
             let scheme = Scheme::ALL.get(index).copied().unwrap_or(Scheme::System);
-            radio.set_selected(scheme == self.profile.scheme);
+            let selected = scheme == self.profile.scheme;
+            if radio.is_selected() != selected {
+                radio.set_selected(selected);
+                damage.add(layout.rect_of(Focus::Scheme(index)));
+            }
+        }
+    }
+
+    /// Show the newly selected well's channels in the three channel sliders,
+    /// reporting the rows they are drawn in.
+    fn adopt_selected_well(&mut self, layout: &Layout, damage: &mut Region) {
+        self.sync_channel_sliders();
+        for index in 0..self.channel_sliders.len() {
+            damage.add(layout.rect_of(Focus::Channel(index)));
         }
     }
 
@@ -645,6 +716,44 @@ impl Settings {
             y = y.saturating_add(to_i32(height)).saturating_add(gap);
         }
         out
+    }
+
+    /// Resolve where every part of the sheet is drawn for `viewport`, and
+    /// re-clamp the scroll position against the active tab's content.
+    ///
+    /// `None` is a viewport too small for the panel to have a content
+    /// rectangle at all — nothing is drawn, so nothing can be routed into or
+    /// reported against. The bar's model is set either way, because it is the
+    /// sheet's only scroll position and the rows are laid out at the offset it
+    /// holds.
+    fn layout(
+        &mut self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> Option<Layout> {
+        let bounds = panel_bounds(viewport, scale);
+        let content = self.panel.content_rect(bounds, scale, theme);
+        let (tabs, body, scrollbar, footer) = content.map_or((None, None, None, None), |content| {
+            self.bands(content, scale, theme)
+        });
+        self.scroll
+            .set_model(self.scrolled_model(body, scale, theme, font));
+        content.is_some().then(|| {
+            let (restore, done) = footer.map_or((None, None), |rect| footer_split(rect, scale));
+            let offset = self.scroll.model().offset();
+            Layout {
+                tabs,
+                body,
+                scrollbar,
+                restore,
+                done,
+                rows: body.map_or_else(Vec::new, |body| {
+                    self.laid_out_rows(body, offset, scale, theme, font)
+                }),
+            }
+        })
     }
 
     /// The panel content split into the tab strip, the scrollable body, the
@@ -844,15 +953,13 @@ impl Settings {
     fn route_body_pointer(
         &mut self,
         event: &InputEvent,
-        body: Rect,
+        layout: &Layout,
         scale: Scale,
-        theme: &Theme,
         font: BitmapFont,
         damage: &mut Region,
     ) -> SheetOutcome {
-        let offset = self.scroll.model().offset();
-        for (row, rect) in self.laid_out_rows(body, offset, scale, theme, font) {
-            let outcome = self.route_row_pointer(event, row, rect, scale, font, damage);
+        for &(row, _) in &layout.rows {
+            let outcome = self.route_row_pointer(event, row, layout, scale, font, damage);
             if outcome != SheetOutcome::Ignored {
                 return outcome;
             }
@@ -865,11 +972,12 @@ impl Settings {
         &mut self,
         event: &InputEvent,
         row: Focus,
-        rect: Rect,
+        layout: &Layout,
         scale: Scale,
         font: BitmapFont,
         damage: &mut Region,
     ) -> SheetOutcome {
+        let rect = layout.rect_of(row);
         match row {
             Focus::Scheme(index) => {
                 let Some(radio) = self.scheme_radios.get_mut(index) else {
@@ -877,8 +985,8 @@ impl Settings {
                 };
                 match radio.on_pointer(event, rect, damage) {
                     Some(SelectorAction::Set { on: true }) => {
-                        self.focus = row;
-                        self.set_scheme(index);
+                        self.focus_on(row, layout, damage);
+                        self.set_scheme(index, layout, damage);
                         SheetOutcome::Settled
                     }
                     _ => SheetOutcome::Ignored,
@@ -888,19 +996,21 @@ impl Settings {
                 let (_, control) = split_row(rect, scale);
                 match self.text_size.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus = row;
-                        self.set_font_size_permille(permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_font_size_permille(permille, rect, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus = row;
-                        self.set_font_size_permille(permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_font_size_permille(permille, rect, damage);
                         SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
                 }
             }
-            Focus::Swatches => self.route_swatches_pointer(event, rect, scale, font),
+            Focus::Swatches => {
+                self.route_swatches_pointer(event, rect, layout, scale, font, damage)
+            }
             Focus::Channel(index) => {
                 let (_, control) = split_row(rect, scale);
                 let Some(slider) = self.channel_sliders.get_mut(index) else {
@@ -908,13 +1018,13 @@ impl Settings {
                 };
                 match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus = row;
-                        self.set_channel_permille(index, permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_channel_permille(index, permille, layout, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus = row;
-                        self.set_channel_permille(index, permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_channel_permille(index, permille, layout, damage);
                         SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
@@ -927,13 +1037,13 @@ impl Settings {
                 };
                 match slider.on_pointer(event, control, damage) {
                     Some(SliderAction::SetValue { permille }) => {
-                        self.focus = row;
-                        self.set_effect_permille(index, permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_effect_permille(index, permille, rect, damage);
                         SheetOutcome::Edited
                     }
                     Some(SliderAction::Settled { permille }) => {
-                        self.focus = row;
-                        self.set_effect_permille(index, permille);
+                        self.focus_on(row, layout, damage);
+                        self.set_effect_permille(index, permille, rect, damage);
                         SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
@@ -948,14 +1058,16 @@ impl Settings {
         &mut self,
         event: &InputEvent,
         rect: Rect,
+        layout: &Layout,
         scale: Scale,
         font: BitmapFont,
+        damage: &mut Region,
     ) -> SheetOutcome {
         let (_, grid_rect) = swatch_caption_split(rect, scale, font);
-        match self.swatches.on_pointer(event, grid_rect) {
+        match self.swatches.on_pointer(event, grid_rect, damage) {
             Some(SwatchAction::Selected { .. }) => {
-                self.focus = Focus::Swatches;
-                self.sync_channel_sliders();
+                self.focus_on(Focus::Swatches, layout, damage);
+                self.adopt_selected_well(layout, damage);
                 SheetOutcome::Changed
             }
             None => SheetOutcome::Ignored,
@@ -966,61 +1078,48 @@ impl Settings {
     fn route_footer_pointer(
         &mut self,
         event: &InputEvent,
-        rect: Rect,
-        scale: Scale,
+        layout: &Layout,
         damage: &mut Region,
     ) -> Option<SheetOutcome> {
-        let (restore, done) = footer_split(rect, scale);
-        if let Some(rect) = restore {
+        if let Some(rect) = layout.restore {
             if let Some(ButtonAction::Activated) = self.restore.on_pointer(event, rect, damage) {
-                self.focus = Focus::Restore;
+                self.focus_on(Focus::Restore, layout, damage);
                 return Some(SheetOutcome::Restore);
             }
         }
-        if let Some(rect) = done {
+        if let Some(rect) = layout.done {
             if let Some(ButtonAction::Activated) = self.done.on_pointer(event, rect, damage) {
-                self.focus = Focus::Done;
+                self.focus_on(Focus::Done, layout, damage);
                 return Some(SheetOutcome::Dismissed);
             }
         }
         None
     }
 
-    /// The control rectangle of the focused slider row, as the body last laid
-    /// it out — the very rectangle the pointer path hit-tests and the renderer
-    /// draws into. `None` where the body is unsizeable or the focus is not a
-    /// slider row.
-    fn focused_slider_rect(
-        &self,
-        body: Option<Rect>,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) -> Option<Rect> {
-        let offset = self.scroll.model().offset();
-        self.laid_out_rows(body?, offset, scale, theme, font)
-            .into_iter()
-            .find(|(row, _)| *row == self.focus)
-            .map(|(_, rect)| split_row(rect, scale).1)
-    }
-
     /// Dispatch one key press to whichever element currently holds focus.
     ///
-    /// The rectangles are the tab strip, the focused slider, and the scrollbar
-    /// as the sheet last laid them out, and are empty where a window too small
-    /// to draw that element leaves it no pixels to report.
+    /// Every rectangle comes from `layout`, so a window too small to draw the
+    /// focused element hands it an empty one: the edit still lands and simply
+    /// reports no pixels.
     fn dispatch_key(
         &mut self,
         key: Key,
-        tabs: Rect,
-        slider: Rect,
-        scrollbar: Rect,
+        layout: &Layout,
+        scale: Scale,
+        font: BitmapFont,
         damage: &mut Region,
     ) -> SheetOutcome {
-        match self.focus {
+        let focus = self.focus;
+        let row = layout.rect_of(focus);
+        // A slider is drawn in the trailing half of its row, so that is the
+        // rectangle it is keyed against — the same split the renderer and the
+        // pointer path use.
+        let slider = split_row(row, scale).1;
+        let tabs = layout.tabs.unwrap_or(Rect::EMPTY);
+        match focus {
             Focus::Tabs => {
                 if let Some(TabsAction::Selected { index }) = self.tabs.on_key(key, tabs, damage) {
-                    self.tabs.set_selected(index, tabs, damage);
+                    self.select_tab(index, layout, damage);
                 }
                 SheetOutcome::Changed
             }
@@ -1030,32 +1129,35 @@ impl Settings {
                 .and_then(|r| r.on_key(key))
             {
                 Some(SelectorAction::Set { on: true }) => {
-                    self.set_scheme(index);
+                    self.set_scheme(index, layout, damage);
                     SheetOutcome::Settled
                 }
                 _ => SheetOutcome::Changed,
             },
             Focus::TextSize => match self.text_size.on_key(key, slider, damage) {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_font_size_permille(permille);
+                    self.set_font_size_permille(permille, row, damage);
                     SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },
-            Focus::Swatches => match self.swatches.on_key(key) {
-                Some(SwatchAction::Selected { .. }) => {
-                    self.sync_channel_sliders();
-                    SheetOutcome::Changed
+            Focus::Swatches => {
+                let (_, grid) = swatch_caption_split(row, scale, font);
+                match self.swatches.on_key(key, grid, damage) {
+                    Some(SwatchAction::Selected { .. }) => {
+                        self.adopt_selected_well(layout, damage);
+                        SheetOutcome::Changed
+                    }
+                    None => SheetOutcome::Changed,
                 }
-                None => SheetOutcome::Changed,
-            },
+            }
             Focus::Channel(index) => match self
                 .channel_sliders
                 .get_mut(index)
                 .and_then(|s| s.on_key(key, slider, damage))
             {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_channel_permille(index, permille);
+                    self.set_channel_permille(index, permille, layout, damage);
                     SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
@@ -1066,15 +1168,22 @@ impl Settings {
                 .and_then(|s| s.on_key(key, slider, damage))
             {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_effect_permille(index, permille);
+                    self.set_effect_permille(index, permille, row, damage);
                     SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },
             // The bar holds the sheet's only scroll position and has already
-            // moved it, so the action needs no write-back.
+            // moved it, so the action needs no write-back. Its rows scroll
+            // with it, so the body it moves is the scope.
             Focus::Scroll => {
-                let _ = self.scroll.on_key(key, scrollbar, damage);
+                if self
+                    .scroll
+                    .on_key(key, layout.scrollbar.unwrap_or(Rect::EMPTY), damage)
+                    .is_some()
+                {
+                    damage.add(layout.body.unwrap_or(Rect::EMPTY));
+                }
                 SheetOutcome::Changed
             }
             Focus::Restore => match self.restore.on_key(key) {
@@ -1089,16 +1198,24 @@ impl Settings {
     }
 
     /// Commit a scheme choice at `index`, clamp, and re-sync every radio.
-    fn set_scheme(&mut self, index: usize) {
+    ///
+    /// The custom editor's caption reads off the same field, so it is redrawn
+    /// with the radios.
+    fn set_scheme(&mut self, index: usize, layout: &Layout, damage: &mut Region) {
         if let Some(scheme) = Scheme::ALL.get(index).copied() {
             self.profile.scheme = scheme;
             self.profile.clamp();
         }
-        self.sync_scheme_radios();
+        self.sync_scheme_radios(layout, damage);
+        damage.add(layout.rect_of(Focus::Swatches));
     }
 
     /// Commit a text-size request, clamp, and reflect the clamped value.
-    fn set_font_size_permille(&mut self, permille: u16) {
+    ///
+    /// `row` is the whole row the value is drawn in: the slider shows it as a
+    /// knob position and the label beside it spells it out, so a report of the
+    /// control alone would leave a stale number on screen.
+    fn set_font_size_permille(&mut self, permille: u16, row: Rect, damage: &mut Region) {
         self.profile.font_size_px =
             bounded_from_permille(permille, MIN_FONT_SIZE_PX, MAX_FONT_SIZE_PX);
         self.profile.clamp();
@@ -1107,12 +1224,22 @@ impl Settings {
             MIN_FONT_SIZE_PX,
             MAX_FONT_SIZE_PX,
         ));
+        damage.add(row);
     }
 
     /// Commit a channel request for the selected well, apply it onto the
     /// custom scheme, and reflect the (never-clamped, channels have no
     /// tighter bound than their own type) value back into the slider.
-    fn set_channel_permille(&mut self, channel: usize, permille: u16) {
+    ///
+    /// The well itself is repainted in the new colour, so the swatch row is in
+    /// scope alongside the channel's own.
+    fn set_channel_permille(
+        &mut self,
+        channel: usize,
+        permille: u16,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
         let selected = self.swatches.selected();
         let mut color = self.swatches.color(selected).unwrap_or_default();
         let value = channel_from_permille(permille);
@@ -1128,6 +1255,8 @@ impl Settings {
         if let Some(slider) = self.channel_sliders.get_mut(channel) {
             slider.set_value(permille_from_channel(value));
         }
+        damage.add(layout.rect_of(Focus::Channel(channel)));
+        damage.add(layout.rect_of(Focus::Swatches));
     }
 
     /// The current channel value (`0..=255`) of the selected well.
@@ -1145,7 +1274,10 @@ impl Settings {
 
     /// Commit an effect request from the slider at `index`, clamp, and
     /// reflect the clamped value back onto that slider's own travel.
-    fn set_effect_permille(&mut self, index: usize, permille: u16) {
+    ///
+    /// `row` is the whole row, because the label beside the slider spells the
+    /// percentage out.
+    fn set_effect_permille(&mut self, index: usize, permille: u16, row: Rect, damage: &mut Region) {
         let Some(&key) = EffectKey::ALL.get(index) else {
             return;
         };
@@ -1158,6 +1290,7 @@ impl Settings {
         if let Some(slider) = self.effect_sliders.get_mut(index) {
             slider.set_value(effect_permille(key, clamped));
         }
+        damage.add(row);
     }
 
     /// Show `profile` instead of the one being edited, rebuilding every
@@ -1169,7 +1302,7 @@ impl Settings {
     /// than assuming this application's own compiled defaults.
     pub fn adopt(&mut self, profile: Profile) {
         self.profile = profile;
-        self.sync_scheme_radios();
+        self.sync_scheme_radios(&Layout::nowhere(), &mut damage::sink());
         self.text_size.set_value(permille_from_bounded(
             self.profile.font_size_px,
             MIN_FONT_SIZE_PX,

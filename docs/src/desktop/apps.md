@@ -83,9 +83,9 @@ The graphical terminal is the first consumer: its settings sheet is a popup
 one menu chain ([Menus](menus.md)).
 
 An overlay's picture is **retained between frames**, exactly as the terminal's
-grid picture is, and its paint is scoped to what its controls reported. The
-sheet's `Slider`s, `Toggle`s and rows already report the rectangles they change
-into the shared damage sink ([Controls](../lib/controls.md)); the terminal's
+grid picture is, and its paint is scoped to what the round reported. The
+sheet's `Slider`s, `Toggle`s and rows report the rectangles they change into
+the shared damage sink ([Controls](../lib/controls.md)); the terminal's
 `SheetScreen` is what those reports are worth something to — it clips the
 render to them and presents only that rectangle. Without it a slider drag cost
 the whole sheet per pointer sample: a screen-sized surface allocated afresh,
@@ -94,6 +94,19 @@ several dozen times a second, so the knob lagged the pointer. A change no
 control could have reported — a re-theme, a new scale, a profile adopted from
 the store, a frame region the session took back — covers the sheet instead,
 which is that change's true scope (`AGENTS.md` §28).
+
+**A control's own report is never the whole scope.** An overlay composes state
+*above* its controls, and every such change is the overlay's to report or the
+retained picture keeps showing the old one. Four kinds are the host's, and the
+sheet resolves its geometry once per routing pass so each report names the very
+rectangle the control was hit-tested and drawn in: switching a tab replaces
+every row of the body and re-clamps the bar beside it, so both bands are the
+scope; a value written back into a control is also spelled out in the label
+next to it, so the whole row is; a scroll moves every row, so the body is; and
+a mark of the host's own — keyboard focus, the scheme dot, the channels the
+selected colour well points the sliders at — costs the elements it moves
+between. A host that scopes its paint to its controls' reports alone leaves the
+tab it came from on screen (`plans/GUI-TERMINAL.md` §9).
 
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 

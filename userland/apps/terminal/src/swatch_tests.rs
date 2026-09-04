@@ -1,5 +1,6 @@
 //! Unit tests for the colour-well grid.
 
+use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_theme::Theme;
@@ -76,9 +77,9 @@ fn new_grid_selects_the_first_well() {
 #[test]
 fn set_selected_ignores_an_out_of_range_index() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
-    grid.set_selected(WELL_COUNT);
+    grid.adopt_selected(WELL_COUNT);
     assert_eq!(grid.selected(), 0);
-    grid.set_selected(5);
+    grid.adopt_selected(5);
     assert_eq!(grid.selected(), 5);
 }
 
@@ -90,10 +91,10 @@ fn pointer_press_and_release_over_the_same_well_selects_it() {
     // Well 4 ("Black") is the first cell of the second row, in the grid's
     // second column band from the left within the test bounds.
     let point = well_centre(4);
-    grid.on_pointer(&moved(point.x, point.y), bounds());
-    assert_eq!(grid.on_pointer(&PRESS, bounds()), None);
+    grid.on_pointer(&moved(point.x, point.y), bounds(), &mut damage::sink());
+    assert_eq!(grid.on_pointer(&PRESS, bounds(), &mut damage::sink()), None);
     assert_eq!(
-        grid.on_pointer(&RELEASE, bounds()),
+        grid.on_pointer(&RELEASE, bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 4 })
     );
     assert_eq!(grid.selected(), 4);
@@ -104,19 +105,33 @@ fn releasing_over_a_different_well_does_not_select() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
     let press_point = well_centre(0);
     let release_point = well_centre(10);
-    grid.on_pointer(&moved(press_point.x, press_point.y), bounds());
-    grid.on_pointer(&PRESS, bounds());
-    grid.on_pointer(&moved(release_point.x, release_point.y), bounds());
-    assert_eq!(grid.on_pointer(&RELEASE, bounds()), None);
+    grid.on_pointer(
+        &moved(press_point.x, press_point.y),
+        bounds(),
+        &mut damage::sink(),
+    );
+    grid.on_pointer(&PRESS, bounds(), &mut damage::sink());
+    grid.on_pointer(
+        &moved(release_point.x, release_point.y),
+        bounds(),
+        &mut damage::sink(),
+    );
+    assert_eq!(
+        grid.on_pointer(&RELEASE, bounds(), &mut damage::sink()),
+        None
+    );
     assert_eq!(grid.selected(), 0);
 }
 
 #[test]
 fn pointer_outside_every_well_selects_nothing() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
-    grid.on_pointer(&moved(-100, -100), bounds());
-    grid.on_pointer(&PRESS, bounds());
-    assert_eq!(grid.on_pointer(&RELEASE, bounds()), None);
+    grid.on_pointer(&moved(-100, -100), bounds(), &mut damage::sink());
+    grid.on_pointer(&PRESS, bounds(), &mut damage::sink());
+    assert_eq!(
+        grid.on_pointer(&RELEASE, bounds(), &mut damage::sink()),
+        None
+    );
 }
 
 /// The centre point of well `index`'s cell within [`bounds`], for driving
@@ -134,29 +149,92 @@ fn well_centre(index: usize) -> Point {
     )
 }
 
+// --- Reporting what changed ------------------------------------------------
+
+#[test]
+fn selecting_another_well_reports_the_two_the_mark_moves_between() {
+    let mut grid = SwatchGrid::from_scheme(&scheme());
+    let point = well_centre(7);
+    let mut damage = damage::sink();
+    grid.on_pointer(&moved(point.x, point.y), bounds(), &mut damage);
+    grid.on_pointer(&PRESS, bounds(), &mut damage);
+    assert!(
+        damage.is_empty(),
+        "the grid draws no press look, so arming reports nothing"
+    );
+
+    let mut damage = damage::sink();
+    assert_eq!(
+        grid.on_pointer(&RELEASE, bounds(), &mut damage),
+        Some(SwatchAction::Selected { index: 7 })
+    );
+    let reported = damage.bounds();
+    assert!(
+        reported.contains(well_centre(0)),
+        "the well the mark left must be redrawn"
+    );
+    assert!(
+        reported.contains(well_centre(7)),
+        "and the well it arrived on"
+    );
+}
+
+#[test]
+fn a_keyed_move_reports_both_wells() {
+    let mut grid = SwatchGrid::from_scheme(&scheme());
+    let mut damage = damage::sink();
+    assert_eq!(
+        grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage),
+        Some(SwatchAction::Selected { index: 1 })
+    );
+    let reported = damage.bounds();
+    assert!(reported.contains(well_centre(0)));
+    assert!(reported.contains(well_centre(1)));
+}
+
+#[test]
+fn a_pointer_event_over_no_well_reports_nothing() {
+    let mut grid = SwatchGrid::from_scheme(&scheme());
+    let mut damage = damage::sink();
+    grid.on_pointer(&moved(-100, -100), bounds(), &mut damage);
+    assert_eq!(grid.on_pointer(&RELEASE, bounds(), &mut damage), None);
+    assert!(
+        damage.is_empty(),
+        "the last pointer position is hit-testing input, never drawn"
+    );
+}
+
+#[test]
+fn an_unhandled_key_reports_nothing() {
+    let mut grid = SwatchGrid::from_scheme(&scheme());
+    let mut damage = damage::sink();
+    assert_eq!(grid.on_key(Key::Char('x'), bounds(), &mut damage), None);
+    assert!(damage.is_empty());
+}
+
 // --- Keyboard navigation ---------------------------------------------------
 
 #[test]
 fn right_and_left_move_the_selection_by_one_well_and_wrap() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Right)),
+        grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 1 })
     );
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Left)),
+        grid.on_key(Key::Named(NamedKey::Left), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 0 })
     );
     // Left from the first well wraps to the last.
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Left)),
+        grid.on_key(Key::Named(NamedKey::Left), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected {
             index: WELL_COUNT - 1
         })
     );
     // Right from the last well wraps back to the first.
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Right)),
+        grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 0 })
     );
 }
@@ -165,16 +243,16 @@ fn right_and_left_move_the_selection_by_one_well_and_wrap() {
 fn down_and_up_move_by_one_row_and_wrap_within_the_column() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Down)),
+        grid.on_key(Key::Named(NamedKey::Down), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 5 })
     );
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Up)),
+        grid.on_key(Key::Named(NamedKey::Up), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 0 })
     );
     // Up from row 0 wraps to the last row of the same column.
     assert_eq!(
-        grid.on_key(Key::Named(NamedKey::Up)),
+        grid.on_key(Key::Named(NamedKey::Up), bounds(), &mut damage::sink()),
         Some(SwatchAction::Selected { index: 15 })
     );
 }
@@ -182,7 +260,10 @@ fn down_and_up_move_by_one_row_and_wrap_within_the_column() {
 #[test]
 fn an_unhandled_key_is_ignored() {
     let mut grid = SwatchGrid::from_scheme(&scheme());
-    assert_eq!(grid.on_key(Key::Char('x')), None);
+    assert_eq!(
+        grid.on_key(Key::Char('x'), bounds(), &mut damage::sink()),
+        None
+    );
     assert_eq!(grid.selected(), 0);
 }
 
@@ -207,11 +288,11 @@ fn the_selected_well_draws_a_shape_mark_distinct_from_an_unselected_well() {
     // Every well in the contrast scheme's ANSI slot 7 ("White") differs from
     // the accent ring/mark colours, so any extra pixel drawn over an
     // unselected well is exactly the selection mark.
-    grid.set_selected(0);
+    grid.adopt_selected(0);
     let mut unselected = tairix_raster::Surface::new(W, H).expect("surface");
     grid.render(&mut unselected, bounds(), Scale::ONE, &theme);
 
-    grid.set_selected(3);
+    grid.adopt_selected(3);
     let mut selected = tairix_raster::Surface::new(W, H).expect("surface");
     grid.render(&mut selected, bounds(), Scale::ONE, &theme);
 

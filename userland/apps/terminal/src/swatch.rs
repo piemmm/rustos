@@ -15,7 +15,8 @@
 //! [`SwatchGrid::apply_to`] writes them back; the two are exact inverses of
 //! each other.
 
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_controls::damage;
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Contrast, Theme};
@@ -135,8 +136,14 @@ impl SwatchGrid {
         self.selected
     }
 
-    /// Select well `index`; an out-of-range index is ignored (fail closed).
-    pub fn set_selected(&mut self, index: usize) {
+    /// Adopt well `index` as the selected one without reporting, for a caller
+    /// composing or rebuilding the grid and presenting it whole; an
+    /// out-of-range index is ignored (fail closed).
+    ///
+    /// The interactive move is [`on_pointer`](Self::on_pointer) /
+    /// [`on_key`](Self::on_key), which report the two wells the mark moves
+    /// between. A rebuild has no layout to resolve those rectangles against.
+    pub fn adopt_selected(&mut self, index: usize) {
         if index < WELL_COUNT {
             self.selected = index;
         }
@@ -240,7 +247,15 @@ impl SwatchGrid {
 
     /// Feed a pointer event; a primary press-and-release completed over the
     /// same well selects it.
-    pub fn on_pointer(&mut self, event: &InputEvent, bounds: Rect) -> Option<SwatchAction> {
+    ///
+    /// The press latch and the last pointer position are hit-testing
+    /// bookkeeping and draw nothing, so only a moved selection reports.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<SwatchAction> {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = *to;
         }
@@ -257,10 +272,7 @@ impl SwatchGrid {
             } => {
                 let armed = self.armed.take();
                 match (armed, over) {
-                    (Some(a), Some(o)) if a == o => {
-                        self.selected = o;
-                        Some(SwatchAction::Selected { index: o })
-                    }
+                    (Some(a), Some(o)) if a == o => Some(self.select(o, bounds, damage)),
                     _ => None,
                 }
             }
@@ -271,7 +283,7 @@ impl SwatchGrid {
     /// Feed a key event; Left/Right move the selection by one well, wrapping
     /// from the last well to the first (and back); Up/Down move by one row,
     /// wrapping within the same column.
-    pub fn on_key(&mut self, key: Key) -> Option<SwatchAction> {
+    pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<SwatchAction> {
         let columns = to_i32(u32::try_from(COLUMNS).unwrap_or(1));
         let delta = match key {
             Key::Named(NamedKey::Right) => 1,
@@ -283,8 +295,25 @@ impl SwatchGrid {
         let len = to_i32(u32::try_from(WELL_COUNT).unwrap_or(1));
         let current = to_i32(u32::try_from(self.selected).unwrap_or(0));
         let next = usize::try_from(current.wrapping_add(delta).rem_euclid(len.max(1))).unwrap_or(0);
-        self.selected = next;
-        Some(SwatchAction::Selected { index: next })
+        Some(self.select(next, bounds, damage))
+    }
+
+    /// Move the selection mark onto well `index`, reporting the well it left
+    /// and the one it arrives on.
+    ///
+    /// A re-selection of the same well is still a completed interaction, so
+    /// this always answers the action; only the report is conditional.
+    fn select(&mut self, index: usize, bounds: Rect, damage: &mut Region) -> SwatchAction {
+        damage::move_mark(
+            Some(self.selected),
+            Some(index),
+            |well| {
+                cell_rect(bounds, well).map(|(x, y, w, h)| Rect::new(to_i32(x), to_i32(y), w, h))
+            },
+            damage,
+        );
+        self.selected = index;
+        SwatchAction::Selected { index }
     }
 }
 
@@ -442,9 +471,9 @@ fn axis_span(index: usize, count: usize, total: u32) -> Option<(u32, u32)> {
 /// `None` if `index` is out of range or `bounds` collapses.
 ///
 /// Wells share `bounds` evenly across [`COLUMNS`] columns and [`ROWS`] rows;
-/// this is the one layout both [`SwatchGrid::render`] and
-/// [`SwatchGrid::on_pointer`] read, so drawing and hit-testing can never
-/// disagree.
+/// this is the one layout [`SwatchGrid::render`], [`SwatchGrid::on_pointer`]
+/// and the selection report all read, so drawing, hit-testing and damage can
+/// never disagree.
 fn cell_rect(bounds: Rect, index: usize) -> Option<(u32, u32, u32, u32)> {
     if index >= WELL_COUNT {
         return None;

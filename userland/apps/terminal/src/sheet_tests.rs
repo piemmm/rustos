@@ -6,8 +6,10 @@
 //! paint can never leave a stale pixel on screen. What a real drag reports is
 //! [`crate::settings`]'s own to assert.
 
-use tairix_geometry::{Point, Rect, Scale};
-use tairix_input::{InputEvent, PointerButton};
+use tairix_controls::damage;
+use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use super::SheetScreen;
@@ -163,4 +165,153 @@ fn a_scoped_paint_leaves_the_picture_a_whole_one_would() {
     whole.invalidate();
     assert_eq!(whole.paint(&sheet, viewport, SCALE, &theme), viewport);
     assert_eq!(whole.surface().pixels(), scoped.surface().pixels());
+}
+
+/// Drive `gesture` into a sheet through the screen's own sink, paint what it
+/// reported, and assert the retained picture now holds what a whole repaint of
+/// the same sheet would.
+///
+/// This is the property every report exists to keep, and the only one that
+/// catches an under-report: a change the sheet made but did not name shows up
+/// here as pixels the screen is still showing and should not be.
+fn reports_cover_the_gesture(
+    label: &str,
+    gesture: impl Fn(&mut Settings, Rect, &Theme, &mut Region),
+) {
+    let theme = theme();
+    let (mut scoped, mut sheet, viewport) = opened();
+    assert_eq!(scoped.paint(&sheet, viewport, SCALE, &theme), viewport);
+
+    gesture(&mut sheet, viewport, &theme, scoped.sink());
+    scoped.paint(&sheet, viewport, SCALE, &theme);
+
+    // A picture with nothing on it yet paints the sheet the gesture left,
+    // whole, so it is what the screen ought to be showing.
+    let (mut whole, ..) = opened();
+    assert_eq!(whole.paint(&sheet, viewport, SCALE, &theme), viewport);
+    assert_eq!(
+        stale_area(scoped.surface(), whole.surface()),
+        Rect::EMPTY,
+        "{label}: the scoped paint left pixels a whole one would not"
+    );
+}
+
+/// The rectangle enclosing every pixel of `shown` that differs from `owed`, so
+/// a failure names where the missing report was rather than dumping two
+/// pictures.
+fn stale_area(shown: &Surface, owed: &Surface) -> Rect {
+    let width = shown.width().min(owed.width());
+    if width == 0 {
+        return Rect::EMPTY;
+    }
+    let mut area = damage::sink();
+    for (index, (a, b)) in shown.pixels().iter().zip(owed.pixels()).enumerate() {
+        if a == b {
+            continue;
+        }
+        let Ok(index) = u32::try_from(index) else {
+            break;
+        };
+        let (Ok(x), Ok(y)) = (i32::try_from(index % width), i32::try_from(index / width)) else {
+            break;
+        };
+        area.add(Rect::new(x, y, 1, 1));
+    }
+    area.bounds()
+}
+
+/// One key press with no modifiers.
+fn press_key(
+    sheet: &mut Settings,
+    viewport: Rect,
+    theme: &Theme,
+    damage: &mut Region,
+    key: NamedKey,
+) {
+    sheet.on_key(
+        Key::Named(key),
+        Modifiers::default(),
+        viewport,
+        SCALE,
+        theme,
+        damage,
+    );
+}
+
+#[test]
+fn switching_tabs_repaints_the_body_it_replaced() {
+    reports_cover_the_gesture("keyboard tab switch", |sheet, viewport, theme, damage| {
+        // Focus opens on the tab strip, so this moves the cursor to the next
+        // tab and chooses it without disturbing anything else.
+        press_key(sheet, viewport, theme, damage, NamedKey::Right);
+        press_key(sheet, viewport, theme, damage, NamedKey::Enter);
+    });
+}
+
+#[test]
+fn walking_the_focus_order_repaints_the_rings_it_moves() {
+    reports_cover_the_gesture("tab traversal", |sheet, viewport, theme, damage| {
+        for _ in 0..4 {
+            press_key(sheet, viewport, theme, damage, NamedKey::Tab);
+        }
+    });
+}
+
+#[test]
+fn editing_from_the_keyboard_repaints_the_label_beside_the_control() {
+    reports_cover_the_gesture("keyed edit", |sheet, viewport, theme, damage| {
+        // Past the strip onto the first row, then along the focus order
+        // editing whatever each row offers `End`.
+        for _ in 0..3 {
+            press_key(sheet, viewport, theme, damage, NamedKey::Tab);
+            press_key(sheet, viewport, theme, damage, NamedKey::End);
+        }
+    });
+}
+
+#[test]
+fn every_press_the_sheet_claims_repaints_what_it_changed() {
+    // A press-drag-release at each node of a grid over the whole sheet, each
+    // on a sheet of its own: a lattice this fine lands on every band, every
+    // row, and every gap between them, so no path is asserted only in the
+    // abstract. The drag is what makes a slider commit a value it must then
+    // redraw its label for.
+    const STEP: u32 = 12;
+
+    let (_, _, viewport) = opened();
+    for down in 0..viewport.height / STEP {
+        for across in 0..viewport.width / STEP {
+            let (Ok(x), Ok(y)) = (i32::try_from(across * STEP), i32::try_from(down * STEP)) else {
+                continue;
+            };
+            let at = Point::new(viewport.left() + x, viewport.top() + y);
+            let drag = i32::try_from(STEP * 2).unwrap_or(0);
+            reports_cover_the_gesture(
+                &alloc::format!("press at {at:?}"),
+                |sheet, viewport, theme, damage| {
+                    for event in [
+                        InputEvent::PointerMoved { to: at },
+                        InputEvent::PointerPressed {
+                            button: PointerButton::Primary,
+                        },
+                        // Diagonal and both ways, so one drag exercises a
+                        // horizontal control's travel and a vertical bar's
+                        // alike, and neither is left clamped at an end it
+                        // started on.
+                        InputEvent::PointerMoved {
+                            to: Point::new(at.x - drag, at.y - drag),
+                        },
+                        InputEvent::PointerMoved {
+                            to: Point::new(at.x + drag, at.y + drag),
+                        },
+                        InputEvent::PointerReleased {
+                            button: PointerButton::Primary,
+                        },
+                    ] {
+                        sheet.on_pointer(&event, viewport, SCALE, theme, damage);
+                    }
+                },
+            );
+        }
+    }
 }
