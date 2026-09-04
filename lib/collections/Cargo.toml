@@ -1,6 +1,6 @@
 [package]
 name = "tairix-collections"
-description = "TAIRiX placeholder: no_std collections shared by TAIRiX."
+description = "TAIRiX shared no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), and the fixed 256-bit set. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,22 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The arch-neutral CPU-capability vocabulary the group-scan candidates are
+# gated on, shared with the Arch HAL from the one ABI definition.
+tairix-abi = { path = "../abi", version = "=0.0.0", default-features = false }
+# The self-optimising dispatch framework the group scan is selected through.
+# The selection algorithm allocates nothing, so the heap-backed `OpsTables`
+# this crate never builds stays switched off.
+tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
+# The hashers and the per-boot key a hash container is built over.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The one-shot cell holding the resolved group scan, so this crate is not a
+# second hand-rolled atomic state machine.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+
+[dev-dependencies]
+# Shared per-run seed / budget seam for the fuzz harness (never in a shipping
+# build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -71,6 +71,11 @@
 //!   charter section number in place of the reason it states; a reference to
 //!   another document (a plan, a `docs/` page, an RFC, a hardware manual)
 //!   passes when that document is named beside the section number
+//! - `miri`         — interpret the crates whose safety rests on a
+//!   hand-written `unsafe` core (`lib/collections`, `lib/hash`) under Miri,
+//!   the undefined-behaviour oracle a test suite cannot be: it checks that a
+//!   raw pointer stayed in bounds, that a slot was initialised before it was
+//!   read, and that two `&mut` never aliased
 //! - `model-check` — exhaustively model-check the Silver capability +
 //!   IPC state machine (an in-tree explicit-state checker; the TLA+
 //!   equivalent), failing closed on any invariant counterexample
@@ -93,7 +98,7 @@
 //!   need only a doc build, so they run ahead of the compile-heavy stages),
 //!   `clippy`, `test` (run 20× on a GitHub Actions runner to catch flaky
 //!   tests; once locally so a pre-push `ci` is not punishingly slow),
-//!   `cargo deny check`, `fuzz --quick`, `proptest --quick`,
+//!   `cargo deny check`, `fuzz --quick`, `proptest --quick`, `miri`,
 //!   the release crypto constant-time tests, and the image gate
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
 //!   runner: every test-executing stage (the host test matrix, the release

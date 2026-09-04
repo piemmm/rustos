@@ -112,6 +112,8 @@ pub fn is_published() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{is_published, publish, published, HashSeed};
+    use crate::build::{BuildSipHash13, Unseeded};
+    use core::hash::BuildHasher;
 
     #[test]
     fn bytes_and_words_agree() {
@@ -135,16 +137,25 @@ mod tests {
 
     /// The publication seam is process-global, so one test owns the whole
     /// lifecycle: unpublished, published once, and a second publication
-    /// refused. Splitting it across tests would race the shared cell.
+    /// refused — including the container shim's fail-closed constructor,
+    /// which reads the same cell. Splitting it across tests would race.
     #[test]
     fn publication_is_one_shot() {
         assert!(!is_published());
         assert_eq!(published(), None);
+        assert_eq!(BuildSipHash13::keyed().err(), Some(Unseeded));
 
         let first = HashSeed::from_words(0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00);
         assert_eq!(publish(first), Ok(()));
         assert!(is_published());
         assert_eq!(published(), Some(first));
+
+        let keyed = BuildSipHash13::keyed().expect("published");
+        assert_eq!(
+            keyed.hash_one(b"k"),
+            BuildSipHash13::with_seed(first).hash_one(b"k"),
+            "the shim must hash under the published key",
+        );
 
         let second = HashSeed::from_words(1, 2);
         assert_eq!(publish(second).map_err(|e| e.0), Err(second));

@@ -193,9 +193,10 @@ fn happy_path_runs_documented_init_order_and_halts() {
     assert_eq!(ready_count, Phase::ORDER.len());
 }
 
-/// Assert the three accelerated-routine-selection audit records the
-/// happy-path boot emits, in order: CRC-32C, page-zero, and the crypto
-/// SHA-256 backend-availability decision. On the host `TestArch` there is
+/// Assert the four accelerated-routine-selection audit records the
+/// happy-path boot emits, in order: CRC-32C, page-zero, the hash-table
+/// control-group scan, and the crypto SHA-256 backend-availability
+/// decision. On the host `TestArch` there is
 /// no CPU-feature HAL slice, so the common feature set is empty and each
 /// family falls closed to its portable/software baseline; the crypto
 /// power-on self-test passes, so no fatal `CryptoSelfTestFailed` is
@@ -222,12 +223,13 @@ fn assert_boot_routine_selection(audit_sink: &TestSink, audit_ids: &[u32]) {
     assert_eq!(field("chosen").as_deref(), Some("crc32c-portable"));
     assert_eq!(field("reason").as_deref(), Some("baseline"));
 
-    // Three families resolve at boot, recorded in this order: CRC-32C
-    // (asserted above), page-zero, and the crypto SHA-256 backend-availability
-    // decision. On the host TestArch the common set is empty, so each falls
-    // closed to its portable/software baseline — and the crypto self-verify
-    // (the FIPS known-answer power-on self-test) passed, so no fatal
-    // `CryptoSelfTestFailed` is emitted and the kernel did not halt early.
+    // Four families resolve at boot, recorded in this order: CRC-32C
+    // (asserted above), page-zero, the hash-table control-group scan, and the
+    // crypto SHA-256 backend-availability decision. On the host TestArch the
+    // common set is empty, so each falls closed to its portable/software
+    // baseline — and the crypto self-verify (the FIPS known-answer power-on
+    // self-test) passed, so no fatal `CryptoSelfTestFailed` is emitted and the
+    // kernel did not halt early.
     let selections: Vec<_> = audit_sink
         .snapshot()
         .into_iter()
@@ -235,8 +237,9 @@ fn assert_boot_routine_selection(audit_sink: &TestSink, audit_ids: &[u32]) {
         .collect();
     assert_eq!(
         selections.len(),
-        3,
-        "CRC-32C, page-zero, and crypto-sha256 families each record a selection: {:#?}",
+        4,
+        "CRC-32C, page-zero, hash-group-scan, and crypto-sha256 families each \
+         record a selection: {:#?}",
         audit_sink.snapshot(),
     );
     let page_zero = &selections[1];
@@ -254,7 +257,25 @@ fn assert_boot_routine_selection(audit_sink: &TestSink, audit_ids: &[u32]) {
     );
     assert_eq!(page_zero_field("reason").as_deref(), Some("baseline"));
 
-    let crypto = &selections[2];
+    let group_scan = &selections[2];
+    let group_scan_field = |key: &str| {
+        group_scan
+            .fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    assert_eq!(
+        group_scan_field("family").as_deref(),
+        Some("hash-group-scan")
+    );
+    assert_eq!(
+        group_scan_field("chosen").as_deref(),
+        Some("group-scan-portable")
+    );
+    assert_eq!(group_scan_field("reason").as_deref(), Some("baseline"));
+
+    let crypto = &selections[3];
     let crypto_field = |key: &str| {
         crypto
             .fields

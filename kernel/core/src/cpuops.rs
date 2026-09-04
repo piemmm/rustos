@@ -87,7 +87,7 @@ pub fn system_features() -> CpuFeatureSet {
 /// audit log, and run the boot-time cryptographic power-on self-test.
 ///
 /// Called once from [`crate::kernel_main`] after every core has contributed
-/// (so [`system_features`] is final). Two families resolve here:
+/// (so [`system_features`] is final). Four families resolve here:
 ///
 /// - **CRC-32C**: ARXFS's fast physical-integrity checksum runs through it
 ///   in-kernel, so on a core with the `crc32c*` / SSE4.2 instruction the
@@ -98,6 +98,12 @@ pub fn system_features() -> CpuFeatureSet {
 ///   block-zero instruction (`DC ZVA` / ERMS) it uses the hardware path
 ///   (self-verified bit-identical to the portable byte fill before it can be
 ///   selected). A pure capability decision, never benchmarked.
+/// - **Hash-table group scan**: every `lib/collections` hash container probes
+///   through it, so on a core with a vector unit the sixteen-lane control
+///   scan is one comparison rather than tens of scalar operations
+///   (self-verified bit-identical to the portable scan before it can be
+///   selected). Never benchmarked: the control bytes it reads are tags
+///   derived from the per-boot hash key.
 /// - **Crypto (SHA-256) backend availability**: an availability-only decision
 ///   whose self-verify is a FIPS known-answer self-test of the live SHA-256
 ///   path (`tairix_crypto::backend`). Never benchmarked (a benchmark must not
@@ -113,6 +119,7 @@ pub fn resolve_accelerated_ops(audit: &dyn Sink) -> bool {
     let features = system_features();
     record(audit, &tairix_crc32c::resolve(features));
     record(audit, &tairix_pagezero::resolve(features));
+    record(audit, &tairix_collections::group::resolve(features));
 
     let crypto = tairix_crypto::backend::resolve(features);
     record(audit, &crypto);

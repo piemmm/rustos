@@ -28,6 +28,7 @@ mod help_lint;
 mod image_apps;
 mod image_drivers;
 mod linkcheck;
+mod miri;
 mod model_check;
 mod netpeer;
 mod parallel;
@@ -65,6 +66,7 @@ pub enum Command {
     Fuzz,
     Proptest,
     FsSoak,
+    Miri,
     ModelCheck,
     SpecReview,
     CharterCite,
@@ -98,6 +100,7 @@ impl Command {
         Command::Fuzz,
         Command::Proptest,
         Command::FsSoak,
+        Command::Miri,
         Command::ModelCheck,
         Command::SpecReview,
         Command::CharterCite,
@@ -130,6 +133,7 @@ impl Command {
             "fuzz" => Command::Fuzz,
             "proptest" => Command::Proptest,
             "fssoak" => Command::FsSoak,
+            "miri" => Command::Miri,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
             "charter-cite" => Command::CharterCite,
@@ -164,6 +168,7 @@ impl Command {
             Command::Fuzz => "fuzz",
             Command::Proptest => "proptest",
             Command::FsSoak => "fssoak",
+            Command::Miri => "miri",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
             Command::CharterCite => "charter-cite",
@@ -216,6 +221,9 @@ impl Command {
             Command::FsSoak => {
                 "Soak arxfs/ext4/fat32 on a ≥1 GiB RAM volume for a wall-clock budget."
             }
+            Command::Miri => {
+                "Interpret the crates with a hand-written unsafe core under the UB oracle."
+            }
             Command::ModelCheck => {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
@@ -259,6 +267,7 @@ impl Command {
             Command::Fuzz => run_fuzz(ctx, args),
             Command::Proptest => run_proptest(ctx, args),
             Command::FsSoak => run_fssoak(ctx, args),
+            Command::Miri => miri::run(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
             Command::CharterCite => run_charter_cite(ctx),
@@ -1056,6 +1065,11 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // (fail-closed). The wall-clock soak is `cargo xtask proptest --soak`,
     // run outside `ci`.
     run_proptest(ctx, &[OsString::from("--once")])?;
+    // The undefined-behaviour oracle over the crates with a hand-written
+    // `unsafe` core. A green test suite says what the code computes; only an
+    // interpreter says whether a raw pointer stayed in bounds. Deterministic
+    // given its logged seed, and fails closed.
+    miri::run(ctx, &[])?;
     // re-run `lib/crypto`'s unit tests under release optimisation
     // (`[profile.release]` is `opt-level = 3`). The constant-time
     // comparison guarantee can be broken by the optimiser, so the charter
@@ -1145,7 +1159,7 @@ fn static_gate(
 ///
 /// The deterministic gates (`fmt`, `clippy`, the modularity checks,
 /// `help-lint`, `docs-check`, `cargo deny`, `supply-chain`, `model-check`,
-/// `spec-review`, `abi-check`, `c-header`, and the image gate) are
+/// `spec-review`, `abi-check`, `c-header`, `miri`, and the image gate) are
 /// pass/fail checks whose
 /// result cannot change between runs, so they run once, exactly as in `ci`.
 /// The repeated stages — the host test matrix, the release crypto
@@ -1193,6 +1207,10 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // This subsumes `ci`'s single-pass test, crypto-constant-time, fuzz, and
     // proptest stages.
     ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS), ci_long::REPS)?;
+
+    // The undefined-behaviour oracle is a deterministic gate, not a flake
+    // candidate, so it runs once here exactly as in `ci`.
+    miri::run(ctx, &[])?;
 
     // `cargo deny` streams its own summary, so it stays sequential (not in the
     // concurrent group), once, after the flake hunt.
@@ -1836,7 +1854,7 @@ fn tool_available(name: &str) -> bool {
 /// cargo-subcommand executable expects its subcommand name as the first
 /// argument, so it must be reached through `cargo` rather than invoked
 /// directly with `--version`.
-fn cargo_subcommand_available(ctx: &Context, sub: &str) -> bool {
+pub(crate) fn cargo_subcommand_available(ctx: &Context, sub: &str) -> bool {
     ctx.cargo()
         .args([sub, "--version"])
         .stdout(std::process::Stdio::null())

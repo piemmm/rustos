@@ -72,7 +72,7 @@ jobs:
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup component add clippy rustfmt rust-src llvm-tools-preview
+          rustup component add clippy rustfmt rust-src llvm-tools-preview miri
           rustc --version
           cargo --version
 

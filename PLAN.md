@@ -8656,7 +8656,7 @@ space so no passphrase reaches ring 0, NS-6 delete the hardcode.
 NS-1 is independent of the rest and closes the duplicate-mount reporting on
 its own.
 
-## COLLECTIONS — the shared container and hashing libraries (`plans/COLLECTIONS.md`)  **[IN PROGRESS — C0 done]**
+## COLLECTIONS — the shared container and hashing libraries (`plans/COLLECTIONS.md`)  **[IN PROGRESS — C0, C1 done]**
 
 **Dependencies:** none blocking. `lib/cpuops` (the group-scan ops table),
 `lib/rng` (the per-boot hash key), `lib/sync` (the concurrent tier's atomics
@@ -8691,7 +8691,7 @@ reach, rehashes, resident bytes per entry, allocations per operation), with
 
 **Increments.** C0 `lib/hash` (**done**); C1 `HashMap`/`HashSet` on a `lib/cpuops`
 group-scan ops table, plus a new `cargo xtask miri` stage over the unsafe
-cores; C2 `ArrayVec`/`SmallVec`/`ArrayString`/`RingBuf`; C3 `IntrusiveList`;
+cores (**done**); C2 `ArrayVec`/`SmallVec`/`ArrayString`/`RingBuf`; C3 `IntrusiveList`;
 C4 O(1) `LruMap`; C5 `RangeMap`/`RangeSet`; C6 `SlotMap`/`IdAllocator`/
 `BitVec`; C7 tagged `RadixTree`; C8 `IndexedHeap`/`TimerWheel`; C9 the
 concurrent tier (`SpscRing`, `MpscQueue`, `ConcurrentMap`) with loom models;

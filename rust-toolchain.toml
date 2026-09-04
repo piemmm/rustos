@@ -9,7 +9,7 @@
 # `cargo xtask ci`, and note the bump in the commit message.
 [toolchain]
 channel = "nightly-2026-07-03"
-components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt"]
+components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt", "miri"]
 targets = [
     "x86_64-unknown-none",
     "aarch64-unknown-none",

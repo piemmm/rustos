@@ -33,6 +33,7 @@ run rather than leaving you to guess which phase to blame. A measured warm run:
 | QEMU fixture cross-compiles | 148 s over 3 spawns | sequential (one per target) |
 | host test matrix | 77 s | one cargo invocation |
 | `clippy` host + 11 target passes | 73 s | sequential |
+| `miri` (the UB oracle over the hand-written `unsafe` cores) | 57 s | one process per crate, concurrent |
 | `docs-check`, and all 11 static gates | 22 s | static gates concurrent |
 
 The pipeline **cannot** be squeezed under ten minutes: the QEMU phase's

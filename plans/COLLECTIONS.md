@@ -1,7 +1,7 @@
 # COLLECTIONS — The shared container and hashing libraries
 
-Status: **in progress** — C0 landed; the containers are still to come. The
-ledger below is the authoritative record of what is left.
+Status: **in progress** — C0 and C1 landed; the remaining containers are still
+to come. The ledger below is the authoritative record of what is left.
 
 ## The ledger
 
@@ -19,7 +19,7 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | # | Increment | Delivers | Depends on | Status |
 |---|---|---|---|---|
 | C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **done** |
-| C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **planned** |
+| C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **done** |
 | C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf` | — | **planned** |
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **planned** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict | C1, C3 | **planned** |
@@ -34,13 +34,10 @@ detail becomes its done-state summary — nothing is appended, here or there.
 
 Binding under `AGENTS.md`. TAIRiX has `alloc` (`Vec`, `String`, `BTreeMap`,
 `BTreeSet`, `VecDeque`, `BinaryHeap`), one 256-bit fixed bitset, and — since
-C0 — `lib/hash`. There is still no hash map anywhere in the tree: `no_std`
-code reaches for `BTreeMap` instead and says so
-(`kernel/mem/src/dma.rs` — "`BTreeMap` rather than `HashMap` because this
-crate is `no_std`"), while `HashMap` appears only in host test mocks. The
-containers a kernel actually runs on — an intrusive list, a generational
-slot map, an interval map, a sparse radix index, a hierarchical bitmap, an
-O(1) LRU, a timing wheel, a lock-free ring — do not exist, so each subsystem
+C0 and C1 — `lib/hash` and the hash tier of `lib/collections`. The rest of the
+containers a kernel actually runs on — an intrusive list, a generational slot
+map, an interval map, a sparse radix index, a hierarchical bitmap, an O(1)
+LRU, a timing wheel, a lock-free ring — still do not exist, so each subsystem
 has grown its own.
 
 That is the defect this plan closes, and what remains of it is measurable
@@ -108,8 +105,10 @@ container, three container families need it, and putting it in
 
 Both hashers implement `core::hash::Hasher`, with integer writes
 little-endian and pointer-sized values widened to 64 bits, so a value hashes
-identically on every port. The `BuildHasher` shims the containers construct
-through land with C1, which is the first thing that needs one.
+identically on every port. `BuildSipHash13` and `BuildFastHash` are the
+`BuildHasher` shims a container constructs through; the first has no
+`Default` and its `keyed()` constructor refuses before a key is published, so
+a container cannot end up unkeyed by accident.
 
 Its only dependency is `lib/sync`, for the one-shot publication cell — the
 alternative was a second hand-rolled atomic state machine. It deliberately
@@ -117,10 +116,12 @@ does **not** depend on `lib/rng`: the seed is injected, so the crate stays
 free of external dependencies and host-testable, and the boot path decides
 where entropy comes from.
 
-**`lib/collections` — the containers.** Depends on `lib/hash` and, for the
-concurrent tier only, `lib/sync`. Nothing else. It never depends on
-`kernel/*`, `drivers/*`, or `userland/*`, so the existing layering holds
-unchanged.
+**`lib/collections` — the containers.** Depends on `lib/hash`; on `lib/cpuops`
+and the `lib/abi` capability vocabulary it gates on, for the hash table's
+group-scan ops table (§4.1); and on `lib/sync`, for the one-shot cell that
+holds the resolved scan and for the concurrent tier's atomics. Nothing else.
+It never depends on `kernel/*`, `drivers/*`, or `userland/*`, so the existing
+layering holds unchanged.
 
 ---
 
@@ -214,8 +215,13 @@ is not in this plan — see §6.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
-| `HashMap<K, V, S = SipHash13>` | O(1) expected lookup/insert/remove, no allocation on lookup | `BTreeMap` used as an unordered index across `kernel/*`, `lib/*`, `drivers/*` |
-| `HashSet<T, S = SipHash13>` | as above | `BTreeSet` used as an unordered set |
+| `HashMap<K, V, S>` | O(1) expected lookup/insert/remove, no allocation on lookup | `BTreeMap` used as an unordered index across `kernel/*`, `lib/*`, `drivers/*` |
+| `HashSet<T, S>` | as above | `BTreeSet` used as an unordered set. **No such site exists yet**: C1 surveyed every in-tree `BTreeSet` and each is either order-load-bearing (`kernel/sec`'s per-process thread set fans signals out in ascending id order; `kernel/sched/cfq`'s run queue is keyed on virtual runtime) or a handful of entries, where the ordered set is cheaper and a conversion would worsen the counters. The type is a zero-duplication wrapper over `HashMap<T, ()>`; C10 either lands its first caller or deletes it |
+
+`S` carries **no default**, though the two rows above once spelled one. A
+defaulted hasher is a `Default`-constructible hasher, which is precisely the
+silently-predictable key §3 refuses; requiring it at the construction site is
+what makes the choice visible in review.
 
 Open addressing with SIMD control-byte groups (the Swiss-table layout): one
 metadata byte per slot plus the entry, probed a group at a time. Chosen over
@@ -224,11 +230,19 @@ footprint — a `BTreeMap` pays pointer-chasing per level and partial node
 fill, which `drivers/filesystem/arxfs/src/dedupe.rs` already has a comment
 apologising for.
 
-* **Footprint target: ≤ 1.15 × `size_of::<(K, V)>()` per live entry** at the
-  87.5 % maximum load factor, versus a `BTreeMap` node's fill-dependent
-  overhead.
+* **Footprint target: ≤ 1.15 × (`size_of::<(K, V)>()` + one control byte) per
+  live entry** at the 87.5 % maximum load factor, versus a `BTreeMap` node's
+  fill-dependent overhead. The load factor alone costs 8/7 = 1.143, so the
+  budget is against the slot *and* its control byte; stated against the slot
+  alone it would be unreachable by arithmetic for any entry under ~160 bytes,
+  which is not a bar, only a miscount. Achieved: 19.43 bytes for a 16-byte
+  entry against a 19.55-byte budget — exactly 8/7 × (entry + 1), there being
+  no node, no partial fill, and no side table.
 * **Probe target: ≤ 1.5 group probes for a hit at maximum load**, counted
-  deterministically (§5), not timed.
+  deterministically (§5), not timed. Achieved: 1.12 with 7 168 live entries
+  at the limit, and 1.00 below it — a sixteen-lane group at that density
+  usually answers on its first scan. The `BTreeMap` it replaces takes 8.1 key
+  comparisons per lookup at 64 entries, 12.2 at 1 000, and 21.7 at 100 000.
 * The group scan is a `lib/cpuops` ops table — SSE2, NEON, and a portable
   scalar baseline — selected through the existing capability gate and
   mandatory self-verify. It is not a `cfg(target_arch)` fork, and the
@@ -329,10 +343,13 @@ uses:
   1 GiB-RAM machine with several 100 TB+ volumes' worth of keys, asserting
   bounded resident bytes and growth-then-fail-closed rather than a panic.
 
-An `unsafe`-heavy container needs an undefined-behaviour oracle, and the
-workspace has none today. **Adding a `cargo xtask miri` stage over the
-`lib/collections` and `lib/hash` unsafe cores is part of C1** — the first
-increment that introduces `unsafe` — and it joins `cargo xtask ci`.
+An `unsafe`-heavy container needs an undefined-behaviour oracle. `cargo xtask
+miri` is it: a registry of the crates whose safety rests on a hand-written
+`unsafe` core, interpreted under Stacked Borrows with strict provenance, in
+`ci` and in `ci-long`'s deterministic-gate set. Each listed crate scales its
+own sweeps down under `cfg(miri)` — the oracle is hunting undefined behaviour,
+which one pass over each code path already exposes, and the wide input search
+belongs to the ordinary and budgeted runs.
 
 ---
 
@@ -382,7 +399,7 @@ counter gates, its rustdoc, and its `docs/src/lib/` page.
 | # | Deletes |
 |---|---|
 | C0 | **done.** Six hand-rolled hashes: the FNV-1a folds in `lib/pagezero`'s self-verify fingerprint, `lib/net/src/iface.rs`'s and `lib/net/src/stack.rs`'s multicast revision counters, `kernel/tairix-kernel`'s build-provenance id, and `lib/fontface`'s rasterisation golden; and the unkeyed Fibonacci mixer in `kernel/core/src/futex.rs`'s bucket index |
-| C1 | `kernel/mem/src/dma.rs`'s `allocations` index, whose only iteration collects keys purely to avoid mutating while iterating. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
+| C1 | **done.** `kernel/mem/src/dma.rs`'s `allocations` `BTreeMap`, whose only iteration collected keys purely to avoid mutating while iterating, is now a `HashMap` under `BuildFastHash` — the keys are that allocator's own page-aligned window addresses and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. The carve reserves the record slot beside `ensure_slots`, before any frame is taken, so a bookkeeping refusal fails with nothing to roll back. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
 | C2 | `sysinfod`'s `heapless_vec`; the rings in `kernel/core/src/seat.rs`, `kernel/core/src/console.rs`, `kernel/core/src/boot_audit_ring.rs`, `lib/log/src/bootring.rs` |
 | C3 | the per-site intrusive-link handling it subsumes |
 | C4 | all six LRUs: `block_cache`, `transform_cache`, `launch_cache`, `fscache`, `arxfs/dedupe`, and the index inside `lib/reclaim/src/cache.rs`; **and the O(n) `lib/net/src/neigh.rs` scan** |

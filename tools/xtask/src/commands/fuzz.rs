@@ -59,6 +59,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/abi wire decoders (IPC + manifest headers)",
     },
     Target {
+        package: "tairix-collections",
+        test: "fuzz_collections",
+        description: "lib/collections hash map against a naive reference, over colliding key streams",
+    },
+    Target {
         package: "tairix-fontface",
         test: "fuzz_face",
         description: "lib/fontface TrueType parser + outline rasteriser",

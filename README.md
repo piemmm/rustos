@@ -72,6 +72,7 @@ for filesystems, the feature section below.
 | Fatal kernel-fault report (registers, backtrace, stop-the-world) | ◐ `#PF` only | ✓ | ✓ | — |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
 | Runtime CPU-feature dispatch (page-zero accel) | ✓ ERMS | ✓ DC ZVA | — baseline | — baseline |
+| Runtime CPU-feature dispatch (hash group-scan accel) | — baseline | ✓ NEON | — baseline | — baseline |
 | Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
 | Framebuffer / display | ✓ | ✓ | ▢ | ✓ |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |

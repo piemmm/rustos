@@ -22,7 +22,11 @@ use tairix_fuzzseed::Lcg;
 use tairix_hash::{FastHash, HashSeed, SipHash13};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 20_000;
+///
+/// Miri interprets every operation and is checking the one-shot publication
+/// cell's `unsafe`, which one pass already exercises; the wide input search
+/// belongs to the ordinary and budgeted runs.
+const SMOKE_ITERATIONS: u64 = if cfg!(miri) { 50 } else { 20_000 };
 
 /// Longest input drawn. Comfortably past the 32-byte stripe and the 8-byte
 /// word so every buffering boundary is exercised.

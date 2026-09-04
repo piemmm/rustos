@@ -63,6 +63,23 @@ same for its state (whose initial value is the key combined with public
 constants), so a key cannot reach a log through a derived `Debug` on an
 enclosing type.
 
+## Building a container's hasher
+
+A container stores a `BuildHasher` rather than a hasher, and asks it for a
+fresh one per key. The two shims are where the security decision is written
+down at the use site:
+
+| Shim | Construction | For |
+|---|---|---|
+| `BuildSipHash13` | `keyed()` — refuses with `Unseeded` before a key is published | keys an attacker can choose or influence |
+| `BuildSipHash13` | `with_seed(k)`, `UNKEYED` | a holder with its own key; a hash that is not a security decision |
+| `BuildFastHash` | `new()`, `with_seed(n)` | keys the kernel assigns itself |
+
+`BuildSipHash13` has no `Default`, so a container cannot end up keyed by
+accident: [`tairix-collections`](collections.md)'s `HashMap` takes its hasher
+explicitly and the choice is visible wherever a map is created. Its `Debug`
+redacts the key like `HashSeed`'s does.
+
 ## Consumers
 
 | Site | Hash | Why |
@@ -72,6 +89,7 @@ enclosing type.
 | `lib/pagezero`'s self-verify fingerprint | `FastHash` | The buffer is the crate's own scratch. |
 | `lib/net`'s multicast revision counters | `FastHash` | Folded over this host's own configured addresses. |
 | `kernel/tairix-kernel`'s build-provenance id | `FastHash` | Distinguishes developer working trees; the image's integrity guarantee is the reproducible build and signed SBOM. |
+| `kernel/mem`'s DMA-window allocation index | `FastHash` | The keys are that allocator's own page-aligned window addresses, and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. |
 
 ## Determinism across ports
 

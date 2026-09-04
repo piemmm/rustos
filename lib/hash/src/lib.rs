@@ -31,6 +31,12 @@
 //! [`HashSeed::UNKEYED`] explicitly, so the choice cannot be made by
 //! accident.
 //!
+//! # Containers
+//!
+//! A container stores a [`BuildHasher`](core::hash::BuildHasher) rather than a
+//! hasher: [`BuildSipHash13`] (whose [`keyed`](BuildSipHash13::keyed)
+//! constructor refuses an unpublished key) or [`BuildFastHash`].
+//!
 //! # Neither function is cryptographic
 //!
 //! `SipHash13` is a keyed PRF sized for hash-table defence, not a MAC: it is
@@ -42,10 +48,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod build;
 pub mod fast;
 pub mod seed;
 pub mod siphash;
 
+pub use build::{BuildFastHash, BuildSipHash13, Unseeded};
 pub use fast::FastHash;
 pub use seed::{is_published, publish, published, AlreadyPublished, HashSeed};
 pub use siphash::SipHash13;

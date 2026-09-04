@@ -38,6 +38,20 @@ decision and must work before the CSPRNG is up names `HashSeed::UNKEYED`
 explicitly. `HashSeed`'s `Debug` redacts the words, so a key cannot reach a log
 through a derived `Debug` on an enclosing type.
 
+## Building a container's hasher
+
+A container stores a `BuildHasher` and asks it for a fresh hasher per key. The
+two shims are where the choice is written down at the use site:
+
+| Shim | Construction | For |
+|---|---|---|
+| `BuildSipHash13` | `keyed()` — refuses with `Unseeded` before a key is published | keys an attacker can choose or influence |
+| `BuildSipHash13` | `with_seed(k)`, `UNKEYED` | a holder with its own key; a hash that is not a security decision |
+| `BuildFastHash` | `new()`, `with_seed(n)` | keys the kernel assigns itself |
+
+`BuildSipHash13` has no `Default`, so a container cannot end up unkeyed by
+accident: `tairix-collections`'s `HashMap` takes its hasher explicitly.
+
 ## Tests
 
 Unit tests live next to the code. Both implementations are pinned by published

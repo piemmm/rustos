@@ -773,6 +773,13 @@ dependencies = [
 [[package]]
 name = "tairix-collections"
 version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-cpuops",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-sync",
+]
 
 [[package]]
 name = "tairix-complete"
@@ -1881,6 +1888,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-api",
  "tairix-caps",
+ "tairix-collections",
  "tairix-cpuops",
  "tairix-crc32c",
  "tairix-crypto",
@@ -1952,9 +1960,11 @@ dependencies = [
  "proptest",
  "tairix-abi",
  "tairix-arch-api",
+ "tairix-collections",
  "tairix-compress",
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-kernel-mem",
  "tairix-log",
  "tairix-pagezero",
