@@ -251,9 +251,9 @@ the built-in glyph for that frame.
   worker is producing, what has come back, and what has already been answered.
   It holds no lock, no thread, and no syscall, so every rule it carries is a
   host test. It lives in `lib/icon` beside the `ArtworkResolver` contract it
-  implements, because the file manager pumps the same desk from its own event
-  loop (`plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
-  `userland/gui/*`. The `Run` binary adds the runtime's futex mutex, a
+  implements, because the file manager drives the same desk from its own
+  reader thread (`plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not
+  depend on `userland/gui/*`. The `Run` binary adds the runtime's futex mutex, a
   condition variable the worker parks on (never a spin), and the shared wake
   pipe the session's wait-set already watches.
 - The worker owns its **own** sandbox child, exactly as the wallpaper worker

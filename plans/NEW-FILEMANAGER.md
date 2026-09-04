@@ -324,15 +324,18 @@ user pick any. See FM6b below. FM6b is complete.
 - **The window never waits on a disk** (`AGENTS.md` §28). Every unbounded read
   the app makes runs on one reader thread: the directory the user navigated to
   (through `ListingDesk<FilesClient>`, committed by `Browser::resume`), the
-  folder cue every visible folder draws (recorded from inside the paint and
-  answered a frame later, so the paint performs no I/O at all), and the
-  three-program-store walk the *Open With…* chooser is built from. They share
-  one worker rather than taking one each — the app browses one place at a time,
-  so these are never concurrent workloads — and the sharing is what gives the
-  order they are served in a single stated answer: the listing first (the user
-  navigated and is waiting), then the cues (which decorate a listing already
-  shown), then the bundle scan (which no frame depends on). Nothing starves:
-  each request set is finite and refilled only by the user asking again.
+  icon artwork every visible tile draws (recorded on `tairix_icon::ArtworkDesk`
+  from inside the paint), the folder cue every visible folder draws (likewise
+  recorded from inside the paint and answered a frame later, so the paint
+  performs no I/O at all), and the three-program-store walk the *Open With…*
+  chooser is built from. They share one worker rather than taking one each —
+  the app browses one place at a time, so these are never concurrent workloads
+  — and the sharing is what gives the order they are served in a single stated
+  answer: the listing first (the user navigated and is waiting), then the
+  artwork (which the listing's own tiles are drawn from), then the cues (which
+  decorate a listing already shown), then the bundle scan (which no frame
+  depends on). Nothing starves: each request set is finite and refilled only by
+  the user asking again.
   - The one read left on the app's own task is `first_listable`, which runs
     before any window exists and answers *which* location to open — a question
     a deferred source cannot answer, since its first answer is always "not yet"
@@ -534,30 +537,33 @@ tile's kind at exactly the side `IconTile::icon_side` reserves, and the tile
 blits what it returns or draws the built-in glyph, so real icon artwork lands
 without a second draw path.
 
-**The decode is never inside the paint.** `crate::icons::IconPipeline` is the
-manager's resolution model: the shared reclaim-governed `ArtworkCache` bound to
+**The decode is never on the event loop at all.** `crate::icons::IconPipeline`
+is the manager's paint side: the shared reclaim-governed `ArtworkCache` bound to
+the resolver its misses go to. That resolver is the reader thread's
 `tairix_icon::ArtworkDesk`, the same deferred-decode desk the desktop session
-uses (`plans/FIX-DESKTOP.md` DESK-8). A tile that misses records the decode and
-draws its built-in glyph; the event loop runs **one** recorded decode per turn
-(`IconPipeline::pump`) between servicing input, and repaints when the desk runs
-dry — one whole-window pass per batch, because a present is a compositor round
-trip and far dearer than the decode that produced one tile. An answer the cache
-took is forgotten by the desk, so an icon it later evicts is decoded again
-rather than answered "not yet" for ever, and a band change re-offers what the
-cache *refused* (`IconPipeline::trim`). `draw_grid` asks only for the tiles on screen,
-so the desk only ever holds the visible set and there is no second definition
-of "what is on screen". Moving that per-turn decode onto the reader thread
-(below) is the remaining piece, staged as `plans/FIX-DESKTOP.md` DESK-12: it is
-milder than what DESK-11 removed — bounded to one asset and interleaved so
-input is served ahead of it — but it is still I/O the loop performs.
-Host-tested in `userland/apps/files/src/icons_tests.rs` (a paint
-performs no read and no sandbox round trip, the pump delivers what the paint
-recorded, a retained decode is never produced twice, every tier's refusal
+uses (`plans/FIX-DESKTOP.md` DESK-8/DESK-12). A tile that misses records the
+decode and draws its built-in glyph; the reader takes the job, reads and
+decodes it with nothing held (in its **own** sandbox child, so no sandbox
+handle crosses a thread), delivers, and nudges the loop once its artwork queue
+drains — one whole-window pass per batch, because a present is a compositor
+round trip and far dearer than the decode that produced one tile. The lock
+carries only the desk: the cache stays on the paint side, since a picture is
+handed out as a borrow into it and a borrow cannot outlive a guard. An answer
+the cache took is forgotten by the desk, so an icon it later evicts is decoded
+again rather than answered "not yet" for ever, and a band change re-offers what
+the cache *refused* (the pressure wake's `IconPipeline::trim` plus the desk's
+`retry_declined`). `draw_grid` asks only for the tiles on screen, so the desk
+only ever holds the visible set and there is no second definition of "what is
+on screen". A kernel that grants no reader thread leaves the read and the round
+trip in the paint, exactly where they used to be. Host-tested in
+`userland/apps/files/src/icons_tests.rs` (a paint performs no read and no
+sandbox round trip, the reader delivers what the paint recorded, a decode in
+flight is neither re-offered nor re-recorded, a delivery after teardown keeps
+nothing, a retained decode is never produced twice, every tier's refusal
 settles on the glyph, a declined decode is not re-asked until the band moves,
 and a whole window's grid keeps every tile's artwork across repaints and a
-scroll)
-— with the inline resolver's read-and-decode-in-the-paint cost pinned beside
-them so those assertions cannot go vacuous.
+scroll) — with the inline resolver's read-and-decode-in-the-paint cost pinned
+beside them so those assertions cannot go vacuous.
 
 The picker passes `NoArtwork`: it draws from built-in glyphs until it is given
 a cache of its own.

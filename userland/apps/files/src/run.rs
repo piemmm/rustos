@@ -146,7 +146,10 @@ mod program {
     use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_icon::{artwork_cache, ArtworkRasteriser, ArtworkReader, MAX_ARTWORK_BYTES};
+    use tairix_icon::{
+        artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
+        ArtworkReader, ArtworkResolver, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
+    };
     use tairix_input::{Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
@@ -166,6 +169,7 @@ mod program {
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
     use crate::deferred::{FilesClient, Probes};
     use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
+    use crate::icons::IconPipeline;
     use crate::listing::{self, ViewMark};
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
@@ -463,7 +467,7 @@ mod program {
         win: &mut OpenWindow,
         client: &mut WindowClient<RtWindowTransport>,
         theme: &Theme,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         scale: Scale,
         repaint: Repaint,
         damage: &Region,
@@ -521,7 +525,7 @@ mod program {
         win: &mut OpenWindow,
         client: &mut WindowClient<RtWindowTransport>,
         theme: &Theme,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno> {
         present_window(
@@ -650,7 +654,7 @@ mod program {
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
         role: Role,
@@ -728,7 +732,7 @@ mod program {
         desktop: &mut Desktop,
         places: &mut Places,
         theme: &Theme,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
@@ -903,7 +907,7 @@ mod program {
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
         location: Option<alloc::vec::Vec<String>>,
@@ -1301,19 +1305,21 @@ mod program {
     /// Everything the file manager reads off its event loop, and the one worker
     /// that reads it.
     ///
-    /// Three kinds of read used to happen on the loop that owes the window a
-    /// frame: the directory the user navigated to, the folder cue every visible
-    /// folder draws, and the three program stores the *Open With…* chooser is
-    /// built from. Each is a read of somebody's disk, so each froze the window
-    /// for as long as that disk took.
+    /// Four kinds of read used to happen on the loop that owes the window a
+    /// frame: the directory the user navigated to, the icon artwork every
+    /// visible tile draws, the folder cue every visible folder draws, and the
+    /// three program stores the *Open With…* chooser is built from. Each is a
+    /// read of somebody's disk, so each froze the window for as long as that
+    /// disk took.
     ///
     /// They share one worker rather than taking one each. The app browses one
     /// place at a time, so these are never concurrent workloads — and a shared
     /// worker gives the order they are served in a single, stated answer:
     ///
     /// 1. **the listing**, because the user navigated and is waiting for it;
-    /// 2. **the folder cues**, which decorate a listing already on screen;
-    /// 3. **the bundle scan**, which the chooser waits on but which no frame
+    /// 2. **the icon artwork**, which the listing's own tiles are drawn from;
+    /// 3. **the folder cues**, which decorate a listing already on screen;
+    /// 4. **the bundle scan**, which the chooser waits on but which no frame
     ///    depends on.
     ///
     /// Nothing can starve: each request set is finite and is refilled only by
@@ -1330,6 +1336,10 @@ mod program {
     /// rather than three that could interleave.
     struct Work {
         listings: ListingDesk<FilesClient>,
+        /// What the paints have asked to be decoded and what has come back.
+        /// Only the desk crosses this lock: the cache that keeps a picture
+        /// lends it as a borrow, which could not outlive a guard.
+        artwork: ArtworkDesk,
         probes: Probes,
         bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
         /// Set once the app is tearing down, so a parked worker leaves instead
@@ -1343,6 +1353,8 @@ mod program {
     enum Read {
         /// List this directory for the browser.
         List(Vec<String>),
+        /// Read and decode one tile's icon artwork.
+        Artwork(ArtworkJob),
         /// Probe these folders' occupancy as one batch.
         Probe(Vec<Vec<String>>),
         /// Walk the program stores for their declared file associations.
@@ -1355,6 +1367,7 @@ mod program {
             Self {
                 work: tairix_rt::sync::Mutex::new(Work {
                     listings: ListingDesk::new(),
+                    artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
                     bundles: tairix_util::defer::JobDesk::new(),
                     stopping: false,
@@ -1366,7 +1379,18 @@ mod program {
 
         /// One worker's whole life: park until something is wanted, read it,
         /// deliver it, wake the loop.
+        ///
+        /// The decoder seams are built here and reused for every later decode,
+        /// so no sandbox handle ever crosses a thread boundary.
         fn serve(&self) {
+            let mut reader = VfsArtworkReader;
+            let mut rasteriser = SandboxRasteriser {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+            };
+            // Whether a decode delivered since the last nudge still owes the
+            // loop one, so a batch drained without waking it cannot be
+            // stranded by a final job the desk no longer wants.
+            let mut artwork_owed = false;
             loop {
                 let job = {
                     let mut work = self.work.lock();
@@ -1390,6 +1414,24 @@ mod program {
                             .listings
                             .deliver(FilesClient::Browser, target, listed)
                     }
+                    Read::Artwork(job) => {
+                        // The shared decode, so deferring it cannot change
+                        // what a tile draws.
+                        let artwork =
+                            render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
+                        let (delivered, more) = {
+                            let mut work = self.work.lock();
+                            (work.artwork.deliver(&job, artwork), work.artwork.has_work())
+                        };
+                        artwork_owed |= delivered;
+                        // Waking on the drained queue rather than each icon
+                        // costs a folder of fifty bundles one repaint instead
+                        // of fifty; a lone icon empties the queue at once, so
+                        // it still lands the moment it is ready.
+                        let nudge = artwork_owed && !more;
+                        artwork_owed &= !nudge;
+                        nudge
+                    }
                     Read::Probe(batch) => {
                         let answers = probe_batch(&batch);
                         self.work.lock().probes.deliver(answers)
@@ -1409,6 +1451,9 @@ mod program {
         fn next_read(work: &mut Work) -> Option<Read> {
             if let Some((_, target)) = work.listings.next_job() {
                 return Some(Read::List(target));
+            }
+            if let Some(job) = work.artwork.next_job() {
+                return Some(Read::Artwork(job));
             }
             if let Some(batch) = work.probes.next_batch() {
                 return Some(Read::Probe(batch));
@@ -1439,6 +1484,57 @@ mod program {
                 self.signal.notify_one();
             }
             listing
+        }
+
+        /// Answer a paint's miss on `key` at `side`, recording the decode if
+        /// this desk has neither run it nor been asked for it already.
+        ///
+        /// Called from *inside a paint*, so it must never read: an undecoded
+        /// icon is `Pending`, the tile draws its built-in glyph, and the
+        /// pixels are drawn a frame later.
+        fn resolve_artwork(&self, key: &ArtworkKey, side: u32) -> Resolved {
+            let (answer, wanted) = {
+                let mut work = self.work.lock();
+                let answer = work.artwork.collect(key, side);
+                (answer, work.artwork.has_work())
+            };
+            if wanted {
+                self.signal.notify_one();
+            }
+            answer
+        }
+
+        /// Record `key` at `side` as wanted, without collecting an answer:
+        /// what a draw site about to show an icon asks for, so the decode
+        /// finishes before the frame that needs it.
+        fn want_artwork(&self, key: &ArtworkKey, side: u32) {
+            let wanted = {
+                let mut work = self.work.lock();
+                work.artwork.want(key, side);
+                work.artwork.has_work()
+            };
+            if wanted {
+                self.signal.notify_one();
+            }
+        }
+
+        /// Note that the cache could not keep this decode, so nothing offers
+        /// it again until the band that refused it moves.
+        fn decline_artwork(&self, key: &ArtworkKey, side: u32) {
+            self.work.lock().artwork.decline(key, side);
+        }
+
+        /// The band moved: offer the refused decodes again.
+        fn retry_declined_artwork(&self) {
+            self.work.lock().artwork.retry_declined();
+        }
+
+        /// Whether a decode has landed since this was last asked.
+        ///
+        /// The loop repaints on a `true`, so a wake that delivered nothing new
+        /// costs no frame.
+        fn take_artwork_landed(&self) -> bool {
+            self.work.lock().artwork.take_landed()
         }
 
         /// Answer the folder cue for `components`, recording the probe if this
@@ -1488,6 +1584,9 @@ mod program {
             let mut work = self.work.lock();
             work.stopping = true;
             work.listings.stop();
+            // Overwrites every decode still held, so one user's rendered
+            // pixels do not outlive their window in reusable heap.
+            work.artwork.stop();
             work.probes.stop();
             work.bundles.stop();
             drop(work);
@@ -1523,6 +1622,27 @@ mod program {
                 ));
                 None
             }
+        }
+    }
+
+    /// The paint's artwork seam: whatever the reader has already decoded, and
+    /// otherwise a recorded decode and the built-in glyph for this frame.
+    ///
+    /// Held by the pipeline behind a boxed trait object, which is why it owns
+    /// its handle to the desk rather than borrowing one.
+    struct DeferredArtwork(alloc::sync::Arc<Reads>);
+
+    impl ArtworkResolver for DeferredArtwork {
+        fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+            self.0.resolve_artwork(key, side)
+        }
+
+        fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.want_artwork(key, side);
+        }
+
+        fn declined(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.decline_artwork(key, side);
         }
     }
 
@@ -1587,14 +1707,6 @@ mod program {
         out
     }
 
-    /// The grid's icon-artwork pipeline over this app's live seams.
-    ///
-    /// The policy — the reclaim-governed decode cache, the deferred-decode
-    /// desk a paint resolves through, and the one decode per loop turn the
-    /// pump runs — is the host-tested [`crate::icons::IconPipeline`]. This
-    /// names the reader and rasteriser it runs over.
-    type Icons = crate::icons::IconPipeline<VfsArtworkReader, SandboxRasteriser>;
-
     /// Build the grid's pipeline for a window whose frame is `frame_bytes`
     /// long, so the artwork it may retain scales with the surface it draws on.
     ///
@@ -1602,7 +1714,16 @@ mod program {
     /// real seat, frame size, pressure gauge, and audit sink, so it is
     /// classified and budgeted by the same desktop policy the session's caches
     /// obey rather than by numbers picked here.
-    fn open_icons(frame_bytes: usize) -> Icons {
+    ///
+    /// With a reader thread the decode happens there and a paint that misses
+    /// draws the built-in glyph until the pixels land; `deferred` false means
+    /// the kernel granted none, so the read and the sandbox round trip happen
+    /// in the paint, exactly as they used to.
+    fn open_icons(
+        frame_bytes: usize,
+        reads: &alloc::sync::Arc<Reads>,
+        deferred: bool,
+    ) -> IconPipeline {
         // The reclaim bookkeeping's audit sink. The shared constructor takes a
         // `'static` borrow, and the runtime sink is a unit value that owns
         // nothing.
@@ -1621,13 +1742,17 @@ mod program {
         if let Some(ledger) = cache.ledger() {
             tairix_rt::cachereport::register(ledger);
         }
-        Icons::new(
-            cache,
-            VfsArtworkReader,
-            SandboxRasteriser {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-            },
-        )
+        let resolver: alloc::boxed::Box<dyn ArtworkResolver> = if deferred {
+            alloc::boxed::Box::new(DeferredArtwork(alloc::sync::Arc::clone(reads)))
+        } else {
+            alloc::boxed::Box::new(InlineArtwork::new(
+                VfsArtworkReader,
+                SandboxRasteriser {
+                    sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                },
+            ))
+        };
+        IconPipeline::new(cache, resolver)
     }
 
     /// The production [`EventSource`]: drain the app's own event
@@ -1657,7 +1782,7 @@ mod program {
         launcher: &'a RefCell<Launcher>,
         /// The grid's artwork pipeline, trimmed on a [`PRESSURE_TOKEN`] wake,
         /// shared with the present path that draws through it.
-        icons: &'a RefCell<Icons>,
+        icons: &'a RefCell<IconPipeline>,
         /// The reader's wake, drained on a [`READS_TOKEN`] wake. Its readiness
         /// is a level peek, so leaving it undrained would report ready for
         /// ever and turn the park into a spin.
@@ -1706,11 +1831,12 @@ mod program {
                 // The machine's band moved: give back whatever the new band
                 // says the decoded artwork may no longer keep, here at the
                 // wake rather than at the next user input. A band that did not
-                // really move costs one read and no eviction work. The pixels
-                // the pump is holding are offered again, since the band that
-                // refused them has changed. The glyph cache this window drew
-                // through gives back the same way.
+                // really move costs one read and no eviction work. A decode
+                // the old band refused to keep is offered again, since the
+                // band that refused it has changed. The glyph cache this
+                // window drew through gives back the same way.
                 self.icons.borrow_mut().trim();
+                self.reads.retry_declined_artwork();
                 tairix_font::trim_glyph_cache();
             }
             Ok(Parked::Served)
@@ -1955,7 +2081,7 @@ mod program {
         chrome: Chrome,
         theme: &Theme,
         target: &mut FrameTarget<'_, T>,
-        icons: &RefCell<Icons>,
+        icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno>
     where
@@ -5227,14 +5353,13 @@ mod program {
         // all it has until the user asks for a window.
         declare_app_bar(&mut client, event_endpoint, start.role, &places);
 
-        // --- The grid's icon artwork: the decode cache, the desk a paint
-        // resolves through, and the read/rasterise seams the pump runs one
-        // decode at a time over — budgeted from one window's frame size and
-        // shared by every window this process opens, so one decode serves them
-        // all. Shared, too, between the present path (which draws through it),
+        // --- The grid's icon artwork: the decode cache and the resolver its
+        // misses go to — budgeted from one window's frame size and shared by
+        // every window this process opens, so one decode serves them all.
+        // Shared, too, between the present path (which draws through it) and
         // the parked event source (which trims it when the machine reports a
-        // different memory-pressure band), and the loop's pump; dropping it
-        // releases the retained pixels.
+        // different memory-pressure band); dropping it releases the retained
+        // pixels.
         // The cache-report rows go with this process on every way out.
         // `bind_event_mailbox` already primed the gauge with the band in
         // force now (`tairix_procinfo::pressure::watch`), so the cache never
@@ -5277,6 +5402,8 @@ mod program {
             let nominal = mode_for(w, h);
             RefCell::new(open_icons(
                 (nominal.stride_bytes as usize) * (nominal.height_px as usize),
+                &reads,
+                reader.is_some(),
             ))
         };
 
@@ -5313,14 +5440,9 @@ mod program {
         // agree on the same in-flight set.
         let launcher = RefCell::new(Launcher::new());
 
-        // Whether an icon decode has landed and is waiting to be drawn. The
-        // batch is drawn when the desk runs dry rather than after every icon,
-        // so a folder's tiles cost one frame instead of one each.
-        let mut artwork_landed = false;
-
-        // --- The event loop: serve input, run one icon decode, repaint, and
-        // park only when there is nothing of either left. A dead channel ends
-        // the app fail-loud; a clean close ends it at zero.
+        // --- The event loop: serve input, adopt what the reader answered,
+        // repaint, and park only when there is nothing of either left. A dead
+        // channel ends the app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
@@ -5465,11 +5587,8 @@ mod program {
                 continue;
             }
 
-            // Queued input first, then one recorded icon decode, and a park
-            // only when neither has anything left. Serving input ahead of the
-            // decode is what keeps a key or a click waiting at most one
-            // decode, rather than the whole grid's worth the paint used to
-            // perform inside itself.
+            // Queued input first, then whatever the reader has answered, and
+            // a park only when neither has anything left.
             let delivered = match events.try_wait(&mut client) {
                 Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
@@ -5510,21 +5629,11 @@ mod program {
                         }
                         continue;
                     }
-                    let ran = {
-                        let mut pipeline = icons.borrow_mut();
-                        let ran = pipeline.pump();
-                        artwork_landed |= pipeline.take_landed();
-                        ran
-                    };
-                    if ran {
-                        continue;
-                    }
-                    // The desk is dry, so the batch that landed is drawn now:
-                    // one whole-window pass for the whole batch, not one per
-                    // icon, and the grid's tiles appear together — a present
-                    // is a round trip through the compositor, which is far
-                    // dearer than the decode that produced one tile.
-                    if core::mem::take(&mut artwork_landed) {
+                    // The reader nudges on its drained queue, so what landed
+                    // is a whole batch: one whole-window pass for it rather
+                    // than one per icon, a present being a compositor round
+                    // trip and far dearer than one tile's decode.
+                    if reads.take_artwork_landed() {
                         for win in &mut windows {
                             if present_whole(win, &mut client, theme, &icons, desktop.scale())
                                 .is_err()

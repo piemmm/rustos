@@ -68,7 +68,7 @@ event loop** inherits the freeze:
 | File manager listings | `userland/apps/files/src/run.rs` (`LiveSource`) | Window frozen for every directory read: navigation, reload, and the bring-up open. Fixed in DESK-11. |
 | File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | `open_dir` + `read` + `close` per newly-visible folder, while painting. Fixed in DESK-11. |
 | File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
-| File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs; **not yet fixed** (DESK-12). |
+| File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs. Fixed in DESK-12. |
 | Statistics reported to `sysinfod` | `lib/rt/src/cachereport.rs`, `userland/gui/session/src/frames.rs` | Up to **eight blocking cross-process round trips a second** on the compositor's own frame path, and on the file manager's and `fontd`'s loops, purely to report counters. `ipc_call` parks the caller off the run queue, so a gesture stuttered four times a second and every app blocked in a window call waited behind it. Fixed in DESK-15. |
 | Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
@@ -680,10 +680,10 @@ Each stage is independently reviewable and must leave the whole-project
   syscall; the `Run` binary adds the futex mutex, the condition variable the
   worker parks on, and the shared wake. It lives in `lib/icon` beside the
   `ArtworkResolver` contract it implements — and *is* that resolver — because
-  the file manager pumps the same desk from its own event loop
-  (`plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
-  `userland/gui/*`. One policy, two drive mechanisms: a worker thread here, an
-  event-loop pump there.
+  the file manager drives the same desk from its own reader thread (DESK-12,
+  `plans/NEW-FILEMANAGER.md`) and `userland/apps/*` may not depend on
+  `userland/gui/*`. One policy, one drive mechanism: a worker thread behind a
+  futex mutex in both processes.
 - **What the desk remembers.** An answer handed over is forgotten: the cache
   owns it, so if the cache later evicts it the next paint's miss is genuine and
   is decoded again. The decode cache is budgeted, though, so it can be asked to
@@ -1043,28 +1043,42 @@ Each stage is independently reviewable and must leave the whole-project
   (`lib/browse/src/tests.rs`).
 
 ### DESK-12 — The file manager's icon decode off its loop
-- **Planned.** The last I/O the file manager's loop performs: `IconPipeline::pump`
-  runs one bounded artwork read plus one parser-sandbox round trip per turn of
-  the event loop (`userland/apps/files/src/icons.rs`). It is materially milder
-  than what DESK-11 removed — already outside the paint, bounded to one asset,
-  and interleaved so input is served ahead of it — but it is still I/O on a loop
-  that owes the window a frame, which `§28.1` forbids without qualification.
-- **Why it is its own stage.** The decode cannot simply move onto the DESK-11
-  reader while `IconPipeline` owns the cache, the desk, the reader *and* the
-  rasteriser: a worker calling `pump` through the shared lock would hold that
-  lock across the read and the sandbox round trip, and the paint resolving
-  through the cache would block on it — the same stall, moved. The pipeline must
-  split at the lock boundary the way the session's already does: the
-  `ArtworkDesk` shared with the worker, the cache on the paint side, and the
-  reader and rasteriser owned by the worker (which builds its own
-  `ParserSandbox`, so no sandbox handle crosses a thread boundary).
-- **Shape.** `IconPipeline` loses its generics, its owned seams, and `pump`,
-  gaining the `take_job`/`deliver` pair the lock boundary implies; the decode
-  itself stays the shared `tairix_icon::render_artwork`. The desk joins the
-  DESK-11 `Work` set, served after listings and before the cues.
-- **Deliverables:** the split and its host tests (the 19-test `icons_tests.rs`
-  suite reworked onto take/deliver, with no assertion weakened), the decode
-  moved onto the reader, and this stage collapsed to its done-state.
+- **Done.** The last I/O the file manager's loop performed — one bounded
+  artwork read plus one parser-sandbox round trip per turn — now runs on the
+  DESK-11 reader thread. No interactive loop in the tree performs I/O.
+- **Where the split falls, and why there.** `IconPipeline` is the paint side
+  alone: the reclaim-governed `ArtworkCache` and the resolver its misses go to.
+  The `ArtworkDesk` moved into the reader's `Work` set and is the only thing
+  the lock carries, because a picture is handed out as a *borrow* into the
+  cache and a borrow cannot outlive a guard — a cache behind that lock could
+  lend nothing to a paint. Keeping the whole pipeline under one lock would have
+  been worse still: the paint's guard would span the render, and the folder-cue
+  probe the render performs takes that same lock.
+- **The reader's turn.** `Work` gained `artwork: ArtworkDesk` and `Read` gained
+  `Artwork(ArtworkJob)`, served after listings and before the cues. The worker
+  takes the job under the lock, drops it, runs the shared
+  `tairix_icon::render_artwork` through seams it built once at the top of
+  `serve` — including its **own** `ParserSandbox`, so no sandbox handle crosses
+  a thread — then retakes the lock to deliver. It nudges the loop when its
+  artwork queue drains rather than after each icon, so a folder of fifty
+  bundles costs one repaint and the tiles appear together.
+- **The paint side.** `DeferredArtwork` is the boxed `ArtworkResolver` over the
+  shared desk; with no reader thread `open_icons` boxes `InlineArtwork`
+  instead, so the read and the round trip happen in the paint exactly as they
+  used to rather than recording jobs nobody will serve. The pressure wake is
+  the pair `IconPipeline::trim` (bytes back) plus the desk's `retry_declined`
+  (the refused decodes offered again); teardown wipes both the cache's
+  retained pictures and the desk's undelivered ones.
+- Host tests (`userland/apps/files/src/icons_tests.rs`) drive the real split
+  with an `Rc<RefCell<ArtworkDesk>>` standing in for the lock: a paint reads
+  and decodes nothing, the reader delivers what the paint recorded, a decode in
+  flight is neither re-offered nor re-recorded, a delivery after teardown keeps
+  nothing and owes no repaint, a retained decode is never produced twice, every
+  tier's refusal settles on the glyph, a declined decode is not re-offered
+  until the band moves, and a whole window's grid keeps every tile's artwork
+  across repaints and a scroll — with the inline resolver's
+  read-and-decode-in-the-paint cost pinned beside them so none of it goes
+  vacuous.
 
 ### DESK-5 — Verified shared image cache (`kernel/mem`)
 - **Deliverables:** the per-boot, content-hash-keyed verified image
@@ -1243,8 +1257,8 @@ Each stage is independently reviewable and must leave the whole-project
   persist-then-adopt happens on a worker.
 - **DESK-11 — done.** Every unbounded read the file manager makes — listings,
   folder cues, and the "Open With…" bundle scan — runs on one reader thread.
-- **DESK-12 — planned.** The file manager's icon decode is still pumped on its
-  event loop, one bounded read plus one sandbox round trip per turn.
+- **DESK-12 — done.** The file manager's icon decode runs on the DESK-11
+  reader thread; no interactive loop in the tree performs I/O.
 - **DESK-15 — done.** No interactive or serve loop waits on a statistics
   report; `tairix_rt::submit::Submission` is the one shape both publishers hand
   them over with.

@@ -1,17 +1,27 @@
-//! Host tests for the grid's icon-artwork pipeline.
+//! Host tests for the grid's icon-artwork arrangement.
 //!
 //! The pinned defect is that a paint used to read and decode: the first frame
 //! of a folder blocked on a sandbox round trip per visible tile. These drive
 //! the real cache and desk over counting seams, so what a paint costs is
 //! asserted rather than argued.
+//!
+//! The split the `Run` binary carries with a mutex and a reader thread is
+//! driven here as direct calls: the paint side's [`IconPipeline`], the desk it
+//! records misses on, and the reader's take/decode/deliver turn. The rules are
+//! the same either way, because the decode is the shared
+//! [`render_artwork`](tairix_icon::render_artwork) in both.
 
+use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 
 use tairix_icon::{
-    artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource,
-    IconKind, IconPicture, IconRequest, InlineArtwork,
+    artwork_cache, render_artwork, ArtworkCache, ArtworkDesk, ArtworkKey, ArtworkRasteriser,
+    ArtworkReader, ArtworkResolver, IconArtwork, IconKind, IconPicture, IconRequest, InlineArtwork,
+    Resolved,
 };
 use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
@@ -60,27 +70,42 @@ fn cache() -> ArtworkCache {
     )
 }
 
+/// What the seams have been asked to do, shared rather than owned so a
+/// resolver the pipeline has boxed is still countable.
+#[derive(Default)]
+struct Calls {
+    /// How many reads have been asked for.
+    reads: Cell<usize>,
+    /// How many decodes — the sandbox round trip, in the tests' terms — have
+    /// been asked for.
+    decodes: Cell<usize>,
+}
+
 /// A reader over a fixed path→bytes table that counts every read.
 struct CountingReader {
     /// The asset bytes the reader will serve, by path.
     assets: Vec<(String, Vec<u8>)>,
-    /// How many reads have been asked for.
-    reads: usize,
+    calls: Rc<Calls>,
 }
 
 impl CountingReader {
     /// A reader holding [`ASSET`] alone.
-    fn new() -> Self {
+    fn new(calls: &Rc<Calls>) -> Self {
+        Self::over(vec![(String::from(ASSET), vec![0u8; 8])], calls)
+    }
+
+    /// A reader over exactly `assets`.
+    fn over(assets: Vec<(String, Vec<u8>)>, calls: &Rc<Calls>) -> Self {
         Self {
-            assets: vec![(String::from(ASSET), vec![0u8; 8])],
-            reads: 0,
+            assets,
+            calls: Rc::clone(calls),
         }
     }
 }
 
 impl ArtworkReader for CountingReader {
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-        self.reads += 1;
+        self.calls.reads.set(self.calls.reads.get() + 1);
         self.assets
             .iter()
             .find(|(held, _)| held == path)
@@ -89,15 +114,23 @@ impl ArtworkReader for CountingReader {
 }
 
 /// A rasteriser that answers the exact square it was asked for and counts
-/// every decode — the sandbox round trip, in the tests' terms.
+/// every decode.
 struct CountingRasteriser {
-    /// How many decodes have been asked for.
-    decodes: usize,
+    calls: Rc<Calls>,
+}
+
+impl CountingRasteriser {
+    /// A rasteriser that has decoded nothing yet.
+    fn new(calls: &Rc<Calls>) -> Self {
+        Self {
+            calls: Rc::clone(calls),
+        }
+    }
 }
 
 impl ArtworkRasteriser for CountingRasteriser {
     fn rasterise(&mut self, side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
-        self.decodes += 1;
+        self.calls.decodes.set(self.calls.decodes.get() + 1);
         // Opaque, so a served picture is observably artwork rather than an
         // empty surface.
         Some(vec![255u8; (side as usize) * (side as usize) * 4])
@@ -119,19 +152,91 @@ fn cacheless() -> ArtworkCache {
     )
 }
 
-/// A rasteriser that has decoded nothing yet.
-const fn decoder() -> CountingRasteriser {
-    CountingRasteriser { decodes: 0 }
+/// The paint side's resolver over a desk the reader also holds — the shape the
+/// `Run` binary builds over its reader's mutex, with an `Rc` standing in for
+/// the `Arc` and a `RefCell` for the lock.
+struct Deferring(Rc<RefCell<ArtworkDesk>>);
+
+impl ArtworkResolver for Deferring {
+    fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+        self.0.borrow_mut().collect(key, side)
+    }
+
+    fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+        self.0.borrow_mut().want(key, side);
+    }
+
+    fn declined(&mut self, key: &ArtworkKey, side: u32) {
+        self.0.borrow_mut().decline(key, side);
+    }
 }
 
-/// A pipeline over the counting seams.
-fn pipeline() -> IconPipeline<CountingReader, CountingRasteriser> {
-    IconPipeline::new(cache(), CountingReader::new(), decoder())
+/// The whole arrangement one tile is resolved through: the paint side, the
+/// desk between it and the reader, and the seams the reader runs over.
+struct Arrangement {
+    pipeline: IconPipeline,
+    desk: Rc<RefCell<ArtworkDesk>>,
+    reader: CountingReader,
+    rasteriser: CountingRasteriser,
+    calls: Rc<Calls>,
 }
 
-/// What the seams have been asked to do so far.
-fn work(pipe: &IconPipeline<CountingReader, CountingRasteriser>) -> (usize, usize) {
-    (pipe.reader.reads, pipe.rasteriser.decodes)
+impl Arrangement {
+    /// An arrangement over `cache` and a reader holding exactly `assets`.
+    fn over(cache: ArtworkCache, assets: Vec<(String, Vec<u8>)>) -> Self {
+        let calls = Rc::new(Calls::default());
+        let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+        Self {
+            pipeline: IconPipeline::new(cache, Box::new(Deferring(Rc::clone(&desk)))),
+            desk,
+            reader: CountingReader::over(assets, &calls),
+            rasteriser: CountingRasteriser::new(&calls),
+            calls,
+        }
+    }
+
+    /// An arrangement over a budgeted cache and a reader holding [`ASSET`].
+    fn new() -> Self {
+        Self::over(cache(), vec![(String::from(ASSET), vec![0u8; 8])])
+    }
+
+    /// What the seams have been asked to do so far.
+    fn work(&self) -> (usize, usize) {
+        (self.calls.reads.get(), self.calls.decodes.get())
+    }
+
+    /// Resolve one tile exactly as a paint does, reporting whether it drew
+    /// real artwork rather than the built-in glyph's coverage mask.
+    fn paint(&mut self) -> bool {
+        matches!(
+            self.pipeline.source().artwork(request(), SIDE),
+            Some(IconPicture::Artwork(_))
+        )
+    }
+
+    /// One turn of the reader: take a recorded decode, run it with nothing
+    /// held, deliver it. Reports whether there was one to run.
+    fn serve(&mut self) -> bool {
+        let Some(job) = self.desk.borrow_mut().next_job() else {
+            return false;
+        };
+        let artwork = render_artwork(&mut self.reader, &mut self.rasteriser, &job.key, job.side);
+        self.desk.borrow_mut().deliver(&job, artwork);
+        true
+    }
+
+    /// Whether a decode has landed since this was last asked.
+    fn take_landed(&mut self) -> bool {
+        self.desk.borrow_mut().take_landed()
+    }
+
+    /// The pressure wake's pair: the cache gives back what the new band no
+    /// longer allows, and the desk re-offers what the old one refused.
+    fn band_moved(&mut self) -> usize {
+        let released = self.pipeline.trim();
+        self.desk.borrow_mut().retry_declined();
+        released
+    }
 }
 
 /// The request one tile makes: a shipped asset, falling back to its kind.
@@ -139,143 +244,191 @@ fn request() -> IconRequest<'static> {
     IconRequest::asset(IconKind::File, ASSET)
 }
 
-/// Resolve one tile exactly as a paint does, reporting whether it drew real
-/// artwork rather than the built-in glyph's coverage mask.
-fn paint(pipe: &mut IconPipeline<CountingReader, CountingRasteriser>) -> bool {
-    matches!(
-        pipe.source().artwork(request(), SIDE),
-        Some(IconPicture::Artwork(_))
-    )
-}
-
-/// The defect this pipeline exists to fix: a paint must perform no read and no
-/// sandbox round trip. The tile draws its built-in glyph and the decode is
+/// The defect this arrangement exists to fix: a paint must perform no read and
+/// no sandbox round trip. The tile draws its built-in glyph and the decode is
 /// merely *recorded*.
 #[test]
 fn a_paint_reads_nothing_and_decodes_nothing() {
-    let mut pipe = pipeline();
+    let mut grid = Arrangement::new();
 
     assert!(
-        !paint(&mut pipe),
+        !grid.paint(),
         "an unresolved tile draws its built-in glyph, never blank"
     );
     assert_eq!(
-        work(&pipe),
+        grid.work(),
         (0, 0),
         "a paint performed a read or a sandbox round trip"
     );
 
     // Repainting the same unresolved tile — a scroll step, a hover — still
     // costs nothing, so a frozen window cannot come back by way of a repaint.
-    assert!(!paint(&mut pipe));
-    assert_eq!(work(&pipe), (0, 0));
+    assert!(!grid.paint());
+    assert_eq!(grid.work(), (0, 0));
 }
 
 /// What the paint used to cost, so the assertion above is not vacuous:
-/// resolving the very same tile through the inline resolver — the one this
-/// pipeline replaced — reads and decodes before it returns.
+/// resolving the very same tile through the inline resolver reads and decodes
+/// before it returns.
 ///
 /// The inline resolver is still the right answer where there is nothing to
-/// defer to (the desktop session's no-thread fallback), so this is a contrast,
-/// not a relic.
+/// defer to — it is what the app installs when the kernel grants it no reader
+/// thread — so this is a live path, not a relic.
 #[test]
 fn the_inline_resolver_is_what_made_the_paint_block() {
-    let mut pipe = pipeline();
-    let IconPipeline {
-        cache,
-        reader,
-        rasteriser,
-        ..
-    } = &mut pipe;
-    let mut inline = InlineArtwork::new(reader, rasteriser);
+    let calls = Rc::new(Calls::default());
+    let mut pipeline = IconPipeline::new(
+        cache(),
+        Box::new(InlineArtwork::new(
+            CountingReader::new(&calls),
+            CountingRasteriser::new(&calls),
+        )),
+    );
 
     assert!(
         matches!(
-            IconArtworkSource::new(cache, &mut inline).artwork(request(), SIDE),
+            pipeline.source().artwork(request(), SIDE),
             Some(IconPicture::Artwork(_))
         ),
         "the inline resolver draws the artwork in the frame that asked"
     );
     assert_eq!(
-        work(&pipe),
+        (calls.reads.get(), calls.decodes.get()),
         (1, 1),
         "and pays a read and a sandbox round trip to do it"
     );
 }
 
-/// The pump runs the recorded decode off the paint, and the next paint serves
-/// it. One pump per call, and it reports when there is nothing left.
+/// The reader runs the recorded decode off the paint, and the next paint
+/// serves it. One job per turn, and it reports when there is nothing left.
 #[test]
-fn the_pump_delivers_what_the_paint_recorded() {
-    let mut pipe = pipeline();
-    assert!(!paint(&mut pipe));
+fn the_reader_delivers_what_the_paint_recorded() {
+    let mut grid = Arrangement::new();
+    assert!(!grid.paint());
 
-    assert!(pipe.pump(), "the paint recorded a decode to run");
-    assert_eq!(work(&pipe), (1, 1));
-    assert!(pipe.take_landed(), "a delivery owes the loop a repaint");
-    assert!(!pipe.pump(), "one paint records exactly one decode");
+    assert!(grid.serve(), "the paint recorded a decode to run");
+    assert_eq!(grid.work(), (1, 1));
+    assert!(grid.take_landed(), "a delivery owes the loop a repaint");
+    assert!(!grid.serve(), "one paint records exactly one decode");
 
-    assert!(paint(&mut pipe), "the landed decode is drawn");
+    assert!(grid.paint(), "the landed decode is drawn");
     assert_eq!(
-        work(&pipe),
+        grid.work(),
         (1, 1),
         "the retained decode was produced a second time"
     );
     assert!(
-        !pipe.take_landed(),
+        !grid.take_landed(),
         "a paint that landed nothing must not force a frame"
+    );
+}
+
+/// A decode the reader has taken is not handed out again while it runs, and a
+/// paint during that window records no second one: what makes it safe for the
+/// read and the decode to happen with the lock dropped.
+#[test]
+fn a_decode_in_flight_is_neither_re_offered_nor_re_recorded() {
+    let mut grid = Arrangement::new();
+    assert!(!grid.paint());
+
+    let job = grid
+        .desk
+        .borrow_mut()
+        .next_job()
+        .expect("the paint recorded a decode");
+    assert!(
+        grid.desk.borrow_mut().next_job().is_none(),
+        "a decode already in flight was handed out a second time"
+    );
+    assert!(
+        !grid.paint(),
+        "a tile whose decode is in flight draws its built-in glyph"
+    );
+    assert!(
+        grid.desk.borrow_mut().next_job().is_none(),
+        "a repaint during the decode recorded a second one"
+    );
+
+    let artwork = render_artwork(&mut grid.reader, &mut grid.rasteriser, &job.key, job.side);
+    assert!(
+        grid.desk.borrow_mut().deliver(&job, artwork),
+        "the delivery of an in-flight decode was refused"
+    );
+    assert!(grid.paint(), "the landed decode is drawn");
+    assert_eq!(grid.work(), (1, 1));
+}
+
+/// A teardown while a decode is in flight keeps nothing and owes no repaint,
+/// so the reader's last delivery cannot resurrect a window that has gone.
+#[test]
+fn a_delivery_after_teardown_keeps_nothing() {
+    let mut grid = Arrangement::new();
+    assert!(!grid.paint());
+    let job = grid
+        .desk
+        .borrow_mut()
+        .next_job()
+        .expect("the paint recorded a decode");
+
+    grid.desk.borrow_mut().stop();
+
+    let artwork = render_artwork(&mut grid.reader, &mut grid.rasteriser, &job.key, job.side);
+    assert!(
+        !grid.desk.borrow_mut().deliver(&job, artwork),
+        "a stopped desk kept a delivery"
+    );
+    assert!(
+        !grid.take_landed(),
+        "a stopped desk owed the loop a repaint"
+    );
+    assert!(
+        !grid.paint(),
+        "a stopped desk answered a paint with artwork"
     );
 }
 
 /// A tile none of whose assets exist settles on its built-in glyph, having
 /// read each tier exactly once. A retained refusal is what makes the next tier
-/// wanted, so the walk costs one paint/pump turn per tier and then stops.
+/// wanted, so the walk costs one paint/serve turn per tier and then stops.
 #[test]
 fn a_request_whose_every_tier_refuses_settles_on_the_glyph() {
-    let mut pipe = IconPipeline::new(
-        cache(),
-        CountingReader {
-            assets: Vec::new(),
-            reads: 0,
-        },
-        CountingRasteriser { decodes: 0 },
-    );
+    let mut grid = Arrangement::over(cache(), Vec::new());
 
     // The tile's own asset, then its kind's raster master, then its kind's
     // vector master.
     for tier in 1..=TIERS {
-        assert!(!paint(&mut pipe), "no tier has artwork to draw");
-        assert!(pipe.pump(), "tier {tier} was not offered");
+        assert!(!grid.paint(), "no tier has artwork to draw");
+        assert!(grid.serve(), "tier {tier} was not offered");
         assert_eq!(
-            work(&pipe),
+            grid.work(),
             (tier, 0),
             "an unreadable asset must never reach the decoder"
         );
     }
 
     assert!(
-        !paint(&mut pipe),
+        !grid.paint(),
         "an exhausted request draws the built-in glyph, never blank"
     );
     assert!(
-        !pipe.pump(),
+        !grid.serve(),
         "every tier is a retained refusal, so nothing is asked for again"
     );
-    assert_eq!(work(&pipe), (TIERS, 0));
+    assert_eq!(grid.work(), (TIERS, 0));
 }
 
 /// A decode the cache retained is never produced again: the retained answer is
 /// what serves every later paint, however many there are.
 #[test]
 fn a_retained_decode_is_never_produced_twice() {
-    let mut pipe = pipeline();
-    assert!(!paint(&mut pipe));
-    assert!(pipe.pump());
-    assert!(paint(&mut pipe));
+    let mut grid = Arrangement::new();
+    assert!(!grid.paint());
+    assert!(grid.serve());
+    assert!(grid.paint());
 
-    assert!(paint(&mut pipe));
-    assert!(!pipe.pump(), "a repaint re-asked for a retained decode");
-    assert_eq!(work(&pipe), (1, 1));
+    assert!(grid.paint());
+    assert!(!grid.serve(), "a repaint re-asked for a retained decode");
+    assert_eq!(grid.work(), (1, 1));
 }
 
 /// A cache with no room for the decode declines it, and the desk stops
@@ -284,37 +437,38 @@ fn a_retained_decode_is_never_produced_twice() {
 /// every frame — precisely when memory is short.
 #[test]
 fn a_declined_decode_is_never_offered_again_until_the_band_moves() {
-    let mut pipe = IconPipeline::new(cacheless(), CountingReader::new(), decoder());
+    let mut grid = Arrangement::over(cacheless(), vec![(String::from(ASSET), vec![0u8; 8])]);
 
-    assert!(!paint(&mut pipe));
-    assert!(pipe.pump());
+    assert!(!grid.paint());
+    assert!(grid.serve());
     // Collected, and refused: nothing is retained, so the tile still draws
     // its glyph.
-    assert!(!paint(&mut pipe));
-    assert_eq!(work(&pipe), (1, 1));
+    assert!(!grid.paint());
+    assert_eq!(grid.work(), (1, 1));
 
-    assert!(!paint(&mut pipe));
-    assert!(!pipe.pump(), "a declined decode was offered again");
-    assert_eq!(work(&pipe), (1, 1));
+    assert!(!grid.paint());
+    assert!(!grid.serve(), "a declined decode was offered again");
+    assert_eq!(grid.work(), (1, 1));
 }
 
 /// A pressure-band change remakes the decision: what a band refused to keep
 /// may now be retainable, so the declined key is offered once more. This is
-/// what [`IconPipeline::trim`] is for beyond releasing bytes.
+/// what the pressure wake's trim-and-re-offer pair is for beyond releasing
+/// bytes.
 #[test]
 fn a_band_change_offers_a_declined_decode_again() {
-    let mut pipe = IconPipeline::new(cacheless(), CountingReader::new(), decoder());
-    assert!(!paint(&mut pipe));
-    assert!(pipe.pump());
-    assert!(!paint(&mut pipe), "the decode was declined");
+    let mut grid = Arrangement::over(cacheless(), vec![(String::from(ASSET), vec![0u8; 8])]);
+    assert!(!grid.paint());
+    assert!(grid.serve());
+    assert!(!grid.paint(), "the decode was declined");
 
-    let _ = pipe.trim();
-    assert!(!paint(&mut pipe));
+    let _ = grid.band_moved();
+    assert!(!grid.paint());
     assert!(
-        pipe.pump(),
+        grid.serve(),
         "a band change must remake the decision it refused"
     );
-    assert_eq!(work(&pipe), (2, 2));
+    assert_eq!(grid.work(), (2, 2));
 }
 
 // ---------------------------------------------------------------------
@@ -329,11 +483,13 @@ fn a_band_change_offers_a_declined_decode_again() {
 // key was answered "not yet" for ever.
 
 mod grid {
+    use alloc::boxed::Box;
     use alloc::format;
+    use alloc::rc::Rc;
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::cell::Cell;
+    use core::cell::{Cell, RefCell};
 
     use tairix_abi::{
         AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
@@ -346,14 +502,15 @@ mod grid {
     };
     use tairix_geometry::{Rect, Scale};
     use tairix_icon::{
-        artwork_cache, ArtworkRasteriser, ArtworkReader, IconArtwork, IconArtworkSource,
-        IconPicture, IconRequest,
+        artwork_cache, render_artwork, ArtworkDesk, ArtworkRasteriser, ArtworkReader, IconArtwork,
+        IconArtworkSource, IconPicture, IconRequest,
     };
     use tairix_log::DiscardSink;
     use tairix_raster::Surface;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_theme::Theme;
 
+    use super::{Calls, Deferring};
     use crate::icons::IconPipeline;
 
     /// Bundles in the browsed directory: more than a window shows, so the view
@@ -436,12 +593,12 @@ mod grid {
 
     /// Serves every bundle's manifest and its named icon, counting reads.
     struct BundleReader {
-        reads: usize,
+        calls: Rc<Calls>,
     }
 
     impl ArtworkReader for BundleReader {
         fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-            self.reads += 1;
+            self.calls.reads.set(self.calls.reads.get() + 1);
             if path.ends_with("/AppInfo") {
                 return Some(manifest());
             }
@@ -452,12 +609,12 @@ mod grid {
     /// Answers the exact square asked for, opaque so a served picture is
     /// observably artwork, and counts every sandbox round trip.
     struct Decoder {
-        decodes: usize,
+        calls: Rc<Calls>,
     }
 
     impl ArtworkRasteriser for Decoder {
         fn rasterise(&mut self, side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
-            self.decodes += 1;
+            self.calls.decodes.set(self.calls.decodes.get() + 1);
             Some(vec![255u8; (side as usize) * (side as usize) * 4])
         }
     }
@@ -490,9 +647,13 @@ mod grid {
         }
     }
 
-    /// A window's worth of the real grid over the real pipeline.
+    /// A window's worth of the real grid over the real arrangement.
     struct Window {
-        pipeline: IconPipeline<BundleReader, Decoder>,
+        pipeline: IconPipeline,
+        desk: Rc<RefCell<ArtworkDesk>>,
+        reader: BundleReader,
+        rasteriser: Decoder,
+        calls: Rc<Calls>,
         browser: Browser<Bundles>,
         surface: Surface,
         theme: Theme,
@@ -509,17 +670,31 @@ mod grid {
             let frame_bytes = (w as usize) * 4 * (h as usize);
             let mut browser = Browser::open_root(Bundles).expect("the fixture root lists");
             browser.set_view_mode(ViewMode::Grid);
+            let calls = Rc::new(Calls::default());
+            let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
             Self {
                 pipeline: IconPipeline::new(
                     artwork_cache("files.test-grid", 1, frame_bytes, &PRESSURE, &SINK),
-                    BundleReader { reads: 0 },
-                    Decoder { decodes: 0 },
+                    Box::new(Deferring(Rc::clone(&desk))),
                 ),
+                desk,
+                reader: BundleReader {
+                    calls: Rc::clone(&calls),
+                },
+                rasteriser: Decoder {
+                    calls: Rc::clone(&calls),
+                },
+                calls,
                 browser,
                 surface: Surface::new(w, h).expect("a window-sized surface"),
                 theme: Theme::dark(),
                 viewport: Rect::new(0, 0, w, h),
             }
+        }
+
+        /// How many sandbox round trips this window's tiles have cost.
+        fn decodes(&self) -> usize {
+            self.calls.decodes.get()
         }
 
         /// Paint the whole window, reporting what each tile drew.
@@ -547,14 +722,22 @@ mod grid {
             (drawn.artwork.get(), drawn.glyph.get())
         }
 
-        /// Run every decode the last paint recorded, as the loop does before
-        /// the repaint that draws the batch.
+        /// Run every decode the last paint recorded, as the reader does before
+        /// the nudge that drives the repaint drawing the batch.
         fn drain(&mut self) -> usize {
             let mut ran = 0;
-            while self.pipeline.pump() {
+            loop {
+                // The take is its own statement so the borrow is dropped
+                // before the decode runs, exactly as the reader drops the lock
+                // before it reads.
+                let Some(job) = self.desk.borrow_mut().next_job() else {
+                    return ran;
+                };
+                let artwork =
+                    render_artwork(&mut self.reader, &mut self.rasteriser, &job.key, job.side);
+                self.desk.borrow_mut().deliver(&job, artwork);
                 ran += 1;
             }
-            ran
         }
 
         /// Scroll the grid by `lines`, as a wheel tick does.
@@ -597,7 +780,7 @@ mod grid {
         assert!(tiles > 0, "the grid drew no tiles at all");
         assert_eq!(glyphs, 0, "a settled grid still drew {glyphs} glyphs");
 
-        let decodes = win.pipeline.rasteriser.decodes;
+        let decodes = win.decodes();
         for frame in 1..=3 {
             assert_eq!(
                 win.paint(),
@@ -606,7 +789,8 @@ mod grid {
             );
         }
         assert_eq!(
-            win.pipeline.rasteriser.decodes, decodes,
+            win.decodes(),
+            decodes,
             "a repaint of an unchanged window re-decoded artwork it already held"
         );
     }
@@ -621,7 +805,7 @@ mod grid {
         win.scroll(3);
         let scrolled = win.settle();
         assert_eq!(scrolled, (tiles, 0), "a scrolled grid drew glyphs");
-        let decodes = win.pipeline.rasteriser.decodes;
+        let decodes = win.decodes();
 
         win.scroll(-3);
         assert_eq!(
@@ -630,7 +814,8 @@ mod grid {
             "scrolling back drew glyphs for artwork already decoded"
         );
         assert_eq!(
-            win.pipeline.rasteriser.decodes, decodes,
+            win.decodes(),
+            decodes,
             "scrolling back re-decoded what was still retained"
         );
     }

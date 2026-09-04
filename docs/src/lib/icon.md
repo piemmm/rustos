@@ -197,10 +197,15 @@ a draw needs* and *producing it*:
   change what it produced.
 
 The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
-Two embedders drive it over the same rules: the desktop session parks a worker
-thread on it behind the runtime's futex mutex and is woken back through its
-wait-set, and the file manager pumps one job per turn of its own event loop
-(`plans/FIX-DESKTOP.md` DESK-8, `plans/NEW-FILEMANAGER.md`).
+Two embedders drive it over the same rules, and both do it the same way: each
+parks a worker thread on the desk behind the runtime's futex mutex and is woken
+back through the wait-set it already parks in — the desktop session on its own
+icon-decoder thread, the file manager on the one reader thread its directory
+listings, folder cues, and program-store walks also share
+(`plans/FIX-DESKTOP.md` DESK-8/DESK-11/DESK-12, `plans/NEW-FILEMANAGER.md`).
+The lock carries only the desk: the decode cache stays on the paint side,
+because a picture is handed out as a borrow into it and a borrow cannot outlive
+a guard. So the read and the sandbox round trip run with nothing held.
 
 ### What the desk remembers
 

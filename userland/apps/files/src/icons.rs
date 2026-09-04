@@ -1,108 +1,67 @@
-//! The grid's icon-artwork pipeline: the decode cache a paint resolves
-//! through, and the one decode per turn the event loop runs.
+//! The grid's icon-artwork paint side: the decode cache a tile resolves
+//! through, and the deferring lookup a miss is recorded on.
 //!
 //! One tile's icon costs a bounded VFS read plus a round trip to the parser
 //! sandbox. Inside a paint that is one round trip per visible tile on a
 //! folder's first frame and another per row revealed by a scroll — seconds of
 //! frozen window on a store like `/System/Commands`, a 256-square master per
-//! bundle. So the paint neither reads nor decodes: it resolves through the
-//! shared deferred-decode desk ([`ArtworkDesk`]), which answers what has
-//! already been produced and *records* everything else, and a tile with
-//! nothing yet draws its built-in glyph.
+//! bundle. So the paint neither reads nor decodes: it resolves through this
+//! cache, whose misses go to an injected [`ArtworkResolver`] that records them
+//! for the reader thread, and a tile with nothing yet draws its built-in
+//! glyph.
 //!
-//! The desktop session drives the same desk from a worker thread; this app
-//! pumps it from its own loop. One window's grid is a bounded set of tiles and
-//! the loop has nothing else to block on, so a thread and its stack would buy
-//! only what a turn of the loop already interleaves.
+//! The cache stays here, on the paint side, because a picture is handed out as
+//! a borrow into it: a cache behind the reader's lock could not lend one for
+//! longer than the guard. Only the desk crosses that lock, so the read and the
+//! sandbox round trip happen with nothing held.
 //!
-//! The cache, the reader, and the rasteriser are injected — only the running
-//! program knows the window's frame size, the live pressure gauge, the audit
-//! sink, and the capability the read runs under — so every rule below is a
-//! host test.
+//! The cache and the resolver are injected — only the running program knows the
+//! window's frame size, the live pressure gauge, the audit sink, the capability
+//! the read runs under, and whether the kernel granted a thread to defer to —
+//! so every rule below is a host test.
 
-use tairix_icon::{
-    render_artwork, ArtworkCache, ArtworkDesk, ArtworkRasteriser, ArtworkReader, IconArtworkSource,
-};
+use alloc::boxed::Box;
 
-/// The decode cache, the desk that defers a miss, and the seams one decode
-/// runs through.
-pub struct IconPipeline<R: ArtworkReader, D: ArtworkRasteriser> {
+use tairix_icon::{ArtworkCache, ArtworkResolver, IconArtworkSource};
+
+/// The decode cache and the resolver its misses are produced through.
+pub struct IconPipeline {
     /// The retained decode outcomes, keyed by what was resolved and the pixel
     /// side.
     cache: ArtworkCache,
-    /// What the paints have asked for and what has come back.
-    desk: ArtworkDesk,
-    /// Where an asset's bytes come from.
-    reader: R,
-    /// Where those bytes become pixels — the parser sandbox in production.
-    rasteriser: D,
+    /// Where a miss goes: the reader thread's desk, or — with no thread to
+    /// defer to — a resolver that reads and decodes in the paint, as this app
+    /// did before it had one.
+    resolver: Box<dyn ArtworkResolver>,
 }
 
-impl<R: ArtworkReader, D: ArtworkRasteriser> IconPipeline<R, D> {
-    /// A pipeline over a ready-built `cache` and the seams a decode runs
-    /// through.
-    pub const fn new(cache: ArtworkCache, reader: R, rasteriser: D) -> Self {
-        Self {
-            cache,
-            desk: ArtworkDesk::new(),
-            reader,
-            rasteriser,
-        }
+impl IconPipeline {
+    /// A pipeline over a ready-built `cache` and the `resolver` its misses are
+    /// produced through.
+    #[must_use]
+    pub fn new(cache: ArtworkCache, resolver: Box<dyn ArtworkResolver>) -> Self {
+        Self { cache, resolver }
     }
 
-    /// The lookup a paint is handed: the cache bound to the desk, so a miss is
-    /// recorded rather than read.
+    /// The lookup a paint is handed: the cache bound to its resolver, so a
+    /// miss is recorded rather than read.
     pub fn source(&mut self) -> IconArtworkSource<'_> {
-        IconArtworkSource::new(&mut self.cache, &mut self.desk)
-    }
-
-    /// Run one recorded decode, reporting whether there was one to run.
-    ///
-    /// One per call, so queued input is served between decodes and a folder of
-    /// fifty bundles never holds the window: the loop drains its mailbox, runs
-    /// a decode, repaints what landed, and parks once both are exhausted.
-    pub fn pump(&mut self) -> bool {
-        let Some(job) = self.desk.next_job() else {
-            return false;
-        };
-        // The read and the sandbox round trip: the calls that used to be
-        // inside the paint. The decode is the shared one, so deferring it
-        // cannot change what a tile draws.
-        let artwork = render_artwork(&mut self.reader, &mut self.rasteriser, &job.key, job.side);
-        // Single-threaded, so nothing can have taken the slot since
-        // `next_job`; the loop reads `take_landed` for whether a frame is owed.
-        self.desk.deliver(&job, artwork);
-        true
-    }
-
-    /// Whether a decode has landed since this was last asked.
-    ///
-    /// The loop repaints on a `true`, so a pump that delivered nothing new
-    /// costs no frame.
-    pub fn take_landed(&mut self) -> bool {
-        self.desk.take_landed()
+        IconArtworkSource::new(&mut self.cache, self.resolver.as_mut())
     }
 
     /// Give back what a changed memory-pressure band no longer allows,
     /// answering the bytes released.
-    ///
-    /// The band that refused to keep a decode may now allow it, so the
-    /// decision is remade here, on the band's own wake, rather than by every
-    /// repaint in between.
     pub fn trim(&mut self) -> usize {
-        let released = self.cache.trim();
-        self.desk.retry_declined();
-        released
+        self.cache.trim()
     }
 }
 
-impl<R: ArtworkReader, D: ArtworkRasteriser> Drop for IconPipeline<R, D> {
-    /// Release every retained decode and every answer the desk still holds,
-    /// overwriting the pixels first, so one user's decoded artwork never
-    /// outlives their window in reusable heap — on every way out of the app,
-    /// not the ones a future edit remembers to spell.
+impl Drop for IconPipeline {
+    /// Release every retained decode, overwriting the pixels first, so one
+    /// user's decoded artwork never outlives their window in reusable heap —
+    /// on every way out of the app, not the ones a future edit remembers to
+    /// spell.
     fn drop(&mut self) {
-        self.desk.stop();
         self.cache.teardown();
     }
 }
