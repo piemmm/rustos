@@ -38,6 +38,9 @@
 //!   would force a heap onto the freestanding boot binaries that deliberately
 //!   have none — and push them into hand-rolling their own lock instead. A
 //!   primitive that must allocate does not belong in this crate.
+//! - Every primitive spins through the one [`spinwait`] round, so a port
+//!   that needs a spinning CPU to serve its peers installs that work once
+//!   ([`spinwait::install_service`]) and reaches every lock.
 //! - Every `unsafe` block carries a `// SAFETY:` rationale per.
 
 #![no_std]
@@ -55,6 +58,7 @@ pub mod once;
 pub mod rwlock;
 pub mod seqlock;
 pub mod spinlock;
+pub mod spinwait;
 
 pub use irq::{InterruptControl, IrqState, NopInterruptControl, NopIrqState};
 pub use mcs::{McsGuard, McsLock, McsNode};

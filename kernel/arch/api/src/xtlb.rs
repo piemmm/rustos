@@ -41,10 +41,11 @@
 //! behind `cfg` (carve-out):
 //!
 //! * **x86_64** has no broadcast TLB invalidation, so the initiator
-//!   raises an inter-processor interrupt to every other online CPU,
-//!   which each run `invlpg` in the shootdown ISR and acknowledge; the
-//!   initiator spins until every target has acknowledged. This is the
-//!   only port that needs an explicit acknowledge protocol.
+//!   raises an inter-processor interrupt to every other online CPU, each
+//!   of which runs `invlpg` and acknowledges — from the shootdown ISR, or
+//!   from a spin round when its interrupts are masked and the IPI cannot
+//!   be taken; the initiator spins until every target has acknowledged.
+//!   This is the only port that needs an explicit acknowledge protocol.
 //! * **aarch64** issues `tlbi vaae1is` (the *inner-shareable* broadcast
 //!   variant): the hardware itself invalidates the page on every PE in
 //!   the inner-shareable domain, so the cross-CPU shootdown is the same
@@ -108,21 +109,15 @@
 ///   i.e. it carries whatever ordering barrier the architecture requires
 ///   (the x86 acknowledge spin, the aarch64 `dsb ish`/`isb`, the SBI
 ///   `remote_sfence_vma` completion).
+/// * The call must complete **whatever the callers' interrupt state**, on
+///   the initiator and on every target. A port whose targets acknowledge in
+///   software owes that itself: a target with its interrupts masked cannot
+///   take an interrupt, so the port must give it another way to acknowledge
+///   (x86_64 serves the request from any `lib/sync` spin round as well as
+///   from its ISR). Pushing the obligation onto callers instead — "only one
+///   masked initiator at a time" — is not sound, because a masked CPU that
+///   merely *waits* for a lock the initiator holds is enough to wedge both.
 /// * Implementations must not panic for any `vaddr`.
-///
-/// # Precondition on a caller that cannot take an interrupt
-///
-/// A port whose shootdown needs the targets to *acknowledge* in software
-/// (x86_64 raises an IPI and waits) cannot be acknowledged by a CPU whose
-/// own interrupts are masked. Two such initiators can therefore cycle: one
-/// holds the shootdown mailbox waiting for the other's acknowledge, while
-/// the other — masked — waits to acquire the mailbox. So a caller that
-/// shoots down with interrupts masked must be the **only** initiator that
-/// can be in flight. The kernel-heap teardown
-/// (`tairix_kernel_mem::KernelVirtMap`) satisfies this because the global
-/// heap lock, which is what masks its interrupts, also serialises it.
-/// **Adding a second production initiator requires closing this first**
-/// (`plans/OPEN-DEFECTS.md` D52 carries the protocol fix).
 pub trait CrossCpuTlbShootdown {
     /// Invalidate every online CPU's cached translation for the 4 KiB
     /// page containing `vaddr`, returning once the invalidation is

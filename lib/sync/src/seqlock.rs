@@ -42,7 +42,8 @@
 //! [`Release`]: core::sync::atomic::Ordering::Release
 //! [`RwLock`]: crate::RwLock
 
-use crate::loom_compat::{fence, spin_loop, AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::loom_compat::{fence, AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::spinwait::spin_wait;
 
 /// A sequence lock protecting a `T: Copy` payload.
 pub struct SeqLock<T: Copy> {
@@ -84,7 +85,7 @@ impl<T: Copy> SeqLock<T> {
             let s1 = self.seq.load(Ordering::Acquire);
             if s1 & 1 != 0 {
                 // A writer is mid-update; spin until they finish.
-                spin_loop();
+                spin_wait();
                 continue;
             }
             // Read the payload.
@@ -100,7 +101,7 @@ impl<T: Copy> SeqLock<T> {
                 return value;
             }
             // Raced; retry.
-            spin_loop();
+            spin_wait();
         }
     }
 

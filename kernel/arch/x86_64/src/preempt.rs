@@ -116,6 +116,12 @@ pub const LAPIC_EOI_OFFSET: usize = 0xB0;
 /// from `apic.rs` to avoid a dependency cycle in the ISR-fast path.
 pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
 
+/// LAPIC ID register MMIO offset (Intel SDM Vol 3A §11.4.6, Table 11-1).
+/// Re-declared here, like [`LAPIC_EOI_OFFSET`], because the paths that read
+/// it — `local_lapic_id` and its callers — run where the `Lapic<M>` driver's
+/// `&mut` cannot be held.
+pub const LAPIC_ID_OFFSET: usize = 0x20;
+
 /// LAPIC Timer LVT register MMIO offset (Intel SDM Vol 3A §11.5.4,
 /// Table 11-1). Re-declared here, like [`LAPIC_EOI_OFFSET`], so the
 /// tickless one-shot arm path writes the LAPIC through a bare-metal
@@ -460,18 +466,29 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     }
 }
 
+/// This CPU's architectural LAPIC id, read from its own LAPIC ID register.
+///
+/// The one definition of that read, so every path that has to name the
+/// running CPU without a scheduler handle — the dense-id lookup below, the
+/// `SchedulerArch::current_cpu` mapping, the TLB-shootdown serve path — names
+/// it the same way.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub fn local_lapic_id() -> u8 {
+    // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4);
+    // the ID register is read-only and reading it has no side effects.
+    unsafe {
+        let id_reg = (LAPIC_BASE_PHYS + LAPIC_ID_OFFSET as u64) as *const u32;
+        (core::ptr::read_volatile(id_reg) >> 24) as u8
+    }
+}
+
 /// The running CPU's dense id, read from its LAPIC ID register through the
 /// `LAPIC_TO_CPU_ID` map, or [`u32::MAX`] when the id is unmapped. Shared
 /// by every ISR that needs the CPU id (the timer and external-IRQ paths).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn current_cpu_id_from_lapic() -> u32 {
-    // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4);
-    // the ID register is read-only and reading it has no side effects.
-    let lapic_id = unsafe {
-        let id_reg = (LAPIC_BASE_PHYS + 0x20) as *const u32;
-        core::ptr::read_volatile(id_reg) >> 24
-    };
-    LAPIC_TO_CPU_ID[(lapic_id & 0xFF) as usize].load(Ordering::Relaxed)
+    LAPIC_TO_CPU_ID[local_lapic_id() as usize].load(Ordering::Relaxed)
 }
 
 /// Drive the installed ring-3 preemption callback iff the interrupted

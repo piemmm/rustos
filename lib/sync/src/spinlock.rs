@@ -46,7 +46,8 @@ use core::fmt;
 use core::ops::{Deref, DerefMut};
 
 use crate::irq::{InterruptControl, NopInterruptControl};
-use crate::loom_compat::{spin_loop, AtomicBool, Ordering, SyncUnsafeCell};
+use crate::loom_compat::{AtomicBool, Ordering, SyncUnsafeCell};
+use crate::spinwait::spin_wait;
 
 /// A test-and-test-and-set spinlock.
 ///
@@ -173,7 +174,7 @@ impl<T: ?Sized> SpinLock<T> {
             // free, then retry the CAS. This avoids hammering the cache
             // line with RMW operations.
             while self.locked.load(Ordering::Relaxed) {
-                spin_loop();
+                spin_wait();
             }
         }
     }

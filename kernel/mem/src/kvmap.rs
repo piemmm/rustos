@@ -232,10 +232,6 @@ impl<P: PageTable + Send> KernelVirtMap for KernelRemap<P> {
             // Every CPU must have forgotten these translations before a
             // recovered frame can be handed back for reuse — and only then;
             // a batch that tore down no leaf left nothing stale to discard.
-            // This runs with interrupts masked (the heap lock's doing),
-            // which the `CrossCpuTlbShootdown` contract permits only for a
-            // *sole* initiator — satisfied here because that same heap lock
-            // serialises every teardown.
             if found != 0 {
                 self.xtlb.shootdown_range(batch_base, batch);
             }

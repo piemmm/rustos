@@ -3032,6 +3032,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-sync",
 ]
 
 [[package]]

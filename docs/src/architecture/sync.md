@@ -81,6 +81,39 @@ for the next-oldest rather than unlocking with the queue still occupied —
 doing that would clear the word with it, so no later release would owe the
 remaining contenders a wake and they would park for good.
 
+## What a spin round does — the port's spin service
+
+Every primitive above spins on contention, and a spinning CPU is by
+definition waiting on another CPU to make progress. Where that other CPU is
+simultaneously waiting on *this* one, only this CPU can break the wait — so a
+spin round is the point at which it discharges whatever a peer is owed.
+
+`spinwait::spin_wait()` is the one place a spin round is spelled. It runs the
+service the port installed (`spinwait::install_service`, set-once, before
+interrupts are first enabled and before any secondary CPU starts) and then
+hints the CPU. Every primitive in the crate spins through it, which is what
+makes the property total rather than a list of audited locks: it holds for a
+primitive added later and for a caller no registry names.
+
+The case that needs it is a cross-CPU TLB shootdown whose targets must
+acknowledge in software. x86_64 has no broadcast invalidation, so the
+initiator IPIs each target and waits — and a target inside
+`IrqSafeSpinLock::lock` has masked its own interrupts for the whole acquire
+spin, so the acknowledge cannot arrive by interrupt. If the lock it is
+spinning for is one the initiator holds (the kernel heap's lock is exactly
+that), both spin for ever. The x86_64 port therefore installs its
+`tlb_shootdown::serve_pending` as the spin service; see
+[the x86_64 platform page](../platform/x86_64.md). aarch64 (`tlbi …is`
+broadcasts in hardware) and riscv64 (the SBI RFENCE is firmware-served) need
+no acknowledge, install nothing, and pay one load and a branch per round.
+
+The service runs on the calling CPU from an arbitrary spin round, so it must
+be reentrant against its own interrupt handler, take no lock, and not spin.
+The slot it lives in is a `core` atomic rather than the `loom_compat` shim on
+purpose: it is written once at boot and never during a model run, so letting
+`loom` explore it would multiply every interleaving for a location that
+cannot race.
+
 ## Decision tree
 
 ```text

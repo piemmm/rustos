@@ -107,10 +107,10 @@ The open items, in priority order:
   fatal tail; the vector is packed into the neutral syndrome so a record can
   say which exception fired. Detail below.
 - **D82 — refining a live translation is a break-before-make violation —
-  OPEN, blocked on D52.** riscv64's missing remote publish fence is fixed;
-  removing the window itself means moving kthread kernel stacks off the
-  identity map into the shared kernel remap window, whose page reclamation
-  makes D52 a prerequisite. Detail below.
+  OPEN.** riscv64's missing remote publish fence is fixed; removing the
+  window itself means moving kthread kernel stacks off the identity map into
+  the shared kernel remap window. Its D52 prerequisite has landed, so the
+  work is unblocked. Detail below.
 - **D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with
   no record, and a spurious LAPIC interrupt is treated as fatal — OPEN.** The
   D83 shape surviving for vectors `32..=255`, which still share one
@@ -851,10 +851,10 @@ its own per-CPU identity (fixed), D47 was a dropped argv[0] in the desktop's
 launch path that started a core component in the wrong role, behind a harness
 that measured the wrong slot (fixed), and D48 was a window request an app could
 build but the protocol had to refuse, dying in silence because a graphical
-elevation's `stderr` reaches no one (fixed), and D52 is an x86_64 cross-CPU
+elevation's `stderr` reaches no one (fixed), and D52 was an x86_64 cross-CPU
 shootdown protocol defect that only became reachable once a production caller
-existed — the tree is safe by the current caller set, not by the protocol
-(open), D57/D58/D59 were a *policy* group rather than coding slips — a
+existed — the tree was safe by the current caller set, not by the protocol
+(fixed: the protocol no longer asks callers for anything), D57/D58/D59 were a *policy* group rather than coding slips — a
 pressure model whose two halves disagreed, three counts standing in for the
 resource they were meant to bound, and a release that undid itself one line
 later and then only ran on an edge nobody crosses (all fixed) — and D60 is the
@@ -3787,81 +3787,100 @@ is now a per-run output too.
 - Do NOT mark any item done on a green compile alone — the tests and the
   §23 gate are the bar.
 
-## D52 — an x86_64 shootdown initiator that cannot take the IPI can deadlock (OPEN)
+## D52 — an x86_64 shootdown target that cannot take the IPI could not acknowledge (FIXED)
 
-**Mechanism.** `tairix_arch_x86_64::tlb_shootdown` reaches the other CPUs by
-raising an IPI at each and spinning until every one has acknowledged from its
-ISR. That protocol assumes each target *can* take the interrupt. A CPU whose
-own interrupts are masked cannot acknowledge one.
+**The defect.** `tairix_arch_x86_64::tlb_shootdown` reached the other CPUs by
+raising an IPI at each and spinning until every one acknowledged *from its
+ISR*. That assumed each target could take the interrupt. A CPU whose own
+interrupts are masked cannot, and `IrqSafeSpinLock` masks the CPU for the
+whole of its acquire **spin** — `tairix_kalloc`'s heap lock included. So one
+initiator was enough, not two:
 
-**One initiator is enough — the record previously said the cycle "needs
-both", and that is wrong.** The masked CPU that cannot acknowledge does not
-have to be a second *initiator*; it only has to be masked and unable to make
-progress. `tairix_kalloc`'s heap lock masks the calling CPU **before** it
-spins for the lock (`FreeListAllocator::with_inner` over
-`IrqSafeSpinLock`), so:
-
-- CPU A holds the heap lock (masked), shrinks a grown region, and drives
+- CPU A holds the heap lock (masked), shrinks a grown region, drives
   `KernelVirtMap::unmap_run` → `shootdown_range` → IPI at B, then spins for
   B's acknowledge;
-- CPU B makes any kernel heap allocation, masks its interrupts, and spins
-  for the heap lock A holds.
+- CPU B makes any kernel heap allocation, masks its interrupts, and spins for
+  the heap lock A holds.
 
-B cannot take A's IPI; A never sees B's acknowledge. Both spin for ever.
-This is reachable with the kernel heap as the *only* production initiator,
-which is what the original record ruled out. It is x86_64-only for the same
-reason the fix below is (aarch64 broadcasts in hardware; the riscv64 SBI
-RFENCE is served by firmware in M-mode, which S-mode masking does not gate).
-It has not been observed because the heap rarely serves from grown regions
-at all (see D53), so a shrink is rare.
+B could not take A's IPI; A never saw B's acknowledge. Both spun for ever.
+It was x86_64-only for the same reason the fix is: aarch64 broadcasts in
+hardware, and the riscv64 SBI RFENCE is served by firmware in M-mode, which
+S-mode masking does not gate.
 
-**What this means for the fix.** Serving the in-flight request from the
-*mailbox-acquire* spin (below) does not close it: the deadlocked waiter is
-spinning on the **heap lock**, not on the mailbox. The serve point must
-therefore be every interrupt-masked spin — i.e. a hook in `lib/sync`'s
-`IrqSafeSpinLock` acquire path, installed by the x86_64 boot path, so any
-masked spin drains a pending shootdown — in addition to the mailbox spin.
+The cycle was never reachable in the shipped kernel, because the production
+x86_64 pipeline is single-CPU by construction — `boot.rs` builds
+`cpu_to_lapic` as `[Option<u8>; 1]` holding only the BSP, so the target set is
+empty, no IPI is raised and nothing is waited on. The protocol was wrong
+regardless of which callers happened to exercise it, and its old contract
+gated every subsystem that must reclaim window pages (D82).
 
-**Why it surfaced now.** Until the fragmentation-immune kernel-heap growth
-landed (`plans/FIX-KHEAP.md`), nothing in production drove
-`CrossCpuTlbShootdown` at all — only the `cross_cpu_tlb_shootdown_qemu_*`
-verticals did. Kernel-heap teardown is the first production initiator, and it
-runs under the global heap lock, which masks interrupts for the whole hold.
+**The fix: the port owes the acknowledge, not the caller.** Two changes, and
+the caller-side precondition the HAL contract used to state is deleted.
 
-**Why it has not bitten.** The heap serves almost everything from its 64 MiB
-bootstrap region, so `HeapSource::shrink` — the only path that tears a window
-run down — is rare (D53 records that nothing observed so far establishes the
-heap reaches grown regions at all). Rarity is not a defence: the deadlock is
-a total system hang with no diagnosis, and it needs only one heap shrink to
-coincide with one heap allocation on another CPU.
+- **A target acknowledges from a spin as readily as from its ISR.**
+  `serve_pending` is the acknowledge, and it is reached from the shootdown
+  ISR, from the descriptor's own acquire spin (the two-masked-initiators
+  case), and from **every spin round in `lib/sync`** — `spinwait::spin_wait`,
+  which each primitive in that crate now spins through, running the service
+  the port installs once (`spinwait::install_service`, from
+  `x86_64/boot.rs`). Putting it there rather than in a list of audited locks
+  is what makes the property total: it holds for a lock added later and for a
+  caller no registry names. aarch64 and riscv64 install nothing and pay one
+  load and a branch per round.
+- **A published target bitmap, not a generation counter.** The initiator
+  stores the range and the acknowledge count, then publishes a 32-byte bitmap
+  of target LAPIC ids **last** as the "go" signal. A target claims by
+  clearing its own bit, so the prior value `fetch_and` returns is *both* the
+  claim and the "am I a target?" test: exactly one caller wins it, and a CPU
+  whose bit is clear — a stale delivery, a CPU never asked, the initiator
+  itself — invalidates and decrements nothing. That is what stops a target
+  acknowledging twice (once from its spin, once when the deferred IPI finally
+  lands), which would return the *next* initiator early, i.e.
+  under-invalidate.
 
-**It also blocks other work.** `CrossCpuTlbShootdown`'s contract says
-"adding a second production initiator requires closing this first", which
-gates any subsystem that must reclaim window pages — including moving the
-kthread kernel stacks off the identity map into the shared kernel window,
-the fix D82 needs (see there).
+Invariants the design rests on, each load-bearing:
 
-**The fix.** Let a target acknowledge from a spin as well as from its ISR,
-exactly once: publish a generation counter last (after the range and the
-outstanding count), record per CPU the last generation it served, and have a
-CPU that is itself spinning to acquire the mailbox serve the in-flight
-request when its generation is new. The ISR does the same check, so a request
-served from the spin is not double-acknowledged when the pending IPI is later
-taken. x86_64 already carries `PerCpuStorage`, so the marker needs no new
-ceiling. aarch64 needs nothing (`tlbi vaae1is` is a hardware broadcast with
-no software acknowledge) and riscv64 needs nothing (the SBI RFENCE is served
-by the firmware in M-mode, which S-mode masking does not gate) — this is an
-x86_64-only protocol defect.
+- `pending >= popcount(targets)` always, because a target clears its bit
+  before it decrements. So `pending == 0` proves no bit is set, which is what
+  lets `serve_pending` gate on one load rather than a LAPIC MMIO read — and
+  it is why the descriptor is provably all-zero when a holder releases it.
+- Winning the claim proves the winner is an unacknowledged target, so the
+  initiator is still inside `shootdown` holding the descriptor and the range
+  read after the claim is still its range.
+- The bitmap **excludes the initiator's own id**, so the initiator can never
+  be a target of its own request; that is why its acknowledge wait does not
+  serve (it would be dead work) and why a caller that lists itself, or lists
+  a target twice, cannot inflate the count into a wait that never ends. The
+  32 bytes cover the 8-bit xAPIC id space exactly — an architectural width,
+  not a CPU-count ceiling, so no id can fall outside it.
+- With no target at all the call never touches the descriptor: a local
+  `invlpg` sweep and return, which is every production call today.
 
-**Definition of done.** The generation-marker protocol lands *and is reached
-from every interrupt-masked spin*, not only the mailbox one: a `lib/sync`
-acquire-path hook the x86_64 boot installs, so a CPU masked on the heap lock
-(or any other `IrqSafeSpinLock`) serves the in-flight request. The
-`cross_cpu_tlb_shootdown_qemu_x86_64` vertical is extended to drive a
-shootdown from a CPU holding a masking lock while a second CPU spins for that
-same lock — the shape derived above, not merely two concurrent initiators —
-and the precondition wording in the HAL contract and the x86_64 module docs
-is deleted (§2.14) because the protocol no longer needs it.
+**Proof.** The bitmap bookkeeping is host-tested (`target_map` /
+`for_each_target`: whole-id-space coverage, self-exclusion, duplicate
+collapse, and that every asked id is yielded back exactly once).
+`cross_cpu_tlb_shootdown_qemu_x86_64` drives all three routes home on two
+real cores — the AP's ISR; the AP's *masked* spin for a lock the BSP holds
+across its shootdown (the production heap-lock shape); and two masked
+initiators shooting at each other, where whichever wins the descriptor cannot
+finish until the loser serves it from its own descriptor spin. Each step
+blocks until its acknowledge lands. Removing the `lib/sync` install wedges
+step two and removing the descriptor-spin serve wedges step three, both at the
+60 s timeout, so the two serve points are independently necessary and
+independently proven.
+
+**Still owed by x86_64 SMP bring-up (`plans/ARCHSUPPORT.md`), not by this
+protocol.** Two properties a future bring-up must supply, recorded here
+because getting either wrong reintroduces a silent hang:
+
+- **The target set must be the set of *started* CPUs, never the set the MADT
+  lists.** A CPU parked waiting for a SIPI cannot service a fixed-vector IPI,
+  so an acknowledge would never come. Today the map holds only the BSP, so
+  the case does not arise.
+- **Production installs no shootdown ISR.** `init_local_tlb_shootdown` has no
+  production caller — only the QEMU vertical — so vector `0x21` still holds
+  the fail-closed default thunk on a production boot. Inert while the target
+  set is empty; a prerequisite the moment it is not.
 
 ## D53 — kernel-heap grow/shrink thrash now costs per-page work (OPEN, reachability unconfirmed)
 
@@ -5099,7 +5118,7 @@ console post-MMU is still owed, so a scan-out the active root does not cover
 would be caught in the matrix rather than on metal — the console now refuses
 such a surface, so this proves the refusal rather than the fault.
 
-## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN, blocked on D52)
+## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN)
 
 Two paths refine a block on a root that is **already the active translation
 regime**: `boot.rs` calls `AddressSpace::prepare_guard_arena` after
@@ -5167,14 +5186,25 @@ unmapped. Then:
   kernel heap's) over a documented split of the port's window, and the frames
   come from the frame allocator like any other kernel memory.
 
-**This is blocked on D52.** Reclaiming a freed stack's pages under memory
-pressure (§26.3 — a pool of freed kernel stacks is exactly the reclaimable
-cache that rule names) drives `KernelVirtMap::unmap_run`, which makes the
-stack teardown a second production initiator of the x86_64 cross-CPU
-shootdown. `tairix_arch_api::CrossCpuTlbShootdown`'s contract states that
-adding one requires closing D52 first — and D52 turns out to be worse than
-recorded (a single initiator plus one masked waiter on the heap lock already
-deadlocks; see there). D52 is therefore a prerequisite, not a parallel item.
+**Its D52 prerequisite has landed, so this is unblocked.** Reclaiming a freed
+stack's pages under memory pressure (§26.3 — a pool of freed kernel stacks is
+exactly the reclaimable cache that rule names) drives
+`KernelVirtMap::unmap_run`, which makes the stack teardown a second
+production initiator of the x86_64 cross-CPU shootdown. That was gated on
+D52, whose contract used to require a masked initiator to be the only one in
+flight; the protocol now owes the acknowledge itself and asks callers for
+nothing, so a second initiator is admissible.
+
+**What a second consumer *does* still owe: the serialiser.** `unmap_run`'s
+teardown was safe partly because the kernel heap's lock serialised every
+teardown, and `KernelRemap::space` is a plain `SpinLock` no second consumer
+sits behind. A stack path reaching `KernelVirtMap` concurrently with the heap
+path must therefore decide deliberately what serialises the two and what
+interrupt state that lock holds — a stale claim of exactly this kind is what
+hid D81, so the decision belongs in the code rather than assumed. Lock order
+is `stacks.slots -> kvmap.space` against the heap's
+`heap -> kheap.slots -> kvmap.space`: no cycle, but nothing may be allocated
+from the heap while `slots` is held.
 
 ### riscv64's remote fence — FIXED
 
@@ -5199,9 +5229,8 @@ The riscv64 QEMU verticals are single-hart, so the matrix still cannot
 observe the multi-hart effect.
 
 **Done when:** kthread kernel stacks are window-backed with an unmapped
-guard page; no `split_block` call reaches a root that is the active
-translation regime (and the surface itself is gone, per above); D52 has
-landed first.
+guard page, and no `split_block` call reaches a root that is the active
+translation regime (the surface itself being gone, per above).
 
 ---
 

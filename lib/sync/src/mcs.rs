@@ -38,7 +38,8 @@ use core::marker::{PhantomData, PhantomPinned};
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 
-use crate::loom_compat::{spin_loop, AtomicBool, AtomicPtr, Ordering, SyncUnsafeCell};
+use crate::loom_compat::{AtomicBool, AtomicPtr, Ordering, SyncUnsafeCell};
+use crate::spinwait::spin_wait;
 
 /// Per-waiter queue node.
 ///
@@ -156,7 +157,7 @@ impl<T: ?Sized> McsLock<T> {
                 (*predecessor).next.store(node_ptr, Ordering::Release);
             }
             while node.locked.load(Ordering::Acquire) {
-                spin_loop();
+                spin_wait();
             }
         }
 
@@ -235,7 +236,7 @@ impl<T: ?Sized> Drop for McsGuard<'_, T> {
                 if !s.is_null() {
                     break s;
                 }
-                spin_loop();
+                spin_wait();
             };
             // SAFETY: The successor's node is kept alive by its caller's
             // outstanding `&'a mut McsNode` borrow.

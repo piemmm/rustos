@@ -429,6 +429,13 @@ pub fn boot(
         crate::x86_64::com1_rx::kalloc_irq_disable,
         crate::x86_64::com1_rx::kalloc_irq_restore,
     );
+    // A masked CPU cannot take the shootdown IPI, so it acknowledges from its
+    // spin instead: this is the one port whose cross-CPU TLB invalidation
+    // needs a software acknowledge, and the lock above is what masks the
+    // kernel heap's teardown. Installed here, with the mask itself and before
+    // any interrupt is enabled or any AP started, so no shootdown can be in
+    // flight while a spinning CPU still has no way to answer it.
+    tairix_sync::spinwait::install_service(tairix_arch_x86_64::tlb_shootdown::serve_pending);
     match try_boot(boot_info, heap, log_sink, audit_sink, log_level) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {

@@ -11,55 +11,67 @@
 //!
 //! # Protocol
 //!
-//! A single global descriptor (`SHOOTDOWN`) serialises shootdowns
-//! behind a spin-acquired flag, so the (rare) page-table-teardown path
-//! never races itself across CPUs. The initiator:
+//! A single global descriptor (`SHOOTDOWN`) serialises shootdowns behind a
+//! spin-acquired flag, so the (rare) page-table-teardown path never races
+//! itself across CPUs. The initiator:
 //!
-//! 1. spin-acquires the descriptor lock,
-//! 2. publishes the target virtual range and the number of CPUs it is
-//!    about to interrupt (the outstanding-acknowledge count),
-//! 3. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each of those CPUs,
-//! 4. invalidates the range on *itself* with `invlpg`,
-//! 5. spins until every interrupted CPU has acknowledged (the count
-//!    reaches zero), then releases the lock.
+//! 1. builds the set of CPUs to interrupt as a bitmap of LAPIC ids, minus
+//!    its own bit (`target_map`),
+//! 2. spin-acquires the descriptor lock,
+//! 3. stores the target range and the outstanding-acknowledge count, then
+//!    publishes the bitmap **last** — the bitmap is the "go" signal,
+//! 4. raises a [`TLB_SHOOTDOWN_VECTOR`] IPI at each CPU in the bitmap,
+//! 5. invalidates the range on *itself* with `invlpg`,
+//! 6. spins until every target has acknowledged (the count reaches zero),
+//!    then releases the lock.
 //!
-//! Each interrupted CPU runs `tairix_arch_x86_64_tlb_shootdown_dispatch`
-//! from the ISR: it reads the published range, runs `invlpg` over it,
-//! writes the LAPIC end-of-interrupt, and decrements the acknowledge
-//! count. A *range* is published rather than a single page because a
-//! large page-table teardown otherwise pays one IPI round-trip per
-//! 4 KiB leaf; one round-trip covers the whole run instead.
+//! With no target at all — the single-CPU case — there is nothing to publish
+//! and nobody to wait for, so the call is just the local `invlpg` sweep and
+//! never touches the descriptor.
 //!
-//! The spin in step 5 is a genuine, bounded synchronisation — a targeted
-//! CPU with interrupts enabled services the IPI — not a "retry until it
-//! works" bring-up hack: under-invalidating (returning before a CPU has
-//! flushed) is the only failure mode, so the initiator *must* wait for the
-//! acknowledge.
+//! The spin in step 6 is a genuine, bounded synchronisation, not a "retry
+//! until it works" bring-up hack: under-invalidating (returning before a CPU
+//! has flushed) is the only failure mode, so the initiator *must* wait for
+//! the acknowledge.
 //!
-//! # The masked-initiator precondition
+//! # A target acknowledges from a spin as readily as from its ISR
 //!
-//! A CPU whose own interrupts are masked cannot acknowledge, so it must not
-//! be one of two concurrent initiators: the other would hold the mailbox
-//! waiting for an acknowledge that cannot come, while this one waits to
-//! acquire the mailbox. The kernel-heap teardown — the only production
-//! caller, and a masked one — satisfies this because the global heap lock
-//! that masks it also serialises it. Adding a second production initiator
-//! requires letting a target acknowledge from a spin as well as from its
-//! ISR (`plans/OPEN-DEFECTS.md` D52).
+//! The acknowledge is `serve_pending`, reached from two places: the
+//! shootdown ISR, and any spin round in `lib/sync` (the boot path installs it
+//! as that crate's spin service). Both matter, because a CPU whose own
+//! interrupts are masked cannot take the IPI at all — and masking is exactly
+//! what `tairix_sync::IrqSafeSpinLock` does for the whole of its acquire
+//! spin, the kernel heap's lock included. An initiator holding that heap lock
+//! and a second CPU spinning to acquire it would otherwise wait on each other
+//! for ever: the initiator for an acknowledge the masked CPU cannot send, the
+//! masked CPU for a lock the initiator will not release until it has one.
+//!
+//! Serving from a spin means a target could otherwise acknowledge twice —
+//! once from the spin, once when the deferred IPI is finally delivered —
+//! double-decrementing the count and returning the *next* initiator early,
+//! i.e. under-invalidating. The bitmap forecloses it: a target claims by
+//! clearing its own bit, so the prior value that `fetch_and` returns is both
+//! the claim and the "am I a target?" test, and exactly one caller can win
+//! it. A CPU whose bit is already clear — a stale delivery, a CPU that was
+//! never asked, the initiator itself — invalidates nothing and decrements
+//! nothing. The ISR still writes its LAPIC EOI unconditionally: the
+//! in-service bit is set whether or not there was work to do.
 //!
 //! # Host build
 //!
-//! The mailbox, the ISR, and the install helper are gated to
-//! `target_os = "none"`: they reach LAPIC MMIO and the per-CPU IDT.
-//! The host build carries none of them; the `X86_64Arch` shootdown
-//! impl is a vacuous no-op there (there is no second CPU and no TLB),
-//! and the conformance vertical asserts only that the call is
-//! total and panic-free. The real cross-CPU round-trip is proven by the
+//! The descriptor, the ISR, and the install helper are gated to
+//! `target_os = "none"`: they reach LAPIC MMIO and the per-CPU IDT. The
+//! bitmap bookkeeping is not, so the decisions the protocol rests on — who
+//! is asked, who is excluded, how many acknowledges are owed — are
+//! host-tested below. The host `X86_64Arch` shootdown impl is a vacuous
+//! no-op (there is no second CPU and no TLB) and the conformance vertical
+//! asserts only that the call is total and panic-free; the real cross-CPU
+//! round-trip, including the masked-spin acknowledge, is proven by the
 //! `cross_cpu_tlb_shootdown_qemu_x86_64` QEMU vertical.
 //!
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::interrupts::SavedRegs;
@@ -72,12 +84,64 @@ use crate::interrupts::SavedRegs;
 /// slot it installs.
 pub const TLB_SHOOTDOWN_VECTOR: u8 = 0x21;
 
+/// Bytes in the target bitmap: one bit per xAPIC id.
+///
+/// An xAPIC id is 8 bits wide (Intel SDM Vol 3A §11.4.6), the same width
+/// every LAPIC-id-taking path on this port carries, so 32 bytes covers the id
+/// space exactly and no id can fall outside the map. That is an architectural
+/// width, not a CPU-count ceiling: it neither shrinks on a small machine nor
+/// needs raising on a large one.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const TARGET_BYTES: usize = 32;
+
+/// The bitmap byte and bit mask a LAPIC id occupies.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const fn target_slot(lapic_id: u8) -> (usize, u8) {
+    ((lapic_id >> 3) as usize, 1u8 << (lapic_id & 7))
+}
+
+/// The target bitmap for `targets`, excluding `own`, and the number of
+/// acknowledges it owes.
+///
+/// Excluding the caller here rather than trusting it to exclude itself is
+/// what makes the acknowledge wait unable to wait on the initiator, and
+/// collapsing duplicates is what stops a repeated id inflating the count into
+/// a wait that never ends.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn target_map(targets: impl Iterator<Item = u8>, own: u8) -> ([u8; TARGET_BYTES], usize) {
+    let mut map = [0u8; TARGET_BYTES];
+    for id in targets {
+        let (byte, bit) = target_slot(id);
+        map[byte] |= bit;
+    }
+    let (own_byte, own_bit) = target_slot(own);
+    map[own_byte] &= !own_bit;
+    let owed = map.iter().map(|bits| bits.count_ones() as usize).sum();
+    (map, owed)
+}
+
+/// Call `f` with every LAPIC id set in `map`.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn for_each_target(map: &[u8; TARGET_BYTES], mut f: impl FnMut(u8)) {
+    let mut base: u8 = 0;
+    for bits in map {
+        if *bits != 0 {
+            for shift in 0..8u8 {
+                if bits & (1u8 << shift) != 0 {
+                    f(base | shift);
+                }
+            }
+        }
+        // The map's 32 bytes cover the 8-bit id space exactly, so the last
+        // step is the one that wraps and no id is built from it.
+        base = base.wrapping_add(8);
+    }
+}
+
 /// Global, lock-serialised shootdown descriptor.
 ///
 /// There is at most one in-flight cross-CPU shootdown system-wide; the
-/// `lock` flag enforces that. `vaddr` is the page to invalidate and
-/// `pending` is the number of interrupted CPUs that have not yet
-/// acknowledged.
+/// `lock` flag enforces that.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 struct ShootdownMailbox {
     /// Spin flag: `true` while an initiator owns the descriptor.
@@ -87,7 +151,14 @@ struct ShootdownMailbox {
     /// How many consecutive 4 KiB pages from `vaddr` to invalidate.
     pages: AtomicUsize,
     /// Outstanding acknowledges; the initiator waits for this to reach 0.
+    ///
+    /// Never below the number of bits still set in `targets`, because a
+    /// target clears its bit before it decrements. So `pending == 0` proves
+    /// no bit is set, which is what lets [`serve_pending`] gate on one load.
     pending: AtomicUsize,
+    /// One bit per LAPIC id still owing an acknowledge: published last, and
+    /// cleared by the owning CPU as its claim.
+    targets: [AtomicU8; TARGET_BYTES],
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -96,48 +167,58 @@ static SHOOTDOWN: ShootdownMailbox = ShootdownMailbox {
     vaddr: AtomicU64::new(0),
     pages: AtomicUsize::new(0),
     pending: AtomicUsize::new(0),
+    targets: [const { AtomicU8::new(0) }; TARGET_BYTES],
 };
 
 /// Invalidate `pages` consecutive 4 KiB pages from the page containing
 /// `vaddr` on the calling CPU and on every CPU whose LAPIC ID `targets`
 /// yields, returning once all of them have acknowledged.
 ///
-/// `targets` must yield the *other* online CPUs' LAPIC ids (never the
-/// caller). An empty iterator degrades to a purely local `invlpg` sweep.
-/// The iterator is taken `Clone` rather than as a `&[u8]` so the caller can
-/// stream the ids straight out of its caller-sized per-CPU map without a
-/// fixed `MAX_CPUS` scratch buffer; `shootdown` walks
-/// it twice — once to publish the acknowledge count, once to raise the
-/// IPIs — so it must be cheap to re-walk. A zero page count is a no-op.
+/// `targets` may yield the calling CPU's own id and may repeat one: the
+/// bitmap excludes the caller and collapses duplicates (`target_map`). A
+/// zero page count is a no-op, and an empty target set degrades to a purely
+/// local `invlpg` sweep that never touches the descriptor.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn shootdown<I>(vaddr: u64, pages: usize, targets: I)
 where
-    I: Iterator<Item = u8> + Clone,
+    I: Iterator<Item = u8>,
 {
     if pages == 0 {
         return;
     }
-    // Acquire the global descriptor. `Acquire` pairs with the `Release`
-    // store in the unlock below so a previous shootdown's writes are
-    // visible before this one reuses the mailbox.
+
+    // Built before the descriptor is touched, so the lock is held for the
+    // round-trip alone.
+    let (map, owed) = target_map(targets, crate::preempt::local_lapic_id());
+    if owed == 0 {
+        invlpg_range(vaddr, pages);
+        return;
+    }
+
+    // Acquire the descriptor, serving any request already in flight: this
+    // spin is reached with interrupts masked (the kernel-heap teardown is
+    // such a caller), so waiting without serving would leave the CPU holding
+    // the descriptor waiting on an acknowledge this CPU cannot send.
     while SHOOTDOWN
         .lock
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        serve_pending();
         core::hint::spin_loop();
     }
 
-    // Publish the range and the acknowledge count *before* any IPI is
-    // raised. `vaddr`/`pages` are stored before `pending` with `Release`
-    // so the ISR's `Acquire` load of `pending` synchronises-with them; the
-    // IPI send below is additionally an MMIO write (a strong ordering
-    // point), so a target never observes a stale range.
+    // The range and the count go out *before* the bitmap: a target that wins
+    // its bit decrements `pending` at once, so storing `pending` after the
+    // bitmap could overwrite that decrement.
     SHOOTDOWN.vaddr.store(vaddr, Ordering::Relaxed);
-    SHOOTDOWN.pages.store(pages, Ordering::Release);
-    SHOOTDOWN
-        .pending
-        .store(targets.clone().count(), Ordering::Release);
+    SHOOTDOWN.pages.store(pages, Ordering::Relaxed);
+    SHOOTDOWN.pending.store(owed, Ordering::Relaxed);
+    for (slot, bits) in SHOOTDOWN.targets.iter().zip(map) {
+        // `Release` on every byte, not just the last: a target reads only
+        // the byte its own id lies in, so each must carry the range with it.
+        slot.store(bits, Ordering::Release);
+    }
 
     // SAFETY: `LAPIC_BASE_PHYS` is identity-mapped (boot.s
     // SAFETY-INVARIANT 4). Each CPU accesses its own per-CPU LAPIC at
@@ -147,25 +228,61 @@ where
     let mmio =
         unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32) };
     let mut lapic = crate::apic::Lapic::new(mmio);
-    for target in targets {
-        lapic.send_ipi(
-            target,
-            crate::apic::DeliveryMode::Fixed,
-            TLB_SHOOTDOWN_VECTOR,
-        );
-    }
+    // Raised from the local copy, never from the published bitmap the targets
+    // are concurrently clearing, so the set asked is exactly the set counted.
+    for_each_target(&map, |id| {
+        lapic.send_ipi(id, crate::apic::DeliveryMode::Fixed, TLB_SHOOTDOWN_VECTOR);
+    });
 
     // Invalidate locally while the targets are flushing in parallel.
     invlpg_range(vaddr, pages);
 
-    // Wait for every interrupted CPU to acknowledge. `Acquire` pairs with
-    // the dispatcher's `Release` decrement so the remote `invlpg`s are
-    // ordered before this call returns.
+    // Wait for every interrupted CPU to acknowledge. `Acquire` pairs with the
+    // acknowledge's `Release` decrement so the remote `invlpg`s are ordered
+    // before this call returns. Serving here would be dead work: this CPU's
+    // own bit was masked out above, so it can never be a target of its own
+    // request.
     while SHOOTDOWN.pending.load(Ordering::Acquire) != 0 {
         core::hint::spin_loop();
     }
 
     SHOOTDOWN.lock.store(false, Ordering::Release);
+}
+
+/// Claim and discharge this CPU's outstanding acknowledge, if it has one.
+///
+/// Total and idempotent: a CPU that was never asked, or that has already
+/// acknowledged, invalidates nothing and decrements nothing. The boot path
+/// installs it as `lib/sync`'s spin service so a CPU spinning with its
+/// interrupts masked still acknowledges; the shootdown ISR calls it for the
+/// ordinary interrupt-delivered case.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn serve_pending() {
+    // Nothing in flight is the overwhelmingly common case and must cost one
+    // load rather than a LAPIC MMIO read. Sound because `pending` is never
+    // below the number of bits still set.
+    if SHOOTDOWN.pending.load(Ordering::Acquire) == 0 {
+        return;
+    }
+
+    let (byte, bit) = target_slot(crate::preempt::local_lapic_id());
+    // The claim. `AcqRel` so the range read below cannot be hoisted above it,
+    // and so it synchronises-with the initiator's `Release` publish of this
+    // byte.
+    if SHOOTDOWN.targets[byte].fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+        return;
+    }
+
+    // Winning the claim proves this CPU is a target that has not yet
+    // acknowledged, so the initiator is still inside `shootdown` holding the
+    // descriptor and the range read here is still its range.
+    let pages = SHOOTDOWN.pages.load(Ordering::Relaxed);
+    let vaddr = SHOOTDOWN.vaddr.load(Ordering::Relaxed);
+    invlpg_range(vaddr, pages);
+
+    // Acknowledge last, with `Release`, so the `invlpg`s above are ordered
+    // before the initiator's `Acquire` load observes the decrement.
+    SHOOTDOWN.pending.fetch_sub(1, Ordering::Release);
 }
 
 /// Invalidate the calling CPU's TLB entries for `pages` consecutive 4 KiB
@@ -201,10 +318,6 @@ fn invlpg(vaddr: u64) {
 
 /// Rust trampoline called by the shootdown ISR stub.
 ///
-/// Reads the published range, invalidates it on this CPU, writes the LAPIC
-/// end-of-interrupt, and decrements the outstanding-acknowledge count so
-/// the initiator can observe completion.
-///
 /// # Safety
 ///
 /// Only callable from the ISR stub. Invoking it from arbitrary Rust is
@@ -213,13 +326,10 @@ fn invlpg(vaddr: u64) {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut SavedRegs) {
-    // `Acquire` pairs with the initiator's `Release` store of `pages`,
-    // which is published after `vaddr`, so the range read here is the
-    // current one.
-    let pages = SHOOTDOWN.pages.load(Ordering::Acquire);
-    let vaddr = SHOOTDOWN.vaddr.load(Ordering::Relaxed);
-    invlpg_range(vaddr, pages);
+    serve_pending();
 
+    // Unconditional, unlike the acknowledge above: the in-service bit is set
+    // for this vector whether or not this CPU still owed one.
     // SAFETY: `LAPIC_EOI_OFFSET` is the architecturally-fixed EOI
     // register; writing `0` is the documented end-of-interrupt sequence
     // (Intel SDM Vol 3A §11.8.5). LAPIC MMIO is identity-mapped.
@@ -227,15 +337,6 @@ unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut Saved
         let eoi =
             (crate::preempt::LAPIC_BASE_PHYS + crate::preempt::LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
-    }
-
-    // Acknowledge last, with `Release`, so the remote `invlpg` above is
-    // ordered before the initiator's `Acquire` load observes the
-    // decrement. `saturating_sub`-style guard: a spurious delivery with
-    // `pending == 0` must not wrap the counter.
-    let prev = SHOOTDOWN.pending.load(Ordering::Relaxed);
-    if prev != 0 {
-        SHOOTDOWN.pending.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -281,7 +382,65 @@ pub unsafe fn init_local_tlb_shootdown(cpu_index: usize) -> Result<(), crate::pe
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{for_each_target, target_map, target_slot, TARGET_BYTES, TLB_SHOOTDOWN_VECTOR};
+
+    /// Every LAPIC id lands in the map, and no two share a bit.
+    #[test]
+    fn the_bitmap_covers_the_whole_xapic_id_space_one_bit_each() {
+        let mut seen = [false; 256];
+        for id in 0..=u8::MAX {
+            let (byte, bit) = target_slot(id);
+            assert!(byte < TARGET_BYTES, "id {id} outside the map");
+            let index = byte * 8 + bit.trailing_zeros() as usize;
+            assert!(!seen[index], "id {id} shares a bit");
+            seen[index] = true;
+        }
+        assert!(seen.iter().all(|hit| *hit));
+    }
+
+    #[test]
+    fn the_map_excludes_the_caller_so_it_cannot_wait_on_itself() {
+        // The caller is listed anyway, exactly as a careless caller would.
+        let (map, owed) = target_map([0u8, 1, 2].into_iter(), 1);
+        assert_eq!(owed, 2, "the caller's own id owes no acknowledge");
+        let (byte, bit) = target_slot(1);
+        assert_eq!(map[byte] & bit, 0);
+        let mut asked = [false; 256];
+        for_each_target(&map, |id| asked[id as usize] = true);
+        assert!(asked[0] && asked[2] && !asked[1]);
+    }
+
+    #[test]
+    fn a_repeated_id_owes_one_acknowledge_not_two() {
+        // A duplicate that inflated the count would leave the initiator
+        // waiting for an acknowledge no CPU owes it.
+        let (map, owed) = target_map([7u8, 7, 7, 200, 200].into_iter(), 0);
+        assert_eq!(owed, 2);
+        let mut asked = 0;
+        for_each_target(&map, |_| asked += 1);
+        assert_eq!(asked, 2, "one IPI per distinct target");
+    }
+
+    #[test]
+    fn an_empty_or_self_only_target_set_owes_nothing() {
+        assert_eq!(target_map(core::iter::empty(), 3).1, 0);
+        assert_eq!(target_map(core::iter::once(3), 3).1, 0);
+    }
+
+    /// The map and the ids it yields are inverses across the whole id space,
+    /// including the top byte whose walk ends on the wrapping step.
+    #[test]
+    fn every_asked_id_is_yielded_back_exactly_once() {
+        let ids: [u8; 6] = [0, 8, 63, 64, 254, 255];
+        let (map, owed) = target_map(ids.into_iter(), 1);
+        assert_eq!(owed, ids.len());
+        let mut yielded = [0usize; 256];
+        for_each_target(&map, |id| yielded[id as usize] += 1);
+        for id in ids {
+            assert_eq!(yielded[id as usize], 1, "id {id} not yielded once");
+        }
+        assert_eq!(yielded.iter().sum::<usize>(), owed);
+    }
 
     #[test]
     fn shootdown_vector_is_one_past_the_timer_vector() {

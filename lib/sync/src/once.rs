@@ -39,7 +39,8 @@
 use core::fmt;
 use core::mem::MaybeUninit;
 
-use crate::loom_compat::{spin_loop, AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::loom_compat::{AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::spinwait::spin_wait;
 
 // State machine.
 const EMPTY: usize = 0;
@@ -209,7 +210,7 @@ impl<T> OnceCell<T> {
                 }
                 _ /* RUNNING */ => {
                     // Wait for the other initialiser.
-                    spin_loop();
+                    spin_wait();
                 }
             }
         }

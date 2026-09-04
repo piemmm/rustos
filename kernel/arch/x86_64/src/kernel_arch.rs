@@ -312,16 +312,7 @@ impl SchedulerArch for X86_64Arch {
     fn current_cpu(&self) -> CpuId {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // SAFETY: `LAPIC_BASE_PHYS` is identity-mapped (boot.s
-            // SAFETY-INVARIANT 4 — 0..4 GiB identity map). The ID
-            // register is read-only and side-effect-free per Intel
-            // SDM Vol 3A §11.4.6. The pointer is never aliased
-            // mutably from any other context.
-            let lapic_id = unsafe {
-                let id_reg = (crate::preempt::LAPIC_BASE_PHYS + 0x20) as *const u32;
-                (core::ptr::read_volatile(id_reg) >> 24) as u8
-            };
-            let mapped = crate::preempt::cpu_id_for_lapic(lapic_id);
+            let mapped = crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id());
             if mapped == u32::MAX {
                 // Mapping table not yet populated — fall back to the
                 // boot CPU. The bin crate populates the table before
@@ -496,21 +487,12 @@ impl CrossCpuTlbShootdown for X86_64Arch {
     fn shootdown_range(&self, start_vaddr: u64, page_count: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // Stream the LAPIC ids of every *other* online CPU straight
-            // to `shootdown`; the caller invalidates itself inside it.
-            // The iterator walks the caller-sized per-CPU map
-            // (no fixed `MAX_CPUS` buffer), and is
-            // `Clone` because it captures only `Copy` data (`self` and
-            // `me`), so `shootdown` can take its length and re-walk it
-            // without an allocation.
-            let me = self.current_cpu();
-            let targets = (0..self.cpu_to_lapic.len()).filter_map(move |idx| {
-                let cpu = CpuId::try_from(idx).ok()?;
-                if cpu == me {
-                    return None;
-                }
-                self.lapic_id_of(cpu)
-            });
+            // Stream every mapped LAPIC id straight to `shootdown`, which
+            // excludes this CPU and invalidates it directly. The iterator
+            // walks the caller-sized per-CPU map, so there is no fixed
+            // `MAX_CPUS` scratch buffer and no allocation.
+            let targets = (0..self.cpu_to_lapic.len())
+                .filter_map(move |idx| self.lapic_id_of(CpuId::try_from(idx).ok()?));
             // One IPI round-trip covers the whole range: `invlpg` is
             // per-page but the acknowledge protocol is what costs, so a
             // large teardown must not pay it once per leaf.

@@ -2380,11 +2380,13 @@ static TESTS: &[QemuTest] = &[
     // WIRING Stage W6: the x86_64 cross-CPU TLB-shootdown vertical — the
     // port whose cross-CPU invalidation is entirely hand-written software
     // (no broadcast `invlpg`). The BSP brings up an application processor
-    // via INIT-SIPI-SIPI; both install the shootdown ISR; the BSP drives
-    // `X86_64Arch::shootdown_page`, which IPIs the AP and spins on the
-    // acknowledge counter, returning only once the AP's ISR has `invlpg`'d
-    // and acknowledged. Reaching PASS proves the IPI + invalidation + ack
-    // round-trip ran on a second real core. Two CPUs and a 60-second
+    // via INIT-SIPI-SIPI, both install the shootdown ISR, and the vertical
+    // then drives every way an acknowledge can come back: from the AP's ISR,
+    // from the AP's *masked* spin for a lock the initiator holds across the
+    // shootdown, and from the masked mailbox spin of two initiators shooting
+    // at each other. Each step blocks until the acknowledge lands, so
+    // reaching PASS proves all three ran on a second real core and a
+    // regression in any of them times out instead. Two CPUs and a 60-second
     // budget.
     QemuTest {
         package: "tairix-test-cross-cpu-tlb-shootdown-qemu-x86-64",

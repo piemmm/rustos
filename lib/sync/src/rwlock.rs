@@ -69,7 +69,8 @@
 use core::fmt;
 use core::ops::{Deref, DerefMut};
 
-use crate::loom_compat::{spin_loop, AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::loom_compat::{AtomicUsize, Ordering, SyncUnsafeCell};
+use crate::spinwait::spin_wait;
 
 // State word layout (in a single `AtomicUsize`):
 //   bit 0           : WRITER_BIT     — set while a writer holds the lock
@@ -208,7 +209,7 @@ impl<T: ?Sized> RwLock<T> {
                 let s = self.state.load(Ordering::Relaxed);
                 writer_held(s) || pending_writers(s) > 0
             } {
-                spin_loop();
+                spin_wait();
             }
         }
     }
@@ -289,7 +290,7 @@ impl<T: ?Sized> RwLock<T> {
                     return RwLockWriteGuard { lock: self };
                 }
             } else {
-                spin_loop();
+                spin_wait();
             }
         }
     }
