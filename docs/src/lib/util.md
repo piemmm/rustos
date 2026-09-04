@@ -81,6 +81,22 @@ and panic-free throughout.
   supervisor's elevation broker, and the masked text field in
   `lib/controls` — erases through this one implementation rather than its
   own.
+* `defer` — the one way an interactive surface hands a piece of slow work to
+  a worker: `JobDesk<Req, Ans>` holds one request waiting, one in flight, and
+  one answer landed, and nothing about it blocks, locks, or performs I/O (the
+  embedder supplies the exclusion and the parking). Two properties are why it
+  is not a queue. **Latest-wins**: a submission made while a job is in flight
+  replaces any earlier waiting one, so an interaction that settles repeatedly
+  costs at most one further job — a queue would make the surface's own
+  responsiveness the thing that generated the backlog. **At most one in
+  flight**: two concurrent writes to the same store would race for what it ends
+  up saying, so a job is handed out only once the previous one has been
+  answered. An answer a newer submission superseded is dropped rather than
+  delivered, and what a submission *displaced* is handed back, so a caller
+  waiting on the displaced request can be told it was superseded instead of
+  left waiting for an answer that will never come. Consumed by the terminal's
+  and the desktop session's settings publishers, the session's
+  program-catalogue scan, and the file manager's bundle scan.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`
   retain only the trailing N units of a stream, so `head`'s `-c -N` /

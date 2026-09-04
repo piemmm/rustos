@@ -44,11 +44,27 @@ use crate::state::{
 /// model: the owner receives the requested value and applies
 /// it (calling [`Slider::set_value`] to confirm, or a different value to
 /// reject/clamp it).
+///
+/// The two variants are the *live* value and the *settled* one, and the
+/// distinction is load-bearing: durable work — writing a setting, publishing a
+/// document, telling another process — is done on [`Settled`] alone. Doing it
+/// on every [`SetValue`] means one write per pointer-motion sample of a drag,
+/// which is the coupling the charter forbids (`plans/GUI-CONTROLS-DESIGN.md`).
+///
+/// [`Settled`]: Self::Settled
+/// [`SetValue`]: Self::SetValue
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SliderAction {
-    /// The slider requests its value become `permille` (`0..=1000`).
+    /// The slider requests its value become `permille` (`0..=1000`) while the
+    /// interaction continues: apply it live, and nothing more.
     SetValue {
         /// The requested new value, in permille.
+        permille: u16,
+    },
+    /// The interaction finished at `permille` — a released drag, a track
+    /// click, or a key step. This is where the owner acts durably.
+    Settled {
+        /// The value the interaction settled on, in permille.
         permille: u16,
     },
 }
@@ -327,8 +343,10 @@ impl Slider {
     }
 
     /// Feed a pointer event; a press/drag over an actionable slider updates the
-    /// value and reports the requested change. A denied, disabled, pending, or
-    /// failed-closed slider ignores pointer input (fail closed). The slider
+    /// value and reports it as
+    /// [`SetValue`](SliderAction::SetValue), and the release that ends the drag
+    /// reports [`Settled`](SliderAction::Settled). A denied, disabled, pending,
+    /// or failed-closed slider ignores pointer input (fail closed). The slider
     /// reports `bounds` into `damage` when the event moved the thumb or changed
     /// the pointer look; a sample that stays inside it reports nothing.
     pub fn on_pointer(
@@ -374,9 +392,15 @@ impl Slider {
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
-                *self.dragging = false;
+                let dragged = core::mem::replace(&mut *self.dragging, false);
                 damage::set(&mut self.state.pointer, hover_or_none, bounds, damage);
-                None
+                // A release settles the *interaction*, so it reports even when
+                // the last sample moved nothing — that is the one moment the
+                // owner may act durably. A release that no press here started
+                // settles nothing.
+                dragged.then_some(SliderAction::Settled {
+                    permille: self.value,
+                })
             }
             _ => None,
         }
@@ -384,8 +408,9 @@ impl Slider {
 
     /// Feed a key event; arrows step by the line step, PageUp/PageDown by the
     /// page step, Home/End jump to the ends, on a focused, actionable slider.
-    /// A step that moves the value reports `bounds` into `damage`; one already
-    /// at the end it steps toward reports nothing.
+    /// A step that moves the value reports `bounds` into `damage` and
+    /// [`Settled`](SliderAction::Settled); one already at the end it steps
+    /// toward reports nothing.
     pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<SliderAction> {
         if !self.state.focus.focused || !self.state.is_actionable() {
             return None;
@@ -401,7 +426,13 @@ impl Slider {
             Key::Named(NamedKey::End) => FULL,
             _ => return None,
         };
+        // One keystroke is a whole interaction, so a step that moves the value
+        // settles it. A step already at the end it presses toward moves
+        // nothing and reports nothing.
         self.request(target, bounds, damage)
+            .map(|_| SliderAction::Settled {
+                permille: self.value,
+            })
     }
 }
 

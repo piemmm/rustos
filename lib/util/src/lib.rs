@@ -50,6 +50,11 @@
 //!   the rasteriser (`lib/raster`), the compositor (`userland/gui/wm`), and
 //!   the PNG decoder (`lib/image`), so every buffer a picture's size decides
 //!   is reserved the same way.
+//! * [`defer`] — handing one piece of slow work off an interactive loop
+//!   (`JobDesk`: latest-wins, at most one in flight), consumed by the
+//!   terminal's and the desktop session's settings publishers, the session's
+//!   program-catalogue scan, and the file manager's bundle scan and
+//!   folder-occupancy probes, so no surface invents a second deferral scheme.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -72,6 +77,7 @@ pub mod cfloat;
 pub mod cnum;
 pub mod conf;
 pub mod count;
+pub mod defer;
 pub mod fallible;
 pub mod fmt;
 pub mod mathf;

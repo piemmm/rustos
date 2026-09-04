@@ -67,51 +67,20 @@ impl<H: AppDataHost> Store for AppDataStore<H> {
         if let Some(err) = store.store_refusal() {
             return Err(err);
         }
-        let mut document = Document::new();
-        for setting in store.settings() {
-            // Fail closed rather than drop: a key this rebuild lost would be
-            // a catalog entry the tool then republished without, silently
-            // unregistering an application. The service cannot answer with a
-            // document it could not itself have accepted, so this is
-            // unreachable — and it costs one `?` to not have to rely on that.
-            document
-                .set(setting.key, setting.value)
-                .map_err(|_| Errno::OutOfRange)?;
-        }
+        // Fail closed rather than drop: a key a rebuild lost would be a catalog
+        // entry the tool then republished without, silently unregistering an
+        // application.
+        let document = store.document().map_err(|_| Errno::OutOfRange)?;
         let empty = document.settings().next().is_none();
         Ok((!empty).then_some(document))
     }
 
-    /// Publish `document` as the whole of this scope.
-    ///
-    /// Every key the scope carries that `document` does not is unset and
-    /// every setting it carries is set, so what the scope says afterwards is
-    /// exactly what was handed in — a removed entry leaves nothing behind.
-    /// The commit publishes the lot as one atomic document replacement, so a
-    /// reader never sees half an edit.
+    /// Publish `document` as the whole of this scope, through the client's own
+    /// whole-scope replacement so the overlay and every other rendered registry
+    /// publish identically.
     fn write(&self, document: &Document) -> Result<(), Errno> {
         let mut host = self.host.borrow_mut();
-        let mut store = SettingsStore::open_published(&mut *host);
-        let stale: alloc::vec::Vec<alloc::string::String> = store
-            .settings()
-            .iter()
-            .filter(|setting| document.get(setting.key).is_none())
-            .map(|setting| alloc::string::String::from(setting.key))
-            .collect();
-        for key in stale {
-            store.unset(&key);
-        }
-        for setting in document.settings() {
-            // The registry only ever renders keys and values the format
-            // engine accepts (`lib/proglib` pins that against the engine's own
-            // definitions), so a refusal here is a defect in this program
-            // rather than the user's doing; it is reported as a refused write
-            // either way.
-            store
-                .set(setting.key, setting.value)
-                .map_err(|_| Errno::OutOfRange)?;
-        }
-        store.commit()
+        SettingsStore::open_published(&mut *host).replace(document)
     }
 }
 

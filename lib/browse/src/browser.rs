@@ -31,7 +31,7 @@ use crate::owner_edit::{validate_owner, OwnerChange, OwnerError};
 use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
-use crate::source::{DirectorySource, Listing};
+use crate::source::{DirectorySource, Listing, Probe};
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
 use tairix_controls::ScrollBar;
 
@@ -302,6 +302,11 @@ impl<S: DirectorySource> Browser<S> {
     /// [`Indeterminate`](Occupancy::Indeterminate) rather than becoming a
     /// per-frame syscall. Indices past the end of the listing are ignored. A
     /// fresh listing resets every answer, so a reload re-probes.
+    ///
+    /// A source that probes elsewhere answers [`Probe::Pending`], which leaves
+    /// the entry unanswered so the next resolve asks again. That is what lets a
+    /// caller resolve occupancy from inside a paint without the paint doing any
+    /// I/O: the ask records a request, and the answer is drawn a frame later.
     pub fn resolve_occupancy(&mut self, range: core::ops::Range<usize>) {
         let end = range.end.min(self.entries.len());
         for index in range.start..end {
@@ -315,8 +320,9 @@ impl<S: DirectorySource> Browser<S> {
             let answer = self.source.has_children(&self.components);
             self.components.pop();
             let occupancy = match answer {
-                Ok(true) => Occupancy::NonEmpty,
-                Ok(false) => Occupancy::Empty,
+                Ok(Probe::Ready(true)) => Occupancy::NonEmpty,
+                Ok(Probe::Ready(false)) => Occupancy::Empty,
+                Ok(Probe::Pending) => continue,
                 Err(_) => Occupancy::Indeterminate,
             };
             if let Some(entry) = self.entries.get_mut(index) {

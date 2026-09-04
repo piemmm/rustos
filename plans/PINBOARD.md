@@ -299,10 +299,22 @@ applies, and persists**.
   it could not read itself.
 - **Reply** — the shared status frame: applied, or a typed refusal. The
   identity check happens *before* the document is decoded, so an
-  unattested caller cannot even reach the parser.
-- **One adopt path.** A request adopted over IPC and a change made from the
-  backdrop menu run through the very same persist-then-adopt code, so the
-  two routes cannot diverge in what they write or what they redraw.
+  unattested caller cannot even reach the parser. The reply waits for the
+  *store*, not for the serve loop: it is sent when the publish lands, so the
+  chooser still learns whether its document was actually written.
+- **One adopt path, and it is off the loop** (`AGENTS.md` §28). A request
+  adopted over IPC and a change made from the backdrop menu run through the
+  very same persist-then-adopt code, so the two routes cannot diverge in what
+  they write or what they redraw — and neither of them writes on the serve
+  loop. The gesture *submits*; the session's settings worker publishes and
+  answers with what the store then holds; the loop adopts that on the wake it
+  nudges and does exactly the work the resulting change names. Persist-then-
+  adopt is intact — the adopted state is always what the store said — and the
+  compositor never stops for a disk. A refused publish is stated on `stderr`
+  and adopts nothing.
+  - A ticketed request the user's next gesture overtakes before any worker
+    took it is answered right there, so no caller is left parked on an answer
+    nobody will produce.
 - **Reading** is not brokered: the chooser reads the document itself, since
   it is the user's own file and a reader needs no coordination.
 

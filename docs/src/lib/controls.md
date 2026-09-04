@@ -57,6 +57,14 @@ under the floor and are unchanged.
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
 | `decision` | `Dialog`, `Tooltip`, `HelpTip` |
 
+A continuous control reports where its interaction *settled*, distinctly from
+the values it took along the way: `Slider` answers `SliderAction::SetValue`
+while the pointer is still down and `SliderAction::Settled` when the drag ends
+(a key step, being one whole interaction, settles at once). Durable work — a
+setting written, a document published, another process told — belongs on the
+settle alone. Acting on every value change means acting once per pointer-motion
+sample, which is how a slider ends up wired to a disk write.
+
 Every one of them resolves its colours, metrics, corner radii, **and text
 face** from the active `Theme` and `Scale` rather than a hard-coded pixel, hue,
 or typeface, composes its appearance from the typed `state` vocabulary, and

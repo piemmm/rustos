@@ -106,9 +106,12 @@ an `EntryKind`, and the display metadata a file manager needs (see below).
 
 The answer is a `Listing`, and it has two normal forms. A source that reads the
 directory on the calling thread answers `Listing::Ready` and is the simple case.
-One that reads it *elsewhere* — the desktop session, whose event loop must not
-stall on a directory a slow disk is still walking — answers `Listing::Pending`,
-and the embedder asks again when its own wake says the answer has landed. A
+One that reads it *elsewhere* — every interactive surface in the tree, whose
+loop must not stall on a directory a slow disk is still walking — answers
+`Listing::Pending`, and the embedder asks again when its own wake says the
+answer has landed. Both the desktop session (its icon column and its trusted
+picker) and the file manager's own browser read that way, through the shared
+`ListingDesk` policy. A
 refusal is the `Err` half and is a third thing entirely: pending is never an
 error, and an error is never retried by waiting. Nothing in the engine polls or
 sleeps; the party that owns the wake decides when to ask again.
@@ -734,12 +737,22 @@ the engine only ever draws an answer it has:
   `NonEmpty`, and `Indeterminate` (a probe that was refused or failed). Only
   `NonEmpty` draws the filled folder; every other state, and every file or
   bundle, draws exactly what it drew before.
-- `DirectorySource::has_children(components)` is the probe. `VfsDirectorySource`
-  answers it with the cheapest honest call sequence — open the directory, read
-  **one** maximal record, close — never a listing and never a walk, so the cost
-  does not grow with the child count. The kernel packs a whole listing or
-  refuses, so no bytes means empty, some bytes means occupied, and a listing
-  too large for the one-record buffer means occupied too.
+- `DirectorySource::has_children(components)` is the probe, answering
+  `Probe::Ready(bool)` or `Probe::Pending`. `VfsDirectorySource` answers it
+  with the cheapest honest call sequence — open the directory, read **one**
+  maximal record, close — never a listing and never a walk, so the cost does
+  not grow with the child count. The kernel packs a whole listing or refuses,
+  so no bytes means empty, some bytes means occupied, and a listing too large
+  for the one-record buffer means occupied too.
+- **A source that probes elsewhere answers `Pending`, and that is what lets the
+  cue be resolved from inside a paint.** The file manager's source records the
+  ask and returns `Pending`; the probe runs on its reader thread and the answer
+  is drawn a frame later. So the paint performs no I/O at all — it asks, which
+  costs a recorded request, and draws what has already arrived (`AGENTS.md`
+  §28.5). A pending entry stays `Unprobed` and is asked again on the next
+  resolve, because latching a pending probe would mean the answer never
+  arrived. The recorded set is probed as one batch: a screenful of folders
+  answered one wake at a time would be a screenful of repaints.
 - `Browser::resolve_occupancy(range)` answers only the indices its caller
   passes, and only for an entry that still needs one. The file manager passes
   `render::visible_range`, so a hundred-thousand-entry directory probes what is

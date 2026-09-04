@@ -316,6 +316,27 @@ impl<'h> Settings<'h> {
         listed
     }
 
+    /// The effective settings as one owned document, layered exactly as
+    /// [`Self::get`] answers them.
+    ///
+    /// What [`Self::settings`] answers, in a form that outlives the handle —
+    /// which is what a caller needs to hand the snapshot across a thread
+    /// boundary, or to diff it against what it is about to publish.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfError`] at the format's own bounds. Every key and value here came
+    /// out of a document this engine already accepted, so a refusal would mean
+    /// the engine disagreed with itself; it is surfaced rather than dropped
+    /// because a silently missing key reads as a setting the user removed.
+    pub fn document(&self) -> Result<Document, ConfError> {
+        let mut document = Document::new();
+        for setting in self.settings() {
+            document.set(setting.key, setting.value)?;
+        }
+        Ok(document)
+    }
+
     /// The boolean value of `key`.
     ///
     /// # Errors
@@ -440,6 +461,40 @@ impl<'h> Settings<'h> {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         !self.dirty.is_empty()
+    }
+
+    /// Make this scope say **exactly** `document`, as one atomic commit.
+    ///
+    /// Every key the scope carries that `document` does not is unset and every
+    /// setting it carries is set, so what the scope says afterwards is exactly
+    /// what was handed in — a removed entry leaves nothing behind and a reader
+    /// never sees half an edit. A `document` that matches what the scope
+    /// already says stages nothing and costs no call.
+    ///
+    /// This is the operation a whole-registry publisher wants: a caller that
+    /// renders its entire model into a document each time it changes should not
+    /// have to work out which keys disappeared.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::commit`], plus [`Errno::OutOfRange`] for a key or value
+    /// outside the format's grammar — which for a rendered registry means a
+    /// defect in the renderer rather than anything the user did.
+    pub fn replace(&mut self, document: &Document) -> Result<(), Errno> {
+        let stale: Vec<String> = self
+            .settings()
+            .iter()
+            .filter(|setting| document.get(setting.key).is_none())
+            .map(|setting| String::from(setting.key))
+            .collect();
+        for key in stale {
+            self.unset(&key);
+        }
+        for setting in document.settings() {
+            self.set(setting.key, setting.value)
+                .map_err(|_| Errno::OutOfRange)?;
+        }
+        self.commit()
     }
 
     /// Publish every edit made since the last commit, as one atomic document

@@ -6,10 +6,11 @@ first-class property of the process-launch path (not a desktop-local
 band-aid), and stages the identical fix for every other interactive
 loop that inherits the same defect.
 
-The rule this plan enforces is already in the charter: an interactive
-loop must never stall on work an unrelated task could do
-(`§2.16`, `§2.23`, `§26.2`), and I/O for one activity must never freeze
-another (`§26.1`). The launch path violates it today.
+The rule this plan enforces is now stated outright in the charter (`§28`,
+"Interactive Surfaces Never Wait on I/O"): an interactive surface performs no
+blocking I/O — not in response to input, not while painting, and never because a
+control's value changed. This plan is that rule's staged enforcement across the
+desktop; it is no longer where the rule is derived.
 
 ---
 
@@ -57,7 +58,13 @@ event loop** inherits the freeze:
 | Desktop launcher | `userland/gui/session/src/run.rs` (the taskbar-launch arms — today the program-library popup and its row activations — `tairix_rt::spawn(...)`) | Compositor loop frozen for the whole launch. **The reported bug.** |
 | Desktop file picker | `userland/gui/session/src/run.rs` (the `SessionPicker`'s `VfsDirectorySource` calling `tairix_rt::read_dir_all` inside `picker.handle_click` / `handle_key`, on the `SEAT_TOKEN` path) | Compositor loop frozen while a directory is read from disk on every open/navigate. Same class of defect (synchronous I/O on the compositor thread), smaller blast radius. |
 | Desktop icon artwork | `userland/gui/session/src/run.rs` (every icon surface resolving through `tairix_icon::ArtworkCache` *inside* its paint) | Compositor loop frozen for a bounded read plus a sandbox round trip, per icon, the first time each is drawn at a given pixel side. Worst on bring-up and on opening the launcher. Fixed in DESK-8. |
-| Desktop program catalog | `userland/gui/session/src/run.rs` (`refresh_library` + `desktop_associations`, on the `OpenLibrary` arm and after a re-list) | Compositor loop frozen while the two catalog documents and then **one `AppInfo` per catalogued application** are read — on the very click that opens the launcher. Same class as the two above; **not yet fixed** (see §5). |
+| Desktop program catalog | `userland/gui/session/src/run.rs` (`refresh_library` + `desktop_associations`, on the `OpenLibrary` arm and after a re-list) | Compositor loop frozen while the two catalog documents and then **one `AppInfo` per catalogued application** are read — on the very click that opens the launcher. Fixed in DESK-9. |
+| Desktop settings publish | `userland/gui/session/src/run.rs` (`adopt_pinboard_settings` → `persist_pinboard`) | Compositor loop frozen for a store open + publish + reload, *deliberately before* the change was adopted. Fixed in DESK-10. |
+| Terminal settings sheet | `userland/apps/terminal/src/{settings,run}.rs` | One store read + publish + reload **per pointer-motion sample of a slider drag**, on the terminal's own loop. The reported defect; fixed in DESK-10. |
+| File manager listings | `userland/apps/files/src/run.rs` (`LiveSource`) | Window frozen for every directory read: navigation, reload, and the bring-up open. Fixed in DESK-11. |
+| File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | `open_dir` + `read` + `close` per newly-visible folder, while painting. Fixed in DESK-11. |
+| File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
+| File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs; **not yet fixed** (DESK-12). |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_as` / `spawn_with`) | One-time, at login. Minor. |
@@ -608,7 +615,7 @@ Each stage is independently reviewable and must leave the whole-project
 - **The shape, twice.** A *desk* is the host-tested policy — what each consumer
   asked for, what has come back, the staleness rule that discards an answer for
   somewhere the desktop has since left — with no lock, thread, or syscall in it:
-  `ListingDesk` (`userland/gui/session/src/listing.rs`) and `WallpaperDesk`
+  `ListingDesk` (`lib/browse/src/desk.rs`) and `WallpaperDesk`
   (`wallpaper.rs`). The `Run` binary adds the runtime's futex mutex, a condition
   variable the worker parks on, and the shared `WorkerWake`.
 - **Listings.** Two consumers — the desktop icon column and the trusted picker —
@@ -732,28 +739,111 @@ Each stage is independently reviewable and must leave the whole-project
   window whose application has no picture leaves it immediately.
 
 ### DESK-9 — The program catalog off the loop
-- **Planned.** The last synchronous read left on the desktop's serve loop, and
-  the one on the most conspicuous gesture: pressing the Library button runs
-  `refresh_library` (both catalog documents) and then `desktop_associations`,
-  which reads **one `AppInfo` per catalogued application** — all on the
-  compositor's task, before the popup can appear. `refresh_pins`'
-  `resolve_pins` reads a bundle manifest per unresolved pin the same way. On a
-  warm VFS these are fast; on cold or contended storage they are the same
-  visible freeze DESK-4 and DESK-8 removed elsewhere.
-- **Why it is its own stage.** The catalog is not artwork: the taskbar's
-  library model has no "not yet" state, so unlike a picture that falls back to
-  a glyph there is nothing coherent to draw while the read is in flight. Making
-  it asynchronous means giving `LibraryPopup` a pending state (an empty popup
-  that fills, rather than a popup that does not open) and deciding what the
-  associations table answers while it is stale — a taskbar-model change, not a
-  worker-thread one, and out of scope for the change that landed DESK-8.
-- **Shape.** A fourth desk in the DESK-4/DESK-8 mould (request the catalog and
-  the association set, worker reads and merges, deliver, nudge, adopt on the
-  wake), plus the popup's pending state. The desk holds the *loaded* catalog,
-  never a partial one, so a popup is never shown half-populated.
-- **Deliverables:** the desk and its host tests, the popup's pending state and
-  its render case, the worker and its degradation path, and this stage
-  collapsed to its done-state.
+- **Done.** The catalogue and the file-type associations are one snapshot read
+  on a worker (`load_programs`, `userland/gui/session/src/library.rs`): the two
+  layers merged as before, then one `AppInfo` per catalogued application, all
+  fail-closed per layer and per bundle. The `Catalogs` desk is a
+  `tairix_util::defer::JobDesk` — one scan waiting, one in flight, latest-wins —
+  and the `OpenLibrary` click submits and opens the popup on the catalogue
+  already in hand, adopting the fresh one on the wake it nudges. A re-list
+  submits the same job, coalesced.
+- **No popup pending state was needed after all.** The stage anticipated one,
+  but the popup opening on the catalogue it *has* is both simpler and better:
+  the launcher opens instantly on what the user last saw and updates in place,
+  where an empty-popup-that-fills would have shown nothing on the very gesture
+  that asked. A fresh session's first popup is the only case with nothing to
+  show, and its catalogue is read at bring-up on the session's own task, before
+  any window is on screen.
+- **One snapshot, not two reads.** The associations come from the bundles the
+  *same* scan catalogued, so a click can never resolve a bundle against a
+  catalogue it was not read from — which the two separate reads it replaced
+  could.
+- Tests: `load_programs_reads_one_manifest_per_catalogued_bundle`
+  (`userland/gui/session/src/tests.rs`) — one read per catalogued bundle, an
+  unreadable manifest claiming nothing.
+
+### DESK-10 — Settings writes off the loop (the reported slider)
+- **Done.** A control's value is no longer tied to a store write anywhere on
+  the desktop.
+  - **`lib/controls`** gives a continuous control a settle point:
+    `SliderAction::Settled` alongside `SetValue`, reported by the release that
+    ends a drag (and at once by a key step, which is one whole interaction).
+    Durable work belongs on the settle; acting on every value change is acting
+    once per pointer sample.
+  - **The terminal** separates the profile the windows *render* from the one the
+    store *holds* (`tairix_terminal::publish::Publication`). A drag previews
+    every sample and writes nothing; the settle asks the settings worker for one
+    write; the answer — what the store then implies, so a machine policy still
+    wins — becomes the profile in force. A refused write reverts the preview and
+    states why, so no window keeps showing a look the next start would not
+    restore. *Restore defaults* is the same path with no second mechanism.
+  - **The desktop session** keeps persist-then-adopt and moves it off the serve
+    loop: both routes into the pinboard settings submit to the `Publisher` desk
+    and adopt nothing, and the answer is adopted on the wake. The chooser's
+    `PINBOARD_ENDPOINT` call is answered when the store has spoken, so it still
+    reports whether its document was published; a request the next gesture
+    overtakes before any worker took it is answered there and then.
+- Tests: `dragging_the_text_size_settles_once_however_many_samples_it_takes`
+  and `clicking_the_text_size_track_settles_the_value_it_jumped_to`
+  (`userland/apps/terminal/src/settings_tests.rs`),
+  `a_drag_reports_one_settle_however_many_samples_it_took`
+  (`lib/controls/src/value_tests.rs`), the `publish` suite (the live/adopted
+  pair, the store's answer winning, a refusal reverting), and the `defer` suite
+  (`lib/util/src/defer_tests.rs`).
+
+### DESK-11 — The file manager's reads off its loop
+- **Done.** Every unbounded read the file manager makes now runs on one reader
+  thread, and the window keeps drawing throughout. The three kinds share a
+  worker rather than taking one each: the app browses one place at a time, so
+  they are never concurrent workloads, and one worker gives the order they are
+  served in a single stated answer — the listing first (the user navigated and
+  is waiting), then the folder cues (which decorate a listing already shown),
+  then the bundle scan (which no frame depends on). Nothing starves: each
+  request set is finite and refilled only by the user asking again.
+  - **Listings** go through `ListingDesk<FilesClient>` and a
+    `DirectorySource` that records and answers `Listing::Pending`;
+    `Browser::resume` commits the answer on the wake. The one read left on the
+    app's own task is `first_listable`, which runs before any window exists and
+    answers *which location to open* — a question a deferred source cannot
+    answer, since its first answer is always "not yet" and every candidate would
+    look listable.
+  - **Folder cues** gained a "not yet" (`tairix_browse::Probe`), so
+    `Browser::resolve_occupancy` may be called from inside a paint without the
+    paint performing any I/O: the ask records, the answer is drawn a frame
+    later. The recorded set is probed as one batch, because a screenful of
+    folders answered one wake at a time would be a screenful of repaints.
+  - **The "Open With…" scan** is a `JobDesk`: the click records what it asked
+    about and the chooser opens when the scan lands. The honest "no application
+    opens this" refusal is unchanged.
+- Tests: the `deferred` suite (`userland/apps/files/src/deferred_tests.rs`) —
+  the ask that performs no I/O, no second probe of a folder already in flight or
+  in a batch, the whole-batch drain, the answer served once, the empty delivery
+  owing no repaint; and `a_pending_probe_leaves_the_entry_unanswered_and_is_asked_again`
+  (`lib/browse/src/tests.rs`).
+
+### DESK-12 — The file manager's icon decode off its loop
+- **Planned.** The last I/O the file manager's loop performs: `IconPipeline::pump`
+  runs one bounded artwork read plus one parser-sandbox round trip per turn of
+  the event loop (`userland/apps/files/src/icons.rs`). It is materially milder
+  than what DESK-11 removed — already outside the paint, bounded to one asset,
+  and interleaved so input is served ahead of it — but it is still I/O on a loop
+  that owes the window a frame, which `§28.1` forbids without qualification.
+- **Why it is its own stage.** The decode cannot simply move onto the DESK-11
+  reader while `IconPipeline` owns the cache, the desk, the reader *and* the
+  rasteriser: a worker calling `pump` through the shared lock would hold that
+  lock across the read and the sandbox round trip, and the paint resolving
+  through the cache would block on it — the same stall, moved. The pipeline must
+  split at the lock boundary the way the session's already does: the
+  `ArtworkDesk` shared with the worker, the cache on the paint side, and the
+  reader and rasteriser owned by the worker (which builds its own
+  `ParserSandbox`, so no sandbox handle crosses a thread boundary).
+- **Shape.** `IconPipeline` loses its generics, its owned seams, and `pump`,
+  gaining the `take_job`/`deliver` pair the lock boundary implies; the decode
+  itself stays the shared `tairix_icon::render_artwork`. The desk joins the
+  DESK-11 `Work` set, served after listings and before the cues.
+- **Deliverables:** the split and its host tests (the 19-test `icons_tests.rs`
+  suite reworked onto take/deliver, with no assertion weakened), the decode
+  moved onto the reader, and this stage collapsed to its done-state.
 
 ### DESK-5 — Verified shared image cache (`kernel/mem`)
 - **Deliverables:** the per-boot, content-hash-keyed verified image
@@ -923,9 +1013,17 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-4 — done** (§4 above).
 - **DESK-8 — done.** Icon artwork is decoded on a worker thread; no icon
   resolution happens inside a paint.
-- **DESK-9 — planned.** The program-library catalog and the per-bundle
-  association reads are still synchronous on the serve loop; the audit table
-  (§1.1) names the sites.
+- **DESK-9 — done.** The program catalogue and the associations its bundles
+  declare are one snapshot read on a worker; the launcher opens on the
+  catalogue in hand and adopts the fresh one when it lands.
+- **DESK-10 — done.** No control's value is tied to a store write: a
+  continuous control reports where it settled, the terminal separates the
+  profile it renders from the one the store holds, and the desktop session's
+  persist-then-adopt happens on a worker.
+- **DESK-11 — done.** Every unbounded read the file manager makes — listings,
+  folder cues, and the "Open With…" bundle scan — runs on one reader thread.
+- **DESK-12 — planned.** The file manager's icon decode is still pumped on its
+  event loop, one bounded read plus one sandbox round trip per turn.
 - **DESK-5 … DESK-7 — planned.**
 
 ---
@@ -954,7 +1052,7 @@ Each stage is independently reviewable and must leave the whole-project
   that §2.6 builds the verified shared image on; `kernel/core`'s
   `launch_cache.rs` (the `LaunchCache` folded into that cache) and
   `lib/appload/src/loader.rs` (the `content_hash` the cache is keyed on).
-- `AGENTS.md` `§2.16`, `§2.23`, `§5.4`, `§17.2`, `§19`, `§24`, `§24.1`,
-  `§26.1`, `§26.2`, `§26.3`, `§26.6`, `§26.7` — the rules this plan
-  enforces (including the demand-paged, CoW-shared, verified image of
+- `AGENTS.md` `§28` — the rule this plan enforces, stated outright; plus
+  `§2.16`, `§2.23`, `§5.4`, `§17.2`, `§19`, `§24`, `§24.1`, `§26.1`, `§26.2`,
+  `§26.3`, `§26.6`, `§26.7` — the rules this plan enforces (including the demand-paged, CoW-shared, verified image of
   §2.6, which puts program loading strictly ahead of Linux).

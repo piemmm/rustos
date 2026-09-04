@@ -26,7 +26,7 @@ use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
 
 use crate::entry::{Entry, EntryKind, LinkResolution};
-use crate::source::{DirectorySource, Listing};
+use crate::source::{DirectorySource, Listing, Probe};
 
 /// What a listed symbolic link holds, as the browser must see it.
 ///
@@ -339,7 +339,7 @@ pub type NoProbe = fn(&str, &mut [u8]) -> Result<usize, Errno>;
 /// fits (zero bytes), a one-child directory fits, and anything larger refuses.
 /// All three answers are decisive, and none of them scales with the child
 /// count.
-const PROBE_BUF_LEN: usize = tairix_abi::fs::DirEntry::HEADER_LEN + tairix_abi::fs::FS_NAME_MAX;
+pub const PROBE_BUF_LEN: usize = tairix_abi::fs::DirEntry::HEADER_LEN + tairix_abi::fs::FS_NAME_MAX;
 
 impl<F, L> VfsDirectorySource<F, L>
 where
@@ -393,13 +393,14 @@ where
         entries_from_dir_stream(&path, &stream, &mut self.links).map(Listing::Ready)
     }
 
-    fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {
+    fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
         let probe = self.probe.as_mut().ok_or(Errno::NotImplemented)?;
         let path = absolute_path(components)?;
         let mut buf = [0u8; PROBE_BUF_LEN];
+        // This thread's own read, so the answer is always ready.
         match probe(&path, &mut buf) {
-            Ok(0) => Ok(false),
-            Ok(_) | Err(Errno::BufferTooSmall) => Ok(true),
+            Ok(0) => Ok(Probe::Ready(false)),
+            Ok(_) | Err(Errno::BufferTooSmall) => Ok(Probe::Ready(true)),
             Err(errno) => Err(errno),
         }
     }

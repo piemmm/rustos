@@ -44,13 +44,15 @@
 //!   its `port_bind`-bound event mailbox (every window's deliveries and the
 //!   application-scoped icon-bar events, each accepted only from the session
 //!   identity the squat-protected create reply named), one shell-output and
-//!   one child member per window, and the memory-pressure wake. When an
-//!   animated screen effect is in force the park carries a one-shot frame
-//!   deadline, so the animation costs one timed wake per frame and nothing
-//!   at all when it is switched off.
+//!   one child member per window, the memory-pressure wake, and the settings
+//!   worker's wake. When an animated screen effect is in force the park
+//!   carries a one-shot frame deadline, so the animation costs one timed wake
+//!   per frame and nothing at all when it is switched off.
 //! * The user's own profile document, read at start-up under this process's
-//!   own identity and rewritten whenever a setting changes. It is the
-//!   *user's* profile, so every window shares it.
+//!   own identity and rewritten on a worker thread whenever a *settled* edit
+//!   asks for it. It is the *user's* profile, so every window shares it, and
+//!   the loop never waits on the store: a slider drag applies live and asks
+//!   for one write when it ends (`tairix_terminal::publish`).
 //!
 //! A key press is either a terminal command (a menu accelerator, or input
 //! the open menu or settings sheet owns) or shell input encoded through the
@@ -96,6 +98,7 @@ mod program {
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
     use tairix_appdata::{RtHost, Settings as SettingsStore};
     use tairix_terminal::profile::Profile;
+    use tairix_terminal::publish::{refusal_warnings, Publication, PublishJob, Published};
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
@@ -143,6 +146,11 @@ mod program {
     /// trimmed as memory tightens instead of being held until something else
     /// is starved.
     const PRESSURE_TOKEN: u64 = 2;
+
+    /// The wait-set token of the settings worker's wake pipe: readable exactly
+    /// when a publish has answered, so the profile the store now holds is
+    /// adopted through the park the loop is already in rather than by polling.
+    const PUBLISH_TOKEN: u64 = 3;
 
     /// Where the per-window token pairs begin, clear of the fixed tokens
     /// above.
@@ -282,33 +290,6 @@ mod program {
             ));
         }
         profile
-    }
-
-    /// Publish `profile` to the app-data store.
-    ///
-    /// A refused publish is reported and otherwise harmless: the terminal
-    /// keeps showing what the user just chose, and the next session opens on
-    /// whatever the store still holds.
-    fn persist_profile(settings: &mut SettingsStore<'_>, profile: &Profile) {
-        if let Err(err) = profile.save(settings) {
-            report(&alloc::format!("the profile was not saved ({err:?})"));
-        }
-    }
-
-    /// Forget the user's own settings and adopt what the store's lower layers
-    /// then imply.
-    ///
-    /// *Restore defaults* deliberately does **not** write this build's default
-    /// values into the user's document: it removes their opinions, so a
-    /// machine-wide policy or a later shipped default applies rather than a
-    /// frozen copy of today's. A refused clear is reported and leaves the
-    /// profile the user is looking at untouched.
-    fn restore_profile(settings: &mut SettingsStore<'_>, profile: &mut Profile) {
-        if let Err(err) = Profile::clear(settings) {
-            report(&alloc::format!("the defaults were not restored ({err:?})"));
-            return;
-        }
-        *profile = load_profile(settings);
     }
 
     /// The settings sheet and the popup window it is drawn in.
@@ -1064,9 +1045,31 @@ mod program {
         // the first frame is what they chose rather than a default corrected
         // once they have seen it. It is the user's, so every window shares
         // it.
-        let mut host = RtHost;
-        let mut store = SettingsStore::open(&mut host, OWN_WORD);
-        let mut profile = load_profile(&store);
+        // Read on this task, unlike every later write: nothing is on screen
+        // yet, so there is no frame to owe anyone.
+        let mut publication = {
+            let mut host = RtHost;
+            Publication::new(load_profile(&SettingsStore::open(&mut host, OWN_WORD)))
+        };
+
+        // Every later write goes to this worker instead, so a settled edit
+        // costs the window no frame. A kernel that will not grant the thread,
+        // or a pipe it refuses, leaves the writes on this task — exactly where
+        // they used to be, and stated once.
+        let publisher =
+            alloc::sync::Arc::new(Publisher::new(tairix_rt::sync::WorkerWake::create()));
+        let publish_worker = if publisher.wake.is_armed() {
+            spawn_publisher(&publisher)
+        } else {
+            report("no settings-worker wake pipe; the profile is saved on the event loop");
+            None
+        };
+        if publish_worker.is_none() {
+            publisher.stop();
+        }
+        // Declared after the handle, so it runs first: the desk stops, then the
+        // handle detaches.
+        let _publisher_guard = PublisherGuard(alloc::sync::Arc::clone(&publisher));
 
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
@@ -1125,6 +1128,21 @@ mod program {
         if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
             return fail(EXIT_NO_EVENTS, "memory-pressure wake refused");
         }
+        // The settings worker's wake. A refused add is fatal rather than
+        // tolerated: a publish whose answer nobody collects would leave the
+        // window showing settings the store may have refused.
+        if let Some(read) = publisher.wake.read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                PUBLISH_TOKEN,
+            ) != 0
+            {
+                return fail(EXIT_NO_EVENTS, "settings wake refused");
+            }
+        }
 
         // Forward this terminal's own inherited environment (USER, HOME,
         // LOGNAME, PATH, LANG, ...) to every shell it hosts, exactly as the
@@ -1168,7 +1186,7 @@ mod program {
             event_endpoint,
             set,
             slot: next_slot,
-            profile: &profile,
+            profile: publication.live(),
             theme: themes.active(),
             desktop: &desktop,
             env: &env,
@@ -1185,7 +1203,10 @@ mod program {
         // next wait. The park carries a frame deadline only while some window
         // has an animated effect in force.
         loop {
-            let animated = profile.effects.is_animated(desktop.scale().percent());
+            let animated = publication
+                .live()
+                .effects
+                .is_animated(desktop.scale().percent());
             let timeout = if animated {
                 FRAME_INTERVAL_NS
             } else {
@@ -1211,7 +1232,7 @@ mod program {
                 EVENT_TOKEN => {
                     let outcome = drain_events(
                         &mut windows,
-                        &mut profile,
+                        &mut publication,
                         &mut desktop,
                         themes.active(),
                         event_endpoint,
@@ -1237,10 +1258,37 @@ mod program {
                             event_endpoint,
                             server,
                             next_slot: &mut next_slot,
-                            profile: &mut profile,
+                            publication: &mut publication,
                             themes: &mut themes,
                             desktop: &mut desktop,
-                            store: &mut store,
+                            publisher: &publisher,
+                            env: &env,
+                        },
+                    ) {
+                        Applied::Running => {}
+                        Applied::Ended => return 0,
+                        Applied::Lost(reason) => return fail(EXIT_CHANNEL_LOST, reason),
+                    }
+                }
+                PUBLISH_TOKEN => {
+                    // The settings worker answered. Draining the nudge is the
+                    // whole of noticing it; what it means is the one adopt
+                    // path, so a publish the loop asked for and one it did
+                    // itself land identically.
+                    publisher.wake.drain();
+                    match apply_outcome(
+                        EventOutcome::ProfilePublished,
+                        &mut windows,
+                        &mut client,
+                        AppContext {
+                            set,
+                            event_endpoint,
+                            server,
+                            next_slot: &mut next_slot,
+                            publication: &mut publication,
+                            themes: &mut themes,
+                            desktop: &mut desktop,
+                            publisher: &publisher,
                             env: &env,
                         },
                     ) {
@@ -1338,8 +1386,247 @@ mod program {
         reason
     }
 
+    /// The terminal's settings publisher: the store round trip a settled edit
+    /// costs, run on a worker thread.
+    ///
+    /// The sheet's sliders are continuous, so a publish per value change is a
+    /// publish per pointer-motion sample — an IPC round trip to the
+    /// configuration service and a disk write each, with the window frozen for
+    /// every one. The loop therefore *asks* and adopts nothing; the worker
+    /// writes and answers with what the store then holds; the loop adopts that
+    /// on the wake it nudges. Persist-then-adopt is intact and the window keeps
+    /// drawing throughout.
+    ///
+    /// The desk coalesces latest-wins, so however many settled edits arrive
+    /// during one write, they cost one further write rather than one each.
+    struct Publisher {
+        desk: tairix_rt::sync::Mutex<tairix_util::defer::JobDesk<PublishJob, PublishAnswer>>,
+        /// Signalled when a job is submitted, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: tairix_rt::sync::WorkerWake,
+    }
+
+    /// What the store said, or why it said nothing.
+    type PublishAnswer = Result<Published, Errno>;
+
+    impl Publisher {
+        /// A desk over `wake`, with no worker yet.
+        fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(tairix_util::defer::JobDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One publisher's whole life: park until a job is submitted, write it,
+        /// deliver what the store then holds, wake the loop.
+        fn serve(&self) {
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                // The store round trip, with no lock held: this is the call
+                // that used to freeze the window.
+                if self.desk.lock().deliver(write_profile(&job)) {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Ask for `job` to be carried out, answering here when there is no
+        /// worker to carry it out elsewhere.
+        fn submit(&self, job: PublishJob) -> Option<PublishAnswer> {
+            let submitted = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    drop(desk);
+                    return Some(write_profile(&job));
+                }
+                desk.submit(job)
+            };
+            if submitted.wake {
+                self.work.notify_one();
+            }
+            None
+        }
+
+        /// Take a landed answer, if one has.
+        fn collect(&self) -> Option<PublishAnswer> {
+            self.desk.lock().collect()
+        }
+
+        /// Put an answer produced on the loop's own thread where
+        /// [`Self::collect`] will find it, so a machine with no worker adopts
+        /// through the very same path as one with one.
+        fn hold(&self, answer: PublishAnswer) {
+            let _ = self.desk.lock().deliver(answer);
+        }
+
+        /// Ask the worker to leave and wake it.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
+    }
+
+    /// Stops the publisher on every way out of [`main`], so it is not left
+    /// writing for a terminal that has ended.
+    ///
+    /// The thread is *detached* rather than joined: a worker mid-write of a
+    /// slow store would otherwise hold the teardown for as long as that store
+    /// takes, and it leaves at its next turn round its loop anyway. Its own
+    /// handle on the desk keeps it alive until then.
+    struct PublisherGuard(alloc::sync::Arc<Publisher>);
+
+    impl Drop for PublisherGuard {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+
+    /// Start the settings worker, stating a refusal once.
+    ///
+    /// A kernel that will not grant the thread is not a failure: the writes
+    /// move back onto the event loop, which is exactly where they used to be.
+    fn spawn_publisher(
+        publisher: &alloc::sync::Arc<Publisher>,
+    ) -> Option<tairix_rt::thread::JoinHandle<()>> {
+        let served = alloc::sync::Arc::clone(publisher);
+        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                report(&alloc::format!(
+                    "no settings thread ({err:?}); the profile is saved on the event loop"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Carry out one publish job against the user's own store, and answer with
+    /// the profile the store then implies.
+    ///
+    /// A fresh handle per job: opening one costs a single read, jobs are one
+    /// per settled interaction, and it all happens on the worker — so holding a
+    /// handle across the process's life would buy nothing and would put the
+    /// store's cached view somewhere two threads could disagree about it.
+    ///
+    /// The answer is deliberately what the store *now says* rather than what
+    /// was asked for, so a value a machine policy or a shipped default supplies
+    /// wins over the widget's, and *Restore defaults* needs no second path.
+    fn write_profile(job: &PublishJob) -> PublishAnswer {
+        let mut host = RtHost;
+        let mut store = SettingsStore::open(&mut host, OWN_WORD);
+        match job {
+            PublishJob::Save(profile) => profile.save(&mut store)?,
+            PublishJob::Restore => Profile::clear(&mut store)?,
+        }
+        let (profile, refused) = Profile::load(&store);
+        Ok(Published {
+            profile,
+            warnings: refusal_warnings(&refused),
+        })
+    }
+
+    /// Ask the publisher for `job`, answering whether the outcome is already
+    /// waiting to be collected.
+    ///
+    /// `true` only where the machine granted no worker: the write then happens
+    /// on this thread, exactly as it did before there was one — slower under
+    /// load, never wrong — and the answer is left where the loop's own collect
+    /// finds it, so there is one adopt path however the write was carried out.
+    fn ask_publish(publisher: &Publisher, job: PublishJob) -> bool {
+        match publisher.submit(job) {
+            Some(answer) => {
+                publisher.hold(answer);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Adopt whatever the publisher has answered with: state anything it could
+    /// not use, re-seed every open sheet from the profile that actually
+    /// applies, and repaint.
+    fn adopt_published(
+        windows: &mut [TerminalWindow],
+        client: &mut WindowClient<RtWindowTransport>,
+        ctx: &mut AppContext<'_>,
+    ) -> Applied {
+        let Some(answer) = ctx.publisher.collect() else {
+            return Applied::Running;
+        };
+        let mut warnings = Vec::new();
+        let changed = ctx.publication.adopt(answer, &mut warnings);
+        for warning in &warnings {
+            let _ = write!(Stderr, "{warning}");
+        }
+        if !changed {
+            return Applied::Running;
+        }
+        // A sheet holds its own copy of what it is editing, so every open one
+        // is re-seeded from what the store actually holds.
+        let profile = *ctx.publication.live();
+        for open in windows.iter_mut() {
+            if let Some(held) = open.overlay.as_mut() {
+                held.adopt_profile(&profile);
+            }
+        }
+        if redraw_windows(windows, client, ctx).is_err() {
+            return Applied::Lost("present refused");
+        }
+        Applied::Running
+    }
+
+    /// Re-derive every window from the profile in force, repaint it, and
+    /// re-present every open settings sheet.
+    ///
+    /// Every window is redrawn because the profile is the *user's* rather than
+    /// one window's, and every open sheet is re-presented for the same reason:
+    /// a second window's sheet showing values nothing is using would be as
+    /// wrong as the pixels behind it.
+    ///
+    /// # Errors
+    ///
+    /// `()` when a present was refused, which ends the process fail-loud: a
+    /// window whose pixels cannot be shown is not a window.
+    fn redraw_windows(
+        windows: &mut [TerminalWindow],
+        client: &mut WindowClient<RtWindowTransport>,
+        ctx: &AppContext<'_>,
+    ) -> Result<(), ()> {
+        let profile = *ctx.publication.live();
+        let scale = ctx.desktop.scale();
+        for open in windows.iter_mut() {
+            open.look
+                .refresh(&profile, ctx.themes.active(), ctx.desktop);
+            apply_blur(client, open.window, &profile);
+            let (cols, rows) = grid_dims(open.mode.width_px, open.mode.height_px, open.look.font);
+            let _ = open.terminal.resize(cols, rows);
+            let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
+            // New colours or a new face: every retained pixel is stale, and
+            // the diff cannot see either.
+            open.screen.invalidate();
+            open.present(client).map_err(|_| ())?;
+            if let Some(held) = open.overlay.as_mut() {
+                present_overlay(held, ctx.themes.active(), scale, client).map_err(|_| ())?;
+            }
+        }
+        Ok(())
+    }
+
     /// The process-wide state applying one drained outcome may reach.
-    struct AppContext<'a, 'store> {
+    struct AppContext<'a> {
         /// The wait-set every window's members live on.
         set: u64,
         /// The one event mailbox.
@@ -1348,19 +1635,16 @@ mod program {
         server: ProcId,
         /// The next window slot to mint.
         next_slot: &'a mut u64,
-        /// The user's profile, shared by every window.
-        profile: &'a mut Profile,
+        /// The user's profile — what the windows render, and what the store
+        /// last said — shared by every window.
+        publication: &'a mut Publication,
         /// The theme registry the appearance is switched in, and whose
         /// active theme every window draws with.
         themes: &'a mut ThemeRegistry,
         /// The desktop the windows are shown on.
         desktop: &'a mut Desktop,
-        /// The app-data store handle every save publishes through.
-        ///
-        /// Its own lifetime is separate from the context's: the handle borrows
-        /// the syscall host for the whole process, while a context is built
-        /// afresh for each drained outcome.
-        store: &'a mut SettingsStore<'store>,
+        /// The worker every settled edit is published through.
+        publisher: &'a Publisher,
         /// This terminal's inherited environment.
         env: &'a [Vec<u8>],
     }
@@ -1382,7 +1666,7 @@ mod program {
         outcome: EventOutcome,
         windows: &mut Vec<TerminalWindow>,
         client: &mut WindowClient<RtWindowTransport>,
-        ctx: AppContext<'_, '_>,
+        mut ctx: AppContext<'_>,
     ) -> Applied {
         // A window-scoped outcome names its window; one the list no longer
         // holds is an outcome for a window that has just closed, and there is
@@ -1407,7 +1691,7 @@ mod program {
                     event_endpoint: ctx.event_endpoint,
                     set: ctx.set,
                     slot,
-                    profile: ctx.profile,
+                    profile: ctx.publication.live(),
                     theme: ctx.themes.active(),
                     desktop: ctx.desktop,
                     env: ctx.env,
@@ -1445,7 +1729,7 @@ mod program {
                     return Applied::Running;
                 };
                 let mode = windows[index].mode;
-                let sheet = Box::new(Settings::new(ctx.profile));
+                let sheet = Box::new(Settings::new(ctx.publication.live()));
                 let opened = open_overlay(
                     client,
                     window,
@@ -1486,48 +1770,41 @@ mod program {
                 }
                 Applied::Running
             }
-            EventOutcome::ProfileChanged { window } | EventOutcome::ProfileRestored { window } => {
-                // The user changed a setting, or asked for the defaults back.
-                // The profile is the *user's*, so every window re-derives its
-                // look, re-applies its blur, reshapes its grid (its pty
-                // follows), and repaints; only the sheet that made the change
-                // re-presents its own popup.
-                if matches!(outcome, EventOutcome::ProfileRestored { .. }) {
-                    restore_profile(ctx.store, ctx.profile);
-                    // The sheet's own copy is stale now: what applies came
-                    // back from the store's lower layers, not from the widget.
-                    if let Some(index) = index(windows, window) {
-                        if let Some(held) = windows[index].overlay.as_mut() {
-                            held.adopt_profile(ctx.profile);
-                        }
-                    }
-                } else {
-                    persist_profile(ctx.store, ctx.profile);
+            EventOutcome::ProfileChanged { settled } => {
+                // The user changed a setting, so every window re-derives its
+                // look and repaints: the profile is the *user's* rather than
+                // one window's.
+                //
+                // The change is published *only* once the interaction that made
+                // it has settled — a slider still under the pointer is one
+                // sample of a drag, and writing the store per sample is the
+                // freeze this arrangement removes — and the write itself always
+                // happens on the publisher's worker, so no gesture waits for a
+                // store either way.
+                let ready = settled && ask_publish(ctx.publisher, ctx.publication.request_save());
+                if redraw_windows(windows, client, &ctx).is_err() {
+                    return Applied::Lost("present refused");
                 }
-                for open in windows.iter_mut() {
-                    open.look
-                        .refresh(ctx.profile, ctx.themes.active(), ctx.desktop);
-                    apply_blur(client, open.window, ctx.profile);
-                    let (cols, rows) =
-                        grid_dims(open.mode.width_px, open.mode.height_px, open.look.font);
-                    let _ = open.terminal.resize(cols, rows);
-                    let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
-                    // New colours or a new face: every retained pixel is
-                    // stale, and the diff cannot see either.
-                    open.screen.invalidate();
-                    if open.present(client).is_err() {
-                        return Applied::Lost("present refused");
-                    }
-                }
-                let scale = ctx.desktop.scale();
-                if let Some(index) = index(windows, window) {
-                    if let Some(open) = windows[index].overlay.as_mut() {
-                        if present_overlay(open, ctx.themes.active(), scale, client).is_err() {
-                            return Applied::Lost("overlay present refused");
-                        }
-                    }
+                if ready {
+                    return adopt_published(windows, client, &mut ctx);
                 }
                 Applied::Running
+            }
+            EventOutcome::ProfileRestored => {
+                // *Restore defaults* removes the user's opinions and adopts
+                // what the layers beneath them then imply — which only the
+                // store knows, so nothing changes on screen until it answers.
+                if ask_publish(ctx.publisher, ctx.publication.restore()) {
+                    return adopt_published(windows, client, &mut ctx);
+                }
+                Applied::Running
+            }
+            EventOutcome::ProfilePublished => {
+                // The store answered. What it now holds is what applies, so a
+                // machine policy or a shipped default wins over the widget's
+                // guess and a refused write reverts the preview — stated on
+                // `stderr`, never silently kept.
+                adopt_published(windows, client, &mut ctx)
             }
             EventOutcome::Resized {
                 window,
@@ -1582,7 +1859,7 @@ mod program {
                 ctx.themes.set_appearance(ctx.desktop.appearance());
                 for open in windows.iter_mut() {
                     open.look
-                        .refresh(ctx.profile, ctx.themes.active(), ctx.desktop);
+                        .refresh(ctx.publication.live(), ctx.themes.active(), ctx.desktop);
                     let (cols, rows) =
                         grid_dims(open.mode.width_px, open.mode.height_px, open.look.font);
                     let _ = open.terminal.resize(cols, rows);
@@ -1647,19 +1924,21 @@ mod program {
             /// The window the sheet belongs to.
             window: u64,
         },
-        /// The user changed a setting from this window's sheet: re-derive
-        /// every window's look, store the profile, and repaint.
+        /// The user changed a setting: re-derive every window's look and
+        /// repaint. The profile is the user's, so no window owns the change.
         ProfileChanged {
-            /// The window whose sheet made the change.
-            window: u64,
+            /// Whether the interaction that made the change has finished, and
+            /// so whether the profile is asked to be written. A slider still
+            /// under the pointer sets this `false`: the change is live, and a
+            /// store write per pointer sample is what this avoids.
+            settled: bool,
         },
-        /// The user asked this window's sheet for *Restore defaults*: remove
-        /// the user's own opinions from the store, adopt the profile the
-        /// layers beneath imply, and tell the sheet what it is.
-        ProfileRestored {
-            /// The window whose sheet asked.
-            window: u64,
-        },
+        /// The user asked for *Restore defaults*: remove their own opinions
+        /// from the store and adopt whatever the layers beneath imply.
+        ProfileRestored,
+        /// The settings worker answered: adopt the profile the store now
+        /// holds, or state why it refused the write.
+        ProfilePublished,
         /// The window manager resized this window to a new client size (a
         /// drag-resize that settled, or a maximize/restore); the caller
         /// re-maps its frame region, reshapes its grid, and updates its pty
@@ -1687,22 +1966,22 @@ mod program {
         command: Command,
         window: u64,
         terminal: &mut Terminal<S>,
-        profile: &mut Profile,
+        publication: &mut Publication,
     ) -> EventOutcome {
+        // A menu row is one whole interaction, so each of these settles.
+        let mut resize = |change: fn(&mut Profile)| {
+            let mut profile = *publication.live();
+            change(&mut profile);
+            publication.preview(profile);
+            EventOutcome::ProfileChanged { settled: true }
+        };
         match command {
             Command::Settings => EventOutcome::OpenSheet { window },
-            Command::Larger => {
-                profile.enlarge();
-                EventOutcome::ProfileChanged { window }
-            }
-            Command::Smaller => {
-                profile.reduce();
-                EventOutcome::ProfileChanged { window }
-            }
-            Command::ActualSize => {
+            Command::Larger => resize(Profile::enlarge),
+            Command::Smaller => resize(Profile::reduce),
+            Command::ActualSize => resize(|profile| {
                 profile.font_size_px = Profile::default().font_size_px;
-                EventOutcome::ProfileChanged { window }
-            }
+            }),
             Command::Clear => {
                 terminal.clear();
                 EventOutcome::Repaint { window }
@@ -1719,7 +1998,7 @@ mod program {
     /// at — and never against the terminal window's.
     fn route_overlay_pointer(
         overlay: &mut Overlay,
-        profile: &mut Profile,
+        publication: &mut Publication,
         action: PointerAction,
         at: Point,
         scale: Scale,
@@ -1730,18 +2009,23 @@ mod program {
         let mut damage = damage::sink();
         let sheet = &mut overlay.sheet;
         for event in pointer_input_events(action, at) {
-            match sheet.on_pointer(&event, viewport, scale, theme, &mut damage) {
+            let outcome = sheet.on_pointer(&event, viewport, scale, theme, &mut damage);
+            // Every edit shows at once; only a settled one asks to be written.
+            // A drag delivers many samples per gesture, so `Edited` is what
+            // keeps the store out of the pointer's path.
+            if matches!(
+                outcome,
+                SheetOutcome::Edited | SheetOutcome::Settled | SheetOutcome::Dismissed
+            ) {
+                publication.preview(*sheet.profile());
+            }
+            match outcome {
                 SheetOutcome::Ignored => {}
                 SheetOutcome::Changed => routing = OverlayRouting::Redraw,
-                SheetOutcome::Edited => {
-                    *profile = *sheet.profile();
-                    routing = OverlayRouting::Edited;
-                }
+                SheetOutcome::Edited => routing = OverlayRouting::Edited,
+                SheetOutcome::Settled => routing = OverlayRouting::Settled,
                 SheetOutcome::Restore => return OverlayRouting::Restore,
-                SheetOutcome::Dismissed => {
-                    *profile = *sheet.profile();
-                    return OverlayRouting::Closed;
-                }
+                SheetOutcome::Dismissed => return OverlayRouting::Closed,
             }
         }
         routing
@@ -1751,7 +2035,7 @@ mod program {
     /// into that sheet.
     fn route_overlay_key(
         overlay: &mut Overlay,
-        profile: &mut Profile,
+        publication: &mut Publication,
         key: tairix_abi::input::KeyInput,
         scale: Scale,
         theme: &Theme,
@@ -1763,13 +2047,17 @@ mod program {
         let mut damage = damage::sink();
         let sheet = &mut overlay.sheet;
         let outcome = sheet.on_key(key, modifiers, viewport, scale, theme, &mut damage);
-        if matches!(outcome, SheetOutcome::Edited | SheetOutcome::Dismissed) {
-            *profile = *sheet.profile();
+        if matches!(
+            outcome,
+            SheetOutcome::Edited | SheetOutcome::Settled | SheetOutcome::Dismissed
+        ) {
+            publication.preview(*sheet.profile());
         }
         match outcome {
             SheetOutcome::Ignored => OverlayRouting::Nothing,
             SheetOutcome::Changed => OverlayRouting::Redraw,
             SheetOutcome::Edited => OverlayRouting::Edited,
+            SheetOutcome::Settled => OverlayRouting::Settled,
             SheetOutcome::Restore => OverlayRouting::Restore,
             SheetOutcome::Dismissed => OverlayRouting::Closed,
         }
@@ -1781,8 +2069,12 @@ mod program {
         Nothing,
         /// The sheet's own pixels changed; re-present its popup.
         Redraw,
-        /// The sheet edited the profile.
+        /// The sheet edited the profile while the interaction continues: show
+        /// it, write nothing.
         Edited,
+        /// The sheet edited the profile and the interaction has finished: show
+        /// it and ask for it to be written.
+        Settled,
         /// The sheet asked for *Restore defaults*: the user's own opinions
         /// are to be removed and the profile the remaining store layers
         /// imply read back.
@@ -1807,7 +2099,7 @@ mod program {
     #[allow(clippy::too_many_lines)] // One dispatch over the whole window vocabulary; splitting it would hide the routing order.
     fn drain_events(
         windows: &mut [TerminalWindow],
-        profile: &mut Profile,
+        publication: &mut Publication,
         desktop: &mut Desktop,
         theme: &Theme,
         endpoint: u64,
@@ -1885,18 +2177,22 @@ mod program {
                             let Some(held) = open.overlay.as_mut() else {
                                 continue;
                             };
-                            match route_overlay_key(held, profile, key, scale, theme) {
+                            match route_overlay_key(held, publication, key, scale, theme) {
                                 OverlayRouting::Nothing => {}
                                 OverlayRouting::Redraw => redrawn = Some(window),
                                 OverlayRouting::Edited => {
-                                    return EventOutcome::ProfileChanged { window }
+                                    return EventOutcome::ProfileChanged { settled: false }
                                 }
-                                OverlayRouting::Restore => {
-                                    return EventOutcome::ProfileRestored { window }
+                                OverlayRouting::Settled => {
+                                    return EventOutcome::ProfileChanged { settled: true }
                                 }
+                                OverlayRouting::Restore => return EventOutcome::ProfileRestored,
                                 OverlayRouting::Closed => {
                                     held.dismissed = true;
-                                    return EventOutcome::ProfileChanged { window };
+                                    // Closing settles whatever the sheet was
+                                    // last showing, so an edit the user made
+                                    // and then dismissed is still written.
+                                    return EventOutcome::ProfileChanged { settled: true };
                                 }
                             }
                         }
@@ -1904,7 +2200,7 @@ mod program {
                             KeyRouting::Nothing => {}
                             KeyRouting::Command(command) => {
                                 return finish(
-                                    run_command(command, window, &mut open.terminal, profile),
+                                    run_command(command, window, &mut open.terminal, publication),
                                     redrawn,
                                 )
                             }
@@ -1915,18 +2211,20 @@ mod program {
                                 continue;
                             };
                             let at = pointer_point(x, y);
-                            match route_overlay_pointer(held, profile, action, at, scale, theme) {
+                            match route_overlay_pointer(held, publication, action, at, scale, theme)
+                            {
                                 OverlayRouting::Nothing => {}
                                 OverlayRouting::Redraw => redrawn = Some(window),
                                 OverlayRouting::Edited => {
-                                    return EventOutcome::ProfileChanged { window }
+                                    return EventOutcome::ProfileChanged { settled: false }
                                 }
-                                OverlayRouting::Restore => {
-                                    return EventOutcome::ProfileRestored { window }
+                                OverlayRouting::Settled => {
+                                    return EventOutcome::ProfileChanged { settled: true }
                                 }
+                                OverlayRouting::Restore => return EventOutcome::ProfileRestored,
                                 OverlayRouting::Closed => {
                                     held.dismissed = true;
-                                    return EventOutcome::ProfileChanged { window };
+                                    return EventOutcome::ProfileChanged { settled: true };
                                 }
                             }
                         }
@@ -1947,7 +2245,7 @@ mod program {
                                                 command,
                                                 window,
                                                 &mut open.terminal,
-                                                profile,
+                                                publication,
                                             ),
                                             redrawn,
                                         );

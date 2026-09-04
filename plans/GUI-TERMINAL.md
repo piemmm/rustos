@@ -78,6 +78,23 @@ AD5 migrated it.
   `CAP_APPDATA_ADMIN` is the service's, never an app's.
 - Colours are bare `rrggbb`, never `#rrggbb`: the grammar's comment marker
   would cut the line at the `#`.
+- **The sheet's controls are not wired to the store** (`AGENTS.md` §28). The
+  profile the windows *render* and the profile the store *holds* are separate
+  (`publish::Publication`): a slider drag previews every sample and writes
+  nothing, and only the settle — the released drag, the chosen scheme, the key
+  step, the sheet closing — asks for a write. Wiring the value to the write
+  cost one store round trip and one disk commit per pointer-motion sample, and
+  the window was frozen for each of them.
+- **The write happens on a worker, and its answer is what applies.** A settled
+  edit is submitted to the settings worker, which publishes and answers with
+  the profile the store then implies — so a machine policy or a shipped default
+  the user's document does not override still wins over what the widget asked
+  for, and *Restore defaults* needs no second mechanism. A refused write
+  reverts the preview and says why, so no window keeps showing a look the next
+  start would not restore. The desk coalesces latest-wins, so any number of
+  settled edits during one write cost one further write rather than one each.
+  With no worker granted, the write happens on the loop exactly as it used to —
+  slower under load, never wrong, and stated once.
 
 Defaults: system scheme, 14 px text, 80% opacity, the backdrop blurred at half
 strength, and the four pass effects off. Translucency is free (it is the alpha

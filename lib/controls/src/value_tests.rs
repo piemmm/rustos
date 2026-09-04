@@ -155,12 +155,12 @@ fn slider_arrows_step_by_the_line_step() {
     slider.set_focused(true);
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 510 })
+        Some(SliderAction::Settled { permille: 510 })
     );
     assert_eq!(slider.value(), 510);
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::Left), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 500 })
+        Some(SliderAction::Settled { permille: 500 })
     );
 }
 
@@ -170,15 +170,15 @@ fn slider_page_and_home_end_keys() {
     slider.set_focused(true);
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::PageUp), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 600 })
+        Some(SliderAction::Settled { permille: 600 })
     );
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::Home), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 0 })
+        Some(SliderAction::Settled { permille: 0 })
     );
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::End), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 1000 })
+        Some(SliderAction::Settled { permille: 1000 })
     );
 }
 
@@ -246,7 +246,79 @@ fn slider_drag_updates_and_commits() {
         dragged,
         Some(SliderAction::SetValue { permille }) if permille > 700
     ));
-    assert_eq!(slider.on_pointer(&RELEASE, b, &mut sink()), None);
+    let settled = slider.on_pointer(&RELEASE, b, &mut sink());
+    assert!(matches!(
+        settled,
+        Some(SliderAction::Settled { permille }) if permille == slider.value()
+    ));
+}
+
+/// The settle point is the whole reason the variants are distinct: a drag
+/// reports one settle however many samples it took, so an owner that persists
+/// on settle writes once per drag rather than once per motion event.
+#[test]
+fn a_drag_reports_one_settle_however_many_samples_it_took() {
+    let mut slider = Slider::new(0);
+    let b = bounds();
+    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
+    let mut live = 0;
+    let mut settled = 0;
+    for x in [100, 120, 140, 151] {
+        let event = if x == 100 { PRESS } else { moved(x, 14) };
+        match slider.on_pointer(&event, b, &mut sink()) {
+            Some(SliderAction::SetValue { .. }) => live += 1,
+            Some(SliderAction::Settled { .. }) => settled += 1,
+            None => {}
+        }
+    }
+    assert!(live > 1, "the drag should report each sample live");
+    assert_eq!(settled, 0, "nothing settles while the drag continues");
+    assert!(matches!(
+        slider.on_pointer(&RELEASE, b, &mut sink()),
+        Some(SliderAction::Settled { .. })
+    ));
+}
+
+/// A release settles the interaction, not the last sample: an owner that only
+/// heard about value *changes* would miss the moment it may act durably.
+#[test]
+fn a_release_settles_even_when_the_last_sample_moved_nothing() {
+    let mut slider = Slider::new(0);
+    let b = bounds();
+    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
+    let _ = slider.on_pointer(&PRESS, b, &mut sink());
+    let value = slider.value();
+    // The same coordinate again: no change, so nothing live is reported.
+    assert_eq!(slider.on_pointer(&moved(100, 14), b, &mut sink()), None);
+    assert_eq!(
+        slider.on_pointer(&RELEASE, b, &mut sink()),
+        Some(SliderAction::Settled { permille: value })
+    );
+}
+
+/// A press and release with no motion between them is a track click: one live
+/// value and one settle.
+#[test]
+fn a_track_click_reports_a_value_then_settles() {
+    let mut slider = Slider::new(0);
+    let b = bounds();
+    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
+    assert!(matches!(
+        slider.on_pointer(&PRESS, b, &mut sink()),
+        Some(SliderAction::SetValue { .. })
+    ));
+    assert!(matches!(
+        slider.on_pointer(&RELEASE, b, &mut sink()),
+        Some(SliderAction::Settled { .. })
+    ));
+}
+
+/// A release this slider's own press never started settles nothing, so a
+/// pointer let go elsewhere cannot make an owner write.
+#[test]
+fn a_release_without_a_drag_settles_nothing() {
+    let mut slider = Slider::new(500);
+    assert_eq!(slider.on_pointer(&RELEASE, bounds(), &mut sink()), None);
 }
 
 #[test]
@@ -278,7 +350,7 @@ fn slider_cannot_step_past_its_cap() {
     // End requests the maximum, which the cap holds at 600 rather than full.
     assert_eq!(
         slider.on_key(Key::Named(NamedKey::End), bounds(), &mut sink()),
-        Some(SliderAction::SetValue { permille: 600 })
+        Some(SliderAction::Settled { permille: 600 })
     );
     assert_eq!(slider.value(), 600);
     // At the cap, a further step reports no change (fail closed).

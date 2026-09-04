@@ -3437,5 +3437,70 @@ interface creep): those rules forbid **speculative** surface, they do
 
 ---
 
+## 28. Interactive Surfaces Never Wait on I/O
+
+An **interactive surface** — the desktop session's compositor/serve loop, an
+application's window event loop, a TUI's key loop, the compositor itself — is
+there to answer the user inside a frame. It therefore performs **no blocking
+I/O**: not in response to input, not while painting, and never as a
+consequence of a control's value changing. I/O belongs on a worker; the loop
+*requests* and *collects*. This is binding and as non-negotiable as §2. It
+states, once and for all, the rule §2.16, §2.23, §26.1 and §26.2 imply and
+that `plans/FIX-DESKTOP.md` was re-deriving each time a freeze was found.
+
+The motivating defect class: a slider whose value was wired straight to a
+settings write, so **every pointer-motion sample of a drag** cost an IPC round
+trip to the configuration service and a disk commit, and the window froze for
+the whole drag. A design that only stays responsive on an idle machine with a
+fast local disk is defective (§26), even when it compiles and its tests pass.
+
+1. **No blocking I/O on an interactive loop.** No syscall or IPC round trip
+   that waits on a device, a filesystem, or another service runs on a loop
+   that owes the user a frame — no store read or commit, no `fs_*` on a file
+   or directory, no whole-store walk, no manifest read. A loop that must have
+   such work done hands it to a worker and carries on serving.
+2. **A control's value is never tied to a write.** Moving a slider, dragging
+   a scrollbar, typing in a field, or picking a row changes the in-memory
+   model and repaints. That is all it does: it opens no store, sends no
+   request, and writes no file. Coupling a control's value to a persistence
+   write is the defect this section exists to forbid.
+3. **A continuous interaction acts durably once, when it settles.** A
+   continuous control reports its settle point, and the durable action is
+   taken *there* — never once per motion sample. One drag is at most one
+   write. Where no settle point can be observed, the write is coalesced
+   latest-wins, so any number of edits cost at most one further write.
+4. **Persist-then-adopt happens off the loop.** Where a setting must not
+   diverge from its store, the surface renders a **live** interaction state
+   and adopts the **durable** one only once the write has landed, taking what
+   it adopts from the store's own post-write answer (so a layer beneath the
+   user's document still wins). It never blocks the loop to find out. A
+   refused write states why (§2.24) and reverts the live state; it never
+   silently leaves a value on screen that the next start would not restore.
+5. **Reads are requested, never awaited.** Listings, artwork, catalogues,
+   manifests, thumbnails and file contents are asked for and collected later.
+   **A paint reads nothing**: it draws what has already arrived, and a
+   meaningful placeholder for what has not (§10's built-in glyph tier is that
+   rule for icons). Recording a request is not I/O; performing one is.
+6. **One deferral mechanism, shared.** The arrangement is a pure
+   request/answer desk, a worker that parks (never spins, §2.23), and one wake
+   into the loop's existing wait-set. A surface does not invent a second
+   scheme, and a desk with more than one consumer lives in `lib/*` rather than
+   beside one of them (§2.2). Where the machine grants no worker the work
+   falls back to the requesting thread — slower under load, never wrong, and
+   never a silently dropped request.
+7. **The bounded exceptions, and nothing else.** In-memory work, work already
+   dequeued, and the frame-present the display protocol serialises are not
+   I/O. That list is exhaustive; reaching for it to excuse a store write, a
+   file read, or a directory walk on the loop is the defect.
+8. **Reviewed under §23.** A surface that stalls on I/O, a control wired to a
+   write, or a paint that reads is a §23.2 defect and a review blocker,
+   however small the file it sits in and however fast the developer's disk.
+
+The staged enforcement across the desktop is `plans/FIX-DESKTOP.md`; the
+control-side obligation (a continuous control reporting its settle point) is
+specified with the control families in `plans/GUI-CONTROLS-DESIGN.md`.
+
+---
+
 Violation of any rule in this document is a defect, regardless of whether
 the code compiles or the tests pass.

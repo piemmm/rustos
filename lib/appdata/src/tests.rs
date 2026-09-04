@@ -16,7 +16,7 @@ use tairix_abi::appdata_ipc::{
 };
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::Errno;
-use tairix_appconf::ConfError;
+use tairix_appconf::{ConfError, Document};
 
 use super::fake::FakeService;
 use super::{blobs, read_published, temp, Settings, Vault, READ_ATTEMPTS};
@@ -209,6 +209,70 @@ fn one_commit_publishes_every_edit_and_touches_each_key_once() {
     // One read at open, one set per edited key, one commit, one read after.
     assert_eq!(host.calls(), 5);
     assert_eq!(host.committed().render(), "a = 3\nb = true\n");
+}
+
+#[test]
+fn a_replace_makes_the_scope_say_exactly_the_document() {
+    let mut host = service().with_store("a = 1\nstale = yes\n");
+    let mut settings = Settings::open(&mut host, OWN_WORD);
+    let mut wanted = Document::new();
+    wanted.set("a", "2").expect("legal");
+    wanted.set("b", "3").expect("legal");
+    settings.replace(&wanted).expect("publishes");
+    drop(settings);
+    assert_eq!(
+        host.committed().render(),
+        "a = 2\nb = 3\n",
+        "the key the document omits is gone, not left behind"
+    );
+}
+
+#[test]
+fn a_replace_that_changes_nothing_costs_no_call() {
+    let mut host = service().with_store("a = 1\n");
+    let mut settings = Settings::open(&mut host, OWN_WORD);
+    let mut same = Document::new();
+    same.set("a", "1").expect("legal");
+    settings.replace(&same).expect("nothing to publish");
+    drop(settings);
+    assert_eq!(host.calls(), 1, "only the read at open");
+}
+
+#[test]
+fn a_replace_leaves_a_lower_layer_showing_for_a_key_it_omits() {
+    let mut host = service_with_defaults("scheme = light\n").with_store("scheme = dark\n");
+    let mut settings = Settings::open(&mut host, OWN_WORD);
+    // The document renders only `font.size`, so the user's own `scheme`
+    // opinion is removed and the shipped default applies again.
+    let mut wanted = Document::new();
+    wanted.set("font.size", "16").expect("legal");
+    settings.replace(&wanted).expect("publishes");
+    assert_eq!(settings.get("scheme"), Some("light"));
+    drop(settings);
+    assert_eq!(host.committed().get("scheme"), None);
+}
+
+#[test]
+fn the_document_snapshot_is_the_layered_answer_and_outlives_the_handle() {
+    let mut host = service_with_defaults("scheme = light\n").with_store("font.size = 16\n");
+    let settings = Settings::open(&mut host, OWN_WORD);
+    let document = settings.document().expect("every key came from the engine");
+    drop(settings);
+    assert_eq!(document.get("font.size"), Some("16"));
+    assert_eq!(document.get("scheme"), Some("light"));
+}
+
+#[test]
+fn the_document_snapshot_reflects_what_a_commit_published() {
+    let mut host = service().with_store("a = 1\n");
+    let mut settings = Settings::open(&mut host, OWN_WORD);
+    settings.set("a", "2").expect("legal");
+    settings.commit().expect("publishes");
+    assert_eq!(
+        settings.document().expect("legal").render(),
+        "a = 2\n",
+        "the snapshot is the store as re-read, not the pre-commit view"
+    );
 }
 
 #[test]

@@ -751,6 +751,18 @@ Sliders are measured controls with a rail, value track, thumb, and optional sema
 - Resource sliders may use semantic rails, such as disk or memory.
 - Dragging updates visual state immediately but commits through the owning model.
 - A privileged or bounded value displays a lock or cap marker at the constrained edge.
+- **The interaction reports where it settled, distinctly from the values it
+  took along the way.** A drag reports one value per pointer sample
+  (`SliderAction::SetValue`) and one settle when it ends
+  (`SliderAction::Settled`); a key step, being one whole interaction, settles
+  at once. Every continuous control this specification covers owes its owner
+  the same signal.
+- **Durable work belongs on the settle alone** — a setting written, a document
+  published, another process told. Acting on each value change means acting
+  once per pointer sample, which is how a slider ends up wired to a disk write
+  and its window frozen for the length of the drag (`AGENTS.md` §28.2, §28.3).
+  An owner that wants live feedback applies the value to its model and
+  repaints; that is not durable work and costs no I/O.
 
 ### 11.7 Progress
 

@@ -52,16 +52,16 @@ use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChai
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
-    load_library, maybe_send_seat_report, open_tray, picker_cells, resolve_library_icons,
-    resolve_window_identities, serve_switchboard_request, thumbnail, AppBarService,
-    ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent, FramePacer,
-    FrameReportGate, IconRasteriser, InputSource, LaunchTable, LockOutcome, LockedDrain,
-    OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
-    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
-    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
-    BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
-    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS,
-    SWITCHBOARD_RUN_PATH,
+    load_library, load_programs, maybe_send_seat_report, open_tray, picker_cells,
+    resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
+    AppBarService, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent,
+    FramePacer, FrameReportGate, IconRasteriser, InputSource, LaunchTable, LockOutcome,
+    LockedDrain, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader,
+    SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost,
+    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
+    TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
+    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::WindowSizing;
 
@@ -3595,6 +3595,35 @@ fn library_host(overlay: Option<&str>) -> tairix_appdata::fake::FakeService {
         Some(text) => service.with_foreign(LIBRARY_PUBLISHER, text),
         None => service,
     }
+}
+
+/// The catalogue and the associations arrive as one snapshot, read on the
+/// worker rather than on the click that opens the launcher: a bundle the
+/// catalogue names contributes its declared types, one whose manifest cannot
+/// be read contributes nothing, and no directory of the store is walked.
+#[test]
+fn load_programs_reads_one_manifest_per_catalogued_bundle() {
+    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\nos.tairix.ghost.name = Ghost\nos.tairix.ghost.bundle = /Apps/ghost.app\nos.tairix.ghost.category = Office\n";
+    let mut reader = MemoryAssets::default()
+        .with(LIBRARY_PATH, machine_conf.as_bytes())
+        .with(
+            "/Apps/editor.app/AppInfo",
+            &manifest_fixture("Editor", None),
+        );
+    let mut host = library_host(None);
+
+    let programs = load_programs(&mut reader, &mut host);
+    assert_eq!(programs.catalog.len(), 2);
+    assert!(programs.warnings.is_empty());
+    // The readable manifest claims its bundle; the absent one claims nothing
+    // rather than being offered on a guess.
+    assert_eq!(programs.associations.len(), 1);
+    assert_eq!(programs.associations[0].bundle_path(), "/Apps/editor.app");
+    assert_eq!(
+        reader.reads("/Apps/editor.app/AppInfo"),
+        1,
+        "one read per catalogued bundle, not one per gesture"
+    );
 }
 
 #[test]

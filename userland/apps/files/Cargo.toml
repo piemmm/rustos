@@ -87,6 +87,10 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
+# The shared latest-wins job desk (`tairix_util::defer`) the deferred bundle
+# scan hands its work to the reader thread through, so walking three program
+# stores never happens on the loop that owes the window a frame.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The window-frame pixel codec (`tairix_display::winframe`): the one
 # definition of the straight-alpha conversion between this program's own
 # surface and the shared frame the desktop session reads, so no app carries a

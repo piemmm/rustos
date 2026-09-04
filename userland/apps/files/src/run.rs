@@ -86,6 +86,7 @@ extern crate alloc;
 pub mod appbar;
 pub mod chrome;
 pub mod command;
+pub mod deferred;
 pub mod gesture;
 pub mod icons;
 pub mod listing;
@@ -102,6 +103,7 @@ mod program {
 
     use alloc::collections::BTreeMap;
     use alloc::string::{String, ToString};
+    use alloc::vec::Vec;
     use core::cell::RefCell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
@@ -132,11 +134,11 @@ mod program {
         trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation, Browser,
         BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextCommand, ContextMenuModel,
         CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan,
-        DeleteWalk, DirectorySource, DoubleClickTracker, EntryKind, ManagerChrome, ManagerTool,
-        ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places,
-        ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader, ToolbarBand,
-        ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
-        MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        DeleteWalk, DirectorySource, DoubleClickTracker, Entry, EntryKind, Listing, ListingDesk,
+        ManagerChrome, ManagerTool, ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem,
+        PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError,
+        RtLinkReader, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode,
+        Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -161,6 +163,7 @@ mod program {
     use crate::appbar;
     use crate::chrome::Chrome;
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
+    use crate::deferred::{FilesClient, Probes};
     use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
     use crate::listing::{self, ViewMark};
     use crate::location::{leave_directory, location_title, retitle, Leave};
@@ -223,6 +226,12 @@ mod program {
     /// something else is starved. The wake is the notification — nothing here
     /// polls or times the band.
     const PRESSURE_TOKEN: u64 = 3;
+
+    /// The wait-set token of the reader's wake pipe: readable exactly when a
+    /// directory listing, a batch of folder cues, or a bundle scan has come
+    /// back, so the answer is adopted through the park the loop is already in
+    /// rather than by polling for it.
+    const READS_TOKEN: u64 = 4;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -407,7 +416,7 @@ mod program {
         /// The session's id for this window.
         window: u64,
         /// The listing this window shows.
-        browser: Browser<LiveSource>,
+        browser: Browser<DeferredSource>,
         /// The overlays open over it.
         overlays: Overlays,
         /// This window's own copy of the places rail: the same shortcuts and
@@ -547,9 +556,10 @@ mod program {
         event_endpoint: u64,
         desktop: &Desktop,
         places: &Places,
+        reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
     ) -> Result<OpenWindow, i32> {
-        let Some(browser) = open_browser(location) else {
+        let Some(browser) = open_browser(reads, location) else {
             report_error("root directory listing refused; no window opened");
             return Err(EXIT_NO_LISTING);
         };
@@ -640,6 +650,7 @@ mod program {
         places: &Places,
         theme: &Theme,
         icons: &RefCell<Icons>,
+        reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
         role: Role,
         event: &WindowEvent,
@@ -657,6 +668,7 @@ mod program {
                     places,
                     theme,
                     icons,
+                    reads,
                     event_endpoint,
                     None,
                 );
@@ -678,6 +690,7 @@ mod program {
                         places,
                         theme,
                         icons,
+                        reads,
                         event_endpoint,
                         location,
                     );
@@ -716,6 +729,7 @@ mod program {
         theme: &Theme,
         icons: &RefCell<Icons>,
         launcher: &RefCell<Launcher>,
+        reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
         role: Role,
         event: &WindowEvent,
@@ -727,6 +741,7 @@ mod program {
             places,
             theme,
             icons,
+            reads,
             event_endpoint,
             role,
             event,
@@ -832,6 +847,7 @@ mod program {
                     open: &mut win.menu,
                 },
                 launcher,
+                reads,
             },
             canvas,
             event,
@@ -887,6 +903,7 @@ mod program {
         places: &Places,
         theme: &Theme,
         icons: &RefCell<Icons>,
+        reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
         location: Option<alloc::vec::Vec<String>>,
     ) {
@@ -895,7 +912,8 @@ mod program {
         // address-space limit, both derived from the machine and both refusing
         // with a stated reason. A hand-picked ceiling in front of them would
         // only refuse windows the machine could have given.
-        let Ok(mut win) = open_window(client, event_endpoint, desktop, places, location) else {
+        let Ok(mut win) = open_window(client, event_endpoint, desktop, places, reads, location)
+        else {
             // Already stated by `open_window`; a component simply has one
             // fewer window and the desktop carries on.
             return;
@@ -1279,6 +1297,295 @@ mod program {
         }
     }
 
+    /// Everything the file manager reads off its event loop, and the one worker
+    /// that reads it.
+    ///
+    /// Three kinds of read used to happen on the loop that owes the window a
+    /// frame: the directory the user navigated to, the folder cue every visible
+    /// folder draws, and the three program stores the *Open With…* chooser is
+    /// built from. Each is a read of somebody's disk, so each froze the window
+    /// for as long as that disk took.
+    ///
+    /// They share one worker rather than taking one each. The app browses one
+    /// place at a time, so these are never concurrent workloads — and a shared
+    /// worker gives the order they are served in a single, stated answer:
+    ///
+    /// 1. **the listing**, because the user navigated and is waiting for it;
+    /// 2. **the folder cues**, which decorate a listing already on screen;
+    /// 3. **the bundle scan**, which the chooser waits on but which no frame
+    ///    depends on.
+    ///
+    /// Nothing can starve: each request set is finite and is refilled only by
+    /// the user asking again.
+    struct Reads {
+        work: tairix_rt::sync::Mutex<Work>,
+        /// Signalled when a read is recorded, and on teardown.
+        signal: tairix_rt::sync::Condvar,
+        wake: tairix_rt::sync::WorkerWake,
+    }
+
+    /// The desks the worker serves, in one lock: they are read by the same
+    /// thread and written by the same worker, so one lock is one ordering
+    /// rather than three that could interleave.
+    struct Work {
+        listings: ListingDesk<FilesClient>,
+        probes: Probes,
+        bundles: tairix_util::defer::JobDesk<(), Vec<AppAssociation>>,
+        /// Set once the app is tearing down, so a parked worker leaves instead
+        /// of looking for work. Its own flag rather than one desk's, so the
+        /// worker's exit test does not depend on which desk happens to carry
+        /// one.
+        stopping: bool,
+    }
+
+    /// One unit of work the reader took.
+    enum Read {
+        /// List this directory for the browser.
+        List(Vec<String>),
+        /// Probe these folders' occupancy as one batch.
+        Probe(Vec<Vec<String>>),
+        /// Walk the program stores for their declared file associations.
+        Bundles,
+    }
+
+    impl Reads {
+        /// A desk over `wake`, with no worker yet.
+        fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
+            Self {
+                work: tairix_rt::sync::Mutex::new(Work {
+                    listings: ListingDesk::new(),
+                    probes: Probes::new(),
+                    bundles: tairix_util::defer::JobDesk::new(),
+                    stopping: false,
+                }),
+                signal: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One worker's whole life: park until something is wanted, read it,
+        /// deliver it, wake the loop.
+        fn serve(&self) {
+            loop {
+                let job = {
+                    let mut work = self.work.lock();
+                    loop {
+                        if work.stopping {
+                            return;
+                        }
+                        if let Some(job) = Self::next_read(&mut work) {
+                            break job;
+                        }
+                        work = self.signal.wait(work);
+                    }
+                };
+                // The reads themselves, with no lock held: these are the calls
+                // that used to stall the window.
+                let owed = match job {
+                    Read::List(target) => {
+                        let listed = read_directory(&target);
+                        self.work
+                            .lock()
+                            .listings
+                            .deliver(FilesClient::Browser, target, listed)
+                    }
+                    Read::Probe(batch) => {
+                        let answers = probe_batch(&batch);
+                        self.work.lock().probes.deliver(answers)
+                    }
+                    Read::Bundles => {
+                        let found = scan_bundles();
+                        self.work.lock().bundles.deliver(found)
+                    }
+                };
+                if owed {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// The next unit of work, in the stated order.
+        fn next_read(work: &mut Work) -> Option<Read> {
+            if let Some((_, target)) = work.listings.next_job() {
+                return Some(Read::List(target));
+            }
+            if let Some(batch) = work.probes.next_batch() {
+                return Some(Read::Probe(batch));
+            }
+            work.bundles.next_job().map(|()| Read::Bundles)
+        }
+
+        /// Answer the browser's request for `components`, recording it if this
+        /// desk does not already hold the answer.
+        ///
+        /// With no worker to answer it the directory is read on the calling
+        /// thread instead, which is exactly what this app did before it had
+        /// one: a recorded request nobody will serve would leave the window
+        /// listing for ever, so the degradation is a real read, not a wait.
+        fn list(&self, components: &[String]) -> Result<Listing, Errno> {
+            let deferred = {
+                let mut work = self.work.lock();
+                if work.stopping {
+                    None
+                } else {
+                    Some(work.listings.take(FilesClient::Browser, components))
+                }
+            };
+            let Some(listing) = deferred else {
+                return read_directory(components).map(Listing::Ready);
+            };
+            if matches!(listing, Ok(Listing::Pending)) {
+                self.signal.notify_one();
+            }
+            listing
+        }
+
+        /// Answer the folder cue for `components`, recording the probe if this
+        /// desk does not already hold the answer.
+        ///
+        /// This is called from *inside a paint*, so it must never read: an
+        /// unknown cue is [`Probe::Pending`], the folder draws without it, and
+        /// the answer is drawn a frame later. A desk with no worker records
+        /// nothing and every folder simply draws plain — a cue is decoration,
+        /// and exercising the user's directory-read authority on the calling
+        /// thread to draw one is exactly what this avoids.
+        fn probe(&self, components: &[String]) -> Probe {
+            let (answer, recorded) = self.work.lock().probes.ask(components);
+            // Only a folder this desk had not seen is worth a wake. Waking on
+            // every ask would mean one `futex_wake` per folder per frame, for
+            // work the worker has already been told about.
+            if recorded {
+                self.signal.notify_one();
+            }
+            answer
+        }
+
+        /// Ask for the program stores to be walked, answering with what they
+        /// declare when there is no worker to walk them elsewhere.
+        fn want_bundles(&self) -> Option<Vec<AppAssociation>> {
+            let submitted = {
+                let mut work = self.work.lock();
+                if work.stopping {
+                    drop(work);
+                    return Some(scan_bundles());
+                }
+                work.bundles.submit(())
+            };
+            if submitted.wake {
+                self.signal.notify_one();
+            }
+            None
+        }
+
+        /// Take a landed bundle scan, if one has.
+        fn take_bundles(&self) -> Option<Vec<AppAssociation>> {
+            self.work.lock().bundles.collect()
+        }
+
+        /// Ask the worker to leave and wake it.
+        fn stop(&self) {
+            let mut work = self.work.lock();
+            work.stopping = true;
+            work.listings.stop();
+            work.probes.stop();
+            work.bundles.stop();
+            drop(work);
+            self.signal.notify_all();
+        }
+    }
+
+    /// Stops the reader on every way out, so it is not left reading a disk for
+    /// a window that has gone.
+    ///
+    /// The thread is *detached* rather than joined: a worker mid-read of a slow
+    /// disk would otherwise hold the teardown for as long as that disk takes,
+    /// and it leaves at its next turn round its loop anyway.
+    struct ReadsGuard(alloc::sync::Arc<Reads>);
+
+    impl Drop for ReadsGuard {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+
+    /// Start the reader, stating a refusal once.
+    ///
+    /// A kernel that will not grant the thread is not a failure: the reads move
+    /// back onto the event loop, which is exactly where they used to be.
+    fn spawn_reader(reads: &alloc::sync::Arc<Reads>) -> Option<tairix_rt::thread::JoinHandle<()>> {
+        let served = alloc::sync::Arc::clone(reads);
+        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                report_error(&alloc::format!(
+                    "no reader thread ({err:?}); directory listings happen on the event loop"
+                ));
+                None
+            }
+        }
+    }
+
+    /// The browser's directory seam: a [`DirectorySource`] that records a
+    /// request and answers with whatever has come back.
+    #[derive(Clone)]
+    struct DeferredSource(alloc::sync::Arc<Reads>);
+
+    impl DirectorySource for DeferredSource {
+        fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+            self.0.list(components)
+        }
+
+        fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
+            Ok(self.0.probe(components))
+        }
+    }
+
+    /// Read the directory named by root-first `components` under this app's own
+    /// identity, through the same validated path spelling and stream decode the
+    /// synchronous source uses.
+    fn read_directory(components: &[String]) -> Result<Vec<Entry>, Errno> {
+        let path = tairix_browse::vfs::absolute_path(components)?;
+        let stream = list_directory(&path)?;
+        tairix_browse::vfs::entries_from_dir_stream(&path, &stream, &mut RtLinkReader)
+    }
+
+    /// Probe every folder in `batch`, answering only for those the probe
+    /// decided.
+    ///
+    /// A folder the user may not read, or that has gone, contributes no answer
+    /// rather than a guess: it draws plain, exactly as a refused probe always
+    /// has.
+    fn probe_batch(batch: &[Vec<String>]) -> Vec<(Vec<String>, bool)> {
+        let mut answers = Vec::new();
+        for folder in batch {
+            let Ok(path) = tairix_browse::vfs::absolute_path(folder) else {
+                continue;
+            };
+            let mut buf = [0u8; tairix_browse::vfs::PROBE_BUF_LEN];
+            let occupied = match probe_directory(&path, &mut buf) {
+                Ok(0) => false,
+                Ok(_) | Err(Errno::BufferTooSmall) => true,
+                Err(_) => continue,
+            };
+            answers.push((folder.clone(), occupied));
+        }
+        answers
+    }
+
+    /// Walk the machine-wide program stores for the file types their bundles
+    /// declare.
+    fn scan_bundles() -> Vec<AppAssociation> {
+        let mut out = Vec::new();
+        for store in [
+            SYSTEM_COMMAND_STORE,
+            SYSTEM_APPLICATION_STORE,
+            INSTALLED_APP_STORE,
+        ] {
+            collect_bundles(store, 0, &mut out);
+        }
+        out
+    }
+
     /// The grid's icon-artwork pipeline over this app's live seams.
     ///
     /// The policy — the reclaim-governed decode cache, the deferred-decode
@@ -1522,6 +1829,17 @@ mod program {
     struct Acts<'a> {
         menu: MenuLink<'a>,
         launcher: &'a RefCell<Launcher>,
+        /// The reader every deferred read is asked for through.
+        reads: &'a Reads,
+    }
+
+    /// What an "Open With…" chooser needs once the bundle scan answers: the
+    /// file it was asked about, by the same spelling every open uses.
+    struct PendingChooser {
+        /// The absolute path of the selected file.
+        path: String,
+        /// Its leaf name, which the candidate match is keyed off.
+        name: String,
     }
 
     /// The transient overlay state layered over the browser view, threaded
@@ -1546,6 +1864,15 @@ mod program {
         /// (`plans/NEW-MENUS.md` §6, decision 2). The right-click menu itself
         /// is the desktop's chain and appears nowhere here.
         open_with: Option<OpenWithChooser>,
+        /// The file the "Open With…" chooser is being built for, while the
+        /// installed bundles are still being read.
+        ///
+        /// The candidates are the declared associations of every bundle in
+        /// three program stores, which is one manifest read per installed
+        /// application — far more than a frame's worth, and it used to happen
+        /// on the very click that asked. So the click records what it asked
+        /// about here and the chooser opens when the scan lands.
+        pending_open_with: Option<PendingChooser>,
         /// The running long file operation (a recursive delete), when one is in
         /// progress. While it is set the event loop drives it interleaved with
         /// input rather than parking, showing progress and honouring a cancel.
@@ -1807,6 +2134,7 @@ mod program {
                 browser,
                 overlays,
                 acts.launcher,
+                acts.reads,
                 scale,
                 theme,
                 viewport,
@@ -3670,6 +3998,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        reads: &Reads,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -3679,7 +4008,7 @@ mod program {
         match outcome {
             MenuOutcome::Chosen(item) => match context_command_from_item(item) {
                 Some(command) => dispatch_context_command(
-                    browser, overlays, launcher, scale, theme, viewport, toolbar, command,
+                    browser, overlays, launcher, reads, scale, theme, viewport, toolbar, command,
                 ),
                 None => (false, false),
             },
@@ -3700,6 +4029,7 @@ mod program {
         browser: &mut Browser<S>,
         overlays: &mut Overlays,
         launcher: &RefCell<Launcher>,
+        reads: &Reads,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -3729,7 +4059,7 @@ mod program {
                 BundleIntent::Launch,
                 AfterHandoff::CloseWindow,
             ),
-            ContextCommand::OpenWith => begin_open_with(browser, overlays),
+            ContextCommand::OpenWith => begin_open_with(browser, overlays, reads),
             ContextCommand::Rename => begin_rename(
                 browser,
                 &mut overlays.rename,
@@ -3785,6 +4115,7 @@ mod program {
     fn begin_open_with<S: DirectorySource>(
         browser: &Browser<S>,
         overlays: &mut Overlays,
+        reads: &Reads,
     ) -> (bool, bool) {
         let Some(entry) = browser.selected_entry() else {
             return (false, false);
@@ -3800,18 +4131,38 @@ mod program {
             report_error(&alloc::format!("could not locate {name}"));
             return (false, false);
         };
-        let mut source = RtBundleSource;
-        // A store that cannot be enumerated yields no candidate rather than an
-        // error the user cannot act on; the honest "no application" path below
-        // reports it.
-        let installed = source.installed_bundles().unwrap_or_default();
-        let apps = applications_for(&name, &installed);
-        let Some(chooser) = OpenWithChooser::new(&apps, file_path, &name) else {
-            report_error(&alloc::format!("no application to open {name}"));
-            return (false, false);
+        // Ask for the installed bundles rather than reading them here: three
+        // program stores and one manifest per application is not a frame's
+        // worth of work. The chooser opens when the scan lands, or at once when
+        // the machine granted no reader to do it elsewhere.
+        overlays.pending_open_with = Some(PendingChooser {
+            path: file_path,
+            name,
+        });
+        match reads.want_bundles() {
+            Some(installed) => (settle_open_with(overlays, &installed), false),
+            None => (false, false),
+        }
+    }
+
+    /// Open the chooser the last "Open With…" asked for, now that the
+    /// installed bundles are known, answering whether the window changed.
+    ///
+    /// A file with no installed application that claims its type is an honest
+    /// refusal stated on `stderr` and opens nothing — never an empty chooser.
+    /// A pending request that has since been dismissed (the user pressed
+    /// Escape, or asked about something else) opens nothing either.
+    fn settle_open_with(overlays: &mut Overlays, installed: &[AppAssociation]) -> bool {
+        let Some(pending) = overlays.pending_open_with.take() else {
+            return false;
+        };
+        let apps = applications_for(&pending.name, installed);
+        let Some(chooser) = OpenWithChooser::new(&apps, &pending.path, &pending.name) else {
+            report_error(&alloc::format!("no application to open {}", pending.name));
+            return false;
         };
         overlays.open_with = Some(chooser);
-        (true, false)
+        true
     }
 
     /// Handle one event while the "Open With…" chooser owns the window.
@@ -4660,6 +5011,7 @@ mod program {
             owner: None,
             delete: None,
             open_with: None,
+            pending_open_with: None,
             operation: None,
             clipboard: None,
             can_chown: tairix_rt::self_origin()
@@ -4710,9 +5062,12 @@ mod program {
         dir.read(buf).map_err(Errno::from_syscall)
     }
 
-    /// The browser's live directory source. Named so a fresh one can be built
-    /// per open attempt: opening consumes its source, so a refused attempt
-    /// cannot hand the same one to the next.
+    /// A directory source that reads on the calling thread. Named so a fresh
+    /// one can be built per attempt: opening consumes its source, so a refused
+    /// attempt cannot hand the same one to the next.
+    ///
+    /// Used only to *find* where to open (below), never by the running window:
+    /// every listing a window asks for goes through [`DeferredSource`].
     type LiveSource = VfsDirectorySource<
         fn(&str) -> Result<alloc::vec::Vec<u8>, Errno>,
         RtLinkReader,
@@ -4733,34 +5088,52 @@ mod program {
     /// default is the list the read-only picker wants, so the manager states
     /// its choice here — once, for whichever location [`first_listable`]
     /// opened.
-    fn open_browser(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
-        let mut browser = first_listable(location)?;
+    fn open_browser(
+        reads: &alloc::sync::Arc<Reads>,
+        location: Option<alloc::vec::Vec<String>>,
+    ) -> Option<Browser<DeferredSource>> {
+        let start = first_listable(location)?;
+        // The window's own listings are read on the worker from here on; this
+        // first one is asked for the same way and arrives with the first
+        // resume, a frame or two later.
+        let mut browser =
+            Browser::open_at(DeferredSource(alloc::sync::Arc::clone(reads)), start).ok()?;
         browser.set_view_mode(ViewMode::Grid);
         Some(browser)
     }
 
-    /// Open a browser at the first location that actually lists: the one the
-    /// command line named, then the launching user's home, then the root view.
+    /// The first location that actually lists: the one the command line named,
+    /// then the launching user's home, then the root view.
     ///
     /// Degrades rather than dies — a location that cannot be listed is stated
     /// on `stderr` and the next one tried, so a caller naming a folder that is
     /// gone, is not a directory, or that this user may not read still gets a
     /// usable window. `None` only when even the root view cannot be listed,
     /// which `main` exits fail-loud on.
-    fn first_listable(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
+    ///
+    /// This reads on the calling thread, and is the one read that does: it runs
+    /// before any window exists, so there is no frame to owe anyone — and the
+    /// answer is *which location to open*, which a deferred source cannot give
+    /// (its first answer is always "not yet", so every candidate would look
+    /// listable and the ladder would never fall through).
+    fn first_listable(
+        location: Option<alloc::vec::Vec<String>>,
+    ) -> Option<alloc::vec::Vec<String>> {
         if let Some(components) = location {
             match Browser::open_at(live_source(), components.clone()) {
-                Ok(browser) => return Some(browser),
+                Ok(browser) => return Some(browser.components().to_vec()),
                 Err(_) => report_error(&unlistable_reason(&components)),
             }
         }
         if let Some(home) = home_components() {
             match Browser::open_at(live_source(), home) {
-                Ok(browser) => return Some(browser),
+                Ok(browser) => return Some(browser.components().to_vec()),
                 Err(_) => report_error("could not list the home directory; opening the root view"),
             }
         }
-        Browser::open_root(live_source()).ok()
+        Browser::open_root(live_source())
+            .ok()
+            .map(|browser| browser.components().to_vec())
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
@@ -4869,6 +5242,38 @@ mod program {
         // force now (`tairix_procinfo::pressure::watch`), so the cache never
         // runs on the fail-closed unknown state before the first draw.
         let _cache_report = tairix_rt::cachereport::ReportGuard;
+
+        // --- The reader: every directory listing, folder cue, and program-store
+        // walk this app makes, run on a worker so a slow or contended disk
+        // cannot stall the window. A pipe the kernel refuses, or a thread it
+        // will not grant, leaves those reads on this task — where they used to
+        // be, and stated once.
+        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create()));
+        let reader = if reads.wake.is_armed() {
+            spawn_reader(&reads)
+        } else {
+            report_error("no reader wake pipe; directory listings happen on the event loop");
+            None
+        };
+        if reader.is_none() {
+            reads.stop();
+        }
+        // Declared after the handle, so it runs first: the desks stop, then the
+        // handle detaches.
+        let _reads_guard = ReadsGuard(alloc::sync::Arc::clone(&reads));
+        if let Some(read) = reads.wake.read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                READS_TOKEN,
+            ) != 0
+            {
+                return fail(EXIT_NO_EVENTS, "reader wake wait refused");
+            }
+        }
+
         let icons = {
             let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
             let nominal = mode_for(w, h);
@@ -4889,6 +5294,7 @@ mod program {
                 event_endpoint,
                 &desktop,
                 &places,
+                &reads,
                 start.location,
             ) {
                 Ok(win) => win,
@@ -5042,6 +5448,7 @@ mod program {
                             theme,
                             &icons,
                             &launcher,
+                            &reads,
                             event_endpoint,
                             start.role,
                             &event,
@@ -5067,6 +5474,43 @@ mod program {
             let delivered = match events.try_wait(&mut client) {
                 Ok(Some(event)) => Ok(event),
                 Ok(None) => {
+                    // A bundle scan the reader has answered opens the
+                    // chooser the click asked for. Collected before the
+                    // listings so the chooser appears on the very frame the
+                    // scan landed on.
+                    let mut resumed = false;
+                    if let Some(installed) = reads.take_bundles() {
+                        for win in &mut windows {
+                            resumed |= settle_open_with(&mut win.overlays, &installed);
+                        }
+                    }
+                    // A listing the reader has answered is adopted here: the
+                    // browser holds the navigation it could not complete, and
+                    // resuming it is what turns the answer into entries. It
+                    // costs a taken `Option` when nothing is pending, so
+                    // asking every turn is free.
+                    for win in &mut windows {
+                        match win.browser.resume() {
+                            Ok(committed) => resumed |= committed,
+                            Err(err) => {
+                                report_error(&alloc::format!("listing refused ({err})"));
+                            }
+                        }
+                    }
+                    if resumed {
+                        // A listing is a whole new set of entries, so the
+                        // window is repainted whole rather than by a mark: no
+                        // reading of the old state describes where anything is
+                        // now.
+                        for win in &mut windows {
+                            if present_whole(win, &mut client, theme, &icons, desktop.scale())
+                                .is_err()
+                            {
+                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                        continue;
+                    }
                     let ran = {
                         let mut pipeline = icons.borrow_mut();
                         let ran = pipeline.pump();
@@ -5130,6 +5574,7 @@ mod program {
                 theme,
                 &icons,
                 &launcher,
+                &reads,
                 event_endpoint,
                 start.role,
                 &event,

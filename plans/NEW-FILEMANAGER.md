@@ -321,6 +321,25 @@ user pick any. See FM6b below. FM6b is complete.
   (write/delete) is gated in the app's own privileged tail, not by forking
   the engine.
 
+- **The window never waits on a disk** (`AGENTS.md` §28). Every unbounded read
+  the app makes runs on one reader thread: the directory the user navigated to
+  (through `ListingDesk<FilesClient>`, committed by `Browser::resume`), the
+  folder cue every visible folder draws (recorded from inside the paint and
+  answered a frame later, so the paint performs no I/O at all), and the
+  three-program-store walk the *Open With…* chooser is built from. They share
+  one worker rather than taking one each — the app browses one place at a time,
+  so these are never concurrent workloads — and the sharing is what gives the
+  order they are served in a single stated answer: the listing first (the user
+  navigated and is waiting), then the cues (which decorate a listing already
+  shown), then the bundle scan (which no frame depends on). Nothing starves:
+  each request set is finite and refilled only by the user asking again.
+  - The one read left on the app's own task is `first_listable`, which runs
+    before any window exists and answers *which* location to open — a question
+    a deferred source cannot answer, since its first answer is always "not yet"
+    and every candidate would look listable.
+  - A kernel that grants no thread, or a pipe it refuses, leaves the reads on
+    the loop, stated once: slower under load, never wrong.
+
 - **The app is its own process with its own bounded authority (§4, §5.2).**
   `files.app` holds exactly its manifest ∩ ceiling set: `CAP_FS_ACCESS`
   (read/list) + `CAP_SHM` + `CAP_CONSOLE_WRITE`, plus `CAP_PROC_SPAWN` (added
@@ -527,10 +546,11 @@ took is forgotten by the desk, so an icon it later evicts is decoded again
 rather than answered "not yet" for ever, and a band change re-offers what the
 cache *refused* (`IconPipeline::trim`). `draw_grid` asks only for the tiles on screen,
 so the desk only ever holds the visible set and there is no second definition
-of "what is on screen". The manager is single-threaded by choice: one window's
-grid is a bounded set of tiles and its loop has nothing else to block on, so a
-thread and its stack would buy only what a turn of the loop already
-interleaves. Host-tested in `userland/apps/files/src/icons_tests.rs` (a paint
+of "what is on screen". Moving that per-turn decode onto the reader thread
+(below) is the remaining piece, staged as `plans/FIX-DESKTOP.md` DESK-12: it is
+milder than what DESK-11 removed — bounded to one asset and interleaved so
+input is served ahead of it — but it is still I/O the loop performs.
+Host-tested in `userland/apps/files/src/icons_tests.rs` (a paint
 performs no read and no sandbox round trip, the pump delivers what the paint
 recorded, a retained decode is never produced twice, every tier's refusal
 settles on the glyph, a declined decode is not re-asked until the band moves,

@@ -354,6 +354,79 @@ impl Default for Condvar {
     }
 }
 
+/// Bytes drained per wake. A worker writes one byte per delivered answer, and
+/// the member is a level-triggered peek, so anything a short drain leaves
+/// re-reports on the very next wait rather than being lost.
+const NUDGE_DRAIN: usize = 8;
+
+/// The one way a worker thread wakes the interactive loop it works for: a byte
+/// on a pipe whose read end is a member of the loop's own wait-set.
+///
+/// One per program rather than one per desk. The loop's wake arm offers every
+/// consumer the chance to adopt whatever arrived, and a consumer with nothing
+/// waiting costs a branch — so a second pipe, token and drain would buy
+/// nothing. The loop therefore learns that work landed through the very wait it
+/// already parks in: no new ABI, no second wake mechanism, and no polling.
+///
+/// A pipe the kernel refuses leaves the wake unarmed
+/// ([`is_armed`](Self::is_armed) answers `false`), which is the embedder's cue
+/// to do the work on its own thread instead: slower under load, never wrong.
+pub struct WorkerWake {
+    /// Write end, held by the workers. `None` when the pipe was refused.
+    write: Option<u32>,
+    /// Read end, added to the loop's wait-set and drained by it.
+    read: Option<u32>,
+}
+
+impl WorkerWake {
+    /// Create the wake pipe, unarmed if the kernel refuses it.
+    #[must_use]
+    pub fn create() -> Self {
+        match crate::pipe_create() {
+            Ok((read, write)) => Self {
+                write: Some(write),
+                read: Some(read),
+            },
+            Err(_) => Self {
+                write: None,
+                read: None,
+            },
+        }
+    }
+
+    /// Nudge the loop, from a worker.
+    ///
+    /// A refused write is dropped rather than retried: the only thing it can
+    /// mean is that the loop is not draining, and a worker that spun on it
+    /// would be a busy-wait. The answer stays on its desk, so the next wake for
+    /// any reason still delivers it.
+    pub fn nudge(&self) {
+        if let Some(fd) = self.write {
+            let _ = crate::fs_write(fd, 0, &[1u8]);
+        }
+    }
+
+    /// The read end to add to the loop's wait-set.
+    #[must_use]
+    pub const fn read_end(&self) -> Option<u32> {
+        self.read
+    }
+
+    /// Whether the pipe exists, and so whether workers are worth starting.
+    #[must_use]
+    pub const fn is_armed(&self) -> bool {
+        self.read.is_some()
+    }
+
+    /// Consume the nudge bytes after the loop's wait reported them.
+    pub fn drain(&self) {
+        if let Some(fd) = self.read {
+            let mut nudge = [0u8; NUDGE_DRAIN];
+            let _ = crate::fs_read(fd, 0, &mut nudge);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

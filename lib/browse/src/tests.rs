@@ -30,7 +30,7 @@ use crate::execute::{
 use crate::media::MediaType;
 use crate::places::{PlaceKind, Places, Volume};
 use crate::select::Selection;
-use crate::source::{DirectorySource, Listing};
+use crate::source::{DirectorySource, Listing, Probe};
 
 /// The chrome these tests measure against unless they say otherwise: the
 /// command band shown, so the listing has a header to be offset by. The
@@ -7239,7 +7239,7 @@ mod occupancy {
                 .ok_or(Errno::NotFound)
         }
 
-        fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {
+        fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
             let path = key(components);
             *self.probes.borrow_mut().entry(path.clone()).or_insert(0) += 1;
             if self.refused.contains(&path) {
@@ -7247,7 +7247,7 @@ mod occupancy {
             }
             self.dirs
                 .get(&path)
-                .map(|children| !children.is_empty())
+                .map(|children| Probe::Ready(!children.is_empty()))
                 .ok_or(Errno::NotFound)
         }
     }
@@ -7319,7 +7319,10 @@ mod occupancy {
                 NoLinks,
                 move |_: &str, _: &mut [u8]| answer,
             );
-            assert_eq!(source.has_children(&["d".to_string()]), Ok(want));
+            assert_eq!(
+                source.has_children(&["d".to_string()]),
+                Ok(Probe::Ready(want))
+            );
         }
 
         // Any other refusal is surfaced, never guessed at.
@@ -7405,6 +7408,51 @@ mod occupancy {
             icon_for_entry(&browser.entries()[0], browser.components()),
             IconKind::Folder
         );
+    }
+
+    /// A source that probes elsewhere leaves the entry unanswered, so a paint
+    /// may resolve occupancy without doing any I/O and the cue is drawn a frame
+    /// later. The re-ask is what makes that work: latching a pending probe as
+    /// indeterminate would mean the answer never arrived.
+    #[test]
+    fn a_pending_probe_leaves_the_entry_unanswered_and_is_asked_again() {
+        /// A source whose probe is answered by somebody else: the first ask
+        /// records it, a later one answers.
+        struct Deferring {
+            entries: Vec<Entry>,
+            asks: usize,
+        }
+
+        impl DirectorySource for Deferring {
+            fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+                Ok(Listing::Ready(self.entries.clone()))
+            }
+
+            fn has_children(&mut self, _components: &[String]) -> Result<Probe, Errno> {
+                self.asks += 1;
+                if self.asks > 2 {
+                    return Ok(Probe::Ready(true));
+                }
+                Ok(Probe::Pending)
+            }
+        }
+
+        let mut browser = Browser::open_root(Deferring {
+            entries: vec![Entry::directory("later")],
+            asks: 0,
+        })
+        .expect("root");
+
+        resolve_visible(&mut browser);
+        assert_eq!(
+            browser.entries()[0].occupancy(),
+            Occupancy::Unprobed,
+            "a pending probe must not latch an answer"
+        );
+        resolve_visible(&mut browser);
+        assert_eq!(browser.entries()[0].occupancy(), Occupancy::Unprobed);
+        resolve_visible(&mut browser);
+        assert_eq!(browser.entries()[0].occupancy(), Occupancy::NonEmpty);
     }
 
     #[test]

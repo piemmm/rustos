@@ -114,6 +114,11 @@ fn slider_point(row: Rect, permille: u32) -> Point {
     Point::new(x, row.top() + to_i32(row.height) / 2)
 }
 
+/// How many of `outcomes` are `wanted`.
+fn count(outcomes: &[SheetOutcome], wanted: SheetOutcome) -> usize {
+    outcomes.iter().filter(|got| **got == wanted).count()
+}
+
 /// The centre of `rect`.
 fn centre(rect: Rect) -> Point {
     Point::new(
@@ -253,7 +258,8 @@ fn a_scheme_radio_puts_that_scheme_in_force() {
     let row = visible_row(&sheet, CLIENT, Focus::Scheme(1));
     assert_eq!(
         click_at(&mut sheet, CLIENT, centre(row)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled,
+        "a chosen radio is one whole interaction, so it settles"
     );
     assert_eq!(sheet.profile().scheme, wanted);
     assert!(sheet.scheme_radios[1].is_selected());
@@ -278,25 +284,83 @@ fn the_text_size_slider_edits_the_font_size_within_its_bounds() {
 
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Named(NamedKey::End)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
     assert_eq!(sheet.profile().font_size_px, MAX_FONT_SIZE_PX);
 
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Named(NamedKey::Home)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
     assert_eq!(sheet.profile().font_size_px, MIN_FONT_SIZE_PX);
 
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Named(NamedKey::Right)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
     let stepped = sheet.profile().font_size_px;
     assert!(
         (MIN_FONT_SIZE_PX..=MAX_FONT_SIZE_PX).contains(&stepped) && stepped > MIN_FONT_SIZE_PX,
         "one line step moves the size up and stays in range, got {stepped}"
     );
+}
+
+/// The regression the live/settled split exists for: dragging a slider changes
+/// the profile on every sample and asks to be **written** only when the drag
+/// ends. Reporting a settled edit per sample cost one IPC round trip to the
+/// configuration service and one disk commit per pointer motion, with the
+/// window frozen for each of them.
+#[test]
+fn dragging_the_text_size_settles_once_however_many_samples_it_takes() {
+    let mut sheet = sheet();
+    let row = visible_row(&sheet, CLIENT, Focus::TextSize);
+    let mut outcomes = alloc::vec::Vec::new();
+    outcomes.push(press_at(&mut sheet, CLIENT, slider_point(row, 0)));
+    for permille in [200, 400, 600, 800, 1000] {
+        outcomes.push(sheet.on_pointer(
+            &moved(slider_point(row, permille)),
+            CLIENT,
+            SCALE,
+            &theme(),
+            &mut damage::sink(),
+        ));
+    }
+    assert!(
+        count(&outcomes, SheetOutcome::Edited) > 1,
+        "every sample of the drag is applied live"
+    );
+    assert_eq!(
+        count(&outcomes, SheetOutcome::Settled),
+        0,
+        "nothing is written while the drag continues"
+    );
+
+    outcomes.push(sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink()));
+    assert_eq!(
+        count(&outcomes, SheetOutcome::Settled),
+        1,
+        "the release settles exactly once"
+    );
+    assert_eq!(sheet.profile().font_size_px, MAX_FONT_SIZE_PX);
+}
+
+/// A press and release with no motion between them is a track click: the value
+/// is applied and then settled, so a single click still saves.
+#[test]
+fn clicking_the_text_size_track_settles_the_value_it_jumped_to() {
+    let mut sheet = sheet();
+    let row = visible_row(&sheet, CLIENT, Focus::TextSize);
+    let point = slider_point(row, 1000);
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, point),
+        SheetOutcome::Edited,
+        "the press applies the value it jumped to"
+    );
+    assert_eq!(
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink()),
+        SheetOutcome::Settled
+    );
+    assert_eq!(sheet.profile().font_size_px, MAX_FONT_SIZE_PX);
 }
 
 // --- Appearance: the custom-scheme editor ----------------------------------
@@ -314,7 +378,7 @@ fn a_channel_slider_edits_the_selected_well_of_the_custom_scheme() {
     focus_on(&mut sheet, CLIENT, Focus::Channel(0));
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Named(NamedKey::End)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
 
     assert_eq!(sheet.profile().custom.background.r, u8::MAX);
@@ -336,7 +400,7 @@ fn selecting_another_well_repoints_the_channel_sliders() {
     focus_on(&mut sheet, CLIENT, Focus::Channel(2));
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Named(NamedKey::Home)),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
 
     assert_eq!(sheet.profile().custom.foreground.b, 0);
@@ -555,7 +619,7 @@ fn the_keyboard_alone_reaches_and_changes_a_setting() {
     focus_on(&mut sheet, CLIENT, Focus::Scheme(2));
     assert_eq!(
         key(&mut sheet, CLIENT, Key::Char(' ')),
-        SheetOutcome::Edited
+        SheetOutcome::Settled
     );
     assert_eq!(sheet.profile().scheme, wanted);
 }
@@ -594,7 +658,7 @@ fn a_keyboard_only_session_reaches_a_row_the_body_cannot_show() {
     focus_on(&mut sheet, TINY, last);
     assert_eq!(
         key(&mut sheet, TINY, Key::Named(NamedKey::End)),
-        SheetOutcome::Edited,
+        SheetOutcome::Settled,
         "a row unreachable by pointer on a tiny viewport is still editable"
     );
 }

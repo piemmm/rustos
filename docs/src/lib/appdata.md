@@ -187,6 +187,16 @@ committed changes nothing on the volume. Two things a `set` deliberately does
 - copy a policy or default value up into the user's own file, which is what
   keeps that file holding only what the user actually chose.
 
+`replace` is the operation a whole-registry publisher wants instead: it makes
+the scope say **exactly** the document handed in — every key the scope carries
+that the document does not is unset, every setting it carries is set, and the
+lot lands as one commit — so a caller that renders its entire model each time it
+changes does not have to work out which keys disappeared. `document` is the
+mirror of it: the effective settings as one owned snapshot, layered exactly as
+`get` answers them, in a form that outlives the handle. That is what a caller
+needs to hand its settings across a thread boundary, which is how a settings
+write happens off the surface that asked for it (`AGENTS.md` §28).
+
 A commit ends by re-reading the store, so the handle goes on reflecting what the
 service actually holds — which matters after an `unset`, where the effective
 value comes back from a layer below rather than from the value removed. A

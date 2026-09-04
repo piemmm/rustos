@@ -189,7 +189,6 @@ pub mod input;
 pub mod keyboard;
 pub mod launch;
 pub mod library;
-pub mod listing;
 pub mod lock;
 pub mod menu;
 pub mod pace;
@@ -255,8 +254,7 @@ pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{
     admitted_pid, launch_argv, launch_failure_report, reap_launched, LaunchTable, LaunchedApp,
 };
-pub use library::{catalogued, load_library, LoadedLibrary};
-pub use listing::{ListingClient, ListingDesk};
+pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use pace::FramePacer;
 pub use picker::{
@@ -267,7 +265,7 @@ pub use presenter::TaskbarPresenter;
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    load_pinboard, persist_pinboard, serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal,
+    load_pinboard, publish_pinboard, serve_pinboard_apply, LoadedPinboard, PinboardApplyRefusal,
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{

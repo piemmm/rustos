@@ -89,7 +89,9 @@ shows the lock bead rather than looking disabled.
 The **value-control family** (`value`) is `Slider` and `Progress`: measured
 controls whose value is a validated permille. A `Slider` drags/steps and commits
 through its owner (`SliderAction`) with an optional cap marker and resource-tinted
-track; a `Progress` is a read-only instrument trace (known %, working/
+track, reporting its live value while the interaction continues and a distinct
+*settled* value when it ends — durable work belongs on the settle alone, because
+a drag reports one value per pointer sample; a `Progress` is a read-only instrument trace (known %, working/
 indeterminate segment that freezes under reduced motion, complete/failed). The
 **text-entry family** (`text`) is `TextField` and `SearchField` over a pure
 caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed

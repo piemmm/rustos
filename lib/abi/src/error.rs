@@ -347,6 +347,11 @@ pub enum Errno {
     /// removed (fail closed). A surprise removal, by contrast, never returns
     /// this code — a vanished device cannot be kept alive by pretending its
     /// volumes are still there.
+    ///
+    /// Also emitted for a request another overtook before anything acted on
+    /// it: the desktop session answers a pinboard *apply* this way when the
+    /// user's next settings gesture displaced it, because that document is not
+    /// going to be published and saying so beats leaving the caller parked.
     Busy = 41,
     /// A path could not be resolved because it traverses too many symbolic
     /// links, or because a link was found where the caller forbade one.

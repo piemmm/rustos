@@ -255,6 +255,18 @@ them spins.
   race: a notification landing in the window between the release and the park
   bumps the counter, and the kernel's own compare then declines to park. A wait
   may return spuriously, so callers re-test their predicate in a loop.
+* **`sync::WorkerWake`** is the one way a worker wakes the interactive loop it
+  works for: a byte on a pipe whose read end is a member of that loop's own
+  wait-set. One per program rather than one per desk — the loop's wake arm
+  offers every consumer the chance to adopt whatever arrived, and a consumer
+  with nothing waiting costs a branch — so the loop learns work landed through
+  the very wait it already parks in, with no new ABI and no polling. A refused
+  nudge is dropped rather than retried (a worker that spun on it would be the
+  busy-wait the charter forbids); the answer stays on its desk and the next wake
+  for any reason delivers it. A pipe the kernel refuses leaves the wake unarmed,
+  which is the embedder's cue to do the work on its own thread instead: slower
+  under load, never wrong. Used by the desktop session, the terminal, and the
+  file manager (`AGENTS.md` §28.6).
 
 ## Limits and observability
 

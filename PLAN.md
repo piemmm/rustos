@@ -7471,6 +7471,19 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-09-03 — §28 states the rule the desktop kept re-deriving: an
+  interactive surface never waits on I/O.** New section (owner decision). Every
+  freeze found in the desktop so far — the synchronous app launch, the picker's
+  listings, the icon artwork decoded inside a paint, and the reported slider
+  whose value was wired to a settings write, one store commit per motion sample
+  — was a violation of the same unwritten rule, and each was argued from §2.16 /
+  §2.23 / §26 afresh in `plans/FIX-DESKTOP.md`. A reviewer had nothing to point
+  at, so a control coupled to a disk write read as ordinary code. §28 names the
+  surface, forbids the coupling outright, requires a continuous interaction to
+  act durably only when it settles, keeps persist-then-adopt but puts it off the
+  loop, states that a paint reads nothing, and closes the list of what does not
+  count as I/O so the exceptions cannot be stretched.
+
 - **2026-08-30 — The gate exemption covers the planning and charter documents,
   not just `plans/`.** Amended §2.15's exemption block and its §7 / §15.6 /
   §23.4 restatements, plus `CLAUDE.md` (owner decision). The reason for the

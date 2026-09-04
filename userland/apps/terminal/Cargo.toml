@@ -106,6 +106,10 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 # host-neutral base dependency with that host for the bare-metal build only, so
 # host tests still drive the client over their own fake.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The shared latest-wins job desk (`tairix_util::defer`) the settings publisher
+# hands a settled edit to its worker thread through, so a store write never
+# happens on the loop that owes the window a frame.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # The engine library's host tests draw text, so they inject the shared solid
 # test transport (never a running `fontd`) via the `test-util` feature.

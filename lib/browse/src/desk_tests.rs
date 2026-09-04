@@ -1,13 +1,35 @@
 //! Unit tests for the listing desk's policy.
 //!
-//! Every rule the worker and the session depend on is exercised here with no
+//! Every rule a worker and a serve loop depend on is exercised here with no
 //! thread and no lock: the request/answer handshake, the staleness rule, the
 //! deduplication that stops one directory being read twice, and the round-robin
-//! that keeps one consumer from starving the other.
+//! that keeps one consumer from starving another.
 
 use super::*;
 
 use alloc::vec;
+
+/// A two-consumer program, standing in for the desktop session's icon column
+/// and trusted file picker.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Consumer {
+    Pinboard,
+    Picker,
+}
+
+impl ListingClient for Consumer {
+    const ALL: &'static [Self] = &[Self::Pinboard, Self::Picker];
+}
+
+/// A one-consumer program, standing in for the file manager's browser.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Sole {
+    Browser,
+}
+
+impl ListingClient for Sole {
+    const ALL: &'static [Self] = &[Self::Browser];
+}
 
 fn path(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| String::from(*name)).collect()
@@ -21,14 +43,11 @@ fn entries(names: &[&str]) -> Vec<Entry> {
 fn a_first_ask_records_the_request_and_answers_pending() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users", "root"]);
-    assert_eq!(
-        desk.take(ListingClient::Picker, &home),
-        Ok(Listing::Pending)
-    );
+    assert_eq!(desk.take(Consumer::Picker, &home), Ok(Listing::Pending));
     assert!(desk.has_work());
     assert_eq!(
         desk.next_job(),
-        Some((ListingClient::Picker, home)),
+        Some((Consumer::Picker, home)),
         "the recorded request is the job"
     );
 }
@@ -37,8 +56,8 @@ fn a_first_ask_records_the_request_and_answers_pending() {
 fn asking_again_for_the_same_directory_starts_no_second_read() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users"]);
-    let _ = desk.take(ListingClient::Picker, &home);
-    let _ = desk.take(ListingClient::Picker, &home);
+    let _ = desk.take(Consumer::Picker, &home);
+    let _ = desk.take(Consumer::Picker, &home);
     assert!(desk.next_job().is_some());
     assert!(
         desk.next_job().is_none(),
@@ -51,20 +70,17 @@ fn asking_again_for_the_same_directory_starts_no_second_read() {
 fn a_delivered_answer_is_served_once_and_then_a_fresh_read_is_asked_for() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users"]);
-    let _ = desk.take(ListingClient::Pinboard, &home);
+    let _ = desk.take(Consumer::Pinboard, &home);
     let (client, target) = desk.next_job().expect("a job");
     assert!(desk.deliver(client, target, Ok(entries(&["a", "b"]))));
 
     assert_eq!(
-        desk.take(ListingClient::Pinboard, &home),
+        desk.take(Consumer::Pinboard, &home),
         Ok(Listing::Ready(entries(&["a", "b"])))
     );
     // Consumed: the consumer has adopted those entries, so asking again means
     // it wants to know what is there *now*.
-    assert_eq!(
-        desk.take(ListingClient::Pinboard, &home),
-        Ok(Listing::Pending)
-    );
+    assert_eq!(desk.take(Consumer::Pinboard, &home), Ok(Listing::Pending));
     assert!(desk.has_work());
 }
 
@@ -72,11 +88,11 @@ fn a_delivered_answer_is_served_once_and_then_a_fresh_read_is_asked_for() {
 fn a_refusal_is_delivered_and_served_exactly_like_a_listing() {
     let mut desk = ListingDesk::new();
     let home = path(&["Locked"]);
-    let _ = desk.take(ListingClient::Picker, &home);
+    let _ = desk.take(Consumer::Picker, &home);
     let (client, target) = desk.next_job().expect("a job");
     assert!(desk.deliver(client, target, Err(Errno::PermissionDenied)));
     assert_eq!(
-        desk.take(ListingClient::Picker, &home),
+        desk.take(Consumer::Picker, &home),
         Err(Errno::PermissionDenied)
     );
 }
@@ -86,22 +102,22 @@ fn an_answer_for_somewhere_the_consumer_left_is_never_served() {
     let mut desk = ListingDesk::new();
     let first = path(&["Users"]);
     let second = path(&["Apps"]);
-    let _ = desk.take(ListingClient::Picker, &first);
+    let _ = desk.take(Consumer::Picker, &first);
     let (client, target) = desk.next_job().expect("a job");
     // The user clicks elsewhere while the first read is in flight.
-    let _ = desk.take(ListingClient::Picker, &second);
+    let _ = desk.take(Consumer::Picker, &second);
     assert!(
         !desk.deliver(client, target, Ok(entries(&["stale"]))),
         "an abandoned read must report that nobody wants it"
     );
     assert_eq!(
-        desk.take(ListingClient::Picker, &second),
+        desk.take(Consumer::Picker, &second),
         Ok(Listing::Pending),
         "the stale answer leaked into the new request"
     );
     assert_eq!(
         desk.next_job(),
-        Some((ListingClient::Picker, second)),
+        Some((Consumer::Picker, second)),
         "the new target was not queued"
     );
 }
@@ -110,12 +126,12 @@ fn an_answer_for_somewhere_the_consumer_left_is_never_served() {
 fn one_consumers_answer_is_not_the_others() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users"]);
-    let _ = desk.take(ListingClient::Pinboard, &home);
+    let _ = desk.take(Consumer::Pinboard, &home);
     let (client, target) = desk.next_job().expect("a job");
-    assert_eq!(client, ListingClient::Pinboard);
+    assert_eq!(client, Consumer::Pinboard);
     assert!(desk.deliver(client, target, Ok(entries(&["mine"]))));
     assert_eq!(
-        desk.take(ListingClient::Picker, &home),
+        desk.take(Consumer::Picker, &home),
         Ok(Listing::Pending),
         "the picker was served the icon column's answer"
     );
@@ -126,8 +142,8 @@ fn two_busy_consumers_are_served_in_turn() {
     let mut desk = ListingDesk::new();
     let mut served = vec![];
     for _ in 0..4 {
-        let _ = desk.take(ListingClient::Pinboard, &path(&["Desktop"]));
-        let _ = desk.take(ListingClient::Picker, &path(&["Users"]));
+        let _ = desk.take(Consumer::Pinboard, &path(&["Desktop"]));
+        let _ = desk.take(Consumer::Picker, &path(&["Users"]));
         let (client, target) = desk.next_job().expect("a job");
         served.push(client);
         assert!(desk.deliver(client, target, Ok(entries(&["x"]))));
@@ -137,10 +153,10 @@ fn two_busy_consumers_are_served_in_turn() {
     assert_eq!(
         served,
         vec![
-            ListingClient::Pinboard,
-            ListingClient::Picker,
-            ListingClient::Pinboard,
-            ListingClient::Picker,
+            Consumer::Pinboard,
+            Consumer::Picker,
+            Consumer::Pinboard,
+            Consumer::Picker,
         ],
         "one consumer starved the other"
     );
@@ -149,7 +165,7 @@ fn two_busy_consumers_are_served_in_turn() {
 #[test]
 fn stopping_hands_out_no_more_work() {
     let mut desk = ListingDesk::new();
-    let _ = desk.take(ListingClient::Picker, &path(&["Users"]));
+    let _ = desk.take(Consumer::Picker, &path(&["Users"]));
     assert!(desk.has_work());
     desk.stop();
     assert!(desk.stopping());
@@ -165,18 +181,33 @@ fn a_request_completes_when_a_reader_serves_it() {
     let home = path(&["Users", "root", "Desktop"]);
 
     // The session asks and gets nothing yet.
-    assert_eq!(
-        desk.take(ListingClient::Pinboard, &home),
-        Ok(Listing::Pending)
-    );
+    assert_eq!(desk.take(Consumer::Pinboard, &home), Ok(Listing::Pending));
     // The worker wakes, takes the job, reads, and delivers.
     let (client, target) = desk.next_job().expect("a job");
     assert_eq!(target, home);
     assert!(desk.deliver(client, target, Ok(entries(&["notes.txt"]))));
     // The session wakes on the pipe byte and asks again.
     assert_eq!(
-        desk.take(ListingClient::Pinboard, &home),
+        desk.take(Consumer::Pinboard, &home),
         Ok(Listing::Ready(entries(&["notes.txt"])))
     );
     assert!(!desk.has_work(), "nothing is left outstanding");
+}
+
+/// A program with one consumer needs no fairness, and the round-robin degrades
+/// to serving it every time rather than to serving it every other time.
+#[test]
+fn a_sole_consumer_is_served_on_every_turn() {
+    let mut desk = ListingDesk::new();
+    for _ in 0..3 {
+        let home = path(&["Users"]);
+        assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+        let (client, target) = desk.next_job().expect("a job");
+        assert_eq!(client, Sole::Browser);
+        assert!(desk.deliver(client, target, Ok(entries(&["a"]))));
+        assert_eq!(
+            desk.take(Sole::Browser, &home),
+            Ok(Listing::Ready(entries(&["a"])))
+        );
+    }
 }

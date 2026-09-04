@@ -953,6 +953,7 @@ dependencies = [
  "tairix-sandbox",
  "tairix-taskbar",
  "tairix-theme",
+ "tairix-util",
  "tairix-wallpaper",
  "tairix-window",
  "tairix-wm",
@@ -1521,6 +1522,7 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-theme",
+ "tairix-util",
  "tairix-window",
 ]
 
@@ -2747,6 +2749,7 @@ dependencies = [
  "tairix-rt",
  "tairix-theme",
  "tairix-users",
+ "tairix-util",
  "tairix-vt",
  "tairix-window",
 ]

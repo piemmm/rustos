@@ -102,7 +102,13 @@ write path on landing.
      `plans/PINBOARD.md` §6 rendezvous exactly as the wallpaper chooser
      already uses it: the session is the only writer, an application publishes
      only its own scope, and the desktop adopts a change **only after the
-     write succeeded**, so memory and disk cannot diverge.
+     write succeeded**, so memory and disk cannot diverge. That write happens
+     on the session's settings worker, never on its serve loop, and the same
+     rule binds this application's own panes: a control's value is never wired
+     to a write, a continuous control acts durably only where its interaction
+     settles, and no pane ever blocks its window on a store (`AGENTS.md` §28).
+     A slider that posted its document per pointer sample would freeze both
+     this window and the desktop's.
   2. **Machine scope → the tool that already writes that store, run as an
      authenticated account.** `system.conf` and `network.conf` have exactly
      one writer engine each (`lib/sysconfig`, `lib/netconfig`) and one command

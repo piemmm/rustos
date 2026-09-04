@@ -1496,19 +1496,26 @@ than from a fixed period — is where `plans/FIX-DISPLAY-ACCELERATION.md` takes
 this next. No display driver reports a refresh today, so a mode field for one
 would be an ABI with no producer.
 
-## Directory listings and the wallpaper are prepared off the loop
+## Nothing the desktop reads or writes happens on the serve loop
 
-Two things the desktop needs are reads of arbitrary length on arbitrary
-hardware: listing a directory (`fs_open` + `fs_readdir`) and preparing the
-wallpaper (a bounded file read, then a round trip through a sandbox worker).
-Run on the session's own task either one stalls the compositor, the seat drain,
-and every application blocked in a window call for as long as the disk takes.
-Both therefore run on `lib/rt` worker threads.
+The serve loop owes the user a frame, so it performs no blocking I/O at all: not
+in response to input, not while painting, and never because a control's value
+changed. Five things it needs are I/O of arbitrary length on arbitrary
+hardware — listing a directory (`fs_open` + `fs_readdir`), preparing the
+wallpaper (a bounded read, then a sandbox round trip), decoding an icon,
+publishing the user's desktop settings (a store round trip through the app-data
+service), and reading the program catalogue (two documents plus one `AppInfo`
+per catalogued application). Run on the session's own task any one of them
+stalls the compositor, the seat drain, and every application blocked in a window
+call for as long as the disk takes. All five therefore run on `lib/rt` worker
+threads.
 
-The arrangement is the same shape twice, and the shape is a **desk**: a
-host-tested state machine (`ListingDesk`, `WallpaperDesk`) holding what each
-consumer asked for, what has come back, and the staleness rule that discards an
-answer for somewhere the desktop has since left. The `Run` binary adds the three
+The arrangement is the same shape five times, and the shape is a **desk**: a
+host-tested state machine (`tairix_browse::ListingDesk`, `WallpaperDesk`,
+`tairix_icon::ArtworkDesk`, and `tairix_util::defer::JobDesk` for the settings
+publish and the catalogue scan) holding what each consumer asked for, what has
+come back, and the staleness rule that discards an answer for somewhere the
+desktop has since left. The `Run` binary adds the three
 things a real program brings — the runtime's futex mutex for exclusion, a
 condition variable the worker parks on with nothing to do, and one byte on a
 pipe whose read end is a wait-set member. So the session learns an answer landed
@@ -1540,6 +1547,31 @@ and nothing anywhere spins.
 - **A refused thread is not a failure.** A kernel that grants no thread, or a
   pipe it refuses, is stated once and that work happens on the serve loop —
   exactly where it used to be. Slower under load, never wrong.
+- **A settings change is published off the loop, and adopted only once it
+  landed.** Both routes into the desktop's settings — a row chosen from the
+  backdrop menu, and an `Apply` from the wallpaper chooser — submit to the
+  settings worker and adopt nothing. The worker publishes to the desktop's own
+  app-data scope and answers with what the store then holds; the serve loop
+  adopts *that* on the wake it nudges, and re-lays-out, re-lists, and re-prepares
+  the wallpaper only for the change the answer actually names. So the adopted
+  state and the published document can never diverge, and neither can freeze the
+  desktop. A refused publish is stated on `stderr` and adopts nothing, leaving
+  the desktop showing the settings the next login would restore.
+  - The chooser's `PINBOARD_ENDPOINT` call is answered when the *store* has
+    spoken, not when the request was decoded, so the chooser still reports
+    whether its document was actually published. A request the user's next
+    gesture overtakes before any worker took it is answered there and then, so
+    no caller is left parked on an answer nobody will produce.
+- **The program catalogue is read off the loop too.** Two configuration
+  documents and then one `AppInfo` per catalogued application is far more than a
+  frame's worth of reads, and it used to happen on the very click that opened
+  the launcher. The popup now opens on the catalogue already in hand and adopts
+  the fresh one when it lands. The catalogue and the file-type associations
+  arrive as *one* snapshot, because the associations are read from the bundles
+  that very catalogue names — so a click can never resolve a bundle against a
+  catalogue it was not read from. The one read that stays on the session's own
+  task is the bring-up read, before any window is on screen and before anything
+  can be clicked.
 
 ## Running-task list ↔ window stack
 

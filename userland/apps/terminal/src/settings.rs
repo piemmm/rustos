@@ -5,7 +5,8 @@
 //! The sheet edits a copy of the [`Profile`] it opened on and never touches
 //! the caller's own copy: [`Settings::profile`] hands back the edited,
 //! always-clamped result, and the caller re-resolves colours, re-derives the
-//! font, repaints, and persists once it sees [`SheetOutcome::Edited`].
+//! font and repaints on [`SheetOutcome::Edited`], and additionally asks for the
+//! profile to be published on [`SheetOutcome::Settled`].
 //!
 //! # Layout
 //!
@@ -111,9 +112,17 @@ pub enum SheetOutcome {
     Ignored,
     /// Claimed; only the sheet's own pixels changed.
     Changed,
-    /// Claimed; the profile was edited (the caller re-resolves colours,
-    /// re-derives the font, repaints, and persists).
+    /// Claimed; the profile was edited while the interaction continues — a
+    /// slider still under the pointer. The caller re-resolves colours,
+    /// re-derives the font and repaints, so the change is *live*, and
+    /// publishes nothing: a drag would otherwise cost one store commit per
+    /// pointer-motion sample.
     Edited,
+    /// Claimed; the profile was edited and the interaction has finished — a
+    /// released drag, a chosen scheme, a key step. The caller does everything
+    /// [`Edited`](Self::Edited) does *and* asks for the profile to be
+    /// published: this is the one moment a durable write belongs.
+    Settled,
     /// Claimed; the user asked for *Restore defaults*.
     ///
     /// The sheet cannot answer this itself: "defaults" means the layers
@@ -325,7 +334,8 @@ impl Settings {
         }
 
         if let Some(rect) = body_rect {
-            if let outcome @ (SheetOutcome::Changed | SheetOutcome::Edited) =
+            if let outcome
+            @ (SheetOutcome::Changed | SheetOutcome::Edited | SheetOutcome::Settled) =
                 self.route_body_pointer(event, rect, scale, theme, font, damage)
             {
                 return outcome;
@@ -869,7 +879,7 @@ impl Settings {
                     Some(SelectorAction::Set { on: true }) => {
                         self.focus = row;
                         self.set_scheme(index);
-                        SheetOutcome::Edited
+                        SheetOutcome::Settled
                     }
                     _ => SheetOutcome::Ignored,
                 }
@@ -881,6 +891,11 @@ impl Settings {
                         self.focus = row;
                         self.set_font_size_permille(permille);
                         SheetOutcome::Edited
+                    }
+                    Some(SliderAction::Settled { permille }) => {
+                        self.focus = row;
+                        self.set_font_size_permille(permille);
+                        SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
                 }
@@ -897,6 +912,11 @@ impl Settings {
                         self.set_channel_permille(index, permille);
                         SheetOutcome::Edited
                     }
+                    Some(SliderAction::Settled { permille }) => {
+                        self.focus = row;
+                        self.set_channel_permille(index, permille);
+                        SheetOutcome::Settled
+                    }
                     None => SheetOutcome::Ignored,
                 }
             }
@@ -910,6 +930,11 @@ impl Settings {
                         self.focus = row;
                         self.set_effect_permille(index, permille);
                         SheetOutcome::Edited
+                    }
+                    Some(SliderAction::Settled { permille }) => {
+                        self.focus = row;
+                        self.set_effect_permille(index, permille);
+                        SheetOutcome::Settled
                     }
                     None => SheetOutcome::Ignored,
                 }
@@ -1006,14 +1031,14 @@ impl Settings {
             {
                 Some(SelectorAction::Set { on: true }) => {
                     self.set_scheme(index);
-                    SheetOutcome::Edited
+                    SheetOutcome::Settled
                 }
                 _ => SheetOutcome::Changed,
             },
             Focus::TextSize => match self.text_size.on_key(key, slider, damage) {
-                Some(SliderAction::SetValue { permille }) => {
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     self.set_font_size_permille(permille);
-                    SheetOutcome::Edited
+                    SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },
@@ -1029,9 +1054,9 @@ impl Settings {
                 .get_mut(index)
                 .and_then(|s| s.on_key(key, slider, damage))
             {
-                Some(SliderAction::SetValue { permille }) => {
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     self.set_channel_permille(index, permille);
-                    SheetOutcome::Edited
+                    SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },
@@ -1040,9 +1065,9 @@ impl Settings {
                 .get_mut(index)
                 .and_then(|s| s.on_key(key, slider, damage))
             {
-                Some(SliderAction::SetValue { permille }) => {
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     self.set_effect_permille(index, permille);
-                    SheetOutcome::Edited
+                    SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },

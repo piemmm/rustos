@@ -47,6 +47,23 @@ pub enum Listing {
     Pending,
 }
 
+/// What a source knows about a directory's occupancy right now.
+///
+/// The [`Listing`] shape, for the one question a listing cannot answer. A
+/// refusal is the `Err` half of the enclosing [`Result`]: pending is never an
+/// error, and an error is never retried by waiting.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Probe {
+    /// Whether the directory holds at least one child.
+    Ready(bool),
+    /// The probe is under way somewhere else and the answer will arrive later.
+    ///
+    /// The source has taken note; the *embedder* asks again when whatever it
+    /// parks on says the answer has landed. A source that returns this forever
+    /// simply leaves the folder drawn without its cue.
+    Pending,
+}
+
 /// A read-only view of the filesystem's directory structure.
 pub trait DirectorySource {
     /// List the children of the directory named by `components`
@@ -77,6 +94,11 @@ pub trait DirectorySource {
     /// listing — an implementation must read the *cheapest* thing that decides
     /// it (one record) and must never build, copy, or walk the children.
     ///
+    /// A source that probes on the caller's own thread answers
+    /// [`Probe::Ready`]. One that probes elsewhere answers [`Probe::Pending`]
+    /// and is asked again on the next resolve; asking again with the same
+    /// `components` must not start a second probe.
+    ///
     /// Probing exercises the caller's directory-read authority on a child the
     /// caller is only *displaying*, so a source is free not to offer it: the
     /// default answers [`Errno::NotImplemented`], which the browser records as
@@ -91,7 +113,7 @@ pub trait DirectorySource {
     /// read — for example [`Errno::PermissionDenied`] when the caller lacks
     /// the capability, or [`Errno::NotImplemented`] when the source does not
     /// probe at all.
-    fn has_children(&mut self, components: &[String]) -> Result<bool, Errno> {
+    fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
         let _ = components;
         Err(Errno::NotImplemented)
     }

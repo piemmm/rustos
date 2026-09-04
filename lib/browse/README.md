@@ -56,7 +56,10 @@ can never diverge in navigation semantics, listing policy, or look.
   retried, and a fresh listing resets every answer. A source that does not
   implement the probe answers `NotImplemented`, which reads as
   `Indeterminate`: the trusted picker takes that default deliberately, so it
-  exercises no directory-read authority it does not need.
+  exercises no directory-read authority it does not need. A source that probes
+  *elsewhere* answers `Probe::Pending`, which leaves the entry unanswered and
+  asks again next resolve — that is what lets a caller resolve occupancy from
+  inside a paint while the paint performs no I/O at all.
 - **Sort** (`SortMode`/`sort_entries`): the one listing order both views
   share — directories first, then a `Name`/`Size`/`Modified` key with a
   direction, with a case-insensitive name tiebreak so the result never
@@ -73,7 +76,7 @@ can never diverge in navigation semantics, listing policy, or look.
   source under the composing process's own identity.
 - **A listing may not be ready yet** (`Listing`, `Browser::resume`): a source
   that reads the directory on the calling thread answers `Listing::Ready`; one
-  that reads it *elsewhere* — the desktop session, whose event loop must not
+  that reads it *elsewhere* — every interactive surface, whose loop must not
   stall on a slow disk — answers `Listing::Pending`, and the embedder asks again
   when its own wake says the answer has landed. Pending is never an error and an
   error is never retried by waiting. A pending navigation has moved **nothing**:
@@ -82,6 +85,15 @@ can never diverge in navigation semantics, listing policy, or look.
   unchanged and a refusal that arrives late is reported in place.
   `Browser::is_listing` / `listing_target` are what a view draws its cue from.
   Nothing in the engine polls, waits, or sleeps.
+- **The deferral policy is shared** (`ListingDesk<C: ListingClient>`): one
+  request slot and one answer slot per named consumer, the staleness rule that
+  drops an answer for somewhere the caller has since left, and the round-robin
+  that stops one busy consumer starving another. It holds no lock, no thread,
+  and no syscall, so every rule is a host test; the embedder supplies the
+  exclusion and the blocking. Each program declares its consumers as a closed
+  `ListingClient` set — the desktop session's icon column and trusted picker,
+  the file manager's browser — so how many there are is a structural fact
+  rather than a capacity.
 - **Navigation history** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar

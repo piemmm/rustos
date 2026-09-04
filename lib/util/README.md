@@ -38,6 +38,12 @@ code.
 * `count` — the GNU count grammar for `-c`/`-n` values
   (`parse_decimal`, and `parse_suffixed` for the multiplier alphabet).
   Consumers: the `head` and `tail` command apps (`plans/APPS.md`).
+* `defer` — handing one piece of slow work off an interactive loop
+  (`JobDesk`: one request waiting, one in flight, one answer landed;
+  latest-wins, and the displaced request handed back so no caller waits
+  for an answer nobody will produce). Consumers: the terminal's and the
+  desktop session's settings publishers, the session's program-catalogue
+  scan, and the file manager's bundle scan.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows (`ByteWindow`, `LineWindow`), so a last-N view costs memory in
   N rather than in the input. Consumers: the `head` and `tail` command

@@ -124,6 +124,7 @@ pub mod chrome;
 pub mod click;
 pub mod clipboard;
 pub mod delete;
+pub mod desk;
 pub mod entry;
 pub mod error;
 pub mod execute;
@@ -157,6 +158,7 @@ pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, P
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
+pub use desk::{ListingClient, ListingDesk};
 pub use entry::{
     is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
 };
@@ -184,7 +186,7 @@ pub use rename::{validate_new_name, RenameError};
 pub use render::{render_into, ManagerChrome};
 pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
-pub use source::{DirectorySource, Listing};
+pub use source::{DirectorySource, Listing, Probe};
 pub use tairix_abi::window_ipc::WindowSizing;
 /// The pointer button [`DoubleClickTracker::register`] pairs on. Re-exported
 /// because it is part of this engine's own surface: a consumer that reports a

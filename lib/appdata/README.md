@@ -139,6 +139,15 @@ A `defaults_refusal` is reported separately, and only for a defaults document
 that *exists* and could not be used — a packaging defect worth saying out loud.
 A bundle that ships none is the ordinary case and reports nothing.
 
+## One publisher, one operation
+
+`Settings::replace` makes a scope say exactly the document handed in (stale keys
+unset, every setting set, one commit), and `Settings::document` answers the
+effective settings as one owned snapshot that outlives the handle. Together they
+are what lets a program render its whole registry and publish it from a worker
+thread, so a settings write never happens on the loop that owes a window a
+frame (`AGENTS.md` §28).
+
 ## Whole documents, never fragments
 
 A read declares the reply capacity the caller has. A document that does not fit

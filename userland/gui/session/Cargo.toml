@@ -166,6 +166,10 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
+# The shared latest-wins job desk (`tairix_util::defer`) the settings publisher
+# and the program-catalogue scan hand their work to a worker thread through, so
+# neither a store write nor a manifest sweep happens on the serve loop.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The display-client half of the zero-copy present protocol: `DisplayClient`
 # (query/configure/present over the `DisplayTransport` seam) and
 # `RemoteDisplay` (the `Display` trait over the client's own frame mapping,

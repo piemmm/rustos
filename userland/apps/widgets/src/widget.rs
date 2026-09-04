@@ -228,7 +228,9 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::Slider(w) => match w.on_pointer(event, rect, damage) {
-                Some(SliderAction::SetValue { permille }) => {
+                // The gallery holds the value in memory and nothing else, so
+                // the live sample and the settle are the same acknowledgement.
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     w.set_value(permille);
                     committed(rect, damage)
                 }
@@ -317,7 +319,7 @@ impl DemoWidget {
                 None => false,
             },
             DemoWidget::Slider(w) => match w.on_key(key, rect, damage) {
-                Some(SliderAction::SetValue { permille }) => {
+                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     w.set_value(permille);
                     committed(rect, damage)
                 }

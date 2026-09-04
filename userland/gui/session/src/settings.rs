@@ -13,8 +13,10 @@
 //!   launches — including the wallpaper chooser — can write the desktop's
 //!   document at all. Every change, whether the backdrop menu asked for it or
 //!   the chooser did, is applied by the session and the desktop adopts it
-//!   **only after the write succeeded**, so memory and disk can never
-//!   diverge.
+//!   **only after the write succeeded** — and the write happens on the
+//!   session's settings worker, never on its serve loop, so the compositor
+//!   does not stop while a disk is written. Memory and disk can never diverge,
+//!   and neither can freeze the desktop.
 //! - Any application may **read** it, through one request shape that carries
 //!   no scope field, so "read the desktop's private settings" is not a
 //!   request that exists. That is what replaces the hand-rolled
@@ -39,7 +41,7 @@ use alloc::vec::Vec;
 use tairix_abi::pinboard_ipc::PinboardRequest;
 use tairix_abi::Errno;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
-use tairix_wallpaper::{decode, DocumentRefusal, PinboardSettings, SettingsKey};
+use tairix_wallpaper::{decode, DocumentRefusal, PinboardSettings};
 
 /// What loading the user's pinboard settings produced: the settings the
 /// desktop starts on, and the ready-to-print warning lines for anything that
@@ -108,50 +110,53 @@ impl PinboardApplyRefusal {
 /// ordinary fresh-account state and warns about nothing.
 pub fn load_pinboard(host: &mut dyn AppDataHost) -> LoadedPinboard {
     let store = SettingsStore::open_published(host);
-    let mut warnings = Vec::new();
+    let mut loaded = read_pinboard(&store);
     if let Some(err) = store.store_refusal() {
-        warnings.push(warning(&format!(
-            "could not be read ({err:?}); using the defaults"
-        )));
+        loaded.warnings.insert(
+            0,
+            warning(&format!("could not be read ({err:?}); using the defaults")),
+        );
     }
-    let (settings, refused) = PinboardSettings::load(&store);
-    for key in refused {
-        warnings.push(warning(&format!(
-            "`{key}` is not a value that setting accepts; using its default"
-        )));
-    }
+    loaded
+}
+
+/// Decode what `store` says, keeping the documented default for anything this
+/// build's registry does not accept and saying so.
+fn read_pinboard(store: &SettingsStore<'_>) -> LoadedPinboard {
+    let (settings, refused) = PinboardSettings::load(store);
+    let warnings = refused
+        .into_iter()
+        .map(|key| {
+            warning(&format!(
+                "`{key}` is not a value that setting accepts; using its default"
+            ))
+        })
+        .collect();
     LoadedPinboard { settings, warnings }
 }
 
-/// Publish `settings` to this application's published scope, replacing what
-/// it says about its own desktop.
+/// Publish `settings` to this application's published scope, replacing what it
+/// says about its own desktop, and answer with what the store then holds.
 ///
-/// Every registry key is offered; the client stages only those whose value
-/// actually changed, and one commit publishes them as one atomic document
-/// replacement. The caller adopts the settings in the desktop model only once
-/// this has succeeded, so a refused write leaves the desktop exactly as it was
-/// rather than showing a backdrop the next login would not restore.
+/// This is the settings worker's whole body: it performs the store round trip,
+/// so it never runs on the serve loop. The desktop adopts the settings this
+/// answers with — not the ones that were asked for — which is what keeps the
+/// adopted state and the published document identical: a refused publish
+/// answers `Err`, and the desktop is left exactly as it was rather than showing
+/// a backdrop the next login would not restore.
 ///
 /// # Errors
 ///
 /// The app-data service's own typed refusal — no service bound, no store for a
 /// caller running no signed bundle, or an unreachable volume. Nothing was
 /// published.
-pub fn persist_pinboard(
+pub fn publish_pinboard(
     host: &mut dyn AppDataHost,
     settings: &PinboardSettings,
-) -> Result<(), Errno> {
+) -> Result<LoadedPinboard, Errno> {
     let mut store = SettingsStore::open_published(host);
-    for key in SettingsKey::ALL {
-        // Every registry key is inside the format's grammar and every rendered
-        // value inside its value grammar (`lib/wallpaper` pins both), so a
-        // refusal here would be a defect in the registry rather than the
-        // user's doing; it is reported as a refused publish either way.
-        store
-            .set(key.name(), &key.value_of(settings))
-            .map_err(|_| Errno::OutOfRange)?;
-    }
-    store.commit()
+    store.replace(&settings.document())?;
+    Ok(read_pinboard(&store))
 }
 
 /// Attest an *apply* request against the session's own identity and read the
@@ -204,7 +209,7 @@ mod tests {
         WallpaperFit,
     };
 
-    use super::{load_pinboard, persist_pinboard, serve_pinboard_apply, PinboardApplyRefusal};
+    use super::{load_pinboard, publish_pinboard, serve_pinboard_apply, PinboardApplyRefusal};
 
     /// The uid the session under test runs as.
     const SESSION_UID: u32 = 1000;
@@ -268,7 +273,13 @@ mod tests {
     #[test]
     fn published_settings_are_read_back_verbatim() {
         let mut host = service();
-        assert_eq!(persist_pinboard(&mut host, &edited()), Ok(()));
+        let published = publish_pinboard(&mut host, &edited()).expect("publishes");
+        assert_eq!(
+            published.settings,
+            edited(),
+            "the desktop adopts what the store now holds"
+        );
+        assert!(published.warnings.is_empty());
         let loaded = load_pinboard(&mut host);
         assert_eq!(loaded.settings, edited());
         assert!(loaded.warnings.is_empty());
@@ -279,7 +290,7 @@ mod tests {
         // The private scope is not what other applications read, so a
         // desktop that published into it would be publishing nothing.
         let mut host = service();
-        assert_eq!(persist_pinboard(&mut host, &edited()), Ok(()));
+        assert!(publish_pinboard(&mut host, &edited()).is_ok());
         assert_eq!(
             host.published().get("fit"),
             Some(WallpaperFit::Centre.as_str())
@@ -313,8 +324,20 @@ mod tests {
     fn a_refused_publish_is_reported_and_publishes_nothing() {
         let mut host = service();
         host.refusal().set(Some(Errno::NoSpace));
-        assert_eq!(persist_pinboard(&mut host, &edited()), Err(Errno::NoSpace));
+        assert_eq!(
+            publish_pinboard(&mut host, &edited()).err(),
+            Some(Errno::NoSpace)
+        );
         assert_eq!(host.published().settings().count(), 0);
+    }
+
+    /// A publish removes every key the registry does not render, so a
+    /// document a previous build left behind cannot outlive it.
+    #[test]
+    fn a_publish_replaces_the_whole_document() {
+        let mut host = service().with_published("fit = centre\nleftover = yes\n");
+        assert!(publish_pinboard(&mut host, &edited()).is_ok());
+        assert_eq!(host.published().get("leftover"), None);
     }
 
     #[test]

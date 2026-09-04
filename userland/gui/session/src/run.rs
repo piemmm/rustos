@@ -107,9 +107,7 @@ mod program {
         WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
-    use tairix_browse::{
-        association_from_appinfo, AppAssociation, DirectorySource, Entry, GridView, Listing,
-    };
+    use tairix_browse::{AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk};
     use tairix_caps::CapabilitySet;
     use tairix_desktop_session::menu::{
         open_desktop_menu, ChainAction, ChainOutcome, ChainOwner, MenuChain,
@@ -121,24 +119,23 @@ mod program {
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
-        drop_is_noteworthy, ensure_switchboard, launch_argv, load_library,
-        load_pinboard as read_pinboard_store, maybe_send_seat_report, open_tray, parse,
-        persist_pinboard, reap_launched, relay_power, resolve_window_identities,
-        serve_pinboard_apply, serve_switchboard_request, window_control_alternate_event,
-        window_control_event, Answer, AppBarBridge, AppBarService, ArtworkFileReader,
-        ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
-        FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource, KeyboardInputSource,
-        LaunchTable, ListingClient, ListingDesk, LockedDrain, OwnerWindow, PickConclusion,
-        Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock, SeatEventReader,
-        SeatInputChannel, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk,
-        WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE, SWITCHBOARD_CALL_REFUSED,
-        SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH,
-        WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
+        drop_is_noteworthy, ensure_switchboard, launch_argv, load_pinboard as read_pinboard_store,
+        load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
+        relay_power, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
+        ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt,
+        Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
+        DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
+        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
+        KeyboardInputSource, LaunchTable, LoadedPinboard, LoadedPrograms, LockedDrain, OwnerWindow,
+        PickConclusion, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
+        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
+        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
+        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
+        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
+        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -305,15 +302,6 @@ mod program {
     /// a wallpaper preparation the session asked for has finished, so whichever
     /// consumer was waiting can adopt it and repaint.
     const WORKER_TOKEN: u64 = 10;
-
-    /// Bytes drained from the worker wake pipe per wake.
-    ///
-    /// A worker writes one byte per delivered answer, and there are three
-    /// consumers between the two workers, so this is comfortably more than can
-    /// ever be outstanding — and the member is a level-triggered peek, so
-    /// anything a short drain left behind re-reports on the very next wait rather
-    /// than being lost.
-    const WORKER_NUDGE_DRAIN: usize = 8;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -1173,6 +1161,8 @@ mod program {
         listings: alloc::sync::Arc<Listings>,
         wallpapers: alloc::sync::Arc<Wallpapers>,
         artworks: alloc::sync::Arc<Artworks>,
+        publisher: alloc::sync::Arc<Publisher>,
+        catalogs: alloc::sync::Arc<Catalogs>,
     }
 
     impl Drop for WorkerGuard {
@@ -1180,7 +1170,23 @@ mod program {
             self.listings.stop();
             self.wallpapers.stop();
             self.artworks.stop();
+            self.publisher.stop();
+            self.catalogs.stop();
         }
+    }
+
+    /// The handles of the workers this session started, one per kind of work.
+    ///
+    /// Held for the session's life and detached at teardown; a `None` is a
+    /// thread the kernel would not grant, whose desk is stopped so its work
+    /// falls back to the serve loop.
+    #[derive(Default)]
+    struct SessionWorkers {
+        listing: Option<tairix_rt::thread::JoinHandle<()>>,
+        wallpaper: Option<tairix_rt::thread::JoinHandle<()>>,
+        artwork: Option<tairix_rt::thread::JoinHandle<()>>,
+        publish: Option<tairix_rt::thread::JoinHandle<()>>,
+        catalog: Option<tairix_rt::thread::JoinHandle<()>>,
     }
 
     /// Spawn one named session worker, stating a refusal once.
@@ -1563,49 +1569,65 @@ mod program {
         // repaint's delay rather than a frozen desktop. A pipe the kernel
         // refuses, or a thread it will not grant, leaves that work on the serve
         // loop's own task: slower under load, never wrong, and stated once.
-        let (worker_wake_read, worker_wake) = if let Ok((read, write)) = tairix_rt::pipe_create() {
-            (Some(read), WorkerWake { fd: Some(write) })
-        } else {
+        let worker_wake = alloc::sync::Arc::new(tairix_rt::sync::WorkerWake::create());
+        if !worker_wake.is_armed() {
             io::write_stderr_line(
-                "desktop: no worker wake pipe; directory listings, icon artwork, and the \
-                 wallpaper are prepared on the serve loop",
+                "desktop: no worker wake pipe; directory listings, icon artwork, the wallpaper, \
+                 the program catalogue, and settings publishing all happen on the serve loop",
             );
-            (None, WorkerWake { fd: None })
-        };
-        let worker_wake = alloc::sync::Arc::new(worker_wake);
+        }
         let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
         let wallpapers =
             alloc::sync::Arc::new(Wallpapers::new(alloc::sync::Arc::clone(&worker_wake)));
         let artworks = alloc::sync::Arc::new(Artworks::new(alloc::sync::Arc::clone(&worker_wake)));
+        let publisher =
+            alloc::sync::Arc::new(Publisher::new(alloc::sync::Arc::clone(&worker_wake)));
+        let catalogs = alloc::sync::Arc::new(Catalogs::new(alloc::sync::Arc::clone(&worker_wake)));
         // One worker per kind of work, spawned only where there is a wake to
         // deliver through. Each handle is held for the session's life; the
         // worker's own `Arc` keeps its desk alive either way.
-        let (listing_worker, wallpaper_worker, artwork_worker) =
-            worker_wake_read.map_or((None, None, None), |_| {
-                let listing = {
+        let workers = if worker_wake.is_armed() {
+            SessionWorkers {
+                listing: {
                     let served = alloc::sync::Arc::clone(&listings);
                     spawn_worker("listing", move || served.serve())
-                };
-                let wallpaper = {
+                },
+                wallpaper: {
                     let served = alloc::sync::Arc::clone(&wallpapers);
                     spawn_worker("wallpaper", move || served.serve())
-                };
-                let artwork = {
+                },
+                artwork: {
                     let served = alloc::sync::Arc::clone(&artworks);
                     spawn_worker("icon", move || served.serve())
-                };
-                (listing, wallpaper, artwork)
-            });
+                },
+                publish: {
+                    let served = alloc::sync::Arc::clone(&publisher);
+                    spawn_worker("settings", move || served.serve())
+                },
+                catalog: {
+                    let served = alloc::sync::Arc::clone(&catalogs);
+                    spawn_worker("program catalogue", move || served.serve())
+                },
+            }
+        } else {
+            SessionWorkers::default()
+        };
         // With no worker there is nobody to answer a recorded request, so the
         // desk is stopped and that work happens on this task instead.
-        if listing_worker.is_none() {
+        if workers.listing.is_none() {
             listings.stop();
         }
-        if wallpaper_worker.is_none() {
+        if workers.wallpaper.is_none() {
             wallpapers.stop();
         }
-        if artwork_worker.is_none() {
+        if workers.artwork.is_none() {
             artworks.stop();
+        }
+        if workers.publish.is_none() {
+            publisher.stop();
+        }
+        if workers.catalog.is_none() {
+            catalogs.stop();
         }
         // Every way out of this function stops every worker. The guard is
         // declared after the handles, so it runs first: the desks stop, then the
@@ -1614,6 +1636,8 @@ mod program {
             listings: alloc::sync::Arc::clone(&listings),
             wallpapers: alloc::sync::Arc::clone(&wallpapers),
             artworks: alloc::sync::Arc::clone(&artworks),
+            publisher: alloc::sync::Arc::clone(&publisher),
+            catalogs: alloc::sync::Arc::clone(&catalogs),
         };
 
         // The desktop's icon artwork — the shipped `/System/Graphics` masters
@@ -1624,7 +1648,7 @@ mod program {
         // happen here, exactly as they used to. Until this call the shell draws
         // every icon from its built-in glyphs, and it falls back to them again
         // whenever either seam refuses.
-        if artwork_worker.is_some() {
+        if workers.artwork.is_some() {
             shell.set_artwork_resolver(alloc::boxed::Box::new(DeferredArtwork(
                 alloc::sync::Arc::clone(&artworks),
             )));
@@ -1637,13 +1661,25 @@ mod program {
             )));
         }
 
-        // The program library: read the machine store and the logged-in
-        // user's overlay under the session's own identity, merge them, and
-        // hand the resolved catalog to the taskbar's popup. A store that
-        // cannot be used is reported loudly and contributes an empty
-        // catalog, so the desktop comes up with a calm empty library rather
-        // than dying over a settings file.
-        refresh_library(&mut shell, &mut compositor);
+        // The program library and what each installed application opens: the
+        // machine store, the logged-in user's overlay, and one bundle manifest
+        // per catalogued application, all read under the session's own
+        // identity. A layer or manifest that cannot be used is reported loudly
+        // and contributes nothing, so the desktop comes up with a calm empty
+        // library rather than dying over a settings file.
+        //
+        // Read on this task, unlike every later refresh: no window is on
+        // screen yet and nothing can be clicked, so there is no frame to owe
+        // anyone — and the very first double-click on a document should find
+        // the application that opens it rather than a not-yet-scanned
+        // catalogue.
+        let mut associations = alloc::vec::Vec::new();
+        adopt_programs(
+            load_programs(&mut VfsFileReader, &mut RtHost),
+            &mut shell,
+            &mut compositor,
+            &mut associations,
+        );
 
         // The icon bar's application strip: one slot per running
         // application, resolved from the bundle the kernel attested owns
@@ -1677,12 +1713,6 @@ mod program {
         // re-sorting a frame later.
         let mut pinboard = load_pinboard(&mut desktop, sandbox);
         desktop.relist(tairix_rt::clock_get());
-        // Which installed application opens which file, read once from the
-        // bundles the catalog already names and refreshed only when the
-        // catalog is. Resolving it per gesture would re-read every manifest
-        // on every click.
-        let mut associations = desktop_associations(&shell);
-
         // The wallpaper the desktop layer is painted over: read under the
         // session's own identity and fitted to this screen in the sandbox
         // worker, once. A wallpaper that cannot be read or rendered leaves
@@ -1898,7 +1928,7 @@ mod program {
         // tolerated — a worker whose answers nobody collects would leave the
         // desktop listing forever, and the session must not park on a set that
         // cannot report it.
-        if let Some(read) = worker_wake_read {
+        if let Some(read) = worker_wake.read_end() {
             if tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Add,
@@ -2256,6 +2286,8 @@ mod program {
                         &mut DesktopMenuDesk {
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
+                            publisher: &publisher,
+                            catalogs: &catalogs,
                             desktop: &mut desktop,
                             launched: &mut launched,
                             associations: &mut associations,
@@ -2353,12 +2385,15 @@ mod program {
                 // two routes cannot diverge. A foreign caller, a malformed
                 // frame, an unusable document, or a refused write is a
                 // typed refusal stated on `stderr`, so no caller is left
-                // parked and the desktop keeps the settings it had.
+                // parked and the desktop keeps the settings it had. The
+                // reply waits for the store, not for this loop: the call is
+                // answered by whichever path learns the outcome.
                 let mut request = [0u8; PINBOARD_MAX_REQUEST];
                 let mut ticket = 0u64;
                 if let Ok(len) = tairix_rt::call_recv(PINBOARD_ENDPOINT, &mut request, &mut ticket)
                 {
-                    let result = serve_pinboard(
+                    serve_pinboard(
+                        &publisher,
                         &mut pinboard,
                         &wallpapers,
                         &mut desktop,
@@ -2368,8 +2403,6 @@ mod program {
                         ticket,
                         &request[..len],
                     );
-                    let reply = encode_status_reply(result);
-                    let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, ticket, &reply);
                 }
             } else if token == HOLDBACK_TOKEN {
                 // An app drained its full event mailbox, so what the session
@@ -2403,9 +2436,18 @@ mod program {
                 // next wait and nothing is lost), then offer every consumer the
                 // chance to adopt what arrived. Each is a no-op unless it was the
                 // one waiting, so one wake serves whichever it was.
-                let mut nudge = [0u8; WORKER_NUDGE_DRAIN];
-                if let Some(read) = worker_wake_read {
-                    let _ = tairix_rt::fs_read(read, 0, &mut nudge);
+                worker_wake.drain();
+                let settings_landed = collect_publish(
+                    &publisher,
+                    &mut pinboard,
+                    &wallpapers,
+                    &mut desktop,
+                    &mut shell,
+                    &mut compositor,
+                    tairix_rt::clock_get(),
+                );
+                if let Some(programs) = catalogs.collect() {
+                    adopt_programs(programs, &mut shell, &mut compositor, &mut associations);
                 }
                 let relisted = desktop.relist(tairix_rt::clock_get());
                 let papered = prepare_wallpaper(
@@ -2450,7 +2492,7 @@ mod program {
                     );
                     shell.present_icon_artwork(&mut compositor);
                 }
-                if relisted || papered || arted {
+                if relisted || papered || arted || settings_landed {
                     shell.present_desktop(&mut compositor, &desktop);
                 }
                 if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
@@ -2718,6 +2760,8 @@ mod program {
                         &mut DesktopMenuDesk {
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
+                            publisher: &publisher,
+                            catalogs: &catalogs,
                             desktop: &mut desktop,
                             launched: &mut launched,
                             associations: &mut associations,
@@ -2742,6 +2786,8 @@ mod program {
                 for outcome in outcomes {
                     route_desktop(
                         &outcome,
+                        &publisher,
+                        &catalogs,
                         &mut pinboard,
                         &wallpapers,
                         &mut desktop,
@@ -2757,6 +2803,7 @@ mod program {
                     match route_outcome(
                         outcome,
                         None,
+                        &catalogs,
                         &mut focused,
                         &mut shell,
                         &mut compositor,
@@ -2819,6 +2866,8 @@ mod program {
                             typed = true;
                             route_desktop(
                                 &outcome,
+                                &publisher,
+                                &catalogs,
                                 &mut pinboard,
                                 &wallpapers,
                                 &mut desktop,
@@ -2834,6 +2883,7 @@ mod program {
                             match route_outcome(
                                 outcome,
                                 Some(record),
+                                &catalogs,
                                 &mut focused,
                                 &mut shell,
                                 &mut compositor,
@@ -3047,31 +3097,22 @@ mod program {
         }
     }
 
-    /// The one nudge the session's worker threads wake its serve loop with: a
-    /// byte on a pipe whose read end is a wait-set member.
+    /// Which of the session's two directory-listing consumers a request belongs
+    /// to.
     ///
-    /// Shared by every worker rather than one pipe each. The serve loop's arm
-    /// offers each consumer the chance to adopt whatever arrived, and a consumer
-    /// with nothing waiting costs a branch — so a second token, a second drain,
-    /// and a second descriptor would buy nothing.
-    struct WorkerWake {
-        /// `None` when the pipe could not be created, in which case the session
-        /// does the work on its own task: slower under load, never wrong.
-        fd: Option<u32>,
+    /// Named, not counted: the desktop has exactly these two, and giving each
+    /// its own slot is what keeps a picker navigating fast from ever displacing
+    /// the icon column's pending re-list.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum ListingClient {
+        /// The desktop's own icon column — the user's `Desktop` folder.
+        Pinboard,
+        /// The trusted file picker the window channel opens on an app's behalf.
+        Picker,
     }
 
-    impl WorkerWake {
-        /// Nudge the serve loop.
-        ///
-        /// A refused write is dropped rather than retried: the only thing it can
-        /// mean is that the session is not draining, and a worker that spun on
-        /// it would be the busy-wait the charter forbids. The answer stays on its
-        /// desk, so the next wake for any reason still delivers it.
-        fn nudge(&self) {
-            if let Some(fd) = self.fd {
-                let _ = tairix_rt::fs_write(fd, 0, &[1u8]);
-            }
-        }
+    impl tairix_browse::ListingClient for ListingClient {
+        const ALL: &'static [Self] = &[Self::Pinboard, Self::Picker];
     }
 
     /// The desktop's wallpaper, prepared on a worker thread that owns its **own**
@@ -3084,11 +3125,11 @@ mod program {
     struct Wallpapers {
         desk: tairix_rt::sync::Mutex<WallpaperDesk>,
         work: tairix_rt::sync::Condvar,
-        wake: alloc::sync::Arc<WorkerWake>,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
     }
 
     impl Wallpapers {
-        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
             Self {
                 desk: tairix_rt::sync::Mutex::new(WallpaperDesk::new()),
                 work: tairix_rt::sync::Condvar::new(),
@@ -3236,11 +3277,11 @@ mod program {
         desk: tairix_rt::sync::Mutex<ArtworkDesk>,
         /// Signalled when a decode is recorded, and on teardown.
         work: tairix_rt::sync::Condvar,
-        wake: alloc::sync::Arc<WorkerWake>,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
     }
 
     impl Artworks {
-        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
             Self {
                 desk: tairix_rt::sync::Mutex::new(ArtworkDesk::new()),
                 work: tairix_rt::sync::Condvar::new(),
@@ -3391,15 +3432,15 @@ mod program {
     /// member, so the session learns an answer landed through the very loop it
     /// already parks in — no new ABI and no second wake mechanism.
     struct Listings {
-        desk: tairix_rt::sync::Mutex<ListingDesk>,
+        desk: tairix_rt::sync::Mutex<ListingDesk<ListingClient>>,
         /// Signalled when a request is recorded, and on teardown.
         work: tairix_rt::sync::Condvar,
-        wake: alloc::sync::Arc<WorkerWake>,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
     }
 
     impl Listings {
         /// A desk with no worker yet.
-        fn new(wake: alloc::sync::Arc<WorkerWake>) -> Self {
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
             Self {
                 desk: tairix_rt::sync::Mutex::new(ListingDesk::new()),
                 work: tairix_rt::sync::Condvar::new(),
@@ -3485,6 +3526,215 @@ mod program {
             &stream,
             &mut tairix_browse::RtLinkReader,
         )
+    }
+
+    /// The desktop's settings publisher: the store round trip that adopting a
+    /// pinboard change costs, run on a worker thread.
+    ///
+    /// Persist-then-adopt is preserved and moved off the loop. The serve loop
+    /// *submits* the settings a gesture asked for and adopts nothing; the worker
+    /// publishes them and answers with what the store then holds; the loop
+    /// adopts that on the next wake. So the adopted state still never diverges
+    /// from the published document, and the compositor never stops for a disk.
+    ///
+    /// The desk coalesces latest-wins, which is what makes a settings surface
+    /// safe to drive from a continuous control: any number of settled edits
+    /// during one publish cost one further publish, not one each.
+    struct Publisher {
+        desk: tairix_rt::sync::Mutex<tairix_util::defer::JobDesk<PublishJob, PublishAnswer>>,
+        /// Signalled when a publish is submitted, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+    }
+
+    /// A publish the desktop wants, and the pinboard call waiting on it.
+    ///
+    /// The ticket rides with the settings because the chooser's reply must state
+    /// what the store actually did, not merely that its request was decoded — so
+    /// the call is answered when the publish lands. A request the user's next
+    /// gesture displaces before it is taken is answered right there, so no
+    /// caller is ever left parked on an answer nobody will produce.
+    struct PublishJob {
+        settings: PinboardSettings,
+        /// The `PINBOARD_ENDPOINT` call to answer, for a publish a foreign
+        /// application asked for. `None` for one the desktop asked itself.
+        ticket: Option<u64>,
+    }
+
+    /// What publishing the desktop's settings produced: the settings to adopt,
+    /// the refusal to state, and the call to answer with either.
+    struct PublishAnswer {
+        outcome: Result<LoadedPinboard, Errno>,
+        ticket: Option<u64>,
+    }
+
+    impl Publisher {
+        /// A desk with no worker yet.
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(tairix_util::defer::JobDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One publisher's whole life: park until settings are submitted,
+        /// publish them, deliver what the store then holds, wake the session.
+        fn serve(&self) {
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                // The store round trip, with no lock held: this is the call that
+                // used to stall the desktop.
+                let answer = PublishAnswer {
+                    outcome: publish_pinboard(&mut RtHost, &job.settings),
+                    ticket: job.ticket,
+                };
+                // A publish the user's next gesture superseded while it ran is
+                // dropped for *adoption* — the queued one will replace what it
+                // would have shown — but it did happen, so its caller learns
+                // the outcome it actually got rather than a refusal.
+                let outcome = answer.outcome.as_ref().map(|_| ()).map_err(|err| *err);
+                let ticket = answer.ticket;
+                if self.desk.lock().deliver(answer) {
+                    self.wake.nudge();
+                } else if let Some(ticket) = ticket {
+                    reply_pinboard(ticket, outcome);
+                }
+            }
+        }
+
+        /// Ask for `settings` to be published, answering the pinboard call
+        /// `ticket` when the store has spoken.
+        ///
+        /// With no publisher to answer it the publish happens on the calling
+        /// thread, exactly as the session did before it had one: a submitted
+        /// change nobody will serve would leave the desktop showing settings it
+        /// never adopted.
+        fn submit(&self, settings: PinboardSettings, ticket: Option<u64>) -> Option<PublishAnswer> {
+            let submitted = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    drop(desk);
+                    return Some(PublishAnswer {
+                        outcome: publish_pinboard(&mut RtHost, &settings),
+                        ticket,
+                    });
+                }
+                desk.submit(PublishJob { settings, ticket })
+            };
+            if submitted.wake {
+                self.work.notify_one();
+            }
+            // A gesture that overtook an application's request before any
+            // worker took it: that request is not going to be published, and
+            // saying so beats leaving its caller parked.
+            if let Some(displaced) = submitted.displaced {
+                if let Some(ticket) = displaced.ticket {
+                    reply_pinboard(ticket, Err(Errno::Busy));
+                }
+            }
+            None
+        }
+
+        /// Take a landed publish, if one has.
+        fn collect(&self) -> Option<PublishAnswer> {
+            self.desk.lock().collect()
+        }
+
+        /// Ask the worker to leave and wake it.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
+    }
+
+    /// The program catalogue and the file associations its bundles declare,
+    /// read on a worker thread.
+    ///
+    /// Two configuration documents and then one `AppInfo` per catalogued
+    /// application: on a machine with a full program store that is far more
+    /// than a frame's worth of reads, and it used to happen on the very click
+    /// that opened the launcher. The popup now opens on the catalogue already
+    /// in hand and adopts the fresh one when it lands.
+    struct Catalogs {
+        desk: tairix_rt::sync::Mutex<tairix_util::defer::JobDesk<(), LoadedPrograms>>,
+        /// Signalled when a scan is submitted, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+    }
+
+    impl Catalogs {
+        /// A desk with no worker yet.
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(tairix_util::defer::JobDesk::new()),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One scanner's whole life: park until a scan is wanted, read the
+        /// stores and the manifests, deliver the snapshot, wake the session.
+        fn serve(&self) {
+            loop {
+                {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if desk.next_job().is_some() {
+                            break;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                }
+                // The reads, with no lock held.
+                let programs = load_programs(&mut VfsFileReader, &mut RtHost);
+                if self.desk.lock().deliver(programs) {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Ask for a fresh scan, answering with the snapshot when there is no
+        /// scanner to do it elsewhere.
+        fn submit(&self) -> Option<LoadedPrograms> {
+            let submitted = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    drop(desk);
+                    return Some(load_programs(&mut VfsFileReader, &mut RtHost));
+                }
+                desk.submit(())
+            };
+            if submitted.wake {
+                self.work.notify_one();
+            }
+            None
+        }
+
+        /// Take a landed scan, if one has.
+        fn collect(&self) -> Option<LoadedPrograms> {
+            self.desk.lock().collect()
+        }
+
+        /// Ask the worker to leave and wake it.
+        fn stop(&self) {
+            self.desk.lock().stop();
+            self.work.notify_all();
+        }
     }
 
     /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a
@@ -3613,6 +3863,8 @@ mod program {
     struct DesktopMenuDesk<'a, S: DirectorySource> {
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
+        publisher: &'a Publisher,
+        catalogs: &'a Catalogs,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
         associations: &'a mut alloc::vec::Vec<AppAssociation>,
@@ -3946,6 +4198,7 @@ mod program {
         let whole = acted.relisted
             | apply_desktop_action(
                 acted.action,
+                desk.publisher,
                 desk.pinboard,
                 desk.wallpapers,
                 desk.desktop,
@@ -3955,8 +4208,7 @@ mod program {
                 now_ns,
             );
         if acted.relisted {
-            refresh_library(shell, compositor);
-            *desk.associations = desktop_associations(shell);
+            request_programs(desk.catalogs, shell, compositor, desk.associations);
         }
         if whole {
             shell.present_desktop(compositor, desk.desktop);
@@ -3994,6 +4246,7 @@ mod program {
     /// no file the session could not already read.
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn serve_pinboard<S: DirectorySource>(
+        publisher: &Publisher,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -4002,28 +4255,55 @@ mod program {
         session_uid: u32,
         ticket: u64,
         request: &[u8],
-    ) -> Result<(), Errno> {
-        let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(PINBOARD_ENDPOINT, ticket, &mut buf)
-            .map_err(Errno::from_syscall)?;
-        let origin = Origin::from_bytes(&buf[..len])?;
-        let settings =
-            serve_pinboard_apply(session_uid, origin.uid(), request).map_err(|refusal| {
-                let msg = refusal.reason();
-                let _ = writeln!(Stderr, "desktop: {msg}");
-                refusal.errno()
-            })?;
-        adopt_pinboard_settings(
+    ) {
+        let attested = attest_pinboard(session_uid, ticket, request);
+        let settings = match attested {
+            Ok(settings) => settings,
+            Err(err) => {
+                reply_pinboard(ticket, Err(err));
+                return;
+            }
+        };
+        // The call is answered when the store has spoken, not now, so the
+        // chooser still learns whether its document was actually published —
+        // and this loop does not wait to find out.
+        if request_pinboard_settings(
             settings,
+            publisher,
+            Some(ticket),
             pinboard,
             wallpapers,
             desktop,
             shell,
             compositor,
             tairix_rt::clock_get(),
-        )?;
-        shell.present_desktop(compositor, desktop);
-        Ok(())
+        ) {
+            shell.present_desktop(compositor, desktop);
+        }
+    }
+
+    /// Attest a pending pinboard call against the session's own identity and
+    /// decode the settings it carries.
+    ///
+    /// # Errors
+    ///
+    /// The wire [`Errno`] for a caller the kernel attests as another user, a
+    /// frame that will not decode, or a document this build's registry refuses
+    /// — each stated on `stderr` in the session's own wording.
+    fn attest_pinboard(
+        session_uid: u32,
+        ticket: u64,
+        request: &[u8],
+    ) -> Result<PinboardSettings, Errno> {
+        let mut buf = [0u8; ORIGIN_WIRE_LEN];
+        let len = tairix_rt::call_peer_origin(PINBOARD_ENDPOINT, ticket, &mut buf)
+            .map_err(Errno::from_syscall)?;
+        let origin = Origin::from_bytes(&buf[..len])?;
+        serve_pinboard_apply(session_uid, origin.uid(), request).map_err(|refusal| {
+            let msg = refusal.reason();
+            let _ = writeln!(Stderr, "desktop: {msg}");
+            refusal.errno()
+        })
     }
 
     /// Re-resolve the icon bar's application strip from live state and push
@@ -4166,6 +4446,7 @@ mod program {
     fn route_outcome<S: DirectorySource, F: FnMut() -> S>(
         outcome: tairix_desktop_session::ShellOutcome,
         key: Option<KeyInput>,
+        catalogs: &Catalogs,
         focused: &mut Option<u64>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -4616,14 +4897,16 @@ mod program {
                 );
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenLibrary) => {
-                // Re-read the stores each time the popup opens, so an edit
-                // made through `applib` (or a fresh install) shows without
-                // restarting the session. Two small documents: cheap, and
-                // always current. What each installed application opens is
-                // read from the same bundles, so it is refreshed here and
-                // nowhere else.
-                refresh_library(shell, compositor);
-                *associations = desktop_associations(shell);
+                // Ask for the stores to be re-read each time the popup opens,
+                // so an edit made through `applib` (or a fresh install) shows
+                // without restarting the session. The popup opens on the
+                // catalogue already in hand and adopts the fresh one when it
+                // lands: two documents plus one manifest per installed
+                // application is far more than a frame's worth of reads, and
+                // doing them on this click is what used to freeze the desktop
+                // as the launcher opened. What each application opens comes
+                // from the same scan, so the two can never disagree.
+                request_programs(catalogs, shell, compositor, associations);
             }
             ShellOutcome::Taskbar(TaskbarResponse::AppDefault { app }) => {
                 // The application declared that it handles the primary click
@@ -4949,28 +5232,39 @@ mod program {
         shell.tasks().window_for(task)
     }
 
-    /// The file-type associations of every catalogued application: each
-    /// entry's bundle manifest, decoded through the shared, fail-closed
-    /// [`association_from_appinfo`].
+    /// Adopt a program-catalogue snapshot: state whatever could not be used,
+    /// hand the catalog to the taskbar's popup, warm its icon artwork, and
+    /// replace the file-type associations.
     ///
-    /// The program-library catalog is the session's existing record of what
-    /// is installed, so the desktop reads no directory of its own to find
-    /// out what can open a file. A bundle whose manifest is missing or will
-    /// not decode simply claims nothing.
-    fn desktop_associations(shell: &DesktopShell) -> alloc::vec::Vec<AppAssociation> {
-        shell
-            .session()
-            .taskbar()
-            .library()
-            .catalog()
-            .entries()
-            .filter_map(|entry| {
-                let bundle = entry.bundle().as_str();
-                let manifest = alloc::format!("{bundle}/AppInfo");
-                let bytes = VfsFileReader.read(&manifest).ok()?;
-                association_from_appinfo(bundle, &bytes)
-            })
-            .collect()
+    /// The catalog and the associations arrive together because the
+    /// associations are read from the bundles that very catalog names, so a
+    /// click can never resolve a bundle against a catalog it was not read
+    /// from.
+    fn adopt_programs(
+        programs: LoadedPrograms,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
+    ) {
+        for warning in &programs.warnings {
+            let _ = write!(Stderr, "{warning}");
+        }
+        shell.set_library(compositor, programs.catalog);
+        shell.warm_icon_artwork(compositor);
+        *associations = programs.associations;
+    }
+
+    /// Ask for a fresh program catalogue, adopting it at once when there is no
+    /// scanner to read it elsewhere.
+    fn request_programs(
+        catalogs: &Catalogs,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        associations: &mut alloc::vec::Vec<AppAssociation>,
+    ) {
+        if let Some(programs) = catalogs.submit() {
+            adopt_programs(programs, shell, compositor, associations);
+        }
     }
 
     /// Apply one shell outcome to the desktop's icon column and carry out
@@ -4988,6 +5282,8 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn route_desktop<S: DirectorySource>(
         outcome: &tairix_desktop_session::ShellOutcome,
+        publisher: &Publisher,
+        catalogs: &Catalogs,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -5048,16 +5344,16 @@ mod program {
         // changes that genuinely repaint the whole layer.
         let whole = acted.relisted
             | apply_desktop_action(
-                action, pinboard, wallpapers, desktop, shell, compositor, launched, now_ns,
+                action, publisher, pinboard, wallpapers, desktop, shell, compositor, launched,
+                now_ns,
             );
         if acted.relisted {
             // The user's own files demonstrably changed under the desktop, so
-            // this is the honest moment to re-read what is installed as well:
-            // a program installed since bring-up can open a document from
-            // here without waiting for the library popup to be opened. A
-            // re-list that found nothing changed costs none of this.
-            refresh_library(shell, compositor);
-            *associations = desktop_associations(shell);
+            // this is the honest moment to ask what is installed as well: a
+            // program installed since bring-up can open a document from here
+            // without waiting for the library popup to be opened. A re-list
+            // that found nothing changed costs none of this.
+            request_programs(catalogs, shell, compositor, associations);
         }
         if whole {
             shell.present_desktop(compositor, desktop);
@@ -5151,6 +5447,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn apply_desktop_action<S: DirectorySource>(
         action: Option<DesktopAction>,
+        publisher: &Publisher,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -5197,10 +5494,9 @@ mod program {
                 let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
                 settle_desktop_create(&link, ret, desktop, now_ns)
             }
-            Some(DesktopAction::AdoptSettings(settings)) => adopt_pinboard_settings(
-                settings, pinboard, wallpapers, desktop, shell, compositor, now_ns,
-            )
-            .is_ok(),
+            Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
+                settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+            ),
             Some(DesktopAction::ChangeBackground) => {
                 let _ = record_launch(
                     launched,
@@ -5245,40 +5541,96 @@ mod program {
         desktop.relist(now_ns)
     }
 
-    /// Persist `settings` to the user's own store and, once that write has
-    /// succeeded, adopt them and do exactly the work the resulting change
-    /// names: re-lay-out, re-list, and re-prepare the wallpaper.
+    /// Ask for `settings` to be published, and adopt them if the answer comes
+    /// back on this thread.
     ///
-    /// The write comes first, so memory and disk can never diverge: a
-    /// refused write states why on `stderr` and leaves the desktop showing
-    /// the settings the next login would restore. Both routes into the
-    /// settings — a chosen menu row and an apply from the wallpaper chooser
-    /// — come through here, so neither can adopt something the other would
-    /// not have.
+    /// Both routes into the settings — a chosen menu row and an apply from the
+    /// wallpaper chooser — come through here, so neither can adopt something
+    /// the other would not have. Nothing is adopted at the point of asking:
+    /// the store round trip happens on the settings worker, and the answer is
+    /// adopted by [`collect_publish`] on the wake it nudges. With no worker to
+    /// answer it the publish happens here and is adopted at once, exactly as
+    /// the session did before it had one.
     ///
-    /// # Errors
-    ///
-    /// The [`Errno`] the app-data service refused the publish with; nothing
-    /// was adopted.
+    /// Answers whether the desktop layer needs a whole repaint.
     #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
-    fn adopt_pinboard_settings<S: DirectorySource>(
+    fn request_pinboard_settings<S: DirectorySource>(
         settings: PinboardSettings,
+        publisher: &Publisher,
+        ticket: Option<u64>,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         now_ns: u64,
-    ) -> Result<(), Errno> {
-        if let Err(err) = persist_pinboard(&mut RtHost, &settings) {
-            let _ = writeln!(
-                Stderr,
-                "desktop: the desktop settings could not be published ({err:?})"
+    ) -> bool {
+        publisher.submit(settings, ticket).is_some_and(|answer| {
+            adopt_publish(
+                answer, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+            )
+        })
+    }
+
+    /// Adopt whatever the settings worker has published, if anything, and do
+    /// exactly the work the resulting change names: re-lay-out, re-list, and
+    /// re-prepare the wallpaper.
+    ///
+    /// Answers whether the desktop layer needs a whole repaint.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
+    fn collect_publish<S: DirectorySource>(
+        publisher: &Publisher,
+        pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> bool {
+        publisher.collect().is_some_and(|answer| {
+            adopt_publish(
+                answer, pinboard, wallpapers, desktop, shell, compositor, now_ns,
+            )
+        })
+    }
+
+    /// Adopt one landed publish: answer the call that asked for it, then apply
+    /// the settings the store now holds.
+    ///
+    /// The write came first, so memory and disk can never diverge: a refused
+    /// write states why on `stderr`, adopts nothing, and leaves the desktop
+    /// showing the settings the next login would restore.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole settings state, threaded explicitly.
+    fn adopt_publish<S: DirectorySource>(
+        answer: PublishAnswer,
+        pinboard: &mut PinboardPanel,
+        wallpapers: &Wallpapers,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> bool {
+        if let Some(ticket) = answer.ticket {
+            reply_pinboard(
+                ticket,
+                answer.outcome.as_ref().map(|_| ()).map_err(|err| *err),
             );
-            return Err(err);
         }
-        let Some(change) = desktop.apply_settings(settings) else {
-            return Ok(());
+        let published = match answer.outcome {
+            Ok(published) => published,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "desktop: the desktop settings could not be published ({err:?})"
+                );
+                return false;
+            }
+        };
+        for warning in &published.warnings {
+            let _ = write!(Stderr, "{warning}");
+        }
+        let Some(change) = desktop.apply_settings(published.settings) else {
+            return false;
         };
         if change.relist {
             desktop.relist(now_ns);
@@ -5289,7 +5641,18 @@ mod program {
         // A re-layout, a re-list, and a new wallpaper all show as the same
         // repaint of the desktop layer, so one present covers whichever of
         // them the change asked for.
-        Ok(())
+        true
+    }
+
+    /// Answer a `PINBOARD_ENDPOINT` call with the shared status frame.
+    ///
+    /// The one place a pinboard call is answered, so every route — a landed
+    /// publish, a refusal the store gave, a request the next gesture overtook,
+    /// and a refusal the attestation itself produced — words its reply
+    /// identically.
+    fn reply_pinboard(ticket: u64, outcome: Result<(), Errno>) {
+        let reply = encode_status_reply(outcome);
+        let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, ticket, &reply);
     }
 
     /// The desktop's answer to an outcome that was not its own: a pointer
@@ -5351,19 +5714,6 @@ mod program {
             label,
             &run_path,
         );
-    }
-
-    /// (Re)load the program library from its two layers — the machine-wide
-    /// store on the volume and the account's overlay as the library-admin
-    /// command publishes it — and hand the resolved catalog to the taskbar's
-    /// popup, reporting each unusable layer loudly on `stderr`.
-    fn refresh_library(shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let loaded = load_library(&mut VfsFileReader, &mut RtHost);
-        for warning in &loaded.warnings {
-            let _ = write!(Stderr, "{warning}");
-        }
-        shell.set_library(compositor, loaded.catalog);
-        shell.warm_icon_artwork(compositor);
     }
 
     /// The session's live file-reading seam: whole-file reads through the

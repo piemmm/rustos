@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_appconf::Document;
 use tairix_appdata::{read_published, AppDataHost};
+use tairix_browse::open_with::{association_from_appinfo, AppAssociation};
 use tairix_proglib::{
     load, merge, Catalog, EntryId, LibraryEntry, LIBRARY_PATH, LIBRARY_PUBLISHER,
 };
@@ -70,6 +71,57 @@ where
     LoadedLibrary {
         catalog: merge(&machine, &overlay),
         warnings,
+    }
+}
+
+/// The resolved program library and the file associations its bundles declare.
+///
+/// One snapshot rather than two, because the associations are derived from the
+/// catalog: computing them separately would let a click resolve a bundle
+/// against a catalog it was not read from.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LoadedPrograms {
+    /// The merged machine ∪ overlay catalog the popup lists.
+    pub catalog: Catalog,
+    /// Which installed application opens which file, from the `AppInfo` of
+    /// every bundle the catalog names.
+    pub associations: Vec<AppAssociation>,
+    /// One line per layer or manifest that could not be used, ready for
+    /// `stderr`.
+    pub warnings: Vec<String>,
+}
+
+/// Load the program library and read one `AppInfo` per catalogued bundle for
+/// its declared associations.
+///
+/// This is the program-catalog worker's whole body: two documents and then a
+/// manifest per application, which on a machine with a full program store is
+/// far more than a frame's worth of reads. It therefore never runs on the serve
+/// loop — the popup opens on the catalog already in hand and adopts this the
+/// moment it lands.
+///
+/// Fail-closed per bundle, like the layers above it: a manifest that cannot be
+/// read or does not parse simply contributes no association, so one broken
+/// bundle costs only its own file types.
+pub fn load_programs<R>(reader: &mut R, host: &mut dyn AppDataHost) -> LoadedPrograms
+where
+    R: SessionFileReader + ?Sized,
+{
+    let loaded = load_library(reader, host);
+    let associations = loaded
+        .catalog
+        .entries()
+        .filter_map(|entry| {
+            let bundle = entry.bundle().as_str();
+            let manifest = format!("{bundle}/AppInfo");
+            let bytes = reader.read(&manifest).ok()?;
+            association_from_appinfo(bundle, &bytes)
+        })
+        .collect();
+    LoadedPrograms {
+        catalog: loaded.catalog,
+        associations,
+        warnings: loaded.warnings,
     }
 }
 
