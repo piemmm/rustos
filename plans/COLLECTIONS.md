@@ -1,7 +1,7 @@
 # COLLECTIONS — The shared container and hashing libraries
 
-Status: **planned** — nothing landed. The ledger below is the authoritative
-record of what is left.
+Status: **in progress** — C0 landed; the containers are still to come. The
+ledger below is the authoritative record of what is left.
 
 ## The ledger
 
@@ -18,8 +18,8 @@ detail becomes its done-state summary — nothing is appended, here or there.
 
 | # | Increment | Delivers | Depends on | Status |
 |---|---|---|---|---|
-| C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **planned** |
-| C1 | Hash containers | `HashMap` / `HashSet`, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **planned** |
+| C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **done** |
+| C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **planned** |
 | C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf` | — | **planned** |
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **planned** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict | C1, C3 | **planned** |
@@ -33,9 +33,9 @@ detail becomes its done-state summary — nothing is appended, here or there.
 ---
 
 Binding under `AGENTS.md`. TAIRiX has `alloc` (`Vec`, `String`, `BTreeMap`,
-`BTreeSet`, `VecDeque`, `BinaryHeap`) and one 256-bit fixed bitset, and
-nothing else. There is no hash map anywhere in the tree: `no_std` code
-reaches for `BTreeMap` instead and says so
+`BTreeSet`, `VecDeque`, `BinaryHeap`), one 256-bit fixed bitset, and — since
+C0 — `lib/hash`. There is still no hash map anywhere in the tree: `no_std`
+code reaches for `BTreeMap` instead and says so
 (`kernel/mem/src/dma.rs` — "`BTreeMap` rather than `HashMap` because this
 crate is `no_std`"), while `HashMap` appears only in host test mocks. The
 containers a kernel actually runs on — an intrusive list, a generational
@@ -43,7 +43,8 @@ slot map, an interval map, a sparse radix index, a hierarchical bitmap, an
 O(1) LRU, a timing wheel, a lock-free ring — do not exist, so each subsystem
 has grown its own.
 
-That is the defect this plan closes, and it is measurable today:
+That is the defect this plan closes, and what remains of it is measurable
+today:
 
 * **Five independent LRU caches**, four of them with a byte-identical
   `evict_until` loop over a `(tick -> key)` `BTreeMap` recency index:
@@ -88,34 +89,38 @@ one measurement harness).
 
 ## 1. Shape: two crates
 
-**`lib/hash` — new, zero external dependencies.** Hashing is not a
+**`lib/hash` — landed, no external dependencies.** Hashing is not a
 container, three container families need it, and putting it in
 `lib/collections` would either force that foundational crate to depend on
 `lib/crypto`'s whole graph (`sha2`, `hmac`, `chacha20poly1305`,
 `ed25519-dalek`) or leave hash maps unseeded by default. It holds:
 
 * `SipHash13` — the keyed pseudo-random function that defends a hash table
-  against collision flooding, and the **default** `BuildHasher` for every
-  container here. Implemented from the reference specification and pinned by
-  the published test vectors, which are the oracle.
-* `FastHash` — a non-cryptographic integer/short-key mixer for
-  kernel-assigned keys, opt-in by naming it. Same justification
-  `lib/rng/src/fast.rs` already carries for xoshiro256++: an ordinary
-  algorithm, not a security primitive.
+  against collision flooding, and the **default** hasher for every container
+  here. Pinned by the published SipHash reference vectors, which are the
+  oracle.
+* `FastHash` — XXH64, a non-cryptographic hash for kernel-assigned keys and
+  fingerprints, opt-in by naming it. Same justification `lib/rng/src/fast.rs`
+  carries for xoshiro256++: an ordinary published algorithm, not a security
+  primitive, pinned by the reference implementation's outputs.
 * `HashSeed` — the per-boot / per-process key and the one-shot publication
   seam, described in §3.
 
-`lib/hash` deliberately does **not** depend on `lib/rng`: the seed is
-injected, so the crate stays dependency-free and host-testable, and the boot
-path decides where entropy comes from.
+Both hashers implement `core::hash::Hasher`, with integer writes
+little-endian and pointer-sized values widened to 64 bits, so a value hashes
+identically on every port. The `BuildHasher` shims the containers construct
+through land with C1, which is the first thing that needs one.
+
+Its only dependency is `lib/sync`, for the one-shot publication cell — the
+alternative was a second hand-rolled atomic state machine. It deliberately
+does **not** depend on `lib/rng`: the seed is injected, so the crate stays
+free of external dependencies and host-testable, and the boot path decides
+where entropy comes from.
 
 **`lib/collections` — the containers.** Depends on `lib/hash` and, for the
 concurrent tier only, `lib/sync`. Nothing else. It never depends on
 `kernel/*`, `drivers/*`, or `userland/*`, so the existing layering holds
 unchanged.
-
-Adding `lib/hash` updates `AGENTS.md` §3, the workspace `members` list, and
-`PLAN.md`.
 
 ---
 
@@ -168,16 +173,24 @@ names, HTTP headers, network 5-tuples, IPC method names, and bundle
 identifiers. `SipHash13` under a key the attacker cannot observe removes the
 attack; a fixed key does not.
 
-* The key is 128 bits drawn from `lib/rng`'s CSPRNG, published **once** per
-  boot in the kernel and **once per process** at spawn by `lib/rt`, so no
-  cross-process collision oracle exists and a compromise of one process does
-  not hand an attacker another's table layout.
-* Publication happens in the boot path before any untrusted input is parsed.
-  `lib/hash` exposes whether it has been seeded, and a boot-order test pins
-  that publication precedes the first parse. A container constructed
-  unseeded is usable for kernel-assigned keys and refuses construction for
-  the untrusted-key case rather than silently using a predictable key —
-  fail closed.
+* The key is 128 bits drawn from the kernel CSPRNG output reserve, published
+  **once** per boot in the kernel (beside the per-boot identifier, from the
+  same reserve, audited as `HashKeyPublished` / `HashKeyUnavailable`) and
+  **once per process** in `lib/rt`'s `_start` driver from a non-blocking
+  `random_get`, so no cross-process collision oracle exists and a compromise
+  of one process does not hand an attacker another's table layout.
+* Publication happens before any program code runs, and in the kernel before
+  userland exists to reach a syscall that hashes. `published()` reports
+  whether a key exists. A container constructed unseeded is usable for
+  kernel-assigned keys and refuses construction for the untrusted-key case
+  rather than silently using a predictable key — fail closed.
+* A consumer that is *not* an authority decision and must keep working on a
+  platform whose CSPRNG never seeded (`riscv64` and `wasm32` expose no
+  entropy source yet) names `HashSeed::UNKEYED`, so the fallback is a
+  reviewable choice at the use site rather than a silent default. The two
+  such sites — the futex bucket index and the bond flow hash — each report
+  the unkeyed state, through the boot audit log and on `stderr`
+  respectively.
 * `FastHash` is never the default and never correct for untrusted keys. Its
   rustdoc says so, and every use site of it names it explicitly, so the
   choice is visible in review.
@@ -361,7 +374,7 @@ counter gates, its rustdoc, and its `docs/src/lib/` page.
 
 | # | Deletes |
 |---|---|
-| C0 | — (new crate; registers in `AGENTS.md` §3, the workspace `members` list, and `PLAN.md`) |
+| C0 | **done.** Six hand-rolled hashes: the FNV-1a folds in `lib/pagezero`'s self-verify fingerprint, `lib/net/src/iface.rs`'s and `lib/net/src/stack.rs`'s multicast revision counters, `kernel/tairix-kernel`'s build-provenance id, and `lib/fontface`'s rasterisation golden; and the unkeyed Fibonacci mixer in `kernel/core/src/futex.rs`'s bucket index |
 | C1 | `kernel/mem/src/dma.rs`'s `allocations` index, whose only iteration collects keys purely to avoid mutating while iterating. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
 | C2 | `sysinfod`'s `heapless_vec`; the rings in `kernel/core/src/seat.rs`, `kernel/core/src/console.rs`, `kernel/core/src/boot_audit_ring.rs`, `lib/log/src/bootring.rs` |
 | C3 | the per-site intrusive-link handling it subsumes |

@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The workspace's two hashes: the keyed one the bond's transmit flow hash is
+# taken with (a remote peer chooses the tuple), and the fast unkeyed one the
+# address-set revision counter folds with.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 
 [lints]
 workspace = true

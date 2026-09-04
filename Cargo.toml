@@ -71,6 +71,7 @@ members = [
     "lib/geometry",
     "lib/glob",
     "lib/greeter",
+    "lib/hash",
     "lib/help",
     "lib/hid",
     "lib/i2c",

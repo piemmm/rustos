@@ -42,7 +42,9 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::Infallible;
+use core::hash::Hasher;
 
+use tairix_hash::{HashSeed, SipHash13};
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::once::OnceCell;
@@ -130,27 +132,33 @@ fn buckets() -> &'static [Bucket] {
 
 /// The index `key` hashes to in a table of `len` buckets.
 ///
-/// Fibonacci hashing (multiply by the 64-bit golden-ratio odd constant, whose
-/// high bits mix every input bit) over the process id combined with the word
-/// index. Shifting the address by two drops the always-zero alignment bits, so
-/// adjacent words in one lock array land in different buckets instead of
-/// crowding one.
+/// Keyed, because the address half of a key is chosen by the caller: with a
+/// predictable hash a process can pick wait addresses that all land in one
+/// bucket and serialise every unrelated futex on that bucket's lock — and the
+/// table is machine-wide, so the process it starves need not be its own. The
+/// per-boot key ([`tairix_hash`]) is what it cannot compute. Shifting the
+/// address by two drops the always-zero alignment bits, so adjacent words in
+/// one lock array still spread rather than crowding one bucket.
+///
+/// A boot whose CSPRNG never seeded has no key and hashes unkeyed; that is a
+/// contention property rather than an authority one, and the boot path audits
+/// the absence rather than refusing to block a thread over it.
 ///
 /// A `len` of zero folds to one so the index is always computable; [`buckets`]
 /// never yields an empty table.
-fn bucket_index(key: FutexKey, len: usize) -> usize {
-    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mixed =
-        key.process.0.wrapping_mul(GOLDEN).rotate_left(31) ^ (key.uaddr >> 2).wrapping_mul(GOLDEN);
-    // The high bits carry the mixing, so they are the ones folded down.
-    (mixed >> 32) as usize % len.max(1)
+fn bucket_index(seed: HashSeed, key: FutexKey, len: usize) -> usize {
+    let mut hasher = SipHash13::new(seed);
+    hasher.write_u64(key.process.0);
+    hasher.write_u64(key.uaddr >> 2);
+    usize::try_from(hasher.finish() % len.max(1) as u64).unwrap_or(0)
 }
 
 /// The bucket a key belongs to.
 fn bucket_of(key: FutexKey) -> &'static Bucket {
     let table = buckets();
+    let seed = tairix_hash::published().unwrap_or(HashSeed::UNKEYED);
     // `table.len()` is at least one, so the index is in range.
-    &table[bucket_index(key, table.len())]
+    &table[bucket_index(seed, key, table.len())]
 }
 
 /// Register `thread` as a waiter on `key` with an absolute monotonic
@@ -430,6 +438,33 @@ mod tests {
         deregister(other, 22);
     }
 
+    /// A fixed key for the pure index assertions, so they do not depend on
+    /// whether the host test binary ever published one.
+    const TEST_SEED: HashSeed = HashSeed::from_words(0x0f1e_2d3c_4b5a_6978, 0x8796_a5b4_c3d2_e1f0);
+
+    /// The key is what stops a caller choosing wait addresses that all crowd
+    /// one bucket lock: the same addresses must land differently under a
+    /// different key, or the hash is predictable and the machine-wide table
+    /// can be jammed by any process that can compute it.
+    #[test]
+    fn the_key_decides_where_a_chosen_address_lands() {
+        let len = 8 * BUCKETS_PER_CPU;
+        let other = HashSeed::from_words(0x0f1e_2d3c_4b5a_6978, 0x8796_a5b4_c3d2_e1f1);
+        let moved = (0..64u64)
+            .filter(|&word| {
+                let k = key(0x9200, 0x8000 + word * 4);
+                bucket_index(TEST_SEED, k, len) != bucket_index(other, k, len)
+            })
+            .count();
+        // A different key re-shuffles the table, so all-but-a-few of any
+        // chosen run of addresses must move. Landing in the same bucket by
+        // chance is a 1-in-`len` event per address.
+        assert!(
+            moved >= 48,
+            "only {moved} of 64 chosen addresses moved when the key changed"
+        );
+    }
+
     /// A per-CPU-sized table is only worth having if neighbouring lock words
     /// do not all crowd one bucket.
     ///
@@ -443,7 +478,7 @@ mod tests {
         let len = 8 * BUCKETS_PER_CPU;
         let mut seen = alloc::collections::BTreeSet::new();
         for word in 0..16u64 {
-            seen.insert(bucket_index(key(0x9008, 0x4000 + word * 4), len));
+            seen.insert(bucket_index(TEST_SEED, key(0x9008, 0x4000 + word * 4), len));
         }
         assert!(
             seen.len() > 1,
@@ -458,7 +493,7 @@ mod tests {
         let len = 8 * BUCKETS_PER_CPU;
         let mut seen = alloc::collections::BTreeSet::new();
         for process in 0..16u64 {
-            seen.insert(bucket_index(key(0x9100 + process, 0x4000), len));
+            seen.insert(bucket_index(TEST_SEED, key(0x9100 + process, 0x4000), len));
         }
         assert!(
             seen.len() > 1,
@@ -472,7 +507,7 @@ mod tests {
     fn a_bucket_index_is_always_in_range() {
         for len in [1usize, 2, 3, 4 * BUCKETS_PER_CPU, 128 * BUCKETS_PER_CPU] {
             for word in 0..64u64 {
-                let index = bucket_index(key(word, word * 4), len);
+                let index = bucket_index(TEST_SEED, key(word, word * 4), len);
                 assert!(index < len, "index {index} out of a {len}-bucket table");
             }
         }

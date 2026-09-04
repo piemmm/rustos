@@ -209,9 +209,9 @@ pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
 /// identical whether or not a given edit was present. A distinct fingerprint
 /// proves a distinct tree; an identical one proves the same content.
 ///
-/// This is a build-provenance fingerprint, not a security digest: a fast,
-/// non-cryptographic hash (FNV-1a-64) is the right tool because it only has
-/// to distinguish developer working trees, never resist an adversary — the
+/// This is a build-provenance fingerprint, not a security digest: the fast,
+/// non-cryptographic shared hash is the right tool because it only has to
+/// distinguish developer working trees, never resist an adversary — the
 /// image's real integrity guarantee is the reproducible build + source-hash
 /// pinning + signed SBOM, not this id (the driver-signing trust model in
 /// [`KERNEL_DRIVER_SIGNING_SEED`] spells that out). Rolling the 8 bytes out
@@ -222,15 +222,7 @@ pub fn parse_source_date_epoch(value: &str) -> Option<u64> {
 /// test build as well as the `std` build script (like
 /// [`parse_source_date_epoch`]).
 pub fn short_content_hash<'a>(bytes: &[u8], out: &'a mut [u8; 12]) -> &'a str {
-    // FNV-1a-64: offset basis and prime are the algorithm's fixed constants
-    // (Fowler–Noll–Vo), not tunables.
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
+    let hash = tairix_hash::FastHash::hash_bytes(0, bytes);
     // The low 48 bits as 12 lowercase hex nibbles, most-significant first —
     // identical to taking the last 12 chars of the full 16-hex rendering.
     for (i, slot) in out.iter_mut().enumerate() {
@@ -376,11 +368,10 @@ mod tests {
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
         }
-        // The empty input hashes to the bare FNV-1a-64 offset basis
-        // (0xcbf29ce484222325); its low 12 hex digits pin the exact bytes so
-        // a refactor cannot silently shift the id.
+        // The empty input's low 12 hex digits pin the exact bytes so a
+        // refactor cannot silently shift the id.
         let mut buf = [0u8; 12];
-        assert_eq!(short_content_hash(b"", &mut buf), "9ce484222325");
+        assert_eq!(short_content_hash(b"", &mut buf), "db3751d8e999");
     }
 
     #[test]

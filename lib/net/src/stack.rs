@@ -36,10 +36,12 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::hash::Hasher;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::time::Duration64;
+use tairix_hash::FastHash;
 
 use crate::addr::{
     is_unicast_link_local, solicited_node_multicast, Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES,
@@ -3772,16 +3774,16 @@ impl Stack {
     /// set.
     #[must_use]
     pub fn multicast_revision(&self) -> u64 {
-        let mut acc: u64 = 0xCBF2_9CE4_8422_2325;
+        let mut hasher = FastHash::new();
         for value in [
             self.membership_v4.revision(),
             self.membership_v6.revision(),
             self.iface.multicast_revision(),
             u64::from(self.ipv4_enabled),
         ] {
-            acc = (acc ^ value).wrapping_mul(0x0100_0000_01B3);
+            hasher.write_u64(value);
         }
-        acc
+        hasher.finish()
     }
 
     /// The receive pre-filter policy for this interface's current

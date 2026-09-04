@@ -23,6 +23,7 @@ use tairix_abi::net_ipc::{
     IF_NAME_LEN, MAX_RESOLVER_SERVERS, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno, MAX_TIME_SERVERS};
+use tairix_hash::HashSeed;
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
 use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
@@ -299,15 +300,24 @@ pub struct Netstack {
     /// swapped.
     datagram_ports: Vec<u16>,
     datagram_ports_scratch: Vec<u16>,
+    /// The key a bond's transmit flow hash is taken under. Injected like the
+    /// randomness factories above, because a remote peer chooses the tuple
+    /// being hashed and must not be able to predict which member it selects.
+    flow_key: HashSeed,
 }
 
 impl Netstack {
     /// An empty table with the injected randomness factories (the service
     /// layer owns entropy): `temp_factory` for RFC 8981 temporary
-    /// addresses (`net.ipv6.privacy`) and `dhcp_rng_factory` for the RFC
-    /// 2131 DHCPv4 client (`<iface>.ipv4.method = dhcp`).
+    /// addresses (`net.ipv6.privacy`), `dhcp_rng_factory` for the RFC
+    /// 2131 DHCPv4 client (`<iface>.ipv4.method = dhcp`), and `flow_key`
+    /// for a bond's transmit flow hash.
     #[must_use]
-    pub fn new(temp_factory: TempAddrFactory, dhcp_rng_factory: DhcpRngFactory) -> Self {
+    pub fn new(
+        temp_factory: TempAddrFactory,
+        dhcp_rng_factory: DhcpRngFactory,
+        flow_key: HashSeed,
+    ) -> Self {
         Self {
             interfaces: Vec::new(),
             settings: NetworkSettings::default(),
@@ -318,6 +328,7 @@ impl Netstack {
             mcast_scratch: Vec::new(),
             datagram_ports: Vec::new(),
             datagram_ports_scratch: Vec::new(),
+            flow_key,
         }
     }
 
@@ -784,8 +795,12 @@ impl Netstack {
         // (actionable) is surfaced rather than masked as "unreachable".
         let mut deferred: Option<Errno> = None;
         let Self {
-            interfaces, out, ..
+            interfaces,
+            out,
+            flow_key,
+            ..
         } = self;
+        let flow_key = *flow_key;
         for iface in interfaces.iter_mut() {
             match iface
                 .stack
@@ -797,7 +812,7 @@ impl Netstack {
                     // (so the caller routes it onto a real channel); a plain
                     // interface tags by its own alias. A bond with no
                     // eligible member drops the frames (fail closed).
-                    let flow = flow_of(dest, source_port, destination_port);
+                    let flow = flow_of(flow_key, dest, source_port, destination_port);
                     if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
                         batches.push((tag, frames));
                         if !multicast {
@@ -846,8 +861,12 @@ impl Netstack {
     ) -> Result<FrameBatch, Errno> {
         let mut deferred: Option<Errno> = None;
         let Self {
-            interfaces, out, ..
+            interfaces,
+            out,
+            flow_key,
+            ..
         } = self;
+        let flow_key = *flow_key;
         for iface in interfaces.iter_mut() {
             match iface
                 .stack
@@ -855,7 +874,7 @@ impl Netstack {
             {
                 Ok(()) => {
                     let frames = core::mem::take(&mut out.frames);
-                    let flow = flow_of(dest, identifier, sequence);
+                    let flow = flow_of(flow_key, dest, identifier, sequence);
                     if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
                         return Ok(alloc::vec![(tag, frames)]);
                     }
@@ -1275,6 +1294,7 @@ impl Netstack {
             mcast_scratch,
             datagram_ports: _,
             datagram_ports_scratch: _,
+            flow_key: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
@@ -1795,7 +1815,7 @@ impl Netstack {
     /// `None` when the interface is unknown or the bond has no eligible
     /// member (fail closed).
     #[must_use]
-    pub fn egress_member(&self, name: [u8; IF_NAME_LEN], flow: u32) -> Option<[u8; IF_NAME_LEN]> {
+    pub fn egress_member(&self, name: [u8; IF_NAME_LEN], flow: u64) -> Option<[u8; IF_NAME_LEN]> {
         let index = self.find(name)?;
         egress_tag(&self.interfaces[index].role, name, flow)
     }
@@ -2034,7 +2054,7 @@ fn member_id(name: [u8; IF_NAME_LEN]) -> MemberId {
 /// active-backup, flow-hashed in balance), a plain interface is itself,
 /// and a member — never addressed directly — resolves to nothing. `None`
 /// when a bond has no eligible member (fail closed).
-fn egress_tag(role: &BondRole, name: [u8; IF_NAME_LEN], flow: u32) -> Option<[u8; IF_NAME_LEN]> {
+fn egress_tag(role: &BondRole, name: [u8; IF_NAME_LEN], flow: u64) -> Option<[u8; IF_NAME_LEN]> {
     match role {
         BondRole::Bond { engine, .. } => engine.transmit_member(flow),
         BondRole::Member { .. } => None,
@@ -2046,10 +2066,10 @@ fn egress_tag(role: &BondRole, name: [u8; IF_NAME_LEN], flow: u32) -> Option<[u8
 /// ports, for bond balance-mode member selection (`plans/NETWORK.md`
 /// §6.3). The source address is left empty — a destination plus ports keys
 /// a flow to one member for its life, and active-backup ignores the hash.
-fn flow_of(dest: IpAddr, port_a: u16, port_b: u16) -> u32 {
+fn flow_of(key: HashSeed, dest: IpAddr, port_a: u16, port_b: u16) -> u64 {
     match dest {
-        IpAddr::V4(v4) => flow_hash(&[], &v4.octets(), port_a, port_b),
-        IpAddr::V6(v6) => flow_hash(&[], &v6.octets(), port_a, port_b),
+        IpAddr::V4(v4) => flow_hash(key, &[], &v4.octets(), port_a, port_b),
+        IpAddr::V6(v6) => flow_hash(key, &[], &v6.octets(), port_a, port_b),
     }
 }
 

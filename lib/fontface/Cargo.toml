@@ -18,6 +18,9 @@ workspace = true
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 
 [dev-dependencies]
+# The shared non-cryptographic hash the static-face rasterisation golden is
+# fingerprinted with, so the test carries no private copy of a hash function.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 # The shared per-run PRNG seed + wall-clock budget seam for the deterministic
 # `fuzz_face` face-parser/rasteriser fuzz harness.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

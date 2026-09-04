@@ -2133,6 +2133,22 @@ fn run_phases<A: KernelArch>(
         &[],
     );
 
+    // Publish the per-boot hash key from the same reserve, before userland
+    // exists to reach a syscall that hashes an address or a name it chose.
+    // Without it an in-kernel hash is predictable, so the record below is
+    // what keeps that state visible rather than silent.
+    let hash_key = crate::boot_id::publish_hash_key(&state.rng);
+    emit(
+        audit_sink,
+        Level::Info,
+        if hash_key {
+            AuditEvent::HashKeyPublished
+        } else {
+            AuditEvent::HashKeyUnavailable
+        },
+        &[],
+    );
+
     // Build the scheduler-side process-wait producer the `wait` syscall
     // drives (`plans/SPAWN.md` SP6b). It owns the parent/child + exit-status
     // bookkeeping and parks a waiting parent back on the scheduler until a

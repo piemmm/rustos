@@ -66,6 +66,7 @@
   - [`tairix-fbcon`](./lib/fbcon.md)
   - [`tairix-font`](./lib/font.md)
   - [`tairix-greeter`](./lib/greeter.md)
+  - [`tairix-hash`](./lib/hash.md)
   - [`tairix-help`](./lib/help.md)
   - [`tairix-hid`](./lib/hid.md)
   - [`tairix-i2c`](./lib/i2c.md)

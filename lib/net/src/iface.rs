@@ -41,8 +41,10 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::hash::Hasher;
 
 use tairix_abi::time::Duration64;
+use tairix_hash::FastHash;
 
 use crate::addr::{Ipv4Addr, Ipv6Addr};
 use crate::nd::PrefixInformation;
@@ -1077,18 +1079,17 @@ impl Iface {
     /// this is cheap enough for the frame pump to consult every pass.
     #[must_use]
     pub fn multicast_revision(&self) -> u64 {
-        // FNV-1a over each address's octets, so two different address sets
-        // cannot fold to the same value as easily as an XOR would allow.
-        let mut acc: u64 = 0xCBF2_9CE4_8422_2325;
+        // Hashed rather than XORed so two different address sets cannot fold
+        // to the same value. The set is this host's own configuration, not a
+        // remote peer's input, so the fast unkeyed hash is the right one.
+        let mut hasher = FastHash::new();
         for entry in &self.v6 {
-            for byte in entry.addr.octets() {
-                acc = (acc ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3);
-            }
+            hasher.write(&entry.addr.octets());
         }
         for flag in [self.v6_disabled, self.v6_admin_disabled] {
-            acc = (acc ^ u64::from(flag)).wrapping_mul(0x0100_0000_01B3);
+            hasher.write_u8(u8::from(flag));
         }
-        acc
+        hasher.finish()
     }
 
     /// Read-only views of every IPv6 address, tentative included.

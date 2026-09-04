@@ -143,6 +143,23 @@ fn happy_path_runs_documented_init_order_and_halts() {
         "happy path must not emit PhaseFailed on the audit sink",
     );
 
+    // The per-boot hash key is decided on the boot path, before userland can
+    // reach a syscall that hashes a name or an address it chose. The test
+    // arch exposes no platform entropy, so the honest record here is that no
+    // key became available — never silence.
+    assert!(
+        audit_ids.contains(&AuditEvent::HashKeyUnavailable.id().0),
+        "boot must record whether a per-boot hash key became available",
+    );
+    let hash_key_at = audit_ids
+        .iter()
+        .position(|&id| id == AuditEvent::HashKeyUnavailable.id().0)
+        .expect("checked above");
+    assert!(
+        hash_key_at < boot_completed_at,
+        "the hash-key decision precedes the end of boot",
+    );
+
     // The accelerated-routine-selection audit records (CRC-32C, page-zero,
     // and the crypto SHA-256 backend decision) are asserted in a helper to
     // keep this test readable.

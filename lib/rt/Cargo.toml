@@ -32,6 +32,12 @@ tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0" }
 # each tool privately — supports resource references.
 tairix-resref = { path = "../resref", version = "=0.0.0" }
 
+# The process hash key `_start` publishes and the hashers keyed with it.
+# A process draws one key at start-up so every hash over untrusted input in
+# it — a container's, the bond flow hash's — shares that key rather than
+# each subsystem drawing its own.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+
 # The `SpinLock` guarding the process-wide cache-report registry
 # (`src/cachereport.rs`), whose critical sections are a few pointer writes on the
 # program's own serve loop. The global allocator does *not* use it: a heap

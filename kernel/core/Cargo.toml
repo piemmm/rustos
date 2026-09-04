@@ -166,6 +166,10 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # read path (`src/users.rs`) parses and the login path authenticates
 # against (`plans/PI.md` P11).
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
+# The per-boot hash key and the keyed hash the futex bucket index is taken
+# with, so a caller that chooses its own wait addresses cannot choose ones
+# that all crowd one bucket lock.
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 # The kernel's single cryptographic random subsystem:
 # `KernelState` composes a `tairix_rng::OutputReserve` and the `random_get`
 # syscall serves bytes from it.

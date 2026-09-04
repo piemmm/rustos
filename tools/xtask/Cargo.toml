@@ -34,6 +34,10 @@ path = "src/main.rs"
 # Rust: a future ABI change cannot pass `cargo build` without breaking
 # the cross-check.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
+# `image-drivers` `#[path]`s the kernel's `build_support.rs`, which takes its
+# build-provenance fingerprint with the workspace's shared non-cryptographic
+# hash.
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 # `font-atlas` rasterises the committed TrueType faces into the generated
 # `lib/font` atlas through the shared `lib/fontface` glyph engine — the same
 # parser + rasteriser the runtime font uses to resize UI glyphs, so the atlas

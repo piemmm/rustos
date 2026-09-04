@@ -51,16 +51,6 @@ fn leftmost_inked_col(raster: &GlyphRaster) -> Option<u32> {
     leftmost
 }
 
-/// An FNV-1a hash over coverage bytes, for the static-face golden.
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
 fn inter() -> Vec<u8> {
     asset("inter/Inter-Variable.ttf")
 }
@@ -257,10 +247,10 @@ fn a_static_face_rasters_are_unchanged() {
         let coverage = face
             .rasterise_glyph(glyph, &geometry, f64::from(GOLDEN_EM_PX), geometry.width)
             .expect("rasterises");
-        total = total.wrapping_add(fnv(&coverage));
+        total = total.wrapping_add(tairix_hash::FastHash::hash_bytes(0, &coverage));
     }
     assert_eq!(
-        total, 0x10e2_f66d_07d2_b731,
+        total, 0x43f7_397e_a301_99d4,
         "a static face's rasterisation changed"
     );
 }

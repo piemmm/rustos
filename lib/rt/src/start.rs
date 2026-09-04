@@ -38,6 +38,8 @@ use core::panic::PanicInfo;
 
 use tairix_abi::process::{ProcessStart, ProcessStartHeader};
 use tairix_abi::Errno;
+use tairix_hash::HashSeed;
+use tairix_util::secret::Wiped;
 
 use crate::exit;
 
@@ -85,6 +87,23 @@ fn install_stack_canary(canary: u64) {
     // write cannot race a read.
     unsafe {
         core::ptr::write(__stack_chk_guard.0.get(), value);
+    }
+}
+
+/// Draw this process's hash key from the platform CSPRNG and publish it for
+/// the program's lifetime, before any program code can parse untrusted input.
+///
+/// One key per process, so a container in one process and a flow hash in
+/// another never share a bucket layout an attacker could probe from either.
+/// The draw is non-blocking: a program must not park at start-up waiting for
+/// entropy, and a platform whose CSPRNG is not seeded simply leaves the key
+/// unpublished — which is the state a consumer over untrusted keys refuses
+/// on, rather than hashing predictably in silence.
+fn publish_hash_key() {
+    let mut key = Wiped::<{ HashSeed::LEN }>::new();
+    let drawn = crate::random_get(&mut key[..], crate::RandomFlags::NON_BLOCKING).unwrap_or(0);
+    if drawn == key.len() {
+        let _ = tairix_hash::publish(HashSeed::from_bytes(*key));
     }
 }
 
@@ -227,6 +246,7 @@ unsafe extern "C" fn rust_rt_start(block_ptr: *const u8) -> ! {
     };
 
     install_stack_canary(view.canary());
+    publish_hash_key();
     // Publish the validated view so the program can read the arguments its
     // spawner chose for it (`crate::startup`).
     crate::startup::install(view);

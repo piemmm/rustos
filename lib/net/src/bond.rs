@@ -42,8 +42,11 @@
 //! [`mcast`]: crate::mcast
 
 use alloc::vec::Vec;
+use core::hash::Hasher;
+
 use tairix_abi::driver::net::LinkState;
 use tairix_abi::time::Duration64;
+use tairix_hash::{HashSeed, SipHash13};
 
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
@@ -284,15 +287,15 @@ impl Bond {
     /// hash selects one member from the eligible ring so a given flow
     /// always stays on one member while that member remains eligible.
     #[must_use]
-    pub fn transmit_member(&self, flow_hash: u32) -> Option<MemberId> {
+    pub fn transmit_member(&self, flow_hash: u64) -> Option<MemberId> {
         match self.mode {
             BondMode::ActiveBackup => self.active,
             BondMode::Balance => {
                 if self.ring.is_empty() {
                     None
                 } else {
-                    let index = (flow_hash as usize) % self.ring.len();
-                    Some(self.ring[index])
+                    let index = usize::try_from(flow_hash % self.ring.len() as u64).unwrap_or(0);
+                    self.ring.get(index).copied()
                 }
             }
         }
@@ -448,33 +451,21 @@ impl Bond {
 /// [`BondMode::Balance`] member selection. The address octets are passed
 /// as opaque byte slices so the hash is address-family agnostic (the
 /// caller supplies v4 or v6 octets); the same 4-tuple always yields the
-/// same value, so a flow stays on one member.
+/// same value under one `key`, so a flow stays on one member.
 ///
-/// A 32-bit FNV-1a fold — a fast, well-distributed non-cryptographic hash;
-/// bond member selection is not a security decision, so no keyed MAC is
-/// required here.
+/// Keyed, because the tuple is a remote peer's to choose: with a predictable
+/// hash an attacker computes tuples that all select one member and lands
+/// every flow of an attack on a single link, which is the balance the bond
+/// exists to provide. `key` is the process's own hash key, so it is a value
+/// the peer cannot observe.
 #[must_use]
-pub fn flow_hash(src: &[u8], dst: &[u8], src_port: u16, dst_port: u16) -> u32 {
-    const OFFSET: u32 = 0x811c_9dc5;
-    const PRIME: u32 = 0x0100_0193;
-    let mut hash = OFFSET;
-    let mut fold = |byte: u8| {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(PRIME);
-    };
-    for &byte in src {
-        fold(byte);
-    }
-    for &byte in dst {
-        fold(byte);
-    }
-    for &byte in &src_port.to_be_bytes() {
-        fold(byte);
-    }
-    for &byte in &dst_port.to_be_bytes() {
-        fold(byte);
-    }
-    hash
+pub fn flow_hash(key: HashSeed, src: &[u8], dst: &[u8], src_port: u16, dst_port: u16) -> u64 {
+    let mut hasher = SipHash13::new(key);
+    hasher.write(src);
+    hasher.write(dst);
+    hasher.write_u16(src_port);
+    hasher.write_u16(dst_port);
+    hasher.finish()
 }
 
 #[cfg(test)]

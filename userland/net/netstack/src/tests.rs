@@ -94,6 +94,13 @@ fn test_temp_factory() -> crate::iface::TempAddrFactory {
     alloc::boxed::Box::new(|| test_temp_source())
 }
 
+/// A fixed bond flow-hash key for the tests, so member selection is
+/// reproducible run to run. The service normally injects the process's own
+/// CSPRNG-drawn key.
+fn test_flow_key() -> tairix_hash::HashSeed {
+    tairix_hash::HashSeed::from_words(0xF10E_5EED_0000_0001, 0xF10E_5EED_0000_0002)
+}
+
 /// A deterministic DHCPv4 client randomness factory for the tests: a
 /// splitmix64 sequence per source, so transaction ids and backoff jitter
 /// are distinct yet reproducible run to run. The service normally injects
@@ -334,7 +341,11 @@ impl Net for LinkNet {
 /// the interface's own stack (no bond, so no announcement).
 #[test]
 fn service_interface_surfaces_a_device_link_change() {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("eth0"),
@@ -438,7 +449,11 @@ fn broker() -> Caller {
 
 /// A `Netstack` managing one Ethernet interface named `wan`.
 fn managed_stack() -> Netstack {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("wan"),
@@ -3321,7 +3336,11 @@ fn interface_config_matches_by_hardware_node_and_renames() {
     // An interface bound at a known hardware location (its register-window
     // base), auto-named `net0` at bind, is renamed by a `match.node`
     // configuration that names that same location — independent of MAC.
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("net0"),
@@ -3537,7 +3556,11 @@ fn interface_config_reports_the_rename_it_performs() {
     // layer must learn of a rename to retarget it — otherwise the renamed
     // interface can never be pumped again. The engine reports the rename;
     // this is the regression guard for that contract.
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("net0"),
@@ -3718,7 +3741,11 @@ fn interface_config_is_idempotent() {
 
 #[test]
 fn interface_config_rejects_an_alias_already_taken() {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("wan"),
@@ -3835,7 +3862,11 @@ fn bond_cfg(
 /// (primary `eth0`, 1 s monitor), a static IPv4 address on the bond, and
 /// both members admitted past the up-delay.
 fn two_member_bond() -> Netstack {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("eth0"),
@@ -4065,7 +4096,11 @@ fn a_bond_reports_the_sum_of_its_members_pre_filter_counts() {
 
 #[test]
 fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("eth0"),
@@ -4113,7 +4148,11 @@ fn a_bond_composes_and_admits_its_members_after_the_up_delay() {
 
 #[test]
 fn a_bond_config_defers_until_all_members_are_present() {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     stack
         .add_interface(
             name("eth0"),
@@ -4376,7 +4415,11 @@ fn a_bond_reload_changes_primary_and_membership() {
 
 #[test]
 fn a_bond_alias_cannot_shadow_a_non_bond_interface() {
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     for (alias, mac, iid) in [
         ("bond0", MAC_A, IID_A),
         ("eth1", MAC_B, IID_B),
@@ -4437,7 +4480,11 @@ impl Net for FilteringNet {
 #[test]
 fn a_filtering_device_is_programmed_with_the_groups_the_stack_needs() {
     let programmed = Rc::new(RefCell::new(None));
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     let mut facts_filtering = facts(MAC_B);
     facts_filtering.multicast_filter = McastFilter::Slots(15);
     stack
@@ -4517,7 +4564,11 @@ fn an_unfiltered_device_is_never_programmed() {
 #[test]
 fn a_device_that_refuses_the_group_set_is_reported_not_hidden() {
     let programmed = Rc::new(RefCell::new(None));
-    let mut stack = Netstack::new(test_temp_factory(), test_dhcp_rng_factory());
+    let mut stack = Netstack::new(
+        test_temp_factory(),
+        test_dhcp_rng_factory(),
+        test_flow_key(),
+    );
     let mut facts_filtering = facts(MAC_B);
     // No slots at all: every set the stack needs overflows.
     facts_filtering.multicast_filter = McastFilter::Slots(0);

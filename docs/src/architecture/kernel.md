@@ -242,6 +242,8 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4061 | Info  | `ENTROPY_RESERVE_UNSEEDED`  | audit  |
 | 4062 | Info  | `BOOT_ID_MINTED`            | audit  |
 | 4063 | Info  | `BOOT_ID_UNAVAILABLE`       | audit  |
+| 4064 | Info  | `HASH_KEY_PUBLISHED`        | audit  |
+| 4065 | Info  | `HASH_KEY_UNAVAILABLE`      | audit  |
 | 4070 | Info  | `SECONDARY_CPU_STARTED`     | audit  |
 | 4071 | Error | `SECONDARY_CPU_START_FAILED`| audit  |
 | 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |

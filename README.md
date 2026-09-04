@@ -163,6 +163,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA/MMIO (§4, §18.1) | Malicious-device DMA, unbounded device memory | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
+| Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ◐ unkeyed | ◐ unkeyed |
 | Hash-chained tamper-evident audit log (§19.4) | Log tampering, forensic evasion | ◐ | ◐ | ◐ | ◐ |
 | Signed driver / app manifests (§9, §16.5) | Unsigned / malicious code execution | ◐ | ◐ | ◐ | ◐ |
 | Supply-chain pinning: SBOM, source-hash, advisory SLA (§19.3) | Dependency compromise (xz-utils class) | ◐ | ◐ | ◐ | ◐ |

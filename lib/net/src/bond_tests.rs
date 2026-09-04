@@ -208,7 +208,7 @@ fn balance_keeps_a_flow_on_one_member_and_spreads_across_the_set() {
     assert_eq!(b.eligible_count(), 2);
 
     // The same flow hash always maps to the same member.
-    let h = flow_hash(&[10, 0, 0, 1], &[10, 0, 0, 2], 40000, 80);
+    let h = flow_hash(TEST_KEY, &[10, 0, 0, 1], &[10, 0, 0, 2], 40000, 80);
     let first = b.transmit_member(h).unwrap();
     assert_eq!(b.transmit_member(h), Some(first));
 
@@ -334,16 +334,36 @@ fn a_stale_report_from_a_removed_member_is_harmless() {
     assert!(!b.is_up());
 }
 
+/// A fixed key for the flow-hash assertions; production draws the process's
+/// own.
+const TEST_KEY: HashSeed = HashSeed::from_words(0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff00);
+
 #[test]
 fn flow_hash_is_deterministic_and_direction_sensitive() {
-    let a = flow_hash(&[10, 0, 0, 1], &[10, 0, 0, 2], 1234, 80);
-    let b = flow_hash(&[10, 0, 0, 1], &[10, 0, 0, 2], 1234, 80);
+    let a = flow_hash(TEST_KEY, &[10, 0, 0, 1], &[10, 0, 0, 2], 1234, 80);
+    let b = flow_hash(TEST_KEY, &[10, 0, 0, 1], &[10, 0, 0, 2], 1234, 80);
     assert_eq!(a, b, "same 4-tuple ⇒ same hash");
 
-    let swapped = flow_hash(&[10, 0, 0, 2], &[10, 0, 0, 1], 80, 1234);
+    let swapped = flow_hash(TEST_KEY, &[10, 0, 0, 2], &[10, 0, 0, 1], 80, 1234);
     assert_ne!(a, swapped, "reversed tuple ⇒ different hash");
 
     // Works for v6-length octets too (address-family agnostic).
-    let v6 = flow_hash(&[0u8; 16], &[1u8; 16], 5000, 443);
+    let v6 = flow_hash(TEST_KEY, &[0u8; 16], &[1u8; 16], 5000, 443);
     assert_ne!(v6, 0);
+}
+
+/// The key is the whole defence: a peer that could predict the hash would
+/// steer every flow of an attack onto one member. The same tuples must
+/// therefore select differently under a different key.
+#[test]
+fn the_key_decides_which_member_a_chosen_flow_selects() {
+    let other = HashSeed::from_words(0x1122_3344_5566_7788, 0x99aa_bbcc_ddee_ff01);
+    let moved = (0..64u16)
+        .filter(|&port| {
+            let mine = flow_hash(TEST_KEY, &[], &[203, 0, 113, 7], port, 443);
+            let theirs = flow_hash(other, &[], &[203, 0, 113, 7], port, 443);
+            mine != theirs
+        })
+        .count();
+    assert_eq!(moved, 64, "a different key left a flow hash unchanged");
 }

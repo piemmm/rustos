@@ -96,6 +96,10 @@ tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+# The shared non-cryptographic hash the build-provenance fingerprint
+# (`src/build_support.rs`) is taken with, so the kernel carries no private
+# copy of a hash function.
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # The read line discipline's shared buffer half: the root-unlock passphrase
 # reader edits its line through the one `tairix_vt::line::LineEditor`
@@ -360,6 +364,10 @@ tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0
 # fixtures use; only build glue and test code
 # name it, never a production runtime path.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["zeroize"] }
+# `src/build_support.rs` is compiled both here (the build script `#[path]`s it)
+# and as a kernel module, so its shared non-cryptographic hash is named in
+# both dependency sets.
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 
 [dev-dependencies]
 # The riscv64 PLIC `IrqController` bridge (`src/riscv64_plic_irq.rs`) is

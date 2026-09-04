@@ -64,6 +64,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/fontface TrueType parser + outline rasteriser",
     },
     Target {
+        package: "tairix-hash",
+        test: "fuzz_hash",
+        description: "lib/hash keyed SipHash-1-3 + XXH64 over arbitrary bytes and chunkings",
+    },
+    Target {
         package: "tairix-kernel-syscall",
         test: "fuzz_args",
         description: "syscall dispatcher argument validation",

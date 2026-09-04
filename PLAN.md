@@ -8656,7 +8656,7 @@ space so no passphrase reaches ring 0, NS-6 delete the hardcode.
 NS-1 is independent of the rest and closes the duplicate-mount reporting on
 its own.
 
-## COLLECTIONS — the shared container and hashing libraries (`plans/COLLECTIONS.md`)  **[PLANNED, NOT STARTED]**
+## COLLECTIONS — the shared container and hashing libraries (`plans/COLLECTIONS.md`)  **[IN PROGRESS — C0 done]**
 
 **Dependencies:** none blocking. `lib/cpuops` (the group-scan ops table),
 `lib/rng` (the per-boot hash key), `lib/sync` (the concurrent tier's atomics
@@ -8678,9 +8678,9 @@ no reuse and no generation, and a `BTreeMap` per futex bucket. That is the
 duplication the charter forbids and, in several places, the O(n)
 load-bearing scan §27 names.
 
-**Shape.** A new zero-dependency `lib/hash` (keyed SipHash-1-3 as the default
-`BuildHasher`, a fast mixer for kernel-assigned keys, and the per-boot /
-per-process seed seam) plus a filled-out `lib/collections` in five tiers:
+**Shape.** `lib/hash` (keyed SipHash-1-3 as the default hasher, XXH64 for
+kernel-assigned keys and fingerprints, and the per-boot / per-process seed
+seam — landed) plus a filled-out `lib/collections` in five tiers:
 hash, sequence, indexed, ordered, and concurrent. Every container has a
 fallible allocating form and no panicking index, allocates nothing on a read
 path, carries no fixed capacity ceiling unless deliberately allocation-free,
@@ -8689,7 +8689,7 @@ Speed is gated by deterministic work counters (probes, comparisons, node
 reach, rehashes, resident bytes per entry, allocations per operation), with
 `cargo xtask bench` producing wall-clock evidence and never a threshold.
 
-**Increments.** C0 `lib/hash`; C1 `HashMap`/`HashSet` on a `lib/cpuops`
+**Increments.** C0 `lib/hash` (**done**); C1 `HashMap`/`HashSet` on a `lib/cpuops`
 group-scan ops table, plus a new `cargo xtask miri` stage over the unsafe
 cores; C2 `ArrayVec`/`SmallVec`/`ArrayString`/`RingBuf`; C3 `IntrusiveList`;
 C4 O(1) `LruMap`; C5 `RangeMap`/`RangeSet`; C6 `SlotMap`/`IdAllocator`/

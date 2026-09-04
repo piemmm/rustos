@@ -10,6 +10,7 @@ no allocation, and exposes a deliberately narrow public surface.
 | [`tairix-caps`](caps.md) | Capabilities, capability sets, and signed delegation tokens.   | stable    |
 | [`tairix-collections`](collections.md) | `no_std` collections (currently `BitSet256`).        | stable    |
 | [`tairix-crypto`](crypto.md) | Audited wrappers (SHA-256, Ed25519 verification).          | stable    |
+| [`tairix-hash`](hash.md) | Keyed SipHash-1-3, the XXH64 fast mixer, and the per-boot / per-process key. | experimental |
 | [`tairix-log`](log.md) | Structured, level-filtered, alloc-free logging.                  | stable    |
 | [`tairix-rng`](rng.md) | CSPRNG (HMAC-DRBG) + entropy/hardware-RNG seam + fast PRNG.       | experimental |
 | [`tairix-util`](util.md) | Reserved destination for ≥ 2-use helpers — empty in Stage 1.   | experimental |

@@ -1,0 +1,24 @@
+[package]
+name = "tairix-hash"
+description = "TAIRiX hashing: keyed SipHash-1-3 (the pseudo-random function that defends a hash container against collision flooding by attacker-chosen keys), the non-cryptographic XXH64 mixer for kernel-assigned keys, and the one-shot per-boot / per-process key publication seam. no_std, no external dependencies, allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The workspace's one set-once publication cell, so the per-boot / per-process
+# key seam is not a second hand-rolled atomic state machine. `lib/sync` needs
+# only `core`, so this crate stays free of external dependencies and
+# host-testable.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
+
+[dev-dependencies]
+# Shared per-run seed / budget seam for the fuzz harness (never in a
+# shipping build).
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

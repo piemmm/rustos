@@ -353,6 +353,22 @@ pub enum AuditEvent {
     /// could not seed the reserve. The kernel never substitutes a predictable
     /// id; it fails closed.
     BootIdUnavailable,
+    /// The kernel published the per-boot hash key from the seeded CSPRNG
+    /// output reserve, so every in-kernel hash over an attacker-influenced
+    /// key (a futex address, a name off a foreign volume) is keyed against
+    /// collision flooding.
+    ///
+    /// Emitted once at boot by [`crate::init`] after the reserve is seeded.
+    /// The record carries the state change only, never the key.
+    HashKeyPublished,
+    /// The kernel could **not** publish the per-boot hash key: the CSPRNG
+    /// output reserve was not seeded in time.
+    ///
+    /// Emitted once at boot on a port whose entropy source could not seed the
+    /// reserve. In-kernel hashes then run unkeyed, so a caller that can choose
+    /// keys can choose colliding ones; the record is what makes that state
+    /// visible rather than silent.
+    HashKeyUnavailable,
     /// A secondary CPU was asked to start (the arch port accepted the
     /// bring-up request for it).
     ///
@@ -639,6 +655,8 @@ impl AuditEvent {
             Self::EntropyReserveUnseeded => 4061,
             Self::BootIdMinted => 4062,
             Self::BootIdUnavailable => 4063,
+            Self::HashKeyPublished => 4064,
+            Self::HashKeyUnavailable => 4065,
             Self::SecondaryCpuStarted => 4070,
             Self::SecondaryCpuStartFailed => 4071,
             Self::SecondaryCpuOnline => 4072,
@@ -707,6 +725,8 @@ impl AuditEvent {
             Self::EntropyReserveUnseeded => "entropy reserve unseeded",
             Self::BootIdMinted => "per-boot id minted",
             Self::BootIdUnavailable => "per-boot id unavailable",
+            Self::HashKeyPublished => "per-boot hash key published",
+            Self::HashKeyUnavailable => "per-boot hash key unavailable",
             Self::SecondaryCpuStarted => "secondary cpu start requested",
             Self::SecondaryCpuStartFailed => "secondary cpu start failed",
             Self::SecondaryCpuOnline => "secondary cpu online",
@@ -790,6 +810,8 @@ mod tests {
             AuditEvent::EntropyReserveUnseeded,
             AuditEvent::BootIdMinted,
             AuditEvent::BootIdUnavailable,
+            AuditEvent::HashKeyPublished,
+            AuditEvent::HashKeyUnavailable,
             AuditEvent::SecondaryCpuStarted,
             AuditEvent::SecondaryCpuStartFailed,
             AuditEvent::SecondaryCpuOnline,

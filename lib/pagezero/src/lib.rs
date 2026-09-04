@@ -63,6 +63,7 @@
 #[cfg_attr(not(any(pagezero_x86_64, pagezero_aarch64)), allow(unused_imports))]
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_cpuops::{Candidate, CoreKey, Decision, Family, FamilyId, Selection, Selector};
+use tairix_hash::FastHash;
 use tairix_sync::OnceCell;
 
 #[cfg(pagezero_aarch64)]
@@ -157,15 +158,13 @@ fn prefill(buf: &mut [u8], seed: u8) {
     }
 }
 
-/// An FNV-1a fingerprint of `buf` — cheap, order-sensitive, and detects any
+/// A fingerprint of `buf` — cheap, order-sensitive, and detects any
 /// single-byte difference, so comparing a candidate's post-state fingerprint to
 /// the reference's is equivalent to comparing the buffers without copying them.
+/// The buffer is this crate's own scratch, never an attacker's, so the fast
+/// unkeyed hash is the right one.
 fn fingerprint(buf: &[u8]) -> u64 {
-    let mut acc = 0xcbf2_9ce4_8422_2325u64;
-    for &byte in buf {
-        acc = (acc ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    acc
+    FastHash::hash_bytes(0, buf)
 }
 
 /// Run a candidate over one self-verify case and fingerprint the result (the

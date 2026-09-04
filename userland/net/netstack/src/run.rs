@@ -65,6 +65,7 @@ mod program {
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::{CapabilityId, Duration64, Errno, Origin, RandomFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
+    use tairix_hash::HashSeed;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_net::iface::{eui64_interface_id, TempAddrSource};
     use tairix_net::stack::StackEvent;
@@ -279,7 +280,7 @@ mod program {
         // identifiers from the platform CSPRNG through this factory; the
         // engine consults it only while net.ipv6.privacy is enabled.
         let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
-        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory());
+        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), flow_key());
         let mut sockets = SocketService::new();
         // The bound NIC channels, one per slot in the reserved endpoint
         // block. A fixed table (not a growable capacity): the channel count
@@ -892,6 +893,28 @@ mod program {
             client,
         });
         Ok(())
+    }
+
+    /// The key a bond's transmit flow hash is taken under: the one key the
+    /// runtime drew for this process at start-up, so the flow hash and any
+    /// other hash over untrusted input here share it rather than each
+    /// drawing its own.
+    ///
+    /// A platform whose CSPRNG could not be seeded published none. Bond
+    /// balancing is not the service's primary purpose, so it degrades to a
+    /// predictable hash rather than refusing to serve the network — and says
+    /// so, because a silently predictable flow hash is one a remote peer can
+    /// steer.
+    fn flow_key() -> HashSeed {
+        if let Some(key) = tairix_hash::published() {
+            return key;
+        }
+        let mut err = tairix_rt::io::Stderr;
+        let _ = tairix_rt::io::Write::write_all(
+            &mut err,
+            b"netstack: no platform entropy; bond flow hashing is unkeyed\n",
+        );
+        HashSeed::UNKEYED
     }
 
     /// Draw a CSPRNG 16-bit IPv4 identification seed. A momentarily

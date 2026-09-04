@@ -1563,6 +1563,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-hash",
 ]
 
 [[package]]
@@ -1685,6 +1686,14 @@ dependencies = [
  "tairix-help",
  "tairix-rt",
  "tairix-users",
+]
+
+[[package]]
+name = "tairix-hash"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -1837,6 +1846,7 @@ dependencies = [
  "tairix-drvhost",
  "tairix-fdt",
  "tairix-fsprobe",
+ "tairix-hash",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -1876,6 +1886,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-fbcon",
  "tairix-fsmeta",
+ "tairix-hash",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
@@ -2223,6 +2234,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-hash",
 ]
 
 [[package]]
@@ -2253,6 +2265,7 @@ dependencies = [
  "tairix-caps",
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-log",
  "tairix-net",
  "tairix-netchan",
@@ -2266,6 +2279,7 @@ dependencies = [
  "tairix-abi",
  "tairix-cpuops",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-sync",
 ]
 
@@ -2467,6 +2481,7 @@ dependencies = [
  "tairix-abi",
  "tairix-abi-trap",
  "tairix-caps",
+ "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
  "tairix-resref",
@@ -5805,6 +5820,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-fwcfg",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-image",

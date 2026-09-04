@@ -20,11 +20,18 @@
 //! `boot_id_get` syscall then reports
 //! [`Errno::EntropyNotReady`](tairix_abi::Errno::EntropyNotReady) — the kernel
 //! never hands out the all-zero sentinel as if it were a real id.
+//!
+//! The per-boot **hash key** ([`publish_hash_key`]) is drawn from the same
+//! reserve at the same point, because it has the same shape: one value per
+//! boot, from the one sanctioned randomness source, before anything that
+//! consumes it can run.
 
 use alloc::boxed::Box;
 
 use tairix_abi::{BootId, BOOT_ID_LEN};
+use tairix_hash::HashSeed;
 use tairix_sync::RwLock;
+use tairix_util::secret::wipe;
 
 use crate::random::RandomReserve;
 
@@ -45,9 +52,31 @@ pub fn mint_boot_id(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> BootI
     }
 }
 
+/// Publish the per-boot hash key from the same reserve, reporting whether a
+/// key became available.
+///
+/// Every in-kernel hash over a key a caller can choose — a futex wait
+/// address today — is taken under this key, so no caller can compute a set of
+/// keys that all land in one bucket. Drawn once per boot, immediately after
+/// the reserve is seeded and before userland can reach a syscall that hashes.
+///
+/// Non-blocking and honest rather than fail-closed: a bucket index is a
+/// contention choice, not an authority one, so a port whose reserve never
+/// seeded keeps working with an unkeyed hash — and the `false` this returns
+/// is what puts that state in the audit log instead of leaving it silent.
+#[must_use]
+pub fn publish_hash_key(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> bool {
+    let mut key = [0u8; HashSeed::LEN];
+    if rng.write().draw(&mut key, true).is_ok() {
+        let _ = tairix_hash::publish(HashSeed::from_bytes(key));
+    }
+    wipe(&mut key);
+    tairix_hash::is_published()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::mint_boot_id;
+    use super::{mint_boot_id, publish_hash_key};
     use crate::random::{BootReserve, RandomReserve};
     use alloc::boxed::Box;
     use tairix_abi::BootId;
@@ -63,5 +92,18 @@ mod tests {
         // the UNSET sentinel, never a predictable (e.g. partially-zero) id.
         let rng = unseeded_rng();
         assert_eq!(mint_boot_id(&rng), BootId::UNSET);
+    }
+
+    /// The hash key is the same draw and fails the same way: no entropy, no
+    /// key. Publishing a zero key here would hand every caller a predictable
+    /// bucket index while reporting success.
+    ///
+    /// Nothing else in this test binary publishes, so the global cell is
+    /// untouched when this runs.
+    #[test]
+    fn an_unseeded_reserve_publishes_no_hash_key() {
+        let rng = unseeded_rng();
+        assert!(!publish_hash_key(&rng));
+        assert!(!tairix_hash::is_published());
     }
 }

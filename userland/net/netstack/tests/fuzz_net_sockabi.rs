@@ -84,6 +84,7 @@ fn routed_stack() -> Netstack {
     let mut stack = Netstack::new(
         Box::new(|| Box::new(FixedTempSource) as Box<dyn TempAddrSource>),
         Box::new(|| Box::new(|| 0u32) as Box<dyn FnMut() -> u32>),
+        tairix_hash::HashSeed::from_words(0xF10E_5EED_0000_0001, 0xF10E_5EED_0000_0002),
     );
     let now = Duration64::from_secs(0);
     stack
