@@ -657,6 +657,17 @@ Behind that, the hold-back overwrites a held `Resized` where it stands (see
 sent. An app slower than the pointer therefore lags a frame, never a queue of
 re-maps for sizes the window has already left.
 
+That last fold is the one an app can *lose* by not reading through the shared
+stream, and losing it is visible: the mailbox holds
+`EVENT_MAILBOX_CAPACITY` samples, the session leaves the geometry to the
+grab while it is live (`window_resized` defers to
+`InputRouter::resizing`), and the moment the button comes up it starts
+honouring the app's re-maps again. An app that then applies each queued
+sample walks its own window back through the tail of the drag before
+settling. So every windowed app reads through `WindowEvents` — including the two
+whose loops own their park (the terminal emulator and Switchboard), which
+take the drain alone rather than spelling a mailbox drain of their own.
+
 **Cursor damage is the rectangle it left plus the one it reached.** The
 pointer overlay is not damaged as it moves; `composite` diffs the
 cursor's current footprint against the one the *previous* composite drew.
@@ -1742,18 +1753,28 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   client's windows are torn down via `client_exited`, and app-ward events
   are validated against the live window before delivery.
 - `WindowClient` / `WindowEvents` — the app half over the `WindowTransport`
-  (`ipc_call`) and `EventSource` (the app's own event endpoint) seams. The
+  (`ipc_call`) and the mailbox seam (the app's own event endpoint). The
   client remembers each window's last presented frame index and extent, so
   `WindowEvents::wait` answers a `RedrawRequested` by re-presenting that
   frame with full-window damage before returning the event to the app —
   no app has to implement the handshake, and an app that wants to render
-  genuinely fresh pixels still sees the event. `EventSource` states the
-  drain (`try_next`, never waits) and the park (`park`) separately, with
-  `next` defaulted as drain-then-park; an app with work of its own —
-  decoding a folder's icon artwork, rendering a gallery of wallpapers —
-  drains with `WindowEvents::try_wait` so input is served ahead of that
-  work and the loop parks only when neither has anything left. Both paths
-  decode and answer the redraw through one definition.
+  genuinely fresh pixels still sees the event. The seam is two traits:
+  `EventDrain` (`try_next`, never waits) and `EventSource: EventDrain`
+  (`park`), with `next` defaulted as drain-then-park over the pair. An app
+  with work of its own — decoding a folder's icon artwork, rendering a
+  gallery of wallpapers — drains with `WindowEvents::try_wait` so input is
+  served ahead of that work and the loop parks only when neither has
+  anything left; an app whose own loop dispatches several wake sources and
+  a deadline of its own keeps that park and takes the drain alone.
+  `EventMailbox` is the production drain: it accepts only frames of the
+  right length from the kernel-attested session identity the create reply
+  named, so that authentication has one definition rather than one per app.
+  Both paths decode and answer the redraw through one definition, and a
+  failed read names which half failed (`EventError`): a frame that will not
+  decode is consumed and the app reads on, a dead mailbox ends the channel.
+  The distinction is a type rather than a set of `Errno` values because the
+  two share one (`ipc_recv` can answer `LengthOutOfRange`), and reading on
+  past a dead mailbox would spin.
 
 Every decode fails closed (`tairix_abi::window_ipc`, enrolled in the
 `fuzz_decode` harness), and the loopback suite in `lib/window/src/tests.rs`

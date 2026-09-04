@@ -10,9 +10,10 @@
 //!   bridge, plus [`deliver_event`](server::WindowServer::deliver_event)
 //!   for the session's app-ward input routing.
 //! * [`client::WindowClient`] / [`client::WindowEvents`] — the app-side
-//!   half over a [`client::WindowTransport`] and a parked
-//!   [`client::EventSource`], so an app creates, presents, closes, and
-//!   waits for events without ever polling, plus
+//!   half over a [`client::WindowTransport`] and the mailbox seam
+//!   ([`client::EventDrain`], plus [`client::EventSource`] where the source
+//!   parks), so an app creates, presents, closes, and reads events without
+//!   ever polling, plus
 //!   [`pointer_input_events`] and [`key_input_event`] — the one
 //!   translation from a delivered wire pointer or key event into the input
 //!   vocabulary the shared controls consume, so no app carries a private
@@ -36,17 +37,21 @@ pub mod client;
 pub mod desktop;
 #[cfg(feature = "rt")]
 pub mod frames;
+#[cfg(feature = "rt")]
+pub mod mailbox;
 pub mod server;
 
 pub use appbar::{declaration, info_and_quit, is_quit, DESKTOP_ROLE_SWITCH, QUIT_ROW};
 pub use client::{
     damage_in, event_endpoint_for, key_input_event, pointer_input_events, pointer_point,
-    present_damage, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowTransport,
-    EVENT_MAILBOX_CAPACITY,
+    present_damage, EventDrain, EventError, EventSource, Parked, Repaint, WindowClient,
+    WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]
 pub use frames::WindowFrames;
+#[cfg(feature = "rt")]
+pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, CallerIdentity, EventSink, PopupSpec, WindowHost, WindowServer,
     WindowSizing, WINDOW_REPLY_MAX,

@@ -45,17 +45,38 @@ server and every app's client can never drift apart.
   `set_backdrop_blur` asks for the content behind the window to be
   frosted, a radius in logical pixels with `0` off and anything above
   `WINDOW_BACKDROP_BLUR_MAX_PX` refused at decode; `close` tears the
-  window down. `WindowEvents` wraps the injected `EventSource`
-  seam — a **parked** wait on the app's own event endpoint, never a
-  poll — and decodes each delivered `WindowEvent` fail-closed. The seam
-  states its two halves separately (`try_next`, which drains without ever
-  waiting, and `park`, the app's own wait-set park), and `next` is
-  defaulted as drain-then-park over them — so an app that interleaves work
-  of its own drains with `WindowEvents::try_wait`, serves input ahead of
-  that work, and parks only when both are exhausted, without carrying its
-  own spelling of the loop. Both paths decode and answer a redraw request
-  through one definition, so the polled path cannot drift from the parked
-  one.
+  window down. `WindowEvents` is the app's event stream over the injected
+  mailbox seam — never a poll — decoding each delivered `WindowEvent`
+  fail-closed. The seam states its two halves as two traits: `EventDrain`
+  (`try_next`, which reads a queued frame and never waits) and
+  `EventSource: EventDrain` (`park`, the app's own wait-set park, with
+  `next` defaulted as drain-then-park over the pair). An app that
+  interleaves work of its own drains with `WindowEvents::try_wait`, serves
+  input ahead of that work, and parks only when both are exhausted; an app
+  whose loop dispatches several wake sources itself — the terminal
+  emulator, with a shell stream per window and an animation deadline;
+  Switchboard, with a command mailbox and a sampling deadline — keeps its
+  own park and takes the drain alone, and still reads through this one
+  stream rather than spelling a mailbox drain of its own.
+  `EventMailbox` is that drain against the app's own endpoint, dropping
+  any frame of the wrong length or from any sender but the session the
+  create reply named: the kernel-attested origin is the authentication,
+  and it has one definition rather than one per app. Both paths decode and
+  answer a redraw request through one definition, so the polled path
+  cannot drift from the parked one. A read that fails says which half
+  failed (`EventError::Undecodable` / `EventError::Mailbox`), because the
+  answers are opposites — read on past a refused frame, end the channel on
+  a dead mailbox — and an `Errno` alone cannot tell them apart
+  (`ipc_recv` answers `LengthOutOfRange` for a received length the address
+  width cannot hold, which is also a decode refusal). Reading on past a
+  dead mailbox would meet the same failure at once and spin.
+- **A run of resizes folds to the newest extent.** A client extent is a
+  value the window converges on, not an occurrence it must witness, and an
+  interactive resize-grab reports one per pointer sample. Every app reads
+  through the fold, so an app slower than the pointer lags a frame rather
+  than a queue — without it, the samples that piled up during a drag are
+  each re-laid-out and re-mapped when the button comes up, and the window
+  visibly walks back through the drag before settling.
   `present_damage` decides *what* a round presents from the three cases
   every such app faces (`Repaint::Nothing` / `Reported` / `Whole`), and
   `damage_in` clips a reported client-space rectangle onto the window —

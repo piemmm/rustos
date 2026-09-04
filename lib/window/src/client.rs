@@ -818,17 +818,16 @@ impl<T: WindowTransport> WindowClient<T> {
     }
 }
 
-/// The event-arrival seam: the app's own event mailbox, split into the drain
-/// that never waits and the park that only waits.
+/// The drain half of the event-arrival seam: read a queued event frame,
+/// never wait for one.
 ///
-/// A loop that has nothing else to do calls [`next`](EventSource::next) and is
-/// parked on its wait-set until the session delivers. A loop that interleaves
-/// input with work of its own — a thumbnail to render, an icon to decode —
-/// drains with [`try_next`](EventSource::try_next) so queued input is served
-/// before the next unit of that work, and parks only once both are exhausted.
-/// Both halves are the mailbox's, so the polled path and the parked one cannot
-/// drift apart.
-pub trait EventSource {
+/// Stated apart from [`EventSource`] because parking is not every loop's to
+/// do. An app whose wait-set carries several wake sources and a frame
+/// deadline dispatches them itself, so it owns the park and wants only the
+/// drain — and [`WindowEvents`] is bounded on *this* trait, so such a loop
+/// still reads through the one shared stream discipline instead of spelling
+/// a raw mailbox drain of its own.
+pub trait EventDrain {
     /// Fill `event` with a queued event frame if one is waiting, answering
     /// `Ok(false)` immediately when the mailbox is empty.
     ///
@@ -837,7 +836,19 @@ pub trait EventSource {
     /// Any [`Errno`] the drain surfaces (the endpoint torn down, the session
     /// gone); the app treats it as the channel ending.
     fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno>;
+}
 
+/// The event-arrival seam: the app's own event mailbox, split into the drain
+/// that never waits and the park that only waits.
+///
+/// A loop that has nothing else to do calls [`next`](EventSource::next) and is
+/// parked on its wait-set until the session delivers. A loop that interleaves
+/// input with work of its own — a thumbnail to render, an icon to decode —
+/// drains with [`try_next`](EventDrain::try_next) so queued input is served
+/// before the next unit of that work, and parks only once both are exhausted.
+/// Both halves are the mailbox's, so the polled path and the parked one cannot
+/// drift apart.
+pub trait EventSource: EventDrain {
     /// Park the task until something the app waits on is ready — a delivered
     /// event, or whatever else the implementation's wait-set carries.
     ///
@@ -873,6 +884,24 @@ pub trait EventSource {
     }
 }
 
+/// Why reading the next event failed.
+///
+/// The two are answered apart because the caller's response to them is
+/// opposite and an [`Errno`] alone cannot tell them apart: the drain surfaces
+/// the kernel's codes, one of which ([`Errno::LengthOutOfRange`]) a decode
+/// refusal also uses. Reading on past a failed *drain* meets the same failure
+/// at once and spins.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EventError {
+    /// The session delivered a frame this build will not decode. It is
+    /// already consumed and nothing was guessed at, so the next read moves
+    /// past it.
+    Undecodable(Errno),
+    /// The mailbox itself failed — the endpoint torn down, the session gone.
+    /// It will fail the same way again; the app treats the channel as ended.
+    Mailbox(Errno),
+}
+
 /// What a [`park`](EventSource::park) woke for.
 ///
 /// A loop with a worker parks on that worker's wake alongside its event
@@ -891,8 +920,13 @@ pub enum Parked {
     Interrupted,
 }
 
-/// The app's typed event wait over an [`EventSource`].
-pub struct WindowEvents<S: EventSource> {
+/// The app's typed event stream over an [`EventDrain`].
+///
+/// Every app reads here rather than from its mailbox, so the one folding rule
+/// below applies to all of them. [`wait`](Self::wait) is additionally offered
+/// where the source can park ([`EventSource`]); a loop that parks on its own
+/// wait-set uses [`try_wait`](Self::try_wait) alone.
+pub struct WindowEvents<S: EventDrain> {
     source: S,
     /// The one frame read ahead while folding a run of resizes and found
     /// not to belong to it. Returned before the source is drained again, so
@@ -900,51 +934,13 @@ pub struct WindowEvents<S: EventSource> {
     read_ahead: Option<[u8; WindowEvent::WIRE_LEN]>,
 }
 
-impl<S: EventSource> WindowEvents<S> {
-    /// A typed wait over `source`.
+impl<S: EventDrain> WindowEvents<S> {
+    /// A typed stream over `source`.
     pub const fn new(source: S) -> Self {
         Self {
             source,
             read_ahead: None,
         }
-    }
-
-    /// Park until the next event arrives, decode it, and answer a
-    /// redraw request on the app's behalf before returning it.
-    ///
-    /// The session releases a window's retained pixels under memory
-    /// pressure and asks for them again with
-    /// [`WindowEvent::RedrawRequested`].
-    /// Answering it is mechanical — re-present the last frame with
-    /// full-window damage — so the library does it through `client`
-    /// ([`WindowClient::answer_redraw`]) and no app has to. A failed
-    /// re-present is not fatal: the window stays blank until the app
-    /// presents for a reason of its own, which is exactly the outcome
-    /// the event already documents.
-    ///
-    /// The event is still returned, so an app that would rather re-render
-    /// its content genuinely (a live view whose last frame is already
-    /// out of date) can act on it.
-    ///
-    /// # Errors
-    ///
-    /// A source failure, or the typed refusal of a malformed frame — a
-    /// corrupt event is refused, never guessed at (the app may keep
-    /// waiting or tear down; the frame is already consumed either way).
-    pub fn wait<T: WindowTransport>(
-        &mut self,
-        client: &mut WindowClient<T>,
-    ) -> Result<Option<WindowEvent>, Errno> {
-        let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        if let Some(held) = self.read_ahead.take() {
-            frame = held;
-        } else if !self.source.next(&mut frame)? {
-            // A park the loop owns interrupted the wait; it has something of
-            // its own to do and no event to handle.
-            return Ok(None);
-        }
-        self.fold_resizes(&mut frame)?;
-        decode_delivered(client, &frame).map(Some)
     }
 
     /// The queued event if one is waiting, and `None` at once when the mailbox
@@ -957,16 +953,21 @@ impl<S: EventSource> WindowEvents<S> {
     ///
     /// # Errors
     ///
-    /// A source failure, or the typed refusal of a malformed frame — refused,
-    /// never guessed at, exactly as in [`wait`](Self::wait).
+    /// [`EventError::Mailbox`] for a drain failure, or
+    /// [`EventError::Undecodable`] for a malformed frame — refused, never
+    /// guessed at, exactly as in [`wait`](Self::wait).
     pub fn try_wait<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
-    ) -> Result<Option<WindowEvent>, Errno> {
+    ) -> Result<Option<WindowEvent>, EventError> {
         let mut frame = [0u8; WindowEvent::WIRE_LEN];
         if let Some(held) = self.read_ahead.take() {
             frame = held;
-        } else if !self.source.try_next(&mut frame)? {
+        } else if !self
+            .source
+            .try_next(&mut frame)
+            .map_err(EventError::Mailbox)?
+        {
             return Ok(None);
         }
         self.fold_resizes(&mut frame)?;
@@ -988,12 +989,16 @@ impl<S: EventSource> WindowEvents<S> {
     /// A frame that will not decode ends the run and is put back, so its
     /// typed refusal reaches the caller on the next drain rather than being
     /// swallowed here.
-    fn fold_resizes(&mut self, frame: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), Errno> {
+    fn fold_resizes(&mut self, frame: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), EventError> {
         let Some(window) = resized_window(frame) else {
             return Ok(());
         };
         let mut ahead = [0u8; WindowEvent::WIRE_LEN];
-        while self.source.try_next(&mut ahead)? {
+        while self
+            .source
+            .try_next(&mut ahead)
+            .map_err(EventError::Mailbox)?
+        {
             if resized_window(&ahead) != Some(window) {
                 self.read_ahead = Some(ahead);
                 return Ok(());
@@ -1001,6 +1006,47 @@ impl<S: EventSource> WindowEvents<S> {
             *frame = ahead;
         }
         Ok(())
+    }
+}
+
+impl<S: EventSource> WindowEvents<S> {
+    /// Park until the next event arrives, decode it, and answer a
+    /// redraw request on the app's behalf before returning it.
+    ///
+    /// The session releases a window's retained pixels under memory
+    /// pressure and asks for them again with
+    /// [`WindowEvent::RedrawRequested`].
+    /// Answering it is mechanical — re-present the last frame with
+    /// full-window damage — so the library does it through `client`
+    /// ([`WindowClient::answer_redraw`]) and no app has to. A failed
+    /// re-present is not fatal: the window stays blank until the app
+    /// presents for a reason of its own, which is exactly the outcome
+    /// the event already documents.
+    ///
+    /// The event is still returned, so an app that would rather re-render
+    /// its content genuinely (a live view whose last frame is already
+    /// out of date) can act on it.
+    ///
+    /// # Errors
+    ///
+    /// [`EventError::Mailbox`] for a source failure, or
+    /// [`EventError::Undecodable`] for a malformed frame — a corrupt event is
+    /// refused, never guessed at. Only the first ends the channel; the frame
+    /// is already consumed either way.
+    pub fn wait<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+    ) -> Result<Option<WindowEvent>, EventError> {
+        let mut frame = [0u8; WindowEvent::WIRE_LEN];
+        if let Some(held) = self.read_ahead.take() {
+            frame = held;
+        } else if !self.source.next(&mut frame).map_err(EventError::Mailbox)? {
+            // A park the loop owns interrupted the wait; it has something of
+            // its own to do and no event to handle.
+            return Ok(None);
+        }
+        self.fold_resizes(&mut frame)?;
+        decode_delivered(client, &frame).map(Some)
     }
 }
 
@@ -1019,8 +1065,8 @@ fn resized_window(frame: &[u8; WindowEvent::WIRE_LEN]) -> Option<u64> {
 fn decode_delivered<T: WindowTransport>(
     client: &mut WindowClient<T>,
     frame: &[u8; WindowEvent::WIRE_LEN],
-) -> Result<WindowEvent, Errno> {
-    let event = WindowEvent::from_bytes(frame)?;
+) -> Result<WindowEvent, EventError> {
+    let event = WindowEvent::from_bytes(frame).map_err(EventError::Undecodable)?;
     if let WindowEvent::RedrawRequested { window_id } = event {
         let _ = client.answer_redraw(window_id);
     }

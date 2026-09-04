@@ -78,9 +78,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppMenuItemId, MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
     };
-    use tairix_abi::{
-        Errno, Origin, ProcId, WaitSetOp, WaitSourceKind, WaitStatus, ORIGIN_WIRE_LEN,
-    };
+    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, WaitStatus};
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
@@ -109,7 +107,8 @@ mod program {
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::{
         damage_in, event_endpoint_for, key_input_event, pointer_input_events, pointer_point,
-        Desktop, PopupSpec, WindowClient, WindowFrames, WindowTransport, EVENT_MAILBOX_CAPACITY,
+        Desktop, EventError, EventMailbox, PopupSpec, WindowClient, WindowEvents, WindowFrames,
+        WindowTransport, EVENT_MAILBOX_CAPACITY,
     };
 
     /// Exit code when the event mailbox or a wait-set member could not be
@@ -1255,6 +1254,11 @@ mod program {
         next_slot += 1;
         let mut windows: Vec<TerminalWindow> = alloc::vec![first];
 
+        // The one event stream for the whole process. It is held across
+        // wakes because it owns the frame it reads ahead while folding a run
+        // of resizes: dropping it between drains would lose that frame.
+        let mut events = WindowEvents::new(EventMailbox::new(event_endpoint, server));
+
         // --- The event loop: park on the wait-set and dispatch on the woken
         // member's token (never drain every source per wake — a blocking
         // receive on an idle source would wedge the loop). Each member's
@@ -1294,8 +1298,8 @@ mod program {
                         &mut publication,
                         &mut desktop,
                         themes.active(),
-                        event_endpoint,
-                        server,
+                        &mut events,
+                        &mut client,
                     );
                     // An overlay that has asked to go leaves before anything
                     // this same outcome opens, so a menu row that chose
@@ -2121,14 +2125,19 @@ mod program {
     /// never applied: the mailbox is open to any capable sender, so the
     /// kernel-attested origin is the authentication. A malformed frame from
     /// the authenticated session is likewise refused (never guessed at).
+    ///
+    /// Reading through the shared stream rather than the mailbox is what
+    /// folds a resize-grab's run of client extents to the newest. Applying
+    /// each queued sample instead would walk the window back through the
+    /// sizes the drag already passed, once the button came up.
     #[allow(clippy::too_many_lines)] // One dispatch over the whole window vocabulary; splitting it would hide the routing order.
     fn drain_events(
         windows: &mut [TerminalWindow],
         publication: &mut Publication,
         desktop: &mut Desktop,
         theme: &Theme,
-        endpoint: u64,
-        server: ProcId,
+        events: &mut WindowEvents<EventMailbox>,
+        client: &mut WindowClient<RtWindowTransport>,
     ) -> EventOutcome {
         let scale = desktop.scale();
         let mut redrawn: Option<u64> = None;
@@ -2139,282 +2148,254 @@ mod program {
         // once: it is one event per gesture, and it owes a write.
         let mut edited = false;
         loop {
-            let mut frame = [0u8; WindowEvent::WIRE_LEN];
-            let mut sender = [0u8; ORIGIN_WIRE_LEN];
-            match tairix_rt::ipc_recv(endpoint, &mut frame, &mut sender) {
-                Ok(len) => {
-                    if len != WindowEvent::WIRE_LEN {
-                        continue;
-                    }
-                    let Ok(origin) = Origin::from_bytes(&sender) else {
+            let event = match events.try_wait(client) {
+                Ok(Some(event)) => event,
+                Ok(None) => return finish(EventOutcome::Continue, redrawn, edited),
+                // A frame the session sent that this build cannot decode is
+                // dropped and the drain reads on past it; only the mailbox
+                // itself failing ends the channel.
+                Err(EventError::Undecodable(_)) => continue,
+                Err(EventError::Mailbox(_)) => return EventOutcome::ChannelLost,
+            };
+            // Every delivered event is offered to the desktop first,
+            // so a scale or appearance change is adopted whether or
+            // not this app otherwise reacts to the event that
+            // carried it. A real change ends this drain (the caller
+            // relays out and repaints); a refusal is stated and the
+            // last good desktop stands.
+            match desktop.apply(&event) {
+                Ok(true) => return EventOutcome::DesktopChanged,
+                Ok(false) => {}
+                Err(err) => {
+                    let _ = writeln!(Stderr, "terminal: could not apply desktop change: {err}");
+                }
+            }
+            // An application-scoped event names the emulator rather
+            // than a window: the icon bar's own click and menu
+            // outcomes. The row id is this terminal's own, so an id
+            // it never declared names no command and is dropped.
+            match event {
+                WindowEvent::AppBarDefault => return EventOutcome::NewWindow,
+                WindowEvent::AppBarMenu { item } => {
+                    return match bar_command(item) {
+                        Some(BarCommand::NewWindow) => EventOutcome::NewWindow,
+                        Some(BarCommand::Quit) => EventOutcome::Quit,
+                        None => EventOutcome::Continue,
+                    };
+                }
+                _ => {}
+            }
+            // Everything else is window-scoped: resolve which of
+            // this process's windows (or which window's popup) it
+            // belongs to. An id neither names is a window that has
+            // just closed, and the event has nowhere to land.
+            let Some(window_id) = event.window_id() else {
+                continue;
+            };
+            let Some(index) = windows.iter().position(|open| {
+                open.window == window_id
+                    || open
+                        .overlay
+                        .as_ref()
+                        .is_some_and(|held| held.window == window_id)
+            }) else {
+                continue;
+            };
+            let open = &mut windows[index];
+            let window = open.window;
+            let for_popup = open.window != window_id;
+            match event {
+                WindowEvent::Key { key, .. } if for_popup => {
+                    let Some(held) = open.overlay.as_mut() else {
                         continue;
                     };
-                    if origin.proc_id() != server {
-                        continue;
-                    }
-                    let Ok(event) = WindowEvent::from_bytes(&frame) else {
-                        continue;
-                    };
-                    // Every delivered event is offered to the desktop first,
-                    // so a scale or appearance change is adopted whether or
-                    // not this app otherwise reacts to the event that
-                    // carried it. A real change ends this drain (the caller
-                    // relays out and repaints); a refusal is stated and the
-                    // last good desktop stands.
-                    match desktop.apply(&event) {
-                        Ok(true) => return EventOutcome::DesktopChanged,
-                        Ok(false) => {}
-                        Err(err) => {
-                            let _ =
-                                writeln!(Stderr, "terminal: could not apply desktop change: {err}");
+                    match route_overlay_key(held, publication, key, scale, theme) {
+                        OverlayRouting::Nothing => {}
+                        OverlayRouting::Redraw => redrawn = Some(window),
+                        OverlayRouting::Edited => edited = true,
+                        OverlayRouting::Settled => {
+                            return EventOutcome::ProfileChanged { settled: true }
+                        }
+                        OverlayRouting::Restore => return EventOutcome::ProfileRestored,
+                        OverlayRouting::Closed => {
+                            held.dismissed = true;
+                            // Closing settles whatever the sheet was
+                            // last showing, so an edit the user made
+                            // and then dismissed is still written.
+                            return EventOutcome::ProfileChanged { settled: true };
                         }
                     }
-                    // An application-scoped event names the emulator rather
-                    // than a window: the icon bar's own click and menu
-                    // outcomes. The row id is this terminal's own, so an id
-                    // it never declared names no command and is dropped.
-                    match event {
-                        WindowEvent::AppBarDefault => return EventOutcome::NewWindow,
-                        WindowEvent::AppBarMenu { item } => {
-                            return match bar_command(item) {
-                                Some(BarCommand::NewWindow) => EventOutcome::NewWindow,
-                                Some(BarCommand::Quit) => EventOutcome::Quit,
-                                None => EventOutcome::Continue,
-                            };
-                        }
-                        _ => {}
+                }
+                WindowEvent::Key { key, .. } => match route_key(&mut open.terminal, key) {
+                    KeyRouting::Nothing => {}
+                    KeyRouting::Command(command) => {
+                        return finish(
+                            run_command(command, window, &mut open.terminal, publication),
+                            redrawn,
+                            edited,
+                        )
                     }
-                    // Everything else is window-scoped: resolve which of
-                    // this process's windows (or which window's popup) it
-                    // belongs to. An id neither names is a window that has
-                    // just closed, and the event has nowhere to land.
-                    let Some(window_id) = event.window_id() else {
+                    KeyRouting::ShellGone => return EventOutcome::CloseWindow { window },
+                },
+                WindowEvent::Pointer { x, y, action, .. } if for_popup => {
+                    let Some(held) = open.overlay.as_mut() else {
                         continue;
                     };
-                    let Some(index) = windows.iter().position(|open| {
-                        open.window == window_id
-                            || open
-                                .overlay
-                                .as_ref()
-                                .is_some_and(|held| held.window == window_id)
-                    }) else {
-                        continue;
-                    };
-                    let open = &mut windows[index];
-                    let window = open.window;
-                    let for_popup = open.window != window_id;
-                    match event {
-                        WindowEvent::Key { key, .. } if for_popup => {
-                            let Some(held) = open.overlay.as_mut() else {
-                                continue;
-                            };
-                            match route_overlay_key(held, publication, key, scale, theme) {
-                                OverlayRouting::Nothing => {}
-                                OverlayRouting::Redraw => redrawn = Some(window),
-                                OverlayRouting::Edited => edited = true,
-                                OverlayRouting::Settled => {
-                                    return EventOutcome::ProfileChanged { settled: true }
-                                }
-                                OverlayRouting::Restore => return EventOutcome::ProfileRestored,
-                                OverlayRouting::Closed => {
-                                    held.dismissed = true;
-                                    // Closing settles whatever the sheet was
-                                    // last showing, so an edit the user made
-                                    // and then dismissed is still written.
-                                    return EventOutcome::ProfileChanged { settled: true };
-                                }
-                            }
+                    let at = pointer_point(x, y);
+                    match route_overlay_pointer(held, publication, action, at, scale, theme) {
+                        OverlayRouting::Nothing => {}
+                        OverlayRouting::Redraw => redrawn = Some(window),
+                        OverlayRouting::Edited => edited = true,
+                        OverlayRouting::Settled => {
+                            return EventOutcome::ProfileChanged { settled: true }
                         }
-                        WindowEvent::Key { key, .. } => match route_key(&mut open.terminal, key) {
-                            KeyRouting::Nothing => {}
-                            KeyRouting::Command(command) => {
+                        OverlayRouting::Restore => return EventOutcome::ProfileRestored,
+                        OverlayRouting::Closed => {
+                            held.dismissed = true;
+                            return EventOutcome::ProfileChanged { settled: true };
+                        }
+                    }
+                }
+                // The one answer the desktop owes an open. An id
+                // that names anything else answers a gesture already
+                // settled, so acting on it would run a stale command.
+                WindowEvent::MenuClosed {
+                    open_id, outcome, ..
+                } if !for_popup && open.menu == Some(open_id) => {
+                    open.menu = None;
+                    match outcome {
+                        MenuOutcome::Chosen(item) => {
+                            // A row id this terminal never declared
+                            // names no command and is dropped.
+                            if let Some(command) = Command::from_item(item) {
                                 return finish(
                                     run_command(command, window, &mut open.terminal, publication),
                                     redrawn,
                                     edited,
-                                )
-                            }
-                            KeyRouting::ShellGone => return EventOutcome::CloseWindow { window },
-                        },
-                        WindowEvent::Pointer { x, y, action, .. } if for_popup => {
-                            let Some(held) = open.overlay.as_mut() else {
-                                continue;
-                            };
-                            let at = pointer_point(x, y);
-                            match route_overlay_pointer(held, publication, action, at, scale, theme)
-                            {
-                                OverlayRouting::Nothing => {}
-                                OverlayRouting::Redraw => redrawn = Some(window),
-                                OverlayRouting::Edited => edited = true,
-                                OverlayRouting::Settled => {
-                                    return EventOutcome::ProfileChanged { settled: true }
-                                }
-                                OverlayRouting::Restore => return EventOutcome::ProfileRestored,
-                                OverlayRouting::Closed => {
-                                    held.dismissed = true;
-                                    return EventOutcome::ProfileChanged { settled: true };
-                                }
+                                );
                             }
                         }
-                        // The one answer the desktop owes an open. An id
-                        // that names anything else answers a gesture already
-                        // settled, so acting on it would run a stale command.
-                        WindowEvent::MenuClosed {
-                            open_id, outcome, ..
-                        } if !for_popup && open.menu == Some(open_id) => {
-                            open.menu = None;
-                            match outcome {
-                                MenuOutcome::Chosen(item) => {
-                                    // A row id this terminal never declared
-                                    // names no command and is dropped.
-                                    if let Some(command) = Command::from_item(item) {
-                                        return finish(
-                                            run_command(
-                                                command,
-                                                window,
-                                                &mut open.terminal,
-                                                publication,
-                                            ),
-                                            redrawn,
-                                            edited,
-                                        );
-                                    }
-                                }
-                                MenuOutcome::Dismissed => {}
-                                MenuOutcome::Refused(reason) => {
-                                    report(&alloc::format!(
-                                        "the desktop showed no menu ({reason:?})"
-                                    ));
-                                }
-                            }
+                        MenuOutcome::Dismissed => {}
+                        MenuOutcome::Refused(reason) => {
+                            report(&alloc::format!("the desktop showed no menu ({reason:?})"));
                         }
-                        WindowEvent::Pointer { x, y, action, .. } => {
-                            // The sheet is modal, so a press that lands on
-                            // the terminal instead dismisses it and reaches
-                            // nothing else. Otherwise a secondary press asks
-                            // the desktop for this window's menu at that
-                            // point, and every other pointer event is a
-                            // no-op: the screen is shell-driven and the
-                            // emulator keeps no scrollback for a wheel to
-                            // move.
-                            if let Some(held) = open.overlay.as_mut() {
-                                if matches!(action, PointerAction::Pressed(_)) {
-                                    held.dismissed = true;
-                                    return EventOutcome::Continue;
-                                }
-                            } else if action
-                                == PointerAction::Pressed(
-                                    tairix_abi::input::PointerButtonCode::Secondary,
-                                )
-                            {
-                                return EventOutcome::OpenMenu {
-                                    window,
-                                    at: pointer_point(x, y),
-                                };
-                            }
-                        }
-                        // A popup wears no close control, so a close asked of
-                        // one can only be the session tearing it down: let the
-                        // overlay go rather than closing the window.
-                        WindowEvent::CloseRequested { .. } if for_popup => {
-                            if let Some(held) = open.overlay.as_mut() {
-                                held.dismissed = true;
-                            }
-                            return EventOutcome::Continue;
-                        }
-                        WindowEvent::CloseRequested { .. } => {
-                            return EventOutcome::CloseWindow { window }
-                        }
-                        // The session dropped a window's pixels under memory
-                        // pressure: repaint whichever window lost them.
-                        WindowEvent::RedrawRequested { .. } if for_popup => {
-                            return EventOutcome::OverlayChanged { window }
-                        }
-                        WindowEvent::RedrawRequested { .. } => {
-                            return EventOutcome::Repaint { window }
-                        }
-                        // Nobody can see this window, so the session gave its
-                        // copy of the pixels back and unmapped the region. Let
-                        // go of this side too — the pages go only when both do
-                        // — and paint nothing: the redraw request that follows
-                        // the window being shown again re-attaches a fresh
-                        // region and fills it. A popup is never hidden, so
-                        // only the top-level window's region is released here.
-                        WindowEvent::ContentReleased { .. } => {
-                            if !for_popup {
-                                open.frames.release();
-                            }
-                        }
-                        // The window manager resized the window (a live
-                        // drag-resize sample, or a maximize/restore): hand the
-                        // new client size back to the caller, which re-maps
-                        // the frame region, reshapes the grid, and updates the
-                        // pty window size. A run of drag samples has already
-                        // folded to its newest in the shared reader, so this
-                        // reshapes once per size the grid actually takes.
-                        // Returning here leaves any events queued behind it
-                        // for the next wake (level-triggered peek).
-                        WindowEvent::Resized {
-                            width_px,
-                            height_px,
-                            ..
-                        } if !for_popup => {
-                            return EventOutcome::Resized {
-                                window,
-                                width_px,
-                                height_px,
-                            }
-                        }
-                        // Focus changes repaint nothing; the screen is
-                        // shell-driven. A wheel likewise has nothing to move:
-                        // the terminal renders the shell's live screen and
-                        // keeps no scrollback, so there is no scrollable
-                        // content a tick could reach. The terminal never
-                        // requests a pick, so a pick conclusion is a session
-                        // bug and is ignored (an unredeemed delegation is
-                        // reclaimed by the kernel at exit).
-                        //
-                        // Minimized needs no action (the window is hidden and
-                        // still reachable through the bar's hover picker; the
-                        // screen is redrawn from the shell on demand). A
-                        // desktop change was already adopted above (or, on
-                        // refusal, stated and left the last good state
-                        // standing); either way there is nothing further to do
-                        // with the event itself. An icon-bar event was handled
-                        // before the window demux. These are honest no-ops,
-                        // not deferred work.
-                        //
-                        // A `Resized` for a popup is likewise nothing: a popup
-                        // is neither decorated nor resizable, so it has no size
-                        // of its own for the session to change.
-                        //
-                        // A secondary press on Close asks to leave what the
-                        // window is showing; the terminal has nothing to leave
-                        // but the window itself, and a primary press already
-                        // closes it.
-                        //
-                        // A `MenuClosed` reaching here failed the guard above
-                        // — it names no open this window is waiting on — and a
-                        // stale answer is dropped rather than acted on. The
-                        // terminal's menu declares no panel row, so no chain
-                        // of its own ever asks it for a surface.
-                        WindowEvent::AlternateCloseRequested { .. }
-                        | WindowEvent::AppBarDefault
-                        | WindowEvent::AppBarMenu { .. }
-                        | WindowEvent::MenuClosed { .. }
-                        | WindowEvent::Focus { .. }
-                        | WindowEvent::Scrolled { .. }
-                        | WindowEvent::Minimized { .. }
-                        | WindowEvent::Resized { .. }
-                        | WindowEvent::FilePicked { .. }
-                        | WindowEvent::PickCancelled { .. }
-                        | WindowEvent::DesktopChanged { .. } => {}
                     }
                 }
-                Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => {
-                    return finish(EventOutcome::Continue, redrawn, edited);
+                WindowEvent::Pointer { x, y, action, .. } => {
+                    // The sheet is modal, so a press that lands on
+                    // the terminal instead dismisses it and reaches
+                    // nothing else. Otherwise a secondary press asks
+                    // the desktop for this window's menu at that
+                    // point, and every other pointer event is a
+                    // no-op: the screen is shell-driven and the
+                    // emulator keeps no scrollback for a wheel to
+                    // move.
+                    if let Some(held) = open.overlay.as_mut() {
+                        if matches!(action, PointerAction::Pressed(_)) {
+                            held.dismissed = true;
+                            return EventOutcome::Continue;
+                        }
+                    } else if action
+                        == PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Secondary)
+                    {
+                        return EventOutcome::OpenMenu {
+                            window,
+                            at: pointer_point(x, y),
+                        };
+                    }
                 }
-                Err(_) => return EventOutcome::ChannelLost,
+                // A popup wears no close control, so a close asked of
+                // one can only be the session tearing it down: let the
+                // overlay go rather than closing the window.
+                WindowEvent::CloseRequested { .. } if for_popup => {
+                    if let Some(held) = open.overlay.as_mut() {
+                        held.dismissed = true;
+                    }
+                    return EventOutcome::Continue;
+                }
+                WindowEvent::CloseRequested { .. } => return EventOutcome::CloseWindow { window },
+                // The session dropped a window's pixels under memory
+                // pressure: repaint whichever window lost them.
+                WindowEvent::RedrawRequested { .. } if for_popup => {
+                    return EventOutcome::OverlayChanged { window }
+                }
+                WindowEvent::RedrawRequested { .. } => return EventOutcome::Repaint { window },
+                // Nobody can see this window, so the session gave its
+                // copy of the pixels back and unmapped the region. Let
+                // go of this side too — the pages go only when both do
+                // — and paint nothing: the redraw request that follows
+                // the window being shown again re-attaches a fresh
+                // region and fills it. A popup is never hidden, so
+                // only the top-level window's region is released here.
+                WindowEvent::ContentReleased { .. } => {
+                    if !for_popup {
+                        open.frames.release();
+                    }
+                }
+                // The window manager resized the window (a live
+                // drag-resize sample, or a maximize/restore): hand the
+                // new client size back to the caller, which re-maps
+                // the frame region, reshapes the grid, and updates the
+                // pty window size. A run of drag samples has already
+                // folded to its newest in the shared reader, so this
+                // reshapes once per size the grid actually takes.
+                // Returning here leaves any events queued behind it
+                // for the next wake (level-triggered peek).
+                WindowEvent::Resized {
+                    width_px,
+                    height_px,
+                    ..
+                } if !for_popup => {
+                    return EventOutcome::Resized {
+                        window,
+                        width_px,
+                        height_px,
+                    }
+                }
+                // Focus changes repaint nothing; the screen is
+                // shell-driven. A wheel likewise has nothing to move:
+                // the terminal renders the shell's live screen and
+                // keeps no scrollback, so there is no scrollable
+                // content a tick could reach. The terminal never
+                // requests a pick, so a pick conclusion is a session
+                // bug and is ignored (an unredeemed delegation is
+                // reclaimed by the kernel at exit).
+                //
+                // Minimized needs no action (the window is hidden and
+                // still reachable through the bar's hover picker; the
+                // screen is redrawn from the shell on demand). A
+                // desktop change was already adopted above (or, on
+                // refusal, stated and left the last good state
+                // standing); either way there is nothing further to do
+                // with the event itself. An icon-bar event was handled
+                // before the window demux. These are honest no-ops,
+                // not deferred work.
+                //
+                // A `Resized` for a popup is likewise nothing: a popup
+                // is neither decorated nor resizable, so it has no size
+                // of its own for the session to change.
+                //
+                // A secondary press on Close asks to leave what the
+                // window is showing; the terminal has nothing to leave
+                // but the window itself, and a primary press already
+                // closes it.
+                //
+                // A `MenuClosed` reaching here failed the guard above
+                // — it names no open this window is waiting on — and a
+                // stale answer is dropped rather than acted on. The
+                // terminal's menu declares no panel row, so no chain
+                // of its own ever asks it for a surface.
+                WindowEvent::AlternateCloseRequested { .. }
+                | WindowEvent::AppBarDefault
+                | WindowEvent::AppBarMenu { .. }
+                | WindowEvent::MenuClosed { .. }
+                | WindowEvent::Focus { .. }
+                | WindowEvent::Scrolled { .. }
+                | WindowEvent::Minimized { .. }
+                | WindowEvent::Resized { .. }
+                | WindowEvent::FilePicked { .. }
+                | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DesktopChanged { .. } => {}
             }
         }
     }

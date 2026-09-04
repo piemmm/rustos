@@ -524,13 +524,22 @@ the session's per-client frame budget and by this process's own stream,
 process, and address-space limits — no count of its own; the last window
 closing ends it.
 
-Two things make it work:
+Three things make it work:
 
 - **Every event is demuxed on the window id it carries.** The one mailbox
   serves every window and every window's popup, so the drain resolves which
   window (or which window's overlay) an event belongs to before routing it.
   An id neither names is a window that has just closed and the event has
   nowhere to land — dropped, never guessed at.
+- **The mailbox is read through the shared stream, not a drain of its own.**
+  The loop dispatches its own wakes — a shell stream and a child per window, a
+  settings worker, a pressure wake, an animation deadline — so it owns the
+  park and implements `tairix_window::EventDrain` alone (over `EventMailbox`,
+  which authenticates each frame against the session's attested identity)
+  rather than `EventSource`. It still reads through `WindowEvents`, which is
+  what folds a resize-grab's run of client extents onto the newest: a window
+  slower than the pointer lags a frame, never a queue of re-maps for sizes the
+  drag has already left behind.
 - **Each window's wait-set tokens are minted from a monotonic slot**, not an
   index into a list that shifts, so a token names the same window for as long
   as that window lives and is never reused after it goes. A window's members

@@ -72,7 +72,7 @@ mod program {
     };
     use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
     use tairix_abi::{
-        CapabilityId, CapabilityQuery, Errno, Origin, PowerAction, ProcId, SchedPriority, Signal,
+        CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
         SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
     use tairix_display::{winframe, SERIAL};
@@ -92,8 +92,8 @@ mod program {
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_point, present_damage, Desktop, Repaint, WindowClient, WindowFrames,
-        WindowTransport,
+        pointer_point, present_damage, Desktop, EventError, EventMailbox, Repaint, WindowClient,
+        WindowEvents, WindowFrames, WindowTransport,
     };
 
     /// Frames in the shared region. The window protocol serialises a
@@ -225,7 +225,6 @@ mod program {
     /// the session blits from.
     struct Window {
         id: u64,
-        server: ProcId,
         mode: DisplayMode,
         surface: Surface,
         frames: WindowFrames,
@@ -262,6 +261,11 @@ mod program {
         desktop: Desktop,
         themes: ThemeRegistry,
         window: Option<Window>,
+        /// The open window's event stream. Created with the window from the
+        /// identity the create reply attested, and dropped with it — the
+        /// mailbox is the process's and outlives any one window, so a stream
+        /// keyed to a window that has gone must not read for the next one.
+        events: Option<WindowEvents<EventMailbox>>,
         session: Option<ProcId>,
     }
 
@@ -278,6 +282,7 @@ mod program {
                 desktop,
                 themes: ThemeRegistry::with_builtins(),
                 window: None,
+                events: None,
                 session: None,
             }
         }
@@ -290,10 +295,29 @@ mod program {
             self.session
         }
 
-        /// The identity serving the open window, for authenticating its
-        /// event mailbox.
-        fn window_server(&self) -> Option<ProcId> {
-            self.window.as_ref().map(|window| window.server)
+        /// The open window's id, or `None` while none is open.
+        fn window_id(&self) -> Option<u64> {
+            self.window.as_ref().map(|window| window.id)
+        }
+
+        /// The next event the session delivered for the open window, with a
+        /// resize-grab's run of client extents folded to the newest.
+        ///
+        /// Folding is what stops a drag being replayed: the grab reports one
+        /// extent per pointer sample, the session leaves the geometry alone
+        /// while the grab is live, and re-mapping for each queued sample once
+        /// the button comes up would walk the window back through the sizes
+        /// the drag has already left.
+        ///
+        /// `None` with no window open — there is nothing to read for, and a
+        /// stream keyed to a window that has gone would authenticate the next
+        /// one's events against the wrong identity.
+        fn next_window_event(&mut self) -> Result<Option<WindowEvent>, EventError> {
+            let Self { events, client, .. } = self;
+            match events.as_mut() {
+                Some(events) => events.try_wait(client),
+                None => Ok(None),
+            }
         }
 
         /// The open window's client bounds.
@@ -379,11 +403,14 @@ mod program {
             }
             self.window = Some(Window {
                 id,
-                server,
                 mode,
                 surface,
                 frames,
             });
+            self.events = Some(WindowEvents::new(EventMailbox::new(
+                self.event_endpoint,
+                server,
+            )));
             Ok(())
         }
 
@@ -391,6 +418,7 @@ mod program {
             let Some(window) = self.window.take() else {
                 return Ok(());
             };
+            self.events = None;
             let disarmed = tairix_rt::waitset_ctl(
                 self.set,
                 WaitSetOp::Del,
@@ -806,42 +834,45 @@ mod program {
     }
 
     /// Drain every window event the session has delivered, applying each in
-    /// turn. Only events whose kernel-attested sender is the identity that
-    /// serves this window are accepted; anything else is dropped with a
-    /// stated reason (fail closed — no forged input ever reaches the panel).
+    /// turn.
+    ///
+    /// The mailbox is open to any sender that can name the endpoint, so the
+    /// kernel-attested origin is the authentication and a frame from anyone
+    /// but the session serving this window never leaves the drain (fail
+    /// closed — no forged input reaches the panel). It is dropped silently:
+    /// one stderr line per refused frame is a flooding channel any process
+    /// could drive.
+    ///
+    /// Every rejection below still takes its message with it. A drain that
+    /// returned with the mailbox non-empty would be woken for it again at
+    /// once, and the loop would spin instead of parking.
     fn drain_window_events(
         service: &mut Service,
         host: &mut RtHost,
         authority: &dyn CapabilityQuery,
     ) {
-        let mut frame = [0u8; WindowEvent::WIRE_LEN];
-        let mut sender = [0u8; ORIGIN_WIRE_LEN];
         loop {
-            let Some(len) = next_message(
-                host.event_endpoint,
-                &mut frame,
-                &mut sender,
-                "read the window event mailbox",
-            ) else {
-                return;
+            let event = match host.next_window_event() {
+                Ok(Some(event)) => event,
+                Ok(None) => return,
+                Err(EventError::Undecodable(_)) => {
+                    io::write_stderr_line("switchboard: dropped a malformed window event");
+                    continue;
+                }
+                // The mailbox will refuse the same way again, so reading on
+                // would spin; the notice states it once and the drain ends.
+                Err(EventError::Mailbox(err)) => {
+                    io::write_stderr_line(&refusal_notice("read the window event mailbox", err));
+                    return;
+                }
             };
-            // Every rejection below still takes its message with it. A drain
-            // that returned with the mailbox non-empty would be woken for it
-            // again at once, and the loop would spin instead of parking.
-            let Some(server) = host.window_server() else {
-                io::write_stderr_line("switchboard: dropped a window event for a closed window");
-                continue;
-            };
-            if !from_identity(&sender, server) {
-                io::write_stderr_line(
-                    "switchboard: dropped a window event from an unattested sender",
-                );
+            // The mailbox outlives any one window, so a frame the session
+            // sent before this window closed can still be queued when the
+            // next one opens. It names the window it was for, and that is
+            // not this one.
+            if event.window_id() != host.window_id() {
                 continue;
             }
-            let Ok(event) = WindowEvent::from_bytes(&frame[..len]) else {
-                io::write_stderr_line("switchboard: dropped a malformed window event");
-                continue;
-            };
             apply_window_event(service, host, authority, &event);
         }
     }
@@ -881,12 +912,6 @@ mod program {
                 Err(_) => io::write_stderr_line("switchboard: dropped a malformed command"),
             }
         }
-    }
-
-    /// `true` when `sender` decodes as an [`Origin`] the kernel attested to
-    /// `expected`.
-    fn from_identity(sender: &[u8; ORIGIN_WIRE_LEN], expected: ProcId) -> bool {
-        Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == expected)
     }
 
     /// Take the next message waiting on `endpoint`, or [`None`] when the

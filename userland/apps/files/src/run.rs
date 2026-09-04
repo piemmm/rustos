@@ -116,9 +116,9 @@ mod program {
         MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
     };
     use tairix_abi::{
-        load_failure_reason, CapabilityId, Errno, FdWire, Origin, ProcId, SpawnAttach, UnlinkFlags,
-        WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
-        INSTALLED_APP_STORE, ORIGIN_WIRE_LEN, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
+        load_failure_reason, CapabilityId, Errno, FdWire, SpawnAttach, UnlinkFlags, WaitFlags,
+        WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
+        INSTALLED_APP_STORE, STDIN, STD_STREAM_COUNT, SYSTEM_APPLICATION_STORE,
         SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_browse::render::{
@@ -156,8 +156,9 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::{
-        pointer_input_events, pointer_point, present_damage, Desktop, EventSource, Parked, Repaint,
-        WindowClient, WindowEvents, WindowFrames, WindowTransport,
+        pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
+        EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowFrames,
+        WindowTransport,
     };
 
     use crate::appbar;
@@ -1646,12 +1647,11 @@ mod program {
     /// serve itself: the answer is the loop's to adopt, so the wake is drained
     /// here and the wait ends without an event.
     struct RtEventSource<'a> {
-        /// The app's event-mailbox endpoint id.
-        endpoint: u64,
+        /// The app's own event mailbox, which authenticates every frame it
+        /// hands over.
+        mailbox: EventMailbox,
         /// The wait-set handle the app parks on.
         set: u64,
-        /// The only sender whose events are accepted.
-        server: ProcId,
         /// The launched-bundle bookkeeping reaped on a [`CHILD_TOKEN`] wake,
         /// shared with the activation path that spawns.
         launcher: &'a RefCell<Launcher>,
@@ -1664,29 +1664,13 @@ mod program {
         reads: &'a Reads,
     }
 
-    /// Whether a received mailbox frame is a genuine event from the desktop
-    /// session: exactly one [`WindowEvent`] wide and from the kernel-attested
-    /// `server` origin. A short frame or a foreign sender is dropped — the
-    /// mailbox is open to any capable sender, so the attested origin is the
-    /// authentication (fail closed).
-    fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
-        len == WindowEvent::WIRE_LEN
-            && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
+    impl EventDrain for RtEventSource<'_> {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+            self.mailbox.try_next(event)
+        }
     }
 
     impl EventSource for RtEventSource<'_> {
-        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
-            loop {
-                let mut sender = [0u8; ORIGIN_WIRE_LEN];
-                match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
-                    Ok(_) => {}
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
-                    Err(err) => return Err(Errno::from_syscall(err)),
-                }
-            }
-        }
-
         fn park(&mut self) -> Result<Parked, Errno> {
             // Park until the session's next delivery — or a launched bundle's
             // exit — wakes the wait-set, never a spin. A cache-report change
@@ -5338,9 +5322,8 @@ mod program {
         // park only when there is nothing of either left. A dead channel ends
         // the app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
-            endpoint: event_endpoint,
+            mailbox: EventMailbox::new(event_endpoint, server),
             set,
-            server,
             launcher: &launcher,
             icons: &icons,
             reads: &reads,
@@ -5474,9 +5457,10 @@ mod program {
                     // Nothing queued, or a malformed frame from the
                     // authenticated session: refused, and the operation
                     // carries on (never guessed at).
-                    Ok(None) | Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => {
+                    Ok(None) | Err(EventError::Undecodable(_)) => {}
+                    Err(EventError::Mailbox(_)) => {
+                        return fail(EXIT_CHANNEL_LOST, "event channel lost")
                     }
-                    Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
                 }
                 continue;
             }
@@ -5565,8 +5549,10 @@ mod program {
                 Ok(event) => event,
                 // A malformed frame from the authenticated session is
                 // refused and the app keeps waiting (never guessed at).
-                Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => continue,
-                Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
+                Err(EventError::Undecodable(_)) => continue,
+                Err(EventError::Mailbox(_)) => {
+                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                }
             };
 
             // The desktop belongs to the seat, not to one window, so a change

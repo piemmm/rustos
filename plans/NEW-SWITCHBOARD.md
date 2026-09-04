@@ -29,7 +29,10 @@ The window is decorated **server-side** by the window manager (see
 resize grabber are the compositor's, drawn around the client. Switchboard
 draws no chrome of its own — its content is the whole client, starting with
 the location band — and resizes only by re-mapping its region on
-`WindowEvent::Resized`.
+`WindowEvent::Resized`. Those arrive one per pointer sample of a
+resize-grab, so they are read through the shared folding stream
+(`tairix_window::WindowEvents`) and a whole drag costs one re-map, not one
+per sample the mailbox happened to hold when the button came up.
 
 At the top of the client sits the **location band**:
 

@@ -26,8 +26,8 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, EventSource, Parked, Repaint, WindowClient,
-    WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, EventDrain, EventError, EventSource, Parked, Repaint,
+    WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -456,7 +456,7 @@ impl QueueSource {
     }
 }
 
-impl EventSource for QueueSource {
+impl EventDrain for QueueSource {
     fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
         let Some(frame) = self.queue.pop_front() else {
             return Ok(false);
@@ -464,7 +464,9 @@ impl EventSource for QueueSource {
         *event = frame;
         Ok(true)
     }
+}
 
+impl EventSource for QueueSource {
     fn park(&mut self) -> Result<Parked, Errno> {
         self.parked += 1;
         Err(Errno::WouldBlock)
@@ -478,11 +480,13 @@ struct InterruptingSource {
     parked: usize,
 }
 
-impl EventSource for InterruptingSource {
+impl EventDrain for InterruptingSource {
     fn try_next(&mut self, _event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
         Ok(false)
     }
+}
 
+impl EventSource for InterruptingSource {
     fn park(&mut self) -> Result<Parked, Errno> {
         self.parked += 1;
         Ok(Parked::Interrupted)
@@ -1481,8 +1485,11 @@ fn events_reach_the_owning_endpoint_and_decode_through_the_client() {
         Ok(Some(WindowEvent::CloseRequested { window_id: a }))
     );
     // An empty queue surfaces the source's wait condition, never a
-    // fabricated event.
-    assert_eq!(waiter.wait(&mut client), Err(Errno::WouldBlock));
+    // fabricated event — as a mailbox failure, which is what ends a channel.
+    assert_eq!(
+        waiter.wait(&mut client),
+        Err(EventError::Mailbox(Errno::WouldBlock))
+    );
 }
 
 /// The defaulted `next` drains before it parks: a loop that has queued input
@@ -1526,6 +1533,121 @@ fn the_drained_wait_answers_without_parking() {
         waiter.try_wait(&mut client),
         Ok(None),
         "an empty mailbox is answered at once, never parked on"
+    );
+}
+
+/// A drain that fails with the one code a decode also produces, so a reader
+/// that told the two apart by [`Errno`] alone could not.
+struct FailingDrain;
+
+impl EventDrain for FailingDrain {
+    fn try_next(&mut self, _event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        Err(Errno::LengthOutOfRange)
+    }
+}
+
+/// A failed drain is answered as a *mailbox* failure even when its code is one
+/// a decode refusal also uses.
+///
+/// The caller's two answers are opposites — read on past an undecodable frame,
+/// end the channel on a dead mailbox — so an ambiguous one is a spin: the next
+/// read meets the same failure and the loop never parks. `ipc_recv` really can
+/// answer `LengthOutOfRange` (a received length the address width cannot
+/// hold), so this is not a hypothetical code.
+#[test]
+fn a_failed_drain_is_never_mistaken_for_an_undecodable_frame() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut events = WindowEvents::new(FailingDrain);
+
+    assert_eq!(
+        events.try_wait(&mut client),
+        Err(EventError::Mailbox(Errno::LengthOutOfRange))
+    );
+}
+
+/// A frame the session sent that will not decode is answered as *undecodable*,
+/// so the caller reads past it rather than tearing the channel down.
+#[test]
+fn a_frame_that_will_not_decode_is_answered_apart_from_a_dead_mailbox() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let mut events = WindowEvents::new(DrainOnlySource {
+        queue: [[0u8; WindowEvent::WIRE_LEN]].into_iter().collect(),
+    });
+
+    assert!(matches!(
+        events.try_wait(&mut client),
+        Err(EventError::Undecodable(_))
+    ));
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(None),
+        "the refused frame is consumed, so the next read moves past it"
+    );
+}
+
+/// A mailbox with no park of its own: the shape an app takes when its loop
+/// dispatches several wake sources and a frame deadline itself, so parking is
+/// the loop's business and only the drain is the mailbox's.
+struct DrainOnlySource {
+    queue: VecDeque<[u8; WindowEvent::WIRE_LEN]>,
+}
+
+impl EventDrain for DrainOnlySource {
+    fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+        let Some(frame) = self.queue.pop_front() else {
+            return Ok(false);
+        };
+        *event = frame;
+        Ok(true)
+    }
+}
+
+/// An app whose loop owns its park still reads through the shared stream, and
+/// so still gets the fold.
+///
+/// This is the terminal emulator's shape, and the reason it matters: its
+/// wait-set carries a shell stream and a child per window, a settings
+/// worker, a pressure wake, and an animation deadline, so it dispatches its
+/// own wakes and cannot hand the park to a source. When the stream was
+/// reachable only *through* a park, that loop had to spell a raw mailbox
+/// drain of its own — which folded nothing, so a resize-grab's queued samples
+/// were each applied on release and walked the window back through the drag.
+#[test]
+fn a_loop_that_owns_its_park_still_folds_a_resize_run() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    let resized = |width_px, height_px| WindowEvent::Resized {
+        window_id: window,
+        width_px,
+        height_px,
+    };
+    // What a drag out and back in leaves queued: every sample the pointer
+    // produced, ending on the size the window actually settled at.
+    let drag = [
+        resized(400, 300),
+        resized(520, 380),
+        resized(640, 460),
+        resized(520, 380),
+        resized(430, 310),
+    ];
+    let mut events = WindowEvents::new(DrainOnlySource {
+        queue: drag.iter().map(WindowEvent::to_le_bytes).collect(),
+    });
+
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(Some(resized(430, 310))),
+        "the whole drag collapses onto the size it ended at, so the window is \
+         re-laid-out once instead of replaying every sample behind the pointer"
+    );
+    assert_eq!(
+        events.try_wait(&mut client),
+        Ok(None),
+        "and nothing of the run is left to apply afterwards"
     );
 }
 

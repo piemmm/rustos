@@ -36,7 +36,7 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WINDOW_ENDPOINT};
-    use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, ProcId};
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
@@ -46,8 +46,9 @@ mod program {
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventSource,
-        Parked, Repaint, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
+        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
+        EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
+        WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -130,31 +131,19 @@ mod program {
     /// whose kernel-attested sender is the desktop session named by the create
     /// reply — anything else is dropped (fail closed).
     struct RtEventSource {
-        endpoint: u64,
+        /// The app's own event mailbox, which authenticates every frame it
+        /// hands over.
+        mailbox: EventMailbox,
         set: u64,
-        server: ProcId,
     }
 
-    /// Whether a received mailbox frame is a genuine event from the desktop
-    /// session: exactly one [`WindowEvent`] wide and from the attested origin.
-    fn accept_frame(len: usize, sender: &[u8; ORIGIN_WIRE_LEN], server: ProcId) -> bool {
-        len == WindowEvent::WIRE_LEN
-            && Origin::from_bytes(sender).is_ok_and(|origin| origin.proc_id() == server)
+    impl EventDrain for RtEventSource {
+        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
+            self.mailbox.try_next(event)
+        }
     }
 
     impl EventSource for RtEventSource {
-        fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
-            loop {
-                let mut sender = [0u8; ORIGIN_WIRE_LEN];
-                match tairix_rt::ipc_recv(self.endpoint, event, &mut sender) {
-                    Ok(len) if accept_frame(len, &sender, self.server) => return Ok(true),
-                    Ok(_) => {}
-                    Err(err) if Errno::from_syscall(err) == Errno::WouldBlock => return Ok(false),
-                    Err(err) => return Err(Errno::from_syscall(err)),
-                }
-            }
-        }
-
         fn park(&mut self) -> Result<Parked, Errno> {
             let mut token = 0u64;
             if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
@@ -516,10 +505,10 @@ mod program {
                 // app parks on nothing of its own), and a malformed frame from
                 // the authenticated session is refused rather than guessed at.
                 // Either way the app keeps waiting.
-                Ok(None) | Err(Errno::OutOfRange | Errno::BadMagic | Errno::BufferTooSmall) => {
-                    continue
+                Ok(None) | Err(EventError::Undecodable(_)) => continue,
+                Err(EventError::Mailbox(_)) => {
+                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
                 }
-                Err(_) => return fail(EXIT_CHANNEL_LOST, "event channel lost"),
             };
 
             // Adopt a desktop change before the app-specific event logic, so
@@ -651,9 +640,8 @@ mod program {
         };
 
         let events = WindowEvents::new(RtEventSource {
-            endpoint: event_endpoint,
+            mailbox: EventMailbox::new(event_endpoint, server),
             set,
-            server,
         });
         run_event_loop(
             &mut surface,

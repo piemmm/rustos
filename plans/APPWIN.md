@@ -150,9 +150,9 @@ speculative:
   shared `tairix_display::ShmMapper`, per-client frame-byte budget,
   `client_exited` teardown, `deliver_event` app-ward routing validated
   against the live window) and `WindowClient`/`WindowEvents` (typed
-  calls over `WindowTransport`, parked — never polling — event wait
-  over `EventSource`). Host-proven against an in-process loopback; no
-  kernel change.
+  calls over `WindowTransport`; a read — never a poll — over the mailbox
+  seam, `EventDrain` for the drain and `EventSource` where the source also
+  parks). Host-proven against an in-process loopback; no kernel change.
 - **The redraw handshake.** The session may release a window's retained
   content to reclaim memory (`docs/src/desktop/wm.md`, "Releasable window
   content"), which costs the app nothing but leaves the window blank
