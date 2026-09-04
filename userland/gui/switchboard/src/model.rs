@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
-use tairix_abi::sysinfo::{CrashFaultBucket, CrashFaultClass, ProcessState};
+use tairix_abi::sysinfo::{CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{
     ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, MAX_CHART_SAMPLES,
@@ -1023,7 +1023,11 @@ fn crash_snapshot(sample: &Sample, proc_id: ProcId) -> Option<CrashSnapshot> {
     Some(CrashSnapshot {
         cause: String::from(crash_cause(crash.fault_class)),
         location: crash_location(crash.fault_bucket, crash.fault_offset),
-        write: crash.is_write(),
+        access: String::from(match crash.access() {
+            CrashAccess::Read => "read",
+            CrashAccess::Write => "write",
+            CrashAccess::Instruction => "instruction (no data access)",
+        }),
         owner: alloc::format!("uid {}, gid {}", crash.uid, crash.gid),
         pc: alloc::format!(
             "{:#018x} ({})",
@@ -1057,6 +1061,7 @@ const fn crash_cause(class: CrashFaultClass) -> &'static str {
         CrashFaultClass::FileRegion => "refused access inside a file mapping",
         CrashFaultClass::Anon => "reserved memory the kernel could not back",
         CrashFaultClass::Wild => "outside every mapping the task owns",
+        CrashFaultClass::Instruction => "an instruction the CPU refused to execute",
     }
 }
 
@@ -1075,6 +1080,9 @@ fn crash_location(bucket: CrashFaultBucket, offset: u64) -> String {
         CrashFaultBucket::PastRegion => alloc::format!("{offset} bytes past its region"),
         CrashFaultBucket::Wild => String::from("far from every mapping (no distance to give)"),
         CrashFaultBucket::InRegion => String::from("inside a region it owns (no distance to give)"),
+        CrashFaultBucket::NoDataAddress => {
+            String::from("no data address — the instruction itself was refused")
+        }
     }
 }
 

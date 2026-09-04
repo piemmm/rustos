@@ -5478,6 +5478,13 @@ pub enum CrashFaultClass {
     /// Outside every mapping the task owns.
     #[default]
     Wild = 4,
+    /// The CPU refused the **instruction**, not an access to data — an
+    /// illegal or privileged encoding, a misaligned program counter, or a
+    /// fetch from a non-executable page. The faulting address is a program
+    /// counter, which bears no relationship to the task's *data* mappings,
+    /// so the only honest locality is
+    /// [`CrashFaultBucket::NoDataAddress`].
+    Instruction = 5,
 }
 
 impl CrashFaultClass {
@@ -5499,6 +5506,7 @@ impl CrashFaultClass {
             2 => Ok(Self::FileRegion),
             3 => Ok(Self::Anon),
             4 => Ok(Self::Wild),
+            5 => Ok(Self::Instruction),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -5528,6 +5536,12 @@ pub enum CrashFaultBucket {
     /// meaningless (`0`): the address is memory the task reserved, not a
     /// stray pointer, so no distance is leaked.
     InRegion = 4,
+    /// The kill was instruction-side ([`CrashFaultClass::Instruction`]), so
+    /// there is no data address to locate and `fault_offset` is meaningless
+    /// (`0`). Measuring a program counter against the data mappings would
+    /// report wherever the program's text happens to sit as a stack
+    /// overrun or a run past a region.
+    NoDataAddress = 5,
 }
 
 impl CrashFaultBucket {
@@ -5549,9 +5563,25 @@ impl CrashFaultBucket {
             2 => Ok(Self::PastRegion),
             3 => Ok(Self::Wild),
             4 => Ok(Self::InRegion),
+            5 => Ok(Self::NoDataAddress),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// What the crashed task's CPU was doing when the fault became fatal.
+///
+/// Derived from a [`CrashRecord`] rather than stored beside its cause, so
+/// no reader can take an instruction-side kill for a load: only a *data*
+/// class carries a direction at all.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CrashAccess {
+    /// A load the resolver refused.
+    Read,
+    /// A store the resolver refused.
+    Write,
+    /// No data access: the instruction itself was refused.
+    Instruction,
 }
 
 /// One named general-purpose register value inside a [`CrashRecord`].
@@ -5687,8 +5717,10 @@ impl CrashRecordRequest {
     }
 }
 
-/// [`CrashRecord::flags`] bit: the fatal access was a **store** (`true`) as
-/// opposed to a load.
+/// [`CrashRecord::flags`] bit: the fatal **data** access was a store as
+/// opposed to a load. Always clear for [`CrashFaultClass::Instruction`],
+/// which performed no data access; read the direction through
+/// [`CrashRecord::access`] rather than this bit.
 pub const CRASH_FLAG_WRITE: u8 = 1 << 0;
 /// [`CrashRecord::flags`] bit: [`CrashRecord::pc`] and every backtrace frame
 /// are **program-relative offsets** (the PIE load base was known). When
@@ -5711,8 +5743,9 @@ pub const CRASH_FLAG_ALL: u8 = CRASH_FLAG_WRITE | CRASH_FLAG_LOAD_BASE_KNOWN | C
 /// The privileged-debugger post-mortem of a task killed by an unresolvable
 /// memory fault. Identity ([`proc_id`](Self::proc_id) / [`pid`](Self::pid) /
 /// name / uid / gid) and cause ([`fault_class`](Self::fault_class),
-/// [`fault_bucket`](Self::fault_bucket), the `write` flag) are attested by
-/// the kernel from the dying task's own state, never a caller claim.
+/// [`fault_bucket`](Self::fault_bucket), the [`access`](Self::access)
+/// direction) are attested by the kernel from the dying task's own state,
+/// never a caller claim.
 ///
 /// # Leak policy
 ///
@@ -5862,10 +5895,19 @@ impl CrashRecord {
         true
     }
 
-    /// `true` if the fatal access was a store.
+    /// What the CPU was doing when the fault became fatal.
+    ///
+    /// The one derivation of the direction, so a consumer cannot render an
+    /// instruction-side kill as a load.
     #[must_use]
-    pub const fn is_write(&self) -> bool {
-        self.flags & CRASH_FLAG_WRITE != 0
+    pub const fn access(&self) -> CrashAccess {
+        if matches!(self.fault_class, CrashFaultClass::Instruction) {
+            CrashAccess::Instruction
+        } else if self.flags & CRASH_FLAG_WRITE != 0 {
+            CrashAccess::Write
+        } else {
+            CrashAccess::Read
+        }
     }
 
     /// `true` if [`Self::pc`] and the frames are program-relative offsets.
@@ -5937,7 +5979,9 @@ impl CrashRecord {
     ///   [`CrashFaultBucket`].
     /// * [`Errno::LengthOutOfRange`] if `name_len` exceeds
     ///   [`PROCESS_NAME_MAX`] or a count exceeds its array bound.
-    /// * [`Errno::BadMagic`] if a reserved `flags` bit is set.
+    /// * [`Errno::BadMagic`] if a reserved `flags` bit is set, or the cause
+    ///   contradicts itself (an instruction-side class paired with a data
+    ///   locality or a store flag, or either the other way round).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -5949,6 +5993,17 @@ impl CrashRecord {
         }
         let fault_class = CrashFaultClass::from_u8(bytes[33])?;
         let fault_bucket = CrashFaultBucket::from_u8(bytes[34])?;
+        // The instruction-side class and its bucket are one fact, and it
+        // implies no data access at all. A record pairing one with a data
+        // counterpart, or claiming a store it cannot have made, is
+        // structurally impossible: refuse it rather than decode a cause
+        // that contradicts itself.
+        let instruction = matches!(fault_class, CrashFaultClass::Instruction);
+        if instruction != matches!(fault_bucket, CrashFaultBucket::NoDataAddress)
+            || (instruction && flags & CRASH_FLAG_WRITE != 0)
+        {
+            return Err(Errno::BadMagic);
+        }
         let name_len = bytes[35];
         if name_len as usize > PROCESS_NAME_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -6011,8 +6066,8 @@ mod tests {
         CPU_MODEL_NAME_MAX,
     };
     use super::{
-        CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, CrashRecordRequest,
-        CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
+        CrashAccess, CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord,
+        CrashRecordRequest, CRASH_FLAG_WRITE, CRASH_MAX_FRAMES, CRASH_MAX_REGS, CRASH_REG_NAME_LEN,
     };
     use super::{DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals};
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
@@ -8283,20 +8338,22 @@ mod tests {
             CrashFaultClass::FileRegion,
             CrashFaultClass::Anon,
             CrashFaultClass::Wild,
+            CrashFaultClass::Instruction,
         ] {
             assert_eq!(CrashFaultClass::from_u8(c.as_u8()), Ok(c));
         }
-        assert_eq!(CrashFaultClass::from_u8(5), Err(Errno::OutOfRange));
+        assert_eq!(CrashFaultClass::from_u8(6), Err(Errno::OutOfRange));
         for b in [
             CrashFaultBucket::NullPage,
             CrashFaultBucket::BelowStackGuard,
             CrashFaultBucket::PastRegion,
             CrashFaultBucket::Wild,
             CrashFaultBucket::InRegion,
+            CrashFaultBucket::NoDataAddress,
         ] {
             assert_eq!(CrashFaultBucket::from_u8(b.as_u8()), Ok(b));
         }
-        assert_eq!(CrashFaultBucket::from_u8(5), Err(Errno::OutOfRange));
+        assert_eq!(CrashFaultBucket::from_u8(6), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -8370,7 +8427,7 @@ mod tests {
         assert_eq!(decoded, rec);
         assert_eq!(decoded.name_bytes(), b"crasher");
         assert_eq!(decoded.pid, 42);
-        assert!(decoded.is_write());
+        assert_eq!(decoded.access(), CrashAccess::Write);
         assert!(decoded.load_base_known());
         assert!(decoded.fp_valid());
         assert_eq!(decoded.fault_class, CrashFaultClass::Wild);
@@ -8399,7 +8456,7 @@ mod tests {
         .expect("empty name fits");
         // A read fault leaves the write flag clear, and no registers were
         // recorded, so load-base/fp flags stay clear too.
-        assert!(!rec.is_write());
+        assert_eq!(rec.access(), CrashAccess::Read);
         assert!(!rec.load_base_known());
         assert!(!rec.fp_valid());
         // Fill both arrays to capacity; the next push is dropped, never a
@@ -8454,6 +8511,41 @@ mod tests {
             CrashRecord::from_bytes(&bytes),
             Err(Errno::LengthOutOfRange)
         );
+    }
+
+    /// An instruction-side kill performed no data access, so it carries no
+    /// data-relative locality and no direction — and a wire record that
+    /// claims otherwise is refused rather than decoded into a cause that
+    /// contradicts itself.
+    #[test]
+    fn crash_record_instruction_side_carries_no_data_locality() {
+        let rec = CrashRecord::new(
+            ProcId::KERNEL,
+            9,
+            0,
+            0,
+            false,
+            CrashFaultClass::Instruction,
+            CrashFaultBucket::NoDataAddress,
+            0,
+            b"crasher",
+        )
+        .expect("fits");
+        assert_eq!(rec.access(), CrashAccess::Instruction);
+        assert_eq!(CrashRecord::from_bytes(&rec.to_le_bytes()), Ok(rec));
+
+        // The class without its bucket, and the bucket without its class.
+        let mut bytes = rec.to_le_bytes();
+        bytes[34] = CrashFaultBucket::Wild.as_u8();
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        let mut bytes = rec.to_le_bytes();
+        bytes[33] = CrashFaultClass::Wild.as_u8();
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+
+        // An instruction-side kill that claims to have been a store.
+        let mut bytes = rec.to_le_bytes();
+        bytes[32] |= CRASH_FLAG_WRITE;
+        assert_eq!(CrashRecord::from_bytes(&bytes), Err(Errno::BadMagic));
     }
 
     /// A sound epoch: a screenful of frames, each damaging part of it.

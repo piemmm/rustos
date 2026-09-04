@@ -44,6 +44,11 @@ pub mod pie;
 /// that rots and ships a stale embedded binary.
 pub mod dep_info;
 
+/// The generated-source glue every freestanding fixture program's build
+/// script shares: the one `program.ld` they link with, and the one emitter
+/// of the `PROGRAM_RXE` + `USER_BIAS` source they `include!`.
+pub mod program_fixture;
+
 /// The M1 demand-paged file-mapping fixture: the single definition of the
 /// fixture file the `file_map_qemu_*` verticals serve kernel-side and probe
 /// from EL0 (geometry constants, content generator, `TAIRIX_FM_*` env

@@ -377,8 +377,9 @@ dynamic-loader policy); CC4 unblocks from here.
 **How the round-trip blocker was resolved.** The earlier blocker — crt0's
 `_start` is not a self-contained leaf, and linking the program against an
 architecture crate collided `_start` — was solved by building the program as a
-**separate** crate (`tests/integration/cc3_program`, crt0 + abi-sys only, its
-own `program.ld` rooting `_start`), converting it to an `rxe` blob at build
+**separate** crate (`tests/integration/cc3_program`, crt0 + abi-sys only,
+rooting `_start` through the shared `tests/integration/harness/program.ld`),
+converting it to an `rxe` blob at build
 time (`elf_to_rxe`), and having the kernel-side test build a real U-mode address
 space with `build_process_image` and `sret` into it through `EnterUser` — i.e.
 a genuine process spawn rather than a single-page alias. The riscv64 vertical
@@ -505,9 +506,11 @@ image `build_process_image` consumes — now exist and are host-green:
   `tairix-crt0` + `tairix-abi-sys` (never an architecture crate, so no `_start`
   collision, the trap the backed-out `crt0_program_qemu_riscv64` hit) and an
   `extern crate tairix_crt0;` forces crt0's rlib (and thus `_start`) onto the
-  link line. Built PIE with `tests/integration/cc3_program/program.ld`
-  (`ENTRY(_start)`, fixed non-zero base, one architecture-neutral script,
-  §2.2), the riscv64 build verified to root at `_start`, keep `main`, and carry
+  link line. Built PIE with `tests/integration/harness/program.ld`
+  (`ENTRY(_start)`, fixed non-zero base, the one architecture-neutral script
+  every fixture program links, reached as
+  `tairix_itest_harness::program_fixture::PROGRAM_LD`), the riscv64 build
+  verified to root at `_start`, keep `main`, and carry
   only `R_RISCV_RELATIVE` relocations (clean PIE, no GOT/PLT). On the host it is
   an inert stub so the workspace tooling still covers it.
 - **The ELF→rxe converter** `tairix_itest_harness::elf2rxe::elf_to_rxe`

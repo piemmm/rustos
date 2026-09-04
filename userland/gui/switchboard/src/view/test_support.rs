@@ -148,7 +148,7 @@ pub(super) fn fault_crash() -> CrashSnapshot {
     CrashSnapshot {
         cause: alloc::string::String::from("outside every mapping the task owns"),
         location: alloc::string::String::from("8 bytes into the null page"),
-        write: true,
+        access: alloc::string::String::from("write"),
         owner: alloc::string::String::from("uid 1000, gid 1000"),
         pc: alloc::string::String::from("0x0000000000401234 (program-relative)"),
         sp: alloc::string::String::from("0x00007ffe0000f000"),

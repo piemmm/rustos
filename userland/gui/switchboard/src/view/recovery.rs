@@ -147,8 +147,9 @@ pub struct CrashSnapshot {
     pub cause: String,
     /// Where the faulting address sat, and how far from its anchor.
     pub location: String,
-    /// Whether the refused access was a write.
-    pub write: bool,
+    /// What the CPU was doing: a read, a write, or an instruction it
+    /// refused outright (which touched no data address).
+    pub access: String,
     /// The owning user and group at crash time.
     pub owner: String,
     /// The faulting program counter, noting whether it is
@@ -756,10 +757,7 @@ fn crash_facts(item: &RecoveryItem) -> Option<FactList> {
     let mut facts = alloc::vec![
         Fact::new("Cause", crash.cause.clone()),
         Fact::new("Address", crash.location.clone()),
-        Fact::new(
-            "Access",
-            String::from(if crash.write { "write" } else { "read" })
-        ),
+        Fact::new("Access", crash.access.clone()),
         Fact::new("Owner", crash.owner.clone()),
         Fact::new("pc", crash.pc.clone()),
         Fact::new("sp", crash.sp.clone()),

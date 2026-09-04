@@ -45,9 +45,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use build_support::{
-    format_grouped_hex, is_freestanding, kernel_isa, linker_script_for, GROUPED_HEX_LEN,
-    KERNEL_DRIVER_SIGNING_SEED, SYSTEM_APP_SIGNING_SEED,
+    is_freestanding, kernel_isa, linker_script_for, KERNEL_DRIVER_SIGNING_SEED,
+    SYSTEM_APP_SIGNING_SEED,
 };
+use tairix_itest_harness::program_fixture::{format_grouped_hex, GROUPED_HEX_LEN};
 use tairix_itest_harness::USER_IMAGE_BIAS;
 
 /// Rust target triple of the freestanding aarch64 (Raspberry Pi 4) build.
@@ -76,21 +77,6 @@ fn program_rustflags_var(target: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-/// Virtual base each spawned program (`Run`) image is mapped at when a
-/// production boot path builds it (`plans/PI.md` P6c-3 on aarch64, X3a on
-/// x86_64, RV-P3 on riscv64; `plans/SPAWN.md` `SP3b`).
-///
-/// 64 GiB — far above each boot path's identity map and within the per-arch
-/// user VA region (the 39-bit aarch64 TTBR0 / x86_64 / Sv39 windows) — so
-/// the program's pages land on freshly walked tables instead of colliding
-/// with an identity gigapage block. The spawn seam / producer passes the
-/// same bias to the build caller, and `elf_to_rxe` relocates the image for
-/// it, so the in-memory pointers match where the image is mapped. Each
-/// program lives in its **own** address space, so every program reuses this
-/// one bias. Mirrors the proven per-arch
-/// `spawn_program_qemu_*` fixtures' bias.
-const USER_BIAS: u64 = 0x10_0000_0000;
 
 /// One embedded `Run` program the boot path builds into an `rxe` image: the
 /// crate package, its `Run` bin, the generated fixture file name, and the
@@ -843,7 +829,7 @@ fn build_and_convert(
     tairix_itest_harness::elf2rxe::elf_to_rxe(
         &elf,
         &tairix_kernel_syscall::SYSCALL_TABLE_HASH,
-        USER_BIAS,
+        USER_IMAGE_BIAS,
     )
     .unwrap_or_else(|e| {
         panic!(
@@ -868,7 +854,7 @@ fn write_fixture(path: &Path, program: &Program, rxe: &[u8]) {
     let _ = writeln!(
         out,
         "pub const {prefix}_USER_BIAS: u64 = {};",
-        format_grouped_hex(USER_BIAS, &mut bias)
+        format_grouped_hex(USER_IMAGE_BIAS, &mut bias)
     );
     let _ = writeln!(
         out,

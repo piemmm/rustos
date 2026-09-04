@@ -116,14 +116,18 @@ safety linchpin the user-stack walk depends on; it is complete, host-tested,
 and fuzzed.
 
 Stage 1 landed: `AuditEvent::TaskFaultKilled` (id 4034) now carries the
-kernel-attested `name` + `proc_id`, the `write` (store vs load) flag, and a
+kernel-attested `name` + `proc_id`, the `access` kind (read / write /
+instruction-side), and a
 coarse, **non-leaking** `fault_offset` bucket (`null_page` /
-`below_stack_guard` / `region` / `wild`) with a region-relative
+`below_stack_guard` / `region` / `wild` / `no_data_address`) with a region-relative
 `region_offset` distance — never a raw user address. The leak-policy
 classification is the one `AddressSpaceRegistry::classify_fault_locality`
 definition (`FaultLocality`, `kernel/core/src/aspace.rs`), unit-tested for
-every bucket; the fault path threads `write` from `resolve_user_fault` and
-does the whole classification allocation-free on the dying task.
+every bucket; the fault path threads a `FaultAccess` from the port —
+`resolve_user_fault`'s data address and store verdict, or
+`terminate_user_fault`'s instruction-side kill, which has no data address
+and is therefore placed nowhere — and does the whole classification
+allocation-free on the dying task.
 
 Binding under `AGENTS.md`. Nothing here fixes a defect in the kernel; it
 enriches the diagnostics emitted when a user task is killed by an
@@ -183,7 +187,7 @@ hot paths). None of this does.
 
 | Addition | Running-app CPU cost | Prod image | Debug image | Other cost |
 |---|---|---|---|---|
-| Faulting `name` + `proc_id` + `write` + coarse `fault_offset` bucket | none (fault path only) | ✓ | ✓ | none |
+| Faulting `name` + `proc_id` + `access` + coarse `fault_offset` bucket | none (fault path only) | ✓ | ✓ | none |
 | User-stack fp backtrace (load-relative offsets) | none (fault path only) | ✓ | ✓ | frame pointers **already on** — none new |
 | Register snapshot in the crash record | none (read-only, at crash) | ✓ | ✓ | none |
 | On-target symbol names (`fn+0x40`) | none (crash path only) | ✗ | ✓ (`cfg!(debug_assertions)`) | image **size** |
@@ -224,9 +228,10 @@ so evolve it in place and update the asserting tests, never add a v2
 - `proc_id` — the CSPRNG-minted `ProcId` process-instance identity (also
   on the cap record via `CapTable::proc_id()`), so a crash stays
   correlatable across the log after the scheduler recycles the task id.
-- `write` — the `resolve_user_fault(fault_va, write)` flag, already in
-  hand and today thrown away. A wild **read** vs a wild **write** sharply
-  narrows the bug class.
+- `access` — `read` / `write` / `instruction`, from the `FaultAccess` the
+  port threads through the fault path. A wild **read**, a wild **write**,
+  and an instruction the CPU refused outright are sharply different bug
+  classes, and only the first two have a data address at all.
 - `fault_offset` — **not** the raw address. The offset of `fault_va`
   relative to the nearest region the task legitimately owns, or a coarse
   bucket when there is no nearby region:
@@ -239,16 +244,20 @@ so evolve it in place and update the asserting tests, never add a v2
     region") — the offset is region-relative, so it names *how far past*
     without publishing *where* the region lives.
   - `wild` — genuinely far from every mapping; no meaningful offset.
+  - `no_data_address` — an instruction-side kill: the faulting address is a
+    program counter, which has no relationship to the *data* mappings, so
+    there is nothing to place and no offset to report.
   The existing `fault_class` (`stack` / `stack_limit` / `file_region` /
-  `anon` / `wild`) stays; `fault_offset` refines it.
+  `anon` / `wild` / `instruction`) stays; `fault_offset` refines it.
 
-`name`, `proc_id`, `write`, and the coarse offset bucket are **program
+`name`, `proc_id`, `access`, and the coarse offset bucket are **program
 state, not secrets, and carry no address-space layout** (§19.4/§23.1), so
 they are safe on the shared log in every image.
 
-`record_fault_exit` currently threads only `fault_va`; it must also
-receive `write` from `resolve_user_fault` (a one-arg plumbing change on
-the one caller — no ABI creep). Keep the classification allocation-free
+`record_fault_exit` takes a `FaultAccess`, not a bare address: a refused
+data access carries its `va` and store verdict, and an instruction-side
+kill carries neither, so the record cannot describe a program counter
+against the task's data mappings. Keep the classification allocation-free
 and on the fault path only.
 
 ### Stage 2 — Register snapshot + user-stack backtrace (every image; symbols debug-only)
@@ -330,7 +339,7 @@ elsh: <name>: killed by fault (wild write near null)
 ```
 
 The breadcrumb carries the cause **class** only (from Stage 1's
-`fault_class` + `write` + coarse offset bucket) — **never** an address, a
+`fault_class` + `access` + coarse offset bucket) — **never** an address, a
 register, a secret, or a capability token (§23.1). Where no terminal
 consumer exists (a daemon / detached session), the observing component
 records the termination through `lib/log` instead, best-effort on both
@@ -362,9 +371,9 @@ capability gate).
 ## Deliverables (staged; each complete, no no-ops, no stubs)
 
 - **Stage 1** (`kernel/core/src/syscalls.rs`, `kernel/core/src/audit.rs`):
-  thread `write` into `record_fault_exit`; look up `name`/`proc_id` via
-  `CapTable`; compute the coarse `fault_offset` bucket; add the
-  `name` / `proc_id` / `write` / `fault_offset` fields to
+  thread the `FaultAccess` into `record_fault_exit`; look up
+  `name`/`proc_id` via `CapTable`; compute the coarse `fault_offset`
+  bucket; add the `name` / `proc_id` / `access` / `fault_offset` fields to
   `AuditEvent::TaskFaultKilled`. Update the `record_fault_exit` rustdoc
   and the audit-event doc page.
 - **Stage 2** (`lib/abi/src/sysinfo.rs`, `kernel/arch/api/src/backtrace.rs`,

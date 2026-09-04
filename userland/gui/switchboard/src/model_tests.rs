@@ -2409,8 +2409,43 @@ fn a_faults_crash_record_is_matched_by_process_identity() {
     assert_eq!(crash.registers.len(), 1);
     assert_eq!(crash.registers[0].0, "x0");
     assert_eq!(crash.registers[0].1, 0xdead_beef);
-    assert!(crash.write, "the record's write bit must survive the join");
+    assert_eq!(
+        crash.access, "write",
+        "the record's access direction must survive the join"
+    );
     assert!(crash.location.contains("null page"), "{}", crash.location);
+}
+
+/// An instruction-side kill reads as one: it names no data location and is
+/// never rendered as a read, which is what a bare write bit would have
+/// made of it.
+#[test]
+fn an_instruction_side_crash_names_no_data_location() {
+    let process = stopped(7);
+    let proc_id = process.proc_id;
+    let mut record = crash_for(proc_id, 7);
+    record.fault_class = CrashFaultClass::Instruction;
+    record.fault_bucket = CrashFaultBucket::NoDataAddress;
+    record.fault_offset = 0;
+    record.flags &= !tairix_abi::sysinfo::CRASH_FLAG_WRITE;
+    let sample = Sample {
+        processes: alloc::vec![process],
+        crashes: Some(alloc::vec![record]),
+        ..Sample::default()
+    };
+    let meters = meters_for(&sample);
+    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
+    let crash = built.model.recovery[0]
+        .crash
+        .as_ref()
+        .expect("the sampled crash record belongs to this fault");
+    assert_eq!(crash.access, "instruction (no data access)");
+    assert!(crash.cause.contains("instruction"), "{}", crash.cause);
+    assert!(
+        crash.location.contains("no data address"),
+        "{}",
+        crash.location
+    );
 }
 
 #[test]

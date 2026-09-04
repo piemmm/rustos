@@ -125,7 +125,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::aspace::{AddressSpaceRegistry, FaultLocality, FileRegion, OpenBacking};
+use crate::aspace::{AddressSpaceRegistry, FaultAccess, FaultLocality, FileRegion, OpenBacking};
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 use crate::console::{ConsoleDevice, NO_CONSOLES};
@@ -1947,29 +1947,32 @@ where
     ///   faulting task's own capability record (never caller-supplied), so
     ///   a crash names *which* program and stays correlatable after the
     ///   scheduler recycles the reusable task id.
-    /// * `write` — whether the fatal access was a store (`true`) or a load
-    ///   (`false`); a wild write and a wild read are sharply different bug
-    ///   classes.
-    /// * `fault_class` — a coarse class of *why* the resolver refused the
-    ///   access: `stack_limit` (stack growth refused because the task's
+    /// * `access` — `read`, `write`, or `instruction`; a wild write, a wild
+    ///   read, and an instruction the CPU refused outright are sharply
+    ///   different bug classes.
+    /// * `fault_class` — a coarse class of *why* the access was refused:
+    ///   `stack_limit` (stack growth refused because the task's
     ///   `StackBytes` soft bound is exhausted), `stack` (growth room the
     ///   resolver could not back, e.g. frame exhaustion), `file_region` (a
     ///   miss inside a live file mapping the resolver refused, e.g. past
     ///   end-of-file), `anon` (a miss inside a reserved anonymous region),
-    ///   or `wild` (outside every mapping).
+    ///   `wild` (outside every mapping), or `instruction` (the instruction
+    ///   itself was unexecutable, so no data address was involved).
     /// * `fault_offset` — a coarse, **non-leaking** locality bucket
     ///   ([`crate::aspace::FaultLocality`]): `null_page` (a null-pointer
     ///   dereference), `below_stack_guard` (an overflow past the stack
     ///   guard), `region` (a bounded run past the end of an owned mapping),
-    ///   or `wild`. When the bucket carries a distance, `region_offset`
-    ///   holds that value — a *distance* from a fixed anchor (virtual
-    ///   address 0, the stack guard, a region end), **never** an absolute
-    ///   virtual address, so the log never becomes an address-space-layout
-    ///   oracle.
+    ///   `wild`, or `no_data_address` (an instruction-side kill, which has
+    ///   no data address to place). When the bucket carries a distance,
+    ///   `region_offset` holds that value — a *distance* from a fixed anchor
+    ///   (virtual address 0, the stack guard, a region end), **never** an
+    ///   absolute virtual address, so the log never becomes an
+    ///   address-space-layout oracle.
     ///
-    /// `write` is threaded from the resolver (`resolve_user_fault`); the
-    /// classification is allocation-free and runs only on the fault path of
-    /// a task that will never execute another instruction.
+    /// `access` is threaded from the port through the resolver
+    /// (`resolve_user_fault`) or the terminator (`terminate_user_fault`);
+    /// the classification is allocation-free and runs only on the fault path
+    /// of a task that will never execute another instruction.
     ///
     /// `regs` is the faulting *user* register frame the architecture port
     /// captured at trap entry, or `None` on a port that does not (yet) save
@@ -1991,8 +1994,7 @@ where
         &self,
         process: ProcessId,
         thread: SecTaskId,
-        fault_va: u64,
-        write: bool,
+        access: FaultAccess,
         regs: Option<&UserRegisterFrame>,
     ) {
         // The crash record's backtrace, filled allocation-free on the stack:
@@ -2006,28 +2008,38 @@ where
 
         let (fault_class, locality) = {
             let aspaces = self.aspaces.read();
-            let growth_span = aspaces
-                .stack_span(thread)
-                .filter(|span| span.in_growth_room(fault_va));
-            let fault_class = if let Some(span) = growth_span {
-                let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
-                let soft = aspaces.limits(process).get(LimitKind::StackBytes).soft;
-                if span.top() - page_va > soft {
-                    "stack_limit"
-                } else {
-                    "stack"
+            // An instruction-side kill refused the instruction, not an
+            // access to data, so none of the data-mapping probes below say
+            // anything about it: they would classify wherever the program's
+            // text happens to sit.
+            let fault_class = match access {
+                FaultAccess::Instruction => "instruction",
+                FaultAccess::Data { va, .. } => {
+                    let growth_span = aspaces
+                        .stack_span(thread)
+                        .filter(|span| span.in_growth_room(va));
+                    if let Some(span) = growth_span {
+                        let page_va = va & !(PAGE_SIZE as u64 - 1);
+                        let soft = aspaces.limits(process).get(LimitKind::StackBytes).soft;
+                        if span.top() - page_va > soft {
+                            "stack_limit"
+                        } else {
+                            "stack"
+                        }
+                    } else if aspaces.file_region_covering(process, va).is_some() {
+                        "file_region"
+                    } else if aspaces.anon_region_covering(process, va) {
+                        // A miss inside a reserved anonymous region the
+                        // resolver could not back (e.g. frame exhaustion) —
+                        // deterministic OOM fatal to this task alone,
+                        // distinct from a wild access.
+                        "anon"
+                    } else {
+                        "wild"
+                    }
                 }
-            } else if aspaces.file_region_covering(process, fault_va).is_some() {
-                "file_region"
-            } else if aspaces.anon_region_covering(process, fault_va) {
-                // A miss inside a reserved anonymous region the resolver
-                // could not back (e.g. frame exhaustion) — deterministic OOM
-                // fatal to this task alone, distinct from a wild access.
-                "anon"
-            } else {
-                "wild"
             };
-            let locality = aspaces.classify_fault_locality(process, thread, fault_va);
+            let locality = aspaces.classify_fault_locality(process, thread, access);
 
             // Build the crash-record backtrace from the captured user frame.
             // The PIE load base makes code addresses load-relative; a task
@@ -2096,8 +2108,12 @@ where
                     value: tairix_log::FieldValue::Str(proc_id_str),
                 },
                 Field {
-                    key: "write",
-                    value: tairix_log::FieldValue::Bool(write),
+                    key: "access",
+                    value: tairix_log::FieldValue::Str(match access {
+                        FaultAccess::Data { write: true, .. } => "write",
+                        FaultAccess::Data { write: false, .. } => "read",
+                        FaultAccess::Instruction => "instruction",
+                    }),
                 },
                 Field {
                     key: "fault_class",
@@ -2138,7 +2154,7 @@ where
                 process.0,
                 uid,
                 gid,
-                write,
+                matches!(access, FaultAccess::Data { write: true, .. }),
                 class,
                 bucket,
                 fault_offset,
@@ -4368,7 +4384,7 @@ const FAULT_EXIT_CODE: i32 = 139;
 /// One definition for both the human audit strings and the machine crash
 /// record, so the two views of a crash's cause can never diverge. An
 /// unrecognised class string is impossible (the fault path produces exactly
-/// the five below), but maps to [`CrashFaultClass::Wild`] rather than
+/// the six below), but maps to [`CrashFaultClass::Wild`] rather than
 /// panicking — fail closed.
 fn crash_cause_codes(
     fault_class: &str,
@@ -4379,6 +4395,7 @@ fn crash_cause_codes(
         "stack_limit" => CrashFaultClass::StackLimit,
         "file_region" => CrashFaultClass::FileRegion,
         "anon" => CrashFaultClass::Anon,
+        "instruction" => CrashFaultClass::Instruction,
         _ => CrashFaultClass::Wild,
     };
     let (bucket, offset) = match locality {
@@ -4391,6 +4408,9 @@ fn crash_cause_codes(
         // `in_region`, carrying no offset — never the misleading `wild`.
         FaultLocality::InRegion => (CrashFaultBucket::InRegion, 0),
         FaultLocality::Wild => (CrashFaultBucket::Wild, 0),
+        // An instruction-side kill: no data address, so no distance and no
+        // data-relative bucket to name.
+        FaultLocality::NoDataAddress => (CrashFaultBucket::NoDataAddress, 0),
     };
     (class, bucket, offset)
 }
@@ -12067,8 +12087,15 @@ where
         match self.handlers.resolve_ramzip_fault(process, fault_va) {
             RamzipFaultOutcome::Handled => return UserFaultOutcome::Resolved,
             RamzipFaultOutcome::Fatal(_) => {
-                self.handlers
-                    .record_fault_exit(process, thread, fault_va, write, regs);
+                self.handlers.record_fault_exit(
+                    process,
+                    thread,
+                    FaultAccess::Data {
+                        va: fault_va,
+                        write,
+                    },
+                    regs,
+                );
                 return UserFaultOutcome::Terminated { cpu };
             }
             // NoEntry (and any future non-restoring outcome): fall through.
@@ -12110,8 +12137,15 @@ where
             crate::watchdog::KernelBreadcrumb::FaultFatal,
             fault_va,
         );
-        self.handlers
-            .record_fault_exit(process, thread, fault_va, write, regs);
+        self.handlers.record_fault_exit(
+            process,
+            thread,
+            FaultAccess::Data {
+                va: fault_va,
+                write,
+            },
+            regs,
+        );
         UserFaultOutcome::Terminated { cpu }
     }
 
@@ -12137,21 +12171,22 @@ where
             return UserFaultOutcome::Unhandled;
         };
         // No resolution is attempted: the instruction is unrecoverable (an
-        // illegal/unallocated encoding, an alignment fault, a store to a
+        // illegal/unallocated encoding, an alignment fault, a fetch from a
         // non-executable page), so retrying it would re-take the exception
-        // forever. Record the crash exit (with the `fault_pc`-relative
-        // backtrace from `regs`) and reclaim the task exactly as the fatal
-        // branch of `resolve_user_fault` does, then hand the port the CPU to
-        // suspend the task on. `write` is `false`: this is an
-        // instruction-side fault, not a store — the audit record's direction
-        // reflects that.
+        // forever. Record the crash exit (with the backtrace from `regs`,
+        // whose `pc` is this `fault_pc`) and reclaim the task exactly as the
+        // fatal branch of `resolve_user_fault` does, then hand the port the
+        // CPU to suspend the task on. The access is instruction-side, so
+        // the record describes no data address: `fault_pc` is a program
+        // counter, and measuring it against the task's data mappings would
+        // report where its text sits as a stack overrun.
         crate::watchdog::note_kernel_breadcrumb(
             cpu,
             crate::watchdog::KernelBreadcrumb::FaultFatal,
             fault_pc,
         );
         self.handlers
-            .record_fault_exit(process, thread, fault_pc, false, regs);
+            .record_fault_exit(process, thread, FaultAccess::Instruction, regs);
         UserFaultOutcome::Terminated { cpu }
     }
 }
@@ -12262,6 +12297,7 @@ mod tests {
     use alloc::sync::Arc;
     use tairix_abi::input::{KeyValue, Modifiers};
     use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_abi::sysinfo::CrashAccess;
     use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT, THREAD_STACK_DEFAULT};
     use tairix_caps::CapabilitySet;
     use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
@@ -22957,8 +22993,24 @@ mod tests {
         // A refused read miss inside the live region (the empty file reads
         // as zero bytes, so the page is past end-of-file), then a wild
         // write.
-        h.record_fault_exit(ProcessId(2), SecTaskId(2), base, false, None);
-        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x9999_0000, true, None);
+        h.record_fault_exit(
+            ProcessId(2),
+            SecTaskId(2),
+            FaultAccess::Data {
+                va: base,
+                write: false,
+            },
+            None,
+        );
+        h.record_fault_exit(
+            ProcessId(2),
+            SecTaskId(2),
+            FaultAccess::Data {
+                va: 0x9999_0000,
+                write: true,
+            },
+            None,
+        );
         let kills: Vec<_> = sink
             .snapshot()
             .into_iter()
@@ -22979,13 +23031,13 @@ mod tests {
         // The read miss and the wild write are distinguished.
         assert!(kills[0]
             .fields
-            .contains(&(String::from("write"), String::from("false"))));
+            .contains(&(String::from("access"), String::from("read"))));
         assert!(kills[0]
             .fields
             .contains(&(String::from("fault_class"), String::from("file_region"))));
         assert!(kills[1]
             .fields
-            .contains(&(String::from("write"), String::from("true"))));
+            .contains(&(String::from("access"), String::from("write"))));
         assert!(kills[1]
             .fields
             .contains(&(String::from("fault_class"), String::from("wild"))));
@@ -23019,6 +23071,56 @@ mod tests {
         }
     }
 
+    /// The scaffold every `record_fault_exit` test needs: a live audit sink,
+    /// scheduler, capability table, address-space registry and crash store,
+    /// with the handlers wired over them.
+    ///
+    /// Leaked `'static` in the same style as [`stack_fault_fixture`], so a
+    /// test can hold every part while the handlers borrow them.
+    fn crash_fixture() -> (
+        &'static TestSink,
+        &'static RwLock<CapTable>,
+        &'static RwLock<AddressSpaceRegistry>,
+        &'static crate::crash::CrashStore,
+        KernelSyscallHandlers<'static, TestArch>,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let crashes: &'static crate::crash::CrashStore =
+            Box::leak(Box::new(crate::crash::CrashStore::new()));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_crashes(crashes);
+        (sink, table, aspaces, crashes, h)
+    }
+
+    /// Admit a named, identifiable capability record for `task`, so a
+    /// fault-kill reads its identity from the task's own record.
+    ///
+    /// One live record per kill: a fault-kill reclaims the faulting task's
+    /// record, so a second kill in the same test needs a second task.
+    fn admit_crasher(
+        table: &RwLock<CapTable>,
+        sink: &'static TestSink,
+        task: u64,
+        name: &[u8],
+        proc_id: u8,
+    ) {
+        table.write().insert(
+            make_caps_record(task, &[], sink)
+                .with_name(tairix_kernel_sec::ProcName::from_bytes_truncating(name))
+                .with_proc_id(ProcId::from_raw([proc_id; PROC_ID_LEN])),
+        );
+    }
+
     /// The crash record surfaces the faulting task's kernel-attested
     /// identity (name + process id) and a coarse, non-leaking
     /// `fault_offset`: a `null_page` bucket for a null-pointer dereference
@@ -23026,29 +23128,9 @@ mod tests {
     /// mapping — while never emitting the raw faulting address.
     #[test]
     fn record_fault_exit_records_identity_cause_and_offset() {
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-
-        // A `CapTable` record per crashing task, named and with a distinct
-        // process-instance id, so each record can be asserted. Two tasks:
-        // a fault-kill reclaims the task's own capability record (a task
-        // never faults twice), so each classification needs its own live
-        // record — exactly as the sibling stack test does.
-        let table = RwLock::new(CapTable::new());
+        let (sink, table, aspaces, _crashes, h) = crash_fixture();
         for task in [2u64, 3] {
-            let record = make_caps_record(task, &[], sink)
-                .with_name(tairix_kernel_sec::ProcName::from_bytes_truncating(
-                    b"crasher",
-                ))
-                .with_proc_id(ProcId::from_raw([0xAB; PROC_ID_LEN]));
-            table.write().insert(record);
+            admit_crasher(table, sink, task, b"crasher", 0xAB);
         }
 
         // A file region [0x0F00_0000, 0x0F00_1000) owned by task 3: a small
@@ -23066,15 +23148,27 @@ mod tests {
             },
         );
 
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
-
         // Task 2: a null-pointer write. Task 3: a bounded read run 0x40
         // past its region's end.
         let region_end = region_base + PAGE_SIZE as u64;
-        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x18, true, None);
-        h.record_fault_exit(ProcessId(3), SecTaskId(3), region_end + 0x40, false, None);
+        h.record_fault_exit(
+            ProcessId(2),
+            SecTaskId(2),
+            FaultAccess::Data {
+                va: 0x18,
+                write: true,
+            },
+            None,
+        );
+        h.record_fault_exit(
+            ProcessId(3),
+            SecTaskId(3),
+            FaultAccess::Data {
+                va: region_end + 0x40,
+                write: false,
+            },
+            None,
+        );
 
         let kills: Vec<_> = sink
             .snapshot()
@@ -23100,7 +23194,7 @@ mod tests {
         // Null-pointer write: null_page, write=true, offset from VA 0.
         assert!(kills[0]
             .fields
-            .contains(&(String::from("write"), String::from("true"))));
+            .contains(&(String::from("access"), String::from("write"))));
         assert!(kills[0]
             .fields
             .contains(&(String::from("fault_offset"), String::from("null_page"))));
@@ -23111,7 +23205,7 @@ mod tests {
         // Bounded run past the region: region bucket, distance 0x40 (64).
         assert!(kills[1]
             .fields
-            .contains(&(String::from("write"), String::from("false"))));
+            .contains(&(String::from("access"), String::from("read"))));
         assert!(kills[1]
             .fields
             .contains(&(String::from("fault_offset"), String::from("region"))));
@@ -23141,6 +23235,103 @@ mod tests {
         }
     }
 
+    /// An instruction-side kill is described as one, and a data access at
+    /// the very same address keeps its data-relative description.
+    ///
+    /// The two kills below run against identical registry state, so the
+    /// data kill's `below_stack_guard`/distance is exactly the record the
+    /// instruction-side kill must not get: its address is a program
+    /// counter, and a program's text legitimately sits under its stack, so
+    /// a data-relative reading would report every illegal instruction as a
+    /// stack overrun. Both the audit record and the capability-gated crash
+    /// record are pinned on each side.
+    #[test]
+    fn record_fault_exit_distinguishes_an_instruction_kill_from_a_data_access() {
+        let (sink, table, aspaces, store, h) = crash_fixture();
+        for task in [2u64, 3] {
+            admit_crasher(table, sink, task, b"crasher", 0xAB);
+        }
+
+        // A stack span for each task, and an address a little below the
+        // reserve base — where a program's text plausibly sits.
+        let span =
+            crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
+                .expect("well-formed");
+        for task in [2u64, 3] {
+            aspaces
+                .write()
+                .set_stack_span(ProcessId(task), SecTaskId(task), span);
+        }
+        let text_like = STACK_RESERVE_BASE - 0x40;
+
+        // Task 2: an instruction the CPU refused, whose pc is `text_like`.
+        h.record_fault_exit(ProcessId(2), SecTaskId(2), FaultAccess::Instruction, None);
+        let instruction_crash = store.latest().expect("a crash record was stored");
+        // Task 3: a genuine data read of that same address.
+        h.record_fault_exit(
+            ProcessId(3),
+            SecTaskId(3),
+            FaultAccess::Data {
+                va: text_like,
+                write: false,
+            },
+            None,
+        );
+        let data_crash = store.latest().expect("a crash record was stored");
+
+        let kills: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::TaskFaultKilled.id())
+            .collect();
+        assert_eq!(kills.len(), 2);
+
+        // The instruction-side kill names an instruction-side cause, no
+        // data-relative bucket, and no distance at all.
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("access"), String::from("instruction"))));
+        assert!(kills[0]
+            .fields
+            .contains(&(String::from("fault_class"), String::from("instruction"))));
+        assert!(kills[0].fields.contains(&(
+            String::from("fault_offset"),
+            String::from("no_data_address")
+        )));
+        assert!(
+            kills[0].fields.iter().all(|(k, _)| k != "region_offset"),
+            "an instruction-side kill has no distance to report"
+        );
+        assert_eq!(
+            instruction_crash.access(),
+            CrashAccess::Instruction,
+            "an instruction-side kill is not a load"
+        );
+        assert_eq!(instruction_crash.fault_class, CrashFaultClass::Instruction);
+        assert_eq!(
+            instruction_crash.fault_bucket,
+            CrashFaultBucket::NoDataAddress
+        );
+        assert_eq!(instruction_crash.fault_offset, 0);
+
+        // The data access at that same address keeps its honest
+        // data-relative description — the reading the instruction-side kill
+        // was fabricating.
+        assert!(kills[1]
+            .fields
+            .contains(&(String::from("access"), String::from("read"))));
+        assert!(kills[1].fields.contains(&(
+            String::from("fault_offset"),
+            String::from("below_stack_guard")
+        )));
+        assert!(kills[1]
+            .fields
+            .contains(&(String::from("region_offset"), String::from("64"))));
+        assert_eq!(data_crash.access(), CrashAccess::Read);
+        assert_eq!(data_crash.fault_bucket, CrashFaultBucket::BelowStackGuard);
+        assert_eq!(data_crash.fault_offset, 0x40);
+    }
+
     /// The capability-gated crash record captures the faulting register
     /// snapshot with a **load-relative** program counter, while the shared
     /// audit log still carries no absolute register value. With
@@ -23150,32 +23341,10 @@ mod tests {
     #[test]
     fn record_fault_exit_captures_a_load_relative_register_snapshot() {
         use tairix_arch_api::backtrace::{FrameLayout, RegisterSnapshot};
-        install_trace_filter();
-        let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let sched = make_sched(arch.clone());
-        let ipc = RwLock::new(PortRegistry::new());
-        let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let rng = unseeded_rng();
-        let irq = IrqTable::new(31);
-        let ctl = UnsupportedController;
-
-        let table = RwLock::new(CapTable::new());
-        let record = make_caps_record(2, &[], sink)
-            .with_name(tairix_kernel_sec::ProcName::from_bytes_truncating(
-                b"crasher",
-            ))
-            .with_proc_id(ProcId::from_raw([0xCD; PROC_ID_LEN]));
-        table.write().insert(record);
+        let (sink, table, aspaces, store, h) = crash_fixture();
+        admit_crasher(table, sink, 2, b"crasher", 0xCD);
         // A known PIE load base so the faulting pc resolves load-relative.
         aspaces.write().set_load_base(ProcessId(2), 0x1000);
-
-        let store: &'static crate::crash::CrashStore =
-            Box::leak(Box::new(crate::crash::CrashStore::new()));
-        let h = KernelSyscallHandlers::new(
-            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        )
-        .with_crashes(store);
 
         let layout = FrameLayout {
             saved_fp_offset: 0,
@@ -23186,12 +23355,20 @@ mod tests {
             .with("x1", 0xBB);
         let frame = UserRegisterFrame::new(snapshot, layout, false);
         // A null-pointer write with the captured (fp-less) register frame.
-        h.record_fault_exit(ProcessId(2), SecTaskId(2), 0x18, true, Some(&frame));
+        h.record_fault_exit(
+            ProcessId(2),
+            SecTaskId(2),
+            FaultAccess::Data {
+                va: 0x18,
+                write: true,
+            },
+            Some(&frame),
+        );
 
         let crash = store.latest().expect("a crash record was stored");
         assert_eq!(crash.pid, 2);
         assert_eq!(crash.name_bytes(), b"crasher");
-        assert!(crash.is_write());
+        assert_eq!(crash.access(), CrashAccess::Write);
         assert!(crash.load_base_known());
         assert!(!crash.fp_valid());
         assert_eq!(crash.fault_class, CrashFaultClass::Wild);
@@ -23236,24 +23413,21 @@ mod tests {
         }
 
         // Without a recorded load base the pc stays absolute — an honest
-        // degradation still behind the same capability gate.
-        let table2 = RwLock::new(CapTable::new());
-        let record2 = make_caps_record(4, &[], sink)
-            .with_name(tairix_kernel_sec::ProcName::from_bytes_truncating(
-                b"nobase",
-            ))
-            .with_proc_id(ProcId::from_raw([0xEE; PROC_ID_LEN]));
-        table2.write().insert(record2);
-        let aspaces2 = RwLock::new(AddressSpaceRegistry::new());
-        let store2: &'static crate::crash::CrashStore =
-            Box::leak(Box::new(crate::crash::CrashStore::new()));
-        let h2 = KernelSyscallHandlers::new(
-            &sched, &table2, &arch, sink, &irq, &ctl, &ipc, &aspaces2, &rng,
-        )
-        .with_crashes(store2);
+        // degradation still behind the same capability gate. A second
+        // fixture, because the first task's record is already reclaimed.
+        let (sink2, table2, _aspaces2, store2, h2) = crash_fixture();
+        admit_crasher(table2, sink2, 4, b"nobase", 0xEE);
         let snapshot2 = RegisterSnapshot::new(0x1040, 0, 0);
         let frame2 = UserRegisterFrame::new(snapshot2, layout, false);
-        h2.record_fault_exit(ProcessId(4), SecTaskId(4), 0x18, false, Some(&frame2));
+        h2.record_fault_exit(
+            ProcessId(4),
+            SecTaskId(4),
+            FaultAccess::Data {
+                va: 0x18,
+                write: false,
+            },
+            Some(&frame2),
+        );
         let crash2 = store2.latest().expect("stored");
         assert!(!crash2.load_base_known());
         assert_eq!(crash2.pc, 0x1040);
@@ -23669,24 +23843,30 @@ mod tests {
         h.record_fault_exit(
             ProcessId(2),
             SecTaskId(2),
-            STACK_COMMITTED_BASE - PAGE_SIZE as u64,
-            true,
+            FaultAccess::Data {
+                va: STACK_COMMITTED_BASE - PAGE_SIZE as u64,
+                write: true,
+            },
             None,
         );
         // Tightened bound (task 3): the same depth is past the limit.
         h.record_fault_exit(
             ProcessId(3),
             SecTaskId(3),
-            STACK_COMMITTED_BASE - PAGE_SIZE as u64,
-            true,
+            FaultAccess::Data {
+                va: STACK_COMMITTED_BASE - PAGE_SIZE as u64,
+                write: true,
+            },
             None,
         );
         // The guard page below the span is outside every mapping (task 4).
         h.record_fault_exit(
             ProcessId(4),
             SecTaskId(4),
-            STACK_RESERVE_BASE - 1,
-            true,
+            FaultAccess::Data {
+                va: STACK_RESERVE_BASE - 1,
+                write: true,
+            },
             None,
         );
         let kills: Vec<_> = sink
@@ -23724,7 +23904,7 @@ mod tests {
         for kill in &kills {
             assert!(kill.fields.iter().any(|(k, _)| k == "name"));
             assert!(kill.fields.iter().any(|(k, _)| k == "proc_id"));
-            assert!(kill.fields.iter().any(|(k, _)| k == "write"));
+            assert!(kill.fields.iter().any(|(k, _)| k == "access"));
             for (_, value) in &kill.fields {
                 for raw in raw_hits {
                     assert_ne!(

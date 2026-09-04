@@ -939,13 +939,13 @@ mod tests {
     use tairix_abi::sysinfo::{
         CacheLedgerListRequest, CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind,
         CacheReportRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
-        CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashRecord, CrashRecordRequest,
-        DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals, HardwareTreeRequest,
-        IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand,
-        MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
-        MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, RaidListRequest,
-        RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        CpuTimeRecord, CrashAccess, CrashFaultBucket, CrashFaultClass, CrashRecord,
+        CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals,
+        HardwareTreeRequest, IrqListRequest, IrqRecord, KernelMemoryStats, LoadAverage,
+        MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest,
+        MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState,
+        RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+        SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoHealthRequest,
         IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES,
         RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY,
@@ -2983,7 +2983,7 @@ mod tests {
         let second = CrashRecord::from_bytes(&resp[CrashRecord::WIRE_LEN..n]).unwrap();
         assert_eq!(first.pid, 2);
         assert_eq!(first.name_bytes(), b"crasher");
-        assert!(first.is_write());
+        assert_eq!(first.access(), CrashAccess::Write);
         assert!(first.load_base_known());
         assert_eq!(first.pc, 0x40);
         assert_eq!(first.frames(), &[0x40, 0x120]);

@@ -27,8 +27,8 @@ through the audit sink. Its fields:
 | `task`          | The reusable scheduler id of the killed task.                  |
 | `name`          | The task's kernel-attested executable basename — *which* program crashed. Never caller-supplied bytes. |
 | `proc_id`       | The CSPRNG-minted process-instance identity, so the crash stays correlatable across the log after the scheduler recycles the `task` id. |
-| `write`         | `true` if the fatal access was a store, `false` if a load — a wild write and a wild read are sharply different bug classes. |
-| `fault_class`   | A coarse class of *why* the resolver refused the access (below). |
+| `access`        | `read`, `write`, or `instruction` — a wild read, a wild write, and an instruction the CPU refused outright are sharply different bug classes. |
+| `fault_class`   | A coarse class of *why* the access was refused (below).        |
 | `fault_offset`  | A coarse, non-leaking locality bucket (below).                 |
 | `region_offset` | Present only when `fault_offset` carries a distance: the *distance* from a fixed anchor, never an absolute address. |
 
@@ -43,6 +43,9 @@ through the audit sink. Its fields:
 - `anon` — a miss inside a reserved anonymous region the resolver could
   not back (deterministic OOM fatal to the task alone).
 - `wild` — an address outside every mapping the task owns.
+- `instruction` — the CPU refused the instruction itself (an illegal or
+  privileged encoding, a misaligned program counter, a fetch from a
+  non-executable page), so no data address was involved at all.
 
 `fault_offset` refines `fault_class` with *where*, without publishing the
 address:
@@ -56,6 +59,13 @@ address:
   end.
 - `wild` — genuinely far from every mapping; no meaningful offset, so no
   `region_offset` is emitted.
+- `no_data_address` — the kill was instruction-side, so there is no data
+  address to place and no `region_offset` is emitted. The faulting address
+  is a *program counter*, and a program's text legitimately sits below its
+  own stack: measuring a pc against the data mappings would report every
+  illegal instruction as a stack overrun a few tens of kilobytes past the
+  guard. The `FaultAccess` the port threads through the fault path is what
+  keeps the two apart, so the record can never invent that reading.
 
 The locality classification is a single definition
 (`AddressSpaceRegistry::classify_fault_locality`), computed
@@ -70,7 +80,7 @@ process that could read back the exact address of each fault would have an
 ASLR/layout oracle. Instead the log carries only:
 
 - the identity (`name`, `proc_id`) — program state, not layout;
-- the cause *class* (`fault_class`, `write`) — a bug class, not an address;
+- the cause *class* (`fault_class`, `access`) — a bug class, not an address;
 - a coarse locality (`fault_offset`) and, at most, a *distance from a fixed
   anchor* (`region_offset`) — how far past a region's end / below the
   guard / from address 0, never *where* the region, guard, or task lives.
@@ -85,8 +95,8 @@ user addresses because the process (and its peers) keep running.
 Everything above runs **only** on a task that is already dying — inside the
 fault resolver, on a task that will never execute another instruction. A
 living program pays nothing: the kernel reads facts it already holds
-(`name`/`proc_id` from the task's capability record, `write` from the
-resolver, the mapping tables it already maintains) and classifies the
+(`name`/`proc_id` from the task's capability record, the access kind from
+the port, the mapping tables it already maintains) and classifies the
 locality with a handful of comparisons. There is no change to how running
 programs are built or scheduled, and no work on any hot path (syscall
 dispatch, the capability check, the scheduler, the allocator). The record
@@ -107,7 +117,10 @@ Each `CrashRecord` carries:
 
 - the faulting identity (`proc_id`, numeric `pid`, `name`, `uid`, `gid`);
 - the cause codes (`fault_class`, `fault_bucket`, and the same non-leaking
-  `fault_offset` distance the audit record uses, plus the `write` flag);
+  `fault_offset` distance the audit record uses, plus the access direction —
+  read, write, or instruction-side — which is derived from the class through
+  `CrashRecord::access`, so no reader can render an instruction-side kill as
+  a load);
 - the faulting **program counter** and a **frame-pointer backtrace**, each
   expressed as a **load-relative offset** from the task's PIE load base
   (recorded per task by the spawn path) when the base is known — never an

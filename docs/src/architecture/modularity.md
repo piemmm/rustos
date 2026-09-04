@@ -428,6 +428,15 @@ names (`#[cfg(itest_x86_64)]`, `#[cfg(not(itest_x86_64))]`, …) rather
 than on `cfg(target_arch …, target_os = "none")`, so `cfg-check` scans
 the tree with no grandfather entry for it.
 
+The harness also owns the rest of each vertical's build glue, so a
+fixture's layout and its generated source have one definition rather than
+a copy per crate: `program_fixture::PROGRAM_LD` is the single PIE link
+script every fixture *program* links with, and `fixture_header` /
+`push_rxe_blob` / `write_fixture` emit the `USER_BIAS` + image-bytes
+source each vertical `include!`s. The bias they emit is the one
+`USER_IMAGE_BIAS` every `rxe` converter bakes relocations for, rendered as
+a grouped hex literal because generated source is linted like any other.
+
 That harness is a *build* dependency, so nothing it holds can be linked
 by a running test kernel. Logic the kernel bodies themselves share needs
 a second crate, `tests/integration/finisher`

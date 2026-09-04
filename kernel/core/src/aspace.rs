@@ -427,6 +427,29 @@ impl StackSpan {
 /// location.
 pub const NEAR_REGION_WINDOW: u64 = 64 * 1024;
 
+/// What the CPU was doing when a user fault became fatal.
+///
+/// A refused data access has an address whose relationship to the task's
+/// mappings is meaningful. An instruction-side kill does not: its address
+/// is a program counter, so measuring it against the *data* mappings would
+/// describe wherever the program's text happens to sit as a stack overrun
+/// or a run past a region. Carrying the distinction in the type is what
+/// stops the fault record fabricating one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultAccess {
+    /// A load (`write == false`) or store the resolver refused, at `va`.
+    Data {
+        /// The refused data address.
+        va: u64,
+        /// Whether the refused access was a store.
+        write: bool,
+    },
+    /// An instruction the CPU refused to execute — an illegal or
+    /// privileged encoding, a misaligned program counter, or a fetch from
+    /// a non-executable page. There is no data address.
+    Instruction,
+}
+
 /// Where a fatal user fault landed relative to the address space the task
 /// legitimately owns, as a coarse, non-leaking descriptor.
 ///
@@ -472,6 +495,11 @@ pub enum FaultLocality {
     /// Genuinely far from every mapping and from the null page — no
     /// meaningful offset to report.
     Wild,
+    /// The kill was instruction-side ([`FaultAccess::Instruction`]), so
+    /// there is no data address to place: the question this type answers
+    /// does not apply, and answering it anyway would invent a distance out
+    /// of where the program's text sits.
+    NoDataAddress,
 }
 
 impl FaultLocality {
@@ -484,6 +512,7 @@ impl FaultLocality {
             Self::PastRegion { .. } => "region",
             Self::InRegion => "in_region",
             Self::Wild => "wild",
+            Self::NoDataAddress => "no_data_address",
         }
     }
 
@@ -495,7 +524,7 @@ impl FaultLocality {
         match self {
             Self::NullPage { offset } | Self::PastRegion { offset } => Some(offset),
             Self::BelowStackGuard { distance } => Some(distance),
-            Self::InRegion | Self::Wild => None,
+            Self::InRegion | Self::Wild | Self::NoDataAddress => None,
         }
     }
 }
@@ -1707,8 +1736,8 @@ impl AddressSpaceRegistry {
         va < base + pages * PAGE_SIZE as u64
     }
 
-    /// Describe where the fatal fault at `va` landed relative to `task`'s
-    /// own address space, as the coarse, non-leaking [`FaultLocality`] the
+    /// Describe where the fatal `access` landed relative to `task`'s own
+    /// address space, as the coarse, non-leaking [`FaultLocality`] the
     /// fault-kill record carries.
     ///
     /// This is the sole place the diagnostics leak-policy is enforced for
@@ -1718,15 +1747,19 @@ impl AddressSpaceRegistry {
     /// never publishes address-space layout. Precedence is most-specific
     /// first — a null-page dereference, then a below-guard stack overflow,
     /// then a bounded run past an owned region's end, and finally a
-    /// genuinely wild access. Runs on the dying-task fault path (never a
+    /// genuinely wild access. An instruction-side kill has no data address
+    /// and is placed nowhere. Runs on the dying-task fault path (never a
     /// hot path) and allocates nothing.
     #[must_use]
     pub fn classify_fault_locality(
         &self,
         task: ProcessId,
         thread: TaskId,
-        va: u64,
+        access: FaultAccess,
     ) -> FaultLocality {
+        let FaultAccess::Data { va, .. } = access else {
+            return FaultLocality::NoDataAddress;
+        };
         // A dereference through (or near) a null pointer: the offset from
         // virtual address 0 reveals nothing about layout.
         if va < PAGE_SIZE as u64 {
@@ -3550,6 +3583,38 @@ mod tests {
         );
         assert_eq!(FaultLocality::Wild.bucket(), "wild");
         assert_eq!(FaultLocality::Wild.offset(), None);
+        assert_eq!(FaultLocality::NoDataAddress.bucket(), "no_data_address");
+        assert_eq!(FaultLocality::NoDataAddress.offset(), None);
+    }
+
+    /// A refused data access at `va`. The locality classification ignores
+    /// the direction, so every data case below reads as a load.
+    const fn data_at(va: u64) -> FaultAccess {
+        FaultAccess::Data { va, write: false }
+    }
+
+    /// An instruction-side kill has no data address, so it is placed
+    /// nowhere — even when the task's own mappings would happily produce a
+    /// data-relative answer for the very same address. That fabricated
+    /// answer (a program counter read as a stack overrun, because the
+    /// program's text sits under its stack) is what this variant excludes.
+    #[test]
+    fn classify_fault_locality_places_an_instruction_kill_nowhere() {
+        let mut reg = AddressSpaceRegistry::new();
+        let reserve_base = 0x20_0000u64;
+        let span = StackSpan::new(reserve_base, reserve_base + 0x4000, reserve_base + 0x8000)
+            .expect("well-formed");
+        reg.set_stack_span(ProcessId(2), TaskId(2), span);
+        assert_eq!(
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), FaultAccess::Instruction),
+            FaultLocality::NoDataAddress
+        );
+        // The same registry, the same address, as a *data* access: this is
+        // the data-relative answer an instruction-side kill must not get.
+        assert_eq!(
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(reserve_base - 0x40)),
+            FaultLocality::BelowStackGuard { distance: 0x40 }
+        );
     }
 
     #[test]
@@ -3557,16 +3622,16 @@ mod tests {
         let reg = AddressSpaceRegistry::new();
         // Anywhere in the first page, offset measured from VA 0.
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0)),
             FaultLocality::NullPage { offset: 0 }
         );
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x18),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x18)),
             FaultLocality::NullPage { offset: 0x18 }
         );
         // The very first byte of the second page is no longer the null page.
         assert_ne!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), PAGE_SIZE as u64)
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(PAGE_SIZE as u64))
                 .bucket(),
             "null_page"
         );
@@ -3584,7 +3649,7 @@ mod tests {
         // A fault a little below the reserve base is an overflow that ran
         // past the guard page.
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), reserve_base - 0x40),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(reserve_base - 0x40)),
             FaultLocality::BelowStackGuard { distance: 0x40 }
         );
         // Far below the reserve base (past the window) is genuinely wild,
@@ -3593,7 +3658,7 @@ mod tests {
             reg.classify_fault_locality(
                 ProcessId(2),
                 TaskId(2),
-                reserve_base - (NEAR_REGION_WINDOW + PAGE_SIZE as u64)
+                data_at(reserve_base - (NEAR_REGION_WINDOW + PAGE_SIZE as u64))
             ),
             FaultLocality::Wild
         );
@@ -3606,12 +3671,12 @@ mod tests {
         // is reported as a region-relative offset, the region unnamed.
         reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_4000 + 0x40),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x10_4000 + 0x40)),
             FaultLocality::PastRegion { offset: 0x40 }
         );
         // One byte past the end is offset 0.
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_4000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x10_4000)),
             FaultLocality::PastRegion { offset: 0 }
         );
         // Far past the region (beyond the window) is wild.
@@ -3619,7 +3684,7 @@ mod tests {
             reg.classify_fault_locality(
                 ProcessId(2),
                 TaskId(2),
-                0x10_4000 + NEAR_REGION_WINDOW + 1
+                data_at(0x10_4000 + NEAR_REGION_WINDOW + 1)
             ),
             FaultLocality::Wild
         );
@@ -3628,7 +3693,7 @@ mod tests {
         // the locality is the honest `InRegion`, never the scaremongering
         // `wild` (which is reserved for addresses outside every mapping).
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x10_2000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x10_2000)),
             FaultLocality::InRegion
         );
     }
@@ -3641,7 +3706,7 @@ mod tests {
         // deterministic OOM, reported as `in_region` with no leaked offset —
         // not `wild`, which would falsely read as a stray pointer.
         reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
-        let locality = reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x20_2000);
+        let locality = reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x20_2000));
         assert_eq!(locality, FaultLocality::InRegion);
         assert_eq!(locality.bucket(), "in_region");
         assert_eq!(locality.offset(), None, "in-region OOM leaks no offset");
@@ -3656,7 +3721,7 @@ mod tests {
         reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000)); // end 0x104000
         reg.record_anon_region(ProcessId(2), 0x20_0000, 4); // end 0x204000
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x20_4000 + 0x10),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x20_4000 + 0x10)),
             FaultLocality::PastRegion { offset: 0x10 }
         );
     }
@@ -3665,7 +3730,7 @@ mod tests {
     fn classify_fault_locality_is_wild_with_no_regions() {
         let reg = AddressSpaceRegistry::new();
         assert_eq!(
-            reg.classify_fault_locality(ProcessId(2), TaskId(2), 0x9999_0000),
+            reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x9999_0000)),
             FaultLocality::Wild
         );
     }

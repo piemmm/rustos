@@ -71,9 +71,22 @@ and doc edit *first*, do no other work while it runs, and run `ci` exactly once
 on the final tree. An edit that becomes necessary mid-run means stopping the
 run, because its result would not describe the tree you report on.
 
-Fingerprint the tree either side of a gate run (`git status --porcelain |
-sha256sum`, `git diff | sha256sum`): other sessions may be live on this repo, and
-a mismatch tells you a failure was theirs, not yours. Never revert their work.
+Fingerprint the tree either side of a gate run: other sessions may be live on
+this repo, and a mismatch tells you a failure was theirs, not yours. Never
+revert their work.
+
+```sh
+{ git diff; git status --porcelain; \
+  git ls-files --others --exclude-standard -z | sort -z | xargs -0 cat; } \
+  | sha256sum
+```
+
+The untracked-file leg is not optional: `git diff` does not cover an untracked
+file at all, and `--porcelain` prints only the *directory* name for a new tree,
+so the shorter `status`+`diff` pair returns a byte-identical hash across a real
+source edit inside any newly added file or crate — silently certifying a stale
+gate result as describing the final tree.
+
 Timings and the per-phase breakdown live in `docs/src/contributing.md`.
 
 ## Before reporting done

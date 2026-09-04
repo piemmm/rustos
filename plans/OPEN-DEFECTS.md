@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 19 open, 68 closed, 87 total.
+table normalises all three to **closed**. 18 open, 69 closed, 87 total.
 
-### Open (19)
+### Open (18)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -45,9 +45,8 @@ table normalises all three to **closed**. 19 open, 68 closed, 87 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D87 | an instruction-side fault kill is audited against the task's *data* mappings | raised while closing D42/D86; shared, pre-existing on every port |
 
-### Closed (68)
+### Closed (69)
 
 | ID | Subject |
 |---|---|
@@ -119,6 +118,7 @@ table normalises all three to **closed**. 19 open, 68 closed, 87 total.
 | D84 | the sleeping mutex lost a contender that published after its release scan |
 | D42 | an x86_64 ring-3 wild jump halted the CPU instead of the task |
 | D86 | on x86_64 a ring-3 exception other than a page fault killed the machine |
+| D87 | an instruction-side fault kill is audited against the task's *data* mappings |
 
 ## Scope
 
@@ -5363,39 +5363,50 @@ the slot's set-once round-trip, the `Origin` table against the SDM, and
 
 ---
 
-## D87 — an instruction-side fault kill is audited against the task's *data* mappings (OPEN)
+## D87 — an instruction-side fault kill is audited against the task's *data* mappings — FIXED
 
-Raised while closing D42/D86, in shared code that predates both.
-`DispatchHook::terminate_user_fault` passes the offending **program
-counter** as `record_fault_exit`'s `fault_va`, and that function's whole
-job is to describe a *data* address's relationship to the task's mappings:
-`fault_class` asks whether the address is in stack growth room, a file
-region or an anonymous region, and `classify_fault_locality` measures its
-distance from the stack reserve base or the nearest region end.
+`record_fault_exit` took a bare faulting address, and
+`DispatchHook::terminate_user_fault` handed it the offending **program
+counter**. Everything downstream describes a *data* address's relationship
+to the task's mappings — `fault_class` asks whether it is in stack growth
+room, a file region or an anonymous region; `classify_fault_locality`
+measures its distance from the stack reserve base or the nearest region
+end — so a code address made the record fabricate one. The D42/D86
+vertical showed it plainly: a wild jump, a `ud2` and a `hlt` all audited
+`fault_class=wild fault_offset=below_stack_guard region_offset=~40400`,
+i.e. "a stack overrun 40 KB below the guard", purely because a program's
+text sits that far below its stack. The kill itself was always correct
+(right exit status, resources reclaimed, backtrace from the real `pc`);
+only the class/bucket/offset fields lied, in a security-relevant audit
+record. Pre-existing on every port — aarch64 and riscv64 have had the
+terminator since D39 — so x86_64 only made it visible.
 
-A code address has no such relationship, so the record fabricates one. The
-D42/D86 vertical shows it plainly: all three children — a wild jump, a
-`ud2`, a `hlt` — are audited `fault_class=wild fault_offset=below_stack_guard
-region_offset=40400`, i.e. "a stack overrun 40 KB below the guard", because
-the program's text happens to sit that far below its stack. The kill itself
-is correct (right exit status, resources reclaimed, backtrace recorded from
-the real `pc`); only the class/bucket/offset fields lie, and they lie in a
-security-relevant audit record.
+**The fix.** The access kind is now carried in the type the fault path
+threads, `aspace::FaultAccess`: `Data { va, write }` or `Instruction`,
+which has no address at all. `classify_fault_locality` therefore *cannot*
+be handed a program counter, and an instruction-side kill resolves to
+`FaultLocality::NoDataAddress` (audit `fault_offset=no_data_address`, no
+`region_offset`) with `fault_class=instruction` and `access=instruction` —
+replacing the old `write` boolean, which could only call an
+instruction-side kill a load. The crash-record vocabulary gained the
+matching `CrashFaultClass::Instruction` / `CrashFaultBucket::NoDataAddress`
+(`lib/abi/src/sysinfo.rs`), and the direction is now *derived* from the
+class by `CrashRecord::access` rather than read off the store flag, so no
+consumer can render an instruction-side kill as a read; `from_bytes`
+refuses a wire record that pairs the instruction class with a data
+locality or a store flag. All three ports route every instruction-side
+exception through `terminate_user_fault` already — x86_64's
+`is_user_data_fault` excludes the `#PF` I/D bit, and the aarch64 and
+riscv64 resolvers only see load/store aborts — so each gets the honest
+record from the one shared path with no per-port change.
 
-Pre-existing on every port — aarch64 and riscv64 have had the terminator
-since D39 — so x86_64 has not made it worse, only more visible.
-
-**The fix.** `record_fault_exit` must know whether it is describing a data
-access or an instruction-side kill, and emit an honest instruction-side
-class/bucket for the latter instead of a data-relative one. That reaches
-the `FaultLocality` / `CrashFaultClass` / `CrashFaultBucket` vocabulary —
-`lib/abi` crash-record types, so the generated C headers regenerate and
-`abi-check` gates it — plus `crash_cause_codes`, the three production
-callers, and the existing host tests that pin the current buckets. Larger
-than the defect it was found under, and it belongs with the crash-record
-work in `plans/FIX-WILD.md`; it is recorded here rather than folded in.
-
-**Done when:** an instruction-side fault kill's audit and crash records
-name an instruction-side cause and carry no fabricated data-relative
-offset; the sibling ports get the same record from the one shared path; and
-a host test pins the distinction for both sides.
+Tests: `classify_fault_locality_places_an_instruction_kill_nowhere` and
+`record_fault_exit_distinguishes_an_instruction_kill_from_a_data_access`
+pin both sides against *identical* registry state, so the data kill's
+`below_stack_guard`+distance is exactly the record the instruction-side
+kill is proven not to get; `crash_record_instruction_side_carries_no_data_locality`
+pins the ABI round-trip and the three fail-closed decodes. The D42/D86
+vertical (`tests/integration/wild_fault_qemu_x86_64`) now grades every
+`TaskFaultKilled` record its own children produce and PASSes only on three
+honestly audited instruction-side kills — the exit status alone cannot
+catch a record lying about the cause.
