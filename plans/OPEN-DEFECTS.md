@@ -21,25 +21,21 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 24 open, 62 closed, 86 total.
+table normalises all three to **closed**. 20 open, 66 closed, 86 total.
 
-### Open (24)
+### Open (20)
 
 | ID | Subject | Note |
 |---|---|---|
 | D1 | FIX-SYSCALL residual per-arch verticals (x86_64, riscv64) | design and code done; verticals not written |
 | D3 | hard-lockup watchdog parity on x86_64 and riscv64 | aarch64 is the only port wired |
-| D6 | `docs-check` cross-crate resolution failure | recurrence cause named (poisoned build cache); the original instance is still unconfirmed |
-| D13 | secondary-CPU hard lockup under `stress --cpu 20` | partial — mute-fault and deadlock-escalation halves fixed; the metal wedge is unconfirmed |
-| D14 | `sysmon-qemu-aarch64` misses its 120 s ceiling under the loaded matrix | load-dependent, so a genuine defect, not a flake |
 | D15 | `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage | — |
 | D17 | riscv64 loader performs no instruction-cache maintenance for loaded code | does not reproduce under QEMU; real silicon can fetch stale code |
 | D21 | a layered block device republishes an unreadable member class as `Virtual` | — |
 | D26 | a mouse scroll produces no input event at all | functional gap, not a lockup |
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
-| D41 | root-unlock login vertical failed once under a loaded gate | unreproduced, not diagnosed |
-| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | — |
+| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | the `#PF` half of the missing terminator; D86 is the other half, one fix closes both |
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
@@ -50,21 +46,24 @@ table normalises all three to **closed**. 24 open, 62 closed, 86 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | — |
+| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | the non-`#PF` half of the missing terminator; D42 is the other half |
 
-### Closed (62)
+### Closed (66)
 
 | ID | Subject |
 |---|---|
 | D2 | P-6: wait-queue §27 completeness rework |
 | D4 | latent §27 audit sweep of the foundational primitives |
 | D5 | `mem-pin-migration` intermittent multi-vCPU-TCG stall |
+| D6 | `docs-check` cross-crate resolution failure |
 | D7 | x86_64 disk-completion interrupt triple-faulted the boot |
 | D8 | x86_64 encrypted-root / users-DB read loop stalled the interactive unlock |
 | D9 | x86_64 `spawn-session` login never exited on the live console |
 | D10 | `autoload-input-qemu-aarch64` intermittent terminal-focus freeze |
 | D11 | `netstack-listener-qemu-aarch64` RTO-cadence crawl |
 | D12 | aarch64 GICv2 SGI end-of-interrupt dropped the source-CPU field |
+| D13 | secondary-CPU hard lockup under `stress --cpu 20` |
+| D14 | `sysmon-qemu-aarch64` missed its inactivity budget under the loaded matrix |
 | D16 | Raspberry Pi 4 near-every-boot hard lockup after USB-HID bring-up |
 | D18 | early-boot silent guest death on PID 1's fifth concurrent spawn |
 | D19 | `autoload-input-qemu-aarch64` terminal sequencing drift |
@@ -85,6 +84,7 @@ table normalises all three to **closed**. 24 open, 62 closed, 86 total.
 | D38 | the nightly soak killed every filesystem soak and a memtest mid-progress |
 | D39 | a riscv64 guest stalled dead moments after a `spawn` |
 | D40 | a mutating memory syscall re-froze the whole address space |
+| D41 | the root-unlock console read failed under a loaded gate |
 | D43 | a riscv64 U-mode task could steer the kernel onto another hart's per-CPU state |
 | D44 | a console reader's re-park used a remembered CPU id, suspending another core's task |
 | D45 | the per-CPU live-space publication accepted a non-`Arc` pointer |
@@ -440,14 +440,14 @@ The open items, in priority order:
 - **D5 — `mem-pin-migration` intermittent multi-vCPU-TCG stall — DONE.**
   Root-caused to a lost-wakeup in the vertical's own secondary-CPU idle
   loop and fixed structurally (not a load artifact, not a budget bump).
-- **D6 — `docs-check` cross-crate resolution failure — RECURRED, CAUSE
-  NAMED.** A `docs-check` build failing to resolve real, unconditional
-  `pub` items in sibling crates. The recurrence was a **poisoned build
-  cache** — truncated zero-byte rmeta left by a `cargo` build killed
-  mid-flight, accepted as fresh by the next build — cleared by
-  `cargo clean -p` of the named crates. The original instance survived a
-  full `cargo clean`, so its cause is still unconfirmed and the entry stays
-  on record with both procedures.
+- **D6 — `docs-check` cross-crate resolution failure — DONE.** A
+  `docs-check` build failing to resolve real, unconditional `pub` items in
+  sibling crates. The cause is a **poisoned build cache**: a `cargo` build
+  killed mid-flight leaves truncated zero-byte rmeta that the next build's
+  fingerprints accept as fresh. Not a rustdoc or mergeable-info defect — the
+  errors come from *rustc* checking a dependent crate. The diagnostic recipe
+  and the one contingency that would still make it a real doc-build defect
+  are kept in its section.
 - **D10 — `autoload-input-qemu-aarch64` intermittent terminal-focus
   freeze — DONE.** The QEMU vertical intermittently timed out at the AW4
   terminal stage. Root cause was a fragile *test-harness* readiness gate
@@ -488,52 +488,37 @@ The open items, in priority order:
   comparison) → EOI, so the source-CPU field survives to the completion
   write; host regression tests lock the full-IAR return and the
   source-CPU-preserving EOIR write in.
-- **D13 — a distinct secondary-CPU hard lockup under `stress --cpu 20`;
-  diagnostic enabler landed, root-cause fix OPEN.** On the (D12-fixed)
-  debug image `stress --cpu 20` still wedges a secondary core (`id=4082
-  cpu=3 context=kernel sampled=pre_silence k_site=task_body`, `k_bt` in
-  the secondary idle/dispatch path). D12's interrupt path is confirmed
-  correct, so this is a *separate* IRQ-masked spinlock deadlock/long-hold
-  in the task-shim / address-space-activation path under heavy multi-core
-  load — the maskable liveness sample cannot observe inside the section,
-  so the report is a bare hard lockup. Because the exact lock cannot be
-  pinned from static reading and guessing an SMP-deadlock fix is a hack
-  (§2.1), the landed step is the **`k_lock` diagnostic enabler**: a
-  debug-only per-CPU lock-site record (`lib/sync` `lock-diagnostics` →
-  `kernel/core` observer → `CpuState::lock_sites`, rendered
-  `k_lock=<file>:<line>` on `id=4085`) so the next reproduction names the
-  culprit spinlock. That evidence has since arrived and points *away* from a
-  deadlock: the reproduction detailed under D23 records `k_lock_state=held`
-  (not `acquiring`), and on this configuration an `IrqSafeSpinLock` hold
-  leaves `DAIF.F` clear and therefore stays sampleable — so a lock wedge
-  could not have been silent. D23's exception-return corruption is a proven,
-  reachable mechanism for a silent wedge on exactly this image, and is the
-  leading candidate for this defect too. The interrupt-safe allocator lock has
-  since landed, and its install — which reached only a heap a bin had
-  published, so it silently no-op'd on every QEMU test bin — is now a
-  crate-global seam covering every heap in a binary, so the QEMU matrix
-  finally runs the fix it is meant to confirm. **Remaining:** re-run
-  `stress --cpu 20` on metal; if it no longer wedges, close this, and if it
-  does, the surviving report is fresh evidence for a genuinely separate
-  defect.
-- **D14 — `sysmon-qemu-aarch64` load-dependent 120 s timeout under
-  concurrent `cargo xtask ci` — OPEN (to root-cause).** The single-CPU,
-  full-boot `sysmon` acceptance vertical (unlock + PBKDF2 + interactive
-  monitor session, 120 s budget) intermittently times out **only** when
-  `cargo xtask ci` runs it alongside its ~dozen other QEMU guests: the
-  run's concurrency budget (host logical CPUs) lets that many single-CPU
-  TCG guests overlap, starving each of TCG throughput so this
-  work-heavy guest misses 120 s. It **passes in isolation**
-  (`cargo xtask test --qemu --only sysmon`) and passed a preceding full
-  `ci` run, so it is not a code regression — it is the load-dependent
-  QEMU-TCG timeout §7 names. Per §7/§2.17 the fix is **structural**
-  (bound the QEMU concurrency so single-CPU TCG guests do not
-  oversubscribe, or size the budget to the actual work), **not** a
-  retry and **not** a bare timeout bump; and, exactly as D5/D11 turned
-  out, a "load flake" here is to be *root-caused*, never waved through.
-  Discovered during `plans/NEW-FILEMANAGER.md` FM11b; recorded here
-  rather than fixed inline because it is a shared-tooling concurrency
-  concern unrelated to that feature.
+- **D13 — a distinct secondary-CPU hard lockup under `stress --cpu 20` —
+  DONE.** On the (D12-fixed) debug image a secondary core wedged inside an
+  IRQ-masked EL1 section, so the maskable liveness sample could only report a
+  bare hard lockup. Root cause: the kernel heap allocator guarded its state
+  with a plain `AtomicBool` spinlock that never masked interrupts, so an
+  interrupt taken on a CPU already holding it whose handler allocated
+  re-entered `alloc` and spun forever on its own mainline's lock — a
+  single-CPU self-deadlock, unsampleable because exception entry masks
+  interrupts. Fixed by `tairix_kalloc`'s crate-global interrupt-control seam
+  (each port installs its primitive at `boot()`, before any secondary
+  starts). The Pi 4 *boot* wedge this defect also chased was D81; the QEMU
+  stress vertical's own early-boot silence was D84. `stress --cpu 20` no
+  longer wedges on metal. The masked-section samplers built to chase it (FIQ
+  self-sample, CoreSight `EDPCSR`) stay as standing observers for any future
+  wedge.
+- **D14 — `sysmon-qemu-aarch64` load-dependent inactivity-budget timeout
+  under concurrent `cargo xtask ci` — DONE.** The single-CPU, full-boot
+  `sysmon` acceptance vertical timed out only when the gate ran it alongside
+  its ~dozen other QEMU guests: the matrix admitted one guest per host
+  logical CPU, so co-scheduled single-CPU TCG guests starved each other of
+  throughput until this work-heavy one fell silent for its whole 120 s.
+  Fixed structurally — not a retry and not a budget bump — by the weighted
+  QEMU concurrency budget (`qemu_host_budget_for`): the matrix admits
+  in-flight guests up to **one third** of the host's logical CPUs, charging a
+  uniprocessor guest two units and an SMP guest the whole budget so an SMP
+  guest runs alone. The deliberate headroom reflects a guest costing far more
+  than its lone vCPU thread (translation, RCU/main-loop and I/O threads, its
+  own in-guest watchdogs). Because the per-guest deadline is an *inactivity*
+  budget that serial output resets, a guest that runs slower co-scheduled is
+  never mistaken for a hung one. Raising the budget is a timing change to be
+  validated on the soak host, never from one green developer run.
 
 - **D44 — a console reader's re-park used the CPU id it remembered before its
   first park, suspending whichever task now ran there — DONE.** `elsh` was
@@ -859,8 +844,9 @@ The open items, in priority order:
   was unreachable by construction), a soak loop that always started one
   pass more than fitted its budget, and a memtest-takeover guest killed
   by a ceiling derived from a silence budget that describes no part of a
-  whole-RAM sweep. All fixed structurally, none by a retry. Does **not**
-  close D14, whose 120 s is an inactivity budget, not a ceiling.
+  whole-RAM sweep. All fixed structurally, none by a retry. These are
+  *ceiling* fixes; an inactivity-budget starvation is a different bound and
+  was D14's, closed by the weighted QEMU concurrency budget.
 - **D39 — a riscv64 guest stalled dead moments after a `spawn` — DONE.**
   `userentry::enter_user_mode` armed `sscratch` — which the trap vector reads
   as "this trap came from U-mode" — with `sstatus.SIE` still set, so an
@@ -928,23 +914,25 @@ The open items, in priority order:
 
 These are **distinct in kind**: D1 finishes an interrupt-model fix, D2
 and D4 are §27 foundational-completeness defects, D3 is an Arch-HAL
-parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6
-is a docs-build resolution failure (recurrence root-caused to a poisoned
-build cache), D10 was a fragile QEMU-harness
+parity gap, D5 was a test-harness idle-loop lost-wakeup (fixed), D6 was a
+docs-build resolution failure root-caused to a poisoned build cache
+(closed), D10 was a fragile QEMU-harness
 readiness gate (fixed), D18 was an early-boot concurrent-spawn scare that
 proved non-reproducing once FONT-SERVICE removed the per-app font payload
 (closed), D19/D20 were the `autoload-input-qemu-aarch64` count-drift
 (closed: marker-based sequencing + file-manager choreography moved to host
 tests), D21 is an ABI-honesty gap — a layer asserting a hardware fact nobody
-reported — D22 is a load-dependent QEMU-harness timeout whose mechanism is
-not yet named, D23 was an observer-perturbs-the-observed defect the debug
+reported — D22 was an unbounded in-kernel virtio completion wait that
+parked the boot task inside a disk request while holding that disk's lock
+(fixed), D23 was an observer-perturbs-the-observed defect the debug
 watchdog's own non-maskable sample exposed (fixed), D42 is the x86_64 half
 of the fatal-user-exception routing D39 closed for riscv64 (open), D24 was a
 missing in-kernel preemption boundary — a fairness defect, not a wedge — that
 let a burst of never-waiting device operations withhold a core (fixed), D25
 was a process-wide test clock that made a host suite's exact-instant assertions
-order-dependent (fixed), D36 is a panic-path self-deadlock in the console
-write path (open, needs a lock-abandon primitive), D37 was a
+order-dependent (fixed), D36 was a shared stroke path that never converged,
+so one graph reading spun a core inside the monitor's own process (fixed),
+D37 was a
 per-port context-switch gap found by reading rather than by a failure — the
 riscv64 floating-point file was never switched while firmware left it enabled
 (fixed), and D43 was a privilege-boundary defect of the same
@@ -1410,99 +1398,51 @@ tested protocol, and the vertical now runs it.
 
 ---
 
-## D6 — `docs-check` cross-crate resolution failure — recurred; cause was a stale build cache
+## D6 — `docs-check` cross-crate resolution failure — DONE (a poisoned build cache)
 
-**State:** `docs-check` is green. The failure recurred once since, with a
-named and cleared cause (below), so the class is no longer a mystery — but
-the entry stays on record because the *mergeable-info* suspicion for the
-original instance was never confirmed.
+**State:** closed. `docs-check` is green and the failure class is
+root-caused, so a recurrence is a known-cause operational condition with a
+fixed remedy rather than an open defect.
 
-**Prior symptom (historical).** `cargo xtask ci` → `docs-check`
-(`cargo doc --workspace --no-deps --document-private-items
--Z rustdoc-mergeable-info`, `RUSTDOCFLAGS="-D warnings"`) was reported to
-fail while documenting `tairix-kernel`:
+**The mechanism.** `docs-check` (`cargo doc --workspace --no-deps
+--document-private-items -Z rustdoc-mergeable-info`, `RUSTDOCFLAGS="-D
+warnings"`) failed to resolve real, unconditional `pub` items in
+feature-less workspace crates — `tairix_arch_api`, `tairix_reclaim`,
+`tairix_tty::read_bounded`, `tairix_qemu::ReservedSocket` and others. A
+`cargo` build killed mid-flight leaves **zero-byte `.rmeta`** files that the
+build's own fingerprints still record as fresh, so a later build accepts
+truncated metadata. The errors come from *rustc* checking a dependent crate,
+not from rustdoc — so this is **not** evidence against
+`-Z rustdoc-mergeable-info`, and that flag stays.
 
+**Remedy, in order.** On a "can't find crate for `<workspace crate>`"
+failure, check for truncated metadata first:
+
+```sh
+find target -name '*.rmeta' -size 0
 ```
-error[E0432]: unresolved import
-  tairix_abi::driver::virtio_pci::virtio_pci_window_resource
- --> kernel/tairix-kernel/src/hwdiscovery.rs:24:5
-```
 
-`virtio_pci_window_resource` is a real, unconditional `pub fn` in
-`lib/abi/src/driver/virtio_pci.rs` (no `cfg`, no feature gate), so the
-failure was a cross-crate rustdoc resolution issue under the unstable
-`-Z rustdoc-mergeable-info` mergeable-info model, never a kernel-logic
-defect.
+Any hits mean a full `cargo clean`, immediately: on a multi-crate cascade a
+`cargo clean -p` of the named crates only moves the failure to the next
+consumer, and deleting the zero-byte files by hand does not help either
+because the fingerprints still call those units fresh. A `-p` clean is
+enough only for a single-crate instance with no cascade behind it. A green
+re-run *after* such a clean is a real fix, not a retry — the cache, not the
+code, was wrong.
 
-**Reproduction attempted, could not reproduce.** The exact CI command was
-run standalone — from a warm cache, from `cargo clean --doc`, and from a
-full `cargo clean` (cold compile of every dependency's rmeta) — and each
-run documented all 373 crates and merged cleanly (`cargo doc -p
-tairix-kernel --no-deps` succeeds too). `cargo xtask docs-check`
-(rustdoc + mdBook + link check) passes end to end. The host carries no
-`sccache`/`RUSTC_WRAPPER` and no shared `CARGO_TARGET_DIR`, so this is not
-a stale-cache artefact.
+**Avoiding it.** Never kill a `cargo` process mid-build, and **batch** the
+cross-target builds and lints separately from the host runs rather than
+alternating between them: every observed instance followed interleaved host
+and `--target <triple>` invocations where one was interrupted.
 
-**Recurred again, same mechanism, and the surgical remedy is not enough.**
-A third instance appeared as a *cascade* — `tairix_arch_api`,
-`tairix_reclaim`, `tairix_crypto`, `tairix_cpuops`, `tairix_fsmeta`,
-`tairix_devmatch`, `tairix_netconfig`, each a real unconditional `pub` item
-in a feature-less workspace crate — after interleaved host and
-`--target <triple> --keep-going` clippy runs. The signature was explicit:
-2111 **zero-byte** `.rmeta` files under `target/`, each with link count 1
-(never hardlinked into the cache) and timestamped to the minute of a build
-that was cut short, sitting beside healthy rmeta for the same crate.
-Two cheaper remedies **failed**: `cargo clean -p` of the named crates just
-moved the failure to the next consumer, and deleting the zero-byte files
-outright did not help either, because the *fingerprints* still recorded
-those units as fresh. Only a full `cargo clean` cleared it. So the practical
-rule is: on a "can't find crate for `<workspace crate>`" cascade, check for
-zero-byte `.rmeta` (`find target -name '*.rmeta' -size 0`) and, if any are
-present, go straight to a full `cargo clean` — do not spend runs on `-p`
-cleans. Avoid interleaving concurrent host and cross-target cargo
-invocations that may be interrupted.
-
-A fourth instance confirmed both the signature and the remedy exactly: 1096
-zero-byte `.rmeta` files after a session that interleaved host `cargo
-test`/`clippy` runs with `--target aarch64-unknown-none` /
-`x86_64-unknown-none` / `riscv64gc-unknown-none-elf` builds, again a
-`can't find crate for tairix_arch_api` / `tairix_reclaim` cascade in
-`docs-check`, and again cleared only by a full `cargo clean` (347 766 files,
-123.8 GiB — which then costs a cold gate run). The practical discipline is
-therefore to **batch** the cross-target builds and lints separately from the
-host runs rather than alternating between them.
-
-**Recurrence, root-caused: a corrupt/stale build cache.** The same shape
-appeared again with three different symbols — `tairix_tty::read_bounded`,
-`tairix_tty::is_line_delimiter` (from `kernel/core`) and
-`tairix_qemu::ReservedSocket` (from `tools/xtask`) — each a real,
-unconditional `pub` item in a feature-less crate, and each *recently added*
-(`ReservedSocket` by the then-latest commit). It reproduced standalone under
-`cargo xtask docs-check`, not only inside the concurrent gate group, and
-vanished permanently after `cargo clean -p` of the four crates involved.
-The cache held rmeta from a pre-commit revision alongside **zero-byte**
-`.rmeta` files timestamped to the minute a nested `cargo` build was killed
-mid-flight, so the mechanism is an interrupted build leaving truncated
-metadata that a later build accepted as fresh — the errors came from *rustc*
-checking a dependent crate, not from rustdoc.
-
-**Consequences for the two theories.** This instance is **not** evidence for
-the mergeable-info suspicion, so do **not** drop `-Z rustdoc-mergeable-info`
-on its account; and the original entry's "not a stale-cache artefact" holds
-only for the original instance, where a full `cargo clean` had already been
-tried. Killing a `cargo` process mid-build is now a known way to poison the
-cache: `cargo clean -p <crate>` for the crates named in the error is the
-correct first response, and a green re-run *after* such a clean is a real
-fix, not a retry.
-
-**If it recurs without a killed build behind it.** Treat it as a real
-cross-crate-rustdoc / mergeable-info defect (not a load flake): confirm
-`cargo clean -p` does *not* clear it, capture whether it appears only under
-the concurrent `cargo xtask ci` static-gate group (memory pressure) vs.
-standalone, and the structural fix is then to drop
-`-Z rustdoc-mergeable-info` from `run_docs_check`
-(`tools/xtask/src/commands.rs`) — the mergeable-info model is a doc-build
-*speed* optimisation, and correctness of the doc build takes precedence.
+**The one contingency that would reopen this.** If it recurs with no killed
+build behind it — no zero-byte rmeta, and `cargo clean -p` does not clear
+it — treat it as a genuine cross-crate-rustdoc / mergeable-info defect, not
+a load flake: capture whether it appears only under the concurrent
+`cargo xtask ci` static-gate group (memory pressure) or standalone too, and
+the structural fix is to drop `-Z rustdoc-mergeable-info` from
+`run_docs_check` (`tools/xtask/src/commands.rs`), since mergeable-info is a
+doc-build *speed* optimisation and doc-build correctness outranks it.
 
 ---
 
@@ -1657,10 +1597,12 @@ whole-project-green gate:
   to a lost-wakeup in the vertical's secondary idle loop and structurally
   fixed (production masked-park protocol); a full `cargo xtask ci` is
   whole-project-green.
-- D6: **NON-REPRODUCING** — the cross-crate rustdoc `docs-check` failure
-  documenting `tairix-kernel` does not reproduce on the pinned toolchain
-  (verified from a full `cargo clean`); the `docs-check` step itself passes
-  end to end. Recorded with its reproduction procedure in case it recurs.
+- D6: **DONE** — the cross-crate `docs-check` resolution failure
+  root-caused to a poisoned build cache (zero-byte rmeta left by a `cargo`
+  build killed mid-flight, still fingerprinted fresh), not to rustdoc or
+  mergeable-info; `docs-check` passes end to end. The detection recipe, the
+  full-`cargo clean` remedy, and the one contingency that would reopen it are
+  recorded in its section.
 - D7: **DONE** — the x86_64 disk-completion-interrupt triple fault
   root-caused (external-IRQ frame offset + shared IO-APIC-pin MSI vector)
   and fixed; `root_unlock_admission_qemu_x86_64` reaches the `/System`
@@ -1805,330 +1747,148 @@ delivers a cumulative ACK up to `snd_max` and asserts `snd_una` advances and
 the RTO disarms (it froze before the fix). Arch-neutral — every port shares
 `lib/net`.
 
-## D13 — secondary-CPU hard lockup under `stress --cpu 20` (mute-fault and deadlock-escalation defects FIXED; the metal `--cpu 20` wedge still to re-confirm)
+## D13 — secondary-CPU hard lockup under `stress --cpu 20` — DONE (the kernel heap lock was not interrupt-safe)
 
-**State:** the `stress --cpu 20 --timeout 120s --background` wedge on the
-debug image is a *distinct* defect from D12 (whose interrupt-completion path
-is confirmed correct). The report is a bare hard lockup on a secondary core
-(`cpu=3 context=kernel sampled=pre_silence k_site=task_body`, `k_bt` in
-`_start_secondary → production_secondary_entry → smp::run_secondary →
-init::run_dispatch_loop → exceptions::enable_irq`). Because the watchdog
-liveness sample is a *maskable* virtual-timer IRQ (GICv2 non-secure has no
-NMI), a hard lockup means the core entered an **IRQ-masked EL1 critical
-section and never left it** — an `IrqSafeSpinLock` deadlock or long hold in
-the task-shim / address-space-activation path under heavy multi-core
-spawn/preempt load. The exact lock cannot be identified from static reading,
-and fabricating an SMP-deadlock fix is a hack (§2.1).
+**State:** closed. `stress --cpu 20` no longer wedges on metal, which was
+this defect's stated done-condition.
 
-**Landed (diagnostic enablers, all debug-only):**
+**The symptom.** On the debug image a secondary core reported a bare hard
+lockup (`cpu=3 context=kernel sampled=pre_silence k_site=task_body`). Because
+the watchdog liveness sample rides a *maskable* virtual-timer IRQ — GICv2
+non-secure has no NMI — a hard lockup means the core entered an IRQ-masked
+EL1 critical section and never left it, which is precisely what no maskable
+sample can observe from the inside.
 
-- `k_lock` stuck-lock record — a per-CPU lock-site stack (`lib/sync`
-  `lock-diagnostics` feature → `kernel/core` observer →
-  `CpuState::{lock_sites,lock_depth,lock_acquiring}`, rendered
-  `k_lock=<file>:<line>` + `k_lock_state` on the `id=4085` detail).
-  `SpinLock::{lock,try_lock}` (which `IrqSafeSpinLock` wraps) are
-  `#[track_caller]` under the feature and report through the `lockwatch`
-  seam; a shippable image compiles it all out (bare CAS).
-- **The global kernel heap lock is on that record.** It is an
-  `IrqSafeSpinLock` over kalloc's installed mask hooks
-  (`tairix-kalloc/lock-diagnostics`, turned on by the same
-  `watchdog-diagnostics` switch) rather than a second hand-rolled spin gate,
-  so it is named like any other lock. It is the one IRQ-masking lock every
-  subsystem descends into, and while it was uninstrumented a core wedged
-  *inside* it was reported against whichever outer lock it happened to hold
-  — the single most likely way for this defect to have hidden.
-- **`k_lock_state` is per entry, so it no longer mislabels a waiter as a
-  holder.** `lock_acquiring` carries one bit per stack entry; a single
-  top-of-stack flag was cleared by *any* nested lock release, so a core
-  spinning with interrupts enabled (every plain `SpinLock`) read as `held`
-  from its first interrupt onwards. **A `k_lock_state=held` in any report
-  captured before this fix may in truth have been `acquiring`** — i.e. the
-  named core may be the contended waiter, not the holder.
-- **Trustworthy pre-silence backtrace** — the aarch64 `k_bt` frame-pointer
-  walk (`kernel/arch/aarch64` `capture_sample_backtrace`) now validates each
-  caller: a return address is accepted only if it lands in kernel
-  executable text (new `__text_start`/`__text_end` linker bounds,
-  `in_kernel_text`) and each frame pointer must sit strictly above the
-  exception frame (stack floor) and strictly increase. This stops the walk
-  emitting a stack **data** word as a caller — the cause of the earlier
-  chains that interleaved unrelated `BTreeMap` instantiations and could not
-  be trusted to justify a fix. The pure `walk_frames` core is host-tested
-  (incl. the non-text-return-address rejection); the `AT S1E1R` map-probe
-  fail-closed guarantee is unchanged.
-- **Reclaim corruption tripwire** — `AddressSpaceRegistry::withdraw` now
-  asserts (`debug_assertions`, i.e. debug image only) its post-condition via
-  the pure `stale_task_entry`: after a task is removed from every per-task
-  map, no map may still hold it. A violation faults **at the reclaim site**
-  and means either a per-task map escaped withdraw (the "reused id inherits
-  a dead task's state" precursor) or a `BTreeMap::remove` did not take —
-  i.e. the map is corrupt, the leading D13 hypothesis. Host-tested; compiled
-  out of shippable images.
-- **Named kernel-internal stuck lines (always-on, not debug-gated)** — the
-  hard-lockup summary's `stuck_owner` now names a stuck line the kernel
-  services *itself* through a chained/bespoke handler (no `irq_wait`
-  binding) instead of reporting a bare `unbound`. A new arch-neutral
-  `watchdog::KernelInternalLines` seam (installed from
-  `KernelArch::watchdog_line_names`, mirroring `watchdog_recovery`) is
-  consulted after the task-owner lookup returns no binding; aarch64 maps its
-  discovered `BRCM_MSI_SPI` → `stuck_owner=pcie-msi` and `UART_RX_INTID` →
-  `stuck_owner=console-uart` (interrupt numbers from the device tree, never
-  board constants). This turned the near-every-boot Pi 4 report
-  `stuck_irq=153 stuck_owner=unbound` into `stuck_owner=console-uart` — the
-  BCM2711 PL011 console UART receive SPI (GIC SPI 153) a wedged cpu 0 could
-  not service — confirming 153 is a *bystander* of an IRQ-masked wedge, not
-  its cause. (The resolver checks `BRCM_MSI_SPI` before `UART_RX_INTID` and
-  still returns `console-uart`, so 153 is the UART line, not the MSI SPI as
-  an earlier note guessed before the resolver existed.) The wedge itself is
-  the D13-class masked-section freeze, which the FIQ self-sample is blind to
-  on the real Pi 4 GIC-400 where Group 0 is secure. Host-tested
-  (`resolve_stuck_owner_with` task-wins/named/unbound; the `console-uart` and
-  `pcie-msi` renders).
-- **Finer dispatch breadcrumb `switch_return` (debug-gated).** The
-  boot-deterministic Pi 4 report (`k_site=user_switch`, `console-uart`
-  bystander, ~10.27 s right after USB HID bring-up) wedges in the masked
-  span the coarse `user_switch` crumb conflated — the arch context switch,
-  or the dispatcher-side teardown after it. `KernelBreadcrumb::SwitchReturn`
-  (`kernel/core`) now splits that span: stamped in `kthread::dispatch_step`
-  immediately after `ContextSwitch::switch` returns, it attributes the
-  post-switch teardown (resume-handle retire, live-space clear, the user-root
-  translation-register **park**, guard check — all IRQ-masked) to
-  `switch_return`, distinct from the switch-in / EL0 (`user_switch`). So the
-  next metal boot tells a wedge coming *back* from a task (notably the
-  user-root park) from one going *into* it. Arch-neutral, feature-gated (zero
-  shippable cost), host-tested (round-trip, distinct tags, the
-  `k_site=switch_return` render).
+**Root cause.** `tairix_kalloc` guarded the kernel heap with a plain
+`AtomicBool` spinlock that never masked interrupts. TAIRiX takes interrupts
+while in-kernel code runs, so an interrupt arriving on a CPU already holding
+that lock — the eMMC completion IRQ during a `BlockCache::populate`
+allocation on the root-unlock read path — whose handler itself allocated
+re-entered `alloc` and spun forever on the lock its own interrupted mainline
+held. A single-CPU self-deadlock, IRQ-masked because exception entry masks
+`DAIF.I`, hence unsampleable. It fits every observed trait: any CPU, ~10 s in
+under heavy concurrent boot allocation (ARXFS reads plus USB bring-up),
+`sampled=pre_silence` (the stale sample *is* the last tick before the handler
+wedged), `k_site=user_switch` (the arch IRQ handler stamps no breadcrumb),
+and real-hardware-mostly, since the interrupt-vs-lock interleaving under heavy
+allocation rarely arises in QEMU.
 
-**Latest evidence (trustworthy tools):** a fresh `--cpu` repro
-(`cpu=2 stalled_ms=10218 k_site=task_body k_lock=cfq/scheduler.rs:753 held
-k_detail=0x15`) decodes with the now-trustworthy unwinder to a *clean,
-consistent* chain — but it is the stale `pre_silence` **idle dispatch-loop
-park** (`run_dispatch_loop → monotonic_ns → enable_irq`), not the wedge. The
-breadcrumb stays `753`-`held` (not another lock `acquiring`), so cpu 2 is
-wedged inside running task 21's body holding that task's body lock in an
-**untracked `DAIF.I`-masked busy-spin/deadlock**. The reclaim tripwire did
-**not** fire (not reclaim/id-reuse corruption) and aarch64 TLB shootdown is a
-hardware inner-shareable broadcast (no IPI busy-wait) — both ruled out. So
-`pre_silence` sampling is exhausted: the defect lives in exactly the
-IRQ-masked section no maskable sample can see.
-
-**Decision (build the masked-section sampler):** the non-maskable **FIQ
-self-sample** is the tool this evidence calls for, staged B1–B4 (full design +
-the decisive `DAIF.F` constraint in this plan). The blocking
-constraint was that aarch64 already masks `DAIF.F` in *every* section the wedge
-lives in (exception entry masks F in hardware; `enable_irq` clears I-only;
-`IrqSafeSpinLock`'s `DaifIrqControl` masks I+F), so an effective FIQ sample
-needs a cross-cutting, feature-gated `DAIF.F`-clear execution discipline plus
-GICv2 Group-0 routing whose acknowledge semantics differ QEMU-`virt` vs the
-Pi-4 GIC-400 — landed incrementally with an empirical, fail-closed delivery
-probe, never guessed (§2.1/§2.16/§2.19).
-
-- **B1 (DAIF.F-clear discipline) — DONE.** Feature-gated, QEMU-validated.
-- **B2 (GIC Group-0 routing + `is_fiq` FIQ dispatcher arm + fail-closed
-  boot deliverability probe reported as a `FeatureSupport` capability) —
-  DONE.** Host-tested; debug + shippable aarch64 builds clean. The probe is
-  `Supported` on a single-Security-state GIC and `Unsupported` on a
-  two-Security-state GIC. Measured under QEMU (B3): the `virt` default
-  (`secure=off`) is single-Security-state and the probe returns `Supported`,
-  so the debug image self-samples via FIQ on QEMU (correcting an earlier
-  untested assumption that it was `Unsupported`). Only a real Pi 4 GIC-400,
-  or QEMU `virt,secure=on`, keeps Group 0 secure and returns `Unsupported`,
-  falling back to the complete buddy detector (fail closed).
-- **B3 (QEMU vertical proving `sampled=live`) — DONE.**
-  `tests/integration/fiq_selfsample_qemu_aarch64` (enrolled in `cargo xtask
-  test --qemu`) probes `Supported`, arms a short Group-0 (FIQ) cadence, masks
-  `DAIF.I`, busy-spins in an `#[inline(never)]` marker, and asserts the FIQ
-  self-sample captured a live in-kernel PC (interrupted `SPSR_EL1.I` masked)
-  whose value and `capture_sample_backtrace` top land inside the marker
-  (`sampled=live`).
-- **B4 (use the sampler to fix D13) — one cause found and fixed; the metal
-  FIQ-`Unsupported` path is separate and still open.** A **deterministic**
-  `stress --cpu 20` wedge was reproduced on the **QEMU-`virt` debug image**
-  (full RPi image + `ramfb`, i.e. the video framebuffer console active — it
-  does **not** reproduce over a UART-only console): all cores end up in EL0
-  workers with the preemption timer (`CNTP`) *fired but never delivered* by the
-  GIC, so nothing preempts and the shell can no longer even spawn a command.
-  Root cause: `Gicv2::enable_intid` gave **every** PPI the same mid-range GIC
-  priority (`0x80`), so the debug watchdog's Group-0/FIQ self-sample
-  (`WATCHDOG_PPI` 27) equalled the preemption-timer IRQ (`TIMER_PPI` 30). On a
-  GICv2 CPU interface with `GICC_CTLR.FIQEn` set, a pending-but-masked
-  (`DAIF.F`, e.g. while an EL0 task runs) Group-0 FIQ of priority ≥ the
-  timer IRQ **holds off** that IRQ — permanently once the level-triggered
-  watchdog `CNTV` has fired on every core — so preemption dies. **Fix:** the
-  self-sample FIQ is dropped strictly below the timer
-  (`watchdog::WATCHDOG_FIQ_PRIORITY = 0xC0`, applied via the new
-  `gic::set_ppi_priority` in both the boot probe and per-CPU
-  `route_watchdog_group0`); a masked Group-0 FIQ can no longer block the
-  Group-1 timer, and a Group-0 FIQ is still signalled independently of a
-  pending Group-1, so the masked-section self-sample still fires. Verified:
-  the ramfb repro stays responsive under `stress --cpu 20` and
-  `fiq_selfsample_qemu_aarch64` still passes; host regression guards
-  `self_sample_fiq_is_strictly_lower_priority_than_the_preemption_timer`
-  (`kernel/arch/aarch64` watchdog) and `set_priority_writes_the_priority_byte`
-  (gic). This is **debug-image only** and QEMU-`virt`-only: on the real Pi 4
-  GIC-400 the FIQ probe returns `Unsupported` (Group 0 secure), so
-  `route_watchdog_group0` never runs and this priority path is inert — the
-  real-Pi masked-section hard lockup is therefore a *separate* defect (below)
-  that this fix does not claim to close.
-
-**The `stress_qemu_aarch64` early-boot silence was a separate defect, now
-found and fixed — see D40.** It was recorded here as a second manifestation of
-the masked-section wedge because it shares the "total silence across every
-core" signature. It is not one: every core is *idle*, not wedged, and the cause
-is a lost wake-up in the sleeping mutex, not an IRQ-masked section.
-
-The Pi-4B armstub FIQ-routing dependency remains a hardware-capability concern
-for `plans/FIX-HARDWARE-FEATURES.md`.
-
-**CoreSight external-debug (EDPCSR) cross-core sampler — the GIC-400 observer
-the FIQ path cannot be.** On the real Pi 4 the FIQ self-sample is `Unsupported`
-(Group 0 secure), so the near-every-boot masked-section wedge shows only a
-stale `sampled=pre_silence` PC. The one live observation that survives there is
-a read of the wedged core's PC by *another* core over the memory-mapped ARMv8
-external-debug interface (`EDPCSR`, DDI 0487 H9): it does not halt the target
-and rides no interrupt `DAIF` can mask. Landed:
-- `WatchdogArch::remote_pc_sample(target) -> RemotePcSample`
-  (`Sampled{pc,context}` / `Unavailable` / `Unsupported`), default `Unsupported`
-  + conformance (`kernel/arch/api`). The hard-lockup `scan` reads it and renders
-  a fresh `live_pc=+0x…` (image-relative) + `live_ctx` in the debug detail,
-  alongside — never replacing — the stale `pc` (feature-gated).
-- aarch64 `coresight` module: host-tested pure `sample_from` (EDLAR unlock →
-  EDDEVID capability → EDPRSR validity → EDPCSR capture-first → assemble), a
-  scale-sized set-once per-cpu debug-base registry, and the freestanding
-  `VolatileDebugMmio`; `Watchdog::remote_pc_sample` delegates to it.
-- Discovery: `fdt::debug_component_bases` parses the Linux
-  `arm,coresight-cpu-debug` binding (translated `reg` + `cpu`-phandle→dense-id),
-  host-tested; boot installs each base **only** when its gigapage is already
-  Device-mapped (a read can never fault), else nothing (fail closed →
-  `Unsupported`, buddy detector unchanged). QEMU `virt` and the stock Pi 4
-  firmware DTB describe no debug nodes, so this is dormant there and validated
-  by the fail-closed path; **enabling it on Pi 4 hardware requires the firmware
-  DTB (or a supplied overlay) to carry the `arm,coresight-cpu-debug` nodes** —
-  a provisioning step, not a code change. The live `EDPCSR` read itself is
-  metal-confirmable only (QEMU models no EDPCSR), mirroring the FIQ-probe
-  precedent.
-
-**Fail-open `DAIF.F` discipline fixed — the leading suspect for the
-near-every-boot Pi 4 masked-section wedge.** The debug (`watchdog-diagnostics`)
-build left FIQ (`DAIF.F`) unmasked **gated on the compile-time feature alone**,
-never on the runtime deliverability probe: the lock critical-section mask was a
-`const` I-only immediate (`daif::critical_section_mask(cfg!(...))`) and
-`enable_fiq_delivery()` fired on *every* `svc`/fault sync entry unconditionally.
-On the real Pi 4 GIC-400 the probe returns `Unsupported` (Group 0 secure), yet
-the kernel still ran with `DAIF.F` clear pervasively — a **fail-open** exposure
-to secure-world Group-0 FIQs the non-secure kernel cannot service (and with no
-self-sample benefit, since none is delivered there). This matches every trait
-of the wedge: debug-build-only, real-Pi-4-only (QEMU `virt,secure=off` is
-single-Security-state, so it never reproduces), masked-section, intermittent,
-any CPU, ~10 s in after heavy `svc`/fault (USB HID) activity. **Fix:** both
-`DAIF.F`-unmask sites now consult the runtime probe (`fiq_cadence_enabled()`)
-and fail closed — the base lock mask is unconditionally I+F and F is re-cleared
-only when the probe proved FIQ deliverable; the obsolete compile-time
-`critical_section_mask` helper is deleted. Host-tested; the metal confirmation
-(no boot wedge on the Pi 4 debug image) is pending a user boot. **This fix did
-not resolve the wedge** — a later Pi 4 boot on a build carrying it wedged
-identically, so it was a real robustness fix but not the root cause.
-
-**Root cause found and fixed — the kernel heap allocator lock was not
-interrupt-safe (§23.2).** Resolving a fresh near-every-boot Pi 4 report's stale
-`pre_silence` `k_bt` against the debug ELF gave a fully coherent chain: cpu 0
-was in `tairix_kalloc::FreeListAllocator::{carve,insert_hole}` via `alloc` ←
-`BlockCache::populate` ← ARXFS `open_data_block`/`read_cluster_frame` (the
-root-unlock eMMC read path). The allocator guarded its state with a **plain
-`AtomicBool` spinlock that never masked interrupts**. TAIRiX takes interrupts
-while in-kernel code runs, so an interrupt taken on a CPU already holding that
-lock (e.g. the eMMC completion IRQ during the `BlockCache::populate`
-allocation) whose handler allocates reenters `alloc`/`dealloc` and spins
-forever on the lock its own interrupted mainline holds — a single-CPU
-self-deadlock, IRQ-masked (exception entry masks `DAIF.I`), so the watchdog
-cannot sample it → the observed hard lockup. This matches every trait: any CPU,
-~10 s in under heavy concurrent boot allocation (ARXFS reads + USB bring-up),
-`sampled=pre_silence` (the stale sample *is* the last watchdog tick before the
-handler wedged), `k_site=user_switch` (the arch IRQ handler stamps no
-breadcrumb), and real-Pi-4-only (the interrupt-vs-lock interleaving under heavy
-allocation rarely arises in QEMU). The watchdog/detector machinery was verified
-sound (physical-`CNTPCT` cross-CPU clock; idle CPUs marked `Idle`; a running
-EL0 task's liveness refreshed by the maskable watchdog IRQ), so this is a
-genuine wedge, not a false positive.
-
-**Fix.** `tairix_kalloc` carries an installable interrupt-control seam
+**The fix.** `tairix_kalloc` carries an installable interrupt-control seam
 (`install_irq_control(disable, restore)`, two set-once `fn`-pointer atomics
 read outside the lock); `with_inner` masks the current CPU's interrupts
-*before* acquiring the lock and restores them *after* releasing — foreclosing
-the reentrant self-deadlock. Each port installs its arch primitive at `boot()`
-entry, before interrupts are ever enabled and before any secondary CPU/hart
-starts (one install covers every core; the hooks mask the *current* CPU):
-aarch64 via `DaifIrqControl`, x86_64 via `RflagsIrqControl`, riscv64 via
-`sstatus.SIE` (`csrrci`/`csrs`); the interrupt-free `wasm32` port and the host
-test build install nothing (that window is single-CPU with interrupts already
-masked).
+before acquiring and restores after releasing. Each port installs its arch
+primitive at `boot()` entry — before interrupts are ever enabled and before
+any secondary CPU or hart starts, so one install covers every core because
+the hooks mask the *calling* CPU: aarch64 `DaifIrqControl`, x86_64
+`RflagsIrqControl`, riscv64 `sstatus.SIE`. The interrupt-free `wasm32` port
+and the host test build install nothing.
 
 **The seam is crate-global, because the first shape of it was fail-open.**
-The hooks were originally per-`FreeListAllocator`, and the boot path reached
-the instance through `kheap::install_kheap_irq_control`, which forwarded to
-whatever the then-existing registration seam had published — *and silently
-no-op'd when nothing had*. Only `kernel/tairix-kernel`'s production `main.rs`
-registered. Every one of the ~155 freestanding QEMU integration-test bins
-declares its own `#[global_allocator] FreeListAllocator` and registered it
-nowhere, so on all of them the install was a no-op and the heap lock stayed
-interrupt-unsafe: the D13 root cause was live in the entire QEMU matrix,
-including the
-`stress_qemu_aarch64` vertical whose job is to confirm D13 fixed. The hooks
-mask the *calling* CPU, so they describe the machine and not any one heap;
-they now live at crate scope in `lib/kalloc`, the ports call
-`tairix_kalloc::install_irq_control` directly, and the `kernel/core` forwarder
-is deleted. Regression test
-`the_lock_masks_interrupts_via_the_installed_control` (`lib/kalloc`) pins both
-halves: the lock masks then restores around each hold once a control is
-installed and not before, *and* an allocator built after the install that no
-registry knows about is interrupt-safe too.
+Per-allocator hooks reached through a registration seam silently no-op'd when
+nothing had registered, and only the production `main.rs` ever registered —
+so on every freestanding QEMU test bin — each declares its own
+`#[global_allocator]` — the heap lock stayed interrupt-unsafe and the root
+cause was live across the whole QEMU matrix, including the `stress` vertical
+whose job is to confirm this fixed. The hooks describe the machine rather
+than any one heap, so they live at crate scope in `lib/kalloc` and the ports
+call `tairix_kalloc::install_irq_control` directly. Regression:
+`the_lock_masks_interrupts_via_the_installed_control` pins both halves — the
+lock masks then restores around each hold once a control is installed and
+not before, *and* an allocator built after the install that no registry knows
+about is interrupt-safe too.
 
-**Noticed while fixing it, not fixed here.**
-- The same registration gate also withheld the frame-backed growth source
-  (`install_frame_heap_source`) from every test bin, so a QEMU vertical booted
-  a kernel whose heap was capped at its `.bss` bootstrap region and the growth
-  path was never exercised under a guest. That was test fidelity and capacity,
-  not the D13 safety property, so it was staged rather than smuggled into that
-  change; it is D69, now fixed by deleting the registration seam in favour of
-  a required `BootInfo` field.
-- Heap growth runs *under* the heap lock and takes the frame allocator's and
-  kernel-remap window's plain `SpinLock`s, so an ISR that allocated while
-  interrupting an EL1 mainline holding one of those would still self-deadlock
-  one layer down. No such path exists today: every ISR-reachable path is
-  lock-free and allocation-free except the return-to-user preempt point, whose
-  interrupted context is EL0 and therefore holds no kernel lock. The allocator
-  masking is correct defence-in-depth; the layer below needs the same
-  treatment only if an ISR ever allocates from an EL1-interrupting context.
+**Adjacent defects that shared this defect's signature, each closed on its
+own:** the Pi 4 near-every-boot *boot* wedge was D81 (a block split
+invalidating one page instead of the block's whole range); the QEMU stress
+vertical's own early-boot silence was D84 (a lost wake-up in the sleeping
+mutex, every core idle rather than wedged); the mute same-EL fault that made
+one boot conclusive where a dozen before it were not was D83.
 
-**Done when:** `stress --cpu 20` no longer wedges on metal. The Pi 4 *boot*
-wedge this defect also chased was D81 — a block split invalidating one page
-instead of the whole block's range — and is fixed and confirmed on metal; only
-the `--cpu 20` stress wedge remains here. (The QEMU stress vertical's own
-early-boot silence was D84, a different defect entirely, and is fixed. The FIQ
-and EDPCSR samplers remain the standing masked-section observers for any
-*future* wedge.)
+**Standing invariant — the self-sample FIQ sits strictly below the
+preemption timer.** `Gicv2::enable_intid` once gave every PPI the same
+mid-range priority (`0x80`), so the debug watchdog's Group-0 FIQ self-sample
+equalled the preemption-timer IRQ. With `GICC_CTLR.FIQEn` set, a
+pending-but-masked Group-0 FIQ of priority ≥ the timer IRQ holds that IRQ
+off — permanently once the level-triggered watchdog counter has fired on
+every core — so preemption dies and the shell can no longer spawn. The
+self-sample is therefore pinned below the timer
+(`watchdog::WATCHDOG_FIQ_PRIORITY = 0xC0`, applied via `gic::set_ppi_priority`
+in both the boot probe and per-CPU `route_watchdog_group0`); a Group-0 FIQ is
+still signalled independently of a pending Group-1, so the masked-section
+self-sample still fires. The ordering is a **compile-time** guard — a
+`const _: () = assert!(WATCHDOG_FIQ_PRIORITY > MID_RANGE_PRIORITY && … < 0xFF)`
+— so regressing it back to an equal priority fails the build rather than
+silently reintroducing the stall; `set_priority_writes_the_priority_byte`
+covers the register write itself.
 
-**The next metal boot decided it: see D81.** The fault theory was right. A
-same-EL *write* to an untranslated scan-out page, inside
-`video::reclaim_surface`'s repaint, on a core holding both the render lock and
-the kernel heap lock — with the two peers already queued behind it. The
-mute-fault and deadlock-escalation defects below are what made that one boot
-conclusive where a dozen before it were not.
+**`DAIF.F` is unmasked only when the runtime probe proved FIQ deliverable.**
+Both unmask sites consult `fiq_cadence_enabled()` and fail closed: the base
+lock mask is unconditionally I+F, and F is re-cleared only where a FIQ can
+actually be delivered. Gating on the compile-time feature alone left the
+debug build exposed to secure-world Group-0 FIQs the non-secure kernel
+cannot service, on exactly the hardware where the probe returns
+`Unsupported` and no self-sample benefit exists.
 
-**What that boot decided, as staged.** The two defects above are closed, so a
-reproduction can no longer be silent: a same-EL fault inside `recv_call` now
-prints its `syndrome` / `fault_addr` / `fault_pc` and stops the world with a
-peer census. Three outcomes, each conclusive:
+### The masked-section observers, retained
 
-- An `id=4011` record — the fault theory is confirmed and the syndrome names
-  the faulting access outright.
-- No fatal record but the boot still wedges — the theory is *wrong*: the hold
-  is not a parked fault, and the live-owner stamp has some other explanation
-  (the endpoint / `Inner` lifetime is the standing hypothesis, since the
-  driver-store kthread holds the endpoint on its own frame while `callreg`
-  holds an `Arc`).
-- An `id=4010`/`id=4011` record naming `peer_unresponsive` — whichever core
-  that is was already wedged with interrupts masked before the report, which
-  is the hard-lockup half rather than the fault half.
+These were built to chase this defect and stay as the standing tools for any
+future IRQ-masked wedge. Both are debug-gated and compile out of a shippable
+image.
+
+- **FIQ self-sample** (non-maskable in-core sample). Needs a `DAIF.F`-clear
+  execution discipline plus GICv2 Group-0 routing, with a fail-closed boot
+  deliverability probe reported as a `FeatureSupport` capability:
+  `Supported` on a single-Security-state GIC, `Unsupported` on a
+  two-Security-state one, where it falls back to the buddy detector. QEMU
+  `virt` defaults to `secure=off` and therefore self-samples; a real Pi 4
+  GIC-400 (and `virt,secure=on`) keeps Group 0 secure and returns
+  `Unsupported`. Witness: `tests/integration/fiq_selfsample_qemu_aarch64`
+  asserts a live in-kernel PC captured with `SPSR_EL1.I` masked
+  (`sampled=live`).
+- **CoreSight external-debug (`EDPCSR`) cross-core sample** — the observer
+  the FIQ path cannot be where Group 0 is secure. One core reads a wedged
+  core's PC over the memory-mapped ARMv8 external-debug interface (DDI 0487
+  H9): it neither halts the target nor rides an interrupt `DAIF` can mask.
+  `WatchdogArch::remote_pc_sample` (default `Unsupported`, with its
+  conformance vertical) renders a fresh image-relative `live_pc` beside —
+  never replacing — the stale `pc`. Discovery parses the Linux
+  `arm,coresight-cpu-debug` binding, and a base is installed only when its
+  gigapage is already Device-mapped so a read can never fault. QEMU models no
+  `EDPCSR` and the stock Pi 4 firmware DTB describes no debug nodes, so
+  enabling it on that hardware is a **provisioning** step — the firmware DTB
+  or an overlay must carry those nodes — not a code change.
+
+### Debug-only diagnostics retained from the investigation
+
+All feature-gated (`watchdog-diagnostics`), all compiled out of a shippable
+image, all host-tested: the per-CPU `k_lock` stuck-lock site record —
+including the kernel heap lock, the one IRQ-masking lock every subsystem
+descends into — with per-entry `k_lock_state` so a spinning waiter is never
+mislabelled a holder; a validated `k_bt` frame-pointer walk that accepts a
+return address only inside kernel text and only on a strictly increasing
+frame pointer above the exception frame, so a stack data word can never be
+emitted as a caller; the `AddressSpaceRegistry::withdraw` post-condition
+tripwire that faults at the reclaim site if a per-task map still holds a
+withdrawn task; the always-on `KernelInternalLines` seam that names a stuck
+line the kernel services through its own chained handler
+(`stuck_owner=console-uart` / `pcie-msi`, interrupt numbers from the device
+tree, never board constants) instead of a bare `unbound`; and the
+`SwitchReturn` breadcrumb splitting the post-switch IRQ-masked teardown from
+the switch-in, so a wedge coming back from a task is distinguishable from one
+going into it.
+
+**Known residual, recorded not buried.** Heap growth runs *under* the heap
+lock and takes the frame allocator's and kernel-remap window's plain
+`SpinLock`s, so an ISR that allocated while interrupting an EL1 mainline
+holding one of those would self-deadlock one layer down. No such path exists:
+every ISR-reachable path is lock-free and allocation-free except the
+return-to-user preempt point, whose interrupted context is EL0 and therefore
+holds no kernel lock. The allocator masking is correct defence-in-depth; the
+layer below needs the same treatment only if an ISR ever allocates from an
+EL1-interrupting context.
+
+The Pi 4B armstub FIQ-routing dependency remains a hardware-capability
+concern for `plans/FIX-HARDWARE-FEATURES.md`.
 
 ---
 
@@ -2269,14 +2029,16 @@ and `the_callers_budget_reaches_the_park` (`kernel/virtio`),
 
 ---
 
-## D41 — root-unlock login vertical failed once under a loaded gate
+## D41 — the root-unlock console read failed under a loaded gate — CLOSED (the route is unreachable by construction)
 
-Status: **open, unreproduced, not diagnosed**. Observed once during a
-`cargo xtask ci` run whose QEMU verticals overlapped the pipeline's own image
-builds; a second and third full run of the same pipeline on the same tree
-passed, and the vertical is green now.
+**State:** closed. Not closed as a load flake, and not closed on a green
+re-run: the failing condition has exactly two reachable causes, and **both
+are now foreclosed structurally** on the two ports that carry this vertical.
+The half of this entry that was recorded as an open question is answered
+outright; the half that is not is stated as unattributed rather than guessed.
 
-Symptom, from the guest log the harness dumped:
+**The symptom**, once, during a `cargo xtask ci` run whose QEMU verticals
+overlapped the pipeline's own image builds:
 
 ```
 id=4138 root-unlock: gave up; no users database installed (reboot required)
@@ -2287,28 +2049,54 @@ id=5004 syscall rejected ... comm=login sc=fs_open err=12
 id=10006 console error task=8 stage=username errno=7
 ```
 
-The interesting part is `cause=console_unreadable` alongside `users_db_read`
-and two `fs_open` calls all refused with the same errno: login concluded no
-users database is installed *because it could not read the console*, and then
-fell closed. Whether the console read failed first and the database reads are
-its consequence, or all four share one cause, is exactly what is not yet
-known.
+**Answered: which of the four came first.** `err=12` is
+`Errno::NotImplemented`, and for `users_db_read` and `fs_open` that is the
+fail-closed answer of the inert `NULL_USERS_DB` / `NULL_FILESYSTEM` holders a
+boot installs while **no root volume is mounted**. The unlock giving up is
+therefore what *causes* the three refusals behind it — they are consequences,
+not a shared fourth cause. The entry no longer has to ask.
 
-**This is not to be closed as a load flake.** A wall-clock or readiness
-window that is met on an idle host and missed when the pipeline is also
-compiling is a load-dependent defect, not an environment blip, and a green
-re-run is not evidence it is gone. The fix is structural — a budget sized to
-the work, a completion signal, or bounded concurrency so guests do not
-oversubscribe the host — never a retry.
+**So the defect is `cause=console_unreadable` alone**, which
+`read_passphrase_line` (`kernel/tairix-kernel/src/root_mount.rs`) reports for
+exactly two conditions: the reader returned `Err`, or it returned a
+zero-length read on a line with no content.
 
-**Next step.** Reproduce deliberately under host load (run the vertical while
-the host is saturated) rather than waiting for it to recur, then follow the
-refused `fs_open`/`users_db_read` errno back to which admission actually
-denied it. It carries a regression test when the fix lands.
+**Both conditions are unreachable from the production unlock reader.** The
+interactive unlock reads through `KthreadConsoleRead` over the port's
+console-0 read half, and on both ports carrying this vertical that half is
+backed by a `ConsoleInputQueue` whose `read` is infallible (`Ok(drain(buf))`):
+aarch64 `VIDEO_KEYBOARD`, or `UART_CONSOLE_READ` through
+`poll_and_read_uart` → `UART_INPUT`; x86_64 `COM1_CONSOLE_READ` through
+`poll_and_read_com1` → `COM1_INPUT`. `KthreadConsoleRead` never returns a
+zero read for a non-empty buffer either — it polls, parks on
+`CONSOLE_WAITQ`, and re-polls, re-resolving its own scheduler id each
+iteration. So neither the `Err` route nor the short-read route exists.
 
-Suspected-unrelated to the font work that surfaced it (fonts changed the
-image payload and `login` is what starts the font service, so the coupling is
-worth ruling out first rather than assuming).
+**Unattributed: which change removed it.** The console and park machinery was
+reworked substantially in this window — D44's live-CPU park fix in the
+sibling `BlockingConsoleRead`, `KthreadConsoleRead`'s per-iteration reader-id
+re-resolution, interrupt-driven receive arming for the unlock window, and
+D62's keyed wakes — and the original was never reproduced, so attributing it
+to one of those would be a guess. It is closed on the structural property,
+not on a named commit.
+
+**What a future change must not regress**, since that property is the
+closure: the unlock reader must stay one that *parks* for input rather than
+reporting a short read, over a backing that cannot fail. A console-0 read
+half that can return `Err` under load, or a reader that answers zero on an
+empty queue, re-opens this defect — it turns a slow console into a
+fail-closed refusal of login until reboot.
+
+**The fail-closed `Console` arm is still correct, not dead.**
+`ConsoleRead::read` may return `Err` by contract, and one port relies on
+that: riscv64's console-0 read half is deliberately the read-less
+`NULL_CONSOLE_READ`, so its first passphrase read errors and the unlock gives
+up at once rather than parking forever on input that cannot arrive. That is a
+documented port decision, not this defect.
+
+**Not the font work that surfaced it.** Fonts changed the image payload and
+`login` starts the font service, so the coupling was worth ruling out; the
+failure is in the console read path, which the font payload does not touch.
 
 ---
 
@@ -3305,12 +3093,11 @@ measurement. The derived default is unchanged for every other vertical,
 and the silence budget stays 60 s, so a genuinely hung guest is still
 caught as fast as before.
 
-**Not a fix for D14.** The open `sysmon-qemu-aarch64` load-dependent
-timeout is the same *class* but a different bound: that vertical's own
-120 s is its **inactivity** budget, so it is a work-heavy guest starved
-into real silence, not a progressing guest cut off by a ceiling. It still
-needs its own root-cause (bounded QEMU concurrency, or a budget sized to
-its work); nothing here closes it.
+**Not what closed D14.** That `sysmon-qemu-aarch64` timeout was the same
+*class* but a different bound: its 120 s is an **inactivity** budget, so it
+was a work-heavy guest starved into real silence, not a progressing guest cut
+off by a ceiling. Nothing here addressed it; the weighted QEMU concurrency
+budget did.
 
 **Regression cover.** `soak_deadline` outlasts every budget it is given
 and saturates instead of overflowing; every `fssoak` mode's deadline

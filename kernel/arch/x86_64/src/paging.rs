@@ -1429,8 +1429,7 @@ fn ensure_child(
     if entry & flags::PRESENT != 0 {
         // A present *huge* leaf is a data page, not a table: dereferencing
         // its address as one would let a mapping walk scribble page-table
-        // entries over mapped memory. Refuse, so the caller fails closed
-        // and the coarse leaf is split explicitly instead.
+        // entries over mapped memory. Refuse, so the caller fails closed.
         if entry & flags::HUGE != 0 {
             return None;
         }
