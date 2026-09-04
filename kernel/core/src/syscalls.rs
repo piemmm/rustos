@@ -5463,9 +5463,9 @@ where
         // touched: a build with no frame allocator threaded fails closed
         // with `NotImplemented`, the spawn-equivalent of
         // `stream_write`'s `NULL_CONSOLE`.
-        let Some(frames) = self.frames else {
+        if self.frames.is_none() {
             return Err(Errno::NotImplemented);
-        };
+        }
 
         // Copy the path in from the caller's address space through the
         // validated `copy_from_user` boundary before
@@ -5568,8 +5568,6 @@ where
         // parent is the kernel-trusted caller identity, never a
         // caller-supplied value.
         let ctx = KernelSpawnCtx::new(
-            frames,
-            self.page_table_frames,
             self.audit,
             self.sched,
             self.caps,
@@ -10396,13 +10394,6 @@ pub struct KernelSpawnCtx<'a, A>
 where
     A: KernelArch + 'static,
 {
-    frames: &'a FrameAllocator,
-    /// The same allocator as [`Self::frames`], but a `'static` borrow, so
-    /// the producer can build the child's **page tables** out of
-    /// reclaimable RAM that scales with the machine rather than a fixed
-    /// `.bss` pool. [`None`] when the boot path wired
-    /// no `'static` allocator, so the producer fails closed.
-    page_table_frames: Option<&'static FrameAllocator>,
     audit: &'a (dyn Sink + Sync),
     sched: &'a Scheduler<A>,
     caps: &'a RwLock<CapTable>,
@@ -10505,8 +10496,7 @@ where
     /// `parent` is the kernel-trusted identity of the spawning caller — for a syscall-driven spawn the dispatcher's
     /// resolved task id, for a kernel-side (host-driven) spawn the
     /// supervising task the child is recorded against for a later `wait`.
-    /// `page_table_frames` is the `'static` allocator the producer builds
-    /// the child's page tables from; `None` fails the spawn closed. `streams` is the descriptor table the
+    /// `streams` is the descriptor table the
     /// child is established with — the spawner's resolved console
     /// attachment. `wired` carries the attach block's resolved
     /// standard-stream open entries (`plans/SPAWN.md` SP10) — empty for an
@@ -10522,8 +10512,6 @@ where
     // wrapper type.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        frames: &'a FrameAllocator,
-        page_table_frames: Option<&'static FrameAllocator>,
         audit: &'a (dyn Sink + Sync),
         sched: &'a Scheduler<A>,
         caps: &'a RwLock<CapTable>,
@@ -10542,8 +10530,6 @@ where
         sandbox: bool,
     ) -> Self {
         Self {
-            frames,
-            page_table_frames,
             audit,
             sched,
             caps,
@@ -10774,10 +10760,6 @@ impl ChildRecordSeed {
 /// returned).
 struct ServicesBuildCtx {
     services: &'static crate::spawn_services::SpawnServices,
-    /// The loading child's kernel-stack guard VA (`Some` for an arena stack,
-    /// `None` for the software-canary `BoxStack`), re-expressed in the
-    /// child's own root by the build.
-    guard: Option<u64>,
 }
 
 impl ImageBuildCtx for ServicesBuildCtx {
@@ -10791,10 +10773,6 @@ impl ImageBuildCtx for ServicesBuildCtx {
 
     fn audit(&self) -> &(dyn Sink + Sync) {
         self.services.audit()
-    }
-
-    fn kernel_stack_guard(&self) -> Option<u64> {
-        self.guard
     }
 }
 
@@ -10927,15 +10905,14 @@ fn body_load_bundle(
 /// record is either the placeholder (untouched) or the effective set of a
 /// child that is about to be torn down, and no frozen space is registered.
 // Threads the full child-load context (services, the kernel-attested record
-// seed, the stack guard, the verified image + its manifest request, and the
-// resolved argv/envp) into one build; bundling these into a struct would only
-// rename the same fields, so the count stands.
+// seed, the verified image + its manifest request, and the resolved
+// argv/envp) into one build; bundling these into a struct would only rename
+// the same fields, so the count stands.
 #[allow(clippy::too_many_arguments)]
 fn build_from_bytes(
     services: &'static crate::spawn_services::SpawnServices,
     sec_id: ProcessId,
     seed: &ChildRecordSeed,
-    guard: Option<u64>,
     rxe: &[u8],
     program: &VerifiedProgram,
     args: &[&[u8]],
@@ -10947,7 +10924,7 @@ fn build_from_bytes(
     let record = seed.record(sec_id, program, services.audit());
     services.caps().write().insert(record);
 
-    let ctx = ServicesBuildCtx { services, guard };
+    let ctx = ServicesBuildCtx { services };
     let image = services.image_builder().build(rxe, &ctx, args, env)?;
 
     // Register the frozen space + direct map and the reserved user-stack span
@@ -10981,16 +10958,14 @@ fn build_from_bytes(
 /// (`plans/FIX-DESKTOP.md` §2.6.5). Any failure returns a stable [`Errno`]
 /// the caller maps to a reserved [`tairix_abi::load_failure_status`] exit.
 // Threads the full child-load context (services, the child's scheduler id and
-// task number, its load plan and record seed, the stack guard, and the
-// resolved argv/envp); a struct would only rename the same fields.
-#[allow(clippy::too_many_arguments)]
+// task number, its load plan and record seed, and the resolved argv/envp); a
+// struct would only rename the same fields.
 fn build_child_image(
     services: &'static crate::spawn_services::SpawnServices,
     sec_id: ProcessId,
     task: u64,
     plan: &LoadPlan,
     seed: &ChildRecordSeed,
-    guard: Option<u64>,
     args: &[&[u8]],
     env: &[&[u8]],
 ) -> Result<ReadyToEnter, Errno> {
@@ -10999,7 +10974,6 @@ fn build_child_image(
             services,
             sec_id,
             seed,
-            guard,
             rxe.as_ref(),
             // A boot-floor program carries no signed manifest, so there is no
             // app identity to attest and it gets no per-app store.
@@ -11029,16 +11003,7 @@ fn build_child_image(
                 // store named by something that could traverse out of one.
                 app: tairix_abi::AppIdentity::new(app.id(), app.publisher()).ok(),
             };
-            build_from_bytes(
-                services,
-                sec_id,
-                seed,
-                guard,
-                app.run_image(),
-                &program,
-                args,
-                env,
-            )
+            build_from_bytes(services, sec_id, seed, app.run_image(), &program, args, env)
         }
     }
 }
@@ -11190,15 +11155,9 @@ where
         };
 
         // Allocate the loading child's kernel stack synchronously, before its
-        // address space exists, so its own loading body runs on it. The guard
-        // VA (`Some` for an arena stack, `None` for the software-canary
-        // `BoxStack`) is threaded to the build, which re-expresses it in the
-        // child's own root. The stack frames come from this context's own
-        // allocator borrows; the architecture image builder is the
-        // boot-installed one.
-        let (stack, guard) = services
-            .image_builder()
-            .alloc_kernel_stack(self.frames, self.page_table_frames);
+        // address space exists, so its own loading body runs on it. Its guard
+        // slot is unmapped in the shared window, so the build owes it nothing.
+        let stack = crate::kstack::alloc_kernel_stack();
 
         let cpu = SchedulerArch::current_cpu(self.arch);
         let cs = self.arch.context_switch();
@@ -11216,7 +11175,7 @@ where
             let arg_refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
             let env_refs: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
             match build_child_image(
-                services, sec_id, task, &plan, &body_seed, guard, &arg_refs, &env_refs,
+                services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
             ) {
                 Ok(ready) => enter_built_child(yielder, ready),
                 Err(errno) => refuse_built_child(services, sec_id, errno),
@@ -16037,14 +15996,6 @@ mod tests {
     struct StubImageBuilder;
 
     impl ArchImageBuilder for StubImageBuilder {
-        fn alloc_kernel_stack(
-            &self,
-            _frames: &FrameAllocator,
-            _pt_frames: Option<&'static FrameAllocator>,
-        ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
-            (Box::new(crate::kthread::BoxStack::new()), None)
-        }
-
         fn build(
             &self,
             _rxe: &[u8],
@@ -16100,14 +16051,6 @@ mod tests {
     }
 
     impl ArchImageBuilder for RecordingImageBuilder {
-        fn alloc_kernel_stack(
-            &self,
-            _frames: &FrameAllocator,
-            _pt_frames: Option<&'static FrameAllocator>,
-        ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
-            (Box::new(crate::kthread::BoxStack::new()), None)
-        }
-
         fn build(
             &self,
             rxe: &[u8],
@@ -16727,7 +16670,6 @@ mod tests {
             1,
             &bundle_plan(),
             &seed,
-            None,
             &[],
             &[],
         ));
@@ -16767,7 +16709,6 @@ mod tests {
             1,
             &bundle_plan(),
             &seed,
-            None,
             &[],
             &[],
         ));
@@ -16803,17 +16744,8 @@ mod tests {
         // its command stem (`resolve_spawn_args`, tested separately); the body
         // threads whatever it is handed into the build verbatim.
         let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
-        build_child_image(
-            services,
-            ProcessId(7),
-            7,
-            &bundle_plan(),
-            &seed,
-            None,
-            &args,
-            &[],
-        )
-        .expect("a verified store bundle loads");
+        build_child_image(services, ProcessId(7), 7, &bundle_plan(), &seed, &args, &[])
+            .expect("a verified store bundle loads");
         // The arch build received byte-for-byte the validated on-disk image
         // and the resolved argument vector.
         assert_eq!(builder.rxe.lock().as_slice(), run.as_slice());
@@ -16869,7 +16801,6 @@ mod tests {
             9,
             &bundle_plan(),
             &body_seed(),
-            None,
             &args,
             &[],
         )
@@ -16914,17 +16845,8 @@ mod tests {
             rxe: alloc::borrow::Cow::Borrowed(b"image".as_slice()),
             requested: CapabilitySet::EMPTY,
         };
-        build_child_image(
-            services,
-            ProcessId(11),
-            11,
-            &plan,
-            &body_seed(),
-            None,
-            &[],
-            &[],
-        )
-        .expect("a prebuilt image builds");
+        build_child_image(services, ProcessId(11), 11, &plan, &body_seed(), &[], &[])
+            .expect("a prebuilt image builds");
         let guard = caps.read();
         let record = guard
             .caps_for(SecTaskId(11))
@@ -16975,7 +16897,6 @@ mod tests {
                 1,
                 &plan,
                 &seed,
-                None,
                 &[],
                 &[],
             ));
@@ -17381,7 +17302,6 @@ mod tests {
             1,
             &bundle_plan(),
             &seed,
-            None,
             &[],
             &[],
         ));
@@ -17719,7 +17639,6 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let frames = spawn_test_frames();
 
         // The matched node's two requested resources: a register window and
         // a DMA constraint. These originate kernel-side (the driver-spawn
@@ -17735,8 +17654,6 @@ mod tests {
         arch.set_ticks(admit_ticks);
 
         let ctx = KernelSpawnCtx::new(
-            &frames,
-            None,
             sink,
             &sched,
             &table,
@@ -17853,7 +17770,6 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
-        let frames = spawn_test_frames();
 
         // Register the spawning parent's own kernel-held record, carrying a
         // known attested process-instance identity distinct from its numeric
@@ -17883,8 +17799,6 @@ mod tests {
         // and the minted child identity is the same live kernel state.
         let make_ctx = |parent: ProcessId, proc_id: tairix_abi::ProcId| {
             KernelSpawnCtx::new(
-                &frames,
-                None,
                 sink,
                 &sched,
                 &table,
@@ -18022,7 +17936,7 @@ mod tests {
             builder,
         );
         let sec_id = ProcessId(1);
-        build_child_image(services, sec_id, 1, &plan, &seed, None, &[], &[])
+        build_child_image(services, sec_id, 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         (caps, sec_id, audit)
     }
@@ -18060,7 +17974,7 @@ mod tests {
             caps,
             builder,
         );
-        build_child_image(services, ProcessId(1), 1, &plan, &seed, None, &[], &[])
+        build_child_image(services, ProcessId(1), 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             builder
@@ -18090,7 +18004,7 @@ mod tests {
             builder2,
             runtime2,
         )));
-        build_child_image(services2, ProcessId(1), 1, &plan, &seed, None, &[], &[])
+        build_child_image(services2, ProcessId(1), 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             !builder2
@@ -23867,10 +23781,6 @@ mod tests {
     }
 
     impl LiveUserSpace for PublishedLive {
-        fn unmap_kernel_stack_guard(&mut self, _guard: u64) -> Result<(), LiveSpaceError> {
-            Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
-        }
-
         fn map_anonymous(&mut self, _base: u64, _pages: u64) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
@@ -23895,7 +23805,11 @@ mod tests {
             // a failure.
             for index in 0..pages {
                 let va = base + index * PAGE_SIZE as u64;
-                let _ = self.space.unmap_single_page(va);
+                if let Ok(page) =
+                    tairix_kernel_mem::Page::from_addr(tairix_kernel_mem::VirtAddr::new(va))
+                {
+                    let _ = self.space.unmap(page);
+                }
             }
             Ok(())
         }

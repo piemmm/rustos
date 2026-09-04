@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use tairix_arch_api::mmu::{
-    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
+    AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
@@ -51,17 +51,6 @@ pub const SATP_MODE_SV39: u64 = 8;
 
 /// Bit position of the `satp` MODE field on RV64.
 pub const SATP_MODE_SHIFT: u64 = 60;
-
-/// Bytes spanned by one Sv39 megapage (level-1) leaf — the coarse block
-/// granularity [`AddressSpace::prepare_guard_arena`] walks (the
-/// guard-page fault-form, `plans/PI.md` G2).
-pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
-
-/// Mask of the PPN field within an Sv39 PTE (bits `[53:10]`). The
-/// complement captures `VALID` plus every permission/attribute bit, so
-/// [`shatter_pte_into`] can replace only the output address when
-/// re-expressing a coarse leaf at finer granularity.
-const PTE_PPN_MASK: u64 = 0x0FFF_FFFF_FFFF << 10;
 
 /// Page-table entry permission/valid bits (privileged spec §4.4.1).
 pub mod flags {
@@ -365,171 +354,6 @@ impl AddressSpace {
         Some(())
     }
 
-    /// Re-express the coarse leaf(s) covering `vaddr` at 4 KiB
-    /// granularity, preserving the mapped output address and every
-    /// permission bit, so the single 4 KiB page containing `vaddr` can
-    /// then be torn down with [`MmuAddressSpace::unmap`] (+ a
-    /// [`TlbShootdown::flush_page`]) without disturbing its neighbours.
-    ///
-    /// This is the foundation of the riscv64 kthread guard page
-    /// (`plans/PI.md` G1, the sibling of the aarch64 block split): a guard
-    /// page that falls inside a region the boot path mapped with a coarse
-    /// 1 GiB gigapage / 2 MiB megapage *leaf* cannot be unmapped while it
-    /// is part of that leaf, because the leaf has no per-4 KiB entry to
-    /// clear. Splitting re-expresses the same translation as a table of
-    /// finer leaves — a gigapage (level 2) becomes a table of 512 × 2 MiB
-    /// megapages, then the megapage (level 1) covering `vaddr` becomes a
-    /// table of 512 × 4 KiB pages — leaving every address translating
-    /// identically but now at 4 KiB granularity.
-    ///
-    /// It is idempotent — a level that is already a table pointer is left
-    /// untouched — so re-splitting an already-fine region succeeds without
-    /// allocating and pays no invalidation.
-    ///
-    /// It is **not** break-before-make-free. Re-expressing a leaf
-    /// preserves each address's output and permissions but changes the
-    /// *granule* it translates at, and a hart holding the coarse
-    /// translation can fault a walk the tables plainly satisfy. The
-    /// maintenance owed is therefore the whole former leaf's range, not the
-    /// one page a caller came for, so a granule change pays one whole-hart
-    /// `sfence.vma` here rather than leaving the caller's
-    /// per-page fence to cover a gigapage-sized change
-    /// (`plans/OPEN-DEFECTS.md` D81, proved on aarch64 and fixed on every
-    /// port). Reaching the *other* harts is the caller's, through the
-    /// port's SBI RFENCE seam; the precondition remains that the root is
-    /// not the active regime (D82).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
-    /// [`MapError::NotMapped`] if `vaddr` has no live mapping at the level
-    /// being split, or [`MapError::PoolExhausted`] if the page-table pool
-    /// cannot supply a replacement table. On [`MapError::PoolExhausted`]
-    /// any level already split stays split (still a faithful identity
-    /// re-expression of the same translation), so the address space is
-    /// never left describing a *different* mapping.
-    pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        if self.refine_to_page(vaddr)? {
-            invalidate_all_local();
-        }
-        Ok(())
-    }
-
-    /// Re-express the leaf covering `vaddr` at 4 KiB granularity,
-    /// reporting whether any level's granule actually changed.
-    ///
-    /// Split out so the decision that drives the fence is separable from
-    /// the bare instruction that performs it. An already-fine hierarchy
-    /// reports `false` and costs no fence.
-    fn refine_to_page(&mut self, vaddr: u64) -> Result<bool, MapError> {
-        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
-            return Err(MapError::Misaligned);
-        }
-        let mut refined = false;
-        let frames = self.frames;
-        let i2 = vpn_index(vaddr, 2);
-
-        // --- Level 2: a 1 GiB gigapage leaf becomes a table of 512 × 2 MiB
-        // megapage leaves.
-        let e2 = self.root[i2];
-        if (e2 & flags::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        if pte_is_leaf(e2) {
-            let TableFrame { phys, entries } =
-                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
-            // 2 MiB sub-entries (shift 21) are still *leaves*, one finer level.
-            shatter_pte_into(entries, e2, 21);
-            // The child's entries must be observable before the pointer that
-            // reaches them: a table walk is not ordered against these plain
-            // stores, so without the fence a walker may follow the new table
-            // while its high entries still read as the frame's previous
-            // contents, and fault on an address the leaf it replaced covered.
-            publish_table_update();
-            self.root[i2] = pte_from_phys(phys, flags::VALID);
-            refined = true;
-        }
-
-        // The root slot now holds a table pointer; recover the L1 table.
-        // SAFETY: the entry is a present, non-leaf table pointer (just
-        // installed above, or pre-existing); its PPN is an identity-mapped
-        // table page (the round-trip `ensure_child`/`translate` rely on),
-        // and `&mut self` makes the borrow exclusive.
-        let l1 = unsafe { &mut *(phys_from_pte(self.root[i2]) as *mut [u64; ENTRIES_PER_TABLE]) };
-        let i1 = vpn_index(vaddr, 1);
-        let e1 = l1[i1];
-        if (e1 & flags::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        if pte_is_leaf(e1) {
-            let TableFrame { phys, entries } =
-                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
-            // 4 KiB sub-entries (shift 12) are level-0 page leaves.
-            shatter_pte_into(entries, e1, 12);
-            // Ordered for the same reason as the child above.
-            publish_table_update();
-            l1[i1] = pte_from_phys(phys, flags::VALID);
-            refined = true;
-        }
-        // L1 now resolves `vaddr` through a 4 KiB page leaf.
-        publish_table_update();
-        Ok(refined)
-    }
-
-    /// Re-express every coarse leaf covering the arena
-    /// `[base, base + len)` at 4 KiB granularity, so any single page in
-    /// the arena (e.g. a kthread kernel-stack guard page) can later be
-    /// torn down with [`MmuAddressSpace::unmap`] (+ a
-    /// [`TlbShootdown::flush_page`]) without disturbing the block the
-    /// running hart executes on (`plans/PI.md` guard-page fault-form,
-    /// stage G2).
-    ///
-    /// This is [`Self::split_block`] applied to every 2 MiB block the
-    /// arena spans: a guard-page arena that the boot path laid down inside
-    /// the coarse identity gigapages has no per-4 KiB leaf to clear, so the
-    /// whole arena is split up-front, at boot, while it holds no running
-    /// context. It inherits [`Self::split_block`]'s precondition — the
-    /// root must **not** be the active regime, because re-expressing a
-    /// leaf changes the granule an address translates at — and is
-    /// idempotent (a re-prepare of an already-fine arena allocates nothing
-    /// and fences nothing).
-    ///
-    /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
-    /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
-    /// arena is walked from the 2 MiB block containing `base` through the
-    /// block containing its last byte.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `len` is zero, `base` is not
-    /// 4 KiB-aligned, or `base + len` wraps; [`MapError::NotMapped`] if any
-    /// covering block has no live mapping; or [`MapError::PoolExhausted`]
-    /// if the page-table pool cannot supply a replacement table. On a
-    /// mid-arena failure the blocks already split stay split (a faithful
-    /// re-expression of the same translation), so the space never describes
-    /// a *different* mapping (fail closed, never
-    /// corrupt).
-    pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
-        if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
-            return Err(MapError::Misaligned);
-        }
-        // The last byte the arena occupies; `len != 0`, so `len - 1` does
-        // not underflow. A `base + len` that wraps `u64` is rejected as a
-        // fail-closed `Misaligned`, never silently truncated.
-        let last = base.checked_add(len - 1).ok_or(MapError::Misaligned)?;
-        let first_block = base & !(BLOCK_2MIB - 1);
-        let last_block = last & !(BLOCK_2MIB - 1);
-        let mut block = first_block;
-        loop {
-            self.split_block(block)?;
-            if block == last_block {
-                break;
-            }
-            block += BLOCK_2MIB;
-        }
-        Ok(())
-    }
-
     /// Map the 1 GiB region at `paddr` to `vaddr` with a single root-level
     /// gigapage leaf.
     ///
@@ -809,33 +633,6 @@ impl MmuAddressSpace for AddressSpace {
             invalidate_page_local(vaddr);
         }
         Ok(was_accessed)
-    }
-
-    fn block_split_support(&self) -> BlockSplit {
-        // Sv39 re-expresses a 1 GiB gigapage / 2 MiB megapage leaf as a
-        // table of finer leaves (`plans/PI.md` G1/G2 — the riscv64
-        // guard-page fault-form foundation, host- and `-M virt`-proven),
-        // the sibling of the aarch64 block split.
-        BlockSplit::Supported
-    }
-
-    fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        // The HAL view of the inherent, fully-tested
-        // `AddressSpace::split_block` (G1): one body, reached either
-        // directly by the arch boot path / verticals or through the HAL
-        // trait here. Inherent methods take precedence
-        // over a same-named trait method, so this forwards to the inherent
-        // body rather than recursing into itself.
-        self.split_block(vaddr)
-    }
-
-    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
-        // The HAL view of the inherent, fully-tested
-        // `AddressSpace::prepare_guard_arena` (G2): one body, reached
-        // either directly or through the HAL trait here.
-        // As with `split_block`, inherent-method resolution forwards to the
-        // inherent body rather than recursing.
-        self.prepare_guard_arena(base, len)
     }
 
     unsafe fn activate(&self) {
@@ -1374,27 +1171,6 @@ pub unsafe fn activate_user_root(root_phys: u64) {
 #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 pub unsafe fn activate_user_root(root_phys: u64) {
     let _ = root_phys;
-}
-
-/// Populate the freshly-allocated table `child` with 512 PTEs that
-/// reproduce the leaf `block` at the next finer granularity, preserving
-/// every permission/attribute bit.
-///
-/// `sub_shift` is the base-2 log of each sub-entry's coverage (21 for the
-/// 2 MiB megapages a gigapage shatters into, 12 for the 4 KiB pages a
-/// megapage shatters into). Sv39 leaves carry the same R/W/X/U/A/D
-/// encoding at every level, so only the PPN changes per sub-entry —
-/// `block & !PTE_PPN_MASK` captures `VALID` plus every permission bit, so
-/// the finer leaves map the same memory with identical permissions
-/// (one attribute vocabulary, never re-derived).
-fn shatter_pte_into(child: &mut [u64; ENTRIES_PER_TABLE], block: u64, sub_shift: u32) {
-    let base = phys_from_pte(block);
-    let attr_bits = block & !PTE_PPN_MASK;
-    let sub_size = 1u64 << sub_shift;
-    for (i, slot) in child.iter_mut().enumerate() {
-        let sub_pa = base + (i as u64) * sub_size;
-        *slot = pte_from_phys(sub_pa, attr_bits);
-    }
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

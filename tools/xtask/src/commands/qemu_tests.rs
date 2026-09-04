@@ -2439,42 +2439,6 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // `plans/PI.md` guard-page fault-form (riscv64 stage G1):
-    // `tairix-test-stack-guard-qemu-riscv64` is the riscv64 sibling of
-    // `tairix-test-stack-guard-qemu-aarch64` — it proves the live Sv39
-    // block-split the riscv64 kthread kernel-stack guard page is built on.
-    // It builds one `paging::AddressSpace` (identity-maps the low 4 GiB),
-    // calls `AddressSpace::split_block` to shatter the coarse identity leaf
-    // covering a dedicated `GUARD_PAGE` static down to 4 KiB pages
-    // (preserving every mapping), installs the S-mode trap vector + a
-    // `fault` handler, turns paging on, writes+reads-back a sentinel
-    // through the guard page (proving the split preserved the mapping
-    // live), then `unmap`s that single page through the Arch HAL +
-    // `flush_page`s its stale TLB entry and reads it: the MMU raises a load
-    // page fault, the handler confirms the cause / faulting address, and
-    // writes the `SiFive` Test PASS finisher. A regression that fails to
-    // split, preserve, or unmap either reports FAILURE explicitly or never
-    // faults (timing out). Single CPU and a 60-second budget match the
-    // other boot-then-do-fixed-work riscv64 tests.
-    QemuTest {
-        package: "tairix-test-stack-guard-qemu-riscv64",
-        binary: "tairix-test-stack-guard-qemu-riscv64",
-        target: "riscv64gc-unknown-none-elf",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        serial: &[],
-    },
     // `tests/SECURITY.md` §5 / `PLAN.md` Stage 7 item E — the per-port
     // `copy_from_user` hardware fault fix-up verticals. Each takes a
     // *real* kernel-mode data fault inside the port's guarded user-copy
@@ -2573,28 +2537,25 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // `plans/PI.md` guard-page fault-form (riscv64 stage G3c): the
-    // *production* fault-form, the riscv64 sibling of
-    // `tairix-test-stack-overrun-qemu-aarch64`.
-    // `tairix-test-stack-overrun-qemu-riscv64` proves that an overrunning
-    // kthread takes a synchronous store page fault, not a next-reschedule
-    // canary detection. It builds an Sv39 identity `AddressSpace`, prepares
-    // a 2 MiB-aligned guard arena (`AddressSpace::prepare_guard_arena`, G2),
-    // carves one kthread stack region `[guard page | usable stack]` out of
-    // it, installs the S-mode trap vector + a `fault` handler, turns paging
-    // on, then `unmap`s the guard page through the Arch HAL + `flush_page`s
-    // it — the production guard-page mechanism (G3b-2). It then builds the
-    // live `tairix-kernel-sched-eevdf` `Scheduler` over `RiscvArch`, admits a
-    // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
-    // drives the cooperative `step` loop. The kthread body overruns its
-    // stack (writes the highest guard byte, the first byte a contiguous
-    // downward overrun crosses); because the guard page is unmapped the
-    // access raises a synchronous store page fault *while the kthread runs*,
-    // the handler confirms the cause / faulting address, and writes the
-    // `SiFive` Test PASS finisher. A regression that left the page mapped
-    // lets the body return cleanly; the drain loop then reports FAILURE
-    // explicitly rather than passing. Single CPU and a 60-second budget match
-    // the other boot-then-do-fixed-work riscv64 tests.
+    // `plans/OPEN-DEFECTS.md` D82, riscv64: the sibling of
+    // `tairix-test-stack-overrun-qemu-aarch64`. It reserves the kernel remap
+    // window, builds an Sv39 identity `AddressSpace` (which installs the
+    // window's shared slots), installs the S-mode trap vector + a `fault`
+    // handler, turns paging on, installs the window-backed stack tier, and
+    // draws one stack from it through the production
+    // `kstack::alloc_kernel_stack`. It checks the stack came from the window
+    // (not the software-canary heap fallback) and that its usable run is
+    // writable, then builds the live `tairix-kernel-sched-eevdf` `Scheduler`
+    // over `RiscvArch`, admits a kthread on that stack via
+    // `kernel_core::spawn_kthread_with_stack`, and drives the cooperative
+    // `step` loop. The body writes the highest byte of its guard slot — the
+    // first byte a contiguous downward overrun crosses — and the unmapped
+    // slot raises a synchronous store page fault *while the kthread runs*;
+    // the handler confirms the cause / faulting address and writes the
+    // `SiFive` Test PASS finisher. A slot left mapped lets the body return
+    // cleanly; the drain loop then reports FAILURE explicitly rather than
+    // passing. Single CPU and a 60-second budget match the other
+    // boot-then-do-fixed-work riscv64 tests.
     QemuTest {
         package: "tairix-test-stack-overrun-qemu-riscv64",
         binary: "tairix-test-stack-overrun-qemu-riscv64",
@@ -4055,62 +4016,24 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // PI Stage G1/G2 (`plans/PI.md`): the x86_64 guard-page fault-form
-    // vertical — the proof that x86_64, the last `BlockSplit::Pending` port,
-    // is now `BlockSplit::Supported`, the sibling of
-    // `stack_guard_qemu_{aarch64,riscv64}`. Unlike those self-contained test
-    // kernels, x86_64 long-mode bring-up (GDT, the dedicated error-code-aware
-    // `#PF` entry, the bump heap) is the production boot pipeline's job, so it
-    // boots the real `tairix-kernel` pipeline (like the x86_64 `mem_map`
-    // vertical) and does the split / unmap / fault work on `BootCompleted`. It
-    // builds a 4 GiB-identity `paging::AddressSpace`, activates it (CR3),
-    // `split_block`s the 2 MiB huge page covering a dedicated guard static
-    // (reached through its low-identity physical alias), proves the split
-    // preserved the mapping (sentinel write/read-back), then `unmap`s +
-    // `flush_page`s the single guard page and reads it — the
-    // `tairix_arch_x86_64::fault` observer reports the supervisor not-present
-    // `#PF` on exactly that page as PASS. A split/unmap failure, a read that
-    // does not fault, or a fault elsewhere flips `qemu_exit::exit_failure` or
-    // times out (fail-loud). Single CPU and a 60-second budget
-    // match the other boot-then-do-fixed-work x86_64 tests.
-    QemuTest {
-        package: "tairix-test-stack-guard-qemu-x86_64",
-        binary: "tairix-test-stack-guard-qemu-x86_64",
-        target: "x86_64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        serial: &[],
-    },
-    // PI Stage G3c (`plans/PI.md`): the x86_64 production guard-page
-    // fault-form vertical — the proof that an *overrunning kthread* faults
-    // synchronously in hardware under the live scheduler, the sibling of
-    // `stack_overrun_qemu_aarch64`. Like the x86_64 `stack_guard` vertical it
-    // boots the real `tairix-kernel` pipeline (so the GDT, the dedicated
-    // error-code-aware `#PF` entry, and the bump heap are installed) and does
-    // the work on `BootCompleted`: it builds a 4 GiB-identity
-    // `paging::AddressSpace`, activates it (CR3), re-expresses a 2 MiB guard
-    // arena at 4 KiB granularity (`prepare_guard_arena`), `unmap`s +
-    // `flush_page`s one kthread stack's guard page, builds the live
-    // `tairix-kernel-sched-eevdf` `Scheduler` over `X86_64Arch`, and admits a
-    // kthread on that arena stack via `spawn_kthread_with_stack`. The
-    // kthread's overrun into the unmapped guard page raises a supervisor
-    // not-present `#PF`; the `tairix_arch_x86_64::fault` observer confirms the
-    // cause + faulting address and reports PASS. A body that returns without
-    // faulting (guard regression) drains the loop and flips
-    // `qemu_exit::exit_failure`, or times out (fail-loud).
-    // Single CPU and a 60-second budget match the other boot-then-do-fixed-
-    // work x86_64 tests.
+    // `plans/OPEN-DEFECTS.md` D82, x86_64: the sibling of
+    // `stack_overrun_qemu_aarch64`. x86_64 long-mode bring-up (GDT, the
+    // error-code-aware `#PF` entry, the bump heap) is the production boot
+    // pipeline's job, so this one boots the real `tairix-kernel` pipeline —
+    // which also installs the remap window and the stack tier — and does the
+    // work on `BootCompleted`: it draws a stack through the production
+    // `kstack::alloc_kernel_stack`, checks it came from the window rather
+    // than the software-canary heap fallback (a fallback here would mean the
+    // production install silently degraded) and that its usable run is
+    // writable, builds the live `tairix-kernel-sched-eevdf` `Scheduler` over
+    // `X86_64Arch`, and admits a kthread on that stack via
+    // `spawn_kthread_with_stack`. The overrun into the unmapped guard slot
+    // raises a supervisor not-present `#PF`; the `tairix_arch_x86_64::fault`
+    // observer confirms the cause + faulting address and reports PASS. A body
+    // that returns without faulting (guard regression) drains the loop and
+    // flips `qemu_exit::exit_failure`, or times out (fail-loud). Single CPU
+    // and a 60-second budget match the other boot-then-do-fixed-work x86_64
+    // tests.
     QemuTest {
         package: "tairix-test-stack-overrun-qemu-x86_64",
         binary: "tairix-test-stack-overrun-qemu-x86_64",
@@ -7467,78 +7390,6 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // `plans/PI.md` guard-page fault-form (stage G1):
-    // `tairix-test-stack-guard-qemu-aarch64` proves the live mechanism the
-    // kthread kernel-stack guard page is built on. It builds one stage-1
-    // `paging::AddressSpace` (identity-maps the low 2 GiB), calls
-    // `AddressSpace::split_block` to shatter the coarse identity block that
-    // covers a dedicated `GUARD_PAGE` static down to 4 KiB pages
-    // (preserving every mapping), installs the EL1 vectors + a `fault`
-    // handler, enables the MMU, writes+reads-back a sentinel through the
-    // guard page (proving the split preserved the mapping live), then
-    // `unmap`s that single page through the Arch HAL + `flush_page`s its
-    // stale TLB entry and reads it: the MMU raises a data abort, the
-    // handler confirms the cause / faulting address, and reports PASS via
-    // semihosting. A regression that fails to split, preserve, or unmap
-    // either reports FAILURE explicitly or never faults (timing out).
-    // Single CPU and a 60-second budget match the other
-    // boot-then-do-fixed-work aarch64 tests.
-    QemuTest {
-        package: "tairix-test-stack-guard-qemu-aarch64",
-        binary: "tairix-test-stack-guard-qemu-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        serial: &[],
-    },
-    // `plans/PI.md` guard-page fault-form (stage G2):
-    // `tairix-test-stack-arena-qemu-aarch64` proves the boot-time
-    // kthread-stack guard arena (`AddressSpace::prepare_guard_arena`). It
-    // builds one stage-1 `paging::AddressSpace` (identity-maps the low
-    // 2 GiB), prepares a 2 MiB-aligned, 2 MiB guard arena at 4 KiB
-    // granularity (the arena is its own L2 block, distinct from the block
-    // holding the running code/stack), installs the EL1 vectors + a
-    // `fault` handler, enables the MMU, writes+reads-back a sentinel
-    // through an arena guard page (proving the split preserved the mapping
-    // live), then `unmap`s that one page through the Arch HAL +
-    // `flush_page`s it, proves the running stack (a different 2 MiB block)
-    // and a neighbouring arena page still work, and reads the unmapped
-    // page: the MMU raises a data abort, the handler confirms the cause /
-    // faulting address, and reports PASS via semihosting. A regression
-    // that shatters the running block, fails to preserve the arena, or
-    // never faults either reports FAILURE explicitly or times out. Single
-    // CPU and a 60-second budget match the other boot-then-do-fixed-work
-    // aarch64 tests.
-    QemuTest {
-        package: "tairix-test-stack-arena-qemu-aarch64",
-        binary: "tairix-test-stack-arena-qemu-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        fs_disk: FsDisk::None,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        serial: &[],
-    },
     // `plans/FIX-KHEAP.md` slab tier: `tairix-test-kslab-qemu-aarch64` proves
     // the kernel heap's page accounting on real hardware. It enables the MMU
     // over an identity space, builds a `FrameAllocator` over a `.bss` pool,
@@ -7572,27 +7423,26 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
-    // `plans/PI.md` guard-page fault-form (stage G3c): the *production*
-    // fault-form. `tairix-test-stack-overrun-qemu-aarch64` proves that an
-    // overrunning kthread takes a synchronous data abort, not a
-    // next-reschedule canary detection. It builds a stage-1 identity
-    // `AddressSpace`, prepares a 2 MiB-aligned guard arena
-    // (`AddressSpace::prepare_guard_arena`, G2), carves one kthread stack
-    // region `[guard page | usable stack]` out of it, installs the EL1
-    // vectors + a `fault` handler, enables the MMU, then `unmap`s the guard
-    // page through the Arch HAL + `flush_page`s it — the production
-    // guard-page mechanism (G3b-2). It then builds the live
-    // `tairix-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`, admits a
-    // kthread on that stack via `kernel_core::spawn_kthread_with_stack`, and
-    // drives the cooperative `step` loop. The kthread body overruns its
-    // stack (touches the highest guard byte, the first byte a contiguous
-    // downward overrun crosses); because the guard page is unmapped the
-    // access raises a synchronous data abort *while the kthread runs*, the
-    // handler confirms the cause / faulting address, and reports PASS via
-    // semihosting. A regression that left the page mapped lets the body
-    // return cleanly; the drain loop then reports FAILURE explicitly rather
-    // than passing. Single CPU and a 60-second budget match the other
-    // boot-then-do-fixed-work aarch64 tests.
+    // `plans/OPEN-DEFECTS.md` D82: kthread kernel stacks are window-backed
+    // with an unmapped guard slot. `tairix-test-stack-overrun-qemu-aarch64`
+    // proves an overrunning kthread takes a synchronous data abort, not a
+    // next-reschedule canary detection. It reserves the kernel remap window,
+    // builds a stage-1 identity `AddressSpace` (which installs the window's
+    // shared slots) and activates it, installs the window-backed stack tier
+    // over that window, and draws one stack from it through the production
+    // `kstack::alloc_kernel_stack`. It checks the stack came from the window
+    // (not the software-canary heap fallback) and that its usable run is
+    // writable, then builds the live `tairix-kernel-sched-eevdf` `Scheduler`
+    // over `Aarch64Arch`, admits a kthread on that stack via
+    // `kernel_core::spawn_kthread_with_stack`, and drives the cooperative
+    // `step` loop. The body touches the highest byte of its guard slot — the
+    // first byte a contiguous downward overrun crosses — and the unmapped
+    // slot raises a synchronous data abort *while the kthread runs*; the
+    // handler confirms the cause / faulting address and reports PASS via
+    // semihosting. A slot left mapped lets the body return cleanly; the
+    // drain loop then reports FAILURE explicitly rather than passing. Single
+    // CPU and a 60-second budget match the other boot-then-do-fixed-work
+    // aarch64 tests.
     QemuTest {
         package: "tairix-test-stack-overrun-qemu-aarch64",
         binary: "tairix-test-stack-overrun-qemu-aarch64",

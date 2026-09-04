@@ -197,71 +197,9 @@ pub enum MapError {
     /// address that was never mapped); the port refuses rather than
     /// fabricating a frame.
     NotMapped,
-    /// The operation is not implemented on this port. Returned by the
-    /// default [`AddressSpace::split_block`] of a port whose
-    /// [`AddressSpace::block_split_support`] is not [`BlockSplit::Supported`]
-    /// — the coarse-block split (the guard-page fault-form, `plans/PI.md`
-    /// G1–G3) is implemented on aarch64 but pending on the other ports, so
-    /// asking for it elsewhere fails closed rather than silently doing
-    /// nothing.
+    /// The operation is not implemented on this port, so it fails closed
+    /// rather than silently doing nothing.
     Unsupported,
-}
-
-/// A port's honest declaration of whether it can re-express a coarse
-/// (large-page / block) mapping at 4 KiB granularity — the foundation of
-/// the kthread guard-page fault-form (`plans/PI.md` G1–G3).
-///
-/// Re-expressing a coarse block as a table of finer leaves is what lets a
-/// single 4 KiB page inside a boot-time identity *block* be unmapped (so
-/// an overrun into it faults) without disturbing its neighbours
-/// ([`AddressSpace::split_block`]). Only aarch64 implements it today; the
-/// other paging ports honestly declare it [`BlockSplit::Pending`] rather
-/// than pretend (the same honesty discipline as
-/// [`crate::memtag::Tagging`] and [`crate::sidechannel::Mitigation`]).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BlockSplit {
-    /// The port re-expresses a coarse block at 4 KiB granularity
-    /// ([`AddressSpace::split_block`] does real work).
-    Supported,
-    /// The port's translation regime has no coarse blocks to split (the
-    /// payload is the justification; it must be non-empty).
-    Unsupported(&'static str),
-    /// The port *could* split blocks but the primitive has not landed yet
-    /// (the payload is the tracking note — the `plans/PI.md` stage that
-    /// will deliver it; it must be non-empty).
-    Pending(&'static str),
-}
-
-impl BlockSplit {
-    /// `true` if the port re-expresses coarse blocks at 4 KiB granularity.
-    #[must_use]
-    pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Supported)
-    }
-
-    /// `true` if the port has a tracked [`BlockSplit::Pending`] gap.
-    #[must_use]
-    pub const fn is_pending(self) -> bool {
-        matches!(self, Self::Pending(_))
-    }
-
-    /// `true` if the declaration is release-ready: either supported or a
-    /// justified [`BlockSplit::Unsupported`]. A [`BlockSplit::Pending`]
-    /// gap is honest but not release-ready.
-    #[must_use]
-    pub const fn is_release_ready(self) -> bool {
-        matches!(self, Self::Supported | Self::Unsupported(_))
-    }
-
-    /// The explanatory note for a non-supported declaration, or `None`
-    /// when supported.
-    #[must_use]
-    pub const fn detail(self) -> Option<&'static str> {
-        match self {
-            Self::Supported => None,
-            Self::Unsupported(reason) | Self::Pending(reason) => Some(reason),
-        }
-    }
 }
 
 /// A port's honest declaration of whether it can report which pages a
@@ -270,7 +208,8 @@ impl BlockSplit {
 /// genuinely cold page from a hot one before the compressed-memory tier
 /// (`plans/SWAPSWAPSWAP.md`) reclaims it.
 ///
-/// This mirrors the honesty discipline of [`BlockSplit`],
+/// This mirrors the honesty discipline of the other capability
+/// declarations,
 /// [`crate::memtag::Tagging`], and [`crate::sidechannel::Mitigation`]: a
 /// port never pretends a referenced bit exists. When the declaration is
 /// not [`AccessTracking::Supported`], [`AddressSpace::test_and_clear_accessed`]
@@ -498,102 +437,6 @@ pub trait AddressSpace {
         Err(MapError::Unsupported)
     }
 
-    /// This port's honest declaration of whether it can re-express a
-    /// coarse (large-page / block) mapping at 4 KiB granularity via
-    /// [`Self::split_block`] (`plans/PI.md` G1–G3).
-    ///
-    /// Every port declares one honest position (never
-    /// pretend a defence exists): [`BlockSplit::Supported`] (the port does
-    /// it), [`BlockSplit::Unsupported`] (its translation regime has no
-    /// coarse blocks to split), or [`BlockSplit::Pending`] (it could but
-    /// the primitive has not landed). A non-supported declaration must
-    /// carry a non-empty justification, which [`conformance::run_all`]
-    /// checks.
-    fn block_split_support(&self) -> BlockSplit;
-
-    /// Re-express the coarse block covering `vaddr` at 4 KiB granularity,
-    /// preserving the mapped output address and every attribute, so the
-    /// single 4 KiB page containing `vaddr` can then be torn down with
-    /// [`Self::unmap`] (+ a [`crate::tlb::TlbShootdown::flush_page`])
-    /// without disturbing its neighbours.
-    ///
-    /// This is the foundation of the kthread guard-page fault-form
-    /// (`plans/PI.md` G1–G3): a guard page that
-    /// the boot path mapped inside a coarse identity *block* has no
-    /// per-4 KiB leaf to clear until the block is re-expressed as a table
-    /// of finer leaves. It is idempotent: an already-fine hierarchy
-    /// allocates nothing and pays no maintenance.
-    ///
-    /// It is **not** break-before-make-free. Adding a table level
-    /// preserves each address's output and permissions but changes the
-    /// *granule* it translates at, and a CPU holding the coarse
-    /// translation may fault a walk the tables plainly satisfy. A port
-    /// therefore owes the maintenance for the whole former block's range
-    /// — not the one page the caller came for — whenever a granule
-    /// actually changed, and the root must not be the active translation
-    /// regime (`plans/OPEN-DEFECTS.md` D81, D82).
-    ///
-    /// The default fails closed with [`MapError::Unsupported`] for a port
-    /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
-    /// — asking it to split a block does nothing silently is *not* an
-    /// option. A supporting port overrides this.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
-    /// [`MapError::NotMapped`] if `vaddr` has no live mapping to split,
-    /// [`MapError::PoolExhausted`] if the page-table pool cannot supply a
-    /// replacement table, or [`MapError::Unsupported`] on a port that does
-    /// not implement the split.
-    fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        let _ = vaddr;
-        Err(MapError::Unsupported)
-    }
-
-    /// Re-express every coarse block covering the arena
-    /// `[base, base + len)` at 4 KiB granularity, so any single page in
-    /// the arena (e.g. a kthread kernel-stack guard page) can later be
-    /// torn down with [`Self::unmap`] (+ a
-    /// [`crate::tlb::TlbShootdown::flush_page`]) without disturbing the
-    /// block the running CPU executes on.
-    ///
-    /// This is [`Self::split_block`] applied to every coarse block the
-    /// arena spans (`plans/PI.md` G2): a guard-page arena laid down inside
-    /// the boot path's coarse identity blocks has no per-4 KiB leaf to
-    /// clear until those blocks are re-expressed as tables of finer
-    /// leaves. Done up-front, at boot, while the arena holds no running
-    /// context. It is idempotent: an already-fine hierarchy allocates
-    /// nothing and changes no granule.
-    ///
-    /// It is **not** break-before-make-free. Adding a table level
-    /// preserves each address's output and permissions but changes the
-    /// *granule* it translates at, and a TLB holding both granules for one
-    /// address is CONSTRAINED UNPREDICTABLE — which is why
-    /// [`Self::split_block`] owns the maintenance for the whole former
-    /// block's range rather than leaving a caller to flush one page of it
-    /// (`plans/OPEN-DEFECTS.md` D81). The precondition is therefore that
-    /// the root **must not** be the active translation regime; a live
-    /// refinement is bounded by that maintenance but still opens a window
-    /// the architecture leaves undefined (D82).
-    ///
-    /// The default fails closed with [`MapError::Unsupported`] for a port
-    /// whose [`Self::block_split_support`] is not [`BlockSplit::Supported`]
-    /// — the arena defence falls back to the software canary for such a
-    /// port, never silently no-ops.
-    /// A supporting port overrides this.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `len` is zero or `base` is not
-    /// 4 KiB-aligned, [`MapError::NotMapped`] if any covering block has no
-    /// live mapping, [`MapError::PoolExhausted`] if the page-table pool
-    /// cannot supply a replacement table, or [`MapError::Unsupported`] on a
-    /// port that does not implement the split.
-    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
-        let _ = (base, len);
-        Err(MapError::Unsupported)
-    }
-
     /// Make this address space the active translation regime on the
     /// calling CPU.
     ///
@@ -655,7 +498,7 @@ pub trait AddressSpace {
 /// port-specific mappable address pair — the same precedent as
 /// [`crate::irq::conformance`] and [`crate::timer::conformance`].
 pub mod conformance {
-    use super::{AccessTracking, AddressSpace, BlockSplit, MapError, PageFlags};
+    use super::{AccessTracking, AddressSpace, MapError, PageFlags};
 
     /// Run the entire [`AddressSpace`] conformance suite against `space`,
     /// using `va` / `pa` as a port-specific 4 KiB-aligned virtual/physical
@@ -683,7 +526,6 @@ pub mod conformance {
         unmapped_address_does_not_translate(space, va);
         maps_translates_then_refuses_a_double_map(space, va, pa);
         unmaps_then_translates_to_nothing(space, va, pa);
-        block_split_declaration_is_honest(space, va);
         access_tracking_declaration_is_honest(space, va);
     }
 
@@ -709,40 +551,6 @@ pub mod conformance {
                 space.test_and_clear_accessed(va),
                 Err(MapError::Unsupported),
                 "a port without access tracking must fail test_and_clear_accessed closed"
-            );
-        }
-    }
-
-    /// The port's [`AddressSpace::block_split_support`] is honest: a
-    /// non-supported declaration carries a non-empty justification
-    /// (a defence is never pretended), and a port that
-    /// does *not* support the split fails both [`AddressSpace::split_block`]
-    /// and [`AddressSpace::prepare_guard_arena`] closed with
-    /// [`MapError::Unsupported`] rather than silently doing nothing
-    /// (the guard-page arena that builds on the split
-    /// must fall back to the software canary, never pretend success). A
-    /// supporting port's positive split behaviour is proven by its own host
-    /// tests (it needs a known coarse block, which this portable suite does
-    /// not have), so the supported case is only required to declare itself,
-    /// not exercised here.
-    fn block_split_declaration_is_honest<A: AddressSpace + ?Sized>(space: &mut A, va: u64) {
-        let support = space.block_split_support();
-        if let Some(reason) = support.detail() {
-            assert!(
-                !reason.trim().is_empty(),
-                "a non-supported block-split declaration must carry a non-empty justification"
-            );
-        }
-        if !matches!(support, BlockSplit::Supported) {
-            assert_eq!(
-                space.split_block(va),
-                Err(MapError::Unsupported),
-                "a port that does not support block-split must fail split_block closed"
-            );
-            assert_eq!(
-                space.prepare_guard_arena(va, 4096),
-                Err(MapError::Unsupported),
-                "a port that does not support block-split must fail prepare_guard_arena closed"
             );
         }
     }
@@ -839,7 +647,7 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{AccessTracking, AddressSpace, BlockSplit, MapError, PageFlags};
+        use super::super::{AccessTracking, AddressSpace, MapError, PageFlags};
         use super::run_all;
 
         /// A faithful host double: it honours the same fail-closed
@@ -898,10 +706,6 @@ pub mod conformance {
                 0x1000
             }
 
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Unsupported("host double tracks single 4 KiB entries; no coarse blocks")
-            }
-
             unsafe fn activate(&self) {}
         }
 
@@ -942,10 +746,6 @@ pub mod conformance {
                 0x1000
             }
 
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Unsupported("test double")
-            }
-
             unsafe fn activate(&self) {}
         }
 
@@ -953,129 +753,6 @@ pub mod conformance {
         #[should_panic(expected = "a misaligned vaddr must be rejected")]
         fn suite_rejects_an_address_space_that_accepts_a_misaligned_vaddr() {
             run_all(&mut LenientAddressSpace, 0x10_0000_0000, 0x20_0000);
-        }
-
-        /// A port that *claims* to split blocks (`BlockSplit::Supported`)
-        /// is taken at its word by the portable suite (its positive split
-        /// behaviour is proven by its own host tests), so a faithful
-        /// double may declare itself supported and still pass.
-        #[derive(Default)]
-        struct SupportedSplitAddressSpace {
-            inner: CellAddressSpace,
-        }
-
-        impl AddressSpace for SupportedSplitAddressSpace {
-            fn map_page(
-                &mut self,
-                vaddr: u64,
-                paddr: u64,
-                flags: PageFlags,
-            ) -> Result<(), MapError> {
-                self.inner.map_page(vaddr, paddr, flags)
-            }
-            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
-                self.inner.translate(vaddr)
-            }
-            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
-                self.inner.unmap(vaddr)
-            }
-            fn root_phys(&self) -> u64 {
-                self.inner.root_phys()
-            }
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Supported
-            }
-            fn split_block(&mut self, _vaddr: u64) -> Result<(), MapError> {
-                Ok(())
-            }
-            unsafe fn activate(&self) {}
-        }
-
-        #[test]
-        fn suite_accepts_a_port_that_declares_block_split_supported() {
-            let mut space = SupportedSplitAddressSpace::default();
-            run_all(&mut space, 0x10_0000_0000, 0x20_0000);
-        }
-
-        /// A port that declares the split *unsupported* but then fails to
-        /// fail `split_block` closed (it silently no-ops) is a fail-open
-        /// hole and must be caught.
-        #[derive(Default)]
-        struct FailOpenSplitAddressSpace {
-            inner: CellAddressSpace,
-        }
-
-        impl AddressSpace for FailOpenSplitAddressSpace {
-            fn map_page(
-                &mut self,
-                vaddr: u64,
-                paddr: u64,
-                flags: PageFlags,
-            ) -> Result<(), MapError> {
-                self.inner.map_page(vaddr, paddr, flags)
-            }
-            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
-                self.inner.translate(vaddr)
-            }
-            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
-                self.inner.unmap(vaddr)
-            }
-            fn root_phys(&self) -> u64 {
-                self.inner.root_phys()
-            }
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Unsupported("no coarse blocks")
-            }
-            fn split_block(&mut self, _vaddr: u64) -> Result<(), MapError> {
-                // Bug: claims unsupported yet silently succeeds.
-                Ok(())
-            }
-            unsafe fn activate(&self) {}
-        }
-
-        #[test]
-        #[should_panic(expected = "must fail split_block closed")]
-        fn suite_rejects_a_fail_open_unsupported_split() {
-            let mut space = FailOpenSplitAddressSpace::default();
-            run_all(&mut space, 0x10_0000_0000, 0x20_0000);
-        }
-
-        /// A non-supported declaration with an empty justification is a
-        /// dishonest profile and must be caught.
-        #[derive(Default)]
-        struct EmptyJustificationAddressSpace {
-            inner: CellAddressSpace,
-        }
-
-        impl AddressSpace for EmptyJustificationAddressSpace {
-            fn map_page(
-                &mut self,
-                vaddr: u64,
-                paddr: u64,
-                flags: PageFlags,
-            ) -> Result<(), MapError> {
-                self.inner.map_page(vaddr, paddr, flags)
-            }
-            fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
-                self.inner.translate(vaddr)
-            }
-            fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
-                self.inner.unmap(vaddr)
-            }
-            fn root_phys(&self) -> u64 {
-                self.inner.root_phys()
-            }
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Pending("   ")
-            }
-            unsafe fn activate(&self) {}
-        }
-
-        #[test]
-        #[should_panic(expected = "must carry a non-empty justification")]
-        fn suite_rejects_an_empty_block_split_justification() {
-            let mut space = EmptyJustificationAddressSpace::default();
-            run_all(&mut space, 0x10_0000_0000, 0x20_0000);
         }
 
         /// A port that declares access tracking unsupported yet returns a
@@ -1105,9 +782,6 @@ pub mod conformance {
             }
             fn root_phys(&self) -> u64 {
                 self.inner.root_phys()
-            }
-            fn block_split_support(&self) -> BlockSplit {
-                BlockSplit::Unsupported("no coarse blocks")
             }
             fn access_tracking(&self) -> AccessTracking {
                 AccessTracking::Unsupported("claims no referenced bit")
@@ -1159,27 +833,6 @@ mod tests {
             | PageFlags::DEVICE;
         assert_eq!(PageFlags::from_bits(all.bits()), Some(all));
         assert_eq!(PageFlags::from_bits(0b1000_0000), None);
-    }
-
-    #[test]
-    fn block_split_helpers_classify_each_declaration() {
-        assert!(BlockSplit::Supported.is_supported());
-        assert!(!BlockSplit::Supported.is_pending());
-        assert!(BlockSplit::Supported.is_release_ready());
-        assert_eq!(BlockSplit::Supported.detail(), None);
-
-        let unsupported = BlockSplit::Unsupported("no coarse blocks");
-        assert!(!unsupported.is_supported());
-        assert!(!unsupported.is_pending());
-        assert!(unsupported.is_release_ready());
-        assert_eq!(unsupported.detail(), Some("no coarse blocks"));
-
-        let pending = BlockSplit::Pending("lands in plans/PI.md G3");
-        assert!(!pending.is_supported());
-        assert!(pending.is_pending());
-        // A Pending gap is honest but not release-ready.
-        assert!(!pending.is_release_ready());
-        assert_eq!(pending.detail(), Some("lands in plans/PI.md G3"));
     }
 
     #[test]

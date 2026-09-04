@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-stack-overrun-qemu-aarch64"
-description = "plans/PI.md guard-page fault-form (stage G3c) QEMU integration test: prove the production fault-form on the virt board — a live kthread running on an arena-backed kernel stack whose guard page is unmapped takes a synchronous data abort when it overruns into that guard page, rather than the deferred next-reschedule canary detection a heap-backed BoxStack falls back to."
+description = "plans/OPEN-DEFECTS.md D82 QEMU integration test: prove on the virt board that a live kthread running on a window-backed kernel stack takes a synchronous data abort when it overruns into the stack's unmapped guard slot, rather than the deferred next-reschedule canary detection a heap-backed BoxStack falls back to."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,16 +11,16 @@ publish = false
 [lints]
 workspace = true
 
-# Freestanding "spawn a real kthread on an arena-backed kernel stack with an
-# unmapped guard page, have it overrun into the guard, and prove the MMU
-# raises a synchronous data abort" integration test: the `-M virt` proof of
-# the `plans/PI.md` stage-G3c production fault-form. It links the
-# `tairix-kernel-core` kthread runtime, the `tairix-arch-aarch64` port, and
-# the default `tairix-kernel-sched-eevdf` policy, builds a guard arena
-# (`AddressSpace::prepare_guard_arena`), allocates one kthread stack region in
-# it, unmaps the guard page through the Arch HAL, admits the kthread via
+# Freestanding "spawn a real kthread on a window-backed kernel stack, have it
+# overrun into the stack's unmapped guard slot, and prove the MMU raises a
+# synchronous data abort" integration test: the `-M virt` proof of the
+# `plans/OPEN-DEFECTS.md` D82 fault form. It links the `tairix-kernel-core`
+# kthread runtime, the `tairix-arch-aarch64` port, and the default
+# `tairix-kernel-sched-eevdf` policy, reserves the kernel remap window,
+# installs the window-backed stack tier over it, draws one stack through the
+# production `kstack::alloc_kernel_stack`, admits the kthread via
 # `spawn_kthread_with_stack`, and drives the cooperative `step` loop; the
-# kthread's overrun into the unmapped guard page faults synchronously and the
+# kthread's overrun into the unmapped guard slot faults synchronously and the
 # `fault` handler reports the result through the ARM semihosting finisher.
 # Keeping the QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a
 # library crate) prevents feature unification from leaking it into any
@@ -39,6 +39,9 @@ tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 # flushed through `tairix_arch_api::tlb::TlbShootdown::flush_page`, so the
 # fault-form is proven *through the HAL*.
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+# The window-backed kthread stack tier is assembled over `kernel/mem`'s
+# frame allocator, direct map, and `KernelRemap`.
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
 tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }

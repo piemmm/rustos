@@ -11,7 +11,7 @@
 //!    pipeline, so it links exactly like the other freestanding x86_64
 //!    integration binaries).
 //!
-//! Like the sibling `stack_guard_qemu_x86_64` this test spawns no ring-3
+//! Like the sibling `mem_map_qemu_x86_64` this test spawns no ring-3
 //! program, so it needs no `rxe` fixture: the arena split / unmap /
 //! scheduler / overrun work happens entirely in supervisor mode on a guard
 //! arena static.

@@ -1190,13 +1190,10 @@ through the semihosting finisher. They are enrolled in
   passes**: a victim and an attacker stage-1 address space disagree on
   one page; switching to the attacker and reading that page raises a
   data abort the `fault` handler confirms.
-- `tairix-test-stack-guard-qemu-aarch64` — **the guard-page fault-form
-  works** (`plans/PI.md` G1): `AddressSpace::split_block` shatters the
-  coarse identity block covering a dedicated guard page down to 4 KiB
-  pages, then that single page is `unmap`ped + `flush_page`d through the
-  Arch HAL; reading it raises a data abort the `fault` handler confirms.
-  A sentinel write/read-back before the unmap proves the split preserved
-  the live mapping.
+- `tairix-test-stack-overrun-qemu-aarch64` — **the kthread guard slot
+  faults**: a kthread admitted on a window-backed kernel stack overruns into
+  the stack's unmapped guard slot and takes a synchronous data abort the
+  `fault` handler confirms, rather than a next-reschedule canary detection.
 - `tairix-test-ipi-smp-qemu-aarch64` — **multi-core bring-up + IPI**
   (Stage W6) **over a discovered GIC base** (PI Stage P3): the boot core
   first poisons the GICv2 base and rediscovers it from the embedded
@@ -2622,250 +2619,68 @@ host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which
 now builds its victim/attacker spaces through this trait.
 
-### Splitting a block: the guard-page fault-form (P6 follow-on, G1)
+### Kthread kernel stacks and their guard page
 
-The boot path identity-maps RAM with coarse 1 GiB / 2 MiB *block*
-descriptors (`new_identity_gigapages`), and a block has no per-4 KiB leaf
-to clear, so an individual page inside it cannot be unmapped. The kthread
-kernel-stack guard page's *deployment* form — turning a stack overflow
-into an immediate hardware fault by unmapping the guard page rather than
-detecting a poison canary at the next reschedule (`AGENTS.md` §2.17,
-`plans/PI.md`) — needs that region re-expressed at 4 KiB granularity
-first. `AddressSpace::split_block(vaddr)` does it: the 1 GiB L1 block
-covering `vaddr` becomes a table of 512 × 2 MiB blocks, then the covering
-2 MiB block becomes a table of 512 × 4 KiB pages. The shared
-`shatter_block_into` helper reproduces the block at the finer granularity
-by preserving every attribute bit (`desc & !ADDR_MASK`) and only
-recomputing each sub-entry's output address, setting `TABLE_OR_PAGE` for
-the L3 page leaves — so the same memory keeps mapping with identical
-permissions (one attribute vocabulary, §2.2).
+A kthread's kernel stack is a run of pages in the **shared kernel remap
+window** (`kernel/mem::KernelVirtMap`), laid out low-to-high as
+`[guard slot | usable stack]`. The guard slot is reserved by the tier and
+never mapped, so an overrun off the bottom of the usable region takes a
+synchronous data abort instead of corrupting the lower-addressed neighbour.
 
-**A split invalidates the whole regime, on every PE.** Replacing a valid
-block leaf with a table descriptor leaves the output address and
-permissions identical but changes the *granule* every address under it
-translates at, and a TLB holding both granules for one address is
-CONSTRAINED UNPREDICTABLE — it may fault the walk. The stale entries
-belong to the block's **other** addresses, so a per-page flush is the
-wrong range: it leaves the rest of the former block refusing translations
-the tables plainly hold. `split_block` therefore issues one
-`tlbi vmalle1is` whenever a granule actually changed, and none when the
-hierarchy was already fine. Over-invalidating once beats a `tlbi` per leaf
-of a gigapage, and this is never a hot path.
+The window's sub-hierarchy is installed by every translation root
+(`reserve_kernel_window` publishes it, every root constructor installs it),
+so the guard is absent in **all** roots at once. Nothing refines a block for
+it, and no root carries a per-task unmap.
 
-Break-before-make is what the architecture asks for, and here the break
-window would momentarily unmap the kernel's own running code, stack, and
-page tables — so it cannot be added. What remains exposed is the few
-instructions between publishing the table and completing the invalidation.
-Refining a root *before* anything translates through it avoids even that,
-and is the open defect `plans/OPEN-DEFECTS.md` D82.
+That is why the port no longer carries a block-split primitive. Replacing a
+valid block leaf with a table changes the *granule* every address the block
+covered translates at, and a TLB holding both granules for one address is
+CONSTRAINED UNPREDICTABLE. Doing that on a root that is already the active
+translation regime is a break-before-make violation the architecture leaves
+undefined — bounded by a whole-regime invalidation, but not removed by it.
+A guard that is never mapped needs no refinement, no unmap, and no
+maintenance, so `split_block`, `prepare_guard_arena`, the `BlockSplit`
+declaration, and the physical guard arena they served are gone
+(`plans/OPEN-DEFECTS.md` D81, D82).
 
-Within a split, the child table's 512 entries are ordered ahead of the
-descriptor that publishes them (`publish_table_update`, a `dsb ishst`):
-both are plain stores to Normal memory, so without it a walker may follow
-the new table while its high entries still read as the frame's previous
-contents. The fill is ascending, so a walker that raced it would see low
-indices populated and high ones absent.
+The tier lives in `kernel/core::kstack`, is architecture-neutral, and is
+installed from the one boot site that also installs the heap's growth source
+so the two share the window without overlapping. Its allocation path is
+`kstack::alloc_kernel_stack`, which every kthread stack — PID 1's, a
+`thread_create`'s, a deferred load's — comes from; a window the port did not
+supply leaves every stack on the software-canary `BoxStack` fallback, fail
+closed.
 
-It is idempotent (a level already a table is left untouched) and fails
-closed (`Misaligned` / `NotMapped` / `PoolExhausted`). After a split, the
-single 4 KiB page unmaps through the existing `MmuAddressSpace::unmap` and
-its stale TLB entry is dropped with `TlbShootdown::flush_page` — an
-unmap *does* withdraw a translation, so it needs the maintenance a split
-does not.
+### Proving the overrun fault-form
 
-The table arithmetic is host-tested (`paging_tests.rs`:
-`split_block_shatters_a_gigapage_to_pages_preserving_the_identity_mapping`,
-`split_block_then_unmap_tears_down_exactly_one_page`,
-`split_block_preserves_device_attributes`,
-`split_block_is_idempotent_and_fails_closed`), and the live mechanism is
-proven on `-M virt` by `tests/integration/stack_guard_qemu_aarch64`: build
-an identity space, `split_block` a RAM block, enable the MMU,
-write+read-back a sentinel through the guard page (the split preserved the
-mapping live), then `unmap` + `flush_page` that one page and read it — the
-MMU raises a synchronous data abort the fault handler reports as PASS.
+`tests/integration/stack_overrun_qemu_aarch64` proves the payoff on the
+`virt` board: a live, scheduled kthread that overruns its kernel stack takes
+a **synchronous data abort the instant the overrun crosses the guard slot**,
+rather than the next-reschedule poison-canary detection the heap-backed
+`BoxStack` falls back to. It:
 
-### A guard-page arena: the boot mapping (P6 follow-on, G2)
-
-G1 supplies the per-page primitive; G2 lays out *where* the guarded
-kthread kernel stacks live so the eventual guard-page unmap (G3) never has
-to break-before-make the coarse block the CPU is currently running on or
-stacked in. The boot path reserves a **guard arena** — a 2 MiB-aligned,
-2 MiB region carved out of the discovered usable RAM window, above the
-kernel image (`tairix-kernel::mem_map`) — and marks it
-`RegionKind::Reserved` so the frame allocator never hands its frames to
-another use (`AGENTS.md` §4: a guard page on shared frames would corrupt
-an unrelated allocation). `build_memory_map` now returns a
-`MemoryLayout { map, arena }` whose regions tile the window exactly
-(reserved kernel image, optional usable head, the reserved arena, usable
-remainder); a window too small for a 2 MiB block degrades to no arena
-(fail closed), leaving the guard in its software-canary form.
-
-`AddressSpace::prepare_guard_arena(base, len)` re-expresses the arena at
-4 KiB granularity by applying `split_block` to every 2 MiB block the arena
-spans. It is idempotent and fails closed (`Misaligned` / `NotMapped` /
-`PoolExhausted`). It inherits `split_block`'s precondition — the root must
-**not** be the active regime, because re-expressing a block changes the
-granule its addresses translate at — so preparing the arena over the
-*active* boot tables is a break-before-make violation that the split's
-whole-regime invalidation bounds but does not remove
-(`plans/OPEN-DEFECTS.md` D82). `boot_aarch64` keeps the live boot `AddressSpace`
-(`enable_mmu_and_vectors` returns it) and prepares the arena after the RAM
-window is discovered, recording a `guard_arena_prepared` audit field. The
-boot page-table pool is sized for this worst case
-(`guard_arena_pool_capacity` over the kernel's arena policy ceiling: the
-identity root, up to two L2 splits for a boundary-straddling arena, and one
-L3 table per 2 MiB block), never a fixed default — a 16-frame default
-passed QEMU `virt`'s small arena but exhausted mid-split on a real 8 GiB
-Pi 4, silently reporting `guard_arena_prepared=false` and degrading the
-kthread stacks to their software-canary form. The
-crucial property is that the arena is its own 2 MiB block, **distinct from
-the block holding the running code and stack** — so unmapping a guard page
-in it later (G3) never touches the running region.
-
-The carving and tiling arithmetic is host-tested (`mem_map.rs`), the
-range-split is host-tested (`paging_tests.rs`:
-`prepare_guard_arena_splits_every_covering_block_preserving_translation`,
-`prepare_guard_arena_is_idempotent`, `prepare_guard_arena_fails_closed`),
-and the live mechanism is proven on `-M virt` by
-`tests/integration/stack_arena_qemu_aarch64`: prepare a 2 MiB-aligned arena
-that is its own block, enable the MMU, write+read-back a sentinel through a
-guard page, `unmap` + `flush_page` it, prove the running stack (a
-*different* 2 MiB block) and a neighbouring arena page still work, then
-read the unmapped page — the MMU raises a synchronous data abort the fault
-handler reports as PASS.
-
-### Promoting the split onto the Arch HAL (G3a)
-
-The block-split primitive is now part of the architecture-neutral Arch HAL
-`AddressSpace` surface (`tairix_arch_api::mmu`, `AGENTS.md` §17.2), so the
-kernel reaches it through one vocabulary rather than naming a concrete
-port. Two members were added:
-
-- `AddressSpace::block_split_support() -> BlockSplit` — each port's honest
-  declaration, modelled on the §19.1 / §19.10 `Mitigation` / `Tagging`
-  profiles: `Supported`, justified `Unsupported`, or tracked `Pending`.
-  aarch64 reports `Supported`; riscv64 and x86_64 report `Pending` (their
-  Sv39 / four-level huge-page splits land with each port's own guard-page
-  fault-form), with a non-empty tracking note the `mmu::conformance`
-  vertical enforces.
-- `AddressSpace::split_block(vaddr)` — the HAL view of the operation. Its
-  default fails closed with `MapError::Unsupported` so a non-supporting
-  port never silently no-ops (`AGENTS.md` §2.9). The aarch64 impl forwards
-  to its inherent, fully-tested `split_block` body, so there is one
-  implementation reached either directly (the boot path and the G1/G2
-  verticals) or through the HAL trait (`AGENTS.md` §2.2).
-
-The `mmu::conformance` suite gained a block-split honesty check (every
-port: the declaration is justified, and a non-`Supported` port fails
-`split_block` closed); aarch64's `paging_tests` additionally proves the
-HAL `split_block` reaches the inherent body over a `dyn AddressSpace`.
-
-### Promoting the arena onto the Arch HAL (G3b)
-
-`AddressSpace::prepare_guard_arena(base, len)` — the arena form of the
-split, applied to every coarse block an arena spans (G2) — is likewise now
-a member of the architecture-neutral HAL `AddressSpace` surface. Its
-default fails closed with `MapError::Unsupported`, so a port whose
-`block_split_support` is not `Supported` falls back to the software canary
-guard rather than silently pretending the arena was hardened (`AGENTS.md`
-§2.9 / §2.17). The aarch64 impl forwards to its inherent, fully-tested
-`prepare_guard_arena` body — one implementation reached either directly
-(the boot path and the G2 vertical) or through the HAL trait (`AGENTS.md`
-§2.2). The `mmu::conformance` honesty check now also requires a
-non-`Supported` port to fail `prepare_guard_arena` closed (riscv64 and
-x86_64 do, matching their `Pending` split); aarch64's `paging_tests`
-proves the HAL `prepare_guard_arena` reaches the inherent body over a
-`dyn AddressSpace`.
-
-### Routing the kthread stack through the arena (G3b-2)
-
-Both spawn paths now draw their kthread kernel stack from the reserved
-guard arena with its guard page genuinely **unmapped in the task's own
-page-table root**, so an overrun of a task's kernel stack takes a
-synchronous data abort under that task's `TTBR0_EL1` rather than a
-next-reschedule poison-canary detection. The pieces:
-
-- A grow-and-shrink block allocator, `stack_arena::KTHREAD_STACK_ARENA`
-  (`tairix-kernel`), hands kthread kernel stacks out of the boot-reserved
-  arena (`mem_map`, G2). `boot_aarch64` `install`s it from the carved
-  arena `(base, len)`; each `alloc` returns an `ArenaStack` — a one-page
-  guard region below the usable `KTHREAD_STACK_BYTES` stack, identical in
-  geometry to the heap-backed `BoxStack`. When the boot block is full it
-  chains a fresh 2 MiB block from the live `FrameAllocator`
-  (`FrameArenaGrow`); when a task exits its `ArenaStack` is dropped and the
-  region returns to its owning block (`StackArena::free`), and an idle
-  chained block is zeroed and returned to the allocator (`FrameArenaShrink`)
-  under a one-free-block grace, so the capacity rises *and* falls without
-  thrashing (`AGENTS.md` §24.1). The boot-carved block is never returned.
-- **PID 1 `init` (G3b-2-i):** `init_spawn` allocates one region, then — on
-  `init`'s *own* concrete `arch` address space, **before** it is switched
-  to — calls `split_block(guard)` (re-expressing the coarse identity block
-  at 4 KiB) followed by `unmap(guard)`. Doing it before activation
-  disturbs no live access and needs no TLB maintenance. The boxed stack is
-  handed to `kernel/core` through the `InitSpawnCtx::admit_init` `stack`
-  parameter (a `Box<dyn KernelStack + Send>`, so the concrete stack source
-  never leaks into the object-safe boundary, §17.4) and admitted via
-  `spawn_user_kthread_with_stack_live` — `init` also passes a retained
-  `LiveSpace` through the seam's `live` parameter so its `mem_map` /
-  `mmio_map` mutate its own address space (see *Architecture → Memory* §7e,
-  `plans/PI.md` 5d-0-ii (b′)-2).
-- **The runtime `spawn` syscall (G3b-2-ii):** `spawn_producer` does the
-  same, on the child's *own* `arch` root — which it builds but **never
-  switches to** (the spawning caller keeps its own `TTBR0_EL1`), so
-  `split_block`/`unmap` only touch the child's tables through the caller's
-  identity window, disturb no live access, and need no TLB maintenance.
-  `kernel/core` grew the matching `SpawnCtx::admit_process` `stack`
-  parameter (mirroring `admit_init`), routing the child through
-  `spawn_user_kthread_with_stack_live` with a retained `LiveSpace` (the
-  `live` parameter). So the session and anything it launches now run on an
-  arena-backed, hardware-guarded kernel stack too, and map their own
-  `mem_map` / `mmio_map` regions into their own retained space.
-- If no arena region is available, or the split/unmap could not be
-  applied, either seam falls back to a software-canary `BoxStack` — neither
-  ever runs on an unguarded stack (fail closed, `AGENTS.md` §2.9 / §2.17).
-
-`ArenaStack::check_guard` keeps the default `Ok(())`: the guard page is
-unmapped, so the hardware fault is the defence (there is no poison canary
-to scan, and reading the page under the dispatcher's root would
-false-positive). The allocator's bump arithmetic is host-tested
-(`stack_arena` unit tests), and the existing aarch64 `spawn_init` /
-`spawn_session` / `wait` QEMU verticals prove `init` still reaches EL0,
-writes its banner, and supervises the session — `init` and the session
-both on arena-backed stacks.
-
-### Proving the overrun fault-form (G3c)
-
-G3b-2 unmaps each kthread stack's guard page; **G3c** proves the payoff on
-the `virt` board: a live, scheduled kthread that overruns its kernel stack
-takes a **synchronous data abort the instant the overrun crosses the guard
-page**, rather than the next-reschedule poison-canary detection the
-heap-backed `BoxStack` falls back to.
-`tests/integration/stack_overrun_qemu_aarch64`:
-
-- builds a stage-1 identity `AddressSpace`, prepares a 2 MiB-aligned guard
-  arena (`prepare_guard_arena`, G2), and carves one kthread stack region
-  `[guard page | usable stack]` out of it;
-- installs the EL1 vectors + a `fault` handler, enables the MMU, then
-  `unmap`s the guard page through the Arch HAL + `flush_page`s it — exactly
-  the G3b-2 production mechanism;
+- reserves the kernel remap window, builds a stage-1 identity `AddressSpace`
+  (which installs the window's shared slots), and activates it;
+- installs the window-backed stack tier over that window and draws one stack
+  from it through the production `kstack::alloc_kernel_stack`, checking the
+  run came from the window — a `BoxStack` fallback would have handed back
+  heap memory — and that its usable run is mapped and writable;
 - builds the live `tairix-kernel-sched-eevdf` `Scheduler` over `Aarch64Arch`
   and admits a kthread on that stack through
   `kernel_core::spawn_kthread_with_stack` (the production runtime path), then
   drives the cooperative `step` loop;
-- the kthread body overruns its stack by touching the highest byte of the
-  guard region — the first byte a contiguous downward overrun crosses.
-  Because that page is unmapped the access faults synchronously *while the
-  kthread runs*; the abort is taken on the still-healthy usable stack above
-  the guard, so the EL1 trampoline does not nest-fault. The handler confirms
-  the cause (`ESR_EL1` is an abort) and the faulting address (`FAR_EL1`
-  inside the guard page) and reports PASS via the semihosting finisher.
+- the kthread body overruns by touching the highest byte of its guard slot —
+  the first byte a contiguous downward overrun crosses. Because that slot is
+  unmapped the access faults synchronously *while the kthread runs*; the
+  abort is taken on the still-healthy usable stack above the guard, so the
+  EL1 trampoline does not nest-fault. The handler confirms the cause
+  (`ESR_EL1` is an abort) and the faulting address (`FAR_EL1` inside the
+  guard slot) and reports PASS via the semihosting finisher.
 
-A regression that left the guard page mapped lets the body return cleanly;
-the drain loop then reports FAILURE explicitly rather than passing
-(`AGENTS.md` §2.9). The vertical is enrolled in
-`tools/xtask/src/commands/qemu_tests.rs` (single CPU, 60 s) and is **verified
-green under QEMU on `-M virt`**. With G3c landed the guard-page fault-form
-(G1–G3) is complete on aarch64.
+A regression that left the guard slot mapped lets the body return cleanly;
+the drain loop then reports FAILURE explicitly rather than passing. The
+vertical is enrolled in `tools/xtask/src/commands/qemu_tests.rs` (single CPU,
+60 s).
 
 ## Cross-CPU TLB shootdown (`CrossCpuTlbShootdown`)
 

@@ -200,15 +200,7 @@ therefore owns the value. Each port exposes a `'static USER_MODE` singleton, so 
 thread created later is entered through the same transition its process's first
 thread was.
 
-**`kernel/mem`:** `AddressSpace::unmap_single_page` and
-`LiveUserSpace::unmap_kernel_stack_guard`, so a thread's kernel-stack guard page
-can be re-expressed as unmapped in the process's **live** root. The first thread
-gets that during the image build while its root is still inactive; a thread
-created later has no such moment, and without it an overrun of its kernel stack
-would silently corrupt the neighbouring arena region (`ArenaStack` has no canary
-— the unmapped page *is* its guard).
-
-Plus `LiveUserSpace::reserve_anonymous_growable` for decision 5a's user-stack
+**`kernel/mem`:** `LiveUserSpace::reserve_anonymous_growable` for decision 5a's user-stack
 reservation: address space with no up-front no-overcommit charge. `LiveSpace`
 records such a region's base, and a release credits back nothing rather than the
 `page_count - resident` a fully-charged `mem_map` region owes — crediting pages

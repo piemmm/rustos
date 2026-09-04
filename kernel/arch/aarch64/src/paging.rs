@@ -33,21 +33,12 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::frames::{reclaim_hierarchy, PageTableFrames, TableFrame};
 use tairix_arch_api::mmu::{
-    AccessTracking, AddressSpace as MmuAddressSpace, BlockSplit, KernelWindow, MapError, PageFlags,
+    AccessTracking, AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags,
 };
 use tairix_arch_api::tlb::TlbShootdown;
 
 /// Size of a single page (and of a page-table page): the one system granule.
 pub use tairix_abi::PAGE_SIZE;
-
-/// Size of an L2 block descriptor's translation (2 MiB).
-///
-/// The granularity [`AddressSpace::split_block`] re-expresses a coarse
-/// block down to before reaching 4 KiB leaves, and the alignment the
-/// guard-page arena ([`AddressSpace::prepare_guard_arena`]) is laid out
-/// at so each guard page becomes its own L3 leaf without disturbing a
-/// neighbour.
-pub const BLOCK_2MIB: u64 = 2 * 1024 * 1024;
 
 /// Number of 64-bit entries in a stage-1 page-table page.
 pub const ENTRIES_PER_TABLE: usize = 512;
@@ -702,7 +693,7 @@ const fn is_kernel_window_slot(index: usize) -> bool {
 ///
 /// Used by [`AddressSpace::ensure_identity_gigapage`]'s invalid→valid L1
 /// update, which needs no TLB invalidation (a walker never caches an invalid
-/// entry), and by [`AddressSpace::split_block`] to order a child table's
+/// entry), to order a child table's
 /// contents ahead of the descriptor that publishes them. Neither is a
 /// substitute for the TLB maintenance a *withdrawn* translation needs. Host
 /// builds walk no hardware tables, so this is a no-op there.
@@ -907,29 +898,10 @@ impl Table {
 
 /// Default pool capacity: what the memory-isolation test and the small
 /// bootstrap spaces need — two [`AddressSpace`]s, each a root plus a
-/// 3-level walk for the extra 4 KiB mapping, with spares. A consumer with
-/// a larger, *derived* demand (the boot pool that also re-expresses the
-/// kthread-stack guard arena at 4 KiB granularity) instantiates
-/// [`PageTablePool`] with its own capacity instead of growing this
-/// default for everyone.
+/// 3-level walk for the extra 4 KiB mapping, with spares. A consumer with a
+/// different, *derived* demand instantiates [`PageTablePool`] with its own
+/// capacity instead of changing this default for everyone.
 const POOL_SIZE: usize = 16;
-
-/// Page-table frames a boot pool must hold to build the gigapage identity
-/// map *and* re-express a guard arena of `arena_bytes` at 4 KiB granularity
-/// ([`AddressSpace::prepare_guard_arena`]): one L1 root, up to two L2
-/// replacement tables (an arena can straddle a 1 GiB boundary, splitting
-/// two gigapage blocks), and one L3 replacement table per 2 MiB block the
-/// arena spans.
-///
-/// The capacity is derived from the arena the caller intends to prepare,
-/// never a hand-picked literal: a fixed default-sized boot pool passed
-/// QEMU `virt` (whose small RAM window sizes a small arena) but exhausted
-/// mid-split on a real 8 GiB Pi 4 (64 MiB arena = 33+ tables), silently
-/// degrading the kthread stacks to their software-canary form.
-#[must_use]
-pub const fn guard_arena_pool_capacity(arena_bytes: u64) -> usize {
-    1 + 2 + (arena_bytes / BLOCK_2MIB) as usize
-}
 
 /// A statically-allocated pool of zero-initialised page-table pages.
 ///
@@ -1292,187 +1264,6 @@ impl AddressSpace {
         }
         l3[i3] = descriptor(paddr, leaf_attrs);
         Some(())
-    }
-
-    /// Split the coarse block descriptor(s) covering `vaddr` down to
-    /// 4 KiB granularity, preserving the mapped output address and every
-    /// attribute, so the single 4 KiB page containing `vaddr` can then be
-    /// torn down with [`MmuAddressSpace::unmap`] without disturbing its
-    /// neighbours.
-    ///
-    /// This is the foundation of the kthread guard page (`plans/PI.md`):
-    /// a guard page that falls inside a region the boot path mapped with
-    /// coarse 1 GiB / 2 MiB *block* descriptors cannot be unmapped while
-    /// it is part of a block, because a block has no per-4 KiB leaf to
-    /// clear. Splitting re-expresses the same translation as a table of
-    /// finer descriptors — an L1 block (1 GiB) becomes a table of 512 ×
-    /// 2 MiB blocks, then the 2 MiB block covering `vaddr` becomes a table
-    /// of 512 × 4 KiB pages — leaving every address translating
-    /// identically but now at 4 KiB granularity.
-    ///
-    /// Replacing a valid block leaf with a table descriptor changes the
-    /// *granule* every address the block covered translates at, even though
-    /// the output address and permissions are identical, and a TLB holding
-    /// both granules for one address is CONSTRAINED UNPREDICTABLE — it may
-    /// fault the walk. **So a split invalidates the whole regime on every
-    /// PE**, not the single page the caller came for: the stale coarse
-    /// entries belong to the block's *other* addresses, which is precisely
-    /// what a per-page flush leaves behind.
-    ///
-    /// Break-before-make is what the architecture asks for and is impossible
-    /// for a block covering the executing kernel — the break window would
-    /// unmap the running code — so the remaining exposure is the few
-    /// instructions between publishing the table and completing the
-    /// invalidation. Refining a root *before* anything translates through it
-    /// avoids even that, and is what `plans/OPEN-DEFECTS.md` D82 tracks.
-    ///
-    /// It is idempotent — a level that is already a table is left untouched —
-    /// so re-splitting an already-fine region succeeds without allocating,
-    /// and pays no invalidation. The caller is still responsible for the TLB
-    /// maintenance a subsequent [`MmuAddressSpace::unmap`] owes, which
-    /// withdraws a translation rather than refining one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `vaddr` is not 4 KiB-aligned,
-    /// [`MapError::NotMapped`] if `vaddr` has no live mapping at the level
-    /// being split (nothing to shatter), or [`MapError::PoolExhausted`] if
-    /// the page-table pool cannot supply a replacement table. On
-    /// [`MapError::PoolExhausted`] any level already split stays split
-    /// (still a faithful identity re-expression of the same translation),
-    /// so the address space is never left describing a *different*
-    /// mapping (fail closed, never corrupt).
-    pub fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        if self.refine_to_page(vaddr)? {
-            // A block that became a table changed the *granule* every
-            // address it covered translates at, so every TLB holding a
-            // coarse entry for any of them now conflicts with the finer
-            // walk and may fault it. The maintenance owed is therefore the
-            // whole former block's range on every PE, not the one page the
-            // caller came for — invalidating just that page leaves the rest
-            // of the block refusing translations the tables plainly hold.
-            // Over-invalidating the regime once is cheaper than a `tlbi` per
-            // leaf of a gigapage and this is never a hot path.
-            invalidate_all_inner_shareable();
-        }
-        Ok(())
-    }
-
-    /// Re-express the leaf covering `vaddr` at 4 KiB granularity, reporting
-    /// whether any level's granule actually changed.
-    ///
-    /// Split out so the decision that drives TLB maintenance is host-testable
-    /// on its own: the invalidation itself is a bare instruction with no
-    /// observable effect off-target, while "did a block become a table" is
-    /// pure table arithmetic. An already-fine hierarchy reports `false` and
-    /// costs no invalidation.
-    fn refine_to_page(&mut self, vaddr: u64) -> Result<bool, MapError> {
-        if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
-            return Err(MapError::Misaligned);
-        }
-        let frames = self.frames;
-        let i1 = table_index(vaddr, 1);
-        let mut refined = false;
-
-        // --- Level 1: a 1 GiB block becomes a table of 512 × 2 MiB blocks.
-        let e1 = self.root[i1];
-        if (e1 & attrs::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        if is_block(e1) {
-            let TableFrame { phys, entries } =
-                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
-            // 2 MiB sub-entries (shift 21) are still *blocks*, not pages.
-            shatter_block_into(entries, e1, 21, false);
-            refined = true;
-            // The child's 512 entries must be observable before the
-            // descriptor that points at them. Both are plain stores to
-            // Normal memory, so without this barrier a table walker — this
-            // CPU's after activation, or a peer's if the root is live — may
-            // follow the new table while its high entries still read as the
-            // frame's previous contents, and fault on an address the block it
-            // replaced covered.
-            publish_table_update();
-            self.root[i1] = table_descriptor(phys);
-        }
-
-        // L1 now holds a table descriptor; recover the L2 table it points at.
-        // SAFETY: the entry is a present, non-block table descriptor (just
-        // installed above, or pre-existing); its output address is an
-        // identity-mapped table page (the round-trip `ensure_child` relies
-        // on), and `&mut self` makes the borrow exclusive.
-        let l2 =
-            unsafe { &mut *(phys_from_descriptor(self.root[i1]) as *mut [u64; ENTRIES_PER_TABLE]) };
-        let i2 = table_index(vaddr, 2);
-        let e2 = l2[i2];
-        if (e2 & attrs::VALID) == 0 {
-            return Err(MapError::NotMapped);
-        }
-        if is_block(e2) {
-            let TableFrame { phys, entries } =
-                frames.alloc_table().ok_or(MapError::PoolExhausted)?;
-            // 4 KiB sub-entries (shift 12) are L3 *pages* (`TABLE_OR_PAGE`).
-            shatter_block_into(entries, e2, 12, true);
-            // Ordered for the same reason as the L1 child above.
-            publish_table_update();
-            l2[i2] = table_descriptor(phys);
-            refined = true;
-        }
-        // L2 now resolves `vaddr` through a 4 KiB page leaf.
-        publish_table_update();
-        Ok(refined)
-    }
-
-    /// Re-express every coarse block covering the arena
-    /// `[base, base + len)` at 4 KiB granularity, so any single page in
-    /// the arena can later be unmapped (e.g. a kthread kernel-stack guard
-    /// page) without shattering the block the running CPU executes on
-    /// (`plans/PI.md` guard-page fault-form, stage G2).
-    ///
-    /// This is [`Self::split_block`] applied to every 2 MiB block the
-    /// arena spans: a guard-page arena that the boot path laid down inside
-    /// the coarse identity gigapages has no per-4 KiB leaf to clear, so the
-    /// whole arena is split up-front, at boot, while it holds no running
-    /// context. It inherits `split_block`'s precondition — **the root must
-    /// not be the active regime**, because refining a block changes the
-    /// granule an address translates at — and is idempotent (a re-prepare of
-    /// an already-fine arena allocates nothing).
-    ///
-    /// `base` and `len` are taken in bytes; `base` must be 4 KiB-aligned
-    /// (the arena is laid out 2 MiB-aligned, which satisfies this). The
-    /// arena is walked from the 2 MiB block containing `base` through the
-    /// block containing its last byte, so an arena that is not itself a
-    /// whole number of 2 MiB blocks still has every covering block split.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MapError::Misaligned`] if `len` is zero or `base` is not
-    /// 4 KiB-aligned, [`MapError::NotMapped`] if any covering block has no
-    /// live mapping, or [`MapError::PoolExhausted`] if the page-table pool
-    /// cannot supply a replacement table. On a mid-arena failure the
-    /// blocks already split stay split (a faithful re-expression of the
-    /// same translation), so the space never describes a *different*
-    /// mapping (fail closed, never corrupt).
-    pub fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
-        if len == 0 || (base & (PAGE_SIZE as u64 - 1)) != 0 {
-            return Err(MapError::Misaligned);
-        }
-        // The last byte the arena occupies; `len != 0`, so `base + len`
-        // does not underflow when computing it. A `base + len` that wraps
-        // `u64` is rejected as a fail-closed `Misaligned` (a degenerate
-        // arena), never silently truncated.
-        let last = base.checked_add(len - 1).ok_or(MapError::Misaligned)?;
-        let first_block = base & !(BLOCK_2MIB - 1);
-        let last_block = last & !(BLOCK_2MIB - 1);
-        let mut block = first_block;
-        loop {
-            self.split_block(block)?;
-            if block == last_block {
-                break;
-            }
-            block += BLOCK_2MIB;
-        }
-        Ok(())
     }
 
     /// Physical address of the L1 root table (the value programmed into
@@ -1933,32 +1724,6 @@ impl MmuAddressSpace for AddressSpace {
             invalidate_page_inner_shareable(vaddr);
         }
         Ok(was_accessed)
-    }
-
-    fn block_split_support(&self) -> BlockSplit {
-        // aarch64 re-expresses a 1 GiB / 2 MiB block as a table of finer
-        // leaves (`plans/PI.md` G1/G2 — the guard-page fault-form
-        // foundation, host- and `-M virt`-proven).
-        BlockSplit::Supported
-    }
-
-    fn split_block(&mut self, vaddr: u64) -> Result<(), MapError> {
-        // The HAL view of the inherent, fully-tested `AddressSpace::split_block`
-        // (G1): one body, reached either directly by the arch boot path /
-        // verticals or through the HAL trait here.
-        // Method-call syntax resolves to the inherent method (inherent methods
-        // take precedence over a same-named trait method), so this forwards to
-        // the inherent body rather than recursing into itself.
-        self.split_block(vaddr)
-    }
-
-    fn prepare_guard_arena(&mut self, base: u64, len: u64) -> Result<(), MapError> {
-        // The HAL view of the inherent, fully-tested
-        // `AddressSpace::prepare_guard_arena` (G2): one body, reached either
-        // directly by the arch boot path / verticals or through the HAL trait
-        // here. As with `split_block`, inherent-method
-        // resolution forwards to the inherent body rather than recursing.
-        self.prepare_guard_arena(base, len)
     }
 
     unsafe fn activate(&self) {
@@ -2430,40 +2195,6 @@ pub const fn par_phys(par: u64, addr: u64) -> u64 {
 #[must_use]
 pub const fn par_faulted(par: u64) -> bool {
     (par & 1) != 0
-}
-
-/// Populate the freshly-allocated table `child` with 512 descriptors that
-/// reproduce the leaf `block` at the next finer granularity, preserving
-/// every attribute bit.
-///
-/// `sub_shift` is the base-2 log of each sub-entry's coverage (21 for the
-/// 2 MiB sub-blocks an L1 block shatters into, 12 for the 4 KiB pages an
-/// L2 block shatters into); `page` selects an L3 *page* descriptor
-/// (`TABLE_OR_PAGE` set) when shattering to 4 KiB, versus a finer *block*
-/// (bit clear) at 2 MiB. Only the output address changes per sub-entry —
-/// `block & !ADDR_MASK` captures `VALID` plus every lower (`[11:2]`) and
-/// upper (`[63:48]`, incl. `PXN`/`UXN`) attribute bit, so the finer
-/// descriptors map the same memory with identical permissions
-/// (one attribute vocabulary, never re-derived).
-fn shatter_block_into(
-    child: &mut [u64; ENTRIES_PER_TABLE],
-    block: u64,
-    sub_shift: u32,
-    page: bool,
-) {
-    let base = phys_from_descriptor(block);
-    let attr_bits = block & !ADDR_MASK;
-    let sub_size = 1u64 << sub_shift;
-    for (i, slot) in child.iter_mut().enumerate() {
-        let sub_pa = base + (i as u64) * sub_size;
-        let mut desc = (sub_pa & ADDR_MASK) | attr_bits;
-        if page {
-            desc |= attrs::TABLE_OR_PAGE;
-        } else {
-            desc &= !attrs::TABLE_OR_PAGE;
-        }
-        *slot = desc;
-    }
 }
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned

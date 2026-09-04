@@ -169,7 +169,7 @@ mod tests {
     use crate::frame::{Frame, PhysAddr, PAGE_SIZE};
     use crate::vmm::{HostPageTable, MapFlags, VirtAddr};
     use alloc::vec;
-    use tairix_arch_api::mmu::{AddressSpace as HalAddressSpace, BlockSplit, MapError, PageFlags};
+    use tairix_arch_api::mmu::{AddressSpace as HalAddressSpace, MapError, PageFlags};
     use tairix_arch_api::tlb::TlbShootdown;
 
     /// User RW flags, the shape of an anonymous page.
@@ -281,9 +281,6 @@ mod tests {
         }
         fn root_phys(&self) -> u64 {
             PAGE_SIZE as u64
-        }
-        fn block_split_support(&self) -> BlockSplit {
-            BlockSplit::Unsupported("test double")
         }
         // Uses the default `access_tracking` (Unsupported) and the default
         // fail-closed `test_and_clear_accessed`.

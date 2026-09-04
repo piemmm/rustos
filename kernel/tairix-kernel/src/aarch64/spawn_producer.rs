@@ -38,11 +38,9 @@ use tairix_arch_aarch64::paging::{
     activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
-use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_kernel_core::{
-    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
-    UserThreadEntry,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
+    ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
@@ -52,7 +50,6 @@ use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
 
 use crate::spawn_layout::{self, CHILD_USER_BIAS};
-use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// The user virtual base every child image this producer builds is mapped
 /// at — the build-time [`CHILD_USER_BIAS`] (64 GiB) `build.rs` bakes the
@@ -187,40 +184,6 @@ pub struct Aarch64ProcessSpawn;
 pub static AARCH64_PROCESS_SPAWN: Aarch64ProcessSpawn = Aarch64ProcessSpawn;
 
 impl ArchImageBuilder for Aarch64ProcessSpawn {
-    fn alloc_kernel_stack(
-        &self,
-        frames: &FrameAllocator,
-        pt_frames: Option<&'static FrameAllocator>,
-    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
-        // Allocate the loading child's kernel stack synchronously at admit,
-        // before its address space exists, so the child's own loading body
-        // runs on it. An arena-backed guard-paged stack when a region is
-        // available (its guard VA returned for [`build`] to unmap in the
-        // child root), else the software-canary [`BoxStack`] fallback.
-        //
-        // Publish the reclaim allocator so idle chained arena blocks return
-        // to it when a spawned task later exits (capacity shrinks as well as
-        // grows). A build with no `'static` allocator wired cannot use the
-        // arena, and neither can an unconfigured identity window; both fall
-        // back to the software-canary `BoxStack`.
-        let Some(pt_frames) = pt_frames else {
-            return (Box::new(BoxStack::new()), None);
-        };
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
-        let identity_gib = configured_identity_gigapages();
-        if identity_gib == 0 {
-            return (Box::new(BoxStack::new()), None);
-        }
-        let grow = FrameArenaGrow::new(frames, (identity_gib as u64) << 30);
-        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityArenaMemory) {
-            Some(stack) => {
-                let guard = stack.guard_page();
-                (Box::new(stack), Some(guard))
-            }
-            None => (Box::new(BoxStack::new()), None),
-        }
-    }
-
     fn build(
         &self,
         rxe: &[u8],
@@ -258,26 +221,9 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         if identity_gib == 0 || ((identity_gib as u64) << 30) > CHILD_USER_BIAS {
             return Err(refuse_build(ctx, "identity_window_invalid"));
         }
-        let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
+        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gib)
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
-
-        // Re-express the loading kthread's kernel-stack guard page in the
-        // *child's own* (inactive) root: split the coarse identity block
-        // covering it to 4 KiB granularity and unmap the single guard page,
-        // so an overrun of the child's kernel stack takes a synchronous data
-        // abort under the child's `TTBR0_EL1` rather than corrupting the
-        // lower-addressed neighbour. Doing it on `arch` — which is never
-        // switched to here — disturbs no live access and needs no TLB
-        // maintenance (the child's root is not active). A `Some(guard)`
-        // whose split+unmap fails fails the build closed rather than running
-        // on an unguarded stack; `None` is the software-canary `BoxStack`
-        // (self-guarded, nothing to unmap).
-        if let Some(guard) = ctx.kernel_stack_guard() {
-            arch.split_block(guard)
-                .and_then(|()| arch.unmap(guard).map(|_| ()))
-                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
-        }
 
         let mut space = AddressSpace::new(arch);
         // The loader fills the child's segment pages through this physmap and,

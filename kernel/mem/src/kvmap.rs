@@ -33,9 +33,10 @@
 
 use tairix_arch_api::mmu::{KernelWindow, MapError, PageFlags};
 use tairix_arch_api::CrossCpuTlbShootdown;
-use tairix_sync::SpinLock;
+use tairix_sync::{InterruptControl, IrqSafeSpinLock, NopInterruptControl};
 
-use crate::frame::{Frame, PhysAddr, PAGE_SIZE};
+use crate::error::AllocError;
+use crate::frame::{Frame, FrameAllocator, PhysAddr, MAX_ORDER, PAGE_SIZE};
 use crate::vmm::PageTable;
 
 /// Leaf permissions every remapped page carries: readable and writable,
@@ -107,6 +108,57 @@ pub trait KernelVirtMap: Sync {
     fn translate(&self, vaddr: u64) -> Option<Frame>;
 }
 
+/// Back `[base, base + pages)` of `map`'s window with frames from `frames`,
+/// preferring the largest block that fits the remainder and stepping the
+/// order down when the pool cannot offer one.
+///
+/// Returns `false` having mapped only part of the run when the pool is
+/// genuinely exhausted or the port refuses a leaf; the caller then releases
+/// the partial run with [`release_run`]. Stepping down is what keeps growth
+/// working on a fragmented pool, so every consumer that assembles a window
+/// run shares this one loop.
+pub fn back_run(map: &dyn KernelVirtMap, frames: &FrameAllocator, base: u64, pages: usize) -> bool {
+    let mut done = 0;
+    while done < pages {
+        let remaining = pages - done;
+        // Largest order whose block fits the remainder, capped at the
+        // allocator's contiguity ceiling. `remaining >= 1` (the loop
+        // guard), so `ilog2` is well defined.
+        let mut order = core::cmp::min(remaining.ilog2(), MAX_ORDER);
+        let frame = loop {
+            // The kernel commit path, so an assembly may draw the reserve
+            // and keeps making progress under user memory pressure.
+            match frames.alloc_order(order) {
+                Ok(frame) => break frame,
+                // No block of this order is free; the pool may be
+                // fragmented, so step down one size and retry before
+                // declaring the request out of memory.
+                Err(AllocError::OutOfMemory) if order > 0 => order -= 1,
+                Err(_) => return false,
+            }
+        };
+        let chunk = 1usize << order;
+        let vaddr = base + (done * PAGE_SIZE) as u64;
+        if map.map_chunk(vaddr, frame, chunk).is_err() {
+            let _ = frames.free_order(frame, order);
+            return false;
+        }
+        done += chunk;
+    }
+    true
+}
+
+/// Tear `[base, base + pages)` of `map`'s window down, returning every frame
+/// it held to `frames`.
+pub fn release_run(map: &dyn KernelVirtMap, frames: &FrameAllocator, base: u64, pages: usize) {
+    map.unmap_run(base, pages, &mut |frame: Frame| {
+        // A frame the window held is always one this allocator handed out,
+        // so the free cannot legitimately fail; there is no recovery beyond
+        // declining, so the result is dropped rather than panicking.
+        let _ = frames.free(frame);
+    });
+}
+
 /// The one implementation of [`KernelVirtMap`], generic over the port's
 /// page-table backend.
 ///
@@ -115,17 +167,22 @@ pub trait KernelVirtMap: Sync {
 /// cross-CPU invalidation. Everything above that is architecture-neutral
 /// and lives here once, so no port re-derives the map/teardown discipline
 /// (`plans/FIX-KHEAP.md`).
-pub struct KernelRemap<P: PageTable + Send> {
+pub struct KernelRemap<P: PageTable + Send, I: InterruptControl = NopInterruptControl> {
     window: KernelWindow,
-    /// The window's sub-hierarchy. Locked rather than borrowed because the
-    /// heap drives it from any CPU through a shared reference; the only
-    /// caller already holds the global heap lock, so the critical section
-    /// is uncontended by construction.
-    space: SpinLock<P>,
+    /// The window's sub-hierarchy, shared by every consumer that draws
+    /// window address space.
+    ///
+    /// It masks the CPU for the hold because one of those consumers is the
+    /// kernel heap, which an interrupt service routine may allocate from:
+    /// a handler that fires on a CPU holding this lock and grows the heap
+    /// would spin here for a lock its own interrupted mainline holds. That
+    /// is a property of the lock, not of an audited caller list, so it
+    /// holds for a consumer added later too.
+    space: IrqSafeSpinLock<P, I>,
     xtlb: &'static (dyn CrossCpuTlbShootdown + Sync),
 }
 
-impl<P: PageTable + Send> KernelRemap<P> {
+impl<P: PageTable + Send, I: InterruptControl> KernelRemap<P, I> {
     /// Wrap `space` — a handle onto `window`'s shared sub-hierarchy — with
     /// the port's cross-CPU invalidation.
     pub fn new(
@@ -135,7 +192,7 @@ impl<P: PageTable + Send> KernelRemap<P> {
     ) -> Self {
         Self {
             window,
-            space: SpinLock::new(space),
+            space: IrqSafeSpinLock::new(space),
             xtlb,
         }
     }
@@ -162,7 +219,7 @@ impl<P: PageTable + Send> KernelRemap<P> {
     }
 }
 
-impl<P: PageTable + Send> KernelVirtMap for KernelRemap<P> {
+impl<P: PageTable + Send, I: InterruptControl> KernelVirtMap for KernelRemap<P, I> {
     fn window(&self) -> KernelWindow {
         self.window
     }

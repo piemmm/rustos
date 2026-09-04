@@ -211,11 +211,10 @@ pub enum PageTableError {
     /// The underlying allocator failed.
     AllocFailed(AllocError),
     /// The backend does not implement the requested page-table operation
-    /// (the fail-closed [`tairix_arch_api::mmu::MapError::Unsupported`]
-    /// from a port whose [`tairix_arch_api::mmu::AddressSpace::split_block`]
-    /// is not implemented). The map/unmap façade never drives such an
-    /// operation, so this surfaces only if a future caller routes one
-    /// through this layer — fail closed, never a silent success.
+    /// (the fail-closed [`tairix_arch_api::mmu::MapError::Unsupported`]).
+    /// The map/unmap façade never drives such an operation, so this
+    /// surfaces only if a future caller routes one through this layer —
+    /// fail closed, never a silent success.
     Unsupported,
 }
 
@@ -307,12 +306,10 @@ fn from_map_error(err: MapError) -> PageTableError {
         MapError::PoolExhausted => PageTableError::AllocFailed(AllocError::OutOfMemory),
         MapError::NotMapped => PageTableError::NotMapped,
         // `kernel/mem`'s map/unmap façade only ever drives `map_page`,
-        // `translate`, and `unmap`, none of which return `Unsupported`
-        // (that is the fail-closed result of `split_block` on a port that
-        // does not implement the coarse-block split, driven elsewhere).
+        // `translate`, and `unmap`, none of which return `Unsupported`.
         // The arm carries the failure faithfully so a future caller that
-        // *does* route a split through this layer fails closed rather than
-        // seeing a mislabelled error.
+        // *does* route such an operation through this layer fails closed
+        // rather than seeing a mislabelled error.
         MapError::Unsupported => PageTableError::Unsupported,
     }
 }
@@ -453,53 +450,6 @@ impl<P: PageTable> AddressSpace<P> {
         self.live.remove(&page);
         self.table.flush_page(vaddr);
         Ok(Frame::containing(PhysAddr::new(paddr)))
-    }
-
-    /// Tear down the single page containing the page-aligned `vaddr` even
-    /// when a coarse block covers it, flushing its TLB entry on the calling
-    /// CPU.
-    ///
-    /// This is the kernel-stack guard-page teardown (`plans/PI.md` G1–G3)
-    /// applied to a *live* root: the page is re-expressed at 4 KiB
-    /// granularity ([`HalAddressSpace::split_block`]) and then unmapped.
-    /// Unlike [`Self::unmap`] it does not name the freed frame — the guard
-    /// page's frame belongs to the stack arena, not to this space — and it is
-    /// **idempotent**: a page already unmapped (an arena region handed back
-    /// and re-handed inside the same root) is success, since the
-    /// post-condition "this page does not translate" is already met.
-    ///
-    /// The `flush_page` below covers the *unmap*. It deliberately
-    /// does not cover the split: refining a block changes the granule every
-    /// address that block covered translates at, so the port's `split_block`
-    /// owns that invalidation and performs it over the whole range. Flushing
-    /// only this page would leave the block's other addresses holding stale
-    /// coarse entries that conflict with the finer walk — observed on a Pi 4
-    /// as a kernel-heap access faulting at an address whose descriptors read
-    /// back perfectly valid.
-    ///
-    /// # Errors
-    ///
-    /// [`PageTableError`] when the split cannot be performed (a port with no
-    /// block-split support, or an exhausted page-table pool) or the unmap is
-    /// refused for any reason other than the page already being absent.
-    pub fn unmap_single_page(&mut self, vaddr: u64) -> Result<(), PageTableError> {
-        match self.table.split_block(vaddr) {
-            Ok(()) => {}
-            // Nothing mapped at `vaddr`: the page already does not
-            // translate, which is the post-condition asked for.
-            Err(MapError::NotMapped) => return Ok(()),
-            Err(other) => return Err(from_map_error(other)),
-        }
-        match self.table.unmap(vaddr) {
-            Ok(_) => {}
-            Err(MapError::NotMapped) => return Ok(()),
-            Err(other) => return Err(from_map_error(other)),
-        }
-        if let Ok(page) = Page::from_addr(VirtAddr::new(vaddr)) {
-            self.live.remove(&page);
-        }
-        self.table.flush_page(vaddr);
-        Ok(())
     }
 
     /// Translate `page` to `(frame, flags)`, or `None` if unmapped.
@@ -817,15 +767,6 @@ impl HalAddressSpace for HostPageTable {
         // The double has no real root table; a non-zero sentinel keeps
         // it honouring the `root_phys` contract (non-null once built).
         PAGE_SIZE as u64
-    }
-
-    fn block_split_support(&self) -> tairix_arch_api::mmu::BlockSplit {
-        // The double tracks single 4 KiB entries in a map; it has no
-        // coarse block descriptors to re-express, so the split is
-        // honestly unsupported.
-        tairix_arch_api::mmu::BlockSplit::Unsupported(
-            "host page-table double tracks single 4 KiB entries; no coarse blocks",
-        )
     }
 
     fn access_tracking(&self) -> AccessTracking {

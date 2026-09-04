@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-stack-overrun-qemu-x86_64"
-description = "plans/PI.md guard-page fault-form (stage G3c, x86_64) QEMU integration test: prove the production fault-form on the production tairix-kernel pipeline — a live, scheduled kthread running on an arena-backed kernel stack whose one-page guard is unmapped takes a synchronous, supervisor-mode not-present page fault the instant it overruns into that guard page, rather than the deferred next-reschedule canary detection a heap-backed BoxStack falls back to. The x86_64 sibling of stack_overrun_qemu_aarch64."
+description = "plans/OPEN-DEFECTS.md D82 QEMU integration test (x86_64): prove on the production tairix-kernel pipeline that a live, scheduled kthread running on a window-backed kernel stack takes a synchronous, supervisor-mode not-present page fault the instant it overruns into the stack's unmapped guard slot, rather than the deferred next-reschedule canary detection a heap-backed BoxStack falls back to. The x86_64 sibling of stack_overrun_qemu_aarch64."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,14 @@ publish = false
 [lints]
 workspace = true
 
-# This bin is the `plans/PI.md` x86_64 guard-page fault-form (G3c)
-# vertical — the production fault-form proof, the sibling of
+# This bin is the `plans/OPEN-DEFECTS.md` D82 x86_64 vertical — the
+# window-backed kthread-stack fault-form proof, the sibling of
 # `tairix-test-stack-overrun-qemu-aarch64`. Unlike the self-contained
 # aarch64 vertical, x86_64 long-mode bring-up (GDT, TSS, the dedicated
 # error-code-aware `#PF` entry, the bump heap) is the production boot
-# pipeline's job, so this test boots the real `tairix-kernel` pipeline
-# (like the sibling `tairix-test-stack-guard-qemu-x86_64`) and does the
-# arena split / unmap / scheduler / overrun work on
-# `AuditEvent::BootCompleted`.
+# pipeline's job, so this test boots the real `tairix-kernel` pipeline —
+# which also installs the remap window and the stack tier — and does the
+# draw / scheduler / overrun work on `AuditEvent::BootCompleted`.
 #
 # The `test-hooks` feature is on by default. Release builds that enable it
 # are rejected by the `compile_error!` guard in `src/main.rs`
@@ -34,11 +33,6 @@ name = "tairix-test-stack-overrun-qemu-x86_64"
 path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
-# The Arch HAL MMU / TLB surface: the guard page is
-# split + torn down through `tairix_arch_api::mmu::AddressSpace`
-# (`prepare_guard_arena` / `unmap`) + `tairix_arch_api::tlb::TlbShootdown`
-# (`flush_page`), so the fault-form is proven *through the HAL*.
-tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The kthread runtime (`spawn_kthread_with_stack`) and the default

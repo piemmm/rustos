@@ -73,7 +73,7 @@ use core::ptr::NonNull;
 
 use tairix_kalloc::{FreeListAllocator, HeapSource};
 use tairix_kernel_mem::{
-    AllocError, Frame, FrameAllocator, FramePages, KernelVirtMap, PhysMap, SlotWindow, MAX_ORDER,
+    back_run, release_run, FrameAllocator, FramePages, KernelVirtMap, PhysMap, SlotWindow,
     PAGE_SIZE,
 };
 use tairix_sync::SpinLock;
@@ -108,57 +108,6 @@ struct FrameHeapSource {
     slots: SpinLock<SlotWindow>,
 }
 
-impl FrameHeapSource {
-    /// Back `[base, base + pages)` with physical chunks, preferring the
-    /// largest block that fits the remainder and stepping the order down
-    /// when the pool cannot offer one.
-    ///
-    /// Returns `false` having mapped only part of the run when the frame
-    /// pool is genuinely exhausted or the port refuses a leaf; the caller
-    /// then tears the partial run down.
-    fn fill(&self, base: u64, pages: usize) -> bool {
-        let mut done = 0;
-        while done < pages {
-            let remaining = pages - done;
-            // Largest order whose block fits the remainder, capped at the
-            // allocator's contiguity ceiling. `remaining >= 1` (the loop
-            // guard), so `ilog2` is well defined.
-            let mut order = core::cmp::min(remaining.ilog2(), MAX_ORDER);
-            let frame = loop {
-                // The kernel commit path, so growth may draw the reserve and
-                // keeps making progress under user memory pressure.
-                match self.frames.alloc_order(order) {
-                    Ok(frame) => break frame,
-                    // No block of this order is free; the pool may be
-                    // fragmented, so step down one size and retry before
-                    // declaring the request out of memory.
-                    Err(AllocError::OutOfMemory) if order > 0 => order -= 1,
-                    Err(_) => return false,
-                }
-            };
-            let chunk = 1usize << order;
-            let vaddr = base + (done * PAGE_SIZE) as u64;
-            if self.kvmap.map_chunk(vaddr, frame, chunk).is_err() {
-                let _ = self.frames.free_order(frame, order);
-                return false;
-            }
-            done += chunk;
-        }
-        true
-    }
-
-    /// Tear `[base, base + pages)` down, returning every frame it held.
-    fn drain(&self, base: u64, pages: usize) {
-        self.kvmap.unmap_run(base, pages, &mut |frame: Frame| {
-            // A frame the window held is always one this allocator handed
-            // out, so the free cannot legitimately fail; there is no
-            // recovery beyond declining, so the result is dropped rather
-            // than panicking.
-            let _ = self.frames.free(frame);
-        });
-    }
-}
-
 impl HeapSource for FrameHeapSource {
     fn grow(&self, min_len: usize) -> Option<(*mut u8, usize)> {
         // The exact page count, floored at the amortised growth granule —
@@ -176,10 +125,10 @@ impl HeapSource for FrameHeapSource {
             let _ = slots.release(slot, pages);
             return None;
         };
-        if !self.fill(base, pages) {
+        if !back_run(self.kvmap, self.frames, base, pages) {
             // Fail closed leaking nothing: hand back every chunk that did
             // land and release the address space.
-            self.drain(base, pages);
+            release_run(self.kvmap, self.frames, base, pages);
             let _ = slots.release(slot, pages);
             return None;
         }
@@ -210,7 +159,7 @@ impl HeapSource for FrameHeapSource {
         if slots.release(slot, pages).is_err() {
             return;
         }
-        self.drain(base_addr, pages);
+        release_run(self.kvmap, self.frames, base_addr, pages);
     }
 }
 
@@ -223,15 +172,19 @@ impl HeapSource for FrameHeapSource {
 /// physical map, and the port's kernel remap window all exist and are
 /// `'static`. `physmap` backs the address-space bookkeeping's own
 /// heap-independent record storage; `kvmap` is where the regions are
-/// assembled. A window whose bookkeeping cannot be sized leaves the heap on
-/// its bootstrap region, fail closed.
+/// assembled. `window_pages` is the heap's share of the window — its low
+/// pages, the kthread stack tier holding the rest
+/// (`crate::kstack::install_kernel_stacks`) — so the two can never hand out
+/// the same address. A window whose bookkeeping cannot be sized leaves the
+/// heap on its bootstrap region, fail closed.
 pub fn install_frame_heap_source(
     heap: &'static FreeListAllocator,
     frames: &'static FrameAllocator,
     physmap: &'static (dyn PhysMap + Sync),
     kvmap: &'static dyn KernelVirtMap,
+    window_pages: usize,
 ) {
-    let Ok(slots) = SlotWindow::new(kvmap.window().pages(), frames, physmap) else {
+    let Ok(slots) = SlotWindow::new(window_pages, frames, physmap) else {
         return;
     };
     let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
@@ -249,11 +202,11 @@ mod tests {
     use crate::test_alloc::{opt_in_current_thread, opt_out_current_thread, LiveBytes};
     use alloc::vec::Vec;
     use tairix_arch_api::mmu::{
-        AccessTracking, AddressSpace as HalAddressSpace, BlockSplit, KernelWindow, MapError,
-        PageFlags,
+        AccessTracking, AddressSpace as HalAddressSpace, KernelWindow, MapError, PageFlags,
     };
     use tairix_arch_api::tlb::TlbShootdown;
     use tairix_arch_api::CrossCpuTlbShootdown;
+    use tairix_kernel_mem::MAX_ORDER;
     use tairix_kernel_mem::{
         BootMemoryMap, KernelRemap, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
     };
@@ -331,10 +284,6 @@ mod tests {
 
         fn root_phys(&self) -> u64 {
             PAGE_SIZE as u64
-        }
-
-        fn block_split_support(&self) -> BlockSplit {
-            BlockSplit::Unsupported("the double tracks single 4 KiB leaves")
         }
 
         fn access_tracking(&self) -> AccessTracking {

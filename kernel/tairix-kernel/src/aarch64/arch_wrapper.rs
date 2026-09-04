@@ -376,9 +376,13 @@ impl KernelArch for Aarch64BinArch {
             let tables = crate::aarch64::spawn_producer::page_table_source(frames).ok()?;
             let window = tairix_arch_aarch64::paging::reserve_kernel_window(tables)?;
             let space = tairix_arch_aarch64::paging::AddressSpace::new_kernel_window(tables)?;
-            let remap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-                tairix_kernel_mem::KernelRemap::new(window, space, arch.arch()),
-            ));
+            let remap =
+                alloc::boxed::Box::leak(alloc::boxed::Box::new(tairix_kernel_mem::KernelRemap::<
+                    _,
+                    tairix_arch_aarch64::irqmask::PortIrqControl,
+                >::new(
+                    window, space, arch.arch()
+                )));
             Some(remap)
         }
         #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]

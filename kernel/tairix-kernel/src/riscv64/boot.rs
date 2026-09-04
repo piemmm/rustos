@@ -96,24 +96,6 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// boot module compiles per image, so the id never collides at runtime.
 const KERNEL_BOOT_RISCV64_REACHED: EventId = EventId(4097);
 
-/// Audit event: the boot path's kthread guard-arena decision
-/// (`plans/PI.md` G3b-2) — carved+installed (Info) or software-canary
-/// fallback (Warn), logged through the shared
-/// [`crate::mem_map::log_guard_arena`] body. Shares the `kernel/core`-owned
-/// `4000..5000` range; `4097`/`4099` are taken by the reached/init-failed
-/// records above, and `4098` is free in this image (the x86_64 pipeline
-/// uses it for its TSC-invariance record, but only one arch's boot module
-/// compiles per image, so the id never collides at runtime).
-const KERNEL_BOOT_GUARD_ARENA: EventId = EventId(4098);
-
-/// Exclusive upper bound for the kthread-stack guard arena: the spawn
-/// seams' per-task identity window (`init_spawn_riscv64` /
-/// `spawn_producer_riscv64` build `IDENTITY_GIB = 4` GiB Sv39 spaces). A
-/// kthread stack above this would be unreachable — and its guard page
-/// unfaultable — under the owning task's own root, so the carve refuses to
-/// place the arena there.
-const KTHREAD_ARENA_IDENTITY_LIMIT: u64 = 4 << 30;
-
 /// Number of 1 GiB identity gigapages the boot address space maps.
 ///
 /// This covers the Sv39 low VA range below the growable kernel heap's remap
@@ -452,9 +434,13 @@ impl KernelArch for RiscvBinArch {
             let tables = crate::riscv64::spawn_producer::page_table_source(frames).ok()?;
             let window = tairix_arch_riscv64::paging::reserve_kernel_window(tables)?;
             let space = tairix_arch_riscv64::paging::AddressSpace::new_kernel_window(tables)?;
-            let remap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-                tairix_kernel_mem::KernelRemap::new(window, space, &arch.arch),
-            ));
+            let remap =
+                alloc::boxed::Box::leak(alloc::boxed::Box::new(tairix_kernel_mem::KernelRemap::<
+                    _,
+                    tairix_arch_riscv64::irqmask::PortIrqControl,
+                >::new(
+                    window, space, &arch.arch
+                )));
             Some(remap)
         }
         #[cfg(not(all(freestanding, kernel_isa = "riscv64")))]
@@ -1094,46 +1080,9 @@ pub fn try_boot(
 
     // 2. Build the physical-memory map from the same parsed tree. The
     //    installed-RAM total is the device tree's whole `/memory` window —
-    //    the figure the ungated `boot_facts_get` syscall reports — taken
-    //    before the guard-arena carve below drops its range from the map.
+    //    the figure the ungated `boot_facts_get` syscall reports.
     let installed_memory_bytes = fdt.first_memory_region().map_or(0, |(_base, size)| size);
-    let mut memory_map = memory_map_from_fdt(&fdt, dtb)?;
-
-    // Carve a 2 MiB-aligned kthread-stack guard arena out of the map and
-    // install it so the spawn seams (`init_spawn_riscv64`,
-    // `spawn_producer_riscv64`) can draw kthread kernel stacks from it and
-    // unmap each stack's guard page in the owning task's own Sv39 root —
-    // turning a stack overrun into a synchronous store page fault rather
-    // than a poison-canary detection (`plans/PI.md` G3b-2, the cross-port
-    // sibling of the aarch64/x86_64 wiring). The arena is sized from the
-    // discovered usable RAM (policy, the sum of `Usable` region
-    // lengths after the kernel-image reservation) and bounded to the seams'
-    // 4 GiB identity window so the stack is reachable under the task's own
-    // root. When no usable region fits a whole arena the carve returns
-    // `None`, the install is skipped, and the seams fall back to a
-    // software-canary `BoxStack` (fail closed, never fatal to boot).
-    let ram_bytes: u64 = memory_map
-        .regions()
-        .iter()
-        .filter(|region| region.kind == RegionKind::Usable)
-        .fold(0u64, |acc, region| acc.saturating_add(region.length));
-    let guard_arena = crate::mem_map::carve_guard_arena_from_map(
-        &mut memory_map,
-        ram_bytes,
-        KTHREAD_ARENA_IDENTITY_LIMIT,
-    );
-    if let Some(arena) = guard_arena {
-        crate::stack_arena::KTHREAD_STACK_ARENA.install(
-            arena.base,
-            arena.len,
-            &crate::stack_arena::IdentityArenaMemory,
-        );
-    }
-    crate::mem_map::log_guard_arena(
-        log_sink,
-        KERNEL_BOOT_GUARD_ARENA,
-        guard_arena.map(|a| (a.base, a.len)),
-    );
+    let memory_map = memory_map_from_fdt(&fdt, dtb)?;
 
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.

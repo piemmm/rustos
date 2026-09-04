@@ -1679,8 +1679,6 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // handed an ambient device; a driver's
         // diagnostics flow through `lib/log`, never `stdout`.
         let ctx = KernelSpawnCtx::new(
-            self.frames,
-            Some(self.frames),
             self.audit,
             self.scheduler,
             self.caps,
@@ -1976,7 +1974,18 @@ fn run_phases<A: KernelArch>(
         let arch_arc: &'static Arc<A> = Box::leak(Box::new(Arc::clone(&arch)));
         let arch_static: &'static A = arch_arc;
         if let Some(kvmap) = A::install_kernel_remap(arch_static, frame_allocator, physmap) {
-            crate::kheap::install_frame_heap_source(heap, frame_allocator, physmap, kvmap);
+            // The window's two consumers are split here, at the one site that
+            // installs both: the stack tier takes the top of the window and
+            // the heap keeps the rest, so neither can hand out address space
+            // the other owns.
+            let heap_pages = crate::kstack::install_kernel_stacks(frame_allocator, physmap, kvmap);
+            crate::kheap::install_frame_heap_source(
+                heap,
+                frame_allocator,
+                physmap,
+                kvmap,
+                heap_pages,
+            );
         }
     }
     phase_ready(log_sink, Phase::Mem);

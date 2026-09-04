@@ -1,6 +1,6 @@
 //! Build script: hand the aarch64 `virt` linker script to `rustc` only
 //! on the freestanding `aarch64-unknown-none` target. Mirrors
-//! `tests/integration/stack_guard_qemu_aarch64/build.rs`; both crates
+//! `tests/integration/stack_overrun_qemu_aarch64/build.rs`; both crates
 //! reference the single per-arch linker script the architecture port owns
 //! (no duplication).
 

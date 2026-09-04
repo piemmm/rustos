@@ -1,6 +1,6 @@
 //! Build script: hand the riscv64 `virt` linker script to `rustc` only
 //! on the freestanding `riscv64gc-unknown-none-elf` target. Mirrors
-//! `tests/integration/stack_guard_qemu_riscv64/build.rs`; both crates
+//! `tests/integration/stack_overrun_qemu_riscv64/build.rs`; both crates
 //! reference the single per-arch linker script the architecture port owns
 //! (no duplication).
 

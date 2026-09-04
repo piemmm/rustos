@@ -48,14 +48,12 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
-use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_x86_64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_x86_64::syscall_entry;
 use tairix_arch_x86_64::userentry::{set_user_thread_pointer, USER_MODE};
 use tairix_kernel_core::{
-    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
-    UserThreadEntry,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
+    ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
@@ -65,7 +63,6 @@ use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
 
 use crate::spawn_layout::{self, CHILD_USER_BIAS};
-use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// Logical CPU the boot processor runs as — the single core the (c7-bin)
 /// bring-up initialises and the one [`syscall_entry::set_kernel_rsp0`]
@@ -171,30 +168,6 @@ pub struct X86_64ProcessSpawn;
 pub static X86_64_PROCESS_SPAWN: X86_64ProcessSpawn = X86_64ProcessSpawn;
 
 impl ArchImageBuilder for X86_64ProcessSpawn {
-    fn alloc_kernel_stack(
-        &self,
-        frames: &FrameAllocator,
-        pt_frames: Option<&'static FrameAllocator>,
-    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
-        // Allocate the loading child's kernel stack synchronously at admit,
-        // before its address space exists, so the child's own loading body
-        // runs on it. An arena-backed guard-paged stack when a region is
-        // available (its guard VA returned for `build` to unmap in the child
-        // root), else the software-canary `BoxStack` fallback.
-        let Some(pt_frames) = pt_frames else {
-            return (Box::new(BoxStack::new()), None);
-        };
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
-        let grow = FrameArenaGrow::new(frames, paging::configured_identity_bytes());
-        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityArenaMemory) {
-            Some(stack) => {
-                let guard = stack.guard_page();
-                (Box::new(stack), Some(guard))
-            }
-            None => (Box::new(BoxStack::new()), None),
-        }
-    }
-
     fn build(
         &self,
         rxe: &[u8],
@@ -224,27 +197,9 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // active.
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
-        let mut arch = ArchAddressSpace::new_identity_window(table_frames)
+        let arch = ArchAddressSpace::new_identity_window(table_frames)
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
-
-        // Re-express the loading kthread's kernel-stack guard page in the
-        // *child's own* (inactive) PML4: split the coarse identity block
-        // covering it to 4 KiB granularity and unmap the single guard page,
-        // so an overrun of the child's kernel stack takes a synchronous page
-        // fault under the child's CR3 rather than corrupting the
-        // lower-addressed neighbour. Doing it on `arch` — never switched to
-        // here — disturbs no live access (the child tables live in the
-        // caller's low identity window) and needs no TLB maintenance (the
-        // child's root is not active). A `Some(guard)` whose split+unmap
-        // fails fails the build closed rather than running on an unguarded
-        // stack; `None` is the software-canary `BoxStack` (self-guarded,
-        // nothing to unmap).
-        if let Some(guard) = ctx.kernel_stack_guard() {
-            arch.split_block(guard)
-                .and_then(|()| arch.unmap(guard).map(|_| ()))
-                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
-        }
 
         let mut space = AddressSpace::new(arch);
         let physmap = ConfiguredIdentityPhysMap;

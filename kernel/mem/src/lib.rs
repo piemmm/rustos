@@ -90,7 +90,7 @@ pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};
 pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
 pub use framepages::FramePages;
-pub use kvmap::{KernelRemap, KernelVirtMap, RemapError};
+pub use kvmap::{back_run, release_run, KernelRemap, KernelVirtMap, RemapError};
 pub use kvslots::{SlotError, SlotWindow};
 pub use live::{DmaMapping, LiveSpace, LiveSpaceError, LiveUserSpace};
 pub use loader::{map_flags_for, map_image, LoadError};

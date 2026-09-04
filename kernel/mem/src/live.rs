@@ -302,33 +302,6 @@ pub trait LiveUserSpace: Send {
     fn release_file_region(&mut self, base_va: u64, page_count: u64)
         -> Result<u64, LiveSpaceError>;
 
-    /// Re-express the kernel-stack guard page at the page-aligned `guard` as
-    /// an **unmapped** page in this live root, so an overrun of a freshly
-    /// created thread's kernel stack faults synchronously under this
-    /// process's translation regime instead of silently corrupting the
-    /// neighbouring arena region.
-    ///
-    /// The process's *first* thread has its guard page unmapped while its
-    /// root is still inactive, during the image build. A thread created later
-    /// has no such moment — the root is already live — so the same
-    /// split-then-unmap runs here, on the space every thread of the process
-    /// shares. The split only adds table levels reproducing the existing
-    /// translation, so it disturbs no live address, and the unmap is
-    /// idempotent (an arena region handed back and re-handed inside one root
-    /// is already unmapped).
-    ///
-    /// `guard` is a kernel virtual address the caller obtained from the stack
-    /// arena, never a value from user space.
-    ///
-    /// # Errors
-    ///
-    /// [`LiveSpaceError::Anon`] carrying [`AnonError::Unaligned`] for a
-    /// `guard` that is not page-aligned, or [`AnonError::Map`] when the port
-    /// cannot re-express the covering block or refuses the unmap. The caller
-    /// fails the thread creation closed rather than running on an unguarded
-    /// stack.
-    fn unmap_kernel_stack_guard(&mut self, guard: u64) -> Result<(), LiveSpaceError>;
-
     /// Map `len` bytes of device physical memory beginning at `phys_base`
     /// into this space, returning the kernel-chosen base user virtual
     /// address of the new, guard-bracketed, caching-disabled,
@@ -990,15 +963,6 @@ where
             },
         )?;
         Ok(())
-    }
-
-    fn unmap_kernel_stack_guard(&mut self, guard: u64) -> Result<(), LiveSpaceError> {
-        if !guard.is_multiple_of(PAGE_SIZE as u64) {
-            return Err(LiveSpaceError::Anon(AnonError::Unaligned));
-        }
-        self.space
-            .unmap_single_page(guard)
-            .map_err(|error| LiveSpaceError::Anon(AnonError::Map(error)))
     }
 
     fn release_file_region(

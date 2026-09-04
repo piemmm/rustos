@@ -98,6 +98,7 @@ pub mod init;
 pub mod introspect;
 pub mod introspect_source;
 pub mod kheap;
+pub mod kstack;
 pub mod kthread;
 pub mod kthread_irq;
 pub mod launch_cache;

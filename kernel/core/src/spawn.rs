@@ -141,15 +141,14 @@ pub trait InitSpawnCtx {
     /// its banner) resolves the caller's address space instead of failing
     /// closed with `BadAddress` (`plans/PI.md` P6c-3 follow-up).
     ///
-    /// `stack` is PID 1's kernel stack, built by the arch seam so the
-    /// concrete stack source never leaks into this object-safe boundary. The seam supplies either the heap-backed
-    /// software-canary [`crate::BoxStack`] or an arena-backed stack whose
-    /// guard page it has **unmapped in PID 1's own page-table root**, so an
-    /// overrun of PID 1's kernel stack takes a synchronous fault under PID
-    /// 1's translation regime rather than corrupting a neighbour
-    /// (`plans/PI.md` guard-page fault-form;). The
-    /// runtime stores it in PID 1's control block and frees it when the task
-    /// exits.
+    /// `stack` is PID 1's kernel stack, boxed so the concrete stack source
+    /// never leaks into this object-safe boundary. It comes from the
+    /// window-backed tier ([`crate::kstack::alloc_kernel_stack`]), whose
+    /// guard slot is unmapped in every root at once, so an overrun takes a
+    /// synchronous fault under PID 1's translation regime rather than
+    /// corrupting a neighbour; a build with no remap window gets the
+    /// software-canary [`crate::BoxStack`] instead. The runtime stores it in
+    /// PID 1's control block and frees it when the task exits.
     ///
     /// `live` is PID 1's process address space (`plans/PI.md` 5d-0-ii (b′)):
     /// when [`Some`], the runtime clones the handle into PID 1's control
@@ -919,10 +918,9 @@ pub enum AdmitError {
 /// spawning caller's task so an interactive loop never freezes behind it.
 ///
 /// It carries **no** kernel stack: the loading kthread already owns the
-/// stack it runs on (allocated at admit through
-/// [`ArchImageBuilder::alloc_kernel_stack`]), and [`ArchImageBuilder::build`]
-/// only re-expresses that stack's guard page in the child's own (inactive)
-/// root ([`ImageBuildCtx::kernel_stack_guard`]).
+/// stack it runs on, allocated at admit from the window-backed tier
+/// (`crate::kstack::alloc_kernel_stack`), whose guard page is unmapped in
+/// every root at once and so needs nothing of the child's.
 pub struct BuiltImage {
     /// The registry-storable, `Send + Sync` frozen snapshot of the child's
     /// user mappings (an arch port's *live* address space is not `Sync`),
@@ -978,19 +976,6 @@ pub trait ImageBuildCtx {
 
     /// The audit sink the build path records `ProcessSpawn*` events through.
     fn audit(&self) -> &(dyn Sink + Sync);
-
-    /// The guard virtual address of the kernel stack the loading kthread
-    /// runs on (from [`ArchImageBuilder::alloc_kernel_stack`]), so
-    /// [`ArchImageBuilder::build`] can split the coarse identity block
-    /// covering it and unmap the single guard page in the *child's own*
-    /// root — turning an overrun of the child's kernel stack into a
-    /// synchronous fault under the child's translation regime rather than
-    /// corrupting a neighbour.
-    ///
-    /// [`None`] when the stack is the heap-backed software-canary
-    /// [`crate::BoxStack`] fallback (which guards itself with a poison
-    /// canary and needs no page unmapped in the child root).
-    fn kernel_stack_guard(&self) -> Option<u64>;
 }
 
 /// The architecture-specific seam that builds a fresh, hardware-isolated
@@ -1001,50 +986,28 @@ pub trait ImageBuildCtx {
 /// Installed into the syscall handler exactly as that producer was, and
 /// captured by the boot-installed `SpawnServices` handle so the child's
 /// loading body — running on its own kernel stack, off the spawning
-/// caller's task — can drive the build. Splitting the old `spawn_with` into
-/// [`alloc_kernel_stack`](Self::alloc_kernel_stack) (run synchronously at
-/// admit, before the child exists) and [`build`](Self::build) (run in the
-/// loading body) is what moves the disk read + verification + image build
-/// off the caller's task.
+/// caller's task — can drive the build. Deferring the whole of the old
+/// `spawn_with` to [`build`](Self::build), run in the loading body, is what
+/// moves the disk read + verification + image build off the caller's task;
+/// that body's kernel stack is allocated by the neutral
+/// `crate::kstack::alloc_kernel_stack` before the child exists.
 ///
 /// `Sync` because the installed builder is shared, immutably, by every
 /// CPU's dispatch path and captured in the `'static` `SpawnServices` handle.
 pub trait ArchImageBuilder: Send + Sync {
-    /// Allocate the loading child's kernel stack, returning it boxed behind
-    /// the object-safe [`crate::kthread::KernelStack`] boundary together
-    /// with its guard VA (`Some` for an arena-backed stack whose guard page
-    /// [`build`](Self::build) will unmap in the child root, `None` for the
-    /// heap-backed software-canary [`crate::BoxStack`] fallback).
-    ///
-    /// Run **synchronously at admit**, before the child's address space
-    /// exists, so the loading kthread has a stack to run its own build on.
-    /// The runtime stores the stack in the child's control block and frees
-    /// it when the task exits.
-    fn alloc_kernel_stack(
-        &self,
-        frames: &FrameAllocator,
-        pt_frames: Option<&'static FrameAllocator>,
-    ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>);
-
     /// Build `rxe` into a fresh, hardware-isolated address space and return
     /// it as a [`BuiltImage`] for the core to admit — never admitting it
     /// here.
     ///
-    /// Runs in the loading child's body, on the stack
-    /// [`alloc_kernel_stack`](Self::alloc_kernel_stack) allocated. It builds
-    /// the image through the production, capability-checked, audited
-    /// [`spawn_image`] caller (spawning is *not* a privileged bypass), then
-    /// re-expresses the loading stack's guard page
-    /// ([`ImageBuildCtx::kernel_stack_guard`]) in the child's own inactive
-    /// root. A `Some(guard)` whose split+unmap fails in the child root fails
-    /// the build **closed** rather than silently downgrading to an unguarded
-    /// stack.
+    /// Runs in the loading child's body, on the kernel stack the neutral
+    /// `crate::kstack::alloc_kernel_stack` allocated. It builds the image
+    /// through the production, capability-checked, audited [`spawn_image`]
+    /// caller — spawning is *not* a privileged bypass.
     ///
     /// # Errors
     ///
-    /// A stable [`Errno`] on any failure — a malformed `rxe`, a build or
-    /// page-table-frame exhaustion, or a guard-unmap failure — never a panic
-    /// or a half-built image.
+    /// A stable [`Errno`] on any failure — a malformed `rxe`, or a build or
+    /// page-table-frame exhaustion — never a panic or a half-built image.
     fn build(
         &self,
         rxe: &[u8],
@@ -1063,20 +1026,10 @@ pub trait ArchImageBuilder: Send + Sync {
 /// a `spawn` admits the child but the child's own load then exits with the
 /// reserved [`tairix_abi::LOAD_MALFORMED`] status
 /// ([`tairix_abi::load_failure_status`] of [`Errno::NotImplemented`]) rather
-/// than the boot path half-building a task. `alloc_kernel_stack` hands back
-/// the software-canary [`crate::BoxStack`] (which self-guards, so it returns
-/// `None` for the guard VA).
+/// than the boot path half-building a task.
 pub struct NullArchImageBuilder;
 
 impl ArchImageBuilder for NullArchImageBuilder {
-    fn alloc_kernel_stack(
-        &self,
-        _frames: &FrameAllocator,
-        _pt_frames: Option<&'static FrameAllocator>,
-    ) -> (Box<dyn crate::kthread::KernelStack + Send>, Option<u64>) {
-        (Box::new(crate::kthread::BoxStack::new()), None)
-    }
-
     fn build(
         &self,
         _rxe: &[u8],
@@ -1503,10 +1456,6 @@ mod tests {
         fn audit(&self) -> &(dyn Sink + Sync) {
             self.sink
         }
-
-        fn kernel_stack_guard(&self) -> Option<u64> {
-            None
-        }
     }
 
     #[test]
@@ -1524,10 +1473,6 @@ mod tests {
             builder.build(b"unused-rxe", &ctx, &[], &[]),
             Err(Errno::NotImplemented)
         ));
-        // Its kernel-stack allocation hands back the software-canary
-        // `BoxStack` with no guard page to unmap in the child root.
-        let (_stack, guard) = builder.alloc_kernel_stack(&ctx.frames, None);
-        assert!(guard.is_none());
     }
 
     /// A minimal [`InitSpawnCtx`] exercising the default

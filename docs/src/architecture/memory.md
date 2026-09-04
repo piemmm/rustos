@@ -1905,7 +1905,7 @@ and its architecture-neutral core lands here (staged in
   and invalidate the page's TLB entry so the next access re-sets it — plus
   an honest `access_tracking()` declaration (`AccessTracking::Supported`
   / `Unsupported(reason)` / `Pending(reason)`, the same honesty discipline
-  as `BlockSplit`, memory tagging, and side-channel mitigation). The
+  as memory tagging and side-channel mitigation). The
   default is fail-closed: a port that does not maintain a referenced bit
   declares it non-`Supported` and `test_and_clear_accessed` returns
   `MapError::Unsupported`. The MMU conformance vertical

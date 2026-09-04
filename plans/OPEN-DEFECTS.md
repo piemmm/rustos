@@ -16,6 +16,109 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 (x86_64 product parity), `plans/CODEVERIFY.md` (the §27 sweep spirit),
 `PLAN.md` immediate-work P-series (P-6 at ~line 2075).
 
+## Ledger
+
+Index only. Each defect's own section — or, for the entries that have no
+section, its Scope bullet below — is authoritative if the two ever disagree.
+The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
+table normalises all three to **closed**. 24 open, 62 closed, 86 total.
+
+### Open (24)
+
+| ID | Subject | Note |
+|---|---|---|
+| D1 | FIX-SYSCALL residual per-arch verticals (x86_64, riscv64) | design and code done; verticals not written |
+| D3 | hard-lockup watchdog parity on x86_64 and riscv64 | aarch64 is the only port wired |
+| D6 | `docs-check` cross-crate resolution failure | recurrence cause named (poisoned build cache); the original instance is still unconfirmed |
+| D13 | secondary-CPU hard lockup under `stress --cpu 20` | partial — mute-fault and deadlock-escalation halves fixed; the metal wedge is unconfirmed |
+| D14 | `sysmon-qemu-aarch64` misses its 120 s ceiling under the loaded matrix | load-dependent, so a genuine defect, not a flake |
+| D15 | `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage | — |
+| D17 | riscv64 loader performs no instruction-cache maintenance for loaded code | does not reproduce under QEMU; real silicon can fetch stale code |
+| D21 | a layered block device republishes an unreadable member class as `Virtual` | — |
+| D26 | a mouse scroll produces no input event at all | functional gap, not a lockup |
+| D27 | ARXFS has no persistent deduplication index | correctness-safe |
+| D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
+| D41 | root-unlock login vertical failed once under a loaded gate | unreproduced, not diagnosed |
+| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | — |
+| D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
+| D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
+| D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
+| D54 | a desktop worker issues ~2500 file opens at session start | starves every concurrent reader; the loop is not yet identified |
+| D56 | the x86_64 page-table walk recovers a table by its raw physical address | — |
+| D60 | the window-content release has no end-to-end vertical | — |
+| D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
+| D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
+| D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
+| D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
+| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | — |
+
+### Closed (62)
+
+| ID | Subject |
+|---|---|
+| D2 | P-6: wait-queue §27 completeness rework |
+| D4 | latent §27 audit sweep of the foundational primitives |
+| D5 | `mem-pin-migration` intermittent multi-vCPU-TCG stall |
+| D7 | x86_64 disk-completion interrupt triple-faulted the boot |
+| D8 | x86_64 encrypted-root / users-DB read loop stalled the interactive unlock |
+| D9 | x86_64 `spawn-session` login never exited on the live console |
+| D10 | `autoload-input-qemu-aarch64` intermittent terminal-focus freeze |
+| D11 | `netstack-listener-qemu-aarch64` RTO-cadence crawl |
+| D12 | aarch64 GICv2 SGI end-of-interrupt dropped the source-CPU field |
+| D16 | Raspberry Pi 4 near-every-boot hard lockup after USB-HID bring-up |
+| D18 | early-boot silent guest death on PID 1's fifth concurrent spawn |
+| D19 | `autoload-input-qemu-aarch64` terminal sequencing drift |
+| D20 | `autoload-input-qemu-aarch64` post-terminal sequencing drift |
+| D22 | `netstack-dhcp-qemu-riscv64` stall on an unbounded device wait |
+| D23 | the debug FIQ self-sample corrupted the exception-return window |
+| D24 | in-kernel work had no yield boundary, so fast device bursts starved tasks |
+| D25 | a nested reader on the address-space registry wedged three CPUs |
+| D28 | ARXFS per-transaction deferred-free and pending-mark sets were unbounded |
+| D29 | a CPU-bound user task was never sampled, so a healthy core read as locked |
+| D30 | the pinned-bar screendump was captured before the panel was painted |
+| D31 | a QEMU vertical whose guest stays chatty ran unbounded |
+| D33 | `waitset_wait` was fixed-priority, so a busy source starved the members behind it |
+| D34 | the tray monitor treated a full session queue as a fault and exited |
+| D35 | an app-ward window event was silently dropped when its mailbox was full |
+| D36 | the shared stroke path never converged, so a graph reading wedged its process |
+| D37 | riscv64 saved no floating-point state, and FP was enabled |
+| D38 | the nightly soak killed every filesystem soak and a memtest mid-progress |
+| D39 | a riscv64 guest stalled dead moments after a `spawn` |
+| D40 | a mutating memory syscall re-froze the whole address space |
+| D43 | a riscv64 U-mode task could steer the kernel onto another hart's per-CPU state |
+| D44 | a console reader's re-park used a remembered CPU id, suspending another core's task |
+| D45 | the per-CPU live-space publication accepted a non-`Arc` pointer |
+| D47 | every desktop launch lost its first argument |
+| D48 | a window `Create` an app could build but the session had to refuse |
+| D50 | the flake hunt's concurrent replicas re-planted one guest's disk under itself |
+| D51 | a byte-stream transfer staged the caller's whole declared length, not one ring |
+| D52 | an x86_64 shootdown target that could not take the IPI could not acknowledge |
+| D55 | the x86_64 direct physical map covered only the first gigabyte |
+| D57 | the first tightening of memory stopped every cache in the system |
+| D58 | three window counts stood in for the bytes a window actually costs |
+| D59 | the many-window memory bound freed the wrong thing |
+| D61 | the stream write path registered for its wake after the poll that found it full |
+| D62 | the stream wait-queue was one global queue woken with `wake_all` |
+| D63 | an ARXFS commit published its superblock slot with no durability barrier |
+| D64 | ARXFS scrub's copy-repair write bypassed the read-only guard |
+| D65 | ARXFS's B-tree insert recursed 8 KiB of stack per tree level |
+| D66 | one `DriverError` spoke for three filesystem conflicts at once |
+| D67 | an ARXFS delete was not incremental, so a fragmented large file was unbounded |
+| D68 | a guard-arena block could only recycle when it drained completely |
+| D69 | no QEMU test kernel published its allocator, so the growable heap was inert |
+| D70 | the memsoak fixture judged a figure any process could move |
+| D71 | eleven x86_64 fixtures ran on a root that identity-mapped only 32 MiB |
+| D72 | one iconbar click opened two terminal windows on a Pi 4B |
+| D73 | a woken task was placed level with the ready population, starving later spawns |
+| D77 | the desktop session panicked inside `alloc` under the 32-window pressure soak |
+| D78 | the file manager's icon cache could not hold one frame of its own grid |
+| D79 | a decorated window's furniture was rendered through a transient |
+| D80 | the pressure soak drove a fixed window count at a relative target |
+| D81 | a block split invalidated one page instead of the block's whole range |
+| D82 | refining a live translation was a break-before-make violation |
+| D83 | on x86_64 only a page fault reached the fatal-fault report |
+| D84 | the sleeping mutex lost a contender that published after its release scan |
+
 ## Scope
 
 The open items, in priority order:
@@ -107,10 +210,9 @@ The open items, in priority order:
   fatal tail; the vector is packed into the neutral syndrome so a record can
   say which exception fired. Detail below.
 - **D82 — refining a live translation is a break-before-make violation —
-  OPEN.** riscv64's missing remote publish fence is fixed; removing the
-  window itself means moving kthread kernel stacks off the identity map into
-  the shared kernel remap window. Its D52 prerequisite has landed, so the
-  work is unblocked. Detail below.
+  FIXED.** kthread kernel stacks are runs of the shared kernel remap window
+  with an unmapped guard slot, so no root refines a block for a guard page
+  and the split surface is deleted. Detail below.
 - **D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with
   no record, and a spurious LAPIC interrupt is treated as fatal — OPEN.** The
   D83 shape surviving for vectors `32..=255`, which still share one
@@ -3812,7 +3914,7 @@ x86_64 pipeline is single-CPU by construction — `boot.rs` builds
 `cpu_to_lapic` as `[Option<u8>; 1]` holding only the BSP, so the target set is
 empty, no IPI is raised and nothing is waited on. The protocol was wrong
 regardless of which callers happened to exercise it, and its old contract
-gated every subsystem that must reclaim window pages (D82).
+gated every subsystem that must reclaim window pages (D82, now fixed).
 
 **The fix: the port owes the acknowledge, not the caller.** Two changes, and
 the caller-side precondition the HAL contract used to state is deleted.
@@ -5063,21 +5165,19 @@ reload on x86_64, whose leaves are never `GLOBAL`; a whole-hart
 `sfence.vma` on riscv64). Intel SDM Vol 3A §4.10.4.1 is explicit that
 software changing a linear address's page size must invalidate before the
 address is used again, so this was never merely theoretical on x86_64.
-riscv64's decision is host-tested
-(`refining_a_leaf_reports_the_granule_change_that_owes_a_fence`); x86_64's
-walk dereferences identity-mapped tables and so is bare-metal-gated, proven
-by `stack_guard_qemu_x86_64`. Reaching the *other* CPUs stays the caller's
-on both ports (neither has a broadcast invalidate), which is part of D82.
+The split surface is since deleted with D82 — kthread stacks no longer live
+in the identity map, so nothing refines a live translation and the
+maintenance this fix added has no remaining caller.
 
 The false claims that hid this — `split_block`'s own "break-before-make-free
 for the running region", `prepare_guard_arena`'s, `unmap_single_page`'s "so
 disturbs no live address", and the `docs/src/platform/aarch64.md` copy — are
 corrected in place.
 
-**Residual exposure, tracked as D82:** the few instructions between publishing
-the table and completing the invalidation are still a break-before-make
-violation. Refining a root before anything translates through it removes even
-that.
+**Residual exposure, closed by D82:** the few instructions between publishing
+the table and completing the invalidation were still a break-before-make
+violation. Moving kthread stacks into the shared kernel remap window removed
+the refinement — and the surface — entirely.
 
 ### Landed alongside, from the same investigation
 
@@ -5112,101 +5212,113 @@ kernel's gigapage it is the only thing that maps it, and `widen_ram_gigapages`
 merges rather than replaces. A second, finer-grained mapping path would add
 machinery with no case where it helps.
 
-**Remaining, tracked elsewhere:** the break-before-make window the fix bounds
-rather than removes is D82. A QEMU vertical that repaints the framebuffer
+**Remaining, tracked elsewhere:** a QEMU vertical that repaints the framebuffer
 console post-MMU is still owed, so a scan-out the active root does not cover
 would be caught in the matrix rather than on metal — the console now refuses
 such a surface, so this proves the refusal rather than the fault.
 
-## D82 — refining a live translation is a break-before-make violation; the invalidation bounds it but does not remove it (OPEN)
+## D82 — refining a live translation was a break-before-make violation; kthread stacks moved off the identity map (FIXED)
 
-Two paths refine a block on a root that is **already the active translation
-regime**: `boot.rs` calls `AddressSpace::prepare_guard_arena` after
-`enable_mmu_and_vectors`, and at runtime `VirtualMemory::unmap_single_page`
-splits the block covering a kthread guard page. Replacing a valid block leaf
-with a table is a **block-size change on a live translation**: identical output
-address and permissions, different granule, and a TLB holding both granules for
-one address is CONSTRAINED UNPREDICTABLE.
+**The defect.** Two paths refined a block on a root that was **already the
+active translation regime**: `boot.rs` called `prepare_guard_arena` after
+`enable_mmu_and_vectors`, and at runtime `unmap_single_page` split the block
+covering a kthread guard page. Replacing a valid block leaf with a table is a
+block-size change on a live translation — identical output address and
+permissions, different granule — and a TLB holding both granules for one
+address is CONSTRAINED UNPREDICTABLE.
 
-D81 was the consequence of that violation going *unmaintained*, and is fixed on
-every port: `split_block` now invalidates the whole address space locally
-whenever a granule changed. **What remains is the break-before-make window
-itself** — the few instructions between publishing the table descriptor and
-completing the invalidation, during which a PE may latch a conflicting entry.
-The invalidation clears it, so the exposure is bounded rather than permanent,
-but it is still a window the architecture leaves undefined.
+D81 was the consequence of that violation going *unmaintained*. Its fix
+(invalidate the whole regime whenever a granule changed) bounded the exposure
+to the few instructions between publishing the table descriptor and completing
+the invalidation, but did not remove it.
 
-### The runtime path is the hard half, and pre-MMU work does not reach it
+### Why the obvious repairs do not work
 
-The record previously framed the fix as "carve the arena before the MMU is
-enabled and lay it down at 4 KiB granularity, so the runtime path finds an
-already-fine hierarchy". That closes the **boot** root and nothing else. The
-runtime refinement is reached from `thread_create`:
-
-`kernel/core/src/threads.rs` -> `LiveUserSpace::unmap_kernel_stack_guard` ->
-`VirtualMemory::unmap_single_page` -> `split_block`, **on the calling
-process's own active root**, for whichever 2 MiB arena block the new thread's
-stack region happens to land in. A process root is built by
-`new_identity_gigapages`, so every arena block is a coarse identity block in
-it until something refines it — and pre-MMU work on the boot root cannot
-refine a root that does not exist yet.
-
-Three ways out were considered and rejected:
+Recorded so they are not re-derived:
 
 - **Break-before-make on the 2 MiB block.** The break window leaves the range
   unmapped, and the range holds *other kthreads' stacks* — a peer CPU may be
   executing on one, translating through this very root. Not available.
 - **Refine the whole arena in each root at construction.** Covers the blocks
-  that exist when the root is built; a block the arena chains *later* (the
-  growable capacity, drawn from the frame allocator at an arbitrary physical
-  address) is coarse in every already-live root, so the live refinement
-  returns.
-- **Share the identity gigapages' L2 tables across roots**, so refining once
-  is visible everywhere. A chained block can be in any gigapage of the
-  identity window, so this would mean sharing all 512 — replacing every 1 GiB
-  block descriptor with a table, i.e. giving up gigapage TLB coverage for the
-  whole kernel. A real performance regression for a rare event.
+  that exist when the root is built; a block the arena chained *later* (drawn
+  from the frame allocator at an arbitrary physical address) is coarse in
+  every already-live root, so the live refinement returns.
+- **Share the identity gigapages' L2 tables across roots.** A chained block
+  can be in any gigapage of the identity window, so this means sharing all
+  512 — giving up gigapage TLB coverage for the whole kernel. A real
+  performance regression for a rare event.
 
-### The fix: kthread stacks do not belong in the identity map
+### The fix: kthread stacks do not live in the identity map
 
 A guard page that is **never mapped** needs no refinement, no unmap and no
-maintenance. Map each kthread kernel stack as a run of pages in the *shared
-kernel remap window* (`kernel/mem::KernelVirtMap`, whose sub-hierarchy every
-root installs — `install_kernel_window_slots`) with the guard page's slot left
-unmapped. Then:
+maintenance. Each kthread kernel stack is now a run of pages in the shared
+kernel remap window (`kernel/mem::KernelVirtMap`, whose sub-hierarchy every
+root installs), laid out `[guard slot | usable run]` with the guard slot
+reserved and never mapped. The guard is therefore absent in *every* root at
+once rather than per-root, and nothing refines a live translation.
 
-- no root ever refines a block for a guard page, so `split_block`,
-  `prepare_guard_arena`, `BlockSplit`, `VirtualMemory::unmap_single_page` and
-  `LiveUserSpace::unmap_kernel_stack_guard` all lose their last consumer and
-  are deleted (§2.14), along with the physical guard-arena carve in
-  `kernel/tairix-kernel/src/mem_map.rs` and the `stack_arena` block/free-list
-  machinery that exists only because the arena is a physical carve;
-- the guard is absent in *every* root at once rather than per-root;
-- the VA sub-allocation is `kernel/mem::SlotWindow` (heap-free, already the
-  kernel heap's) over a documented split of the port's window, and the frames
-  come from the frame allocator like any other kernel memory.
+The tier is architecture-neutral (`kernel/core::kstack`), so the three ports'
+duplicate `alloc_kernel_stack` bodies are gone with it and
+`ArchImageBuilder::alloc_kernel_stack` / `ImageBuildCtx::kernel_stack_guard`
+are deleted: a build owes the child's root nothing. `kstack::alloc_kernel_stack`
+is the one allocation path — PID 1's stack, `thread_create`'s, a deferred
+load's — and falls back to the software-canary `BoxStack` when no window
+exists, never to an unguarded stack.
 
-**Its D52 prerequisite has landed, so this is unblocked.** Reclaiming a freed
-stack's pages under memory pressure (§26.3 — a pool of freed kernel stacks is
-exactly the reclaimable cache that rule names) drives
-`KernelVirtMap::unmap_run`, which makes the stack teardown a second
-production initiator of the x86_64 cross-CPU shootdown. That was gated on
-D52, whose contract used to require a masked initiator to be the only one in
-flight; the protocol now owes the acknowledge itself and asks callers for
-nothing, so a second initiator is admissible.
+Deleted with it (§2.14): `split_block`, `refine_to_page`,
+`prepare_guard_arena` and the `BlockSplit` declaration on all three ports and
+in the HAL (plus its conformance vertical and host tests);
+`VirtualMemory::unmap_single_page`; `LiveUserSpace::unmap_kernel_stack_guard`;
+the physical guard-arena carve in `kernel/tairix-kernel/src/mem_map.rs` and
+the `MemoryLayout` pairing it existed for; `kernel/tairix-kernel/src/
+stack_arena.rs` and its tests; and the four QEMU verticals that existed only
+to prove the split (`stack_guard_qemu_{aarch64,riscv64,x86_64}`,
+`stack_arena_qemu_aarch64`). `BLOCK_2MIB` and `guard_arena_pool_capacity`
+lost their last consumers and went too; the aarch64 boot page-table pool is
+now one frame, since the identity map is all it builds.
 
-**What a second consumer *does* still owe: the serialiser.** `unmap_run`'s
-teardown was safe partly because the kernel heap's lock serialised every
-teardown, and `KernelRemap::space` is a plain `SpinLock` no second consumer
-sits behind. A stack path reaching `KernelVirtMap` concurrently with the heap
-path must therefore decide deliberately what serialises the two and what
-interrupt state that lock holds — a stale claim of exactly this kind is what
-hid D81, so the decision belongs in the code rather than assumed. Lock order
-is `stacks.slots -> kvmap.space` against the heap's
-`heap -> kheap.slots -> kvmap.space`: no cycle, but nothing may be allocated
-from the heap while `slots` is held.
+### The three decisions the design owed
 
-### riscv64's remote fence — FIXED
+- **The serialiser.** `KernelRemap::space` is now an `IrqSafeSpinLock`
+  parameterised on the port's `PortIrqControl`. It masks because one of its
+  consumers is the kernel heap, which an interrupt handler may allocate from:
+  a handler firing on a CPU that holds the lock and then growing the heap
+  would spin for a lock its own interrupted mainline holds. That is a property
+  of the lock, not of an audited caller list, so it holds for a consumer added
+  later. The stack tier's own `slots` stays a plain `SpinLock`: it is reached
+  only from thread admission and from the drop of an admitted task's control
+  block, both in task or dispatcher context. Lock order is slots-then-map on
+  both the heap and the stack path, so the two can never be taken in opposing
+  order. The stale "the only caller already holds the global heap lock" claim
+  on `space` is replaced rather than left standing — a claim of exactly that
+  kind is what hid D81.
+- **The window split.** Decided at the one site that installs both consumers
+  (`kernel/core::init`, Phase Mem), as a policy over discovered geometry
+  (§24.1): every stack page is frame-backed, so the tier can never usefully
+  hold more pages than the machine has usable RAM, and it takes exactly that,
+  capped at half the window so the heap keeps a guaranteed share on a machine
+  whose RAM rivals the window. Below the cap the tier cannot exhaust address
+  space before the frame allocator is out of memory, so its fail-closed path
+  is a genuine OOM rather than an invented ceiling. The heap takes the low
+  remainder and the tier the top, so the two can never hand out the same
+  address.
+- **Zeroing.** Neither `FrameAllocator::free`/`free_order` nor
+  `FrameHeapSource::fill` nor `KernelVirtMap::map_chunk` zeroes, so the tier
+  owes it: a freed stack is scrubbed through `lib/pagezero` while it is still
+  mapped, before `unmap_run` hands its frames back (§4 zero-on-free — a kernel
+  stack can hold spilled capability tokens).
+
+Reclaiming a freed stack drives `KernelVirtMap::unmap_run`, which makes stack
+teardown a second production initiator of the x86_64 cross-CPU shootdown. That
+was gated on D52, whose contract used to require a masked initiator to be the
+only one in flight; the protocol now owes the acknowledge itself and asks
+callers for nothing.
+
+`FrameHeapSource::fill`/`drain` were hoisted rather than copied: both
+consumers share `kernel/mem::back_run` (the order-step-down assembly that
+keeps growth working on a fragmented pool) and `release_run`.
+
+### riscv64's remote fence — fixed
 
 `publish_mappings` reasoned that "the scheduler never runs one space on two
 harts at once, so no remote fence is owed". True for a process space, false
@@ -5221,16 +5333,21 @@ per port and performed by the consumer that holds the cross-CPU handle:
 x86_64 never cache an absent entry and keep paying nothing), overridden
 `true` on riscv64, and `KernelRemap::map_chunk` follows the local publish
 with a `shootdown_range` over exactly the installed run when the port
-declares it. Host-tested both ways in `kernel/mem/src/kvmap.rs`
-(`an_installation_reaches_every_cpu_where_the_port_declares_it_must`,
-`a_refused_installation_publishes_nothing_remotely`, and the pre-existing
-`mapping_publishes_without_invalidating_anything` for the no-remote posture).
-The riscv64 QEMU verticals are single-hart, so the matrix still cannot
-observe the multi-hart effect.
+declares it. Host-tested both ways in `kernel/mem/src/kvmap.rs`. The riscv64
+QEMU verticals are single-hart, so the matrix still cannot observe the
+multi-hart effect.
 
-**Done when:** kthread kernel stacks are window-backed with an unmapped
-guard page, and no `split_block` call reaches a root that is the active
-translation regime (the surface itself being gone, per above).
+**Proof.** The split policy is host-tested in `kernel/core::kstack` (RAM-bound
+and cap-bound ends, and that the two shares tile the window). The fault form
+is proven on all three ports by the rewritten
+`stack_overrun_qemu_{aarch64,riscv64,x86_64}`: each draws a stack through the
+production `kstack::alloc_kernel_stack`, **checks the run came from the
+window** — a silent degrade to `BoxStack` fails the test rather than passing
+it, the D69 shape — checks the usable run is writable, admits a kthread on it
+through `spawn_kthread_with_stack`, and observes the synchronous fault its
+overrun into the unmapped guard slot raises. The x86_64 vertical boots the
+whole production pipeline, so its window check also proves the *production*
+install rather than the test's own.
 
 ---
 

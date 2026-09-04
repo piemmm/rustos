@@ -387,7 +387,6 @@ mod tests {
     use tairix_abi::Errno;
     use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 
-    use crate::kthread::{BoxStack, KernelStack};
     use crate::procwait::NULL_PROCESS_WAIT;
     use crate::spawn::{BuiltImage, ImageBuildCtx};
     use crate::test_sink::TestSink;
@@ -421,14 +420,6 @@ mod tests {
     struct StubImageBuilder;
 
     impl ArchImageBuilder for StubImageBuilder {
-        fn alloc_kernel_stack(
-            &self,
-            _frames: &FrameAllocator,
-            _pt_frames: Option<&'static FrameAllocator>,
-        ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
-            (Box::new(BoxStack::new()), None)
-        }
-
         fn build(
             &self,
             _rxe: &[u8],

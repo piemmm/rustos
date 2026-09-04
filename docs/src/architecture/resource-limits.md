@@ -259,121 +259,50 @@ hardware), under two knobs:
   region lands on a clean boundary in either profile. Halving the release
   reservation doubles how many guarded stacks a given arena block holds — the
   server profile's win.
-- **Guard-arena size** (`tairix_kernel::mem_map::stack_arena_bytes`) is
-  **derived from the discovered RAM window**, not a fixed 2 MiB block (§24.1).
-  The boot path reserves roughly 1/64 of discovered RAM for kthread kernel
-  stacks, clamped to `[2 MiB, 64 MiB]` and rounded down to a whole 2 MiB
-  block (so every guard page still becomes its own L3 leaf after
-  `prepare_guard_arena`). A 64 MiB embedded board floors at one 2 MiB block
-  (tens of stacks); a 1 GiB desktop gets 16 MiB (hundreds); a large server
-  caps at 64 MiB (over a thousand) rather than reserving an unbounded slab up
-  front. A RAM window too small to carve even one block degrades to no arena
-  and the software-canary `BoxStack` fallback (fail closed, §2.17).
+- **Kthread stack address space** (`kernel/core::kstack`) is **derived from
+  discovered RAM**, not a fixed reservation (§24.1). Kthread kernel stacks are
+  runs of the shared kernel remap window, which the boot path splits between
+  the growable kernel heap and the stack tier at the one site that installs
+  both. Every stack page is frame-backed, so the tier can never usefully hold
+  more pages than the machine has usable RAM: it takes exactly that much of
+  the window, capped at half so the heap keeps a guaranteed share on a machine
+  whose RAM rivals the window. Below that cap the tier cannot exhaust address
+  space before the frame allocator is genuinely out of memory, so its
+  fail-closed path is a real out-of-memory rather than an invented ceiling.
 
-## Growable *and* shrinkable kernel-stack arena
+## Growable *and* shrinkable kernel-stack tier
 
-The boot-carved guard arena above is the *first* block, not a ceiling. When it
-runs out of room for a whole guarded region, `tairix_kernel::stack_arena::
-StackArena` **grows** by chaining a fresh, independently block-split 2 MiB
-block rather than failing over to the software-canary `BoxStack`; and when a
-chained block later goes idle it **shrinks** by returning that block to the
-allocator. So the hardware-guarded kthread-stack capacity scales with
-discovered RAM and rises *and* falls on demand (§24.1 — never a one-way
-ratchet), not just with the size of the boot block.
+The stack tier's footprint tracks the **live** thread set, not the spawn
+history. Each stack reserves `1 + KTHREAD_STACK_BYTES / 4 KiB` window slots —
+the unmapped guard slot plus the usable run — from a `SlotWindow`, and backs
+the usable run with frames from the live `FrameAllocator` through the shared
+`kernel/mem::back_run` assembly (which steps the allocation order down so a
+fragmented pool still serves the run). When the owning task exits, the
+scheduler drops its `Box<dyn KernelStack>`, whose `Drop` scrubs the run, tears
+it down through `KernelVirtMap::unmap_run`, and returns the slots. So capacity
+rises *and* falls on demand (§24.1 — never a one-way ratchet).
 
-- **The grow source** (`FrameArenaGrow`) draws each fresh block from the
-  kernel's live `FrameAllocator` as a 2 MiB-aligned, contiguous
-  `alloc_order(9)` block — the same block granularity the boot arena uses, so
-  every guard page in a chained block still lands on its own L3 leaf when the
-  spawn seam re-expresses the covering block at 4 KiB granularity
-  (`split_block`) in the owning task's root and unmaps the guard page. A
-  chained block therefore hosts hardware-guarded stacks exactly as the
-  boot-carved block does (§4 — the guard-page invariant is preserved while the
-  capacity grows).
-- **Bounded to the identity window.** A chained block must lie wholly within
-  the identity window every spawned address space identity-maps (on aarch64
-  derived from the configured Device/RAM gigapage masks; a fixed
-  `IDENTITY_GIB` on the other ports),
-  so the stack stays mapped — and its guard page faults — in *every* space the
-  task runs under. A block the allocator hands back above that window is
-  returned to the allocator and the grow **fails closed** (`None`), dropping the
-  caller to the `BoxStack` software-canary fallback rather than handing out an
-  unreachable stack (§4 / §2.9).
-- **Fails closed on physical exhaustion.** When the frame allocator can no
-  longer supply a 2 MiB block, the grow returns `None`, and the spawn seam
-  falls back to a software-canary `BoxStack` — deterministic, never a panic
-  (§2.9 / §2.17).
-- **Serialised, off the hot path.** The whole bump-and-chain is serialised by a
-  `SpinLock`; `alloc` is a per-spawn operation, not a hot path, so a lock is the
-  simplest correct way to chain a fresh block atomically (§2.16). The chaining
-  arithmetic, the frame-allocator-backed grow, the identity-window rejection,
-  and the fail-closed-on-OOM path are all exercised by host unit tests over a
-  real `FrameAllocator`; the per-stack guard-page split/unmap a chained block
-  relies on is the same mechanism the `stack_arena_qemu_aarch64` and
-  `stack_overrun_qemu_aarch64` verticals already prove on a 2 MiB identity
-  block.
+- **Secure.** A freed stack is fully zeroed before its frames leave the
+  mapping (§4 zero-on-free — a kthread kernel stack can hold spilled
+  capability tokens or credentials). The teardown synchronises every CPU's
+  TLB before a recovered frame is handed back, so no stale translation can
+  alias reallocated memory.
+- **Fails closed on physical exhaustion.** A run the frame pool cannot back
+  is released whole and the allocation falls back to a software-canary
+  `BoxStack` — deterministic, never a panic (§2.9 / §2.17) and never an
+  unguarded stack.
+- **Serialised, off the hot path.** The tier's slot bookkeeping is behind a
+  plain `SpinLock`: it is reached only from thread admission and from the drop
+  of an admitted task's control block, both in task or dispatcher context, so
+  no interrupt handler can reenter it. The remap map's own lock *does* mask
+  the CPU, because the kernel heap shares it and an interrupt handler may
+  allocate. Ordering is always slots-then-map, on both paths.
 
-**Shrinks on demand too.** Reclamation is symmetric: when a task exits, the
-scheduler drops its `Box<dyn KernelStack>`, which drops the `ArenaStack`, whose
-`Drop` returns the region to its owning block (`StackArena::free`). The capacity
-falls as well as rises, without thrashing:
-
-- **Per-block live-count accounting.** Each block (boot-carved + each chained)
-  carries the count of guarded regions currently handed out from it. A free
-  locates its owning block by address range and checked-decrements that count;
-  a foreign/misaligned address, a region the block never handed out, an
-  already-zero count, and a region already on a free list are each rejected
-  without underflowing or double-linking — fail closed (§2.9), surfaced as a
-  typed `FreeOutcome`. A block whose count reaches zero is *idle*. The
-  per-block `{ next, live, cursor, free_head }` records live in a reserved,
-  identity-mapped header at each block's own base — outside the guarded
-  regions, accessed through the `ArenaMemory` seam — so the block list is
-  itself a §24.1 capacity (no second allocation, no fixed block cap; the host
-  tests drive an in-memory `ArenaMemory`).
-- **A returned region is reusable while its block still has live stacks.**
-  Each block keeps a free list of the regions handed back to it
-  (`free_head`, threaded through the freed regions themselves), and `alloc`
-  pops that list before it advances the block's bump cursor. Without it a
-  block's capacity was recoverable only when the *whole* block drained, which
-  never happens to the boot block — a handful of long-lived boot kthreads pin
-  it — so the arena chained a fresh 2 MiB block every `capacity` spawns and
-  the boot arena's RAM was never reused: a capacity tracking spawn *history*
-  rather than the live set, ratcheting up on any busy system (§24.1, §26.2).
-  This was defect D68.
-  A returned region is **zeroed** before it is threaded (§4 zero-on-free — a
-  kthread stack can hold spilled capability tokens, so recycling one
-  unscrubbed would hand them to the next task), and the link and its free
-  marker live in the first bytes of the region's *usable* area: never the
-  guard page, which aarch64 has unmapped at that very address in the exiting
-  task's own root.
-- **One-free-block grace (hysteresis).** Exactly one idle chained block stays
-  resident: a chained block is returned to the allocator only when it goes idle
-  *and* another idle chained block already exists, so an alloc/free oscillation
-  across a block boundary reuses the retained idle block instead of repeatedly
-  free→chain (amortised, no thrash, §2.16). Reclamation is at most one block
-  return per free — never a spin/retry loop (§2.1) — under the same `SpinLock`
-  off the hot path.
-- **Boot block is never returned.** The boot-carved first block
-  (`RegionKind::Reserved`, kernel-image-owned) is never released; only
-  `FrameArenaGrow`-chained blocks are reclaimed, through a symmetric
-  `FrameArenaShrink` over `free_order(9)`.
-- **Secure.** A reclaimed block is fully zeroed before it returns to the
-  allocator (§4 zero-on-free — a kthread kernel stack can hold spilled
-  capability tokens or credentials); a block that cannot be safely
-  scrubbed/returned is retained rather than released (fail closed, §2.17). The
-  per-stack guard `split_block`/`unmap` was applied in the *task's own* root,
-  which is torn down on exit, so reclaiming the block aliases no live mapping
-  in the kernel's identity map.
-
-The live-count accounting, the grace hysteresis (release only on the second
-idle block, zero releases under boundary oscillation), region recycling inside
-a block that still holds a live stack, the scrub-before-reuse order, the
-fail-closed double-/foreign-/misaligned-/never-allocated-free paths, the
-boot-block-never-released invariant, and the real-buffer zero-on-free scrub are
-all covered by host unit tests; the `Drop` reclaim seam and the `free_order` return-to-
-allocator step run on the `stack_arena_qemu_aarch64` / `stack_overrun_qemu_
-aarch64` verticals. Sizing the per-arch CPU/hart secondary-bring-up bound from
-§18 discovery is the remaining §24.1 sweep work (see *Per-arch CPU/hart handle
+The split policy is host-unit-tested (`kernel/core::kstack`), and the
+end-to-end fault form — a scheduled kthread overrunning into its unmapped
+guard slot — is proven on all three ports by the `stack_overrun_qemu_*`
+verticals. Sizing the per-arch CPU/hart secondary-bring-up bound from §18
+discovery is the remaining §24.1 sweep work (see *Per-arch CPU/hart handle
 bookkeeping* below).
 
 ## Userland heap free-span table (grow-on-demand)
@@ -644,9 +573,8 @@ host-provided.)
   handlers are wired in `kernel/core`.
 - **L3a — discovered-hardware capacity policies (landed).** The release-tuned
   per-task kernel-stack size (`KTHREAD_STACK_BYTES`, 32 KiB release / 64 KiB
-  debug) and the RAM-window-derived guard-arena policy
-  (`stack_arena_bytes`, ≈1/64 of RAM clamped to `[2 MiB, 64 MiB]`,
-  2 MiB-rounded). See *Discovered-hardware capacity policies* above.
+  debug) and the RAM-derived kthread stack address-space policy
+  (`kernel/core::kstack`). See *Discovered-hardware capacity policies* above.
 - **L3b — growable arena + per-arch arrays (in progress).** The userland-heap
   free-span table is now a grow-on-demand capacity (see *Userland heap
   free-span table* above), the `kernel/sec` supplementary-group ceiling is now
@@ -658,13 +586,10 @@ host-provided.)
   per-CPU handle bookkeeping are now caller-provided `&'static`-slice capacities
   via `RiscvArchStorage<N>` / `Aarch64ArchStorage<N>` / `X86_64ArchStorage<N>`
   (see *Per-arch CPU/hart handle bookkeeping* above), and the kthread-stack
-  arena now both **grows** *past* its policy size on genuine exhaustion (by
-  chaining a fresh, independently block-split 2 MiB block from the live
-  `FrameAllocator` rather than failing over to a `BoxStack`) **and shrinks**
-  (returning an idle chained block through `FrameArenaShrink`, zeroed-on-free,
-  with a one-free-block grace and fail-closed double-/foreign-free) — see
-  *Growable and shrinkable kernel-stack arena* above; both aarch64 production
-  spawn seams draw through it and reclaim on `ArenaStack` drop. The per-arch
+  tier draws each stack from the shared kernel remap window and returns it —
+  scrubbed — when the owning task exits, so its footprint tracks the live
+  thread set (see *Growable and shrinkable kernel-stack tier* above). The
+  per-arch
   **secondary-bring-up** bound is now converted on **aarch64** *and*
   **riscv64** (the `.bss`/`SECONDARY_MAX_*` pool and the `MAX_CPUS` /
   `MAX_HARTS` constant are gone; the secondary stack is a caller-sized

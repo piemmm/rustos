@@ -113,9 +113,9 @@ tairix-kernel-virtio = { path = "../virtio", version = "=0.0.0" }
 # (`plans/WIRING.md` Stage W3).
 tairix-arch-api = { path = "../arch/api", version = "=0.0.0" }
 # Allocation-free, panic-free integer formatting for the boot audit
-# lines: the aarch64 `/memory` discovery summary (`plans/PI.md` P6c-1)
-# and the x86_64 guard-arena install decision (`boot`, `plans/PI.md`
-# G3b-2). The project-wide first-party formatter; re-implementing it
+# lines: the aarch64 `/memory` discovery summary (`plans/PI.md` P6c-1) and
+# the x86_64 identity-window decision. The project-wide first-party
+# formatter; re-implementing it
 # locally would duplicate `lib/util`. Consumed by
 # both ports' boot paths, so it is a common dependency.
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }

@@ -152,8 +152,9 @@ pub fn thread_reserve_pages(stack_bytes: u64) -> u64 {
 ///
 /// # Errors
 ///
-/// * [`Errno::NotImplemented`] — the build wired no live address space, frame
-///   allocator, or image builder, so no stack can be reserved (fail closed).
+/// * [`Errno::NotImplemented`] — the build retained no live address space, so
+///   no stack can be reserved, or the process's siblings cannot be driven to a
+///   stopping point (fail closed).
 /// * [`Errno::OutOfRange`] — the process is at its `threads` bound, or the
 ///   requested stack exceeds its `stack-bytes` bound.
 /// * [`Errno::BadAddress`] — `entry`, `tls_base`, or `clear_on_exit` does not
@@ -177,9 +178,6 @@ where
     // that retained none can neither reserve a stack nor resume a thread, so it
     // fails closed rather than admitting a thread that could never run.
     let space = crate::kthread::current_process_space(cpu).ok_or(Errno::NotImplemented)?;
-    let frames = handlers.frames.ok_or(Errno::NotImplemented)?;
-    let services =
-        crate::spawn_services::installed_spawn_services().ok_or(Errno::NotImplemented)?;
     // A group whose siblings cannot be driven to a stopping point can never be
     // torn down: its death would either strand the process's kernel state or
     // reclaim its address space from under a running sibling. Refuse the second
@@ -190,18 +188,10 @@ where
 
     let stack_bytes = request.stack_bytes;
 
-    // The thread's kernel stack, and its guard page re-expressed as unmapped in
-    // the process's live root so an overrun of it faults instead of corrupting
-    // the neighbouring arena region. A guard the port cannot express fails the
-    // creation closed — a thread never runs on an unguarded kernel stack.
-    let (kernel_stack, kernel_guard) = services
-        .image_builder()
-        .alloc_kernel_stack(frames, handlers.page_table_frames);
-    if let Some(guard) = kernel_guard {
-        space
-            .with(|live| live.unmap_kernel_stack_guard(guard))
-            .map_err(|_| Errno::NoSpace)?;
-    }
+    // The thread's kernel stack: a run of the shared kernel remap window whose
+    // guard slot is unmapped in every root at once, so an overrun of it faults
+    // rather than corrupting the lower-addressed neighbour.
+    let kernel_stack = crate::kstack::alloc_kernel_stack();
 
     // Reserve `[guard | stack]` in the process's own anonymous window — address
     // space only. A stack is a span whose depth is unknown and mostly untouched,

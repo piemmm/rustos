@@ -441,7 +441,7 @@ pub mod console_uart;
 // composition), gated on the matching `kernel_isa` build-script name — the
 // single selection point lives in `build.rs`, never an
 // inline `target_arch` predicate. Code shared across the ports stays at the
-// crate root (`dispatch_core`, `mem_map`, `stack_arena`, `spawn_layout`,
+// crate root (`dispatch_core`, `mem_map`, `spawn_layout`,
 // the driver registry, …) rather than being duplicated into a port. Each port's bare-metal-only modules are further gated
 // on `freestanding` inside its root module.
 #[cfg(kernel_isa = "x86_64")]
@@ -531,10 +531,10 @@ mod program_manifests;
 ))]
 mod user_windows;
 
-// The boot memory-map arithmetic (`plans/PI.md` P6c-1, G3b-2): the aarch64
-// `/memory` → `BootMemoryMap` window translation and the shared
-// guard-arena sizing / carving every port uses to reserve the kthread-stack
-// guard arena. The arithmetic is free of the bare-metal-only ports, so it
+// The boot memory-map arithmetic (`plans/PI.md` P6c-1): the aarch64
+// `/memory` → `BootMemoryMap` window translation, plus the x86_64
+// identity-window sizing and page-directory carve. The arithmetic is free
+// of the bare-metal-only ports, so it
 // compiles — and its bounds-check unit tests run — on the CI host under
 // `cargo test` as well as on each production build that consumes it
 // (`aarch64::boot`, `x86_64::boot`, `riscv64::boot`). Gated to exactly those
@@ -548,24 +548,6 @@ mod user_windows;
     test
 ))]
 mod mem_map;
-
-// The guarded kthread kernel-stack arena (`plans/PI.md` G3b-2): the
-// forward-only bump allocator that hands kthread kernel stacks out of the
-// boot-reserved guard arena (`mem_map`) so a stack's guard page can be
-// unmapped in the owning task's root and an overrun faults in hardware
-// (`aarch64::init_spawn` on aarch64, `x86_64::init_spawn` on x86_64,
-// `riscv64::init_spawn` on riscv64). Its bump arithmetic is free of the
-// bare-metal ports, so it compiles — and its unit tests run — on the CI
-// host as well as on the bare-metal production builds that consume it, and
-// on no other configuration, so it is never dead code.
-#[cfg(any(
-    all(
-        freestanding,
-        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
-    ),
-    test
-))]
-mod stack_arena;
 
 // The build script's pure target-selection logic, compiled into the
 // host test build so its rules are unit tested.

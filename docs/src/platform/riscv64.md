@@ -117,13 +117,11 @@ three things on the `BootInfo` hand-off:
   Its `pre_resume` hook reactivates PID 1's `satp` root before every
   switch-in (isolation, §4); the kernel-stack-top argument is unused on
   riscv64, since `sscratch` is re-armed per-task by `userentry::enter_user`
-  and the trap vector. PID 1's kernel stack is drawn from the boot-reserved
-  guard arena (G3b-2): the seam splits the coarse identity block covering
-  the stack's guard page in PID 1's *own* root and unmaps that single page,
-  so an overrun faults synchronously under PID 1's `satp`; when no arena
-  region is available (or the split/unmap fails) it falls back to a
-  heap-backed software-canary `BoxStack`, never an unguarded raw stack
-  (§2.9).
+  and the trap vector. PID 1's kernel stack is drawn from the
+  window-backed stack tier (`kernel/core::kstack`), whose guard slot is
+  unmapped in every root at once, so an overrun faults synchronously under
+  PID 1's `satp`; a build with no remap window falls back to a heap-backed
+  software-canary `BoxStack`, never an unguarded raw stack.
 - **Runtime `spawn` producer (`with_spawn`).**
   `riscv64::spawn_producer::RiscvProcessSpawn` + the embedded program
   registry mapping `/System/Services/login.app/Run` (the P11 session `init`
@@ -137,9 +135,9 @@ three things on the `BootInfo` hand-off:
   tables from the allocator-backed `kernel_mem::FrameTableSource` (no fixed
   reserve, so the spawn capacity scales with RAM and grows on demand,
   §24.1) and admits it Ready — a true concurrent spawn. Each child's
-  kernel stack is an arena-backed guard stack with its guard page
-  split+unmapped in the *child's own* (never-activated) root, mirroring
-  the PID 1 seam, with the same fail-closed `BoxStack` fallback (§2.9).
+  kernel stack is a window-backed guard stack whose guard slot is unmapped
+  in every root at once, mirroring the PID 1 seam, with the same
+  fail-closed `BoxStack` fallback.
 
 The embedded `init`/`Shell`/login `rxe` blobs are built for the riscv64
 target by the kernel `build.rs` (the same one-build-path the aarch64/x86_64
@@ -965,99 +963,65 @@ the resulting leaf bits. The `satp` write itself is proven by
 `memory_isolation_qemu_riscv64`, which now builds its victim/attacker
 spaces through this trait.
 
-### Sv39 block split + guard-page fault-form (G1/G2)
+### Kthread kernel stacks and their guard page
 
-The riscv64 `AddressSpace` declares `block_split_support() ==
-BlockSplit::Supported` (`AGENTS.md` §17.2, the sibling of aarch64): it
-re-expresses a coarse Sv39 *leaf* at 4 KiB granularity so a single page
-inside a boot-time identity gigapage/megapage can be unmapped — the
-foundation of the kthread kernel-stack guard page's hardware fault-form
-(`plans/PI.md` G1/G2, `AGENTS.md` §4 / §2.17).
+A kthread's kernel stack is a run of pages in the **shared kernel remap
+window** (`kernel/mem::KernelVirtMap`), laid out low-to-high as
+`[guard slot | usable stack]`. The guard slot is reserved by the tier and
+never mapped, so an overrun off the bottom of the usable region takes a
+synchronous store page fault instead of corrupting the lower-addressed
+neighbour.
 
-`AddressSpace::split_block(vaddr)` re-expresses the coarse leaf covering
-`vaddr` one level at a time: a level-2 1 GiB gigapage leaf becomes a table
-of 512 × 2 MiB megapage leaves, then the covering level-1 megapage leaf
-becomes a table of 512 × 4 KiB page leaves. Sv39 carries the same
-R/W/X/U/A/D encoding at *every* level, so the shared `shatter_pte_into`
-helper only changes the PPN per sub-entry (`block & !PTE_PPN_MASK`
-captures `VALID` + every permission bit), reproducing the identical
-translation at the finer granularity (`AGENTS.md` §2.2 — one attribute
-vocabulary). It is idempotent (a level that is already a table pointer is
-left untouched, allocating nothing and fencing nothing) and fails closed
-(`Misaligned`/`NotMapped`/`PoolExhausted`). It is **not**
-break-before-make-free: re-expressing a leaf preserves each address's
-output and permissions but changes the *granule* it translates at, and a
-hart holding the coarse translation can fault a walk the tables plainly
-satisfy — so a granule change pays one whole-hart `sfence.vma` here rather
-than leaving a caller's per-page fence to cover a gigapage-sized change
-(`plans/OPEN-DEFECTS.md` D81). Reaching the other harts is the caller's,
-and the root must not be the active regime (D82). After the split the single
-4 KiB page tears down with the existing `unmap` + `TlbShootdown::flush_page`.
+The window's sub-hierarchy is installed by every translation root, so the
+guard is absent in **all** roots at once. Nothing refines a leaf for it, and
+no root carries a per-task unmap.
 
-`AddressSpace::prepare_guard_arena(base, len)` is `split_block` applied to
-every 2 MiB block the arena spans, done up-front at boot while the arena
-holds no running context (`plans/PI.md` G2). Both are the inherent bodies;
-the HAL-trait `split_block`/`prepare_guard_arena` overrides forward to them
-(one implementation, §2.2), and `paging_tests.rs` proves the split, the
-identity preservation, idempotency, fail-closed paths, the arena, and the
-object-safe HAL forwarding on the host.
+That is why the port no longer carries a block-split primitive.
+Re-expressing a coarse Sv39 leaf preserves each address's output and
+permissions but changes the *granule* it translates at, and a hart holding
+the coarse translation can fault a walk the tables plainly satisfy — a
+break-before-make violation on a root that is already the active regime,
+bounded by a whole-hart `sfence.vma` but not removed by it. A guard that is
+never mapped needs no refinement, no unmap, and no maintenance, so
+`split_block`, `prepare_guard_arena`, the `BlockSplit` declaration, and the
+physical guard arena they served are gone (`plans/OPEN-DEFECTS.md` D81,
+D82).
 
-The deployment form (unmapping the guard page so an overrun faults
-synchronously) is proven end to end on `-M virt` by
-`stack_guard_qemu_riscv64` (below), and the *production runtime*
-fault-form — a scheduled kthread overrunning its arena-backed stack — by
-`stack_overrun_qemu_riscv64` (G3c, below). The production pipeline is
-wired the same way (G3b-2): `boot_riscv64::try_boot` carves a
-2 MiB-aligned guard arena out of the discovered memory map (§24.2 policy,
-bounded to the spawn seams' 4 GiB identity window), installs it into the
-shared `tairix-kernel` kthread-stack allocator, and audits the decision
-(`EventId(4098)`); the `riscv64::init_spawn` / `riscv64::spawn_producer`
-seams then draw PID 1's and every spawned child's kernel stack from that
-arena and split+unmap each stack's guard page in the owning task's own
-Sv39 root. A machine whose map cannot host an arena falls back to
-software-canary `BoxStack` stacks (fail closed, `AGENTS.md` §2.17).
+The tier lives in `kernel/core::kstack`, is architecture-neutral, and is
+installed from the one boot site that also installs the heap's growth source
+so the two share the window without overlapping. Its allocation path is
+`kstack::alloc_kernel_stack`, which every kthread stack comes from; a window
+the port did not supply leaves every stack on the software-canary `BoxStack`
+fallback, fail closed.
 
-### Stack-guard fault-form QEMU vertical
+Sv39 permits caching an *invalid* entry, so the window declares
+`publish_needs_remote()` and an installation fences the other harts over
+exactly the installed run — see the cross-CPU shootdown section.
 
-`stack_guard_qemu_riscv64` (the riscv64 sibling of
-`stack_guard_qemu_aarch64`, `plans/PI.md` G1) proves the live Sv39 split
-end to end on `-M virt`. It builds one `paging::AddressSpace`
-(identity-maps the low 4 GiB), `split_block`s the coarse leaf covering a
-dedicated page-aligned `GUARD_PAGE` static, installs the S-mode trap
-vector + a `fault` handler, turns paging on, and writes+reads-back a
-sentinel through the guard page (proving the split preserved the mapping
-live). It then `unmap`s that single page through the Arch HAL +
-`flush_page`s its stale TLB entry and reads it: the MMU raises a load page
-fault (`scause` 13), the handler confirms the cause and that `stval` is
-exactly the guard page, and writes the `SiFive` Test PASS finisher. A
-regression that fails to split, preserve, or unmap either reports FAILURE
-explicitly or never faults (timing out).
+### Proving the overrun fault-form
 
-### Proving the overrun fault-form (G3c)
+`stack_overrun_qemu_riscv64` (the sibling of
+`stack_overrun_qemu_{aarch64,x86_64}`) proves the production fault-form: an
+overrunning kthread takes a **synchronous store page fault while running**
+under the live scheduler, not the deferred next-reschedule poison-canary
+detection a heap-backed `tairix_kernel_core::kthread::BoxStack` falls back
+to.
 
-`stack_overrun_qemu_riscv64` (the riscv64 sibling of
-`stack_overrun_qemu_{aarch64,x86_64}`, `plans/PI.md` G3c) proves the
-*production* fault-form: an overrunning kthread takes a **synchronous
-store page fault while running** under the live scheduler, not the
-deferred next-reschedule poison-canary detection a heap-backed
-`tairix_kernel_core::BoxStack` falls back to.
-
-It builds an Sv39 `AddressSpace` identity-mapping the low 4 GiB,
-re-expresses a 2 MiB-aligned guard arena at 4 KiB granularity
-(`prepare_guard_arena`, G2), installs the S-mode trap vector + a `fault`
-handler, turns paging on, then `unmap`s + `flush_page`s one kthread
-stack's one-page guard through the Arch HAL — the production guard-page
-mechanism. It then builds the live `tairix-kernel-sched-eevdf`
-`Scheduler` over `RiscvArch` and admits a kthread on that arena-backed
-stack (laid out `[guard page | usable stack]`) via
-`kernel_core::spawn_kthread_with_stack` — the production runtime path,
-not a bare call. The kthread body overruns its stack by writing the
-highest byte of the guard region (the first byte a contiguous downward
-overrun crosses); because that page is unmapped the access raises a
-synchronous store page fault (`scause` 15) *while the kthread runs* — the
-trap is taken on the still-healthy usable stack above the guard, so the
-S-mode trap vector does not nest-fault. The handler confirms the cause
-and that `stval` lies in the guard page, and writes the `SiFive` Test
-PASS finisher. A regression that left the page mapped lets the body
-return cleanly; the cooperative `step` loop then drains the task and the
-test reports FAILURE explicitly (`AGENTS.md` §2.9) rather than passing.
+It reserves the kernel remap window, builds an Sv39 `AddressSpace`
+identity-mapping the low 4 GiB (which installs the window's shared slots),
+installs the S-mode trap vector + a `fault` handler, turns paging on,
+installs the window-backed stack tier, and draws one stack from it through
+the production `kstack::alloc_kernel_stack` — checking the run came from the
+window (a `BoxStack` fallback would have handed back heap memory) and that
+its usable run is writable. It then builds the live
+`tairix-kernel-sched-eevdf` `Scheduler` over `RiscvArch` and admits a kthread
+on that stack via `kernel_core::spawn_kthread_with_stack` — the production
+runtime path, not a bare call. The body overruns by writing the highest byte
+of its guard slot (the first byte a contiguous downward overrun crosses);
+because that slot is unmapped the access raises a synchronous store page
+fault (`scause` 15) *while the kthread runs* — the trap is taken on the
+still-healthy usable stack above the guard, so the S-mode trap vector does
+not nest-fault. The handler confirms the cause and that `stval` lies in the
+guard slot, and writes the `SiFive` Test PASS finisher. A slot left mapped
+lets the body return cleanly; the cooperative `step` loop then drains the
+task and the test reports FAILURE explicitly rather than passing.

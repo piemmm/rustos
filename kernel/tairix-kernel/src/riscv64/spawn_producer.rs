@@ -30,28 +30,22 @@
 //! declares intersected with its user's grants;
 //! this seam only authorises the *act* of spawning under `CAP_PROC_SPAWN`.
 //!
-//! Each spawned child's kernel stack is drawn from the boot-reserved guard
-//! arena (`plans/PI.md` G3b-2): the producer re-expresses the coarse
-//! identity block covering the stack's guard page at 4 KiB granularity in
-//! the *child's own* Sv39 root — which it builds but never switches to — and
-//! unmaps that single page, so an overrun of the child's kernel stack takes
-//! a synchronous store page fault under the child's `satp` — the cross-port
-//! mirror of the `aarch64`/`x86_64` producers. Where no arena region is
-//! available, or the split/unmap fails, it falls back to a heap-backed
-//! software-canary [`BoxStack`] (fail closed).
+//! Each spawned child's kernel stack is drawn from the window-backed tier
+//! ([`tairix_kernel_core::kstack::alloc_kernel_stack`]) before this seam
+//! runs. Its guard slot is unmapped in every root at once, so an overrun of
+//! the child's kernel stack takes a synchronous store page fault under the
+//! child's `satp` and this producer owes the child's Sv39 root nothing.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
-use tairix_arch_api::mmu::AddressSpace as MmuAddressSpace;
 use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_kernel_core::{
-    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BoxStack, BuiltImage,
-    ImageBuildCtx, KernelStack, ProcessResume, ProcessSpace, SpawnMode, SpawnRequest,
-    UserThreadEntry,
+    refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
+    ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
     AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
@@ -66,7 +60,6 @@ use crate::spawn_layout;
 // the exact bias this producer maps every child at — the aarch64 port's
 // `USER_IMAGE_BIAS` export, mirrored (one definition, no copied constant).
 pub use crate::spawn_layout::CHILD_USER_BIAS;
-use crate::stack_arena::{FrameArenaGrow, KTHREAD_STACK_ARENA};
 
 /// Gigabytes of identity map each spawned child address space provides.
 ///
@@ -145,30 +138,6 @@ pub struct RiscvProcessSpawn;
 pub static RISCV_PROCESS_SPAWN: RiscvProcessSpawn = RiscvProcessSpawn;
 
 impl ArchImageBuilder for RiscvProcessSpawn {
-    fn alloc_kernel_stack(
-        &self,
-        frames: &FrameAllocator,
-        pt_frames: Option<&'static FrameAllocator>,
-    ) -> (Box<dyn KernelStack + Send>, Option<u64>) {
-        // Allocate the loading child's kernel stack synchronously at admit,
-        // before its address space exists, so the child's own loading body
-        // runs on it. An arena-backed guard-paged stack when a region is
-        // available (its guard VA returned for [`build`] to unmap in the
-        // child root), else the software-canary [`BoxStack`] fallback.
-        let Some(pt_frames) = pt_frames else {
-            return (Box::new(BoxStack::new()), None);
-        };
-        crate::stack_arena::publish_reclaim_frames(pt_frames);
-        let grow = FrameArenaGrow::new(frames, (IDENTITY_GIB as u64) << 30);
-        match KTHREAD_STACK_ARENA.alloc(&grow, &crate::stack_arena::IdentityArenaMemory) {
-            Some(stack) => {
-                let guard = stack.guard_page();
-                (Box::new(stack), Some(guard))
-            }
-            None => (Box::new(BoxStack::new()), None),
-        }
-    }
-
     fn build(
         &self,
         rxe: &[u8],
@@ -193,25 +162,9 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         // root is reactivated by its `pre_resume` hook before the scheduler
         // first resumes it as a user task (`plans/SPAWN.md` SP2). An
         // allocator exhausted of even the root table fails closed.
-        let mut arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
+        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
-
-        // Re-express the loading kthread's kernel-stack guard page in the
-        // *child's own* (inactive) Sv39 root: split the coarse identity block
-        // covering it to 4 KiB granularity and unmap the single guard page,
-        // so an overrun of the child's kernel stack takes a synchronous store
-        // page fault under the child's `satp` rather than corrupting the
-        // lower-addressed neighbour. Doing it on `arch` — never switched to
-        // here — disturbs no live access and needs no TLB maintenance. A
-        // `Some(guard)` whose split+unmap fails fails the build closed rather
-        // than running on an unguarded stack; `None` is the software-canary
-        // `BoxStack` (self-guarded, nothing to unmap).
-        if let Some(guard) = ctx.kernel_stack_guard() {
-            arch.split_block(guard)
-                .and_then(|()| arch.unmap(guard).map(|_| ()))
-                .map_err(|_| refuse_build(ctx, "kernel_stack_guard_unmap_failed"))?;
-        }
 
         let mut space = AddressSpace::new(arch);
         let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);

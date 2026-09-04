@@ -4772,17 +4772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-test-stack-arena-qemu-aarch64"
-version = "0.0.0"
-dependencies = [
- "tairix-arch-aarch64",
- "tairix-arch-api",
- "tairix-itest-finisher",
- "tairix-itest-harness",
- "tairix-log",
-]
-
-[[package]]
 name = "tairix-test-stack-grow"
 version = "0.0.0"
 dependencies = [
@@ -4862,39 +4851,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-test-stack-guard-qemu-aarch64"
-version = "0.0.0"
-dependencies = [
- "tairix-arch-aarch64",
- "tairix-arch-api",
- "tairix-itest-finisher",
- "tairix-itest-harness",
- "tairix-log",
-]
-
-[[package]]
-name = "tairix-test-stack-guard-qemu-riscv64"
-version = "0.0.0"
-dependencies = [
- "tairix-arch-api",
- "tairix-arch-riscv64",
- "tairix-itest-finisher",
- "tairix-itest-harness",
- "tairix-log",
-]
-
-[[package]]
-name = "tairix-test-stack-guard-qemu-x86_64"
-version = "0.0.0"
-dependencies = [
- "tairix-arch-api",
- "tairix-arch-x86_64",
- "tairix-itest-harness",
- "tairix-kernel",
- "tairix-log",
-]
-
-[[package]]
 name = "tairix-test-stack-overrun-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -4905,6 +4861,7 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
  "tairix-log",
 ]
@@ -4919,6 +4876,7 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",
  "tairix-log",
 ]
@@ -4927,7 +4885,6 @@ dependencies = [
 name = "tairix-test-stack-overrun-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
- "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",

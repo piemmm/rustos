@@ -54,9 +54,8 @@ use core::sync::atomic::{AtomicU64, AtomicU8};
 use tairix_abi::HwNode;
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_ram_gigapages, guard_arena_pool_capacity,
-    identity_device_mask, identity_ram_mask, ram_gigapages, AddressSpace, PageTablePool,
-    GIGAPAGE_MASK_WORDS,
+    configure_device_gigapages, configure_ram_gigapages, identity_device_mask, identity_ram_mask,
+    ram_gigapages, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
@@ -100,26 +99,17 @@ include!(concat!(env!("OUT_DIR"), "/build_id.rs"));
 /// mask [`boot`] derives before enabling the MMU.
 const IDENTITY_GIGABYTES: usize = 512;
 
-/// Boot-time page-table frame source for the stage-1 identity map *and*
-/// the guard-arena re-expression over the live boot tables.
+/// Boot-time page-table frame source for the stage-1 identity map: one
+/// frame, since a single root L1 table holds all 512 gigapage block
+/// descriptors.
 ///
-/// The identity map takes one frame (a single root L1 table holds all 512
-/// gigapage block descriptors); [`AddressSpace::prepare_guard_arena`] then
-/// draws the replacement L2/L3 tables that re-express the carved arena at
-/// 4 KiB granularity, so the pool is sized for that worst case
-/// ([`guard_arena_pool_capacity`] over the arena policy ceiling
-/// [`crate::mem_map::STACK_ARENA_MAX_BYTES`] — a fixed default here
-/// exhausted on a real 8 GiB Pi 4
-/// and silently degraded the kthread stacks to software canaries). It
-/// lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
+/// It lives in `.bss` for the lifetime of the kernel image, so `TTBR0_EL1`
 /// keeps pointing at a valid table after [`enable_mmu_and_vectors`]
 /// returns even though the transient [`AddressSpace`] handle is dropped
 /// (the pool is monotonic and never freed). The real per-process page
 /// tables are built over the `kernel/mem` frame allocator at a later
 /// stage.
-static BOOT_PAGE_TABLES: PageTablePool<
-    { guard_arena_pool_capacity(crate::mem_map::STACK_ARENA_MAX_BYTES) },
-> = PageTablePool::new();
+static BOOT_PAGE_TABLES: PageTablePool<1> = PageTablePool::new();
 
 /// The boot CPU's dense logical id. The boot trampoline parks every
 /// other CPU until `kernel_main`'s SMP bring-up issues PSCI `CPU_ON`
@@ -200,12 +190,8 @@ fn kernel_end_addr() -> u64 {
 /// logs and parks on rather than running `kernel_main` over un-cacheable
 /// Device memory.
 ///
-/// The handle is returned, not dropped, so the caller can re-express the
-/// kthread-stack guard arena at 4 KiB granularity over the *active*
-/// tables once the RAM window has been discovered
-/// ([`AddressSpace::prepare_guard_arena`], `plans/PI.md` stage G2). The
-/// returned space still owns `TTBR0_EL1`'s root table
-/// ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
+/// The handle is returned, not dropped: it still owns `TTBR0_EL1`'s root
+/// table ([`BOOT_PAGE_TABLES`]), which lives for the kernel's lifetime.
 fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     let space = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)?;
     // The tables were just written with the data cache off; sweep them
@@ -409,58 +395,13 @@ pub fn boot(
     // with the firmware blob reserved out of it.
     let layout_result = build_boot_memory_layout(&ram_windows, dtb, early.dtb_len);
     let (mem_status, usable_bytes, reserved_bytes) = match &layout_result {
-        Ok(layout) => {
-            let (usable, reserved) = region_byte_totals(&layout.map);
+        Ok(map) => {
+            let (usable, reserved) = region_byte_totals(map);
             ("built", usable, reserved)
         }
         Err(status) => (*status, 0, 0),
     };
     let mem_map_built = layout_result.is_ok();
-
-    // G2: re-express the reserved kthread-stack guard arena at 4 KiB
-    // granularity over the *active* boot tables, so a guard page in it can
-    // later be unmapped without shattering the 2 MiB block the CPU runs on
-    // (`plans/PI.md` stage G2 → G3). A window too small to carve an arena,
-    // or a pool that cannot supply the replacement tables, leaves the guard
-    // in its software-canary form — fail closed, never fatal to boot
-    // (`plans/PI.md` G2 watch-out).
-    //
-    // Refining the *live* regime is an architectural violation, not a
-    // safe optimisation: replacing a valid 1 GiB block with a table changes
-    // the granule every address under it translates at, and a TLB holding
-    // both granules for one address may fault the walk. Break-before-make
-    // is what the architecture requires and is impossible here — the break
-    // window would unmap the executing kernel — so the fix is to carve the
-    // arena before the MMU is enabled and lay it down fine from the start.
-    // That needs the RAM windows pre-MMU and is tracked as
-    // `plans/OPEN-DEFECTS.md` D82.
-    let arena_prepared = match (boot_space.as_mut(), &layout_result) {
-        (Some(space), Ok(layout)) => layout
-            .arena
-            .is_some_and(|arena| space.prepare_guard_arena(arena.base, arena.len).is_ok()),
-        _ => false,
-    };
-
-    // G3b-2: publish the reserved guard arena to the kthread-stack
-    // allocator so the PID 1 spawn seam can draw `init`'s kernel stack out
-    // of it and unmap that stack's guard page in `init`'s own page-table
-    // root — turning a stack overrun into a synchronous fault rather than a
-    // poison-canary detection (`plans/PI.md` G3b-2). Installed from the
-    // carved arena regardless of `arena_prepared` (which only re-expresses
-    // the arena over the *boot* tables): `init` builds its own root and
-    // splits the arena there independently; it needs only that the arena's
-    // frames are `Reserved` (the memory-map builder guarantees this). When
-    // no arena was carved the install is skipped and the seam falls back to
-    // a software-canary `BoxStack` (fail closed).
-    if let Ok(layout) = &layout_result {
-        if let Some(arena) = layout.arena {
-            crate::stack_arena::KTHREAD_STACK_ARENA.install(
-                arena.base,
-                arena.len,
-                &crate::stack_arena::IdentityArenaMemory,
-            );
-        }
-    }
 
     let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
 
@@ -489,7 +430,6 @@ pub fn boot(
             cpu_count: cpu_mpidrs.len(),
             smp_prepared: yes_no(smp_prepared),
             mmu_enabled: yes_no(mmu_on),
-            guard_arena_prepared: yes_no(arena_prepared),
         },
     );
 
@@ -497,7 +437,7 @@ pub fn boot(
     // is sound; otherwise park fail-closed. The map is
     // moved into `BootInfo` here, so it is built exactly once.
     if ready {
-        if let Ok(layout) = layout_result {
+        if let Ok(map) = layout_result {
             // Resolve + audit which discovered storage node binds the
             // bootstrap root block driver before entering the core — the storage analogue of the
             // keyboard bind gate. Read-only: it mounts nothing; the
@@ -509,7 +449,7 @@ pub fn boot(
             enter_kernel_core(
                 arch,
                 BootMemory {
-                    map: layout.map,
+                    map,
                     installed_bytes: installed_memory_bytes,
                 },
                 heap,
@@ -837,14 +777,14 @@ fn build_boot_memory_layout(
     ram_windows: &[(u64, u64)],
     dtb: u64,
     dtb_len: u64,
-) -> Result<crate::mem_map::MemoryLayout, &'static str> {
+) -> Result<tairix_kernel_mem::BootMemoryMap, &'static str> {
     if ram_windows.is_empty() {
         return Err("no_memory_window");
     }
-    let mut layout = build_memory_map(ram_windows, kernel_end_addr())
+    let mut map = build_memory_map(ram_windows, kernel_end_addr())
         .map_err(crate::mem_map::MemoryMapError::as_str)?;
-    crate::mem_map::reserve_blob_frames(&mut layout.map, dtb, dtb_len);
-    Ok(layout)
+    crate::mem_map::reserve_blob_frames(&mut map, dtb, dtb_len);
+    Ok(map)
 }
 
 /// The consolidated aarch64 boot line's report, rendered by [`boot`] so
@@ -919,9 +859,6 @@ struct BootStatus {
     smp_prepared: &'static str,
     /// Stage-1 translation is on.
     mmu_enabled: &'static str,
-    /// The kthread-stack guard arena was re-expressed at 4 KiB
-    /// granularity over the boot tables.
-    guard_arena_prepared: &'static str,
 }
 
 /// Emit the one consolidated aarch64 boot line.
@@ -982,7 +919,6 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
         ),
         ("smp_prepared", status.smp_prepared),
         ("mmu_enabled", status.mmu_enabled),
-        ("guard_arena_prepared", status.guard_arena_prepared),
         ("next_stage", "pi_p6c3_spawn_init_el0"),
         ("build_id", KERNEL_BUILD_ID),
     ];

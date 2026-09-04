@@ -1,28 +1,33 @@
-//! The x86_64 stack-overrun test kernel: boot the production pipeline,
-//! then on `BootCompleted` build a 4 GiB-identity address space, re-express
-//! a 2 MiB guard arena at 4 KiB granularity, unmap one kthread stack's
-//! guard page, admit a kthread on that stack via the production
-//! `spawn_kthread_with_stack` runtime path, and prove its overrun into the
-//! guard page faults synchronously (`plans/PI.md` G3c, the x86_64 sibling
-//! of `stack_overrun_qemu_aarch64`).
+//! The x86_64 stack-overrun test kernel: boot the production pipeline, then
+//! on `BootCompleted` draw a kthread kernel stack from the **window-backed**
+//! stack tier the boot path installed, admit a kthread on it via the
+//! production `spawn_kthread_with_stack` runtime path, and prove its overrun
+//! into the stack's unmapped guard slot faults synchronously
+//! (`plans/OPEN-DEFECTS.md` D82, the x86_64 sibling of
+//! `stack_overrun_qemu_aarch64`).
+//!
+//! Unlike its siblings this bin boots the whole production pipeline, so the
+//! remap window and the stack tier are installed by the kernel itself — a
+//! stack that came back outside the window would mean the production install
+//! silently degraded to the software-canary fallback, which the window check
+//! below catches before the kthread runs.
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 extern crate alloc;
 use alloc::sync::Arc;
 
-use tairix_arch_api::mmu::AddressSpace as _;
-use tairix_arch_api::tlb::TlbShootdown as _;
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
-use tairix_arch_x86_64::paging::{self, BLOCK_2MIB, KERNEL_VMA_BASE, PAGE_SIZE};
+use tairix_arch_x86_64::paging::PAGE_SIZE;
 use tairix_arch_x86_64::{fault, qemu_exit, smp};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
-use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack, KTHREAD_STACK_BYTES};
+use tairix_kernel_core::kstack::alloc_kernel_stack;
+use tairix_kernel_core::{spawn_kthread_with_stack, KernelStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
@@ -40,16 +45,9 @@ const SO_TEST_FAIL: EventId = EventId(4326);
 /// The single-core slice runs logical CPU 0 on the boot processor.
 const BOOT_CPU: u32 = 0;
 
-/// Width of the kthread-stack guard region: one 4 KiB page, matching
-/// `tairix_kernel_core::BoxStack` and the production `ArenaStack` (the
-/// guard sits immediately *below* the usable stack).
+/// Width of a kthread stack's guard region: one 4 KiB page, the slot the
+/// tier reserves and never maps immediately *below* the usable stack.
 const STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
-
-/// Offset of the kthread stack region within the arena. Chosen well inside
-/// the arena (page 4) so the guard page has mapped neighbours on both sides
-/// and the region (`STACK_GUARD_BYTES + KTHREAD_STACK_BYTES`, ~68 KiB) fits
-/// comfortably within the 2 MiB arena.
-const STACK_REGION_OFFSET: u64 = 4 * PAGE_SIZE as u64;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the workload drained without faulting (a guard regression).
@@ -68,83 +66,15 @@ static mut HEAP: Heap = Heap::ZERO;
 static ALLOCATOR: FreeListAllocator =
     unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
 
-/// Page-table pool backing the new address space (lives in `.bss`).
-static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();
-
-/// Backing store for the kthread-stack guard arena: two 2 MiB blocks of
-/// page-aligned `.bss`, big enough to carve one 2 MiB-aligned, 2 MiB arena
-/// out of wherever the linker places the static. Page (not 2 MiB)
-/// alignment keeps the linker from over-aligning the whole `.bss` section;
-/// the 2 MiB-aligned arena is rounded up inside this window
-/// ([`arena_phys`]). The arena then occupies a whole identity huge page of
-/// its own, so re-expressing it at 4 KiB granularity (and unmapping a guard
-/// page inside it) never disturbs the block holding the running code, boot
-/// stack, or heap.
-#[repr(C, align(4096))]
-struct ArenaBacking([u8; 2 * BLOCK_2MIB as usize]);
-static mut ARENA_BACKING: ArenaBacking = ArenaBacking([0; 2 * BLOCK_2MIB as usize]);
-
-/// `true` once the guard page has been unmapped — lets [`on_fault`] tell
-/// the *expected* fault from a kernel bug that faults earlier.
-static GUARD_UNMAPPED: AtomicBool = AtomicBool::new(false);
+/// The guard slot of the stack under test, published once it is drawn so
+/// the fault observer can name the address it expects. Zero until then,
+/// which lets [`on_fault`] tell the *expected* overrun from a kernel bug
+/// that faults earlier.
+static GUARD_SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Set once the test has been driven so a duplicate `BootCompleted` cannot
 /// re-enter the test logic.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
-
-/// Physical base of the 2 MiB-aligned guard arena — a low-identity
-/// address, which the identity map aliases 1:1. `ARENA_BACKING` is a
-/// higher-half kernel symbol (linked at `KERNEL_VMA_BASE + p`, loaded at
-/// physical `p`), so subtracting [`KERNEL_VMA_BASE`] recovers the physical
-/// address `p`; rounding that up to the next 2 MiB boundary yields a
-/// 2 MiB-aligned arena that fits within the backing store (which is twice
-/// the arena size). The kthread runs on this low-identity alias so the
-/// guard page we unmap is exactly the page it overruns into.
-fn arena_phys() -> u64 {
-    let backing = (core::ptr::addr_of!(ARENA_BACKING) as u64) - KERNEL_VMA_BASE;
-    (backing + (BLOCK_2MIB - 1)) & !(BLOCK_2MIB - 1)
-}
-
-/// Base (4 KiB-aligned) of the kthread stack region inside the arena: the
-/// low edge of its one-page guard, the page the test unmaps.
-fn guard_page() -> u64 {
-    arena_phys() + STACK_REGION_OFFSET
-}
-
-/// The address the kthread body writes to overrun its stack: the highest
-/// byte of the guard region — the first byte a contiguous downward stack
-/// overrun crosses. It lies inside the (unmapped) guard page, so the access
-/// faults synchronously.
-fn overrun_target() -> u64 {
-    guard_page() + STACK_GUARD_BYTES - 1
-}
-
-/// A kthread kernel stack carved from the arena, laid out
-/// `[guard page | usable stack]` exactly like the production `ArenaStack`.
-/// Its guard page is unmapped before the kthread runs, so
-/// [`KernelStack::check_guard`] keeps the default `Ok(())` — the hardware
-/// fault is the defence, not a canary scan.
-#[derive(Copy, Clone)]
-struct ArenaTestStack {
-    guard: u64,
-}
-
-// SAFETY: `top` returns the region base plus the guard page plus the usable
-// `KTHREAD_STACK_BYTES`, rounded down to the 16-byte ABI alignment. The
-// usable region `[guard + STACK_GUARD_BYTES, top)` is a sub-range of the
-// identity-mapped, single-owner `ARENA` static that outlives the binary;
-// only the guard page below it is unmapped. The arena hands this region to
-// exactly one kthread, so it is exclusive.
-unsafe impl KernelStack for ArenaTestStack {
-    fn top(&self) -> u64 {
-        let top = self.guard + STACK_GUARD_BYTES + KTHREAD_STACK_BYTES as u64;
-        top & !0xF
-    }
-
-    fn usable_bytes(&self) -> u64 {
-        KTHREAD_STACK_BYTES as u64
-    }
-}
 
 fn note(level: Level, id: EventId, message: &'static str) {
     log(
@@ -182,13 +112,13 @@ fn fail(what: &'static str) -> ! {
 }
 
 /// The page-fault observer the production `#PF` entry invokes. The
-/// overrunning kthread's access to the unmapped guard page must land here
-/// as a **supervisor, not-present** fault on exactly the guard page;
+/// overrunning kthread's access to the unmapped guard slot must land here
+/// as a **supervisor, not-present** fault on exactly the guard slot;
 /// anything else is a closed failure. Never returns.
 extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
-    let base = guard_page();
+    let base = GUARD_SLOT.load(Ordering::Acquire);
     let page_end = base + STACK_GUARD_BYTES;
-    if !GUARD_UNMAPPED.load(Ordering::SeqCst) {
+    if base == 0 {
         note(
             Level::Error,
             SO_TEST_FAIL,
@@ -223,19 +153,18 @@ extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
     note(
         Level::Info,
         SO_TEST_PASS,
-        "x86_64 stack-overrun test: kthread overran into the unmapped guard page",
+        "x86_64 stack-overrun test: kthread overran into the unmapped guard slot",
     );
     qemu_exit::exit_success();
 }
 
-/// Build the identity space + guard arena, unmap one kthread stack's guard
-/// page, admit a kthread on that stack, and drive it until it overruns and
-/// faults. Never returns.
+/// Draw a stack from the boot-installed window tier, admit a kthread on it,
+/// and drive it until it overruns and faults. Never returns.
 fn run_overrun_test() -> ! {
     note(
         Level::Info,
         SO_TEST_START,
-        "x86_64 stack-overrun test: arming an unmapped kthread-stack guard page",
+        "x86_64 stack-overrun test: drawing a window-backed kthread stack",
     );
 
     // Keep dispatch deterministic: mask interrupts so the LAPIC timer does
@@ -247,42 +176,32 @@ fn run_overrun_test() -> ! {
         core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
     }
 
-    let arena = arena_phys();
-    let guard = guard_page();
-
-    // Build a 4 GiB-identity space (low identity + higher-half kernel
-    // window) so the running RIP / stack / per-CPU TLS, the heap, and the
-    // arena's low-identity alias all stay mapped across the CR3 switch.
-    let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
-        fail("page-table pool exhausted");
-    };
-
-    // Activate it before splitting, so `prepare_guard_arena`'s low-identity
-    // table dereferences resolve through this space's own 4 GiB identity map
-    // (the x86_64 four-level walk recovers tables by their low physical
-    // address — see `stack_guard_qemu_x86_64`).
-    // SAFETY: the new space maps the low 4 GiB and the higher-half kernel
-    // window, so the executing RIP, the current stack, the per-CPU swapgs
-    // TLS, the heap, and the page-table pool all stay mapped across the CR3
-    // load.
-    unsafe { space.activate() };
-
-    // Re-express the 2 MiB identity huge page covering the arena at 4 KiB
-    // granularity so a single guard page in it can be torn down. The split
-    // only *adds* table levels reproducing the existing translation, so it
-    // is safe against the running regime.
-    if space.prepare_guard_arena(arena, BLOCK_2MIB).is_err() {
-        fail("prepare_guard_arena failed");
+    // Draw a stack from the tier the production boot installed. The active
+    // CR3 already carries the window's shared sub-hierarchy, so the run
+    // resolves without this test touching a page table.
+    let stack = alloc_kernel_stack();
+    // The tier lays a stack out as `[guard slot | usable run]`, so the guard
+    // is the page below the usable base.
+    let usable_base = stack.top() - stack.usable_bytes();
+    let guard = usable_base - STACK_GUARD_BYTES;
+    // A `BoxStack` fallback would have handed back heap memory, which means
+    // the production install silently degraded. The window sits above the
+    // higher-half kernel image and far above the bump heap, so a heap
+    // address cannot reach it.
+    if guard < tairix_arch_x86_64::paging::kernel_window_base() {
+        fail("stack is not window-backed");
     }
-
-    // Tear the kthread stack's guard page down through the Arch HAL and
-    // flush its stale TLB entry — exactly the production guard-page
-    // mechanism (G3b-2). The usable stack above it stays mapped.
-    if space.unmap(guard).is_err() {
-        fail("unmap guard page failed");
+    GUARD_SLOT.store(guard, Ordering::Release);
+    // The usable run must be mapped and writable, or the fault below would
+    // prove nothing about the guard.
+    // SAFETY: the run was installed by the tier and is exclusive to this
+    // stack, which nothing is running on yet.
+    unsafe {
+        core::ptr::write_volatile(usable_base as *mut u8, 0x5A);
+        if core::ptr::read_volatile(usable_base as *const u8) != 0x5A {
+            fail("usable stack not writable");
+        }
     }
-    space.flush_page(guard);
-    GUARD_UNMAPPED.store(true, Ordering::SeqCst);
 
     // Build the live scheduler over a fresh production arch handle (the
     // cooperative `step` loop drives dispatch; interrupts are masked, so the
@@ -303,20 +222,22 @@ fn run_overrun_test() -> ! {
         fail("scheduler new failed");
     };
 
-    // Admit a kthread on the arena-backed, guard-unmapped stack. The body
-    // overruns into the guard page on its first (and only) dispatch.
-    let target = overrun_target();
+    // Admit a kthread on the window-backed stack. The body overruns into
+    // the unmapped guard slot on its first (and only) dispatch: the highest
+    // byte of that slot is the first byte a contiguous downward overrun
+    // crosses.
+    let target = guard + STACK_GUARD_BYTES - 1;
     let spawned = spawn_kthread_with_stack(
         &sched,
         ContextSwitchHal::new(),
-        ArenaTestStack { guard },
+        stack,
         BOOT_CPU,
         Priority::Normal,
         move |_yielder| {
-            // Overrun the usable stack into the (unmapped) guard page: touch
+            // Overrun the usable stack into the (unmapped) guard slot: touch
             // the highest guard byte, the first byte a contiguous downward
             // overrun crosses. This must fault synchronously.
-            // SAFETY: the access is *expected* to fault — the guard page is
+            // SAFETY: the access is *expected* to fault — the guard slot is
             // unmapped. The write is volatile so it is not elided; if the
             // MMU wrongly permitted it the body simply returns and the drain
             // loop below reports the guard FAILURE.
@@ -331,12 +252,12 @@ fn run_overrun_test() -> ! {
     note(
         Level::Info,
         SO_TEST_SPAWNED,
-        "x86_64 stack-overrun test: kthread spawned on the guarded arena stack",
+        "x86_64 stack-overrun test: kthread spawned on the window-backed stack",
     );
 
     // Drive the cooperative dispatch loop. The first `step` enters the
     // kthread, whose overrun faults into `on_fault` (which exits PASS). If
-    // the guard page were wrongly left mapped the body would return (Exit)
+    // the guard slot were wrongly left mapped the body would return (Exit)
     // and the loop would drain — a guard regression we report below rather
     // than letting it pass silently.
     let mut steps = 0u64;
@@ -352,7 +273,7 @@ fn run_overrun_test() -> ! {
         &Event {
             level: Level::Error,
             id: SO_TEST_FAIL,
-            message: "x86_64 stack-overrun test: kthread overran the guard page without faulting",
+            message: "x86_64 stack-overrun test: kthread overran the guard slot without faulting",
             fields: &[Field {
                 key: "drained",
                 value: tairix_log::FieldValue::Str(if sched.live_task_count() == 0 {

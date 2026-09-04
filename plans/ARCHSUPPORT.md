@@ -265,7 +265,7 @@ the seat-lease scenario on x86_64.
 The remaining aarch64-only verticals gain x86_64 siblings (thin bins over
 the shared scenario crates): `sandbox`, `heap`, `file_map`, `mmio_map`,
 `mem_pin`, `memsoak`, `service_ceiling`/`session_ceiling`, `irq_kthread`,
-`preempt_inkernel`, `stack_arena`, `sched_drive`, `ipi_smp`,
+`preempt_inkernel`, `sched_drive`, `ipi_smp`,
 `timer_preempt` — audited against the then-current inventory when A6
 starts; any vertical exercising a feature a prior increment wired lands
 with that increment instead. Same-change docs: `docs/src/platform/` x86_64
