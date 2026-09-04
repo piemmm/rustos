@@ -39,7 +39,7 @@ table normalises all three to **closed**. 24 open, 62 closed, 86 total.
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
 | D41 | root-unlock login vertical failed once under a loaded gate | unreproduced, not diagnosed |
-| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | — |
+| D42 | an x86_64 ring-3 wild jump halts the CPU instead of the task | the `#PF` half of the missing terminator; D86 is the other half, one fix closes both |
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
@@ -50,7 +50,7 @@ table normalises all three to **closed**. 24 open, 62 closed, 86 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | — |
+| D86 | on x86_64 a ring-3 exception other than a page fault kills the machine, not the task | the non-`#PF` half of the missing terminator; D42 is the other half |
 
 ### Closed (62)
 
