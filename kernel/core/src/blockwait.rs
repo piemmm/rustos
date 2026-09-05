@@ -199,52 +199,9 @@ impl IrqWaiter for IrqParkWaiter {
 mod tests {
     use super::*;
 
-    use core::sync::atomic::{AtomicU64, Ordering};
-
     use tairix_kernel_irq::MaskError;
-    use tairix_sync::once::Once;
 
-    use crate::waitq::{install_wait_arch, WaitQueueArch};
-
-    /// Shared test clock/arch. Installed once for the whole test binary
-    /// (the hook is set-once); every test advances the one clock through
-    /// its fallback and uses relative timeouts, so tests stay independent
-    /// of ordering.
-    struct TestArch {
-        now: AtomicU64,
-    }
-
-    impl WaitQueueArch for TestArch {
-        fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
-        fn now_ns(&self) -> u64 {
-            self.now.load(Ordering::SeqCst)
-        }
-        fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
-        fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
-            Some(0)
-        }
-        fn current_task(
-            &self,
-            _cpu: tairix_kernel_sched_api::CpuId,
-        ) -> Option<tairix_kernel_sched_api::TaskId> {
-            Some(4242)
-        }
-    }
-
-    static TEST_ARCH: TestArch = TestArch {
-        now: AtomicU64::new(0),
-    };
-    static INSTALL: Once<()> = Once::new();
-
-    fn arch() -> &'static TestArch {
-        INSTALL
-            .call_once(|| {
-                install_wait_arch(&TEST_ARCH).expect("first install");
-                Ok::<(), core::convert::Infallible>(())
-            })
-            .expect("install is infallible");
-        &TEST_ARCH
-    }
+    use crate::test_boot;
 
     /// Permissive controller so `IrqTable::fire` can mask and the waiter
     /// can re-arm without an architecture port.
@@ -256,34 +213,46 @@ mod tests {
     }
     static CONTROLLER: OkController = OkController;
 
-    /// Fallback that advances the shared clock, so a bounded wait with a
-    /// never-firing line reaches its deadline instead of looping forever.
-    /// (Tests run in parallel over one global clock; it is monotonic, and
-    /// every deadline is relative, so cross-test ticks only shorten waits.)
+    /// Fallback that advances this test's own wait clock, so a bounded wait
+    /// with a never-firing line reaches its deadline instead of looping.
     fn ticking_fallback(_table: &IrqTable, _handle: IrqHandle) {
-        arch().now.fetch_add(100, Ordering::SeqCst);
+        test_boot::advance_clock(100);
+    }
+
+    /// Fallback that raises the line itself, standing in for a completion
+    /// arriving while the caller is parked.
+    fn firing_fallback(table: &IrqTable, _handle: IrqHandle) {
+        table.fire(LINE, &OkController).expect("fires");
+    }
+
+    /// Fallback proving a wait never parks at all.
+    fn no_park(_table: &IrqTable, _handle: IrqHandle) {
+        panic!("this wait must not park at all");
     }
 
     const LINE: u32 = 9;
     const OWNER: ProcessId = ProcessId(31);
 
-    fn bound_waiter() -> (&'static IrqTable, IrqHandle, IrqParkWaiter) {
+    /// A fresh table with `LINE` bound, and a waiter over it driving
+    /// `fallback`.
+    ///
+    /// The test claims its own wait hook, so `yield_now` runs the whole
+    /// register → re-test → suspend interlock; the claimed CPU has no
+    /// per-CPU state slot, so the suspend then fails closed there — the
+    /// not-parkable answer a host test with no dispatch loop must get — and
+    /// the fallback is reached deterministically.
+    fn bound_waiter(fallback: FallbackPark) -> (&'static IrqTable, IrqHandle, IrqParkWaiter) {
+        let _ = test_boot::claim_scheduler();
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, ticking_fallback);
+        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, fallback);
         (table, out.handle, waiter)
     }
 
     #[test]
     fn a_pre_fired_line_is_consumed_without_any_park() {
-        // A fallback that panics proves the pre-fired wait never parks.
-        fn no_park(_table: &IrqTable, _handle: IrqHandle) {
-            panic!("a pre-fired wait must not park at all");
-        }
-        let _ = arch();
-        let (table, handle, _) = bound_waiter();
-        let waiter = IrqParkWaiter::new(table, handle, LINE, &CONTROLLER, no_park);
+        let (table, handle, waiter) = bound_waiter(no_park);
         table.fire(LINE, &OkController).expect("fires");
         assert_eq!(waiter.park_wait(OWNER, 1_000_000), WaitOutcome::Ready);
         // The fire was consumed: the flag is clear for the next wait.
@@ -292,8 +261,7 @@ mod tests {
 
     #[test]
     fn a_silent_line_times_out_instead_of_waiting_forever() {
-        let _ = arch();
-        let (_table, _handle, waiter) = bound_waiter();
+        let (_table, _handle, waiter) = bound_waiter(ticking_fallback);
         // 250 ns budget, 100 ns per fallback tick: the deadline is reached
         // after a bounded number of parks — the fail-closed outcome a dead
         // controller must produce.
@@ -302,22 +270,15 @@ mod tests {
 
     #[test]
     fn a_fire_during_the_wait_wakes_and_consumes() {
-        // The consuming re-poll runs after each fallback park; fire on the
-        // first park through a fallback that raises the line itself.
-        fn firing_fallback(table: &IrqTable, _handle: IrqHandle) {
-            table.fire(LINE, &OkController).expect("fires");
-        }
-        let _ = arch();
-        let (table, handle, _waiter) = bound_waiter();
-        let waiter = IrqParkWaiter::new(table, handle, LINE, &CONTROLLER, firing_fallback);
+        // The consuming re-poll runs after each fallback park.
+        let (table, handle, waiter) = bound_waiter(firing_fallback);
         assert_eq!(waiter.park_wait(OWNER, u64::MAX), WaitOutcome::Ready);
         assert!(!table.ready_for(handle), "ready flag must be consumed");
     }
 
     #[test]
     fn a_released_binding_fails_closed_as_not_found() {
-        let _ = arch();
-        let (table, _handle, waiter) = bound_waiter();
+        let (table, _handle, waiter) = bound_waiter(no_park);
         table.release_for(OWNER);
         assert_eq!(waiter.park_wait(OWNER, 1_000), WaitOutcome::NotFound);
     }

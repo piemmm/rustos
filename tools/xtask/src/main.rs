@@ -28,7 +28,11 @@
 //!   (alias `--iterations N`) repeats the whole matrix N times to surface
 //!   flaky tests, defaulting to one run; `--soak` (tuned by `--secs N`)
 //!   instead repeats it for a wall-clock budget (24 h by default), which the
-//!   nightly `soak` workflow uses to run the tests repeatedly for 24 h
+//!   nightly `soak` workflow uses to run the tests repeatedly for 24 h.
+//!   `--shuffle` starts each host pass in a randomised order (the seed is in
+//!   the step's label; `--shuffle-seed N` pins it) so a suite that passes
+//!   only in the harness's alphabetical order fails instead of hiding — `ci`
+//!   and `ci-long` both run the host tests this way
 //! - `clippy`       — `-D warnings` for the host
 //!   (`--workspace --all-targets`) **and once per Tier-1 target**: the three
 //!   freestanding triples over the cross-compiled product tree, each QEMU

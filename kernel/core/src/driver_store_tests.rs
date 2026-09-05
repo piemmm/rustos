@@ -243,6 +243,18 @@ impl FilesystemSecurity for MockStore {
     }
 }
 
+/// Enumerate the store while the shared log-level guard is held.
+///
+/// The scan's one audit record is emitted at `Level::Info` through the
+/// `tairix_log` threshold, which is a single process-global atomic: a sibling
+/// test pinning it below `Info` for its own body would otherwise drop the
+/// record and leave [`scanned_record`] looking at an empty sink.
+fn scan(fs: &mut MockStore, sink: &TestSink) -> Vec<String> {
+    crate::test_sink::with_log_level(tairix_log::Level::Info, || {
+        enumerate_driver_store(fs, DRIVER_STORE_PATH, sink)
+    })
+}
+
 fn scanned_record(sink: &TestSink) -> (usize, usize) {
     let events = sink.snapshot();
     assert_eq!(events.len(), 1, "exactly one scan record is emitted");
@@ -268,7 +280,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
     fs.add_file("/System/Drivers/usb_kbd");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert_eq!(
         drivers,
@@ -289,7 +301,7 @@ fn a_missing_store_is_not_an_error_and_yields_nothing() {
     fs.add_dir("/System");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert!(drivers.is_empty());
     // The absent store root is the legitimate "no drivers" case: not a
@@ -304,7 +316,7 @@ fn an_entirely_absent_system_tree_yields_nothing() {
     let mut fs = MockStore::new();
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert!(drivers.is_empty());
     assert_eq!(scanned_record(&sink), (0, 0));
@@ -321,7 +333,7 @@ fn an_unreadable_subdirectory_is_skipped_and_the_walk_continues() {
     fs.set_security(private, NodeSecurity::new(0o700, 7, 7));
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     // The readable driver is found; the unreadable subtree is skipped.
     assert_eq!(drivers, alloc::vec!["/System/Drivers/bus_usb".to_string()]);
@@ -344,7 +356,7 @@ fn a_node_below_the_depth_bound_is_refused() {
     fs.add_file("/System/Drivers/shallow");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert_eq!(drivers, alloc::vec!["/System/Drivers/shallow".to_string()]);
     let (found, skipped) = scanned_record(&sink);
@@ -361,7 +373,7 @@ fn the_driver_count_is_bounded() {
     }
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert_eq!(drivers.len(), MAX_STORE_DRIVERS);
     let (found, skipped) = scanned_record(&sink);
@@ -376,7 +388,7 @@ fn an_empty_store_directory_yields_nothing() {
     fs.add_dir("/System/Drivers");
 
     let sink = TestSink::new();
-    let drivers = enumerate_driver_store(&mut fs, DRIVER_STORE_PATH, &sink);
+    let drivers = scan(&mut fs, &sink);
 
     assert!(drivers.is_empty());
     assert_eq!(scanned_record(&sink), (0, 0));

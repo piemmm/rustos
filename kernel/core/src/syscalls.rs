@@ -17246,6 +17246,9 @@ mod tests {
             Box::leak(Box::new(tairix_reclaim::MemoryPressure::over(source)));
         let audit: &'static crate::test_sink::TestSink =
             Box::leak(Box::new(crate::test_sink::TestSink::new()));
+        // The cache keys its index under the per-boot hash key; without one it
+        // is born poisoned and every launch re-reads the bundle.
+        crate::test_boot::publish_hash_key();
         store.install_reclaim(
             tairix_reclaim::CacheBudget::from_backing(1 << 24),
             pressure,
@@ -30125,7 +30128,11 @@ mod tests {
     /// `id` and return it; the test must `crate::callreg::unregister(id)`
     /// when done so the global registry does not leak across tests.
     fn register_call_endpoint(id: u64, sink: &(dyn Sink + Sync)) -> Arc<CallEndpoint> {
-        let creator = make_caps_record(1, &[], sink);
+        // Owned by the calling test's own reserved id. The registry is
+        // process-global and torn down *by owner*, so a shared low owner
+        // means any concurrent test reclaiming that process destroys this
+        // endpoint under its caller — which surfaces as a cancelled call.
+        let creator = make_caps_record(crate::test_boot::claim_task(), &[], sink);
         let ep = Arc::new(
             CallEndpoint::create(
                 EndpointId(id),
@@ -30143,6 +30150,85 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
         ep
+    }
+
+    /// A scoped server thread for a call endpoint: it answers `reply` to each
+    /// `request` a client posts, and is released when the client body it
+    /// brackets returns **or unwinds**.
+    ///
+    /// Both halves of that matter. `std::thread::scope` joins before it
+    /// propagates a panic, so a server left waiting for calls a failed client
+    /// will never make turns the failure into a hang that prints nothing; and
+    /// `std::thread::spawn` + `join` fails the other way, leaving the server
+    /// spinning on a core for the rest of the run once the client skips its
+    /// join.
+    struct CallServer<'x> {
+        /// The bytes the server asserts each call carried, so the request
+        /// reaching the server is checked and not merely counted.
+        request: &'x [u8],
+        /// The bytes it answers with.
+        reply: &'x [u8],
+        released: core::sync::atomic::AtomicBool,
+    }
+
+    /// Releases its [`CallServer`] on drop, so both the return and the unwind
+    /// path end the server.
+    struct CallServerGuard<'a>(&'a CallServer<'a>);
+
+    impl Drop for CallServerGuard<'_> {
+        fn drop(&mut self) {
+            self.0
+                .released
+                .store(true, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl<'x> CallServer<'x> {
+        const fn new(request: &'x [u8], reply: &'x [u8]) -> Self {
+            Self {
+                request,
+                reply,
+                released: core::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        /// Serve up to `calls` requests on `ep` while `client` runs.
+        /// `on_thread` brackets the server thread's own body (the live-byte
+        /// opt-in a leak soak needs).
+        fn serve<R>(
+            &self,
+            ep: &Arc<CallEndpoint>,
+            calls: usize,
+            on_thread: Option<&'static crate::test_alloc::LiveBytes>,
+            client: impl FnOnce() -> R,
+        ) -> R {
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    if let Some(counter) = on_thread {
+                        crate::test_alloc::opt_in_current_thread(counter);
+                    }
+                    let mut served = 0usize;
+                    while served < calls
+                        && !self.released.load(core::sync::atomic::Ordering::Acquire)
+                    {
+                        match ep.recv_call(usize::MAX) {
+                            RecvCall::Received(call) => {
+                                assert_eq!(call.request.as_bytes(), self.request);
+                                ep.reply(call.ticket, self.reply, &NULL_LOG_SINK)
+                                    .expect("reply");
+                                served += 1;
+                            }
+                            _ => std::thread::yield_now(),
+                        }
+                    }
+                    if on_thread.is_some() {
+                        crate::test_alloc::opt_out_current_thread();
+                    }
+                });
+                let _release = CallServerGuard(self);
+                client()
+            })
+        }
     }
 
     /// `ipc_call` to an unregistered endpoint fails closed with `NotFound`
@@ -30308,12 +30394,7 @@ mod tests {
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
-        // A live scheduler task so the park loop's cooperative-yield
-        // fallback returns `InvalidState` (the task is Ready, not Running)
-        // and keeps polling, rather than `NoSuchTask`.
-        let tid = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
-            .expect("spawn caller task");
+        let tid = crate::test_boot::claim_task();
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = call_aspace(b"ping");
@@ -30334,26 +30415,14 @@ mod tests {
         let id = 0xCA11_2001;
         let ep = register_call_endpoint(id, sink);
 
-        // The server: drain the one posted call and answer it.
-        let server_ep = ep.clone();
-        let handle = std::thread::spawn(move || loop {
-            if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
-                assert_eq!(call.request.as_bytes(), b"ping");
-                server_ep
-                    .reply(call.ticket, b"pong", &TestSink::new())
-                    .expect("reply");
-                break;
-            }
-            std::thread::yield_now();
-        });
-
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let written = h
-            .ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
-            .expect("call completes");
-        handle.join().expect("server thread joins");
+        let server = CallServer::new(b"ping", b"pong");
+        let written = server.serve(&ep, 1, None, || {
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+                .expect("call completes")
+        });
         assert_eq!(written, 4);
 
         // The reply landed in the caller's page-2 buffer.
@@ -30371,9 +30440,7 @@ mod tests {
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
-        let tid = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
-            .expect("spawn caller task");
+        let tid = crate::test_boot::claim_task();
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = call_aspace(b"ping");
@@ -30393,23 +30460,13 @@ mod tests {
 
         let id = 0xCA11_2002;
         let ep = register_call_endpoint(id, sink);
-        let server_ep = ep.clone();
-        let handle = std::thread::spawn(move || loop {
-            if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
-                server_ep
-                    .reply(call.ticket, b"a long reply", &TestSink::new())
-                    .expect("reply");
-                break;
-            }
-            std::thread::yield_now();
-        });
 
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
+        let server = CallServer::new(b"ping", b"a long reply");
         // The reply is 12 bytes; the caller offers only 4.
-        let result = h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 4);
-        handle.join().expect("server thread joins");
+        let result = server.serve(&ep, 1, None, || h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 4));
         assert_eq!(result, Err(Errno::BufferTooSmall));
         crate::callreg::unregister(EndpointId(id));
     }
@@ -30900,17 +30957,18 @@ mod tests {
     }
 
     /// Register a grant-restricted endpoint (required send cap
-    /// `CAP_IPC_ENDPOINT`) owned by task 1, returning it for unregistration.
+    /// `CAP_IPC_ENDPOINT`) owned by the calling test, returning it for
+    /// unregistration.
     fn register_grant_restricted_endpoint(id: u64, sink: &(dyn Sink + Sync)) -> Arc<CallEndpoint> {
-        register_grant_restricted_endpoint_owned_by(1, id, sink)
+        register_grant_restricted_endpoint_owned_by(crate::test_boot::claim_task(), id, sink)
     }
 
     /// [`register_grant_restricted_endpoint`] with the serving task chosen by
-    /// the caller, for a test that tears endpoints down by owner.
+    /// the caller, for a test that needs two distinct owners of its own.
     ///
-    /// The endpoint registry is process-global, so a test that drives
-    /// `teardown_owned_by` picks an owner no other test uses: tearing down a
-    /// shared owner would destroy a concurrently-running test's endpoint.
+    /// The registry is process-global and torn down *by owner*, so every
+    /// owner a test names must be one no other test uses: tearing down a
+    /// shared owner destroys a concurrently-running test's endpoint.
     fn register_grant_restricted_endpoint_owned_by(
         owner: u64,
         id: u64,
@@ -30982,9 +31040,7 @@ mod tests {
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
-        let tid = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
-            .expect("spawn caller task");
+        let tid = crate::test_boot::claim_task();
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let (space, physmap) = call_aspace(b"ping");
@@ -31008,24 +31064,14 @@ mod tests {
             caps: &caps,
         };
         let ep = register_grant_restricted_endpoint(id, sink);
-        let server_ep = ep.clone();
-        let handle = std::thread::spawn(move || loop {
-            if let RecvCall::Received(call) = server_ep.recv_call(usize::MAX) {
-                assert_eq!(call.request.as_bytes(), b"ping");
-                server_ep
-                    .reply(call.ticket, b"pong", &TestSink::new())
-                    .expect("reply");
-                break;
-            }
-            std::thread::yield_now();
-        });
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let written = h
-            .ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
-            .expect("granted call completes");
-        handle.join().expect("server thread joins");
+        let server = CallServer::new(b"ping", b"pong");
+        let written = server.serve(&ep, 1, None, || {
+            h.ipc_call(&ctx, id, 0x1000, 4, 0x2000, 64)
+                .expect("granted call completes")
+        });
         assert_eq!(written, 4);
         crate::callreg::unregister(EndpointId(id));
     }
@@ -32467,9 +32513,13 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
+        // A reserved owner of this test's own: the wait-set registry is
+        // process-global and released *by owner*, so a low id shared with
+        // another test has that test's sets torn down under it.
+        let owner = crate::test_boot::claim_task();
+        let caps = make_caps_record(owner, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(8),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -32527,7 +32577,7 @@ mod tests {
         );
 
         // Cleanup so the global wait-set registry does not leak across tests.
-        assert_eq!(crate::waitset::release_owned_by(8), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// `waitset_wait` with no member ready and a zero timeout returns
@@ -32575,16 +32625,20 @@ mod tests {
         let (space, physmap) = call_aspace(b"");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        // A reserved owner of this test's own, for the same reason the
+        // sibling wait-set tests use one: the registry is process-global and
+        // released by owner.
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(7), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let permissive = PermissiveController;
-        let caps = make_caps_record(7, &[CapabilityId::IRQ_BIND], sink);
+        let caps = make_caps_record(owner, &[CapabilityId::IRQ_BIND], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(7),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let h = KernelSyscallHandlers::new(
@@ -32601,7 +32655,11 @@ mod tests {
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
         // The ready member's token was written to `token_out` (page 2).
         let token_bytes = read_reply_page(
-            aspaces.read().resolve(ProcessId(7)).expect("registered").1,
+            aspaces
+                .read()
+                .resolve(ProcessId(owner))
+                .expect("registered")
+                .1,
             8,
         );
         assert_eq!(
@@ -32610,7 +32668,7 @@ mod tests {
         );
         // The edge was consumed: a second wait with no new fire times out.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
-        assert_eq!(crate::waitset::release_owned_by(7), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
     /// The machine has one memory-pressure band, so the only nameable
@@ -36342,20 +36400,25 @@ mod tests {
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
+        // A reserved owner of this test's own, for the same reason the
+        // sibling wait-set tests use one: the registry is process-global and
+        // released by owner. The watch registry is keyed by node identity, so
+        // the watched node is this test's own too.
+        let owner = crate::test_boot::claim_task();
         aspaces
             .write()
-            .register(ProcessId(2), space, physmap)
+            .register(ProcessId(owner), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let caps = make_caps_record(owner, &[CapabilityId::FS_ACCESS], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(owner),
             caps: &caps,
         };
         let file_id = tairix_abi::FileId {
             volume: [9u8; 16],
-            node: 42,
+            node: owner,
         };
         let mut mock = RecordingFs::new();
         mock.stat = FileStat {
@@ -36412,7 +36475,7 @@ mod tests {
         // entry (the `fswatch` refcount returned to zero).
         assert_eq!(h.waitset_ctl(&ctx, set, WS_OP_DEL, kind, member, 0), Ok(0));
         assert_eq!(crate::fswatch::current_generation(file_id), 0);
-        assert_eq!(crate::waitset::release_owned_by(2), 1);
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 
@@ -36968,11 +37031,7 @@ mod tests {
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
         let sched = make_sched(arch.clone());
-        // A live scheduler task so the `ipc_call` park loop's cooperative
-        // fallback keeps polling (the task is Ready, not Running).
-        let tid = sched
-            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
-            .expect("spawn caller task");
+        let tid = crate::test_boot::claim_task();
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         // Page 1 carries the request the viewer sends; page 2 receives the
@@ -37060,26 +37119,8 @@ mod tests {
 
         let id = 0xCA11_50AC;
         let ep = register_call_endpoint(id, sink);
-        let server_ep = ep.clone();
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                crate::test_alloc::opt_in_current_thread(counter);
-                let mut served = 0usize;
-                while served < WARMUP + MEASURED {
-                    match server_ep.recv_call(usize::MAX) {
-                        RecvCall::Received(call) => {
-                            assert_eq!(call.request.as_bytes(), request);
-                            server_ep
-                                .reply(call.ticket, reply, &NULL_LOG_SINK)
-                                .expect("reply");
-                            served += 1;
-                        }
-                        _ => std::thread::yield_now(),
-                    }
-                }
-                crate::test_alloc::opt_out_current_thread();
-            });
-
+        let server = CallServer::new(request, reply);
+        server.serve(&ep, WARMUP + MEASURED, Some(counter), || {
             crate::test_alloc::opt_in_current_thread(counter);
             let cycle = || {
                 // The elapsed refresh bound is the cycle's normal outcome,

@@ -3871,6 +3871,9 @@ mod tests {
 
     #[test]
     fn reading_frame_reports_needs_the_cross_principal_gate_and_is_audited() {
+        // The served record below is `Debug`, so widen the global filter to
+        // observe it rather than depending on a sibling test having done so.
+        tairix_log::set_max_level(Level::Trace);
         let source = FixtureSource::new();
         let mut reports = SelfReports::new(1 << 30);
         let session = user_caller(&[], 0xF3, 81);

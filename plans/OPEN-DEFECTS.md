@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 19 open, 71 closed, 90 total.
+table normalises all three to **closed**. 18 open, 72 closed, 90 total.
 
-### Open (19)
+### Open (18)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -45,9 +45,8 @@ table normalises all three to **closed**. 19 open, 71 closed, 90 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D90 | `kernel/core`'s host test suite is order-dependent: several tests fail or hang under any order but the alphabetical one | reproduced at HEAD; the one instance reachable in the default order is fixed |
 
-### Closed (71)
+### Closed (72)
 
 | ID | Subject |
 |---|---|
@@ -122,6 +121,7 @@ table normalises all three to **closed**. 19 open, 71 closed, 90 total.
 | D87 | an instruction-side fault kill is audited against the task's *data* mappings |
 | D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
 | D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate could not build on any Tier-1 target |
+| D90 | the host test suite passed only in the harness's alphabetical order |
 
 ## Scope
 
@@ -5531,53 +5531,71 @@ occurrence of `no global memory allocator`.
 
 ---
 
-## D90 — `kernel/core`'s host test suite only passes in alphabetical order (OPEN)
+## D90 — the host test suite passed only in the harness's alphabetical order (DONE)
 
-Noticed while landing `plans/COLLECTIONS.md` C5, when one run of
-`cargo test -p tairix-kernel-core --lib` failed a single test and the next
-passed. The charter forbids closing that with a re-run, so it was diagnosed:
-the test harness runs 1 570 tests across 24 threads, and several of them
-share **process-global** state whose safety today rests entirely on the
-harness's default *alphabetical* start order.
+A test suite is a set, not a sequence, and this one had become a sequence:
+several tests read process-global kernel state another test writes, so they
+passed only for as long as the harness's default alphabetical start order
+happened to put them the right way round. Four of them **hung** rather than
+failed, and a hang has no budget above it.
 
-**The instance that was reachable in the default order is fixed.**
-`boot_id::tests` asserted `!tairix_hash::is_published()` — the per-boot
-hash-key cell, which is a one-shot process global — while
-`launch_cache_tests` legitimately publishes to it (`LaunchCache::new` keys its
-index through `BuildSipHash13::keyed()`, so its tests must). Alphabetically
-`boot_id` starts first and almost always wins; under load or a different
-order it does not. The fix split the fail-closed *decision* out as
-`boot_id::draw_hash_key`, so the test asserts what it owns — no entropy, no
-key; a seeded reserve, a non-zero key — and reads no global at all. No order
-can break it now.
+Closed on two axes: the order dependence itself, and the gate blindness that
+let it accumulate.
 
-**The rest of the family is pre-existing and unfixed.** Replaying a shuffled
-order (`--shuffle-seed 1788601047185464875`) against the **unmodified tree at
-HEAD** fails four tests and hangs three more past sixty seconds:
+**The gate now randomises the order.** `cargo xtask test --shuffle` starts each
+host pass in a fresh random order and puts the seed in the step's label;
+`--shuffle-seed N` replays it. `ci` passes `--shuffle`, and `ci-long`'s flake
+hunt gives each replica an order of its own, so ordering is hunted alongside
+timing. An order-dependent suite now fails the change that introduces it
+(`docs/src/contributing.md`).
 
-| Test | Manifestation |
-|---|---|
-| `console::tests::a_parking_read_resolves_the_live_cpu_at_every_park` | fails |
-| `fs::writeback::tests::the_host_reads_no_clock_until_the_flusher_arms_it` | fails |
-| `blockwait::tests::a_silent_line_times_out_instead_of_waiting_forever` | fails |
-| `blockwait::tests::{a_pre_fired_line_is_consumed_without_any_park, a_fire_during_the_wait_wakes_and_consumes, a_released_binding_fails_closed_as_not_found}` | hang |
-| `syscalls::tests::ipc_call_grant_restricted_with_grant_round_trips` | fails (`Interrupted`), under other seeds |
+**What the order dependence actually was**, in the shape the fixes took:
 
-The default order is clean: 810 consecutive full-suite runs, including 20
-under 24-core saturation, produced no failure once the `boot_id` instance was
-fixed. So the gate is not currently masking a live failure — but a suite that
-is correct only in one order is a latent one, and the hangs are worse than the
-failures: a hang has no timeout above it.
+* **A boot publication one test decided for every other.** `WAIT_ARCH` is
+  set-once per boot, but the unit-test binary runs many independent boots in
+  one process, so whichever of `init`, `console`, and `blockwait` reached it
+  first fixed what the rest saw — and `blockwait` then `expect`ed an install
+  that had already happened. `waitq::wait_arch` now answers from a per-test
+  claim (`kernel/core/src/test_boot.rs`; libtest runs each test on its own
+  thread) and `install_wait_arch` publishes through a cell of its own under
+  `cfg(test)`, the same treatment `cpu_state::install` already gave its
+  table. A test that claims nothing sees no hook, exactly as before any boot
+  publication.
+* **State keyed by an id every test mints identically.** The signal kill gate,
+  the wait-set registry, the call-endpoint registry and the watch registry are
+  process-global and keyed by task id — and each test builds its own scheduler,
+  every one of which mints `1`, `2`, `3`. So a termination one test
+  legitimately deferred against *its* task 1 read as one against another's, and
+  a `release_owned_by(7)` tore down a concurrently-running test's wait-set.
+  `test_boot::claim_task` issues each test an id of its own, far above every id
+  the suite spells by hand; the two default endpoint fixtures own their
+  endpoints under it rather than under a shared `1`.
+* **A container born poisoned for want of a boot publication.** `LaunchCache`
+  keys its index under the per-boot hash key and starts poisoned without one,
+  so the reclaim and cached-launch tests measured nothing unless a sibling had
+  published first. The publication is now one shared helper every such test
+  calls.
+* **Two reads of a monotonic clock compared to each other.** The writeback
+  host's clock gate asserted `now_ns() == wait_now_ns()`, which holds only
+  while nothing advances between them. It now advances a clock of its own and
+  checks the value.
+* **A level-gated record another test's threshold could drop.** The
+  `tairix_log` filter is one process-global atomic: the driver-store scan's
+  `Info` record vanished whenever a sibling pinned the threshold below it, and
+  a `sysinfod` query test observed a `Debug` record only because a sibling had
+  widened the filter first. Both now hold the level they read.
 
-**The fix.** Per shared global, one of three: give the test its own instance
-instead of the global (the shape the `boot_id` fix took, and the cheapest
-where the production type allows it); exercise the whole lifecycle in **one**
-test, as `cpuops::tests` already does deliberately for its three atomics; or,
-where neither is possible, make the dependency explicit rather than
-positional. Each of the hanging `blockwait` tests additionally needs its wait
-bounded, since a test that can hang has no budget of its own.
+**Two defects found on the way, fixed here.**
 
-**Done when:** the suite passes under repeated shuffled orders as reliably as
-it does alphabetically, with no test hanging; and every remaining
-process-global a test reads is either owned by that one test or explicitly
-sequenced.
+* **`OnceCell::get_or_try_init` stranded its `RUNNING` claim on an unwinding
+  initialiser** (`lib/sync`), so every later caller spun on a state nothing
+  would ever advance. That is what turned one failing `blockwait` test into
+  three hangs. An unwind now poisons the cell like a returned `Err`.
+* **A scoped server thread outlived its failing client.** The refresh-cycle
+  soak's server waits for 4 160 calls; a client that panics part-way through
+  never makes the rest, and `thread::scope` joins before it propagates, so the
+  failure's own message was never printed and the run hung instead. The
+  `CallServer` fixture releases its server on both the return and the unwind
+  path, and the three sibling `ipc_call` tests use it too — a `thread::spawn`
+  + `join` there left the server spinning on a core for the rest of the run
+  whenever the client failed.

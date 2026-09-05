@@ -239,16 +239,22 @@ fn a_driver_registered_before_a_host_exists_is_handed_none() {
 #[test]
 fn the_host_reads_no_clock_until_the_flusher_arms_it() {
     let mounts = registry();
+    // This test's own wait clock, standing at a value no other test can move,
+    // so the armed answer is checked against a known reading rather than
+    // against a second read of a clock that may have advanced between the two.
+    let _ = crate::test_boot::claim_scheduler();
+    crate::test_boot::advance_clock(4_242);
     assert_eq!(
         WritebackHost::now_ns(mounts),
         None,
         "deferral is refused while nothing would publish it"
     );
     mounts.set_writeback_armed(true);
-    // A host build installs no scheduler clock, so an armed host still has
-    // none to read — the gate is proven by the disarmed answer above and by
-    // the arming being the only other condition.
-    assert_eq!(WritebackHost::now_ns(mounts), crate::waitq::wait_now_ns());
+    assert_eq!(
+        WritebackHost::now_ns(mounts),
+        Some(4_242),
+        "an armed host defers against the wait clock"
+    );
     mounts.set_writeback_armed(false);
     assert_eq!(WritebackHost::now_ns(mounts), None);
 }

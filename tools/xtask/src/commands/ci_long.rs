@@ -49,7 +49,7 @@
 //!   headroom budget allows rather than all at once.
 
 use crate::commands::parallel::{self, Job};
-use crate::commands::{fuzz, proptest, qemu_tests};
+use crate::commands::{fuzz, proptest, qemu_tests, seed};
 use crate::Context;
 
 /// How many times each test is run in each phase.
@@ -70,7 +70,8 @@ pub(crate) struct FlakeUnit<'a> {
     /// replicas concurrently (see the module docs for why it differs by kind).
     concurrency_budget: usize,
     /// Builds a fresh, single-use job for the given repetition index. The
-    /// index only varies a fuzz/proptest PRNG seed; it is ignored otherwise.
+    /// index varies a fuzz/proptest PRNG seed and the host matrix's test
+    /// start order; it is ignored otherwise.
     factory: Box<dyn Fn(usize) -> Job + 'a>,
 }
 
@@ -136,15 +137,22 @@ pub(crate) fn all_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
 fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
     let budget = reps as usize;
     vec![
-        FlakeUnit::new("host cargo test", budget, move |_| {
+        FlakeUnit::new("host cargo test", budget, move |replica| {
             let mut cmd = ctx.cargo();
             cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+            // Each replica starts in an order of its own, so the hunt covers
+            // test *ordering* as well as timing: a suite that only passes in
+            // the harness's alphabetical order is a flake like any other. The
+            // seed is in the replica's label, so a hit replays.
+            let order = seed::job_seed(None, replica);
+            cmd.args(super::host_order_args(&[], order));
             // This one job compiles *and* runs every host-testable crate in
             // the workspace, so from a cold `target/` it legitimately runs far
             // longer than an ordinary step. It gets the long budget so a slow
             // machine is never mistaken for a hung one, while a genuine hang
             // is still stopped rather than left for an operator to notice.
-            Job::new("host cargo test", cmd).with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
+            Job::new(format!("host cargo test (order seed {order})"), cmd)
+                .with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
         }),
         // The constant-time comparison guarantee can be broken by the
         // optimiser, so this runs the secret-handling tests at `-C

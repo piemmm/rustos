@@ -16,20 +16,11 @@ use crate::test_sink::TestSink;
 
 extern crate std;
 
-/// A generous budget every test entry fits under.
+/// A generous budget every test entry fits under, with the per-boot hash key
+/// the cache's index is keyed under already published.
 fn budget() -> CacheBudget {
-    publish_boot_hash_key();
+    crate::test_boot::publish_hash_key();
     CacheBudget::from_backing(1 << 20)
-}
-
-/// Stand in for the kernel's per-boot publication, so the cache's index is
-/// keyed here exactly as it is on a booted system. A second call is refused
-/// and ignored: the key is published once per process, as it is once per boot.
-fn publish_boot_hash_key() {
-    let _ = tairix_hash::publish(tairix_hash::HashSeed::from_words(
-        0x4C41_554E_4348_0001,
-        0x4C41_554E_4348_0002,
-    ));
 }
 
 /// A leaked capturing sink for the cache's audit records.

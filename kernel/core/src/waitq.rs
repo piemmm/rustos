@@ -510,6 +510,7 @@ impl Default for WaitQueue {
 }
 
 /// The boot-installed [`WaitQueueArch`] adapter (set-once per boot).
+#[cfg(not(test))]
 static WAIT_ARCH: OnceCell<&'static (dyn WaitQueueArch + 'static)> = OnceCell::new();
 
 /// Error returned when [`install_wait_arch`] is called more than once.
@@ -525,13 +526,34 @@ pub struct WaitArchAlreadyInstalled;
 pub fn install_wait_arch(
     arch: &'static (dyn WaitQueueArch + 'static),
 ) -> Result<(), WaitArchAlreadyInstalled> {
-    WAIT_ARCH.set(arch).map_err(|_| WaitArchAlreadyInstalled)
+    #[cfg(test)]
+    {
+        // The unit-test binary runs many independent boots in one process, so
+        // each exercises the same set-once publication through a cell of its
+        // own rather than contaminating the next boot's view (the same
+        // treatment `crate::cpu_state::install` gives its table). A test that
+        // needs a live hook claims one for itself (`crate::test_boot`).
+        OnceCell::new()
+            .set(arch)
+            .map_err(|_| WaitArchAlreadyInstalled)
+    }
+    #[cfg(not(test))]
+    {
+        WAIT_ARCH.set(arch).map_err(|_| WaitArchAlreadyInstalled)
+    }
 }
 
 /// The installed [`WaitQueueArch`], or `None` before a hook is published.
 #[must_use]
 pub fn wait_arch() -> Option<&'static (dyn WaitQueueArch + 'static)> {
-    WAIT_ARCH.get().ok().flatten().copied()
+    #[cfg(test)]
+    {
+        crate::test_boot::claimed_wait_arch()
+    }
+    #[cfg(not(test))]
+    {
+        WAIT_ARCH.get().ok().flatten().copied()
+    }
 }
 
 /// The wait-queue holding the in-kernel driver-store **server** kthread

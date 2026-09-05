@@ -77,6 +77,9 @@ fn warmed_pair(
     );
     assert!(fs_cache.accounting().class_bytes(ReclaimClass::FsMetadata) > 0);
 
+    // The launch cache keys its index under the per-boot hash key; without
+    // one it is born poisoned and admits nothing.
+    crate::test_boot::publish_hash_key();
     let mut launch = LaunchCache::new(budget(), pressure, sink());
     launch.insert("/System/Commands/ps.app", &verified_app());
     assert!(

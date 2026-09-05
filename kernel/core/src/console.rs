@@ -1427,6 +1427,14 @@ mod tests {
         std::boxed::Box::leak(std::boxed::Box::new(TestArch::with_cpus(1)))
     }
 
+    /// As [`leaked_arch`], reporting `cpu` as the current CPU, so a park
+    /// driven through it lands on the CPU the caller claimed.
+    fn leaked_arch_on(cpu: tairix_kernel_sched_api::CpuId) -> &'static TestArch {
+        let arch = TestArch::with_cpus(cpu + 1);
+        arch.set_current_cpu(cpu);
+        std::boxed::Box::leak(std::boxed::Box::new(arch))
+    }
+
     /// A device whose pending bytes deplete as they are read, standing in for
     /// a receive FIFO with no queue of its own to reach into.
     struct DepletingRead {
@@ -1583,32 +1591,6 @@ mod tests {
         assert_eq!(INNER.polls.load(Ordering::Relaxed), 0);
     }
 
-    /// A [`WaitQueueArch`] that makes a caller *parkable* so the blocking read
-    /// reaches its park, and reports a task id so the wait-queue registration
-    /// is real. Installed idempotently: the hook is set-once per process and
-    /// the crate's tests share one binary, so whichever module installed first
-    /// wins — every candidate reports a task, which is all this needs.
-    struct ParkableWaitArch;
-
-    impl crate::waitq::WaitQueueArch for ParkableWaitArch {
-        fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
-        fn now_ns(&self) -> u64 {
-            0
-        }
-        fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
-        fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
-            Some(0)
-        }
-        fn current_task(
-            &self,
-            _cpu: tairix_kernel_sched_api::CpuId,
-        ) -> Option<tairix_kernel_sched_api::TaskId> {
-            Some(0x5044)
-        }
-    }
-
-    static PARKABLE_WAIT_ARCH: ParkableWaitArch = ParkableWaitArch;
-
     #[test]
     fn a_parking_read_resolves_the_live_cpu_at_every_park() {
         // `plans/OPEN-DEFECTS.md` D44. Between two polls the reader is parked,
@@ -1619,13 +1601,12 @@ mod tests {
         // than the single read the caller's own task lookup costs.
         static INNER: ScriptedRead = ScriptedRead::with_bytes(&[]);
 
-        let _ = crate::waitq::install_wait_arch(&PARKABLE_WAIT_ARCH);
-        let hook = crate::waitq::wait_arch().expect("a wait-arch hook is installed");
-        assert!(
-            hook.current_task(0).is_some(),
-            "the effective hook must make the caller parkable, or no park is reached"
-        );
-        let arch = leaked_arch();
+        // A claimed wait hook is what makes the caller parkable at all: no
+        // task, no registration, and the read fails closed before reaching a
+        // park. The claim's CPU has no per-CPU state slot, so the suspend
+        // itself then fails closed there whatever another test publishes.
+        let (cpu, _task) = crate::test_boot::claim_scheduler();
+        let arch = leaked_arch_on(cpu);
         let blocking = BlockingConsoleRead::new(arch, &INNER, None);
         let mut buf = [0u8; 8];
         // The park itself fails closed (no resume handle is published for a

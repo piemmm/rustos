@@ -330,6 +330,42 @@ mod tests {
     }
 
     #[test]
+    fn oncecell_initialiser_that_unwinds_poisons_instead_of_stranding_running() {
+        // An initialiser that leaves by an unwind used to abandon the
+        // `RUNNING` claim, so every later caller spun on it for ever — the
+        // second `get_or_try_init` below never returned.
+        let c: Arc<OnceCell<u32>> = Arc::new(OnceCell::new());
+        let panicking = Arc::clone(&c);
+        let unwound = thread::spawn(move || {
+            let _ = panicking.get_or_try_init::<_, ()>(|| panic!("initialiser unwinds"));
+        })
+        .join();
+        assert!(unwound.is_err(), "the initialiser must have unwound");
+
+        assert!(c.is_poisoned());
+        assert_eq!(c.get(), Err(PoisonError));
+        assert_eq!(
+            c.get_or_try_init::<_, ()>(|| Ok(1)),
+            Err(InitError::Poisoned)
+        );
+    }
+
+    #[test]
+    fn once_call_once_after_an_unwinding_initialiser_reports_poison() {
+        let o: Arc<Once<u32>> = Arc::new(Once::new());
+        let panicking = Arc::clone(&o);
+        let unwound = thread::spawn(move || {
+            let _ = panicking.call_once::<_, ()>(|| panic!("initialiser unwinds"));
+        })
+        .join();
+        assert!(unwound.is_err(), "the initialiser must have unwound");
+
+        assert!(o.is_poisoned());
+        assert_eq!(o.call_once::<_, ()>(|| Ok(2)), Err(InitError::Poisoned));
+        assert_eq!(o.call_once_infallible(|| 3), Err(PoisonError));
+    }
+
+    #[test]
     fn oncecell_take_resets() {
         let mut c: OnceCell<String> = OnceCell::new();
         c.set(String::from("hi")).unwrap();

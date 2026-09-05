@@ -538,6 +538,15 @@ struct TestOptions {
     /// skipped so a `--only` run exercises exactly the named guests; it is
     /// never a substitute for the whole matrix.
     only: Option<String>,
+    /// Randomise each host pass's test start order (`--shuffle`), so a suite
+    /// that passes only in the harness's default alphabetical order fails the
+    /// gate instead of hiding until an unrelated change reshuffles it
+    /// (`plans/OPEN-DEFECTS.md` D90).
+    shuffle: bool,
+    /// Base seed the per-pass order is derived from (`--shuffle-seed N`,
+    /// which implies `--shuffle`). `None` draws a fresh entropy seed per
+    /// pass; the seed is always logged, so a reported failure replays.
+    shuffle_seed: Option<u64>,
     /// Remaining arguments forwarded verbatim to `cargo test`.
     forward: Vec<OsString>,
 }
@@ -545,10 +554,10 @@ struct TestOptions {
 /// Parse the `test` subcommand arguments.
 ///
 /// Recognises `--qemu`, `--wasm`, `--count N` (alias `--iterations N`),
-/// `--soak`, and `--secs N`; everything else is forwarded verbatim to
-/// `cargo test`. `--count` rejects a missing, non-numeric, or zero value
-/// rather than silently defaulting, so a typo can never quietly collapse
-/// the matrix to a single run. A fixed count and a wall-clock budget are
+/// `--soak`, `--secs N`, `--shuffle`, and `--shuffle-seed N`; everything else
+/// is forwarded verbatim to `cargo test`. `--count` rejects a missing,
+/// non-numeric, or zero value rather than silently defaulting, so a typo can
+/// never quietly collapse the matrix to a single run. A fixed count and a wall-clock budget are
 /// mutually exclusive: combining `--count` with `--soak`/`--secs` is an
 /// error rather than a silent precedence rule.
 fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
@@ -559,6 +568,8 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
     let mut soak = false;
     let mut secs: Option<u64> = None;
     let mut only: Option<String> = None;
+    let mut shuffle = false;
+    let mut shuffle_seed: Option<u64> = None;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
         if a == "--qemu" {
@@ -591,6 +602,14 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
                 .next()
                 .ok_or_else(|| "test: `--secs` requires an integer argument".to_string())?;
             secs = Some(parse_secs(value)?);
+        } else if a == "--shuffle" {
+            shuffle = true;
+        } else if a == "--shuffle-seed" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "test: `--shuffle-seed` requires a u64 argument".to_string())?;
+            shuffle_seed = Some(parse_shuffle_seed(value)?);
+            shuffle = true;
         } else {
             forward.push(a.clone());
         }
@@ -626,7 +645,19 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
         run_qemu,
         run_wasm,
         only,
+        shuffle,
+        shuffle_seed,
         forward,
+    })
+}
+
+/// Parse a `--shuffle-seed` value: any `u64`.
+fn parse_shuffle_seed(value: &OsString) -> Result<u64, String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| "test: `--shuffle-seed` value is not valid UTF-8".to_string())?;
+    text.parse::<u64>().map_err(|_| {
+        format!("test: invalid `--shuffle-seed` value {text:?}; expected an unsigned integer")
     })
 }
 
@@ -668,6 +699,9 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // budget, which the nightly `soak` workflow uses to run the tests for
     // 24 h. `--count N` remains for the orchestrator's own tests and ad-hoc
     // local repeat runs.
+    //
+    // `--shuffle` randomises each host pass's start order; see
+    // [`host_order_args`] for why the gate wants it.
     let opts = parse_test_options(args)?;
 
     // Build the opt-in matrices once, before any repeated passes, so a soak
@@ -698,10 +732,20 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             let mut cmd = ctx.cargo();
             cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
             cmd.args(&opts.forward);
-            let label = if opts.budget.is_repeated() {
-                format!("test (pass {pass})")
-            } else {
-                "test".to_string()
+            let order = opts.shuffle.then(|| {
+                seed::job_seed(
+                    opts.shuffle_seed,
+                    usize::try_from(pass).unwrap_or(usize::MAX),
+                )
+            });
+            if let Some(order) = order {
+                cmd.args(host_order_args(&opts.forward, order));
+            }
+            let label = match (opts.budget.is_repeated(), order) {
+                (true, Some(order)) => format!("test (pass {pass}, order seed {order})"),
+                (true, None) => format!("test (pass {pass})"),
+                (false, Some(order)) => format!("test (order seed {order})"),
+                (false, None) => "test".to_string(),
             };
             ctx.run(&label, cmd)?;
         }
@@ -714,6 +758,30 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+/// The libtest arguments that start a host pass in `seed`'s order.
+///
+/// A test suite is a set, not a sequence: one that passes only in the
+/// harness's default alphabetical order is relying on whichever test happened
+/// to reach a process-global first, and stays green until an unrelated change
+/// renames or adds a test and reshuffles it. Ordering every gate run afresh
+/// turns that latency into a failure the seed in the run's label replays
+/// exactly (`plans/OPEN-DEFECTS.md` D90).
+///
+/// A `--` already in the forwarded arguments is the caller's own harness
+/// separator, so a second one would read as a test-name filter rather than a
+/// separator; the ordering flags then just join what the caller passed.
+pub(super) fn host_order_args(forward: &[OsString], seed: u64) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::with_capacity(4);
+    if !forward.iter().any(|a| a == "--") {
+        args.push(OsString::from("--"));
+    }
+    args.push(OsString::from("-Z"));
+    args.push(OsString::from("unstable-options"));
+    args.push(OsString::from("--shuffle-seed"));
+    args.push(OsString::from(seed.to_string()));
+    args
 }
 
 /// Lint the workspace for the host, then once per freestanding Tier-1 target.
@@ -1049,7 +1117,13 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // flake-hunting repetition lives in the time-limited GitHub soaks
     // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
     // fuzz and proptest gates below likewise run a single iteration here.
-    run_test(ctx, &[OsString::from("--qemu")])?;
+    // The host pass runs in a freshly-seeded order (`--shuffle`) so an
+    // order-dependent suite fails the gate rather than passing on the
+    // harness's alphabetical accident; the seed is in the step's label.
+    run_test(
+        ctx,
+        &[OsString::from("--qemu"), OsString::from("--shuffle")],
+    )?;
     // `cargo deny check` streams its own summary, so it stays sequential among
     // the compile-heavy phases rather than joining the concurrent group.
     run_deny(ctx)?;
@@ -1873,7 +1947,7 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, format_bytes, kernel_build_profile,
+        cargo_subcommand_available, dir_size, format_bytes, host_order_args, kernel_build_profile,
         kernel_diag_feature_args, parse_run_args, parse_test_options, Command, RunBudget,
         DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, TEST_SOAK_SECS,
     };
@@ -2064,7 +2138,53 @@ mod tests {
         assert_eq!(opts.budget, RunBudget::Count(1));
         assert!(!opts.run_qemu);
         assert!(!opts.run_wasm);
+        assert!(!opts.shuffle);
+        assert_eq!(opts.shuffle_seed, None);
         assert!(opts.forward.is_empty());
+    }
+
+    /// A pinned order seed selects shuffling too, so `--shuffle-seed N` alone
+    /// replays a reported failure.
+    #[test]
+    fn a_pinned_order_seed_implies_shuffling() {
+        let opts = parse_test_options(&argv(&["--shuffle-seed", "1234"])).expect("parse");
+        assert!(opts.shuffle);
+        assert_eq!(opts.shuffle_seed, Some(1234));
+        assert!(opts.forward.is_empty(), "the flags are not forwarded");
+    }
+
+    #[test]
+    fn shuffle_alone_leaves_the_seed_fresh_per_pass() {
+        let opts = parse_test_options(&argv(&["--shuffle"])).expect("parse");
+        assert!(opts.shuffle);
+        assert_eq!(opts.shuffle_seed, None);
+    }
+
+    #[test]
+    fn a_non_numeric_order_seed_is_rejected() {
+        let err = parse_test_options(&argv(&["--shuffle-seed", "later"]))
+            .expect_err("non-numeric rejected");
+        assert!(
+            err.contains("invalid `--shuffle-seed`"),
+            "unexpected error: {err}"
+        );
+        let err =
+            parse_test_options(&argv(&["--shuffle-seed"])).expect_err("missing value rejected");
+        assert!(err.contains("requires a u64"), "unexpected error: {err}");
+    }
+
+    /// The ordering flags reach the harness, and supply the `--` separator
+    /// only when the caller did not already pass one.
+    #[test]
+    fn order_args_supply_the_harness_separator_exactly_once() {
+        assert_eq!(
+            host_order_args(&[], 7),
+            argv(&["--", "-Z", "unstable-options", "--shuffle-seed", "7"])
+        );
+        assert_eq!(
+            host_order_args(&argv(&["--", "--nocapture"]), 7),
+            argv(&["-Z", "unstable-options", "--shuffle-seed", "7"])
+        );
     }
 
     #[test]

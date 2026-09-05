@@ -2,10 +2,10 @@
 //!
 //! Both primitives publish a single value of type `T` exactly once, with
 //! no possibility of double-init and **no panics**. If the initialiser
-//! returns an error (or if a previous initialiser left the cell in a
-//! half-initialised state) the cell becomes *poisoned*: every subsequent
-//! access returns [`Err(PoisonError)`](PoisonError) and the partially
-//! constructed value (if any) is dropped.
+//! returns an error, unwinds, or left the cell half-initialised, the cell
+//! becomes *poisoned*: every subsequent access returns
+//! [`Err(PoisonError)`](PoisonError) and the partially constructed value
+//! (if any) is dropped.
 //!
 //! # Difference between the two
 //!
@@ -77,6 +77,21 @@ pub enum InitError<E> {
 impl<E> From<PoisonError> for InitError<E> {
     fn from(_: PoisonError) -> Self {
         Self::Poisoned
+    }
+}
+
+/// Poisons a cell whose initialiser left by an unwind rather than by
+/// returning, so the abandoned `RUNNING` claim becomes the terminal
+/// `POISONED` every later caller reports instead of spinning on it for
+/// ever. Forgotten on the normal path, where the initialiser's own result
+/// decides the state.
+struct ReleaseOnUnwind<'a> {
+    state: &'a AtomicUsize,
+}
+
+impl Drop for ReleaseOnUnwind<'_> {
+    fn drop(&mut self) {
+        self.state.store(POISONED, Ordering::Release);
     }
 }
 
@@ -163,7 +178,10 @@ impl<T> OnceCell<T> {
     /// Get the value, initialising it with `f` if necessary.
     ///
     /// If `f` returns `Err` the cell is poisoned permanently and the
-    /// error is forwarded to the caller.
+    /// error is forwarded to the caller. An `f` that leaves by unwinding
+    /// instead of returning poisons it the same way, so a caller that
+    /// arrives afterwards reports the poison rather than spinning for
+    /// ever on an initialisation nothing will finish.
     pub fn get_or_try_init<F, E>(&self, f: F) -> Result<&T, InitError<E>>
     where
         F: FnOnce() -> Result<T, E>,
@@ -188,7 +206,14 @@ impl<T> OnceCell<T> {
                         )
                         .is_ok()
                     {
-                        match f() {
+                        // The initialiser is arbitrary caller code and may
+                        // leave by an unwind as well as by `Err`; both must
+                        // release `RUNNING`, or every later caller spins on a
+                        // state nothing will ever advance.
+                        let guard = ReleaseOnUnwind { state: &self.state };
+                        let produced = f();
+                        core::mem::forget(guard);
+                        match produced {
                             Ok(v) => {
                                 // SAFETY: We are the unique writer.
                                 self.value
@@ -304,7 +329,8 @@ impl<T> Once<T> {
     ///
     /// On success returns `Ok(&T)`. If `f` returns `Err`, the cell is
     /// poisoned and `Err(InitError::Init(e))` is returned. Subsequent
-    /// calls observe `Err(InitError::Poisoned)`.
+    /// calls observe `Err(InitError::Poisoned)`, as they do after an `f`
+    /// that unwound.
     pub fn call_once<F, E>(&self, f: F) -> Result<&T, InitError<E>>
     where
         F: FnOnce() -> Result<T, E>,

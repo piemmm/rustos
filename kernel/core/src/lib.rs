@@ -152,6 +152,12 @@ pub(crate) mod test_alloc;
 // volume is defined once.
 #[cfg(test)]
 pub(crate) mod test_bundle;
+// Shared host-test stand-ins for the process-global publications a real boot
+// makes once (the per-boot hash key, the scheduler wait hook), so a test that
+// needs one is not left observing whichever independent test boot reached the
+// publication first.
+#[cfg(test)]
+pub(crate) mod test_boot;
 // Shared host-test fixture for the reclaimable-cache pressure gauge (a
 // controllable free-memory source plus per-band readings), used by the
 // filesystem-cache, launch-cache, and cross-cache integration suites so

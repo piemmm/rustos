@@ -102,13 +102,43 @@ ask — never wave the failure through as transient, load, or environment.
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
 | `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
-| `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test])                          |
+| `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test]); the host pass starts in a randomised order, seed logged (see below) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
 | `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
+
+## The host tests run in a randomised order
+
+A test suite is a set, not a sequence. The harness's default is alphabetical,
+so a test that reads process-global state another test writes stays green for
+as long as the two happen to start the right way round — and then fails when an
+unrelated change renames or adds a test and reshuffles them. `kernel/core`'s
+suite had accumulated more than a dozen such tests, four of which *hung*
+rather than failed (`plans/OPEN-DEFECTS.md` D90).
+
+The `test` step therefore starts each host pass in a fresh random order
+(`cargo xtask test --shuffle`, which `ci` passes), so an order-dependent suite
+fails the gate that introduces it. The seed is in the step's label:
+
+```text
+xtask: [test (order seed 1788601047185464875)] ...
+```
+
+Feed it back to replay exactly that order:
+
+```sh
+cargo xtask test --shuffle-seed 1788601047185464875
+```
+
+`cargo xtask ci-long`'s flake hunt gives each of its replicas an order of its
+own too, so ordering is hunted alongside timing.
+
+A test that depends on start order is a defect, not a configuration: fix the
+test so it owns what it reads, exercise the whole lifecycle in one test, or
+sequence the dependency explicitly — never by hoping for an order.
 
 ## `clippy` lints every target, not just the host
 
