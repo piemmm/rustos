@@ -51,7 +51,7 @@ fn cache_for(total_ram_bytes: u64, band: PressureBand) -> (GlyphCache, &'static 
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(band);
     (
-        crate::service::glyph_cache(total_ram_bytes, gauge, &SINK),
+        crate::service::glyph_cache(total_ram_bytes, gauge, &SINK, crate::service::TEST_HASH_KEY),
         gauge,
     )
 }

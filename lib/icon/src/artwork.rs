@@ -47,6 +47,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
+use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
 use tairix_reclaim::{
@@ -468,6 +469,9 @@ pub fn artwork_cache(
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> ArtworkCache {
+    // The keys name assets inside this session's own user's stores, so a
+    // grind that crowded one bucket would only slow the grinder's own
+    // desktop: the fast unkeyed hash, named here rather than defaulted.
     ArtworkCache::new(working_set_ui_cache(
         label,
         seat,
@@ -475,6 +479,7 @@ pub fn artwork_cache(
         ARTWORK_ENTRY_METADATA_BYTES,
         pressure,
         sink,
+        BuildFastHash::new(),
     ))
 }
 
@@ -485,7 +490,7 @@ pub fn artwork_cache(
 /// icon (or names one that will not decode) remembers that refusal too. A
 /// directory and an asset file can never spell the same path, but keeping the
 /// two apart in the key type says so rather than relying on it.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtworkKey {
     /// An asset file read directly: a shipped `<asset-id>.png` or
     /// `<asset-id>.svg`, or an icon path the caller had already resolved.
@@ -549,7 +554,7 @@ pub enum ArtworkOutcome {
 /// would let a crafted or merely crowded store grow a session without limit;
 /// the budget forecloses that.
 pub struct ArtworkCache {
-    entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, ()>,
+    entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, (), BuildFastHash>,
 }
 
 impl ArtworkCache {
@@ -560,7 +565,9 @@ impl ArtworkCache {
     /// the audit sink; a cache built without them would retain nothing while
     /// looking like it worked. [`artwork_cache`] assembles one.
     #[must_use]
-    pub const fn new(entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, ()>) -> Self {
+    pub const fn new(
+        entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, (), BuildFastHash>,
+    ) -> Self {
         Self { entries }
     }
 

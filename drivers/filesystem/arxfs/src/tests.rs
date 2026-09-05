@@ -61,6 +61,7 @@ struct MemBlock {
 
 impl MemBlock {
     fn new(block_size: u32, block_count: u64) -> Self {
+        publish_boot_hash_key();
         let len = block_size as usize * as_usize(block_count);
         Self {
             store: alloc::vec![0u8; len],
@@ -81,6 +82,7 @@ impl MemBlock {
     }
 
     fn from_bytes(bytes: alloc::vec::Vec<u8>, block_size: u32, block_count: u64) -> Self {
+        publish_boot_hash_key();
         Self {
             store: bytes,
             block_size,
@@ -471,7 +473,18 @@ impl EntropySource for TestEntropy {
     }
 }
 
+/// Stand in for the kernel's per-boot publication, so the dedupe index is
+/// keyed here exactly as it is on a booted system. A second call is refused
+/// and ignored: the key is published once per process, as it is once per boot.
+fn publish_boot_hash_key() {
+    let _ = tairix_hash::publish(tairix_hash::HashSeed::from_words(
+        0x4152_5846_5300_0001,
+        0x4152_5846_5300_0002,
+    ));
+}
+
 fn fmt(block_size: u32, block_count: u64, inodes: u32) -> ARXFS<MemBlock> {
+    publish_boot_hash_key();
     ARXFS::format(
         MemBlock::new(block_size, block_count),
         inodes,

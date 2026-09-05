@@ -10,6 +10,9 @@ publish.workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The neighbour cache's index: one map holding both the address lookup and
+# the recency order eviction takes, so neither costs a scan of the table.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The workspace's two hashes: the keyed one the bond's transmit flow hash is
 # taken with (a remote peer chooses the tuple), and the fast unkeyed one the
 # address-set revision counter folds with.

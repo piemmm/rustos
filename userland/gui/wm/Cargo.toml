@@ -58,6 +58,7 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # cursor controller's rasterised-image cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an
 # unbounded cache of its own.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The one shared fallible-allocation reservation: the scan-out frame and each
 # baked layer buffer are sized by the screen, so they are what a machine short

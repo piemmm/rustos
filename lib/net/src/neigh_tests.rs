@@ -3,6 +3,9 @@
 use super::*;
 use crate::addr::Ipv4Addr;
 
+/// A fixed hash key, so the table's layout is the same on every run.
+const TEST_KEY: HashSeed = HashSeed::from_words(0x4E45_4947_4800_0001, 0x4E45_4947_4800_0002);
+
 const MAC_A: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 0xAA]);
 const MAC_B: MacAddress = MacAddress([0x02, 0, 0, 0, 0, 0xBB]);
 
@@ -15,7 +18,7 @@ fn secs(s: i64) -> Duration64 {
 }
 
 fn table(capacity: usize) -> NeighborTable {
-    NeighborTable::new(capacity, NeighborConfig::default())
+    NeighborTable::new(capacity, NeighborConfig::default(), TEST_KEY)
 }
 
 #[test]
@@ -140,19 +143,19 @@ fn probe_confirmation_returns_to_reachable() {
 #[test]
 fn learn_creates_stale_and_refreshes_changed_binding() {
     let mut t = table(4);
-    t.learn(ip(1), MAC_A, secs(0));
+    t.learn(ip(1), MAC_A);
     assert_eq!(t.entry(ip(1)), Some((NeighborState::Stale, Some(MAC_A))));
 
     // Same binding again: a Reachable entry is not downgraded.
     t.confirm(ip(1), MAC_A, true, true, secs(1));
-    t.learn(ip(1), MAC_A, secs(2));
+    t.learn(ip(1), MAC_A);
     assert_eq!(
         t.entry(ip(1)),
         Some((NeighborState::Reachable, Some(MAC_A)))
     );
 
     // Changed binding: refreshed to Stale with the new address.
-    t.learn(ip(1), MAC_B, secs(3));
+    t.learn(ip(1), MAC_B);
     assert_eq!(t.entry(ip(1)), Some((NeighborState::Stale, Some(MAC_B))));
 }
 
@@ -192,7 +195,7 @@ fn override_confirmation_replaces_the_address() {
 #[test]
 fn upper_layer_confirmation_marks_reachable() {
     let mut t = table(4);
-    t.learn(ip(1), MAC_A, secs(0));
+    t.learn(ip(1), MAC_A);
     t.upper_layer_confirmation(ip(1), secs(1));
     assert_eq!(
         t.entry(ip(1)),
@@ -208,12 +211,12 @@ fn upper_layer_confirmation_marks_reachable() {
 #[test]
 fn capacity_evicts_least_recently_used_resolved_entry() {
     let mut t = table(2);
-    t.learn(ip(1), MAC_A, secs(0));
-    t.learn(ip(2), MAC_B, secs(1));
+    t.learn(ip(1), MAC_A);
+    t.learn(ip(2), MAC_B);
 
     // Touch ip(1) so ip(2) is the LRU victim.
     assert_eq!(t.lookup(ip(1), secs(2)), LookupResult::Send(MAC_A));
-    t.learn(ip(3), MAC_B, secs(3));
+    t.learn(ip(3), MAC_B);
     assert_eq!(t.len(), 2);
     assert!(t.entry(ip(1)).is_some());
     assert_eq!(t.entry(ip(2)), None);
@@ -229,7 +232,7 @@ fn full_table_of_resolving_entries_fails_closed() {
     // A third resolution cannot evict live resolution state.
     assert_eq!(t.lookup(ip(3), secs(0)), LookupResult::TableFull);
     // Nor can a learned binding.
-    t.learn(ip(4), MAC_A, secs(0));
+    t.learn(ip(4), MAC_A);
     assert_eq!(t.entry(ip(4)), None);
     assert_eq!(t.len(), 2);
 }
@@ -240,7 +243,7 @@ fn next_deadline_tracks_the_earliest_pending_transition() {
     assert_eq!(t.next_deadline(), None);
 
     // Stale entries have no pending transition.
-    t.learn(ip(1), MAC_A, secs(0));
+    t.learn(ip(1), MAC_A);
     assert_eq!(t.next_deadline(), None);
 
     // A new resolution is due immediately.
@@ -256,8 +259,8 @@ fn next_deadline_tracks_the_earliest_pending_transition() {
 #[test]
 fn remove_and_clear_drop_entries() {
     let mut t = table(4);
-    t.learn(ip(1), MAC_A, secs(0));
-    t.learn(ip(2), MAC_B, secs(0));
+    t.learn(ip(1), MAC_A);
+    t.learn(ip(2), MAC_B);
     t.remove(ip(1));
     assert_eq!(t.entry(ip(1)), None);
     assert_eq!(t.len(), 1);

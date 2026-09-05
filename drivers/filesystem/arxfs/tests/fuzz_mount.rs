@@ -58,6 +58,17 @@ use tairix_drv_fs_arxfs::{
 };
 use tairix_log::{Event, Sink};
 
+/// Stand in for the kernel's per-boot publication, so the volume's dedupe
+/// index is keyed here exactly as it is on a booted system. A second call is
+/// refused and ignored: the key is published once per process, as once per
+/// boot.
+fn publish_boot_hash_key() {
+    let _ = tairix_hash::publish(tairix_hash::HashSeed::from_words(
+        0x4152_5846_5300_0001,
+        0x4152_5846_5300_0002,
+    ));
+}
+
 /// Capability set granting the scrub gate (`CAP_FS_MOUNT`).
 struct AllCaps;
 impl CapabilityQuery for AllCaps {
@@ -308,6 +319,7 @@ fn exercise(image: &[u8]) {
 /// most of their time near genuinely valid tree metadata rather than pure
 /// noise. Populating stops at the first `NoSpace` on the tiny fuzz device.
 fn formatted_image() -> Vec<u8> {
+    publish_boot_hash_key();
     let mut fs = ARXFS::format(
         MemBlock {
             store: vec![0u8; IMAGE_LEN],

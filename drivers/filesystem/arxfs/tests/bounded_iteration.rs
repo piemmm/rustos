@@ -42,6 +42,17 @@ use tairix_drv_fs_arxfs::{
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PinnedAccounting, PressureBand, ReportedPressure};
 
+/// Stand in for the kernel's per-boot publication, so the volume's dedupe
+/// index is keyed here exactly as it is on a booted system. A second call is
+/// refused and ignored: the key is published once per process, as once per
+/// boot.
+fn publish_boot_hash_key() {
+    let _ = tairix_hash::publish(tairix_hash::HashSeed::from_words(
+        0x4152_5846_5300_0001,
+        0x4152_5846_5300_0002,
+    ));
+}
+
 /// A pass-through allocator that tracks live bytes and their high-water mark
 /// while counting is armed, so a measured window can be asserted to hold a
 /// bounded footprint.
@@ -247,6 +258,7 @@ fn fragmented_volume(files: u32, runs: u64) -> ARXFS<SparseBlock> {
         blocks: BTreeMap::new(),
         block_count: DEVICE_BLOCKS,
     };
+    publish_boot_hash_key();
     let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xA1))
         .expect("format the fixture volume");
     let root = fs.root();
@@ -284,6 +296,7 @@ fn contiguous_volume(blocks: u64) -> (ARXFS<SparseBlock>, u64) {
         blocks: BTreeMap::new(),
         block_count: DEVICE_BLOCKS,
     };
+    publish_boot_hash_key();
     let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xB2))
         .expect("format the fixture volume");
     let root = fs.root();
@@ -607,6 +620,7 @@ fn bounded_fragmented_volume(extents: u64) -> ARXFS<SparseBlock> {
     let device = SparseBlock::primed(PRIMED_DEVICE_BLOCKS);
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
+    publish_boot_hash_key();
     let mut fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0xC3))
         .expect("format the fixture volume")
         .with_writeback_bound(

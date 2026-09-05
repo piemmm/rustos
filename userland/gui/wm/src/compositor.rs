@@ -27,6 +27,7 @@ use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
 use tairix_controls::{damage, FurniturePart, ResizeEdge, TitleBarEvent, WindowFrame};
 use tairix_cursor::{CursorImage, PlacedCursor};
+use tairix_hash::BuildFastHash;
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
@@ -109,12 +110,12 @@ pub struct Compositor {
     theme_generation: u64,
     /// Every decorated window's rendered furniture, bounded by one
     /// screenful and released under memory pressure (see [`crate::chrome`]).
-    chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
+    chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
     /// Every backdrop-blurred window's frosted backdrop, bounded and
     /// released on the same terms (see [`crate::frost`]). A window's own
     /// repaint therefore costs a row copy instead of two blur passes over
     /// the whole of it.
-    frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch>,
+    frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
     /// The machine's memory-pressure band, shared with the furniture
     /// cache so the desktop has one notion of how tight memory is.
     pressure: &'static (dyn PressureGauge + 'static),
@@ -277,8 +278,8 @@ impl Compositor {
     pub fn new(
         mode: DisplayMode,
         background: Color,
-        chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
-        frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch>,
+        chrome: ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
+        frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
         pressure: &'static (dyn PressureGauge + 'static),
     ) -> Option<Self> {
         let order = ChannelOrder::for_format(mode.format)?;
@@ -3860,7 +3861,7 @@ fn frame_share(before: u64, after: u64) -> u32 {
 /// frame could not be rendered at all — which draws the client alone rather
 /// than failing the frame.
 fn resolve_chrome<'a>(
-    cache: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch>,
+    cache: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
     epoch: &ChromeEpoch,
     id: WindowId,
     fallback: &'a ChromeFallback,

@@ -24,6 +24,12 @@ tairix-crypto = { path = "../../../lib/crypto", version = "=0.0.0" }
 # carve-out — an error-detecting checksum, so first-party is permitted
 # (`docs/src/filesystem/arxfs-spec.md` §6; `plans/FIX-HARDWARE-FEATURES.md`).
 tairix-crc32c = { path = "../../../lib/crc32c", version = "=0.0.0" }
+# The dedupe index's bounded recency map: one hash probe and one splice per
+# lookup, refresh, and eviction, in place of a pair of ordered maps.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+# The keyed hash that index is filed under: its keys carry a hash of the
+# writer's own bytes, so a predictable one would be grindable.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The first-party LZ codec every file-data record is compressed with before
 # encryption (`docs/src/filesystem/arxfs-spec.md` §6, §10). It is first-party,
 # not an external zstd/compression crate (this is *not* the

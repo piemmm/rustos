@@ -31,6 +31,7 @@ tairix-svg = { path = "../svg", version = "=0.0.0" }
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # The audit sink the reclaimable-memory cache logs classification and
 # eviction through — supplied by the process that builds the cache.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 tairix-log = { path = "../log", version = "=0.0.0" }
 # The shared text rasteriser. An account's identity disc bears its
 # monogram, drawn through the one shared blitter rather than a second glyph

@@ -60,6 +60,8 @@ use crate::model::{
     CacheBudget, CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner,
     ReclaimRule, Sensitivity, UI_CACHE_RESERVE_BYTES,
 };
+use core::hash::{BuildHasher, Hash};
+
 use crate::pressure::PressureGauge;
 
 /// The classification every desktop-session disposable-UI raster cache
@@ -93,18 +95,20 @@ pub const fn disposable_ui_candidate(seat: u64, entry_metadata_bytes: usize) -> 
 /// caller's truthful bound on its own per-entry bookkeeping (its key's
 /// size plus this cache's share of the map/index node overhead).
 #[must_use]
-pub fn disposable_ui_cache<K, V, E>(
+pub fn disposable_ui_cache<K, V, E, S>(
     label: &'static str,
     seat: u64,
     fb_bytes: usize,
     entry_metadata_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<K, V, E>
+    hasher: S,
+) -> ReclaimCache<K, V, E, S>
 where
-    K: Ord + Clone,
+    K: Eq + Hash,
     V: CachedBytes,
     E: PartialEq + Clone,
+    S: BuildHasher,
 {
     ReclaimCache::new(
         label,
@@ -112,6 +116,7 @@ where
         CacheBudget::from_backing(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
+        hasher,
     )
 }
 
@@ -130,18 +135,20 @@ where
 /// them by the cursor cache's fraction instead would refuse a single
 /// ordinary window and rebuild it every frame.
 #[must_use]
-pub fn screenful_ui_cache<K, V, E>(
+pub fn screenful_ui_cache<K, V, E, S>(
     label: &'static str,
     seat: u64,
     fb_bytes: usize,
     entry_metadata_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<K, V, E>
+    hasher: S,
+) -> ReclaimCache<K, V, E, S>
 where
-    K: Ord + Clone,
+    K: Eq + Hash,
     V: CachedBytes,
     E: PartialEq + Clone,
+    S: BuildHasher,
 {
     ReclaimCache::new(
         label,
@@ -149,6 +156,7 @@ where
         CacheBudget::from_ceiling(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
+        hasher,
     )
 }
 
@@ -175,18 +183,20 @@ where
 /// off-screen speculation and goes at the first tightening; severe and critical
 /// take it down to the shared irreducible reserve like every other UI cache.
 #[must_use]
-pub fn working_set_ui_cache<K, V, E>(
+pub fn working_set_ui_cache<K, V, E, S>(
     label: &'static str,
     seat: u64,
     fb_bytes: usize,
     entry_metadata_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<K, V, E>
+    hasher: S,
+) -> ReclaimCache<K, V, E, S>
 where
-    K: Ord + Clone,
+    K: Eq + Hash,
     V: CachedBytes,
     E: PartialEq + Clone,
+    S: BuildHasher,
 {
     let budget = CacheBudget::from_ceiling(fb_bytes);
     ReclaimCache::new(
@@ -197,6 +207,7 @@ where
             .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
+        hasher,
     )
 }
 
@@ -214,9 +225,14 @@ const WORKING_SET_DIVISOR: usize = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::model::AdmissionRefusal;
     use crate::pressure::{PressureBand, ReportedPressure};
+    use tairix_hash::BuildFastHash;
     use tairix_log::DiscardSink;
+
+    /// The cache shape every builder under test produces.
+    type GlyphCache = ReclaimCache<u32, Glyph, u64, BuildFastHash>;
 
     extern crate std;
     use alloc::boxed::Box;
@@ -268,7 +284,7 @@ mod tests {
         // strips at that width — the figures a real desktop retains.
         let fb_bytes = 1920 * 1080 * 4;
         let strips = 1920 * 32 * 4;
-        let furniture = |key: u32, cache: &mut ReclaimCache<u32, Glyph, u64>| {
+        let furniture = |key: u32, cache: &mut ReclaimCache<u32, Glyph, u64, BuildFastHash>| {
             let _ = cache.get_or_build(&1, key, || {
                 Some(Glyph {
                     bytes: vec![0x11; strips],
@@ -276,10 +292,24 @@ mod tests {
             });
         };
 
-        let mut chrome: ReclaimCache<u32, Glyph, u64> =
-            screenful_ui_cache("test.chrome", 1, fb_bytes, 32, gauge, sink);
-        let mut glyphs: ReclaimCache<u32, Glyph, u64> =
-            disposable_ui_cache("test.glyphs", 1, fb_bytes, 32, gauge, sink);
+        let mut chrome: ReclaimCache<u32, Glyph, u64, BuildFastHash> = screenful_ui_cache(
+            "test.chrome",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
+        let mut glyphs: ReclaimCache<u32, Glyph, u64, BuildFastHash> = disposable_ui_cache(
+            "test.glyphs",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
         for key in 0..8u32 {
             furniture(key, &mut chrome);
             furniture(key, &mut glyphs);
@@ -316,10 +346,24 @@ mod tests {
         let icon = 42 * 42 * 4;
         let tiles = 16u32;
 
-        let mut icons: ReclaimCache<u32, Glyph, u64> =
-            working_set_ui_cache("test.icons", 1, fb_bytes, 32, gauge, sink);
-        let mut fraction: ReclaimCache<u32, Glyph, u64> =
-            disposable_ui_cache("test.fraction", 1, fb_bytes, 32, gauge, sink);
+        let mut icons: ReclaimCache<u32, Glyph, u64, BuildFastHash> = working_set_ui_cache(
+            "test.icons",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
+        let mut fraction: ReclaimCache<u32, Glyph, u64, BuildFastHash> = disposable_ui_cache(
+            "test.fraction",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
         for key in 0..tiles {
             for cache in [&mut icons, &mut fraction] {
                 let _ = cache.get_or_build(&1, key, || {
@@ -358,8 +402,15 @@ mod tests {
         assert!(floor > UI_CACHE_RESERVE_BYTES, "the reserve would dominate");
         let icon = 42 * 42 * 4;
 
-        let mut icons: ReclaimCache<u32, Glyph, u64> =
-            working_set_ui_cache("test.icons.mild", 1, fb_bytes, 32, gauge, sink);
+        let mut icons: ReclaimCache<u32, Glyph, u64, BuildFastHash> = working_set_ui_cache(
+            "test.icons.mild",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
         for key in 0..u32::try_from(fb_bytes / icon).expect("a screenful of icons") {
             let _ = icons.get_or_build(&1, key, || {
                 Some(Glyph {
@@ -393,18 +444,42 @@ mod tests {
         let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
         let fb_bytes = 1920 * 1080 * 4;
 
-        let mut caches: Vec<(&str, ReclaimCache<u32, Glyph, u64>)> = vec![
+        let mut caches: Vec<(&str, GlyphCache)> = vec![
             (
                 "cursor",
-                disposable_ui_cache("test.cursor", 1, fb_bytes, 32, gauge, sink),
+                disposable_ui_cache(
+                    "test.cursor",
+                    1,
+                    fb_bytes,
+                    32,
+                    gauge,
+                    sink,
+                    BuildFastHash::new(),
+                ),
             ),
             (
                 "chrome",
-                screenful_ui_cache("test.chrome", 1, fb_bytes, 32, gauge, sink),
+                screenful_ui_cache(
+                    "test.chrome",
+                    1,
+                    fb_bytes,
+                    32,
+                    gauge,
+                    sink,
+                    BuildFastHash::new(),
+                ),
             ),
             (
                 "icons",
-                working_set_ui_cache("test.icons", 1, fb_bytes, 32, gauge, sink),
+                working_set_ui_cache(
+                    "test.icons",
+                    1,
+                    fb_bytes,
+                    32,
+                    gauge,
+                    sink,
+                    BuildFastHash::new(),
+                ),
             ),
         ];
         for (what, cache) in &mut caches {
@@ -434,8 +509,15 @@ mod tests {
         // the figures are a real desktop's.
         gauge.report(PressureBand::Normal);
         let strips = 1920 * 32 * 4;
-        let mut chrome: ReclaimCache<u32, Glyph, u64> =
-            screenful_ui_cache("test.chrome.deep", 1, fb_bytes, 32, gauge, sink);
+        let mut chrome: ReclaimCache<u32, Glyph, u64, BuildFastHash> = screenful_ui_cache(
+            "test.chrome.deep",
+            1,
+            fb_bytes,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
         for key in 0..8u32 {
             let _ = chrome.get_or_build(&1, key, || {
                 Some(Glyph {
@@ -467,8 +549,15 @@ mod tests {
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
         gauge.report(PressureBand::Normal);
         let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
-        let mut cache: ReclaimCache<u32, Glyph, u64> =
-            disposable_ui_cache("test.wired", 1, 64 * 1024, 32, gauge, sink);
+        let mut cache: ReclaimCache<u32, Glyph, u64, BuildFastHash> = disposable_ui_cache(
+            "test.wired",
+            1,
+            64 * 1024,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        );
         for key in 0..8u32 {
             let _ = cache.get_or_build(&1, key, || {
                 Some(Glyph {

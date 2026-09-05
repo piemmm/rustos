@@ -65,6 +65,7 @@ use tairix_abi::font_ipc::{
     FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_METRICS_REPLY_LEN,
 };
 use tairix_abi::Errno;
+use tairix_hash::BuildSipHash13;
 use tairix_reclaim::ReclaimCache;
 use tairix_rt::sync::{Mutex, MutexGuard};
 
@@ -105,7 +106,7 @@ pub type GlyphKey = (u32, [u8; FONT_FAMILY_KEY_LEN], u32, u16);
 /// eviction, by pressure, or with the cache itself — which is exactly the
 /// owner-teardown invalidation the shared classification declares. Inventing
 /// a churning epoch would throw a live working set away for no event.
-pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, ()>;
+pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, (), BuildSipHash13>;
 
 /// The audit label the client's own cache is named by in reclaim records.
 #[cfg(feature = "rt")]
@@ -807,7 +808,15 @@ fn default_cache() -> GlyphCache {
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
     let _ = tairix_procinfo::pressure::refresh();
-    let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+    let key = tairix_rt::hash_seed();
+    // The index is keyed under this process's hash key, because the caller
+    // chooses the characters and sizes it is keyed by. A process that could
+    // draw none takes a zero budget instead: it retains nothing and pays the
+    // round trip per glyph, which is slower and never a predictable table.
+    let total = match key {
+        Some(_) => tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
+        None => 0,
+    };
     let cache = ReclaimCache::new(
         CLIENT_CACHE_LABEL,
         crate::glyph_cache::glyph_cache_candidate(ReclaimOwner::UserlandProcess(
@@ -816,6 +825,7 @@ fn default_cache() -> GlyphCache {
         crate::glyph_cache::client_glyph_cache_budget(total),
         tairix_rt::pressure::gauge(),
         &LOG_SINK,
+        BuildSipHash13::with_seed(key.unwrap_or(tairix_hash::HashSeed::UNKEYED)),
     );
     // This cache is built here, on the process's behalf, so it is this
     // library — not the program linking it — that tells the process-wide
@@ -844,13 +854,21 @@ fn default_measure_cache() -> MeasureCache {
 
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
-    let total = tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+    // Keyed, and zero-budgeted without a key, for the reason
+    // [`default_cache`] states: the memo is keyed by a fingerprint of the
+    // caller's own text.
+    let key = tairix_rt::hash_seed();
+    let total = match key {
+        Some(_) => tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
+        None => 0,
+    };
     let cache = ReclaimCache::new(
         MEASURE_CACHE_LABEL,
         measure::measure_cache_candidate(ReclaimOwner::UserlandProcess(CLIENT_CACHE_OWNER)),
         measure::measure_cache_budget(total),
         tairix_rt::pressure::gauge(),
         &LOG_SINK,
+        BuildSipHash13::with_seed(key.unwrap_or(tairix_hash::HashSeed::UNKEYED)),
     );
     if let Some(ledger) = cache.ledger() {
         tairix_rt::cachereport::register(ledger);
@@ -1404,6 +1422,10 @@ pub(crate) mod tests {
             budget,
             gauge,
             &SINK,
+            BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(
+                0x4642_4E54_5445_5354,
+                0x4642_4E54_5445_5355,
+            )),
         );
         (cache, gauge)
     }
@@ -1617,6 +1639,10 @@ pub(crate) mod tests {
             glyph_cache_budget(1 << 30),
             gauge,
             &SINK,
+            BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(
+                0x4642_4E54_5445_5354,
+                0x4642_4E54_5445_5355,
+            )),
         ));
 
         for _ in 0..8 {

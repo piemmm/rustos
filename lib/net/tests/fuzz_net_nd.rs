@@ -24,6 +24,11 @@ const SMOKE_ITERATIONS: u64 = 20_000;
 /// Neighbour-table capacity the harness asserts is never exceeded.
 const TABLE_CAPACITY: usize = 8;
 
+/// The key the table under test hashes its addresses under. Fixed, so a
+/// reported seed reproduces the run exactly.
+const TABLE_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x4E44_4655_5A5A_0001, 0x4E44_4655_5A5A_0002);
+
 fn exercise(
     message_type: u8,
     code: u8,
@@ -54,9 +59,9 @@ fn exercise(
     // Feeding any validated message into the table must stay total and
     // bounded.
     let source = Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 0x77);
-    nd::apply_neighbor_solicitation(&message, source, table, now);
+    nd::apply_neighbor_solicitation(&message, source, table);
     nd::apply_neighbor_advertisement(&message, table, now);
-    nd::apply_redirect(&message, table, now);
+    nd::apply_redirect(&message, table);
     assert!(table.len() <= TABLE_CAPACITY);
 }
 
@@ -98,7 +103,7 @@ fn random_inputs_never_panic() {
         "random_inputs_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let mut table = NeighborTable::new(TABLE_CAPACITY, NeighborConfig::default());
+    let mut table = NeighborTable::new(TABLE_CAPACITY, NeighborConfig::default(), TABLE_KEY);
     let mut buf = [0u8; 256];
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
@@ -162,7 +167,7 @@ fn structured_inputs_with_corrupted_fields_never_panic() {
     )
     .expect("seed parses");
 
-    let mut table = NeighborTable::new(TABLE_CAPACITY, NeighborConfig::default());
+    let mut table = NeighborTable::new(TABLE_CAPACITY, NeighborConfig::default(), TABLE_KEY);
     let now = Duration64::from_secs(1);
     for byte in 0..body.len() {
         for bit in 0..8u32 {

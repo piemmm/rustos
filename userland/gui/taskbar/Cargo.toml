@@ -54,6 +54,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # renderer's notification-glyph cache is a bounded, pressure-governed
 # `ReclaimCache` built from the shared desktop cache policy, never an
 # unbounded cache of its own.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the icon cache's
 # audit sink is typed against: the renderer never invents its own

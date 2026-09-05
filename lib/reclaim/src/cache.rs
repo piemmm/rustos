@@ -39,16 +39,17 @@
 //!
 //! # Hot path
 //!
-//! A hit is one generation comparison, one gauge sample, one `BTreeMap`
-//! lookup, and one recency touch — all O(log n), never a linear scan of
-//! the entries. Eviction pops the oldest entry from a `(tick -> key)`
-//! index, so a forced shrink visits only the entries it actually
-//! releases rather than sweeping the whole cache to find them.
+//! A hit is one generation comparison, one gauge sample, one hash probe, and
+//! one three-link splice — expected constant time, never a linear scan of the
+//! entries and never the O(log n) a recency index keyed by a tick would cost.
+//! Eviction takes the entry at the cold end of that same order, so a forced
+//! shrink visits only what it actually releases.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use core::hash::{BuildHasher, Hash};
 use core::ops::Deref;
 
+use tairix_collections::LruMap;
 use tairix_log::Sink;
 
 use crate::audit::{log_cache_poisoned, log_cache_refused};
@@ -136,8 +137,8 @@ enum PoisonCause {
     /// A discharge would have underflowed the byte ledger: more was
     /// removed than was ever charged.
     LedgerUnderflow,
-    /// The key index and the recency index disagreed about which
-    /// entries exist.
+    /// The entry index and the byte ledger disagreed about what the
+    /// cache holds.
     IndexDivergence,
 }
 
@@ -164,8 +165,6 @@ impl PoisonCause {
 /// it again exactly as it charged it.
 struct Entry<V> {
     value: V,
-    /// Recency tick; the key of this entry in the LRU index.
-    tick: u64,
     /// The payload figure charged on admission, discharged verbatim on
     /// release so the ledger balances even if the value's own
     /// measurement were to drift.
@@ -176,9 +175,15 @@ struct Entry<V> {
 /// cache. See the [module docs](self).
 ///
 /// `K` identifies an entry within a generation, `V` is the retained
-/// value, and `E` is the generation token whose change empties the
-/// cache.
-pub struct ReclaimCache<K, V, E> {
+/// value, `E` is the generation token whose change empties the cache, and `S`
+/// is how the keys are hashed.
+///
+/// `S` has no default and is named at the construction site, because whether
+/// the keys are attacker-influenced is a property of the consumer and not of
+/// the cache: a cache keyed by a window id the compositor assigned may use the
+/// fast unkeyed hash, while one keyed by anything a remote or unprivileged
+/// party chooses must use the keyed one.
+pub struct ReclaimCache<K, V, E, S> {
     /// Fixed label naming this cache in audit records.
     label: &'static str,
     /// The declared owner and class, kept so the cache can describe itself
@@ -202,25 +207,19 @@ pub struct ReclaimCache<K, V, E> {
     /// classification refusal or a detected ledger/index defect. Every
     /// lookup then builds and serves uncached (fail closed).
     poisoned: bool,
-    /// Monotonic recency counter; every touch assigns a fresh tick, so
-    /// ticks are unique and the LRU index is keyed by them. A `u64` of
-    /// ticks outlasts any machine uptime by centuries, so the counter
-    /// is never exhausted in practice; it wraps rather than trapping
-    /// because a wrapped recency order would still be a correct cache,
-    /// merely a badly ordered one.
-    tick: u64,
     /// The generation the retained entries were built at.
     generation: Option<E>,
-    entries: BTreeMap<K, Entry<V>>,
-    /// Recency index: tick (oldest first) to entry key.
-    lru: BTreeMap<u64, K>,
+    /// The retained entries, with the recency order eviction takes maintained
+    /// alongside them.
+    entries: LruMap<K, Entry<V>, S>,
 }
 
-impl<K, V, E> core::fmt::Debug for ReclaimCache<K, V, E>
+impl<K, V, E, S> core::fmt::Debug for ReclaimCache<K, V, E, S>
 where
-    K: Ord + Clone,
+    K: Eq + Hash,
     V: CachedBytes,
     E: PartialEq + Clone,
+    S: BuildHasher,
 {
     /// A summary, not a dump: which cache this is, how much it is
     /// holding, and whether it has failed closed.
@@ -243,11 +242,12 @@ where
     }
 }
 
-impl<K, V, E> ReclaimCache<K, V, E>
+impl<K, V, E, S> ReclaimCache<K, V, E, S>
 where
-    K: Ord + Clone,
+    K: Eq + Hash,
     V: CachedBytes,
     E: PartialEq + Clone,
+    S: BuildHasher,
 {
     /// Build a cache from a declared [`CacheCandidate`], bounded by
     /// `budget` and governed by `pressure`.
@@ -263,6 +263,7 @@ where
         budget: CacheBudget,
         pressure: &'static (dyn PressureGauge + 'static),
         sink: &'static (dyn Sink + Sync),
+        hasher: S,
     ) -> Self {
         let owner = candidate.owner;
         let declared_class = candidate.class;
@@ -285,10 +286,8 @@ where
             poisoned: policy.is_none(),
             entry_metadata_bytes,
             policy,
-            tick: 0,
             generation: None,
-            entries: BTreeMap::new(),
-            lru: BTreeMap::new(),
+            entries: LruMap::with_hasher(hasher),
         }
     }
 
@@ -386,7 +385,7 @@ where
         if self.poisoned || self.generation.as_ref() != Some(generation) {
             return None;
         }
-        self.entries.get(key).map(|entry| &entry.value)
+        self.entries.peek(key).map(|entry| &entry.value)
     }
 
     /// Serve `key` at `generation`, building it once if it is absent.
@@ -397,7 +396,9 @@ where
     ///
     /// `build` returning `None` (a degenerate input the consumer cannot
     /// render) retains nothing and yields `None`, so the next call
-    /// retries rather than the failure being remembered.
+    /// retries rather than the failure being remembered. A cache that detects
+    /// its own bookkeeping to be inconsistent while admitting the value
+    /// poisons itself and yields `None` the same way.
     pub fn get_or_build<F>(&mut self, generation: &E, key: K, build: F) -> Option<Served<'_, V>>
     where
         F: FnOnce() -> Option<V>,
@@ -415,7 +416,8 @@ where
 
         if self.entries.contains_key(&key) {
             self.accounting.record_hit(policy.class());
-            self.touch(&key);
+            // The lookup is the use the recency order tracks, so this is the
+            // one accessor that refreshes it.
             return self
                 .entries
                 .get(&key)
@@ -424,7 +426,7 @@ where
 
         self.accounting.record_miss(policy.class());
         let value = build()?;
-        Some(self.admit(policy, key, value))
+        self.admit(policy, key, value)
     }
 
     /// Retain `value` under `key` at `generation`, replacing whatever was
@@ -452,7 +454,7 @@ where
         let Some(policy) = self.policy else {
             return;
         };
-        let _ = self.admit(policy, key, value);
+        drop(self.admit(policy, key, value));
     }
 
     /// Drop everything retained at a different generation and adopt this
@@ -558,10 +560,14 @@ where
     /// A value already held for `key` is released first, so the newest one
     /// is what is retained and the old one's bytes are discharged rather
     /// than left charged against an entry nothing can reach.
-    fn admit(&mut self, policy: CachePolicy, key: K, value: V) -> Served<'_, V> {
-        if self.entries.contains_key(&key) {
-            let _ = self.release(&key);
-        }
+    ///
+    /// `None` reports that the cache detected its own bookkeeping to be
+    /// inconsistent and poisoned itself with the value already taken. Nothing
+    /// reachable produces it — the reservation below is what makes the
+    /// insertion that follows infallible — and the caller treats it exactly as
+    /// a build that yielded nothing.
+    fn admit(&mut self, policy: CachePolicy, key: K, value: V) -> Option<Served<'_, V>> {
+        let _ = self.release(&key);
         let payload = value.payload_bytes();
         let cost = payload.saturating_add(self.entry_metadata_bytes);
 
@@ -573,7 +579,7 @@ where
         let ceiling = shrink_target(allowance.band(), policy.class(), self.budget);
         if !allowance.take(policy.class(), self.budget, cost) {
             self.accounting.record_refusal(policy.class());
-            return Served::Uncached(value);
+            return Some(Served::Uncached(value));
         }
 
         if self.charged_bytes().saturating_add(cost) > ceiling {
@@ -588,7 +594,15 @@ where
         }
         if self.charged_bytes().saturating_add(cost) > ceiling {
             self.accounting.record_refusal(policy.class());
-            return Served::Uncached(value);
+            return Some(Served::Uncached(value));
+        }
+
+        // Room for the entry before the ledger is touched and before the value
+        // moves, so a refusal hands it straight back with nothing charged and
+        // the insertion below cannot fail.
+        if self.entries.try_reserve(1).is_err() {
+            self.accounting.record_refusal(policy.class());
+            return Some(Served::Uncached(value));
         }
 
         if let Err(error) =
@@ -596,38 +610,35 @@ where
                 .charge(policy.class(), payload, self.entry_metadata_bytes)
         {
             self.poison(PoisonCause::of(error));
-            return Served::Uncached(value);
+            return Some(Served::Uncached(value));
         }
 
-        self.tick = self.tick.wrapping_add(1);
-        let tick = self.tick;
-        self.lru.insert(tick, key.clone());
-        let admitted = self.entries.entry(key).or_insert(Entry {
+        let entry = Entry {
             value,
-            tick,
             charged_payload: payload,
-        });
-        Served::Cached(&admitted.value)
-    }
-
-    /// Move `key` to the head of the recency order.
-    fn touch(&mut self, key: &K) {
-        self.tick = self.tick.wrapping_add(1);
-        let next = self.tick;
-        let Some(entry) = self.entries.get_mut(key) else {
-            return;
         };
-        let previous = entry.tick;
-        entry.tick = next;
-        self.lru.remove(&previous);
-        self.lru.insert(next, key.clone());
+        if self.entries.try_insert(key, entry).is_err() {
+            self.discharge(policy, payload);
+            self.poison(PoisonCause::IndexDivergence);
+            return None;
+        }
+        if self.entries.peek_mru().is_none() {
+            self.poison(PoisonCause::IndexDivergence);
+            return None;
+        }
+        self.entries
+            .peek_mru()
+            .map(|(_, admitted)| Served::Cached(&admitted.value))
     }
 
     /// Evict oldest-first until the charged total is at or below
     /// `ceiling`.
     fn evict_to(&mut self, ceiling: usize) {
         while self.charged_bytes() > ceiling {
-            let Some((_, key)) = self.lru.iter().next().map(|(t, k)| (*t, k.clone())) else {
+            let Some(policy) = self.policy else {
+                return;
+            };
+            let Some((_, entry)) = self.entries.pop_lru() else {
                 // Bytes remain charged with no entry left to release:
                 // the ledger and the index disagree.
                 if self.charged_bytes() > 0 {
@@ -635,10 +646,7 @@ where
                 }
                 return;
             };
-            if self.release(&key).is_none() {
-                self.poison(PoisonCause::IndexDivergence);
-                return;
-            }
+            self.wipe_and_discharge(policy, entry);
             self.accounting.record_eviction();
             if self.poisoned {
                 return;
@@ -650,19 +658,28 @@ where
     /// wiping it where the declared sensitivity requires.
     fn release(&mut self, key: &K) -> Option<()> {
         let policy = self.policy?;
-        let mut entry = self.entries.remove(key)?;
-        self.lru.remove(&entry.tick);
+        let entry = self.entries.remove(key)?;
+        self.wipe_and_discharge(policy, entry);
+        Some(())
+    }
+
+    /// Wipe a released entry where its sensitivity requires and give the
+    /// ledger back exactly what admission charged.
+    fn wipe_and_discharge(&mut self, policy: CachePolicy, mut entry: Entry<V>) {
         if wipes_on_release(policy.sensitivity()) {
             entry.value.wipe();
         }
-        if let Err(error) = self.accounting.discharge(
-            policy.class(),
-            entry.charged_payload,
-            self.entry_metadata_bytes,
-        ) {
+        self.discharge(policy, entry.charged_payload);
+    }
+
+    /// Give the ledger back one entry's charge.
+    fn discharge(&mut self, policy: CachePolicy, payload: usize) {
+        if let Err(error) =
+            self.accounting
+                .discharge(policy.class(), payload, self.entry_metadata_bytes)
+        {
             self.poison(PoisonCause::of(error));
         }
-        Some(())
     }
 
     /// Drop every entry, wiping where required, without counting an
@@ -671,12 +688,12 @@ where
         let wipe = self
             .policy
             .is_some_and(|policy| wipes_on_release(policy.sensitivity()));
-        for (_, mut entry) in core::mem::take(&mut self.entries) {
+        while let Some((_, mut entry)) = self.entries.pop_lru() {
             if wipe {
                 entry.value.wipe();
             }
         }
-        self.lru.clear();
+        self.entries.clear();
         self.accounting.zero_ledger();
     }
 
@@ -723,6 +740,8 @@ const fn wipes_on_release(sensitivity: Sensitivity) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tairix_hash::BuildFastHash;
 
     extern crate std;
 
@@ -812,7 +831,7 @@ mod tests {
         band: PressureBand,
         sensitivity: Sensitivity,
     ) -> (
-        ReclaimCache<u32, Block, u64>,
+        ReclaimCache<u32, Block, u64, BuildFastHash>,
         &'static ReportedPressure,
         &'static CountingSink,
     ) {
@@ -824,6 +843,7 @@ mod tests {
             CacheBudget::from_backing(64 * 1024),
             gauge,
             sink,
+            BuildFastHash::new(),
         );
         (cache, gauge, sink)
     }
@@ -1062,12 +1082,13 @@ mod tests {
     fn an_unknown_band_admits_nothing() {
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
         let sink = leak_sink();
-        let mut cache: ReclaimCache<u32, Block, u64> = ReclaimCache::new(
+        let mut cache: ReclaimCache<u32, Block, u64, BuildFastHash> = ReclaimCache::new(
             "test.cache",
             candidate(Sensitivity::UserData),
             CacheBudget::from_backing(64 * 1024),
             gauge,
             sink,
+            BuildFastHash::new(),
         );
         let served = cache
             .get_or_build(&1, 7, || Some(Block::of(16, 1)))
@@ -1081,12 +1102,13 @@ mod tests {
         let sink = leak_sink();
         let mut refused = candidate(Sensitivity::UserData);
         refused.sensitivity = Some(Sensitivity::CredentialOrKey);
-        let mut cache: ReclaimCache<u32, Block, u64> = ReclaimCache::new(
+        let mut cache: ReclaimCache<u32, Block, u64, BuildFastHash> = ReclaimCache::new(
             "test.cache",
             refused,
             CacheBudget::from_backing(64 * 1024),
             gauge,
             sink,
+            BuildFastHash::new(),
         );
         assert!(cache.poisoned());
         assert_eq!(sink.count(), 1);

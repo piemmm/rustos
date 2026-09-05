@@ -503,6 +503,10 @@ fn warm_font_client() {
         glyph_cache_budget(1 << 30),
         &PRESSURE,
         &SINK,
+        tairix_hash::BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(
+            0x4245_4E43_4800_0001,
+            0x4245_4E43_4800_0002,
+        )),
     ));
 }
 

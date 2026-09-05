@@ -280,7 +280,7 @@ mod program {
         // identifiers from the platform CSPRNG through this factory; the
         // engine consults it only while net.ipv6.privacy is enabled.
         let temp_factory = Box::new(|| Box::new(RandomTempSource) as Box<dyn TempAddrSource>);
-        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), flow_key());
+        let mut stack = Netstack::new(temp_factory, dhcp_rng_factory(), peer_hash_key());
         let mut sockets = SocketService::new();
         // The bound NIC channels, one per slot in the reserved endpoint
         // block. A fixed table (not a growable capacity): the channel count
@@ -895,22 +895,23 @@ mod program {
         Ok(())
     }
 
-    /// The key a bond's transmit flow hash is taken under: this process's one
-    /// hash key, so the flow hash and any other hash here over input a peer
-    /// chooses share it rather than each drawing its own.
+    /// The key every hash this process takes over input a remote peer chooses
+    /// is drawn under — a bond's transmit flow hash, each interface's
+    /// neighbour-cache index — so they share one key rather than each drawing
+    /// its own.
     ///
-    /// A platform whose CSPRNG could not be seeded has none. Bond balancing
-    /// is not the service's primary purpose, so it degrades to a predictable
-    /// hash rather than refusing to serve the network — and says so, because
-    /// a silently predictable flow hash is one a remote peer can steer.
-    fn flow_key() -> HashSeed {
+    /// A platform whose CSPRNG could not be seeded has none. Neither hash is
+    /// the service's primary purpose, so both degrade to a predictable one
+    /// rather than refusing to serve the network — and it says so, because a
+    /// silently predictable hash is one a remote peer can steer.
+    fn peer_hash_key() -> HashSeed {
         if let Some(key) = tairix_rt::hash_seed() {
             return key;
         }
         let mut err = tairix_rt::io::Stderr;
         let _ = tairix_rt::io::Write::write_all(
             &mut err,
-            b"netstack: no platform entropy; bond flow hashing is unkeyed\n",
+            b"netstack: no platform entropy; peer-input hashing is unkeyed\n",
         );
         HashSeed::UNKEYED
     }

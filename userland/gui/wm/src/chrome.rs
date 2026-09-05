@@ -45,6 +45,7 @@
 //! every released strip is overwritten before its heap becomes reusable.
 
 use tairix_controls::WindowFrame;
+use tairix_hash::BuildFastHash;
 use tairix_icon::IconPicture;
 use tairix_log::Sink;
 use tairix_reclaim::{screenful_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
@@ -93,7 +94,7 @@ pub fn chrome_cache(
     fb_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
+) -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash> {
     screenful_ui_cache(
         "wm.chrome",
         seat,
@@ -101,6 +102,9 @@ pub fn chrome_cache(
         ENTRY_METADATA_BYTES,
         pressure,
         sink,
+        // Keyed by an identifier this compositor assigned itself, so the
+        // fast unkeyed hash is correct and is named here.
+        BuildFastHash::new(),
     )
 }
 

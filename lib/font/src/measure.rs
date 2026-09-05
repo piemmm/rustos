@@ -32,6 +32,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::{FamilyKey, FontWeight, FONT_FAMILY_KEY_LEN};
+use tairix_hash::BuildSipHash13;
 #[cfg(any(feature = "rt", test))]
 use tairix_reclaim::{
     CacheBudget, CacheCandidate, InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner,
@@ -50,7 +51,7 @@ pub(crate) type MeasureKey = ([u8; FONT_FAMILY_KEY_LEN], u32, u16, u32, u32);
 pub(crate) type MeasureEpoch = u64;
 
 /// The client's measurement memo.
-pub(crate) type MeasureCache = ReclaimCache<MeasureKey, MeasuredText, MeasureEpoch>;
+pub(crate) type MeasureCache = ReclaimCache<MeasureKey, MeasuredText, MeasureEpoch, BuildSipHash13>;
 
 /// The key `text` measured in `family` at `pixel_height` and `weight` is
 /// retained under.

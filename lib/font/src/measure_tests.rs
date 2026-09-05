@@ -6,6 +6,7 @@
 //! else the harness is running in parallel.
 
 use alloc::string::String;
+use tairix_hash::{BuildSipHash13, HashSeed};
 
 use tairix_log::DiscardSink;
 use tairix_reclaim::{CacheBudget, CachedBytes, PressureBand, ReclaimOwner, ReportedPressure};
@@ -43,6 +44,10 @@ fn measuring_client(
         memo_budget,
         gauge,
         &SINK,
+        BuildSipHash13::with_seed(HashSeed::from_words(
+            0x4642_4E54_5445_5354,
+            0x4642_4E54_5445_5355,
+        )),
     ));
     (client, gauge)
 }
@@ -379,6 +384,10 @@ fn a_service_that_answers_metrics_but_no_glyph_measures_zero_and_retains_nothing
         measure_cache_budget(1 << 30),
         gauge,
         &SINK,
+        BuildSipHash13::with_seed(HashSeed::from_words(
+            0x4642_4E54_5445_5354,
+            0x4642_4E54_5445_5355,
+        )),
     ));
     let font = BitmapFont::new(NOTO, HEIGHT);
     let text = "Switchboard";

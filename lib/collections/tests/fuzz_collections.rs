@@ -12,6 +12,10 @@
 //! 3. A tombstone never hides a live entry.
 //! 4. Every value is dropped exactly once, including the ones a rebuild moved,
 //!    and every `SmallVec` element exactly once across its spill.
+//! 5. An `LruMap` agrees with a naive recency list — the same membership, and
+//!    the same victim on every eviction — across the same adversarial key
+//!    streams, with its node arena bounded by the peak occupancy however long
+//!    the churn runs.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -20,7 +24,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use tairix_collections::{HashMap, SmallVec};
+use tairix_collections::{HashMap, LruMap, SmallVec};
 use tairix_fuzzseed::Lcg;
 use tairix_hash::{BuildSipHash13, HashSeed};
 
@@ -174,6 +178,95 @@ fn sweep_smallvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
     }
 }
 
+/// Drive an `LruMap` against a naive `(membership, recency order)` model.
+///
+/// The model is a plain vector of keys, oldest first, searched linearly — the
+/// definition of the order the map claims to keep in constant time.
+fn sweep_lru(rng: &mut Lcg, seed: HashSeed, live: &Rc<Cell<i64>>) {
+    let mut map: LruMap<u64, Tracked, BuildSipHash13> =
+        LruMap::with_hasher(BuildSipHash13::with_seed(seed));
+    let mut order: Vec<u64> = Vec::new();
+    let width = 1 + rng.below(256);
+    // The bound the churn is held to, so eviction is exercised throughout.
+    let bound = 1 + rng.below(64);
+
+    let touch = |order: &mut Vec<u64>, key: u64| {
+        if let Some(at) = order.iter().position(|held| *held == key) {
+            order.remove(at);
+            order.push(key);
+        }
+    };
+
+    for step in 0..OPS_PER_ROUND {
+        let key = draw_key(rng, width);
+        match rng.below(8) {
+            0..=3 => {
+                let replaced = map
+                    .try_insert(key, Tracked::new(key, live))
+                    .expect("the host allocator serves this harness");
+                let known = order.contains(&key);
+                assert_eq!(replaced.is_some(), known, "step {step}, key {key}");
+                assert!(replaced.is_none_or(|value| value.key == key));
+                touch(&mut order, key);
+                if !known {
+                    order.push(key);
+                }
+            }
+            4 => {
+                let found = map.get(&key).map(|value| value.key);
+                assert_eq!(found.is_some(), order.contains(&key), "step {step}");
+                assert!(found.is_none_or(|found| found == key));
+                touch(&mut order, key);
+            }
+            5 => {
+                let peeked = map.peek(&key).map(|value| value.key);
+                assert_eq!(peeked.is_some(), order.contains(&key), "step {step}");
+            }
+            6 => {
+                let removed = map.remove(&key).map(|value| value.key);
+                let at = order.iter().position(|held| *held == key);
+                assert_eq!(removed.is_some(), at.is_some(), "step {step}");
+                assert!(removed.is_none_or(|found| found == key));
+                if let Some(at) = at {
+                    order.remove(at);
+                }
+            }
+            _ => {
+                let evicted = map.pop_lru().map(|(key, _)| key);
+                let expected = (!order.is_empty()).then(|| order.remove(0));
+                assert_eq!(evicted, expected, "step {step}: wrong victim");
+            }
+        }
+        while order.len() > bound {
+            let evicted = map.pop_lru().map(|(key, _)| key);
+            assert_eq!(evicted, Some(order.remove(0)), "step {step}: wrong victim");
+        }
+
+        assert_eq!(map.len(), order.len(), "step {step}");
+        assert!(
+            map.iter_lru()
+                .map(|(key, _)| *key)
+                .eq(order.iter().copied()),
+            "step {step}: recency order diverged",
+        );
+        assert_eq!(
+            i64::try_from(map.len()).expect("fits"),
+            live.get(),
+            "step {step}: one undropped value per live entry",
+        );
+    }
+
+    // The arena is bounded by the peak occupancy: a freed node is reused, so
+    // a long churn does not grow it once the bound is reached.
+    assert!(
+        map.capacity() <= 2 * bound + INLINE,
+        "arena grew to {} for a bound of {bound}",
+        map.capacity(),
+    );
+    drop(map);
+    assert_eq!(live.get(), 0, "every value must be dropped exactly once");
+}
+
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Lcg::new(tairix_fuzzseed::start(
@@ -191,6 +284,10 @@ fn heap_backed_containers_agree_with_their_models() {
             let live = Rc::new(Cell::new(0i64));
             sweep_smallvec(&mut rng, &live);
             assert_eq!(live.get(), 0, "a `SmallVec` leaked or double-dropped");
+
+            let live = Rc::new(Cell::new(0i64));
+            sweep_lru(&mut rng, key, &live);
+            assert_eq!(live.get(), 0, "an `LruMap` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

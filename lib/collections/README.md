@@ -13,6 +13,7 @@ depends on it for the inline half of its `SmallVec`.
 |---|---|
 | `HashMap<K, V, S>` | expected O(1) lookup / insert / remove, one control byte + one `(K, V)` slot per bucket, no per-entry node |
 | `HashSet<T, S>` | the same, over a zero-sized value |
+| `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container

@@ -27,6 +27,10 @@
 //!   the least-recently-used entry that is not mid-resolution; if every
 //!   entry is mid-resolution the insert is refused (fail closed) rather
 //!   than evicting state an attacker could churn.
+//! - The index is keyed. A remote peer chooses the addresses this table is
+//!   keyed by, so it is hashed under the caller's per-boot key: an
+//!   unpredictable one denies an attacker a set of addresses that all land in
+//!   the same bucket and turn every transmit into a scan of the table.
 //! - A confirmation ([`NeighborTable::confirm`]) for an address with no
 //!   entry is ignored — an unsolicited reply never creates state.
 //! - Only [`NeighborTable::lookup`] (this host is sending) and
@@ -37,6 +41,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::net::MacAddress;
 use tairix_abi::time::Duration64;
+use tairix_collections::LruMap;
+use tairix_hash::{BuildSipHash13, HashSeed};
 
 use crate::addr::IpAddr;
 use crate::timeutil::{nanos, NEVER};
@@ -87,8 +93,9 @@ pub enum LookupResult {
     Send(MacAddress),
     /// Resolution is in progress; queue the packet and wait.
     Pending,
-    /// The table is full of mid-resolution entries; the packet is
-    /// refused (fail closed), not queued.
+    /// No entry could be made: every entry is mid-resolution, or the
+    /// allocator refused one. The packet is refused (fail closed), not
+    /// queued.
     TableFull,
 }
 
@@ -138,17 +145,18 @@ enum Phase {
 }
 
 /// One cache entry.
+///
+/// Neither the address nor a last-use stamp is here: the address is the
+/// index's key, and the recency order the index maintains is what eviction
+/// reads, so both are held once.
 #[derive(Copy, Clone, Debug)]
 struct Entry {
-    ip: IpAddr,
     phase: Phase,
     /// Next timed transition, in nanoseconds ([`NEVER`] when the state
     /// has none).
     deadline: u128,
     /// Solicitations/probes sent in the current state.
     attempts: u8,
-    /// Last use by a sender, for LRU eviction.
-    last_used: u128,
 }
 
 /// The bounded, provider-agnostic neighbour cache.
@@ -159,19 +167,26 @@ struct Entry {
 /// [`learn`](Self::learn), …), then call [`advance`](Self::advance) and
 /// perform the returned actions, then re-arm the caller's one-shot timer
 /// from [`next_deadline`](Self::next_deadline).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NeighborTable {
-    entries: Vec<Entry>,
+    /// Address to entry, with the recency order eviction takes maintained in
+    /// constant time alongside it.
+    entries: LruMap<IpAddr, Entry, BuildSipHash13>,
     capacity: usize,
     config: NeighborConfig,
 }
 
 impl NeighborTable {
-    /// A table holding at most `capacity` entries.
+    /// A table holding at most `capacity` entries, keyed under `key`.
+    ///
+    /// `key` is the caller's per-boot hash key. A platform whose CSPRNG never
+    /// seeded has none and names [`HashSeed::UNKEYED`], which still resolves
+    /// every neighbour — only the bucket a peer's address lands in becomes
+    /// predictable, and the table's fixed capacity bounds what that costs.
     #[must_use]
-    pub fn new(capacity: usize, config: NeighborConfig) -> Self {
+    pub fn new(capacity: usize, config: NeighborConfig, key: HashSeed) -> Self {
         Self {
-            entries: Vec::new(),
+            entries: LruMap::with_hasher(BuildSipHash13::with_seed(key)),
             capacity,
             config,
         }
@@ -196,9 +211,12 @@ impl NeighborTable {
     }
 
     /// Current state and cached link-layer address of `ip`'s entry.
+    ///
+    /// An observation, not a use: it leaves the recency order alone, so a
+    /// diagnostic read never changes which entry eviction takes.
     #[must_use]
     pub fn entry(&self, ip: IpAddr) -> Option<(NeighborState, Option<MacAddress>)> {
-        self.find(ip).map(|i| match self.entries[i].phase {
+        self.entries.peek(&ip).map(|entry| match entry.phase {
             Phase::Incomplete => (NeighborState::Incomplete, None),
             Phase::Resolved { mac, reach } => {
                 let state = match reach {
@@ -223,16 +241,19 @@ impl NeighborTable {
     pub fn lookup(&mut self, ip: IpAddr, now: Duration64) -> LookupResult {
         let now = nanos(now);
         let delay = nanos(self.config.delay_first_probe);
-        let Some(index) = self.find(ip) else {
-            if !self.insert(Entry {
+        // A sender's lookup is the use the recency order tracks, so this is
+        // the one accessor that refreshes it.
+        let Some(entry) = self.entries.get_mut(&ip) else {
+            if !self.insert(
                 ip,
-                phase: Phase::Incomplete,
-                // Due immediately: the next `advance` emits the first
-                // multicast solicitation.
-                deadline: now,
-                attempts: 0,
-                last_used: now,
-            }) {
+                Entry {
+                    phase: Phase::Incomplete,
+                    // Due immediately: the next `advance` emits the first
+                    // multicast solicitation.
+                    deadline: now,
+                    attempts: 0,
+                },
+            ) {
                 return LookupResult::TableFull;
             }
             return LookupResult::Pending;
@@ -241,10 +262,7 @@ impl NeighborTable {
             phase,
             deadline,
             attempts,
-            last_used,
-            ..
-        } = &mut self.entries[index];
-        *last_used = now;
+        } = entry;
         let Phase::Resolved { mac, reach } = phase else {
             return LookupResult::Pending;
         };
@@ -276,10 +294,11 @@ impl NeighborTable {
     ) {
         let now = nanos(now);
         let reachable = nanos(self.config.reachable_time);
-        let Some(index) = self.find(ip) else {
+        // A reply is the peer's traffic, not this host's, so it updates the
+        // entry without counting as a use.
+        let Some(entry) = self.entries.peek_mut(&ip) else {
             return;
         };
-        let entry = &mut self.entries[index];
         match entry.phase {
             Phase::Incomplete => {
                 let reach = if solicited {
@@ -333,11 +352,14 @@ impl NeighborTable {
     /// link-layer address to `Stale` when it changed. When the table is
     /// full of mid-resolution entries the binding is not recorded; the
     /// neighbour is resolved on demand instead.
-    pub fn learn(&mut self, ip: IpAddr, mac: MacAddress, now: Duration64) {
-        let now = nanos(now);
-        match self.find(ip) {
-            Some(index) => {
-                let entry = &mut self.entries[index];
+    ///
+    /// Unlike the other events this takes no `now`: a learned binding is the
+    /// peer's traffic rather than this host's, and it arms no timer — a fresh
+    /// entry enters at the newest end of the recency order by being created,
+    /// and refreshing an existing one has never counted as a use.
+    pub fn learn(&mut self, ip: IpAddr, mac: MacAddress) {
+        match self.entries.peek_mut(&ip) {
+            Some(entry) => {
                 let refresh = match entry.phase {
                     Phase::Incomplete => true,
                     Phase::Resolved { mac: cached, .. } => cached != mac,
@@ -352,16 +374,17 @@ impl NeighborTable {
                 }
             }
             None => {
-                self.insert(Entry {
+                self.insert(
                     ip,
-                    phase: Phase::Resolved {
-                        mac,
-                        reach: Reach::Stale,
+                    Entry {
+                        phase: Phase::Resolved {
+                            mac,
+                            reach: Reach::Stale,
+                        },
+                        deadline: NEVER,
+                        attempts: 0,
                     },
-                    deadline: NEVER,
-                    attempts: 0,
-                    last_used: now,
-                });
+                );
             }
         }
     }
@@ -371,8 +394,7 @@ impl NeighborTable {
     pub fn upper_layer_confirmation(&mut self, ip: IpAddr, now: Duration64) {
         let now = nanos(now);
         let reachable = nanos(self.config.reachable_time);
-        if let Some(index) = self.find(ip) {
-            let entry = &mut self.entries[index];
+        if let Some(entry) = self.entries.peek_mut(&ip) {
             if let Phase::Resolved { mac, .. } = entry.phase {
                 entry.phase = Phase::Resolved {
                     mac,
@@ -405,9 +427,7 @@ impl NeighborTable {
 
     /// Drop `ip`'s entry (interface reconfiguration, admin flush).
     pub fn remove(&mut self, ip: IpAddr) {
-        if let Some(index) = self.find(ip) {
-            self.entries.swap_remove(index);
-        }
+        self.entries.remove(&ip);
     }
 
     /// Drop every entry.
@@ -421,9 +441,9 @@ impl NeighborTable {
     pub fn next_deadline(&self) -> Option<Duration64> {
         let earliest = self
             .entries
-            .iter()
-            .map(|e| e.deadline)
-            .filter(|&d| d != NEVER)
+            .iter_lru()
+            .map(|(_, entry)| entry.deadline)
+            .filter(|&deadline| deadline != NEVER)
             .min()?;
         let clamped = u64::try_from(earliest).unwrap_or(u64::MAX);
         Some(Duration64::from_nanos(clamped))
@@ -436,23 +456,22 @@ impl NeighborTable {
         let retrans = nanos(self.config.retrans_timer);
         let config = self.config;
         let mut actions = Vec::new();
-        let mut index = 0;
-        while index < self.entries.len() {
-            let entry = &mut self.entries[index];
+        // A transition is the table's own timer firing, not a use, so the
+        // survivors keep the recency order they had.
+        self.entries.retain(|&ip, entry| {
             if entry.deadline > now {
-                index += 1;
-                continue;
+                return true;
             }
             match entry.phase {
                 Phase::Incomplete => {
                     if entry.attempts < config.max_multicast_solicit {
                         entry.attempts += 1;
                         entry.deadline = now + retrans;
-                        actions.push(NeighborAction::SolicitMulticast { ip: entry.ip });
-                        index += 1;
+                        actions.push(NeighborAction::SolicitMulticast { ip });
+                        true
                     } else {
-                        actions.push(NeighborAction::Unreachable { ip: entry.ip });
-                        self.entries.swap_remove(index);
+                        actions.push(NeighborAction::Unreachable { ip });
+                        false
                     }
                 }
                 Phase::Resolved { mac, reach } => match reach {
@@ -462,7 +481,7 @@ impl NeighborTable {
                             reach: Reach::Stale,
                         };
                         entry.deadline = NEVER;
-                        index += 1;
+                        true
                     }
                     Reach::Delay => {
                         entry.phase = Phase::Resolved {
@@ -471,55 +490,46 @@ impl NeighborTable {
                         };
                         entry.attempts = 1;
                         entry.deadline = now + retrans;
-                        actions.push(NeighborAction::SolicitUnicast { ip: entry.ip, mac });
-                        index += 1;
+                        actions.push(NeighborAction::SolicitUnicast { ip, mac });
+                        true
                     }
                     Reach::Probe => {
                         if entry.attempts < config.max_unicast_solicit {
                             entry.attempts += 1;
                             entry.deadline = now + retrans;
-                            actions.push(NeighborAction::SolicitUnicast { ip: entry.ip, mac });
-                            index += 1;
+                            actions.push(NeighborAction::SolicitUnicast { ip, mac });
+                            true
                         } else {
-                            actions.push(NeighborAction::Unreachable { ip: entry.ip });
-                            self.entries.swap_remove(index);
+                            actions.push(NeighborAction::Unreachable { ip });
+                            false
                         }
                     }
                     // Stale never has a deadline; nothing is due.
-                    Reach::Stale => index += 1,
+                    Reach::Stale => true,
                 },
             }
-        }
+        });
         actions
     }
 
-    fn find(&self, ip: IpAddr) -> Option<usize> {
-        self.entries.iter().position(|e| e.ip == ip)
-    }
-
-    /// Store `entry`, evicting the least-recently-used entry that is
-    /// not mid-resolution when full. Returns `false` (nothing stored)
-    /// when every entry is mid-resolution — churn an attacker could
-    /// force must never evict live resolution state.
-    fn insert(&mut self, entry: Entry) -> bool {
-        if self.entries.len() < self.capacity {
-            self.entries.push(entry);
-            return true;
+    /// Store `entry` for `ip`, evicting the least-recently-used entry that is
+    /// not mid-resolution when full. Returns `false` (nothing stored) when
+    /// every entry is mid-resolution — churn an attacker could force must
+    /// never evict live resolution state — or when the allocator refused the
+    /// entry, which is the same fail-closed answer.
+    fn insert(&mut self, ip: IpAddr, entry: Entry) -> bool {
+        if self.entries.len() >= self.capacity {
+            let victim = self
+                .entries
+                .iter_lru()
+                .find(|(_, held)| !matches!(held.phase, Phase::Incomplete))
+                .map(|(ip, _)| *ip);
+            let Some(victim) = victim else {
+                return false;
+            };
+            self.entries.remove(&victim);
         }
-        let victim = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| !matches!(e.phase, Phase::Incomplete))
-            .min_by_key(|(_, e)| e.last_used)
-            .map(|(i, _)| i);
-        match victim {
-            Some(index) => {
-                self.entries[index] = entry;
-                true
-            }
-            None => false,
-        }
+        self.entries.try_insert(ip, entry).is_ok()
     }
 }
 

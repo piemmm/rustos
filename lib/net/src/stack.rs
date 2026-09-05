@@ -41,7 +41,7 @@ use core::hash::Hasher;
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::time::Duration64;
-use tairix_hash::FastHash;
+use tairix_hash::{FastHash, HashSeed};
 
 use crate::addr::{
     is_unicast_link_local, solicited_node_multicast, Ecn, IpAddr, Ipv4Addr, Ipv6Addr, ALL_NODES,
@@ -561,6 +561,12 @@ pub struct StackConfig {
     pub neighbor: NeighborConfig,
     /// Neighbour-cache capacity (entries).
     pub neighbor_capacity: usize,
+    /// The key the neighbour cache's index hashes under; drawn by the
+    /// service from the platform CSPRNG, because a remote peer chooses the
+    /// addresses that index is keyed by. [`HashSeed::UNKEYED`] on a platform
+    /// whose CSPRNG never seeded — a named, reviewable choice, never a
+    /// silent default.
+    pub neighbor_key: HashSeed,
     /// Fragment-reassembly budgets.
     pub reassembly: ReassemblyConfig,
     /// Default-router list capacity (RFC 4861 requires ≥ 2).
@@ -587,16 +593,23 @@ pub struct StackConfig {
 
 impl StackConfig {
     /// A configuration with production defaults for `facts`, an
-    /// interface identifier, and an identification seed (both drawn
-    /// by the caller — the RFC 7217 identifier and CSPRNG seed are
-    /// the service layer's job).
+    /// interface identifier, an identification seed, and the neighbour
+    /// cache's hash key (all drawn by the caller — the RFC 7217 identifier,
+    /// the CSPRNG seed, and the per-boot hash key are the service layer's
+    /// job).
     #[must_use]
-    pub fn new(facts: DeviceFacts, interface_id: [u8; 8], ipv4_ident_seed: u16) -> Self {
+    pub fn new(
+        facts: DeviceFacts,
+        interface_id: [u8; 8],
+        ipv4_ident_seed: u16,
+        neighbor_key: HashSeed,
+    ) -> Self {
         Self {
             facts,
             iface: IfaceConfig::new(interface_id),
             neighbor: NeighborConfig::default(),
             neighbor_capacity: 64,
+            neighbor_key,
             reassembly: ReassemblyConfig::default(),
             router_capacity: 4,
             pmtu_capacity: 32,
@@ -771,7 +784,11 @@ impl Stack {
             hop_limit: crate::ipv6::DEFAULT_HOP_LIMIT,
             iface: Iface::new(&config.iface, temp_source, now),
             ipv4_enabled: config.ipv4_enabled,
-            neighbors: NeighborTable::new(config.neighbor_capacity, config.neighbor),
+            neighbors: NeighborTable::new(
+                config.neighbor_capacity,
+                config.neighbor,
+                config.neighbor_key,
+            ),
             routes_v4: RoutingTable::new(),
             routes_v6: RoutingTable::new(),
             routers: DefaultRouterList::new(config.router_capacity),
@@ -1189,7 +1206,7 @@ impl Stack {
         match arp.operation {
             OP_REQUEST if arp.target_protocol == our_v4 => {
                 self.neighbors
-                    .learn(IpAddr::V4(arp.sender_protocol), arp.sender_hardware, now);
+                    .learn(IpAddr::V4(arp.sender_protocol), arp.sender_hardware);
                 let mut buf = [0u8; crate::arp::ARP_PACKET_LEN];
                 if arp.reply_from(self.mac).write(&mut buf).is_some() {
                     self.push_frame(out, arp.sender_hardware, ETHERTYPE_ARP, &buf);
@@ -1804,12 +1821,7 @@ impl Stack {
                     }
                     return;
                 }
-                crate::nd::apply_neighbor_solicitation(
-                    message,
-                    header.source,
-                    &mut self.neighbors,
-                    now,
-                );
+                crate::nd::apply_neighbor_solicitation(message, header.source, &mut self.neighbors);
                 if self.iface.is_assigned(*target) {
                     self.send_neighbor_advertisement(out, *target, header.source, true, now);
                 }
@@ -1853,7 +1865,7 @@ impl Stack {
                         self.redirect_routes += 1;
                     }
                 }
-                apply_redirect(message, &mut self.neighbors, now);
+                apply_redirect(message, &mut self.neighbors);
             }
         }
     }
@@ -1887,7 +1899,7 @@ impl Stack {
             return;
         }
         if let Some(ll) = source_ll {
-            self.neighbors.learn(IpAddr::V6(header.source), *ll, now);
+            self.neighbors.learn(IpAddr::V6(header.source), *ll);
         }
         self.routers.update(header.source, *router_lifetime, now);
         if *cur_hop_limit != 0 {

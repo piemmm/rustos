@@ -35,7 +35,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
 
 fn stack(mac: MacAddress, iid: [u8; 8]) -> Stack {
     Stack::new(
-        &StackConfig::new(facts(mac), iid, 0x1234),
+        &StackConfig::new(facts(mac), iid, 0x1234, STACK_HASH_KEY),
         temp_source(),
         t(0),
     )
@@ -707,7 +707,12 @@ fn construction_refuses_bad_device_facts() {
     let mut bad = facts(MAC_A);
     bad.mtu = 0;
     assert_eq!(
-        Stack::new(&StackConfig::new(bad, IID_A, 0), temp_source(), t(0)).err(),
+        Stack::new(
+            &StackConfig::new(bad, IID_A, 0, STACK_HASH_KEY),
+            temp_source(),
+            t(0)
+        )
+        .err(),
         Some(StackError::BadDeviceFacts)
     );
 }
@@ -1597,7 +1602,12 @@ fn corrupt_udp_checksum_is_dropped() {
 fn stack_with_rx_csum(mac: MacAddress, iid: [u8; 8]) -> Stack {
     let mut f = facts(mac);
     f.offloads = tairix_abi::driver::net::NetOffloads::RX_CSUM_VALIDATED;
-    Stack::new(&StackConfig::new(f, iid, 0x1234), temp_source(), t(0)).expect("valid facts")
+    Stack::new(
+        &StackConfig::new(f, iid, 0x1234, STACK_HASH_KEY),
+        temp_source(),
+        t(0),
+    )
+    .expect("valid facts")
 }
 
 /// A UDP/IPv4 datagram from `V4_B` to `V4_A` (Ethernet destination
@@ -2046,6 +2056,11 @@ fn ipv6_multicast_datagram_source_fragments_when_oversize() {
 use crate::tcp::conn::{State, Tcb, TcpConfig};
 use crate::tcp::TcpSegment;
 
+/// A fixed key for the stack's neighbour-cache index, so a run's table layout
+/// is reproducible.
+const STACK_HASH_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x5354_4143_4B00_0001, 0x5354_4143_4B00_0002);
+
 const A_PORT: u16 = 40000;
 const B_PORT: u16 = 80;
 
@@ -2393,7 +2408,7 @@ fn tcp_v4_tx_checksum_offload_matches_the_software_path() {
     let mut off_facts = facts(MAC_A);
     off_facts.offloads = tairix_abi::driver::net::NetOffloads::TX_CSUM_TCP;
     let mut off = Stack::new(
-        &StackConfig::new(off_facts, IID_A, 0x1234),
+        &StackConfig::new(off_facts, IID_A, 0x1234, STACK_HASH_KEY),
         temp_source(),
         t(0),
     )
@@ -2484,7 +2499,7 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
     )
     .expect("defined bits");
     let mut off = Stack::new(
-        &StackConfig::new(facts_off, IID_A, 0x4321),
+        &StackConfig::new(facts_off, IID_A, 0x4321, STACK_HASH_KEY),
         temp_source(),
         t(0),
     )
@@ -2609,7 +2624,7 @@ fn tcp_v4_tx_segmentation_offload_matches_the_software_path() {
 
 #[test]
 fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
-    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234, STACK_HASH_KEY);
     config.iface.ipv6_enabled = false;
     let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     assert!(a.iface().ipv6_addresses().is_empty());
@@ -2627,7 +2642,7 @@ fn ipv6_disabled_stack_forms_no_link_local_and_ignores_ra() {
 
 #[test]
 fn re_enabling_ipv6_on_a_stack_brings_the_link_local_up() {
-    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234, STACK_HASH_KEY);
     config.iface.ipv6_enabled = false;
     let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     a.set_ipv6_enabled(true, t(0));
@@ -2660,7 +2675,7 @@ fn disabling_ipv6_at_runtime_flushes_addresses_and_clears_routes() {
 
 #[test]
 fn ipv4_disabled_stack_refuses_assignment() {
-    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234);
+    let mut config = StackConfig::new(facts(MAC_A), IID_A, 0x1234, STACK_HASH_KEY);
     config.ipv4_enabled = false;
     let mut a = Stack::new(&config, temp_source(), t(0)).expect("valid facts");
     assert_eq!(

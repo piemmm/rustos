@@ -300,23 +300,25 @@ pub struct Netstack {
     /// swapped.
     datagram_ports: Vec<u16>,
     datagram_ports_scratch: Vec<u16>,
-    /// The key a bond's transmit flow hash is taken under. Injected like the
-    /// randomness factories above, because a remote peer chooses the tuple
-    /// being hashed and must not be able to predict which member it selects.
-    flow_key: HashSeed,
+    /// The key every hash this service takes over input a remote peer chooses
+    /// is drawn under: a bond's transmit flow hash, and each interface's
+    /// neighbour-cache index. Injected like the randomness factories above,
+    /// because a peer that could predict either would choose which bond
+    /// member it lands on, or a set of addresses that all crowd one bucket.
+    peer_hash_key: HashSeed,
 }
 
 impl Netstack {
     /// An empty table with the injected randomness factories (the service
     /// layer owns entropy): `temp_factory` for RFC 8981 temporary
     /// addresses (`net.ipv6.privacy`), `dhcp_rng_factory` for the RFC
-    /// 2131 DHCPv4 client (`<iface>.ipv4.method = dhcp`), and `flow_key`
-    /// for a bond's transmit flow hash.
+    /// 2131 DHCPv4 client (`<iface>.ipv4.method = dhcp`), and `peer_hash_key`
+    /// for every hash taken over input a remote peer chooses.
     #[must_use]
     pub fn new(
         temp_factory: TempAddrFactory,
         dhcp_rng_factory: DhcpRngFactory,
-        flow_key: HashSeed,
+        peer_hash_key: HashSeed,
     ) -> Self {
         Self {
             interfaces: Vec::new(),
@@ -328,7 +330,7 @@ impl Netstack {
             mcast_scratch: Vec::new(),
             datagram_ports: Vec::new(),
             datagram_ports_scratch: Vec::new(),
-            flow_key,
+            peer_hash_key,
         }
     }
 
@@ -380,7 +382,7 @@ impl Netstack {
         // A new interface adopts the current stack-wide family policy at
         // construction: a disabled family forms no address (no link-local
         // for v6) and the engine answers nothing for it.
-        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
+        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed, self.peer_hash_key);
         config.ipv4_enabled = self.settings.ipv4_enabled;
         config.iface.ipv6_enabled = self.settings.ipv6_enabled;
         config.iface.privacy = self.settings.ipv6_privacy;
@@ -797,10 +799,10 @@ impl Netstack {
         let Self {
             interfaces,
             out,
-            flow_key,
+            peer_hash_key,
             ..
         } = self;
-        let flow_key = *flow_key;
+        let peer_hash_key = *peer_hash_key;
         for iface in interfaces.iter_mut() {
             match iface
                 .stack
@@ -812,7 +814,7 @@ impl Netstack {
                     // (so the caller routes it onto a real channel); a plain
                     // interface tags by its own alias. A bond with no
                     // eligible member drops the frames (fail closed).
-                    let flow = flow_of(flow_key, dest, source_port, destination_port);
+                    let flow = flow_of(peer_hash_key, dest, source_port, destination_port);
                     if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
                         batches.push((tag, frames));
                         if !multicast {
@@ -863,10 +865,10 @@ impl Netstack {
         let Self {
             interfaces,
             out,
-            flow_key,
+            peer_hash_key,
             ..
         } = self;
-        let flow_key = *flow_key;
+        let peer_hash_key = *peer_hash_key;
         for iface in interfaces.iter_mut() {
             match iface
                 .stack
@@ -874,7 +876,7 @@ impl Netstack {
             {
                 Ok(()) => {
                     let frames = core::mem::take(&mut out.frames);
-                    let flow = flow_of(flow_key, dest, identifier, sequence);
+                    let flow = flow_of(peer_hash_key, dest, identifier, sequence);
                     if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
                         return Ok(alloc::vec![(tag, frames)]);
                     }
@@ -1294,7 +1296,7 @@ impl Netstack {
             mcast_scratch,
             datagram_ports: _,
             datagram_ports_scratch: _,
-            flow_key: _,
+            peer_hash_key: _,
         } = self;
         let iface = &mut interfaces[index];
         let mut events = Vec::new();
@@ -1554,7 +1556,7 @@ impl Netstack {
         let interface_id = eui64_interface_id(*facts.mac.as_octets());
         let octets = *facts.mac.as_octets();
         let ipv4_ident_seed = u16::from_le_bytes([octets[4], octets[5]]);
-        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed);
+        let mut config = StackConfig::new(facts, interface_id, ipv4_ident_seed, self.peer_hash_key);
         config.ipv4_enabled = self.settings.ipv4_enabled;
         config.iface.ipv6_enabled = self.settings.ipv6_enabled;
         config.iface.privacy = self.settings.ipv6_privacy;

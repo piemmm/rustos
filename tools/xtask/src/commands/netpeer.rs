@@ -47,6 +47,11 @@ use tairix_net::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMet
 use tairix_net::udp::{self, PROTOCOL_UDP};
 use tairix_test_netstack_wire as wire;
 
+/// A fixed key for the stack's neighbour-cache index, so a run's table layout
+/// is reproducible.
+const STACK_HASH_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x5354_4143_4B00_0001, 0x5354_4143_4B00_0002);
+
 /// A fixed temporary-address source for the harness peer stacks: they
 /// do not exercise RFC 8981 privacy addresses, so the engine never
 /// consults it.
@@ -426,7 +431,7 @@ fn run_bond_peer(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -583,7 +588,7 @@ fn run_v6_campaign(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -697,7 +702,7 @@ fn run_dhcp_peer(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -821,7 +826,7 @@ fn run_dhcp_time_peer(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -1316,7 +1321,7 @@ fn run_dhcp6_peer(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -1941,7 +1946,7 @@ fn run_ping_responder(
         Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
     };
     let mut stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now(start),
     )
@@ -2341,7 +2346,7 @@ fn peer_stack(start: Instant) -> Result<(Stack, core::net::Ipv6Addr), String> {
     let now0 =
         Duration64::from_nanos(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX));
     let stack = Stack::new(
-        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED),
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
         Box::new(FixedTempSource),
         now0,
     )

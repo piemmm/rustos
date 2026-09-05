@@ -330,9 +330,22 @@ mod program {
         // The cache is sized from the machine's own RAM, never a hand-picked
         // ceiling: a reading the System Information service cannot supply is
         // zero, which admits nothing and leaves every glyph rasterised on
-        // demand — slower, never wrong.
-        let total_ram = tairix_procinfo::memory_total_bytes(&IpcTransport).unwrap_or(0);
-        let cache = tairix_fontd::glyph_cache(total_ram, tairix_rt::pressure::gauge(), &LOG_SINK);
+        // demand — slower, never wrong. A platform that could not seed its
+        // CSPRNG yields the same zero: every client on the machine chooses the
+        // characters this index is keyed by, so an unkeyed one is a table any
+        // of them could crowd, and retaining nothing is the fail-closed
+        // answer.
+        let key = tairix_rt::hash_seed();
+        let total_ram = match key {
+            Some(_) => tairix_procinfo::memory_total_bytes(&IpcTransport).unwrap_or(0),
+            None => 0,
+        };
+        let cache = tairix_fontd::glyph_cache(
+            total_ram,
+            tairix_rt::pressure::gauge(),
+            &LOG_SINK,
+            key.unwrap_or(tairix_hash::HashSeed::UNKEYED),
+        );
         // From here on the registry may hold this process's glyph-cache row,
         // so every return path — startup failure or the serve loop's own
         // fail-loud exit — must withdraw it; a dropped guard does that once,

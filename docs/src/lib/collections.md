@@ -25,7 +25,39 @@ a later tier.
 |---|---|---|
 | `HashMap<K, V, S>` | expected O(1) lookup, insert, and remove; one control byte and one `(K, V)` slot per bucket, no per-entry node | a `BTreeMap` used where the key order was never wanted |
 | `HashSet<T, S>` | the same, over a zero-sized value | a `BTreeSet` used as an unordered set |
+| `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry | a cache's `(tick -> key)` `BTreeMap` eviction index, O(log n) on all three |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
+
+## `LruMap`
+
+A cache holds what fits and drops what has gone coldest, and both halves of
+that must be constant time or the cache costs more than the misses it saves.
+`LruMap` is one open-addressed index over a node arena, with the recency order
+and the free list threaded through that arena as two
+[`IntrusiveList`](./inline.md)s:
+
+* the index bucket holds the *node handle*, not a copy of the key, so a key is
+  stored once however many structures reach it;
+* each node carries the hash it was filed under, so eviction reaches its bucket
+  without hashing a key and a table rebuild moves entries without hashing any;
+* an evicted node returns to the free list and the next insertion reuses it, so
+  a map at its steady occupancy returns to the allocator not at all;
+* `clear` releases both allocations rather than keeping the capacity, because
+  the callers that drain a whole map are caches a memory-pressure band is
+  reclaiming and holding their peak footprint afterwards is the memory the
+  drain was for.
+
+It evicts nothing on its own. A caller bounds it by its own budget — entries,
+bytes, or a pressure band — and calls `pop_lru` until the bound is met, which
+is what lets one map serve a fixed-entry index and a byte-budgeted cache alike.
+`get`/`get_mut` are uses and refresh an entry; `peek`/`peek_mut` and
+`iter_lru` are observations and do not, so a diagnostic read never changes what
+eviction takes next.
+
+Every link it splices names a node from its own arena, so a refused splice
+means something outside the map corrupted its bookkeeping. Such a refusal is
+fail-closed — nothing found, nothing inserted — and a debug assertion, since no
+input reaches it.
 
 ## The rules every container obeys
 
@@ -130,6 +162,9 @@ maximum load factor:
 |---|---|---|
 | Control-group scans per hit | ≤ 1.5 | 1.12 with 7 168 live entries; 1.00 below the limit |
 | Bytes per live entry | ≤ 1.15 × (entry + control byte) | 19.43 for a 16-byte entry, against a 19.55 budget — exactly 8/7 |
+| `LruMap` scans per hit | ≤ 1.5 | 1.00 at 3 584 live entries, the table's load limit |
+| `LruMap` bytes per live entry | ≤ 8/7 × (handle + control byte) + one node | 58.29 for a 16-byte entry, met exactly |
+| `LruMap` allocations per touch, insert-over-a-freed-node, and eviction | 0 | 0, held across 4 096 rounds of churn and at 16, 1 024, and 16 384 entries |
 
 Against the `BTreeMap` these replace, over page-aligned `u64` keys of the shape
 the DMA-window index uses:
@@ -169,7 +204,9 @@ has written back, so the unswept tail leaks where a double drop would be
 unsound.
 
 `tests/fuzz_collections.rs` drives the map against a plain association list
-over deliberately colliding key streams, `tests/fuzz_sequences.rs` drives the
+over deliberately colliding key streams and the recency map against a naive
+`(membership, order)` list — the same membership, the same victim on every
+eviction, and an arena that stops growing once the churn's bound is reached — `tests/fuzz_sequences.rs` drives the
 sequence tier against naive models over arbitrary lengths and text — the
 lengths are attacker-influenced by design, since a boot audit line carries
 caller-controlled text into an `ArrayString` and a console ring takes whatever

@@ -42,6 +42,7 @@ tairix-proglib = { path = "../../../lib/proglib", version = "=0.0.0" }
 # process pressure gauge, so it builds the window manager's cursor cache and
 # the taskbar's glyph cache from the one classified, budgeted, band-governed
 # desktop policy and hands each crate its ready-made cache.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # The one structured-logging surface: the caches audit a
 # classification refusal or a detected ledger defect through it.

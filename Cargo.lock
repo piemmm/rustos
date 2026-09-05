@@ -947,6 +947,7 @@ dependencies = [
  "tairix-fsmeta",
  "tairix-geometry",
  "tairix-greeter",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-keymap",
@@ -1159,12 +1160,14 @@ name = "tairix-drv-fs-arxfs"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-compress",
  "tairix-crc32c",
  "tairix-crypto",
  "tairix-fsmeta",
  "tairix-fsprobe",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
  "zeroize",
@@ -1541,6 +1544,7 @@ dependencies = [
  "tairix-abi",
  "tairix-crc32c",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-log",
  "tairix-procinfo",
  "tairix-raster",
@@ -1558,6 +1562,7 @@ dependencies = [
  "tairix-caps",
  "tairix-font",
  "tairix-fontface",
+ "tairix-hash",
  "tairix-log",
  "tairix-procinfo",
  "tairix-reclaim",
@@ -1759,6 +1764,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-font",
+ "tairix-hash",
  "tairix-log",
  "tairix-path",
  "tairix-raster",
@@ -2254,6 +2260,7 @@ name = "tairix-net"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-fuzzseed",
  "tairix-hash",
 ]
@@ -2436,6 +2443,8 @@ name = "tairix-reclaim"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
+ "tairix-hash",
  "tairix-log",
 ]
 
@@ -2730,6 +2739,7 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-icon",
  "tairix-input",
  "tairix-log",
@@ -5789,6 +5799,7 @@ dependencies = [
  "tairix-display",
  "tairix-font",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-icon",
  "tairix-input",
  "tairix-log",

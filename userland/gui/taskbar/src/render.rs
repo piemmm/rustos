@@ -64,6 +64,7 @@ use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
+use tairix_hash::BuildFastHash;
 use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
@@ -108,7 +109,9 @@ pub fn icon_cache(
     fb_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<IconKind, Surface, IconEpoch> {
+) -> ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash> {
+    // Keyed by an icon kind this bar itself chose, so the fast unkeyed hash
+    // is correct and is named here.
     disposable_ui_cache(
         "taskbar.icon",
         seat,
@@ -116,6 +119,7 @@ pub fn icon_cache(
         ENTRY_METADATA_BYTES,
         pressure,
         sink,
+        BuildFastHash::new(),
     )
 }
 
@@ -125,7 +129,7 @@ pub fn icon_cache(
 /// the cached glyphs). Bundled so the painters take one parameter rather than
 /// three.
 struct IconContext<'a> {
-    cache: &'a mut ReclaimCache<IconKind, Surface, IconEpoch>,
+    cache: &'a mut ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash>,
     set: &'a IconSet,
     generation: u64,
 }
@@ -150,7 +154,7 @@ struct IconContext<'a> {
 /// ledger would double-count its bytes.
 #[derive(Debug)]
 pub struct TaskbarRenderer {
-    icons: ReclaimCache<IconKind, Surface, IconEpoch>,
+    icons: ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash>,
     icon_set: IconSet,
     icon_generation: u64,
 }
@@ -166,7 +170,7 @@ impl TaskbarRenderer {
     /// size, the owning seat, and the process's live pressure gauge — this
     /// renderer never invents that policy itself.
     #[must_use]
-    pub const fn new(cache: ReclaimCache<IconKind, Surface, IconEpoch>) -> Self {
+    pub const fn new(cache: ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash>) -> Self {
         Self {
             icons: cache,
             icon_set: IconSet::builtin(),

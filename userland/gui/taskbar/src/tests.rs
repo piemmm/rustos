@@ -27,6 +27,7 @@ use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory,
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, TextRole, Theme, ThemeId};
 
+use tairix_hash::BuildFastHash;
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{CacheBudget, PressureBand, ReclaimCache, ReportedPressure};
 
@@ -64,7 +65,7 @@ static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
 /// A glyph cache at normal pressure, built through the real desktop
 /// policy so the tests exercise the shipping budget derivation.
-fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
+fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     icon_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }

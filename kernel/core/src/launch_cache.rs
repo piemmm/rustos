@@ -57,12 +57,13 @@
 //! process legitimately holds the same image, and the bytes are the
 //! world-readable store's own contents.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_appload::LoadedApp;
+use tairix_collections::LruMap;
+use tairix_hash::BuildSipHash13;
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
@@ -72,8 +73,8 @@ use tairix_reclaim::{
 
 use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
 
-/// Approximate per-entry bookkeeping cost (map nodes, the LRU index
-/// slot, the fixed entry fields, the `Arc` control block) charged on
+/// Approximate per-entry bookkeeping cost (the index bucket, the recency
+/// node, the key copy's own allocation, the `Arc` control block) charged on
 /// top of an entry's payload so the ledger tracks real heap footprint.
 const ENTRY_OVERHEAD: usize = 128;
 
@@ -86,13 +87,6 @@ const MAX_BUNDLE_KEY: usize = 256;
 
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "launch";
-
-/// One cached verification result: the accepted [`LoadedApp`] and the
-/// recency tick of its last use.
-struct Entry {
-    app: Arc<LoadedApp>,
-    tick: u64,
-}
 
 /// The reclaimable semantic launch cache the app store installs once
 /// the `/System` mount is published. See the module docs.
@@ -116,17 +110,13 @@ pub struct LaunchCache {
     /// The classified admission policy; `None` when classification
     /// refused, which poisons the cache from birth.
     policy: Option<CachePolicy>,
-    /// The cache admits nothing further (a classification refusal or a
-    /// detected ledger defect): every lookup misses and every launch
-    /// runs the full load gate (fail closed).
+    /// The cache admits nothing further (a classification refusal, an
+    /// unkeyable index, or a detected ledger defect): every lookup misses and
+    /// every launch runs the full load gate (fail closed).
     poisoned: bool,
-    /// Monotonic recency counter; every touch assigns a fresh tick, so
-    /// ticks are unique and the LRU index is keyed by them.
-    tick: u64,
-    /// Retained verification results, keyed by the bundle root path.
-    entries: BTreeMap<String, Entry>,
-    /// LRU index: tick (oldest first) to entry key.
-    lru: BTreeMap<u64, String>,
+    /// Retained verification results, keyed by the bundle root path, with the
+    /// recency order eviction takes maintained alongside them.
+    entries: LruMap<String, Arc<LoadedApp>, BuildSipHash13>,
 }
 
 impl LaunchCache {
@@ -160,6 +150,24 @@ impl LaunchCache {
                 None
             }
         };
+        // The keys are caller-chosen bundle paths, so the index is keyed under
+        // the per-boot hash key. A boot that never got one starts the cache
+        // poisoned rather than filing them under a predictable one: every
+        // launch then runs the full load gate, which is the slower answer and
+        // never the wrong one.
+        let Ok(hasher) = BuildSipHash13::keyed() else {
+            log_cache_poisoned(sink, CACHE_LABEL, Some(owner), "unkeyed_index");
+            return Self {
+                budget,
+                control: &CACHE_CONTROL,
+                pressure,
+                sink,
+                accounting: Arc::new(CacheAccounting::new()),
+                poisoned: true,
+                policy,
+                entries: LruMap::with_hasher(BuildSipHash13::UNKEYED),
+            };
+        };
         Self {
             budget,
             control: &CACHE_CONTROL,
@@ -168,9 +176,7 @@ impl LaunchCache {
             accounting: Arc::new(CacheAccounting::new()),
             poisoned: policy.is_none(),
             policy,
-            tick: 0,
-            entries: BTreeMap::new(),
-            lru: BTreeMap::new(),
+            entries: LruMap::with_hasher(hasher),
         }
     }
 
@@ -217,12 +223,6 @@ impl LaunchCache {
         ))
     }
 
-    /// The next unique recency tick.
-    fn next_tick(&mut self) -> u64 {
-        self.tick += 1;
-        self.tick
-    }
-
     /// The accounted `(payload, metadata)` byte cost of caching `app`
     /// under `key`: the validated image, the owned manifest strings,
     /// and the resolved-library references as payload; the key copy,
@@ -251,14 +251,20 @@ impl LaunchCache {
         (payload, metadata)
     }
 
-    /// Remove the entry under `key`, dropping its LRU slot and
-    /// discharging its cost. `false` when no such entry exists.
+    /// Remove the entry under `key`, discharging its cost. `false` when no
+    /// such entry exists.
     fn remove_key(&mut self, key: &str) -> bool {
-        let Some(entry) = self.entries.remove(key) else {
+        let Some(app) = self.entries.remove(key) else {
             return false;
         };
-        self.lru.remove(&entry.tick);
-        let (payload, metadata) = Self::cost_of(key, &entry.app);
+        self.discharge(key, &app);
+        true
+    }
+
+    /// Discharge exactly what an entry was charged, poisoning the cache if the
+    /// ledger will not balance.
+    fn discharge(&mut self, key: &str, app: &Arc<LoadedApp>) {
+        let (payload, metadata) = Self::cost_of(key, app);
         if self
             .accounting
             .discharge(ReclaimClass::SemanticAppCache, payload, metadata)
@@ -266,7 +272,6 @@ impl LaunchCache {
         {
             self.poison("ledger_imbalance");
         }
-        true
     }
 
     /// Drop every entry and admit nothing further: the fail-closed
@@ -291,7 +296,6 @@ impl LaunchCache {
         self.accounting
             .record_teardown(ReclaimClass::SemanticAppCache);
         self.entries.clear();
-        self.lru.clear();
         self.accounting.zero_ledger();
     }
 
@@ -299,17 +303,17 @@ impl LaunchCache {
     /// most `target`.
     fn evict_until(&mut self, target: usize) {
         while self.accounting.total_bytes() > target {
-            let Some((_, key)) = self.lru.first_key_value() else {
-                return;
-            };
-            let key = key.clone();
-            if !self.remove_key(&key) {
-                // An index slot with no backing entry is a ledger
+            let Some((key, app)) = self.entries.pop_lru() else {
+                // Bytes charged with nothing left to release is a ledger
                 // defect; fail closed rather than loop.
                 self.poison("orphan_index_slot");
                 return;
-            }
+            };
+            self.discharge(&key, &app);
             self.accounting.record_eviction();
+            if self.poisoned {
+                return;
+            }
         }
     }
 
@@ -350,18 +354,12 @@ impl LaunchCache {
             return None;
         }
         self.enforce_pressure();
-        if !self.entries.contains_key(bundle) {
+        let Some(app) = self.entries.get(bundle).map(Arc::clone) else {
             self.accounting.record_miss(ReclaimClass::SemanticAppCache);
             return None;
-        }
-        let tick = self.next_tick();
-        if let Some(entry) = self.entries.get_mut(bundle) {
-            self.lru.remove(&entry.tick);
-            self.lru.insert(tick, String::from(bundle));
-            entry.tick = tick;
-        }
+        };
         self.accounting.record_hit(ReclaimClass::SemanticAppCache);
-        self.entries.get(bundle).map(|entry| Arc::clone(&entry.app))
+        Some(app)
     }
 
     /// Record `app` as the verified result for `bundle`.
@@ -422,6 +420,13 @@ impl LaunchCache {
             return;
         }
         key.push_str(bundle);
+        // Room for the entry before the ledger is touched, so a refusal
+        // discharges nothing it never charged.
+        if self.entries.try_reserve(1).is_err() {
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
+            return;
+        }
         if self
             .accounting
             .charge(ReclaimClass::SemanticAppCache, payload, metadata)
@@ -431,15 +436,11 @@ impl LaunchCache {
                 .record_refusal(ReclaimClass::SemanticAppCache);
             return;
         }
-        let tick = self.next_tick();
-        self.lru.insert(tick, key.clone());
-        self.entries.insert(
-            key,
-            Entry {
-                app: Arc::clone(app),
-                tick,
-            },
-        );
+        if self.entries.try_insert(key, Arc::clone(app)).is_err() {
+            debug_assert!(false, "a reservation left room for the entry");
+            self.accounting
+                .record_refusal(ReclaimClass::SemanticAppCache);
+        }
     }
 
     /// Whether `bundle` is currently resident, without disturbing the
@@ -466,7 +467,10 @@ impl LaunchCache {
     /// visibility only; never an authority or serving path.
     #[must_use]
     pub fn resident(&self) -> Vec<&str> {
-        self.lru.values().map(String::as_str).collect()
+        self.entries
+            .iter_lru()
+            .map(|(key, _)| key.as_str())
+            .collect()
     }
 }
 

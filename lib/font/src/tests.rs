@@ -1,5 +1,12 @@
 //! Unit tests: atlas integrity, Unicode lookup, and the glyph blitter.
 
+use tairix_hash::{BuildSipHash13, HashSeed};
+
+/// A fixed hash key, so a run's cache layout is reproducible.
+const TEST_HASHER: BuildSipHash13 = BuildSipHash13::with_seed(HashSeed::from_words(
+    0x4642_4E54_5445_5354,
+    0x4642_4E54_5445_5355,
+));
 use crate::atlas;
 use crate::glyph::{lookup, lookup_or_fallback, Glyph};
 
@@ -546,6 +553,7 @@ mod render {
             glyph_cache_budget(1 << 30),
             gauge,
             &SINK,
+            super::TEST_HASHER,
         ));
 
         let mut miss = surface();

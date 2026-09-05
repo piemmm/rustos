@@ -53,6 +53,7 @@ use tairix_abi::font_ipc::{
 use tairix_abi::Errno;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, CachedGlyph};
 use tairix_fontface::{lineart, AxisSetting, CellGeometry, Face};
+use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::Sink;
 use tairix_reclaim::{PressureGauge, ReclaimCache, ReclaimOwner};
 use tairix_vt::char_width;
@@ -68,7 +69,7 @@ use crate::embolden::{embolden, stroke_subpixels, SUBPIXEL};
 /// faces differ — so the same glyph can rasterise to two different bitmaps;
 /// keying by the resolved face alone would risk serving one family's raster
 /// to the other.
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GlyphKey {
     /// The requesting family, which drives the shared geometry a run renders
     /// at.
@@ -103,7 +104,7 @@ pub struct GlyphKey {
 /// time. Entries leave by eviction, by memory pressure, or with the service
 /// itself — the owner-teardown invalidation the shared classification
 /// declares.
-pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, ()>;
+pub type GlyphCache = ReclaimCache<GlyphKey, CachedGlyph, (), BuildSipHash13>;
 
 /// The audit label the service's cache is named by in reclaim records.
 const CACHE_LABEL: &str = "fontd.glyphs";
@@ -111,6 +112,12 @@ const CACHE_LABEL: &str = "fontd.glyphs";
 /// The owner the service's cache charges its bytes to: this service process,
 /// named directly, since a userland service has no numeric task id to quote.
 const CACHE_OWNER: &str = "fontd";
+
+/// A fixed key for the crate's own tests, so a run's cache layout is
+/// reproducible.
+#[cfg(test)]
+pub(crate) const TEST_HASH_KEY: HashSeed =
+    HashSeed::from_words(0x464F_4E54_4400_0001, 0x464F_4E54_4400_0002);
 
 /// Build the service's glyph cache, budgeted from the machine's total usable
 /// physical RAM.
@@ -122,11 +129,18 @@ const CACHE_OWNER: &str = "fontd";
 /// budget, which admits nothing: every glyph is then rasterised on demand,
 /// correct and merely slower, never a hand-picked ceiling standing in for a
 /// figure the machine did not supply.
+///
+/// `key` is this service's hash key. Every client on the machine chooses the
+/// characters, sizes, and weights this index is keyed by, so an unpredictable
+/// key is what stops one of them crowding a bucket and slowing every other
+/// client's glyphs; a service that could draw none is given a zero budget by
+/// its caller and retains nothing instead.
 #[must_use]
 pub fn glyph_cache(
     total_ram_bytes: u64,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
+    key: HashSeed,
 ) -> GlyphCache {
     let cache = ReclaimCache::new(
         CACHE_LABEL,
@@ -134,6 +148,7 @@ pub fn glyph_cache(
         glyph_cache_budget(total_ram_bytes),
         pressure,
         sink,
+        BuildSipHash13::with_seed(key),
     );
     // This is the one cache every GUI client's own glyph-atlas cache is
     // ultimately backed by, so it is the most important row the desktop's

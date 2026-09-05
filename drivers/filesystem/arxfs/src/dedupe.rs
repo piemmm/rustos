@@ -20,7 +20,11 @@
 //! * the **dedupe index** ([`DedupeIndex`], rebuildable, never authoritative):
 //!   an in-memory `(domain, length, logical hash) -> chunk` map consulted for
 //!   bounded foreground discovery on write and warmed by the writes
-//!   themselves. Because *missing a duplicate is acceptable*, the index is a
+//!   themselves. Its keys carry a hash of the writer's own bytes, so they are
+//!   attacker-influenced and the index is keyed under the per-boot hash key;
+//!   a boot with no key indexes nothing rather than filing them under a
+//!   predictable one, which costs only sharing. Because *missing a duplicate
+//!   is acceptable*, the index is a
 //!   **bounded cache**, not an unbounded map: its resident RAM is capped at
 //!   [`DEDUPE_INDEX_BUDGET_BYTES`], split into a [`DEDUPE_HOT_BUDGET_BYTES`]
 //!   "frequently used" tier (candidates promoted on a dedupe hit) and a
@@ -36,8 +40,10 @@
 //! domain is carried in every chunk record and index key so the rule holds
 //! once multiple domains exist.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+
+use tairix_collections::LruMap;
+use tairix_hash::BuildSipHash13;
 
 use crate::btree::TreeSpec;
 use crate::header::ReservedOwner;
@@ -231,14 +237,14 @@ pub(crate) const DEDUPE_GENERAL_BUDGET_BYTES: usize =
     DEDUPE_INDEX_BUDGET_BYTES - DEDUPE_HOT_BUDGET_BYTES;
 
 /// Conservative resident-RAM estimate for one cached candidate, in bytes,
-/// across both backing maps of an [`LruTier`]. The `by_key` map stores a
-/// [`DedupeKey`] (44) + [`DedupeCandidate`] (24 with alignment padding) + a
-/// `u64` recency stamp (8) = 76 bytes; the `by_recency` map stores the stamp
-/// (8) + the key (44) = 52 bytes; 128 bytes of payload in total. The figure is
-/// doubled to bound `BTreeMap` node bookkeeping and partial node fill, a
-/// deliberate over-estimate so the entry caps below keep the index strictly
-/// within its byte budget rather than merely near it.
-const ENTRY_FOOTPRINT_BYTES: usize = 256;
+/// inside an [`LruTier`]. One index bucket holds a node handle (8) and a
+/// control byte, which the table's 8/7 load factor makes 11; one arena node
+/// holds the [`DedupeKey`] and [`DedupeCandidate`] behind a discriminant
+/// (80 with alignment padding), the hash they were filed under (8), and the
+/// recency links (16) — 104. The 24 bytes of headroom above the resulting 115
+/// keep the caps below strictly within the byte budget rather than merely
+/// near it, with no side table and no partial node fill to allow for.
+const ENTRY_FOOTPRINT_BYTES: usize = 128;
 
 /// Maximum candidates held in the hot tier (derived from its byte budget).
 const HOT_CAP: usize = DEDUPE_HOT_BUDGET_BYTES / ENTRY_FOOTPRINT_BYTES;
@@ -258,76 +264,57 @@ const _: () = {
 };
 
 /// A fixed-capacity least-recently-used map from [`DedupeKey`] to
-/// [`DedupeCandidate`]. Recency is a monotonic stamp; `by_recency` mirrors
-/// `by_key` ordered by that stamp so the least-recently-used entry is
-/// `by_recency`'s first key — eviction and refresh are both `O(log n)` with no
-/// linear scan.
+/// [`DedupeCandidate`]: the shared recency map bounded by an entry count, so
+/// a lookup, a refresh, and an eviction are each one hash probe and a splice.
 struct LruTier {
     cap: usize,
-    next_stamp: u64,
-    by_key: BTreeMap<DedupeKey, (DedupeCandidate, u64)>,
-    by_recency: BTreeMap<u64, DedupeKey>,
+    entries: LruMap<DedupeKey, DedupeCandidate, BuildSipHash13>,
 }
 
 impl LruTier {
-    fn new(cap: usize) -> Self {
+    fn new(cap: usize, hasher: BuildSipHash13) -> Self {
         Self {
             cap,
-            next_stamp: 0,
-            by_key: BTreeMap::new(),
-            by_recency: BTreeMap::new(),
+            entries: LruMap::with_hasher(hasher),
         }
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.by_key.len()
+        self.entries.len()
     }
 
     fn contains(&self, key: &DedupeKey) -> bool {
-        self.by_key.contains_key(key)
+        self.entries.contains_key(key)
     }
 
     /// Stamp the entry under `key` (if any) as most-recently-used and return
     /// its candidate.
     fn touch(&mut self, key: &DedupeKey) -> Option<DedupeCandidate> {
-        let (cand, old) = *self.by_key.get(key)?;
-        self.by_recency.remove(&old);
-        let stamp = self.next_stamp;
-        self.next_stamp += 1;
-        self.by_recency.insert(stamp, *key);
-        self.by_key.insert(*key, (cand, stamp));
-        Some(cand)
+        self.entries.get(key).copied()
     }
 
     fn remove(&mut self, key: &DedupeKey) -> Option<DedupeCandidate> {
-        let (cand, stamp) = self.by_key.remove(key)?;
-        self.by_recency.remove(&stamp);
-        Some(cand)
+        self.entries.remove(key)
     }
 
     /// Insert or update `key` as most-recently-used, evicting and returning the
     /// least-recently-used `(key, candidate)` when that pushes the tier over
-    /// its capacity. A zero capacity holds nothing and evicts immediately.
+    /// its capacity. A zero capacity holds nothing and hands the candidate
+    /// straight back, as does an allocator that refuses it — missing a
+    /// duplicate is acceptable, so neither is an error.
     fn insert(
         &mut self,
         key: DedupeKey,
         cand: DedupeCandidate,
     ) -> Option<(DedupeKey, DedupeCandidate)> {
-        if let Some((_, old)) = self.by_key.get(&key).copied() {
-            self.by_recency.remove(&old);
+        if self.cap == 0 || self.entries.try_insert(key, cand).is_err() {
+            return Some((key, cand));
         }
-        let stamp = self.next_stamp;
-        self.next_stamp += 1;
-        self.by_key.insert(key, (cand, stamp));
-        self.by_recency.insert(stamp, key);
-        if self.by_key.len() <= self.cap {
+        if self.entries.len() <= self.cap {
             return None;
         }
-        let (&victim_stamp, &victim_key) = self.by_recency.iter().next()?;
-        self.by_recency.remove(&victim_stamp);
-        let (victim_cand, _) = self.by_key.remove(&victim_key)?;
-        Some((victim_key, victim_cand))
+        self.entries.pop_lru()
     }
 }
 
@@ -344,10 +331,21 @@ pub(crate) struct DedupeIndex {
 
 impl DedupeIndex {
     /// A new, empty index sized to the configured hot and general budgets.
+    ///
+    /// A boot with no per-boot hash key holds nothing: the keys carry a hash
+    /// of the writer's own bytes, so filing them under a predictable one would
+    /// let a writer grind a set that all crowd one bucket and turn every write
+    /// into a scan. Forgoing the sharing costs space, never correctness.
     pub(crate) fn new() -> Self {
-        Self {
-            hot: LruTier::new(HOT_CAP),
-            general: LruTier::new(GENERAL_CAP),
+        match BuildSipHash13::keyed() {
+            Ok(hasher) => Self {
+                hot: LruTier::new(HOT_CAP, hasher),
+                general: LruTier::new(GENERAL_CAP, hasher),
+            },
+            Err(_) => Self {
+                hot: LruTier::new(0, BuildSipHash13::UNKEYED),
+                general: LruTier::new(0, BuildSipHash13::UNKEYED),
+            },
         }
     }
 
@@ -355,9 +353,13 @@ impl DedupeIndex {
     /// exercise eviction without filling the production-sized budgets.
     #[cfg(test)]
     fn with_caps(hot_cap: usize, general_cap: usize) -> Self {
+        let hasher = BuildSipHash13::with_seed(tairix_hash::HashSeed::from_words(
+            0x4445_4455_5045_0001,
+            0x4445_4455_5045_0002,
+        ));
         Self {
-            hot: LruTier::new(hot_cap),
-            general: LruTier::new(general_cap),
+            hot: LruTier::new(hot_cap, hasher),
+            general: LruTier::new(general_cap, hasher),
         }
     }
 

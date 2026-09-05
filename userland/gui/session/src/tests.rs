@@ -25,6 +25,7 @@ use tairix_controls::damage::Repaint;
 use tairix_controls::{ChainModel, Fact, FactList, PointerState};
 use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
+use tairix_hash::BuildFastHash;
 use tairix_icon::{
     artwork_cache, icon_artwork_path, ArtworkCache, ArtworkDesk, ArtworkResolver,
     IconArtworkSource, IconKind, IconSet, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
@@ -144,7 +145,7 @@ static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
 /// A glyph cache at normal pressure for a renderer used on its own,
 /// outside a whole shell.
-fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
+fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     icon_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
@@ -152,14 +153,16 @@ fn test_icon_cache() -> ReclaimCache<IconKind, Surface, IconEpoch> {
 /// The window-furniture cache every compositor under test is built with,
 /// at normal pressure and through the shipping desktop policy — the
 /// compositor takes it as an argument exactly as the session hands it one.
-pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
+pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>
+{
     NORMAL_PRESSURE.report(PressureBand::Normal);
     chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
 /// The frosted-backdrop cache every compositor under test is built with, on
 /// the same terms as its furniture cache.
-pub(crate) fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch> {
+pub(crate) fn test_frost_cache(
+) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     frost_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }

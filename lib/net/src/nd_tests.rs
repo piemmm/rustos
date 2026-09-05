@@ -3,6 +3,10 @@
 use super::*;
 use crate::neigh::{NeighborConfig, NeighborState};
 use alloc::vec;
+use tairix_hash::HashSeed;
+
+/// A fixed hash key, so the table's layout is the same on every run.
+const TEST_KEY: HashSeed = HashSeed::from_words(0x4E44_5445_5354_0001, 0x4E44_5445_5354_0002);
 
 const MAC: MacAddress = MacAddress([0x02, 0xCA, 0xFE, 0xBA, 0xBE, 0x01]);
 const TARGET: Ipv6Addr = Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1);
@@ -280,26 +284,25 @@ fn unknown_options_are_skipped() {
 
 #[test]
 fn apply_solicitation_learns_sender_binding() {
-    let mut table = NeighborTable::new(4, NeighborConfig::default());
-    let now = Duration64::from_secs(1);
+    let mut table = NeighborTable::new(4, NeighborConfig::default(), TEST_KEY);
     let ns = NdMessage::NeighborSolicitation {
         target: TARGET,
         source_ll: Some(MAC),
     };
-    apply_neighbor_solicitation(&ns, PEER, &mut table, now);
+    apply_neighbor_solicitation(&ns, PEER, &mut table);
     assert_eq!(
         table.entry(IpAddr::V6(PEER)),
         Some((NeighborState::Stale, Some(MAC)))
     );
     // Duplicate address detection (unspecified source) creates nothing.
-    let mut fresh = NeighborTable::new(4, NeighborConfig::default());
-    apply_neighbor_solicitation(&ns, Ipv6Addr::UNSPECIFIED, &mut fresh, now);
+    let mut fresh = NeighborTable::new(4, NeighborConfig::default(), TEST_KEY);
+    apply_neighbor_solicitation(&ns, Ipv6Addr::UNSPECIFIED, &mut fresh);
     assert!(fresh.is_empty());
 }
 
 #[test]
 fn apply_advertisement_confirms_resolution() {
-    let mut table = NeighborTable::new(4, NeighborConfig::default());
+    let mut table = NeighborTable::new(4, NeighborConfig::default(), TEST_KEY);
     let now = Duration64::from_secs(1);
     // The host is resolving TARGET (an Incomplete entry exists).
     table.lookup(IpAddr::V6(TARGET), now);
@@ -317,21 +320,20 @@ fn apply_advertisement_confirms_resolution() {
     );
     // An unsolicited advertisement about an unknown address creates
     // nothing.
-    let mut fresh = NeighborTable::new(4, NeighborConfig::default());
+    let mut fresh = NeighborTable::new(4, NeighborConfig::default(), TEST_KEY);
     apply_neighbor_advertisement(&na, &mut fresh, now);
     assert!(fresh.is_empty());
 }
 
 #[test]
 fn apply_redirect_learns_new_first_hop() {
-    let mut table = NeighborTable::new(4, NeighborConfig::default());
-    let now = Duration64::from_secs(1);
+    let mut table = NeighborTable::new(4, NeighborConfig::default(), TEST_KEY);
     let redirect = NdMessage::Redirect {
         target: TARGET,
         destination: PEER,
         target_ll: Some(MAC),
     };
-    apply_redirect(&redirect, &mut table, now);
+    apply_redirect(&redirect, &mut table);
     assert_eq!(
         table.entry(IpAddr::V6(TARGET)),
         Some((NeighborState::Stale, Some(MAC)))

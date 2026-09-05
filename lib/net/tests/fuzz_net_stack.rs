@@ -21,6 +21,11 @@ use tairix_net::iface::{TempAddrSource, MAX_IPV6_ADDRS};
 use tairix_net::stack::{Stack, StackConfig, StackOutput};
 use tairix_net::{IpAddr, Ipv4Addr};
 
+/// A fixed key for the stack's neighbour-cache index, so a run's table layout
+/// is reproducible.
+const STACK_HASH_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x5354_4143_4B00_0001, 0x5354_4143_4B00_0002);
+
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 5_000;
 
@@ -76,7 +81,7 @@ fn fresh_stack() -> Stack {
         max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
         multicast_filter: McastFilter::Unfiltered,
     };
-    let mut config = StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242);
+    let mut config = StackConfig::new(facts, [0, 0, 0, 0, 0, 0, 0, 0xA1], 0x4242, STACK_HASH_KEY);
     // Exercise the RFC 8981 privacy-address path against the hostile RAs
     // this harness crafts: temporary addresses must never breach the
     // address-table bound (invariant 2) no matter what the peer sends.

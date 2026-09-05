@@ -22,7 +22,8 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **done** |
 | C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf`, `SecretRing` | — | **done** |
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **done** |
-| C4 | Recency | `LruMap`, O(1) touch / insert / evict | C1, C3 | **planned** |
+| C4 | Recency | `LruMap`, O(1) touch / insert / evict, and the caches whose key order is not load-bearing | C1, C3 | **done** |
+| C4a | Ordered recency | the three caches whose key index answers range queries — `block_cache`, `transform_cache`, `fscache` — reach O(1) recency without losing them | C4, C7 | **planned** |
 | C5 | Intervals | `RangeMap`, `RangeSet` | — | **planned** |
 | C6 | Identity | `SlotMap`, `IdAllocator`, `BitVec` | — | **planned** |
 | C7 | Sparse index | `RadixTree` with tagged iteration | — | **planned** |
@@ -43,18 +44,10 @@ own.
 That is the defect this plan closes, and what remains of it is measurable
 today:
 
-* **Five independent LRU caches**, four of them with a byte-identical
-  `evict_until` loop over a `(tick -> key)` `BTreeMap` recency index:
-  `kernel/tairix-kernel/src/block_cache.rs`,
-  `kernel/tairix-kernel/src/transform_cache.rs`,
-  `kernel/core/src/launch_cache.rs`, `kernel/core/src/fs/fscache.rs`, and
-  `drivers/filesystem/arxfs/src/dedupe.rs`, with a sixth embedded inside
-  `lib/reclaim/src/cache.rs`. All are O(log n) where O(1) is standard.
-* **A sixth LRU that is O(n)** on a packet data path:
-  `lib/net/src/neigh.rs` resolves every transmit through
-  `entries.iter().position(|e| e.ip == ip)` and evicts by
-  `min_by_key(last_used)` — a linear scan of the neighbour table per
-  packet, on the path §26.4 says is fed by hostile remote clients.
+* **Three LRU caches still carrying the byte-identical `evict_until` loop
+  over a `(tick -> key)` `BTreeMap` recency index** — `block_cache`,
+  `transform_cache`, and `fscache`, the three whose key index also answers
+  range queries (C4a). All are O(log n) where O(1) is standard.
 * **Four hand-rolled address-range maps**, each a `BTreeMap<u64, len>` with
   its own overlap arithmetic: `kernel/mem/src/anon_window.rs`,
   `kernel/mem/src/mmio.rs`, `kernel/core/src/aspace.rs` (twice — file and
@@ -328,7 +321,7 @@ carries both.
 | `BitVec` | dynamic-length bitmap with summary levels: find-first-free in O(log n), not O(n/64) | ad-hoc `Vec<bool>` and `Vec<u64>` scans, including `kernel/mem/src/dma.rs`'s `slot_used` |
 | `RangeMap<K, V>` / `RangeSet<K>` | non-overlapping intervals; O(log n) lookup, insert, split, and coalesce | the four range maps listed at the top of this plan |
 | `RadixTree<V>` | sparse `u64`-keyed index, fixed-depth descent, gang lookup and **tagged iteration** (dirty / writeback) | `arxfs` page cache and write-cache dirty set, the block cache index |
-| `LruMap<K, V>` | **O(1)** touch, insert, and evict via an intrusive list plus a hash index | the six LRUs listed at the top of this plan |
+| `LruMap<K, V, S>` | **O(1)** touch, insert, and evict via an intrusive list plus a hash index | the LRUs at the top of this plan whose key order is not load-bearing; the three that answer range queries are C4a |
 
 `SlotMap`'s generation counter is a security property, not an ergonomic
 one: today a wrapped `next_id` silently aliases a live object with a dead
@@ -480,7 +473,8 @@ among them. C3's split (§1) removes the requirement at the root rather than
 satisfying it seventeen times: `lib/log` now depends on `lib/inline`, which
 links no allocator, so those binaries have no `alloc` in their graph at all |
 | C3 | **done.** The tier was **split into two crates** (§1): `lib/inline` for the containers that allocate nothing and `lib/collections` for the heap-backed ones, so `lib/log`, `lib/caps`, the boot console and three of the four architecture ports link no allocator. `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
-| C4 | all six LRUs: `block_cache`, `transform_cache`, `launch_cache`, `fscache`, `arxfs/dedupe`, and the index inside `lib/reclaim/src/cache.rs`; **and the O(n) `lib/net/src/neigh.rs` scan** |
+| C4 | **done.** `LruMap` is one open-addressed index over a node arena, with the recency order and the free list as two `IntrusiveList`s through the same arena: a key is stored once (the index holds the node handle, not a copy), the hash is stored beside the entry so eviction and a table rebuild hash nothing, and a steady-state map returns to the allocator not at all. It evicts nothing on its own — the caller's budget calls `pop_lru` — which is what lets one map serve a fixed-entry index and a byte-budgeted cache alike. Converted with it: **`lib/net/src/neigh.rs`**, whose `entries.iter().position(…)` cost a scan of the table *per transmitted packet* and whose eviction cost a second one, both now one probe and one splice, and whose index is keyed under the service's peer-input key because a remote peer chooses the addresses (the `Entry`'s own `ip` and `last_used` fields went with it, and `learn`'s unused `now` with them); **`drivers/filesystem/arxfs/src/dedupe.rs`**, whose two-tier `LruTier` was a `by_key`/`by_recency` `BTreeMap` pair, now one map per tier under the per-boot key — its keys carry a hash of the writer's own bytes, so a boot with no key indexes nothing rather than filing them under a predictable one; **`kernel/core/src/launch_cache.rs`**, whose `Entry` collapsed to the `Arc` it held; and **`lib/reclaim/src/cache.rs`**, the shared engine, which gains an `S` parameter so every consumer names its hasher in review — the desktop's window, cursor, and artwork caches the fast unkeyed one (identifiers the compositor assigned), the font glyph and measurement caches the keyed one (a caller chooses the characters and the text). A cache with no key takes a zero budget and retains nothing rather than an index a grinder could crowd. **What C4 did not convert, and why, is C4a:** `block_cache`, `transform_cache`, and `fscache` answer *range* queries against their key index — `invalidate_range(lba, blocks)`, `invalidate_run(phys, len)`, and `data.range((node, 0)..=(node, u64::MAX))` — so a hash index would turn each into a scan. Their recency order is the defect; their key order is load-bearing, exactly the per-site judgement C1 fixed |
+| C4a | the recency index and `evict_until` loop in `block_cache`, `transform_cache`, and `fscache`, without a hash index. The shape they need is the one `LruMap` already has — a node arena, a recency list, and a free list — under an *ordered* key index rather than a hash one, so the engine is extended rather than a second one written (§2.2). C7 is a dependency because it names the block-cache index as its own: settle whether that index becomes a `RadixTree` before deciding what the ordered variant must offer |
 | C5 | `kernel/mem/src/anon_window.rs`, `kernel/mem/src/mmio.rs`, both maps in `kernel/core/src/aspace.rs`, `drivers/filesystem/arxfs/src/runs.rs` |
 | C6 | the `next_id` counters in `sharedreg` and all three schedulers; `dma.rs`'s `slot_used`; flat bitmap scans |
 | C7 | `arxfs/pagecache.rs`, `arxfs/wcache.rs`'s dirty set, the block-cache index |

@@ -39,6 +39,9 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0", optional = true }
 # the `fontd` service both build from, so a glyph cache is declared once
 # rather than twice on opposite sides of the font-service endpoint.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0", optional = true }
+# The keyed hash the glyph and measurement caches file their entries under:
+# a caller chooses the characters and the text those keys are built from.
+tairix-hash = { path = "../hash", version = "=0.0.0", optional = true }
 # The System Information client helper the client cache reads the machine's
 # total RAM through, to derive its byte budget from the machine rather than a
 # hand-picked constant. Only the `rt` feature needs it (a host test never
@@ -77,7 +80,7 @@ render = [
 # The shared cached-glyph declaration (`glyph_cache`) alone, with none of
 # `render`'s drawing dependencies. `fontd` enables just this, since it
 # rasterises glyphs itself and never draws through this crate's blitter.
-glyph-cache = ["dep:tairix-reclaim"]
+glyph-cache = ["dep:tairix-reclaim", "dep:tairix-hash"]
 # The production, `ipc_call`-backed font-service transport. A program that
 # runs on the TAIRiX runtime enables this so `draw_text` reaches `fontd`
 # without any explicit setup; host tests leave it off and inject a mock. It

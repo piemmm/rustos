@@ -34,6 +34,11 @@ use tairix_net::addr::{IpAddr, Ipv4Addr};
 use tairix_net::iface::TempAddrSource;
 use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput};
 
+/// A fixed key for the stack's neighbour-cache index, so a run's table layout
+/// is reproducible.
+const STACK_HASH_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x5354_4143_4B00_0001, 0x5354_4143_4B00_0002);
+
 /// A fixed [`TempAddrSource`]: this test keeps privacy addresses off, so
 /// the engine never consults it; it exists only to satisfy the
 /// constructor without allocating on the measured data path.
@@ -106,7 +111,7 @@ fn facts(mac: MacAddress) -> DeviceFacts {
 }
 
 fn stack(mac: MacAddress, iid: u8, addr: Ipv4Addr) -> Stack {
-    let config = StackConfig::new(facts(mac), [0, 0, 0, 0, 0, 0, 0, iid], 1);
+    let config = StackConfig::new(facts(mac), [0, 0, 0, 0, 0, 0, 0, iid], 1, STACK_HASH_KEY);
     let mut s = Stack::new(&config, Box::new(FixedTempSource), Duration64::ZERO).expect("stack");
     s.set_ipv4_config(addr, 24, None).expect("addr");
     s

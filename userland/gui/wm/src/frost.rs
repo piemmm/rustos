@@ -50,6 +50,7 @@
 
 use core::mem::size_of;
 
+use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_reclaim::{screenful_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 
@@ -142,7 +143,7 @@ pub fn frost_cache(
     fb_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch> {
+) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
     screenful_ui_cache(
         "wm.frost",
         seat,
@@ -150,6 +151,9 @@ pub fn frost_cache(
         ENTRY_METADATA_BYTES,
         pressure,
         sink,
+        // Keyed by an identifier this compositor assigned itself, so the
+        // fast unkeyed hash is correct and is named here.
+        BuildFastHash::new(),
     )
 }
 

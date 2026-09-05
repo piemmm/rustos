@@ -42,6 +42,17 @@ use tairix_reclaim::{
     PressureBand, ReclaimOwner, ReportedPressure,
 };
 
+/// Stand in for the kernel's per-boot publication, so the volume's dedupe
+/// index is keyed here exactly as it is on a booted system. A second call is
+/// refused and ignored: the key is published once per process, as once per
+/// boot.
+fn publish_boot_hash_key() {
+    let _ = tairix_hash::publish(tairix_hash::HashSeed::from_words(
+        0x4152_5846_5300_0001,
+        0x4152_5846_5300_0002,
+    ));
+}
+
 /// One command the driver issued to the device, in issue order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Command {
@@ -310,6 +321,7 @@ fn volume(
 ) -> (ARXFS<LedgerBlock>, Rc<RefCell<Ledger>>) {
     let ledger = Rc::new(RefCell::new(Ledger::default()));
     let device = LedgerBlock::new(block_size, device_bytes / u64::from(block_size), &ledger);
+    publish_boot_hash_key();
     let fs = ARXFS::format(device, 64, &TEST_KEY, &mut TestEntropy(0x2f)).expect("format");
     let fs = match publish {
         Publish::PerOperation => fs,

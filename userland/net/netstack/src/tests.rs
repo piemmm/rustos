@@ -248,7 +248,7 @@ struct PeerNet {
 impl PeerNet {
     fn new(now: Duration64) -> Self {
         let mut stack = Stack::new(
-            &StackConfig::new(facts(MAC_B), IID_B, 0x4242),
+            &StackConfig::new(facts(MAC_B), IID_B, 0x4242, STACK_HASH_KEY),
             test_temp_source(),
             now,
         )
@@ -2453,6 +2453,11 @@ use tairix_net::checksum::Pseudo;
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::TcpSegment;
 
+/// A fixed key for the stack's neighbour-cache index, so a run's table layout
+/// is reproducible.
+const STACK_HASH_KEY: tairix_hash::HashSeed =
+    tairix_hash::HashSeed::from_words(0x5354_4143_4B00_0001, 0x5354_4143_4B00_0002);
+
 /// The client's async delivery port for stream events (the tests decode
 /// the delivered frames directly rather than doing IPC).
 const DELIVER_PORT: u64 = 0x9999;
@@ -2472,7 +2477,7 @@ struct PeerTcpNet {
 impl PeerTcpNet {
     fn new(now: Duration64) -> Self {
         let mut stack = Stack::new(
-            &StackConfig::new(facts(MAC_B), IID_B, 0x4242),
+            &StackConfig::new(facts(MAC_B), IID_B, 0x4242, STACK_HASH_KEY),
             test_temp_source(),
             now,
         )

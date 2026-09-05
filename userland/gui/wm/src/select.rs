@@ -67,6 +67,7 @@
 
 use tairix_controls::{FurniturePart, ResizeEdge};
 use tairix_cursor::{CursorImage, CursorRegistry, CursorSetId};
+use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
 use tairix_theme::CursorKind;
@@ -160,7 +161,7 @@ pub fn cursor_cache(
     fb_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
-) -> ReclaimCache<CursorKind, CursorImage, CursorEpoch> {
+) -> ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash> {
     disposable_ui_cache(
         "wm.cursor",
         seat,
@@ -168,6 +169,9 @@ pub fn cursor_cache(
         ENTRY_METADATA_BYTES,
         pressure,
         sink,
+        // Keyed by an identifier this compositor assigned itself, so the
+        // fast unkeyed hash is correct and is named here.
+        BuildFastHash::new(),
     )
 }
 
@@ -195,7 +199,7 @@ pub struct CursorController {
     registry: CursorRegistry,
     kind: CursorKind,
     shown: Option<CursorEpoch>,
-    cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch>,
+    cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash>,
 }
 
 impl CursorController {
@@ -209,7 +213,7 @@ impl CursorController {
     /// display backing size, the owning seat, and the process's live
     /// pressure gauge — this controller never invents that policy itself.
     #[must_use]
-    pub fn new(cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch>) -> Self {
+    pub fn new(cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash>) -> Self {
         Self::with_registry(CursorRegistry::with_builtin(), cache)
     }
 
@@ -218,7 +222,7 @@ impl CursorController {
     #[must_use]
     pub const fn with_registry(
         registry: CursorRegistry,
-        cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch>,
+        cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash>,
     ) -> Self {
         Self {
             registry,

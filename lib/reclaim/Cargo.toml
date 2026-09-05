@@ -9,6 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# The one bounded recency map every cache here is built on: a hit is a hash
+# probe and a splice, and eviction takes the cold end without a search.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# The two hashers a consumer names when it builds a cache: the fast unkeyed
+# one for keys this system assigns, the keyed one for anything a caller picks.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 # The one structured-logging surface. A classification refusal or a
 # detected ledger defect is a security-relevant decision, so it emits a
 # stable audit event rather than a bare failure — the same event contract

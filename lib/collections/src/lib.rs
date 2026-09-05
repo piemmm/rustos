@@ -17,6 +17,9 @@
 //! * [`HashMap`] / [`HashSet`] — expected constant-time unordered lookup, open
 //!   addressed over control-byte groups. What `BTreeMap` was standing in for
 //!   wherever a key order was never wanted.
+//! * [`LruMap`] — the same table with a recency order threaded through it, so
+//!   a cache finds and drops its coldest entry without a search. What every
+//!   hand-rolled `(tick -> key)` eviction index was standing in for.
 //! * [`SmallVec`] — inline while it is small, spilling to the heap beyond
 //!   that, for the paths that carry a handful of elements and pay an
 //!   allocation for it.
@@ -51,11 +54,13 @@ extern crate alloc;
 use core::fmt;
 
 pub mod group;
+pub mod lru;
 pub mod map;
 mod raw;
 pub mod set;
 pub mod smallvec;
 
+pub use lru::LruMap;
 pub use map::HashMap;
 pub use set::HashSet;
 pub use smallvec::SmallVec;

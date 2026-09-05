@@ -232,7 +232,12 @@ mod tests {
         static SINK: DiscardSink = DiscardSink;
         static GAUGE: ReportedPressure = ReportedPressure::unknown();
         GAUGE.report(PressureBand::Normal);
-        glyph_cache(ROOMY_MACHINE_BYTES, &GAUGE, &SINK)
+        glyph_cache(
+            ROOMY_MACHINE_BYTES,
+            &GAUGE,
+            &SINK,
+            crate::service::TEST_HASH_KEY,
+        )
     }
 
     /// The committed `mono` face, small enough to embed directly in a test.

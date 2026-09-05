@@ -15,6 +15,7 @@ use crate::surface::Surface;
 use crate::{Compositor, WindowId};
 
 use tairix_cursor::CursorImage;
+use tairix_hash::BuildFastHash;
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{CachedBytes, PressureBand, ReclaimCache, ReportedPressure};
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
@@ -5097,20 +5098,20 @@ static TEST_SINK: SilentSink = SilentSink;
 static NORMAL_PRESSURE: ReportedPressure = ReportedPressure::unknown();
 
 /// A cursor cache at normal pressure, sized from a 1080p output.
-fn test_cursor_cache() -> ReclaimCache<CursorKind, CursorImage, CursorEpoch> {
+fn test_cursor_cache() -> ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     cursor_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
 /// A window-furniture cache at normal pressure, sized from a 1080p output.
-fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch> {
+fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }
 
 /// The frosted-backdrop cache the shipping desktop policy builds, at normal
 /// pressure and sized from a 1080p output.
-fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch> {
+fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     frost_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
 }

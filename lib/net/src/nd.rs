@@ -395,7 +395,6 @@ pub fn apply_neighbor_solicitation(
     message: &NdMessage,
     source: Ipv6Addr,
     table: &mut NeighborTable,
-    now: Duration64,
 ) {
     if let NdMessage::NeighborSolicitation {
         source_ll: Some(mac),
@@ -403,7 +402,7 @@ pub fn apply_neighbor_solicitation(
     } = message
     {
         if !source.is_unspecified() {
-            table.learn(IpAddr::V6(source), *mac, now);
+            table.learn(IpAddr::V6(source), *mac);
         }
     }
 }
@@ -437,14 +436,14 @@ pub fn apply_neighbor_advertisement(
 /// address, it is learned like a solicitation's source binding. The
 /// route change itself is the caller's decision (its destination
 /// cache), made only for redirects from the current first-hop router.
-pub fn apply_redirect(message: &NdMessage, table: &mut NeighborTable, now: Duration64) {
+pub fn apply_redirect(message: &NdMessage, table: &mut NeighborTable) {
     if let NdMessage::Redirect {
         target,
         target_ll: Some(mac),
         ..
     } = message
     {
-        table.learn(IpAddr::V6(*target), *mac, now);
+        table.learn(IpAddr::V6(*target), *mac);
     }
 }
 

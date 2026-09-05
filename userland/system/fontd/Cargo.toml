@@ -37,6 +37,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The shared first-party TrueType reader + scanline rasteriser — the *one*
 # engine the atlas generator and this service share. Only
 # this service ever parses a face at runtime.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 tairix-fontface = { path = "../../../lib/fontface", version = "=0.0.0" }
 # structured audit log: startup, skipped-family, and bind decisions are
 # recorded through a `tairix_log::Sink`.
