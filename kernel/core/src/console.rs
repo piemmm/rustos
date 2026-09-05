@@ -30,8 +30,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_abi::{Errno, InputMode, TerminalSize};
-use tairix_collections::SecretRing;
 use tairix_fbcon::Surface;
+use tairix_inline::SecretRing;
 use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;

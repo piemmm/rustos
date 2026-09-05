@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use tairix_hash::{BuildFastHash, BuildSipHash13, HashSeed};
 
 use crate::group::GROUP_LEN;
-use crate::test_support::Counted;
 use crate::{HashMap, HashSet, TryReserveError};
+use tairix_fuzzseed::Counted;
 
 /// A keyed builder for tests, so the maps under test hash the way a
 /// production map over untrusted keys does without touching the global

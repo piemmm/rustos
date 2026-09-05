@@ -1,4 +1,4 @@
-//! Deterministic fuzz harness for the hash containers.
+//! Deterministic fuzz harness for the heap-backed containers.
 //!
 //! The keys a TAIRiX hash table sees are attacker-influenced by design — a
 //! filename off a foreign volume, a DNS name, a 5-tuple — so this drives a map
@@ -10,7 +10,8 @@
 //! 1. The map agrees with the naive reference after every single operation.
 //! 2. Nothing panics, whatever the operation order or key stream.
 //! 3. A tombstone never hides a live entry.
-//! 4. Every value is dropped exactly once, including the ones a rebuild moved.
+//! 4. Every value is dropped exactly once, including the ones a rebuild moved,
+//!    and every `SmallVec` element exactly once across its spill.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -19,9 +20,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use tairix_collections::HashMap;
+use tairix_collections::{HashMap, SmallVec};
 use tairix_fuzzseed::Lcg;
 use tairix_hash::{BuildSipHash13, HashSeed};
+
+/// Inline bound the `SmallVec` under test is built at, so the stream crosses
+/// its spill repeatedly rather than settling on one storage.
+const INLINE: usize = 8;
 
 /// Rounds run per sweep of the loop below. Miri interprets every operation, so
 /// it drives a handful of rounds: it is hunting undefined behaviour in the
@@ -138,10 +143,41 @@ fn run_round(rng: &mut Lcg, seed: HashSeed) {
     assert_eq!(live.get(), 0, "every value must be dropped exactly once");
 }
 
+/// Drive a `SmallVec` across its spill against a `Vec` model.
+fn sweep_smallvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
+    let mut vec: SmallVec<Tracked, INLINE> = SmallVec::new();
+    let mut model: Vec<u64> = Vec::new();
+    let mut spilled = false;
+    for key in 0..u64::from(OPS_PER_ROUND) {
+        match prng.next_u64() % 5 {
+            0..=2 => {
+                vec.try_push(Tracked::new(key, live))
+                    .expect("the host heap");
+                model.push(key);
+            }
+            3 => assert_eq!(vec.pop().map(|t| t.key), model.pop()),
+            _ => {
+                let index = usize::try_from(prng.next_u64() % 20).expect("small");
+                let taken = vec.remove(index).map(|t| t.key);
+                let expect = (index < model.len()).then(|| model.remove(index));
+                assert_eq!(taken, expect);
+            }
+        }
+        assert_eq!(vec.len(), model.len(), "length diverged");
+        assert!(
+            vec.iter().map(|t| t.key).eq(model.iter().copied()),
+            "contents diverged"
+        );
+        assert_eq!(vec.spilled(), model.len() > INLINE || spilled);
+        // Once spilled the vector stays spilled, whatever it shrinks back to.
+        spilled |= vec.spilled();
+    }
+}
+
 #[test]
-fn hash_containers_agree_with_a_naive_reference() {
+fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Lcg::new(tairix_fuzzseed::start(
-        "hash_containers_agree_with_a_naive_reference",
+        "heap_backed_containers_agree_with_their_models",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -151,6 +187,10 @@ fn hash_containers_agree_with_a_naive_reference() {
             // only one exercised.
             let key = HashSeed::from_words(rng.next_u64(), rng.next_u64());
             run_round(&mut rng, key);
+
+            let live = Rc::new(Cell::new(0i64));
+            sweep_smallvec(&mut rng, &live);
+            assert_eq!(live.get(), 0, "a `SmallVec` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

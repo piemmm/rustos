@@ -60,7 +60,7 @@
 //! no input can make a read panic.
 
 use tairix_abi::Duration64;
-use tairix_collections::{ArrayString, RingBuf};
+use tairix_inline::{ArrayString, RingBuf};
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_sync::irq::{InterruptControl, NopInterruptControl};
 use tairix_sync::IrqSafeSpinLock;

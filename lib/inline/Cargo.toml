@@ -1,0 +1,27 @@
+[package]
+name = "tairix-inline"
+description = "TAIRiX allocation-free no_std containers whose storage lives inline in what the caller already owns: the fixed-capacity vector and UTF-8 string, the circular queue and its scrubbing variant, the index-addressed intrusive list, and the fixed 256-bit set. Linking this crate never requires a global allocator, so the pre-heap layer can use it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Deliberately no dependencies at all — not even `alloc`. That is the whole
+# point of the crate: a consumer that runs before a heap exists (an
+# architecture port at CPU reset, the boot console, the audit ring) can link it
+# without acquiring an allocator requirement it cannot satisfy.
+[dependencies]
+
+[dev-dependencies]
+# Shared host test-support: the drop counter every container here is held to
+# one-drop-per-element with, and the per-run seed/budget seam the fuzz
+# harnesses draw from. Test scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+
+[lib]
+path = "src/lib.rs"

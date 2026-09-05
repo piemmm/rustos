@@ -11,7 +11,7 @@
 //!   [`AllocError::InvariantViolation`].
 //!
 //! - **Buddy free lists.** For every order `0..=MAX_ORDER` we keep a
-//!   [`tairix_collections::IntrusiveList`] of free blocks of exactly that
+//!   [`tairix_inline::IntrusiveList`] of free blocks of exactly that
 //!   order, threaded through a per-frame `links` array indexed by starting
 //!   frame. Splits push two half-blocks to `order - 1`; merges pop a buddy
 //!   at `order` and push the parent at `order + 1`. The bitmap is consulted
@@ -51,7 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use tairix_collections::intrusive::{IntrusiveList, Link};
+use tairix_inline::intrusive::{IntrusiveList, Link};
 use tairix_reclaim::RESERVE_DIVISOR;
 use tairix_sync::SpinLock;
 
@@ -542,7 +542,7 @@ impl FrameAllocator {
         // A frame slot can never reach the indices the link encoding
         // reserves: `total_frames` is a byte count shifted down by
         // `PAGE_SHIFT`, so the largest slot is far below
-        // `tairix_collections::intrusive::MAX_INDEX`, and the link array is
+        // `tairix_inline::intrusive::MAX_INDEX`, and the link array is
         // shorter still.
 
         // 2. Detect overlaps by sorting by start and scanning.

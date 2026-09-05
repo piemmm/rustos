@@ -38,7 +38,11 @@ pub struct Target {
 pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-collections",
-        description: "the open-addressed hash table's control array and iterators, and the sequence tier's inline slot arrays",
+        description: "the open-addressed hash table's control array and iterators",
+    },
+    Target {
+        package: "tairix-inline",
+        description: "the allocation-free tier's inline slot arrays, and the volatile scrub a secret ring leaves behind",
     },
     Target {
         package: "tairix-hash",

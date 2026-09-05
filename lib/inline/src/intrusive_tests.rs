@@ -3,10 +3,10 @@
 
 extern crate std;
 
-use alloc::vec;
-use alloc::vec::Vec;
 use core::cell::Cell;
 use core::mem::size_of;
+use std::vec;
+use std::vec::Vec;
 
 use super::{IntrusiveList, Link, LinkError, LinkStore, MAX_INDEX, NONE, OFF_LIST};
 
@@ -573,7 +573,7 @@ fn a_long_list_stays_consistent_through_churn() {
 
 #[test]
 fn the_error_text_names_the_refusal() {
-    use alloc::format;
+    use std::format;
 
     assert_eq!(
         format!("{}", LinkError::AlreadyLinked),

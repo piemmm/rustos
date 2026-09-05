@@ -957,7 +957,7 @@ mod tests {
         CapabilityId, Errno, LimitKind, Origin, ProcId, ResourceLimit, SchedPriority, TrustDomain,
         ORIGIN_WIRE_LEN,
     };
-    use tairix_collections::ArrayVec;
+    use tairix_inline::ArrayVec;
     use tairix_log::{Event, EventId, Level, Sink};
 
     /// The capabilities a test caller's attested origin should summarise.

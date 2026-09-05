@@ -29,6 +29,10 @@ tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 # page-aligned addresses).
 tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
+# The intrusive list the buddy allocator's per-order free lists are, from the
+# crate that links no allocator — the frame allocator must not depend on the
+# heap it is the growth source for.
+tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
 
 # The Arch HAL surface — the one kernel crate `kernel/mem` may name.
 # The slab allocator's software use-after-free tag check

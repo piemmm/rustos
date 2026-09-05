@@ -5,8 +5,10 @@ extern crate std;
 
 use core::mem::size_of;
 
-use crate::test_support::Counted;
-use crate::{ArrayVec, SmallVec, TryReserveError};
+use tairix_fuzzseed::Counted;
+use tairix_inline::ArrayVec;
+
+use crate::{SmallVec, TryReserveError};
 
 #[test]
 fn an_empty_vector_is_inline_and_reads_back_nothing() {

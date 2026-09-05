@@ -26,9 +26,9 @@
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use tairix_collections::intrusive::MAX_INDEX;
-use tairix_collections::{IntrusiveList, Link, LinkError};
 use tairix_fuzzseed::Lcg;
+use tairix_inline::intrusive::MAX_INDEX;
+use tairix_inline::{IntrusiveList, Link, LinkError};
 
 /// Rounds run per sweep. Miri interprets every operation, so it drives a
 /// handful: the list itself holds no `unsafe`, and what the oracle watches

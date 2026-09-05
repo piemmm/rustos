@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
-tairix-collections = { path = "../collections", version = "=0.0.0" }
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 
 [dev-dependencies]

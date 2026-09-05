@@ -5,8 +5,8 @@ extern crate std;
 
 use core::mem::size_of;
 
-use crate::test_support::Counted;
 use crate::{ArrayVec, CapacityError};
+use tairix_fuzzseed::Counted;
 
 #[test]
 fn an_empty_vector_reads_back_nothing() {

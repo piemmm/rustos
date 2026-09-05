@@ -77,6 +77,7 @@ members = [
     "lib/i2c",
     "lib/icon",
     "lib/image",
+    "lib/inline",
     "lib/input",
     "lib/keymap",
     "lib/log",
@@ -276,7 +277,6 @@ members = [
     # build-glue crate that emits their `freestanding`/`itest_*` cfgs, keeping
     # target selection out of test source.
     "tests/integration/harness",
-    "tests/integration/itest_heap",
     "tests/integration/finisher",
     "tests/integration/memory_isolation",
     "tests/integration/accessed_bit_qemu_x86_64",

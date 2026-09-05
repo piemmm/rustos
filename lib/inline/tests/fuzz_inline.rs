@@ -1,4 +1,4 @@
-//! Deterministic fuzz harness for the sequence containers.
+//! Deterministic fuzz harness for the allocation-free containers.
 //!
 //! The lengths and text these see are attacker-influenced by design: a boot
 //! audit line carries caller-controlled text into an `ArrayString`, a console's
@@ -10,8 +10,8 @@
 //! 2. Nothing panics, whatever the operation order, length, or text.
 //! 3. An `ArrayString` never stores a partial character, however the text was
 //!    cut, so reading it back as UTF-8 can never fail.
-//! 4. Every element is dropped exactly once — a bulk push, a wrapped drain, an
-//!    eviction, and a spill included.
+//! 4. Every element is dropped exactly once — a bulk push, a wrapped drain and
+//!    an eviction included.
 //! 5. A `SecretRing` leaves nothing but the blank in a slot it has vacated.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
@@ -22,8 +22,8 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use tairix_collections::{ArrayString, ArrayVec, RingBuf, SecretRing, SmallVec};
 use tairix_fuzzseed::Lcg;
+use tairix_inline::{ArrayString, ArrayVec, RingBuf, SecretRing};
 
 /// Rounds run per sweep. Miri interprets every operation, so it drives a
 /// handful: it is hunting undefined behaviour in the containers' unsafe cores,
@@ -101,37 +101,6 @@ fn sweep_arrayvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
             vec.iter().map(|t| t.tag).eq(model.iter().copied()),
             "contents diverged"
         );
-    }
-}
-
-/// Drive a `SmallVec` across its spill against a `Vec` model.
-fn sweep_smallvec(prng: &mut Lcg, live: &Rc<Cell<i64>>) {
-    let mut vec: SmallVec<Tracked, INLINE> = SmallVec::new();
-    let mut model: Vec<u64> = Vec::new();
-    let mut spilled = false;
-    for tag in 0..u64::from(OPS_PER_ROUND) {
-        match prng.next_u64() % 5 {
-            0..=2 => {
-                vec.try_push(Tracked::new(tag, live))
-                    .expect("the host heap");
-                model.push(tag);
-            }
-            3 => assert_eq!(vec.pop().map(|t| t.tag), model.pop()),
-            _ => {
-                let index = usize::try_from(prng.next_u64() % 20).expect("small");
-                let taken = vec.remove(index).map(|t| t.tag);
-                let expect = (index < model.len()).then(|| model.remove(index));
-                assert_eq!(taken, expect);
-            }
-        }
-        assert_eq!(vec.len(), model.len(), "length diverged");
-        assert!(
-            vec.iter().map(|t| t.tag).eq(model.iter().copied()),
-            "contents diverged"
-        );
-        assert_eq!(vec.spilled(), model.len() > INLINE || spilled);
-        // Once spilled the vector stays spilled, whatever it shrinks back to.
-        spilled |= vec.spilled();
     }
 }
 
@@ -286,9 +255,9 @@ fn sweep_secret_ring(prng: &mut Lcg) {
 }
 
 #[test]
-fn sequence_containers_match_their_models_and_never_panic() {
+fn inline_containers_match_their_models_and_never_panic() {
     let mut prng = Lcg::new(tairix_fuzzseed::start(
-        "sequence_containers_match_their_models_and_never_panic",
+        "inline_containers_match_their_models_and_never_panic",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
@@ -297,8 +266,6 @@ fn sequence_containers_match_their_models_and_never_panic() {
             let live = Rc::new(Cell::new(0i64));
             sweep_arrayvec(&mut prng, &live);
             assert_eq!(live.get(), 0, "an `ArrayVec` leaked or double-dropped");
-            sweep_smallvec(&mut prng, &live);
-            assert_eq!(live.get(), 0, "a `SmallVec` leaked or double-dropped");
             sweep_ringbuf(&mut prng, &live);
             assert_eq!(live.get(), 0, "a `RingBuf` leaked or double-dropped");
             sweep_arraystring(&mut prng);

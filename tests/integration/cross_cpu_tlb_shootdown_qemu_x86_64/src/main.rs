@@ -56,12 +56,6 @@
 // range first.
 #![cfg_attr(itest_x86_64, allow(clippy::cast_possible_truncation))]
 
-// Links the shared vertical heap for its `#[global_allocator]`: this binary's
-// graph reaches `alloc` through the architecture port's logging, so it must
-// name one even though nothing on the test path allocates.
-#[cfg(itest_x86_64)]
-use tairix_itest_heap as _;
-
 #[cfg(itest_x86_64)]
 mod kernel {
     use core::fmt::Write as _;

@@ -55,4 +55,4 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 [dev-dependencies]
 # The shared fixed-capacity vector the test audit sink records into, so the
 # fixture needs no allocator and no hand-rolled container.
-tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }

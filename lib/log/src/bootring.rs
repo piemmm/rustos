@@ -37,7 +37,7 @@
 use core::mem::size_of;
 
 use tairix_abi::{Duration64, Errno};
-use tairix_collections::RingBuf;
+use tairix_inline::RingBuf;
 
 /// Bytes of the frame header holding the body length.
 const BODY_LEN_FIELD: usize = size_of::<u32>();

@@ -583,8 +583,9 @@ tairix/
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.
 │   ├── cmdres/          # Shared command-word resolution policy.
-│   ├── collections/     # no_std collections not in core/alloc: the hash,
-│   │                    #   sequence, indexed, ordered, and concurrent tiers.
+│   ├── collections/     # Heap-backed no_std containers not in core/alloc: the
+│   │                    #   hash, indexed, ordered, and concurrent tiers. The
+│   │                    #   allocation-free ones are `lib/inline`.
 │   ├── complete/        # Shared filename-completion engine.
 │   ├── compress/        # First-party LZ codec.
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
@@ -619,6 +620,9 @@ tairix/
 │   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
 │   │                    #   and the shipped raster masters in `assets/`.
 │   ├── image/           # Fail-closed raster-image decoding (PNG).
+│   ├── inline/          # Allocation-free containers (bounded vector/string,
+│   │                    #   rings, intrusive list, fixed bitset). Links no
+│   │                    #   allocator, so the pre-heap layer can use it.
 │   ├── input/           # Shared pointer input-event vocabulary.
 │   ├── kalloc/          # Freeing kernel heap allocator.
 │   ├── keymap/          # Shared terminal key map.
@@ -1517,7 +1521,7 @@ You are not exempt from any rule above. In addition:
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The `vim` app | `plans/VIM.md` |
-    | Shared containers and hashing: the hash/sequence/indexed/ordered/concurrent tiers in `lib/collections`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
+    | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |
     | Open core-kernel defect tracking | `plans/OPEN-DEFECTS.md` |
 

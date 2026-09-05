@@ -64,12 +64,6 @@
 #![cfg_attr(itest_aarch64, no_main)]
 #![deny(missing_docs)]
 
-// Links the shared vertical heap for its `#[global_allocator]`: this binary's
-// graph reaches `alloc` through the architecture port's logging, so it must
-// name one even though nothing on the test path allocates.
-#[cfg(itest_aarch64)]
-use tairix_itest_heap as _;
-
 // Test affordances must never reach a release binary.
 // `test-hooks` is on by default for this crate; a release build that
 // re-enables it is a configuration error, so we fail the build outright,

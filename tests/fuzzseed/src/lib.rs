@@ -38,6 +38,8 @@
 //! security seed, so it must not route through `lib/crypto` / `lib/rng`
 //! (the charter governs the kernel CSPRNG, not host test tooling).
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -331,6 +333,31 @@ pub mod prop {
                 break;
             }
         }
+    }
+}
+
+/// A value that records its own drop, so a container can be held to exactly
+/// one drop per element it ever took — across growth, overwrite, removal,
+/// retention, and an abandoned owning iterator.
+pub struct Counted(Rc<Cell<usize>>);
+
+impl Counted {
+    /// A fresh drop counter, at zero.
+    #[must_use]
+    pub fn counter() -> Rc<Cell<usize>> {
+        Rc::new(Cell::new(0))
+    }
+
+    /// A value reporting its drop to `counter`.
+    #[must_use]
+    pub fn new(counter: &Rc<Cell<usize>>) -> Self {
+        Self(Rc::clone(counter))
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
     }
 }
 

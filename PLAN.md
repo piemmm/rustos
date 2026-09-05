@@ -84,7 +84,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
   errors, capability IDs. Versioned (`abi-v1`).
 - `lib/caps`: `Capability`, `CapabilitySet`, delegation/revocation primitives,
   serializable token format (signed by the local authority key).
-- `lib/collections`: only collections actually required by stages 2–6.
+- `lib/collections` / `lib/inline`: only the containers actually required by
+  stages 2–6, split so the pre-heap layer links no allocator.
 - `lib/crypto`: thin, audited wrappers around vetted upstream crates
   (e.g. `ring`, `rustcrypto`). No hand-rolled primitives.
 - `lib/log`: structured, level-filtered, no-alloc-on-hot-path logging with
@@ -107,8 +108,8 @@ Do **not** begin a stage before all its listed dependencies are complete.
 
 **Status: complete.**
 - All `lib/*` crates implemented `no_std` (`abi`, `caps`, `collections`,
-  `crypto`, `log`, `rng`, `util`), rustdoc + unit tests per §7; coverage
-  clears §7 thresholds.
+  `crypto`, `inline`, `log`, `rng`, `util`), rustdoc + unit tests per §7;
+  coverage clears §7 thresholds.
 - `lib/abi` ships the `abi-v1` types + a fuzz harness. `abi-v1` is **not
   frozen yet** (no release); "frozen" elsewhere means the per-type stability
   discipline (a shipped wire layout is not widened in place), not a released
@@ -2268,7 +2269,7 @@ order (one fully-gated increment each):
                  foundational primitive other code builds on: the `lib/sync`
                  locks (`SpinLock`/`IrqSafeSpinLock`, the fair FIFO `McsLock`,
                  the writer-preference `RwLock`, `SeqLock`), `OnceCell`/`Once`,
-                 `lib/collections::BitSet256`, `lib/caps` (`CapabilitySet`
+                 `lib/inline::BitSet256`, `lib/caps` (`CapabilitySet`
                  delegation + `CapToken`), `kernel/ipc` (`PortRegistry` +
                  `call`/`port`/`notify` over the P-6 wake/drain), and the
                  allocators (`lib/kalloc`'s slab + segregated-fit tiers, `lib/rt`
@@ -8680,8 +8681,10 @@ load-bearing scan §27 names.
 
 **Shape.** `lib/hash` (keyed SipHash-1-3 as the default hasher, XXH64 for
 kernel-assigned keys and fingerprints, and the per-boot / per-process seed
-seam — landed) plus a filled-out `lib/collections` in five tiers:
-hash, sequence, indexed, ordered, and concurrent. Every container has a
+seam — landed), plus the containers across two crates: `lib/inline` for the
+ones that allocate nothing — so the layer running before a heap exists can use
+them without acquiring an allocator requirement — and `lib/collections` for the
+heap-backed hash, indexed, ordered, and concurrent tiers. Every container has a
 fallible allocating form and no panicking index, allocates nothing on a read
 path, carries no fixed capacity ceiling unless deliberately allocation-free,
 and reports through the existing pressure model rather than a second one.
@@ -8696,7 +8699,7 @@ C4 O(1) `LruMap`; C5 `RangeMap`/`RangeSet`; C6 `SlotMap`/`IdAllocator`/
 `BitVec`; C7 tagged `RadixTree`; C8 `IndexedHeap`/`TimerWheel`; C9 the
 concurrent tier (`SpscRing`, `MpscQueue`, `ConcurrentMap`) with loom models;
 C10 the closing docs, stability tiers, and a `deps-check` rule against
-re-rolling a container outside `lib/collections`. Each increment lands its
+re-rolling a container outside the two container crates. Each increment lands its
 engine, migrates its callers, and deletes the copies it replaces in the same
 change — an increment that leaves both is not done. C0–C3 are prerequisites;
 C4–C9 are mutually independent once C3 lands.

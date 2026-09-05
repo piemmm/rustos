@@ -1,6 +1,6 @@
 [package]
 name = "tairix-collections"
-description = "TAIRiX shared no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), the fixed-capacity sequence tier, the index-addressed intrusive list, and the fixed 256-bit set. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path."
+description = "TAIRiX shared heap-backed no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), and the spilling SmallVec. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path. The allocation-free containers are lib/inline."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,9 @@ tairix-abi = { path = "../abi", version = "=0.0.0", default-features = false }
 tairix-cpuops = { path = "../cpuops", version = "=0.0.0", default-features = false }
 # The hashers and the per-boot key a hash container is built over.
 tairix-hash = { path = "../hash", version = "=0.0.0" }
+# The inline half of `SmallVec`, and with it the shared `CapacityError`: the
+# fixed-capacity vector is defined once, in the crate that links no allocator.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one-shot cell holding the resolved group scan, so this crate is not a
 # second hand-rolled atomic state machine.
 tairix-sync = { path = "../sync", version = "=0.0.0" }

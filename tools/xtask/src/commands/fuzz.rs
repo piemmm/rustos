@@ -61,17 +61,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-collections",
         test: "fuzz_collections",
-        description: "lib/collections hash map against a naive reference, over colliding key streams",
-    },
-    Target {
-        package: "tairix-collections",
-        test: "fuzz_intrusive",
-        description: "lib/collections intrusive list, two lists over one store, against naive order models",
-    },
-    Target {
-        package: "tairix-collections",
-        test: "fuzz_sequences",
-        description: "lib/collections sequence tier (array/small vectors, bounded string, rings) against naive models",
+        description: "lib/collections heap-backed tier (hash map, spilling small vector) against naive models",
     },
     Target {
         package: "tairix-fontface",
@@ -82,6 +72,16 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-hash",
         test: "fuzz_hash",
         description: "lib/hash keyed SipHash-1-3 + XXH64 over arbitrary bytes and chunkings",
+    },
+    Target {
+        package: "tairix-inline",
+        test: "fuzz_inline",
+        description: "lib/inline allocation-free tier (bounded vector and string, rings) against naive models",
+    },
+    Target {
+        package: "tairix-inline",
+        test: "fuzz_intrusive",
+        description: "lib/inline intrusive list, two lists over one store, against naive order models",
     },
     Target {
         package: "tairix-kernel-syscall",

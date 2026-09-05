@@ -37,7 +37,7 @@ Hybrid **buddy + bitmap**:
   non-existent`. The bitmap is the source of truth for ownership, so
   every double-free or stray-free is detected and reported as
   `AllocError::InvariantViolation`.
-- A [`tairix_collections::IntrusiveList`](../lib/collections.md) per
+- A [`tairix_inline::IntrusiveList`](../lib/inline.md) per
   buddy order holds the free blocks of that order, threaded through one
   link array indexed by starting frame. Splits push two half-blocks down
   one order; merges pop a buddy at the same order and push the parent up

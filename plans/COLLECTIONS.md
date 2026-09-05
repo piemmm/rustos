@@ -69,7 +69,7 @@ today:
 Every one of those is the duplication the charter forbids, and several are
 the §27.2 "O(n) linear scan on a load-bearing path" defect by name.
 
-Read first: `lib/collections/src/bitset.rs` (the existing crate),
+Read first: `lib/inline/src/bitset.rs` (the oldest container here),
 `lib/reclaim/src/cache.rs` (the closest thing to a shared cache engine, and
 the pressure model every cache-shaped container must integrate with rather
 than duplicate), `lib/sync/src/` (locks, epoch, the loom harness),
@@ -79,7 +79,7 @@ one measurement harness).
 
 ---
 
-## 1. Shape: two crates
+## 1. Shape: three crates
 
 **`lib/hash` — landed, no external dependencies.** Hashing is not a
 container, three container families need it, and putting it in
@@ -111,12 +111,35 @@ does **not** depend on `lib/rng`: the seed is injected, so the crate stays
 free of external dependencies and host-testable, and the boot path decides
 where entropy comes from.
 
-**`lib/collections` — the containers.** Depends on `lib/hash`; on `lib/cpuops`
-and the `lib/abi` capability vocabulary it gates on, for the hash table's
-group-scan ops table (§4.1); and on `lib/sync`, for the one-shot cell that
-holds the resolved scan and for the concurrent tier's atomics. Nothing else.
-It never depends on `kernel/*`, `drivers/*`, or `userland/*`, so the existing
-layering holds unchanged.
+**`lib/inline` — the containers that allocate nothing, and the reason there
+are three crates.** It depends on **nothing at all**, not even `alloc`, and
+that is its entire purpose: a container crate that links `alloc` forces a
+`#[global_allocator]` requirement onto every consumer, whether or not the
+consumer ever allocates. TAIRiX has real consumers that cannot satisfy it —
+three of the four architecture ports allocate nothing in production and run
+from CPU reset, the boot console and the early-boot audit ring allocate
+nothing, and the staged first-party loader (`plans/BOOTLOADER.md`) cannot. A
+cargo feature cannot express this: features unify per build, so a single
+heap-backed consumer in the same invocation re-enables `alloc` for everyone.
+Only a separate crate makes "the pre-heap layer cannot allocate" an invariant
+the dependency graph enforces rather than a convention. It holds `ArrayVec`,
+`ArrayString`, `RingBuf`, `SecretRing`, `IntrusiveList`, `BitSet256`, and the
+`CapacityError` they refuse through.
+
+**`lib/collections` — the heap-backed containers.** Depends on `lib/inline`,
+for the inline half of `SmallVec` and the shared `CapacityError`; on
+`lib/hash`; on `lib/cpuops` and the `lib/abi` capability vocabulary it gates
+on, for the hash table's group-scan ops table (§4.1); and on `lib/sync`, for
+the one-shot cell that holds the resolved scan and for the concurrent tier's
+atomics. Nothing else. Neither crate ever depends on `kernel/*`, `drivers/*`,
+or `userland/*`, so the existing layering holds unchanged.
+
+**Which crate a new container goes in** is decided by one question, asked
+once: can it allocate? If it can, it is `lib/collections`; if it cannot, it is
+`lib/inline`. That bisects some later tiers — C9's `SpscRing<T, N>` is
+allocation-free while its `MpscQueue<T>` is not — and that is the intended
+answer, because the allocation boundary is the one a consumer's crate graph
+actually feels.
 
 ---
 
@@ -147,10 +170,10 @@ one is not done.
    token stores a zeroizing value type. This is the rule `lib/rt`'s heap
    already states; there is not a second one.
 6. **Every `unsafe` block carries its invariant and a test that exercises
-   it**, and no `unsafe` escapes the crate's safe API. The unsafe surface is
-   confined to three places — the open-addressing table, the inline slot
-   arrays (`ArrayVec`, `RingBuf` and its `SecretRing` scrub), and the
-   concurrent tier — and each is covered by proptest models, and by loom for
+   it**, and no `unsafe` escapes its crate's safe API. The unsafe surface is
+   confined to three places — the open-addressing table (`lib/collections`),
+   the inline slot arrays (`ArrayVec`, `RingBuf` and its `SecretRing` scrub,
+   all `lib/inline`), and the concurrent tier — and each is covered by proptest models, and by loom for
    the concurrent tier. `SmallVec`'s spill needs none of its own: it is an
    enum over `ArrayVec` and `Vec`, so the transition is an ordinary move
    through the owning iterator. `ArrayString` needs none either: a string's
@@ -257,6 +280,9 @@ apologising for.
 
 ### 4.2 Sequences
 
+Every row but `SmallVec` is `lib/inline`: they allocate nothing. `SmallVec`
+spills, so it is `lib/collections`, built over `lib/inline`'s `ArrayVec`.
+
 | Type | Guarantee | Replaces |
 |---|---|---|
 | `ArrayVec<T, N>` | fixed capacity, zero allocation, usable in interrupt context | `sysinfod`'s private `heapless_vec`, and the inline slot array the rest of the tier is built on |
@@ -317,6 +343,9 @@ blocks instead of walking the whole index; `plans/ARXFS-WRITEBACK.md`
 describes that sweep and currently has no structure that supports it.
 
 ### 4.4 Ordered and time-ordered
+
+`IntrusiveList` is `lib/inline` (it allocates nothing); the other two rows are
+`lib/collections`.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
@@ -443,8 +472,14 @@ counter gates, its rustdoc, and its `docs/src/lib/` page.
 |---|---|
 | C0 | **done.** Six hand-rolled hashes: the FNV-1a folds in `lib/pagezero`'s self-verify fingerprint, `lib/net/src/iface.rs`'s and `lib/net/src/stack.rs`'s multicast revision counters, `kernel/tairix-kernel`'s build-provenance id, and `lib/fontface`'s rasterisation golden; and the unkeyed Fibonacci mixer in `kernel/core/src/futex.rs`'s bucket index |
 | C1 | **done.** `kernel/mem/src/dma.rs`'s `allocations` `BTreeMap`, whose only iteration collected keys purely to avoid mutating while iterating, is now a `HashMap` under `BuildFastHash` — the keys are that allocator's own page-aligned window addresses and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. The carve reserves the record slot beside `ensure_slots`, before any frame is taken, so a bookkeeping refusal fails with nothing to roll back. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
-| C2 | **done.** All five: `sysinfod`'s `heapless_vec` (an `ArrayVec` whose bound now refuses an over-long fixture loudly instead of silently dropping records); `seat.rs`'s `ChannelRing` and `console.rs`'s `InputRing`, both now `SecretRing`, which also gives the console the drop-time scrub it never had and makes both scrubs volatile where the console's were plain; `boot_audit_ring.rs`'s `RingState`, where `Slot` and `TailRecord` collapsed into one type over an `ArrayString` — deleting the `[u8; 120]`+length pair, the `Level::from_u8` and `u16::try_from` fail-safes the round trip needed, `wrap_index`, and `truncate_on_char_boundary`; and `lib/log`'s `BootRing`, now record framing and eviction-loss accounting over a `RingBuf<u8, N>`, with its byte-at-a-time copies replaced by at most two `copy_from_slice` runs and its borrowed arena by a caller-chosen `N` — so `BufferTooSmall` at construction became a build error and the ring is `const`-constructible for a pre-allocator `static`. **One consequence of that last conversion was missed and is closed by C3:** giving `lib/log` a dependency on this crate put `alloc` into the graph of every consumer of a *log-bearing architecture port*, and a `no_std` binary whose graph links `alloc` must name a global allocator. Seventeen freestanding verticals across all three bare-metal targets — the ones that exercise only an architecture primitive (a page-table isolation proof, a referenced-bit probe, a TLB shootdown, an IPI, a timer preemption, a UART console) — had none, so the QEMU build stage stopped on them. A per-crate `alloc` feature does **not** answer it: cargo unifies features per build, and that stage builds each target's whole enrolled set in one invocation alongside verticals that link the full kernel, so the heap-backed tier is compiled in regardless. They link `tests/integration/itest_heap` instead — that `#[global_allocator]` over a one-page arena, defined **once**. One page is the point: nothing on those paths allocates, so a request that arrives is a defect and gets a null rather than being hidden by a large heap, and the image stays inside the identity window a paging vertical maps |
-| C3 | **done.** `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
+| C2 | **done.** All five: `sysinfod`'s `heapless_vec` (an `ArrayVec` whose bound now refuses an over-long fixture loudly instead of silently dropping records); `seat.rs`'s `ChannelRing` and `console.rs`'s `InputRing`, both now `SecretRing`, which also gives the console the drop-time scrub it never had and makes both scrubs volatile where the console's were plain; `boot_audit_ring.rs`'s `RingState`, where `Slot` and `TailRecord` collapsed into one type over an `ArrayString` — deleting the `[u8; 120]`+length pair, the `Level::from_u8` and `u16::try_from` fail-safes the round trip needed, `wrap_index`, and `truncate_on_char_boundary`; and `lib/log`'s `BootRing`, now record framing and eviction-loss accounting over a `RingBuf<u8, N>`, with its byte-at-a-time copies replaced by at most two `copy_from_slice` runs and its borrowed arena by a caller-chosen `N` — so `BufferTooSmall` at construction became a build error and the ring is `const`-constructible for a pre-allocator `static`. **One consequence of that last conversion was missed, and C3 closes it:**
+giving `lib/log` a dependency on a container crate that links `alloc` put a
+`#[global_allocator]` requirement on every consumer of a *log-bearing
+architecture port* — seventeen freestanding verticals that allocate nothing
+among them. C3's split (§1) removes the requirement at the root rather than
+satisfying it seventeen times: `lib/log` now depends on `lib/inline`, which
+links no allocator, so those binaries have no `alloc` in their graph at all |
+| C3 | **done.** The tier was **split into two crates** (§1): `lib/inline` for the containers that allocate nothing and `lib/collections` for the heap-backed ones, so `lib/log`, `lib/caps`, the boot console and three of the four architecture ports link no allocator. `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
 | C4 | all six LRUs: `block_cache`, `transform_cache`, `launch_cache`, `fscache`, `arxfs/dedupe`, and the index inside `lib/reclaim/src/cache.rs`; **and the O(n) `lib/net/src/neigh.rs` scan** |
 | C5 | `kernel/mem/src/anon_window.rs`, `kernel/mem/src/mmio.rs`, both maps in `kernel/core/src/aspace.rs`, `drivers/filesystem/arxfs/src/runs.rs` |
 | C6 | the `next_id` counters in `sharedreg` and all three schedulers; `dma.rs`'s `slot_used`; flat bitmap scans |

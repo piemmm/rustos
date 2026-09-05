@@ -16,7 +16,7 @@ use crate::CapacityError;
 /// reach an allocator (an interrupt handler, early boot), or a buffer whose
 /// ceiling is dictated by what it accumulates rather than by the machine.
 /// Anything whose size should follow the hardware wants `alloc`'s `Vec`, or
-/// [`SmallVec`](crate::SmallVec) when the common case is small.
+/// `tairix_collections::SmallVec` when the common case is small.
 ///
 /// Nothing here panics. [`try_push`](Self::try_push) hands a rejected value
 /// back rather than dropping it, and every positional operation answers with

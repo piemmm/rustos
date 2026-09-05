@@ -11,7 +11,7 @@
 //!    parent set") cannot be bypassed by mistake.
 
 use tairix_abi::{CapabilityId, Errno};
-use tairix_collections::BitSet256;
+use tairix_inline::BitSet256;
 
 /// Set of capabilities held by a principal (task, manifest, or token).
 ///
@@ -197,7 +197,7 @@ impl tairix_abi::CapabilityQuery for CapabilitySet {
 /// Ascending iterator over the capabilities of a [`CapabilitySet`].
 #[derive(Clone, Debug)]
 pub struct CapabilitySetIter {
-    inner: tairix_collections::BitSet256Iter,
+    inner: tairix_inline::BitSet256Iter,
 }
 
 impl Iterator for CapabilitySetIter {

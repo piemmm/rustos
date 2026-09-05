@@ -180,11 +180,14 @@ tairix-rng = { path = "../../lib/rng", version = "=0.0.0" }
 # `crc32c*`/SSE4.2 hardware path where present, self-verified against the
 # portable baseline (never hand-rolled per op — one shared definition).
 tairix-crc32c = { path = "../../lib/crc32c", version = "=0.0.0" }
-# The shared containers. `kernel_main` resolves their control-group scan once
-# against the finalised common CPU-feature set (`src/cpuops.rs`) so a hash
+# The heap-backed containers. `kernel_main` resolves their control-group scan
+# once against the finalised common CPU-feature set (`src/cpuops.rs`) so a hash
 # table probes through the vector scan where the silicon has one, self-verified
 # against the portable scan before it can be selected.
 tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
+# The allocation-free containers: the boot audit ring's bounded string and byte
+# ring, and the scrubbing rings the console and seat carry a credential across.
+tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
 # The self-optimising page-zero dispatch (`plans/FIX-HARDWARE-FEATURES.md` P3):
 # `kernel_main` resolves it once against the finalised common CPU-feature set
 # (`src/cpuops.rs`) so the in-kernel frame scrub (`kernel/mem`) uses the

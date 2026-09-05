@@ -7,7 +7,9 @@ use core::mem;
 use core::ops::{Deref, DerefMut};
 use core::slice;
 
-use crate::{ArrayVec, TryReserveError};
+use tairix_inline::ArrayVec;
+
+use crate::TryReserveError;
 
 /// Whether `count` elements of `T` have a representable allocation.
 fn layout_fits<T>(count: usize) -> Result<(), TryReserveError> {
@@ -334,7 +336,7 @@ impl<T, const N: usize> IntoIterator for SmallVec<T, N> {
 
 /// Whichever storage the consuming iterator is walking.
 enum IntoIterInner<T, const N: usize> {
-    Inline(crate::arrayvec::IntoIter<T, N>),
+    Inline(tairix_inline::arrayvec::IntoIter<T, N>),
     Spilled(alloc::vec::IntoIter<T>),
 }
 
