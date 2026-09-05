@@ -65,6 +65,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-collections",
+        test: "fuzz_intrusive",
+        description: "lib/collections intrusive list, two lists over one store, against naive order models",
+    },
+    Target {
+        package: "tairix-collections",
         test: "fuzz_sequences",
         description: "lib/collections sequence tier (array/small vectors, bounded string, rings) against naive models",
     },

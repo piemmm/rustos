@@ -21,6 +21,10 @@
 //!   ends. What every hand-rolled type-ahead buffer, diagnostic tail, and
 //!   driver hand-off ring was standing in for. [`SecretRing`] is the same
 //!   queue for one a credential transits, scrubbing each slot it vacates.
+//! * [`IntrusiveList`] — a doubly-linked list whose links live in nodes the
+//!   caller owns, so an arbitrary node leaves it in constant time with no
+//!   search and no allocation. What every hand-written `next`/`prev` index
+//!   pair was standing in for.
 //! * [`BitSet256`] — a fixed 256-bit set, holding a process's capability
 //!   membership (`lib/caps`).
 //!
@@ -66,6 +70,7 @@ pub mod arraystring;
 pub mod arrayvec;
 pub mod bitset;
 pub mod group;
+pub mod intrusive;
 pub mod map;
 mod raw;
 pub mod ringbuf;
@@ -75,6 +80,7 @@ pub mod smallvec;
 pub use arraystring::ArrayString;
 pub use arrayvec::ArrayVec;
 pub use bitset::{BitSet256, BitSet256Iter};
+pub use intrusive::{IntrusiveList, Link, LinkError, LinkStore};
 pub use map::HashMap;
 pub use ringbuf::{RingBuf, SecretRing};
 pub use set::HashSet;

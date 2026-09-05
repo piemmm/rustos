@@ -1812,6 +1812,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-itest-heap"
+version = "0.0.0"
+dependencies = [
+ "tairix-itest-harness",
+ "tairix-kalloc",
+]
+
+[[package]]
 name = "tairix-journald"
 version = "0.0.0"
 dependencies = [
@@ -2803,6 +2811,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -2816,6 +2825,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -2850,6 +2860,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-heap",
 ]
 
 [[package]]
@@ -3041,6 +3052,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3052,6 +3064,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3062,6 +3075,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-sync",
 ]
 
@@ -3339,6 +3353,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3520,6 +3535,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3531,6 +3547,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3824,6 +3841,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-heap",
 ]
 
 [[package]]
@@ -3834,6 +3852,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -3845,6 +3864,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -5192,6 +5212,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -5202,6 +5223,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -5235,6 +5257,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -5246,6 +5269,7 @@ dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 
@@ -5268,6 +5292,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-heap",
  "tairix-log",
 ]
 

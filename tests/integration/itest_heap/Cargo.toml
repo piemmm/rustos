@@ -1,0 +1,25 @@
+[package]
+name = "tairix-itest-heap"
+description = "The global allocator a freestanding QEMU integration binary links when its crate graph reaches `alloc` but its own test path never allocates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one kernel heap. This crate supplies only the static arena and the
+# `#[global_allocator]` attribute over it — never a second allocator.
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+
+[build-dependencies]
+# The one target classification every freestanding vertical gates on, so the
+# architecture choice stays in that shared build glue.
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+
+[lib]
+path = "src/lib.rs"

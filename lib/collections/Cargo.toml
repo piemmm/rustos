@@ -1,6 +1,6 @@
 [package]
 name = "tairix-collections"
-description = "TAIRiX shared no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), and the fixed 256-bit set. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path."
+description = "TAIRiX shared no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), the fixed-capacity sequence tier, the index-addressed intrusive list, and the fixed 256-bit set. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

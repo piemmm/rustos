@@ -36,6 +36,12 @@
 #![cfg_attr(itest_aarch64, no_main)]
 #![deny(missing_docs)]
 
+// Links the shared vertical heap for its `#[global_allocator]`: this binary's
+// graph reaches `alloc` through the architecture port's logging, so it must
+// name one even though nothing on the test path allocates.
+#[cfg(itest_aarch64)]
+use tairix_itest_heap as _;
+
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
 compile_error!(
     "tairix-test-fiq-selfsample-qemu-aarch64: the `test-hooks` Cargo feature is a \

@@ -24,6 +24,7 @@ a later tier.
 | `ArrayString<N>` | up to `N` bytes inline, the UTF-8 invariant held by construction | an ad-hoc `[u8; N]` plus length, with the invariant assumed |
 | `RingBuf<T, N>` | a fixed-capacity circular queue, constant time at both ends | every hand-rolled type-ahead buffer, diagnostic tail, and driver hand-off ring |
 | `SecretRing<T, N>` | the same, scrubbing each slot it vacates | a ring a credential transits, zeroed by hand at each call site |
+| `IntrusiveList` | a doubly-linked list over nodes the caller owns: constant-time unlink of any node, no search, no allocation | a hand-written `next`/`prev` index pair with its own sentinel and splice arithmetic |
 | `BitSet256` | a fixed 256-bit set: constant-time membership, allocation-free | a process's capability membership (`lib/caps`) |
 
 ## The rules every container obeys
@@ -98,6 +99,76 @@ has no way to un-initialise one, `backing_store` can hand out the whole store,
 vacated slots included. That is what lets a holder's own test prove the scrub
 left nothing behind, which is not observable through a container's safe API at
 all.
+
+## The intrusive list
+
+`IntrusiveList` is a three-word header. The links live in the caller's own
+store — a `[Link]`, or its own slot type carrying a `Link` field, reached
+through the `LinkStore` trait — and every operation takes it. That is the
+property an owning container cannot offer: **any** node leaves the list in
+constant time from its index alone, with no search and no allocation. A buddy
+allocator splices an arbitrary free block out on a merge; a recency list moves
+an arbitrary entry to the front on a touch. Several lists may share one store,
+which is exactly what a per-order free-list array is.
+
+There is no ordering policy of its own — the caller picks one by which end it
+pushes and pops. `push_back` with `pop_front` is FIFO, the discipline a wait
+set wants because it cannot starve a waiter; `push_front` with `pop_back` is
+recency, where `move_to_front` is the touch and the eviction candidate is the
+back.
+
+### Index-addressed, and no `unsafe`
+
+A pointer-linked list is what a C kernel writes, and it is also how a stray
+link becomes a wild store. Here a link holds an index into the caller's store
+and every one is bounds-checked, so a corrupted link is a refused splice
+(`LinkError::Corrupt`) rather than memory corruption — which is why this
+container is in the tier's `unsafe` budget for nothing at all, and why a
+`LinkStore` implementation that answers inconsistently can make a list
+*wrong* but never unsound.
+
+A link is two words. The on-a-list state is encoded in the neighbour ends
+rather than carried in a third field, because rounding the link up to three
+words costs a word per node and a free list with one link per page cannot
+afford one. That reserves the two index values above `MAX_INDEX` — a bound no
+store with a representable size comes near, since a node occupies at least a
+link's worth of storage.
+
+### What it checks, and what it says it cannot
+
+Nothing is written until every node a splice touches is known to exist, so a
+refused operation leaves the list and the store exactly as they were. Within
+that:
+
+* A node is on at most one list: a push of a node another list holds is
+  refused outright.
+* An unlink is refused when the node is on no list, or when it claims an end
+  this list does not hold.
+* Every neighbour must link back at the node, and a link naming a node the
+  store no longer holds is corruption rather than a caller error.
+* Walks are bounded by the length, so links corrupted into a cycle end an
+  iteration instead of spinning, and `clear` empties the list whatever the
+  chain turns out to be — reporting how many it detached, so a caller
+  comparing that against the length it had is what notices.
+
+The one case it *cannot* detect is an **interior** node of a sibling list
+sharing the same store: its neighbours do link back at it, and only a list
+identity stored in every link would tell the two apart. That word per node is
+the cost the two-word link exists to avoid, and the caller sharing a store
+already holds the answer — `kernel/mem`'s per-order tag array is exactly that
+knowledge, and it is what makes the buddy allocator's `remove_free_block`
+name the right list before it asks.
+
+### The first caller
+
+`kernel/mem`'s buddy allocator keeps one list per order over a single link
+array indexed by starting frame, and a merge unlinks its buddy from the middle
+of a list in constant time. It had hand-written `prev`/`next` fields, a
+`usize::MAX` sentinel, and its own head-array splice arithmetic; those are
+gone, and two silent-corruption paths went with them. Registering a block
+twice, or unlinking one whose order tag and links disagree, are now
+`AllocError::InvariantViolation` instead of a release-mode `debug_assert` and
+a frame handed out twice.
 
 ## Choosing a hasher
 
@@ -206,6 +277,11 @@ survivor still reachable and the footprint still bounded, and one drop per
 value ever inserted across growth, overwrite, removal, retention, and an
 abandoned owning iterator.
 
+The intrusive list is gated on the same kind of number: a mid-list unlink
+reaches the departing node and its two neighbours and writes exactly those
+three links, identically over three nodes and over ten thousand. That is what
+"constant time, no search" is, stated as something a regression shows up in.
+
 The sequence tier's tests hold each container to the same bar: one drop per
 element ever taken, across a bulk push, a wrapped drain, an eviction and a
 spill; a footprint that is the elements plus their indices and no heap block;
@@ -219,7 +295,10 @@ over deliberately colliding key streams, `tests/fuzz_sequences.rs` drives the
 sequence tier against naive models over arbitrary lengths and text — the
 lengths are attacker-influenced by design, since a boot audit line carries
 caller-controlled text into an `ArrayString` and a console ring takes whatever
-a keyboard produces — both under `cargo xtask fuzz`, and
+a keyboard produces — and `tests/fuzz_intrusive.rs` drives two lists over one
+shared store against naive order models, since a free list's link/unlink order
+is whatever a process's allocation pattern makes it. All under
+`cargo xtask fuzz`, and
 `cargo xtask miri` interprets the whole suite under the undefined-behaviour
 oracle — the table's `unsafe` core is why that stage exists. A test suite says
 what the code computes; only an interpreter says whether a raw pointer stayed

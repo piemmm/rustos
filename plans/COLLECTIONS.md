@@ -1,6 +1,6 @@
 # COLLECTIONS — The shared container and hashing libraries
 
-Status: **in progress** — C0, C1 and C2 landed; the remaining containers are
+Status: **in progress** — C0 through C3 landed; the remaining containers are
 still to come. The ledger below is the authoritative record of what is left.
 
 ## The ledger
@@ -21,7 +21,7 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | C0 | Hashing | `lib/hash`: `SipHash13` with its published test vectors, `FastHash`, `HashSeed` and the boot/spawn publication seam | — | **done** |
 | C1 | Hash containers | `HashMap` / `HashSet` and their `BuildHasher` shims, the `lib/cpuops` group-scan ops table, and the `cargo xtask miri` stage | C0 | **done** |
 | C2 | Sequences | `ArrayVec`, `SmallVec`, `ArrayString`, `RingBuf`, `SecretRing` | — | **done** |
-| C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **planned** |
+| C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **done** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict | C1, C3 | **planned** |
 | C5 | Intervals | `RangeMap`, `RangeSet` | — | **planned** |
 | C6 | Identity | `SlotMap`, `IdAllocator`, `BitVec` | — | **planned** |
@@ -35,10 +35,10 @@ detail becomes its done-state summary — nothing is appended, here or there.
 Binding under `AGENTS.md`. TAIRiX has `alloc` (`Vec`, `String`, `BTreeMap`,
 `BTreeSet`, `VecDeque`, `BinaryHeap`), one 256-bit fixed bitset, and — since
 C0 and C1 — `lib/hash` and the hash tier of `lib/collections`. The rest of the
-containers a kernel actually runs on — an intrusive list, a generational slot
-map, an interval map, a sparse radix index, a hierarchical bitmap, an O(1)
-LRU, a timing wheel, a lock-free ring — still do not exist, so each subsystem
-has grown its own.
+containers a kernel actually runs on — a generational slot map, an interval
+map, a sparse radix index, a hierarchical bitmap, an O(1) LRU, a timing
+wheel, a lock-free ring — still do not exist, so each subsystem has grown its
+own.
 
 That is the defect this plan closes, and what remains of it is measurable
 today:
@@ -148,14 +148,21 @@ one is not done.
    already states; there is not a second one.
 6. **Every `unsafe` block carries its invariant and a test that exercises
    it**, and no `unsafe` escapes the crate's safe API. The unsafe surface is
-   confined to four places — the open-addressing table, the inline slot arrays
-   (`ArrayVec`, `RingBuf` and its `SecretRing` scrub), the intrusive list, and
-   the concurrent tier — and each is covered by proptest models, and by loom
-   for the concurrent tier. `SmallVec`'s spill needs none of its own: it is an
+   confined to three places — the open-addressing table, the inline slot
+   arrays (`ArrayVec`, `RingBuf` and its `SecretRing` scrub), and the
+   concurrent tier — and each is covered by proptest models, and by loom for
+   the concurrent tier. `SmallVec`'s spill needs none of its own: it is an
    enum over `ArrayVec` and `Vec`, so the transition is an ordinary move
    through the owning iterator. `ArrayString` needs none either: a string's
    bytes are always initialised, so it holds a plain `[u8; N]`, which is also
    what lets it be `Copy` and be lifted out from under a lock inside a record.
+   **`IntrusiveList` needs none, which is why it is index-addressed rather
+   than pointer-linked**: a link holds an index into the caller's store and
+   every one is bounds-checked, so a corrupted link is a refused splice rather
+   than a wild store. That is the stronger property for a free list a stray
+   write can reach, and it is the representation both `LruMap` and `TimerWheel`
+   want anyway, since their nodes live in a growable arena a reallocation
+   moves.
 7. **Untrusted keys are a threat surface.** Every container that accepts
    attacker-influenced keys or lengths gets a fuzz harness in the per-PR
    `--quick` set and the nightly soak.
@@ -313,7 +320,7 @@ describes that sweep and currently has no structure that supports it.
 
 | Type | Guarantee | Replaces |
 |---|---|---|
-| `IntrusiveList<T>` | O(1) unlink **without a search**, no allocation, links live in the element | the free-list and wait-set link handling written per site |
+| `IntrusiveList` | O(1) unlink **without a search**, no allocation, links live in the element | the per-site free-list link handling; the `BTreeMap`-based wait set is C8's, once the deadline index it needs exists |
 | `IndexedHeap<K, P>` | binary heap with **decrease-key** and O(log n) removal by key | `alloc::BinaryHeap`, which supports neither |
 | `TimerWheel` | O(1) arm and cancel, O(1) amortised expiry over thousands of timers | per-subsystem deadline bookkeeping |
 
@@ -400,6 +407,17 @@ rejected for a stated reason.
   structure the controller reads.
 * **Per-CPU storage** — the Arch HAL owns it (§17.2); a container crate must
   not grow a second one.
+* **`lib/kalloc`'s three pointer-linked lists** (free blocks, grown regions,
+  partial slab pages) **and `kernel/mem/src/kvslots.rs`'s record chains** —
+  these look like `IntrusiveList` callers and are not. Their links live *in
+  the memory being managed*: a free block's own payload, a slab page's first
+  object slot, a record carved out of a drawn frame. There is no array to
+  index into, so they are addressed by pointer because the boundary-tag and
+  slab *layouts* are, and that layout is a format rather than a container.
+  Converting them would also point the global allocator at a crate that
+  itself allocates — `lib/kalloc` is deliberately a leaf over `core` and
+  stays one. Recorded here so a later sweep does not "fix" them into a
+  defect.
 * **`kernel/sec/src/captable.rs`'s three `BTreeMap`s** — these look like
   hash-map candidates and are not. The System Information API pages a
   consistent process list off the ascending `ProcessId` iteration order, so
@@ -425,8 +443,8 @@ counter gates, its rustdoc, and its `docs/src/lib/` page.
 |---|---|
 | C0 | **done.** Six hand-rolled hashes: the FNV-1a folds in `lib/pagezero`'s self-verify fingerprint, `lib/net/src/iface.rs`'s and `lib/net/src/stack.rs`'s multicast revision counters, `kernel/tairix-kernel`'s build-provenance id, and `lib/fontface`'s rasterisation golden; and the unkeyed Fibonacci mixer in `kernel/core/src/futex.rs`'s bucket index |
 | C1 | **done.** `kernel/mem/src/dma.rs`'s `allocations` `BTreeMap`, whose only iteration collected keys purely to avoid mutating while iterating, is now a `HashMap` under `BuildFastHash` — the keys are that allocator's own page-aligned window addresses and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. The carve reserves the record slot beside `ensure_slots`, before any frame is taken, so a bookkeeping refusal fails with nothing to roll back. **A `BTreeMap` converts only where its key order is provably not depended on** — that judgement is per-site, made at migration time, and a site that pages, compares, or logs in key order stays ordered |
-| C2 | **done.** All five: `sysinfod`'s `heapless_vec` (an `ArrayVec` whose bound now refuses an over-long fixture loudly instead of silently dropping records); `seat.rs`'s `ChannelRing` and `console.rs`'s `InputRing`, both now `SecretRing`, which also gives the console the drop-time scrub it never had and makes both scrubs volatile where the console's were plain; `boot_audit_ring.rs`'s `RingState`, where `Slot` and `TailRecord` collapsed into one type over an `ArrayString` — deleting the `[u8; 120]`+length pair, the `Level::from_u8` and `u16::try_from` fail-safes the round trip needed, `wrap_index`, and `truncate_on_char_boundary`; and `lib/log`'s `BootRing`, now record framing and eviction-loss accounting over a `RingBuf<u8, N>`, with its byte-at-a-time copies replaced by at most two `copy_from_slice` runs and its borrowed arena by a caller-chosen `N` — so `BufferTooSmall` at construction became a build error and the ring is `const`-constructible for a pre-allocator `static` |
-| C3 | the per-site intrusive-link handling it subsumes |
+| C2 | **done.** All five: `sysinfod`'s `heapless_vec` (an `ArrayVec` whose bound now refuses an over-long fixture loudly instead of silently dropping records); `seat.rs`'s `ChannelRing` and `console.rs`'s `InputRing`, both now `SecretRing`, which also gives the console the drop-time scrub it never had and makes both scrubs volatile where the console's were plain; `boot_audit_ring.rs`'s `RingState`, where `Slot` and `TailRecord` collapsed into one type over an `ArrayString` — deleting the `[u8; 120]`+length pair, the `Level::from_u8` and `u16::try_from` fail-safes the round trip needed, `wrap_index`, and `truncate_on_char_boundary`; and `lib/log`'s `BootRing`, now record framing and eviction-loss accounting over a `RingBuf<u8, N>`, with its byte-at-a-time copies replaced by at most two `copy_from_slice` runs and its borrowed arena by a caller-chosen `N` — so `BufferTooSmall` at construction became a build error and the ring is `const`-constructible for a pre-allocator `static`. **One consequence of that last conversion was missed and is closed by C3:** giving `lib/log` a dependency on this crate put `alloc` into the graph of every consumer of a *log-bearing architecture port*, and a `no_std` binary whose graph links `alloc` must name a global allocator. Seventeen freestanding verticals across all three bare-metal targets — the ones that exercise only an architecture primitive (a page-table isolation proof, a referenced-bit probe, a TLB shootdown, an IPI, a timer preemption, a UART console) — had none, so the QEMU build stage stopped on them. A per-crate `alloc` feature does **not** answer it: cargo unifies features per build, and that stage builds each target's whole enrolled set in one invocation alongside verticals that link the full kernel, so the heap-backed tier is compiled in regardless. They link `tests/integration/itest_heap` instead — that `#[global_allocator]` over a one-page arena, defined **once**. One page is the point: nothing on those paths allocates, so a request that arrives is a defect and gets a null rather than being hidden by a large heap, and the image stays inside the identity window a paging vertical maps |
+| C3 | **done.** `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
 | C4 | all six LRUs: `block_cache`, `transform_cache`, `launch_cache`, `fscache`, `arxfs/dedupe`, and the index inside `lib/reclaim/src/cache.rs`; **and the O(n) `lib/net/src/neigh.rs` scan** |
 | C5 | `kernel/mem/src/anon_window.rs`, `kernel/mem/src/mmio.rs`, both maps in `kernel/core/src/aspace.rs`, `drivers/filesystem/arxfs/src/runs.rs` |
 | C6 | the `next_id` counters in `sharedreg` and all three schedulers; `dma.rs`'s `slot_used`; flat bitmap scans |

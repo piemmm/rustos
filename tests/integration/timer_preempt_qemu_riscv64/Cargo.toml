@@ -31,6 +31,9 @@ path = "src/main.rs"
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-
+# The `#[global_allocator]` this binary must name because its graph reaches
+# `alloc` through the architecture port's logging, even though nothing on this
+# test's path allocates. Shared rather than restated per vertical.
+tairix-itest-heap = { path = "../itest_heap", version = "=0.0.0" }
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

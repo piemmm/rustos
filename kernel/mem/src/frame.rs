@@ -11,25 +11,25 @@
 //!   [`AllocError::InvariantViolation`].
 //!
 //! - **Buddy free lists.** For every order `0..=MAX_ORDER` we keep a
-//!   doubly-linked list of free blocks of exactly that order, threaded
-//!   through a per-frame `nodes` array indexed by starting frame. Splits
-//!   push two half-blocks to `order - 1`; merges pop a buddy at `order`
-//!   and push the parent at `order + 1`. The bitmap is consulted on
-//!   every merge to refuse merging across reserved boundaries (this is
+//!   [`tairix_collections::IntrusiveList`] of free blocks of exactly that
+//!   order, threaded through a per-frame `links` array indexed by starting
+//!   frame. Splits push two half-blocks to `order - 1`; merges pop a buddy
+//!   at `order` and push the parent at `order + 1`. The bitmap is consulted
+//!   on every merge to refuse merging across reserved boundaries (this is
 //!   the "hybrid" part — reserved frames look identical to allocated
 //!   frames at the bitmap level, so the buddy never reaches across them).
 //!
 //! # No dependency on the kernel heap
 //!
 //! The per-order free lists are **intrusive**: their links live in the
-//! `nodes`/`blk_order` arrays this allocator owns, both sized once from
+//! `links`/`blk_order` arrays this allocator owns, both sized once from
 //! the frame count at construction. Allocation and freeing therefore
 //! touch no other allocator — critically, they never call the global
 //! kernel heap. This is what lets the kernel heap grow by drawing frames
 //! from here without re-entering itself (a heap that fed itself through
 //! a page allocator whose free lists allocated *from that heap* would
 //! deadlock under its own lock). The only heap use is the one-time
-//! `nodes`/`blk_order`/`bitmap` construction, before the heap is under
+//! `links`/`blk_order`/`bitmap` construction, before the heap is under
 //! load. Each free block occupies at most one node (its start frame),
 //! so the per-frame overhead is a fixed `2 * usize + 1` byte — far
 //! leaner than a per-frame descriptor, and proportional to the RAM the
@@ -51,6 +51,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_collections::intrusive::{IntrusiveList, Link};
 use tairix_reclaim::RESERVE_DIVISOR;
 use tairix_sync::SpinLock;
 
@@ -143,40 +144,10 @@ impl Frame {
 // State (private)
 // ---------------------------------------------------------------------------
 
-/// Sentinel for "no frame" in the intrusive free-list links and heads.
-///
-/// `usize::MAX` can never be a real frame index: valid indices are
-/// `0..total_frames`, and `total_frames` is derived from a physical
-/// address that fits `u64`, so the largest index is always strictly below
-/// `usize::MAX` on every Tier-1 (64-bit) port.
-const NIL: usize = usize::MAX;
-
 /// Sentinel for "this frame is not a registered free-block head" in
 /// [`FrameAllocatorState::blk_order`]. A real order is `0..=MAX_ORDER`
 /// (≤ 13), so `0xFF` never collides.
 const NOT_A_HEAD: u8 = 0xFF;
-
-/// One entry of the intrusive per-order free list, indexed by the free
-/// block's starting frame.
-///
-/// Only a block's *start* frame is ever a live node; the interior frames
-/// of a block carry stale link values that are never read (the block is
-/// found and unlinked by its start alone). Both links are [`NIL`] when
-/// the frame is not the head/tail of its order's list.
-#[derive(Clone, Copy)]
-struct FrameNode {
-    /// Next free block of the same order, or [`NIL`].
-    next: usize,
-    /// Previous free block of the same order, or [`NIL`].
-    prev: usize,
-}
-
-impl FrameNode {
-    const UNLINKED: Self = Self {
-        next: NIL,
-        prev: NIL,
-    };
-}
 
 /// Internal, lock-free state of the frame allocator.
 ///
@@ -186,7 +157,7 @@ impl FrameNode {
 ///
 /// The per-order free lists are intrusive (see the module docs): a heap
 /// allocation never occurs on the allocate/free paths, only on the
-/// one-time construction of `bitmap`/`nodes`/`blk_order`.
+/// one-time construction of `bitmap`/`links`/`blk_order`.
 struct FrameAllocatorState {
     /// Address-space extent, in frames: the frame count from physical zero
     /// to the highest mapped address. Reported by [`FrameAllocator::total_frames`]
@@ -195,7 +166,7 @@ struct FrameAllocatorState {
     /// (`span`) and indexed from `base_frame`.
     total_frames: usize,
     /// Lowest usable frame index — the base every per-frame array
-    /// (`bitmap`, `nodes`, `blk_order`) is indexed from. A frame `f` maps to
+    /// (`bitmap`, `links`, `blk_order`) is indexed from. A frame `f` maps to
     /// slot `f - base_frame`. Sizing the arrays to the *usable* frame span
     /// rather than to the whole address-space extent keeps the per-frame
     /// bookkeeping proportional to the RAM the machine actually has, so a
@@ -212,15 +183,16 @@ struct FrameAllocatorState {
     bitmap: Vec<u64>,
     /// Intrusive free-list links, one per frame of the usable span (indexed
     /// by `frame - base_frame`). Only a free block's start frame holds live
-    /// links.
-    nodes: Vec<FrameNode>,
+    /// links; every other frame's link reads back unlinked.
+    links: Vec<Link>,
     /// The order a free block starting at this frame is registered at, or
-    /// [`NOT_A_HEAD`] (indexed by `frame - base_frame`). Lets an arbitrary
-    /// buddy be found and unlinked in O(1) without scanning.
+    /// [`NOT_A_HEAD`] (indexed by `frame - base_frame`). One store carries
+    /// every order's list, so it is this that says *which* list a registered
+    /// head is on — and so lets an arbitrary buddy be found and unlinked in
+    /// O(1) without scanning.
     blk_order: Vec<u8>,
-    /// `free_heads[order]` = starting frame of the first free block of
-    /// that order, or [`NIL`].
-    free_heads: [usize; MAX_ORDER as usize + 1],
+    /// Free blocks of each order, keyed by slot (`frame - base_frame`).
+    free_lists: [IntrusiveList; MAX_ORDER as usize + 1],
     /// Cached count of free frames (sum over the free lists of 2^order).
     free_frames: usize,
     /// Number of whole frames inside `Usable` boot-map regions — the RAM
@@ -316,72 +288,74 @@ impl FrameAllocatorState {
         true
     }
 
-    /// The compact-array slot for `frame`: its offset from `base_frame`.
-    /// Every free-block start is a usable frame, so it is always
-    /// `>= base_frame` and in range.
-    #[inline]
-    fn slot(&self, frame: usize) -> usize {
-        frame - self.base_frame
-    }
-
     /// Insert a maximally-aligned free block into the buddy lists.
     ///
     /// `start` must be an off-list, aligned block start of `order`; it
     /// becomes the new head of that order's intrusive list.
-    fn add_free_block(&mut self, start: usize, order: u32) {
-        let head = self.free_heads[order as usize];
-        let s = self.slot(start);
-        self.nodes[s] = FrameNode {
-            next: head,
-            prev: NIL,
-        };
-        if head != NIL {
-            let h = self.slot(head);
-            self.nodes[h].prev = start;
-        }
-        self.free_heads[order as usize] = start;
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::InvariantViolation`] when the block's slot is outside
+    /// the usable span, or the list refuses it because it is already
+    /// registered. Both mean this allocator's own bookkeeping has diverged,
+    /// and refusing is what stops a corrupt list being handed out as free
+    /// memory. [`AllocError::SizeUnsupported`] when `order` names no list.
+    fn add_free_block(&mut self, start: usize, order: u32) -> Result<(), AllocError> {
+        let slot = start
+            .checked_sub(self.base_frame)
+            .ok_or(AllocError::InvariantViolation)?;
+        self.free_lists
+            .get_mut(order as usize)
+            .ok_or(AllocError::SizeUnsupported)?
+            .push_front(&mut self.links[..], slot)
+            .map_err(|_| AllocError::InvariantViolation)?;
         // `order <= MAX_ORDER` (13) by construction, so it fits a `u8`.
         #[allow(clippy::cast_possible_truncation)]
         {
-            self.blk_order[s] = order as u8;
+            self.blk_order[slot] = order as u8;
         }
         self.free_frames += 1usize << order;
+        Ok(())
     }
 
     /// Unlink the free block starting at `start` from `order`'s list.
     ///
-    /// Returns `false` (and changes nothing) when `start` is not a
+    /// Returns `Ok(false)` (and changes nothing) when `start` is not a
     /// registered free-block head of exactly `order` — the caller then
     /// knows the buddy is split into smaller blocks and cannot merge.
-    fn remove_free_block(&mut self, start: usize, order: u32) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`AllocError::InvariantViolation`] when the block is registered at
+    /// this order yet the list will not splice it out, which is the
+    /// bookkeeping divergence [`Self::add_free_block`] describes, and
+    /// [`AllocError::SizeUnsupported`] when `order` names no list.
+    fn remove_free_block(&mut self, start: usize, order: u32) -> Result<bool, AllocError> {
         // `start` may be any frame the merge logic probes, including one
         // below `base_frame`; resolve the slot fail-safe.
-        let Some(s) = start.checked_sub(self.base_frame) else {
-            return false;
+        let Some(slot) = start.checked_sub(self.base_frame) else {
+            return Ok(false);
         };
-        if self.blk_order.get(s).copied().map(u32::from) != Some(order) {
-            return false;
+        if self.blk_order.get(slot).copied().map(u32::from) != Some(order) {
+            return Ok(false);
         }
-        let FrameNode { next, prev } = self.nodes[s];
-        if prev == NIL {
-            self.free_heads[order as usize] = next;
-        } else {
-            let p = self.slot(prev);
-            self.nodes[p].next = next;
-        }
-        if next != NIL {
-            let n = self.slot(next);
-            self.nodes[n].prev = prev;
-        }
-        self.nodes[s] = FrameNode::UNLINKED;
-        self.blk_order[s] = NOT_A_HEAD;
+        self.free_lists
+            .get_mut(order as usize)
+            .ok_or(AllocError::SizeUnsupported)?
+            .unlink(&mut self.links[..], slot)
+            .map_err(|_| AllocError::InvariantViolation)?;
+        self.blk_order[slot] = NOT_A_HEAD;
         self.free_frames -= 1usize << order;
-        true
+        Ok(true)
     }
 
     /// Greedy insertion of every free run discovered in `[start, end)`:
     /// chop the run into maximally-aligned, maximally-sized buddy blocks.
-    fn populate_run(&mut self, mut start: usize, end: usize) {
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add_free_block`].
+    fn populate_run(&mut self, mut start: usize, end: usize) -> Result<(), AllocError> {
         while start < end {
             // The largest order we can place at `start` is bounded by
             // (a) alignment of `start` and (b) the number of frames left
@@ -395,9 +369,10 @@ impl FrameAllocatorState {
                 .checked_ilog2()
                 .map_or(0, |o| core::cmp::min(o, MAX_ORDER));
             let order = core::cmp::min(align_order, max_by_remaining);
-            self.add_free_block(start, order);
+            self.add_free_block(start, order)?;
             start += 1usize << order;
         }
+        Ok(())
     }
 
     fn alloc_order(&mut self, order: u32) -> Result<usize, AllocError> {
@@ -407,25 +382,28 @@ impl FrameAllocatorState {
         // Find lowest order ≥ `order` with a non-empty free list.
         let mut found: Option<u32> = None;
         for o in order..=MAX_ORDER {
-            if self.free_heads[o as usize] != NIL {
+            if !self.free_lists[o as usize].is_empty() {
                 found = Some(o);
                 break;
             }
         }
         let mut cur = found.ok_or(AllocError::OutOfMemory)?;
-        // Pop the head block at `cur`. The intrusive list is LIFO, so the
-        // head is the most recently freed/split block of this order —
+        // Pop the front block at `cur`. The intrusive list is LIFO, so the
+        // front is the most recently freed/split block of this order —
         // deterministic, and O(1).
-        let start = self.free_heads[cur as usize];
-        debug_assert_ne!(start, NIL);
-        let removed = self.remove_free_block(start, cur);
-        debug_assert!(removed);
+        let slot = self.free_lists[cur as usize]
+            .front()
+            .ok_or(AllocError::InvariantViolation)?;
+        let start = self.base_frame + slot;
+        if !self.remove_free_block(start, cur)? {
+            return Err(AllocError::InvariantViolation);
+        }
 
         // Split down to the requested order.
         while cur > order {
             cur -= 1;
             let buddy = start + (1usize << cur);
-            self.add_free_block(buddy, cur);
+            self.add_free_block(buddy, cur)?;
         }
 
         self.mark_range_used(start, 1usize << order);
@@ -483,7 +461,7 @@ impl FrameAllocatorState {
             if !self.block_is_free(buddy, cur_order) {
                 break;
             }
-            if !self.remove_free_block(buddy, cur_order) {
+            if !self.remove_free_block(buddy, cur_order)? {
                 // The buddy is bitmap-free but not registered at this
                 // order — it must be split into smaller blocks below us,
                 // so we cannot merge.
@@ -492,7 +470,7 @@ impl FrameAllocatorState {
             cur_start = parent_start;
             cur_order += 1;
         }
-        self.add_free_block(cur_start, cur_order);
+        self.add_free_block(cur_start, cur_order)?;
         Ok(())
     }
 }
@@ -561,11 +539,11 @@ impl FrameAllocator {
             return Err(AllocError::OutOfMemory);
         }
 
-        // A `usize` frame count can never reach the `NIL` sentinel: valid
-        // frame indices are `0..total_frames`, so the largest possible index
-        // is `total_frames - 1 < usize::MAX == NIL`. `NIL` therefore never
-        // collides with a real index for any representable `total_frames`,
-        // and no explicit guard is needed here.
+        // A frame slot can never reach the indices the link encoding
+        // reserves: `total_frames` is a byte count shifted down by
+        // `PAGE_SHIFT`, so the largest slot is far below
+        // `tairix_collections::intrusive::MAX_INDEX`, and the link array is
+        // shorter still.
 
         // 2. Detect overlaps by sorting by start and scanning.
         let mut sorted: Vec<_> = map.regions().to_vec();
@@ -633,16 +611,16 @@ impl FrameAllocator {
         //    grow by drawing frames from here without re-entering itself.
         let words = span.div_ceil(64);
         let bitmap = vec![u64::MAX; words];
-        let nodes = vec![FrameNode::UNLINKED; span];
+        let links = vec![Link::UNLINKED; span];
         let blk_order = vec![NOT_A_HEAD; span];
         let mut state = FrameAllocatorState {
             total_frames,
             base_frame,
             span,
             bitmap,
-            nodes,
+            links,
             blk_order,
-            free_heads: [NIL; MAX_ORDER as usize + 1],
+            free_lists: [const { IntrusiveList::new() }; MAX_ORDER as usize + 1],
             free_frames: 0,
             usable_frames: 0,
             reserve_frames: 0,
@@ -657,7 +635,7 @@ impl FrameAllocator {
                 state.clear_bit(i);
             }
             state.usable_frames += last_excl - first;
-            state.populate_run(first, last_excl);
+            state.populate_run(first, last_excl)?;
         }
 
         // 6. Derive the kernel reserve floor from the discovered RAM (never
@@ -1132,6 +1110,69 @@ mod tests {
         assert!(a.free_frames() < 8);
         a.free(f).unwrap();
         assert_eq!(a.free_frames(), 8);
+    }
+
+    #[test]
+    fn re_registering_a_free_block_is_refused_rather_than_double_counted() {
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        let mut state = a.inner.lock();
+
+        // Slot 0 is the region's first frame, so the populate pass registered
+        // it as a free-block head at whatever order it could place there.
+        let order = u32::from(state.blk_order[0]);
+        assert_ne!(state.blk_order[0], NOT_A_HEAD);
+        assert!(state.links[0].is_linked());
+        let free = state.free_frames;
+        let base = state.base_frame;
+
+        assert_eq!(
+            state.add_free_block(base, order),
+            Err(AllocError::InvariantViolation)
+        );
+        assert_eq!(state.free_frames, free);
+    }
+
+    #[test]
+    fn an_order_tag_without_a_link_refuses_the_unlink() {
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        let mut state = a.inner.lock();
+
+        // Tag a slot that is on no list as an order-0 head, so the tag and the
+        // links disagree exactly as a stray write would leave them.
+        let victim = state.span - 1;
+        assert!(!state.links[victim].is_linked());
+        state.blk_order[victim] = 0;
+        let frame = state.base_frame + victim;
+        let free = state.free_frames;
+
+        assert_eq!(
+            state.remove_free_block(frame, 0),
+            Err(AllocError::InvariantViolation)
+        );
+        assert_eq!(state.free_frames, free);
+    }
+
+    #[test]
+    fn a_front_block_whose_order_tag_disagrees_refuses_the_allocation() {
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        {
+            let mut state = a.inner.lock();
+            // The registered head still fronts its order's list, but its tag
+            // now claims a different order, so no order can pop it. Before the
+            // free lists refused this, the mismatch was a release-mode
+            // `debug_assert` and the frame was handed out anyway.
+            let wrong = u32::from(state.blk_order[0]) + 1;
+            assert!(wrong <= MAX_ORDER);
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                state.blk_order[0] = wrong as u8;
+            }
+        }
+
+        assert_eq!(a.alloc().err(), Some(AllocError::InvariantViolation));
     }
 
     #[test]

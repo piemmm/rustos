@@ -13,6 +13,7 @@ for. `alloc` already supplies `Vec`, `String`, `BTreeMap`, `BTreeSet`,
 | `ArrayString<N>` | up to `N` bytes inline, the UTF-8 invariant held by construction |
 | `RingBuf<T, N>` | a fixed-capacity circular queue, constant time at both ends |
 | `SecretRing<T, N>` | the same, scrubbing each slot it vacates |
+| `IntrusiveList` | a doubly-linked list over nodes the caller owns: constant-time unlink of any node, no search, no allocation |
 | `BitSet256` | a fixed 256-bit set: constant-time membership, allocation-free |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed and what is still to
@@ -49,6 +50,35 @@ with a later tier.
    no operation carries both.** Hence no positional insert on the
    fixed-capacity vectors: its two failure modes are unrelated and no single
    error spells them honestly.
+
+## The intrusive list
+
+`IntrusiveList` is a three-word header; the links live in the caller's own
+store — a `[Link]`, or its own slot type with a link field — and every
+operation takes it. That is what an owning container cannot offer: any node
+leaves the list in constant time from its index alone, with no search and no
+allocation, so a buddy allocator can splice out an arbitrary free block on a
+merge and a recency list can move an arbitrary entry to the front. Several
+lists may share one store, which is exactly what a per-order free-list array
+is.
+
+It is **index-addressed, and holds no `unsafe`.** A pointer-linked list is
+what a C kernel writes, and it is also how a stray link becomes a wild store;
+here every index is bounds-checked, so a corrupted link is a refused splice
+(`LinkError::Corrupt`) rather than memory corruption. A link is two words —
+the on-a-list state is encoded in the neighbour ends rather than a third
+field, because a free list with one link per page cannot afford one — which
+reserves the two index values above `MAX_INDEX`, far above any store that has
+a representable size.
+
+Nothing is written until every node a splice touches is known to exist, so a
+refused operation leaves the list and the store exactly as they were. What the
+list can check it does: a node is on at most one list, an unlink of a node
+claiming an end this list does not hold is refused, and every neighbour must
+link back. What it cannot check it says: an *interior* node of a sibling list
+sharing the store is indistinguishable from one of its own, which would need a
+list identity in every link, and the caller sharing a store is the one that
+already knows (`kernel/mem`'s per-order tag array is that knowledge).
 
 ## Choosing a hasher
 
@@ -114,12 +144,18 @@ across a bulk push, a wrapped drain, an eviction and a spill; a footprint that
 is the elements plus their indices and no heap block; and a `retain` predicate
 that unwinds leaving the vector describing exactly what it wrote back.
 
+The intrusive list is gated the same way: a mid-list unlink reaches the
+departing node and its two neighbours and writes exactly those three links,
+over three nodes and over ten thousand alike, which is what "constant time, no
+search" means as a reproducible number.
+
 `tests/fuzz_collections.rs` drives the map against a plain association list
-over deliberately colliding key streams and `tests/fuzz_sequences.rs` drives
-the sequence tier against naive models over arbitrary lengths and text, both
-under `cargo xtask fuzz`; `cargo xtask miri` interprets the whole suite under
-the undefined-behaviour oracle — the inline slot arrays are the reason that
-stage exists.
+over deliberately colliding key streams, `tests/fuzz_sequences.rs` drives the
+sequence tier against naive models over arbitrary lengths and text, and
+`tests/fuzz_intrusive.rs` drives two lists over one shared store against naive
+order models — all under `cargo xtask fuzz`; `cargo xtask miri` interprets the
+whole suite under the undefined-behaviour oracle — the inline slot arrays are
+the reason that stage exists.
 
 ## Stability
 

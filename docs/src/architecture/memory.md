@@ -37,11 +37,16 @@ Hybrid **buddy + bitmap**:
   non-existent`. The bitmap is the source of truth for ownership, so
   every double-free or stray-free is detected and reported as
   `AllocError::InvariantViolation`.
-- A `BTreeSet<usize>` per buddy order tracks the starting frame
-  indices of free blocks at that order. Splits push two half-blocks
-  down one order; merges pop a buddy at the same order and push the
-  parent up one order. Merging consults the bitmap so it never
-  reaches across a reserved region.
+- A [`tairix_collections::IntrusiveList`](../lib/collections.md) per
+  buddy order holds the free blocks of that order, threaded through one
+  link array indexed by starting frame. Splits push two half-blocks down
+  one order; merges pop a buddy at the same order and push the parent up
+  one order — and a merge unlinks its buddy from the *middle* of a list in
+  constant time, which is why the lists are intrusive rather than ordered
+  sets. Merging consults the bitmap so it never reaches across a reserved
+  region. The links are the allocator's own array, so the allocate and
+  free paths reach no other allocator and the kernel heap can grow by
+  drawing frames from here without re-entering itself.
 
 The allocator never panics on OOM: `alloc` / `alloc_order` return
 `AllocError::OutOfMemory`. The constructor refuses overlapping or
