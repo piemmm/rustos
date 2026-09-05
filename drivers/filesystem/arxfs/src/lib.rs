@@ -64,6 +64,7 @@ pub use tairix_abi::driver::filesystem::{
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
+use tairix_collections::RangeKey;
 use tairix_crypto::{AeadKey, MacKey};
 use tairix_fsmeta::{AttrFlags, AttrKey, AttrSet};
 use tairix_reclaim::{CacheBudget, PinnedAccounting, PressureGauge};
@@ -82,7 +83,6 @@ mod health;
 mod integrity;
 mod pagecache;
 mod reconcile;
-mod runs;
 mod scratch;
 mod scrub;
 mod superblock;
@@ -1422,16 +1422,16 @@ impl<B: Block> ARXFS<B> {
             let private = self
                 .allocator()
                 .ok()
-                .and_then(|alloc| alloc.txn_private.first_overlap(pos, end - pos));
-            let Some((run_start, run_len)) = private else {
+                .and_then(|alloc| alloc.txn_private.first_overlap(pos..end));
+            let Some(run) = private else {
                 self.defer_free(pos, end - pos);
                 return;
             };
-            if run_start > pos {
-                self.defer_free(pos, run_start - pos);
+            if run.start > pos {
+                self.defer_free(pos, run.start - pos);
             }
-            self.reclaim_private(run_start, run_len);
-            pos = run_start.saturating_add(run_len);
+            self.reclaim_private(run.start, run.end - run.start);
+            pos = run.end;
         }
     }
 
@@ -1455,14 +1455,17 @@ impl<B: Block> ARXFS<B> {
         let Ok(alloc) = self.allocator_mut() else {
             return;
         };
-        alloc.txn_private.remove(start, len);
+        let Some(run) = start.span(len) else {
+            return;
+        };
+        alloc.txn_private.remove(run);
         // Whatever this operation did not claim itself was claimed by an
         // earlier operation of the same transaction, which undoing this one
         // must give back.
         let mut pos = start;
-        while let Some((gap_start, gap_len)) = alloc.op_claimed.first_gap(pos, end - pos) {
-            alloc.op_released.insert(gap_start, gap_len);
-            pos = gap_start.saturating_add(gap_len);
+        while let Some(gap) = alloc.op_claimed.first_gap(pos..end) {
+            pos = gap.end;
+            alloc.op_released.insert(gap);
             if pos >= end {
                 break;
             }
@@ -1479,15 +1482,15 @@ impl<B: Block> ARXFS<B> {
             let fresh = self
                 .allocator()
                 .ok()
-                .and_then(|alloc| alloc.txn_freed.first_gap(pos, end - pos));
-            let Some((gap_start, gap_len)) = fresh else {
+                .and_then(|alloc| alloc.txn_freed.first_gap(pos..end));
+            let Some(gap) = fresh else {
                 return;
             };
             if let Ok(alloc) = self.allocator_mut() {
-                alloc.txn_freed.insert(gap_start, gap_len);
-                alloc.op_deferred.insert(gap_start, gap_len);
+                alloc.txn_freed.insert(gap.clone());
+                alloc.op_deferred.insert(gap.clone());
             }
-            pos = gap_start.saturating_add(gap_len);
+            pos = gap.end;
         }
     }
 
@@ -1875,23 +1878,23 @@ impl<B: Block> ARXFS<B> {
         }
         if let Ok(alloc) = self.allocator_mut() {
             let deferred = core::mem::take(&mut alloc.op_deferred);
-            for (start, len) in deferred.iter() {
-                alloc.txn_freed.remove(start, len);
+            for run in &deferred {
+                alloc.txn_freed.remove(run);
             }
         }
         let claimed = match self.allocator_mut() {
             Ok(alloc) => core::mem::take(&mut alloc.op_claimed),
             Err(_) => return,
         };
-        for (start, len) in claimed.iter() {
-            self.unclaim_private(start, len);
+        for run in &claimed {
+            self.unclaim_private(run.start, run.end - run.start);
         }
         let released = match self.allocator_mut() {
             Ok(alloc) => core::mem::take(&mut alloc.op_released),
             Err(_) => return,
         };
-        for (start, len) in released.iter() {
-            self.reclaim_released(start, len);
+        for run in &released {
+            self.reclaim_released(run.start, run.end - run.start);
         }
     }
 
@@ -1904,15 +1907,15 @@ impl<B: Block> ARXFS<B> {
             let held = self
                 .allocator()
                 .ok()
-                .and_then(|alloc| alloc.txn_private.first_overlap(pos, end - pos));
-            let Some((run_start, run_len)) = held else {
+                .and_then(|alloc| alloc.txn_private.first_overlap(pos..end));
+            let Some(run) = held else {
                 return;
             };
             if let Ok(alloc) = self.allocator_mut() {
-                alloc.txn_private.remove(run_start, run_len);
+                alloc.txn_private.remove(run.clone());
             }
-            self.mark_run_free(run_start, run_len);
-            pos = run_start.saturating_add(run_len);
+            self.mark_run_free(run.start, run.end - run.start);
+            pos = run.end;
         }
     }
 
@@ -1926,15 +1929,15 @@ impl<B: Block> ARXFS<B> {
             let missing = self
                 .allocator()
                 .ok()
-                .and_then(|alloc| alloc.txn_private.first_gap(pos, end - pos));
-            let Some((gap_start, gap_len)) = missing else {
+                .and_then(|alloc| alloc.txn_private.first_gap(pos..end));
+            let Some(gap) = missing else {
                 return;
             };
             if let Ok(alloc) = self.allocator_mut() {
-                alloc.txn_private.insert(gap_start, gap_len);
+                alloc.txn_private.insert(gap.clone());
             }
-            self.mark_run_used(gap_start, gap_len);
-            pos = gap_start.saturating_add(gap_len);
+            self.mark_run_used(gap.start, gap.end - gap.start);
+            pos = gap.end;
         }
     }
 
@@ -1959,8 +1962,8 @@ impl<B: Block> ARXFS<B> {
             Ok(alloc) => core::mem::take(&mut alloc.txn_private),
             Err(_) => return,
         };
-        for (start, len) in private.iter() {
-            self.mark_run_free(start, len);
+        for run in &private {
+            self.mark_run_free(run.start, run.end - run.start);
         }
     }
 
@@ -1982,7 +1985,7 @@ impl<B: Block> ARXFS<B> {
         let freed = core::mem::take(&mut self.allocator_mut()?.txn_freed);
         let result = freed
             .iter()
-            .try_for_each(|(start, len)| self.mark_range_free(start, len));
+            .try_for_each(|run| self.mark_range_free(run.start, run.end - run.start));
         // The set stays whole whatever the outcome: a failure aborts the
         // transaction, which reserves exactly these runs again.
         if let Ok(alloc) = self.allocator_mut() {
@@ -2005,8 +2008,8 @@ impl<B: Block> ARXFS<B> {
             Ok(alloc) => core::mem::take(&mut alloc.txn_freed),
             Err(_) => return,
         };
-        for (start, len) in freed.iter() {
-            self.mark_run_used(start, len);
+        for run in &freed {
+            self.mark_run_used(run.start, run.end - run.start);
         }
     }
 
@@ -2028,7 +2031,7 @@ impl<B: Block> ARXFS<B> {
         self.free_count = self.allocator().map_or(self.free_count, |alloc| {
             self.saved_txn
                 .free_count
-                .saturating_sub(alloc.txn_private.blocks())
+                .saturating_sub(alloc.txn_private.covered())
         });
         self.schedule.closed();
         self.read_only = true;
@@ -2047,8 +2050,8 @@ impl<B: Block> ARXFS<B> {
         // allocations recorded.
         alloc.txn_private.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
-        for (start, len) in freed.iter() {
-            self.enqueue_discard_run(start, len);
+        for run in &freed {
+            self.enqueue_discard_run(run.start, run.end - run.start);
         }
         self.sample_pinned();
     }
@@ -2070,8 +2073,8 @@ impl<B: Block> ARXFS<B> {
             return;
         }
         if let Ok(alloc) = self.allocator_mut() {
-            if alloc.pending_discard.run_count() < MAX_PENDING_DISCARD_RUNS {
-                alloc.pending_discard.insert(lo, hi - lo);
+            if alloc.pending_discard.len() < MAX_PENDING_DISCARD_RUNS {
+                alloc.pending_discard.insert(lo..hi);
             }
         }
     }

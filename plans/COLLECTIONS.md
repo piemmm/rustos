@@ -1,6 +1,6 @@
 # COLLECTIONS — The shared container and hashing libraries
 
-Status: **in progress** — C0 through C3 landed; the remaining containers are
+Status: **in progress** — C0 through C5 landed; the remaining containers are
 still to come. The ledger below is the authoritative record of what is left.
 
 ## The ledger
@@ -8,7 +8,7 @@ still to come. The ledger below is the authoritative record of what is left.
 Order is top to bottom, but `Depends on` is the binding constraint, not the
 row order: an increment may start as soon as every increment it names is
 `done`, and rows with no edge between them may proceed in parallel across
-sessions. C5 and C7 depend on nothing and can be taken first if their
+sessions. C6 and C7 depend on nothing and can be taken next if their
 defects are the pressing ones.
 
 The table **gains rows**: a defect too large for the increment that found it
@@ -24,7 +24,7 @@ detail becomes its done-state summary — nothing is appended, here or there.
 | C3 | Intrusive list | `IntrusiveList` — the primitive C4 and C8 are built on | — | **done** |
 | C4 | Recency | `LruMap`, O(1) touch / insert / evict, and the caches whose key order is not load-bearing | C1, C3 | **done** |
 | C4a | Ordered recency | the three caches whose key index answers range queries — `block_cache`, `transform_cache`, `fscache` — reach O(1) recency without losing them | C4, C7 | **planned** |
-| C5 | Intervals | `RangeMap`, `RangeSet` | — | **planned** |
+| C5 | Intervals | `RangeMap`, `RangeSet` | — | **done** |
 | C6 | Identity | `SlotMap`, `IdAllocator`, `BitVec` | — | **planned** |
 | C7 | Sparse index | `RadixTree` with tagged iteration | — | **planned** |
 | C8 | Deadlines | `IndexedHeap`, `TimerWheel` | C3 | **planned** |
@@ -48,10 +48,6 @@ today:
   over a `(tick -> key)` `BTreeMap` recency index** — `block_cache`,
   `transform_cache`, and `fscache`, the three whose key index also answers
   range queries (C4a). All are O(log n) where O(1) is standard.
-* **Four hand-rolled address-range maps**, each a `BTreeMap<u64, len>` with
-  its own overlap arithmetic: `kernel/mem/src/anon_window.rs`,
-  `kernel/mem/src/mmio.rs`, `kernel/core/src/aspace.rs` (twice — file and
-  anonymous regions), and `drivers/filesystem/arxfs/src/runs.rs`.
 * **Monotonic `next_id` counters** standing in for identifier allocation in
   `kernel/core/src/sharedreg.rs` and all three schedulers, with no reuse and
   no generation — so a recycled identifier aliases a dead object rather than
@@ -147,6 +143,15 @@ one is not done.
    not a panic. No `Index`/`IndexMut` impl exists on any map: `map[key]`
    panicking on a missing key has no place in a kernel. Infallible forms
    exist only where they genuinely cannot fail (`get`, `remove`, `len`).
+   The **one exception is the ordered tier**, and it is `alloc`'s rather than
+   ours: `RangeMap` stores its entries in `alloc::collections::BTreeMap`,
+   whose `insert` cannot be made fallible from outside `alloc` — there is no
+   `try_insert` and no `reserve` to pre-charge. Re-implementing an ordered map
+   to gain one is exactly the bloat §6 excludes, and every ordered map already
+   in the tree has the same property, so C5 did not introduce it and does not
+   close it. Recorded here so a later sweep does not re-derive the question:
+   changing it is a whole-tree decision about `BTreeMap`, not a container one.
+   Every *read* on that tier still allocates nothing.
 2. **No allocation on any read path, ever.** Lookup, iteration, and range
    query allocate nothing. Growth is amortised and off the hot path.
 3. **No fixed capacity ceiling.** Every heap-backed container grows from
@@ -319,7 +324,7 @@ carries both.
 | `SlotMap<K, V>` | O(1) insert/remove/get, dense stable keys, **generation counter rejects a stale key** | `next_id` counters plus a `BTreeMap`, in `sharedreg`, all three schedulers, and the capability table |
 | `IdAllocator` | smallest-free-id allocation and release over a hierarchical bitmap | monotonic `next_id.fetch_add` for pids, fds, IRQ and MSI vectors, port numbers |
 | `BitVec` | dynamic-length bitmap with summary levels: find-first-free in O(log n), not O(n/64) | ad-hoc `Vec<bool>` and `Vec<u64>` scans, including `kernel/mem/src/dma.rs`'s `slot_used` |
-| `RangeMap<K, V>` / `RangeSet<K>` | non-overlapping intervals; O(log n) lookup, insert, split, and coalesce | the four range maps listed at the top of this plan |
+| `RangeMap<K, V>` / `RangeSet<K>` | non-overlapping intervals; O(log n) lookup, insert, split, and coalesce. The map keeps abutting entries apart (an entry is an identity) and refuses an overlap; the set absorbs what it touches, so its entry count is one per contiguous run | the five hand-rolled range maps C5 deleted, and the two free-space structures — a fragmenting hole list and a scanned occupancy bitmap — that sat beside two of them |
 | `RadixTree<V>` | sparse `u64`-keyed index, fixed-depth descent, gang lookup and **tagged iteration** (dirty / writeback) | `arxfs` page cache and write-cache dirty set, the block cache index |
 | `LruMap<K, V, S>` | **O(1)** touch, insert, and evict via an intrusive list plus a hash index | the LRUs at the top of this plan whose key order is not load-bearing; the three that answer range queries are C4a |
 
@@ -475,8 +480,8 @@ links no allocator, so those binaries have no `alloc` in their graph at all |
 | C3 | **done.** The tier was **split into two crates** (§1): `lib/inline` for the containers that allocate nothing and `lib/collections` for the heap-backed ones, so `lib/log`, `lib/caps`, the boot console and three of the four architecture ports link no allocator. `kernel/mem/src/frame.rs`'s hand-written per-order free lists: the `FrameNode` `prev`/`next` pair, the `usize::MAX` `NIL` sentinel, the `free_heads` array, and both splice bodies are gone, replaced by one `IntrusiveList` per order over a single `Vec<Link>` indexed by slot. The link is the same two words the old node was, so the per-frame overhead is unchanged. The `blk_order` tag array stays and earns its keep: one store carries every order's list, so it is what says *which* list a registered head is on — the knowledge a shared store cannot hold in the links without a word per node. Two silent-corruption paths closed with it: re-registering a block, and unlinking one whose tag and links disagree, are now `AllocError::InvariantViolation` where the first was undetected and the second a release-mode `debug_assert` above a frame handed out twice. The counter gate is nodes reached: a mid-list unlink reaches the departing node and its two neighbours and writes exactly those three links, identically over three nodes and over ten thousand |
 | C4 | **done.** `LruMap` is one open-addressed index over a node arena, with the recency order and the free list as two `IntrusiveList`s through the same arena: a key is stored once (the index holds the node handle, not a copy), the hash is stored beside the entry so eviction and a table rebuild hash nothing, and a steady-state map returns to the allocator not at all. It evicts nothing on its own — the caller's budget calls `pop_lru` — which is what lets one map serve a fixed-entry index and a byte-budgeted cache alike. Converted with it: **`lib/net/src/neigh.rs`**, whose `entries.iter().position(…)` cost a scan of the table *per transmitted packet* and whose eviction cost a second one, both now one probe and one splice, and whose index is keyed under the service's peer-input key because a remote peer chooses the addresses (the `Entry`'s own `ip` and `last_used` fields went with it, and `learn`'s unused `now` with them); **`drivers/filesystem/arxfs/src/dedupe.rs`**, whose two-tier `LruTier` was a `by_key`/`by_recency` `BTreeMap` pair, now one map per tier under the per-boot key — its keys carry a hash of the writer's own bytes, so a boot with no key indexes nothing rather than filing them under a predictable one; **`kernel/core/src/launch_cache.rs`**, whose `Entry` collapsed to the `Arc` it held; and **`lib/reclaim/src/cache.rs`**, the shared engine, which gains an `S` parameter so every consumer names its hasher in review — the desktop's window, cursor, and artwork caches the fast unkeyed one (identifiers the compositor assigned), the font glyph and measurement caches the keyed one (a caller chooses the characters and the text). A cache with no key takes a zero budget and retains nothing rather than an index a grinder could crowd. **What C4 did not convert, and why, is C4a:** `block_cache`, `transform_cache`, and `fscache` answer *range* queries against their key index — `invalidate_range(lba, blocks)`, `invalidate_run(phys, len)`, and `data.range((node, 0)..=(node, u64::MAX))` — so a hash index would turn each into a scan. Their recency order is the defect; their key order is load-bearing, exactly the per-site judgement C1 fixed |
 | C4a | the recency index and `evict_until` loop in `block_cache`, `transform_cache`, and `fscache`, without a hash index. The shape they need is the one `LruMap` already has — a node arena, a recency list, and a free list — under an *ordered* key index rather than a hash one, so the engine is extended rather than a second one written (§2.2). C7 is a dependency because it names the block-cache index as its own: settle whether that index becomes a `RadixTree` before deciding what the ordered variant must offer |
-| C5 | `kernel/mem/src/anon_window.rs`, `kernel/mem/src/mmio.rs`, both maps in `kernel/core/src/aspace.rs`, `drivers/filesystem/arxfs/src/runs.rs` |
-| C6 | the `next_id` counters in `sharedreg` and all three schedulers; `dma.rs`'s `slot_used`; flat bitmap scans |
+| C5 | **done.** `RangeMap` and `RangeSet` are one storage and one disjointness invariant, differing only in what they do to a neighbour: the map keeps abutting entries apart because an entry is an identity, and refuses an *overlapping* insertion; the set absorbs everything it touches, so its entry count is one per contiguous run. Only `Ord` decides overlap, adjacency, and splitting, so `RangeKey` carries just the measuring arithmetic — `span`, the one place a `(base, count)` pair becomes a range with the overflow checked, and `distance_from`. `RangeMap::place` is first-fit over the gaps *between* what a window handed out, which is the whole free-space representation. Converted with it: **`anon_window.rs`**, whose released-hole map beside its live-region map never joined the two holes an adjacent pair of releases left — so a request larger than either was refused while the address space for it sat free (a regression test now covers it) — and whose free-list, bump cursor, and slot/address conversions went with it; **`mmio.rs`**, whose `Vec<bool>` occupancy bitmap was first-fit *scanned* up to the window's whole 262 144-slot ceiling per placement and grew to the deepest slot ever touched, now one entry per handed-out run keyed by leading guard slot and valued by the block's within-page offset (the data-page count being the run's own length less its guards), which deleted `Record`, `slot_is_used`, `alloc_free_run`, and the `OutOfMemory` variant the bitmap growth existed to report, and turned the part-way-mapped rollback into one `unwind_run` that releases the record as well as the pages; **`aspace.rs`**, both maps, where `FileRegion` lost the `base`/`len` the index already held (the fault path now asks the registry for the file offset a page reads from, since the registry is what holds the extent) and `nearest_region_end_at_or_below` stopped walking every region of a task in favour of two probes per map; and **`arxfs`**'s `runs.rs`, deleted outright, its eight transaction sets now `RangeSet<u64>` with the byte-accounting constant left where the accounting policy is. Two records over one address are now refused rather than recorded, so `mem_map`/`file_map` hand a refused overlapping reservation straight back and answer `AlreadyExists` |
+| C6 | the `next_id` counters in `sharedreg` and all three schedulers; `dma.rs`'s `slot_used`, the one flat bitmap scan C5 left (the MMIO window's is gone: its slots are now runs in a `RangeMap`, and a DMA pool's are a *bitmap* question rather than a range one because it hands out single pages) |
 | C7 | `arxfs/pagecache.rs`, `arxfs/wcache.rs`'s dirty set, the block-cache index |
 | C8 | per-subsystem deadline bookkeeping; wires `plans/FIX-IO.md`'s per-request deadlines |
 | C9 | `kernel/core/src/futex.rs`'s `BTreeMap`-per-bucket table, which becomes one `ConcurrentMap` — migrated once, here, rather than through an interim `HashMap` under the same bucket locks; and per-CPU log and console ingest |

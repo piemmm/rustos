@@ -62,11 +62,13 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
 use tairix_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
 use tairix_caps::CapabilitySet;
+use tairix_collections::{RangeError, RangeKey, RangeMap};
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
 use tairix_kernel_sec::{ProcessId, TaskId};
 
@@ -248,7 +250,7 @@ pub struct AddressSpaceRegistry {
     /// to `None` and the task is terminated rather than silently backed
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
-    file_regions: BTreeMap<ProcessId, BTreeMap<u64, FileRegion>>,
+    file_regions: BTreeMap<ProcessId, RangeMap<u64, FileRegion>>,
     /// Each live task's reserved demand-paged **anonymous** mappings (the
     /// regions `mem_map` reserves and the anonymous fault path backs one
     /// zeroed page at a time), keyed by region base and valued by the
@@ -264,7 +266,7 @@ pub struct AddressSpaceRegistry {
     /// fault-validation and accounting bookkeeping. Dropped at
     /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
     /// task's mappings.
-    anon_regions: BTreeMap<ProcessId, BTreeMap<u64, u64>>,
+    anon_regions: BTreeMap<ProcessId, RangeMap<u64, ()>>,
     /// Each live task's reserved user-stack span (the region the spawn
     /// layout placed and the stack-growth fault path backs on demand).
     /// Keyed by **thread**, not by process: every thread of a process has a
@@ -316,24 +318,18 @@ pub struct AddressSpaceRegistry {
     load_bases: BTreeMap<ProcessId, u64>,
 }
 
-/// One live demand-paged file mapping of a task: the region `file_map`
-/// reserved, the file range behind it, and the mapping-time identity the
-/// fault path reads under.
+/// What one live demand-paged file mapping of a task reads: the file behind
+/// it and the mapping-time identity the fault path reads under.
 ///
-/// `len` is the page-rounded byte length actually reserved (the figure
-/// charged against `LimitKind::AddressSpaceBytes` and credited back on
-/// release), and `offset` the page-aligned file byte offset of the
-/// region's first page. `uid` and `caps` are the caller's kernel-attested
-/// owner and effective capability snapshot at map time — the same
-/// authority model as an open descriptor, so a later capability revocation
-/// affects new mappings, not pages an existing mapping still faults in
-/// (exactly as it does not retract an open descriptor).
+/// The reserved user-virtual extent is the registry's own key for the record,
+/// so it is not repeated here. `offset` is the page-aligned file byte offset
+/// of the region's first page. `uid` and `caps` are the caller's
+/// kernel-attested owner and effective capability snapshot at map time — the
+/// same authority model as an open descriptor, so a later capability
+/// revocation affects new mappings, not pages an existing mapping still
+/// faults in (exactly as it does not retract an open descriptor).
 #[derive(Clone, Debug)]
 pub struct FileRegion {
-    /// Base user virtual address of the reserved region.
-    pub base: u64,
-    /// Page-rounded byte length of the region.
-    pub len: u64,
     /// Absolute path of the mapped file, as resolved at open time.
     pub path: String,
     /// Page-aligned byte offset into the file of the region's first page.
@@ -1618,8 +1614,8 @@ impl AddressSpaceRegistry {
         self.load_bases.get(&task).copied()
     }
 
-    /// Record `task`'s live demand-paged file mapping `region`, keyed by its
-    /// base address.
+    /// Record `task`'s live demand-paged file mapping of `pages` pages at
+    /// `base`, carrying `region`.
     ///
     /// Called by the `file_map` handler *after* the producer has reserved
     /// the region, so every record names address space the task actually
@@ -1627,23 +1623,39 @@ impl AddressSpaceRegistry {
     /// capability snapshot) the fault path pages under — the same authority
     /// model as an open descriptor, resolved once at map time. The `task`
     /// argument is the kernel-trusted caller id.
-    pub fn record_file_region(&mut self, task: ProcessId, region: FileRegion) {
-        self.file_regions
+    ///
+    /// # Errors
+    ///
+    /// [`RangeError`] when the extent covers nothing, does not fit the
+    /// address space, or intersects a mapping the task already holds. A
+    /// reservation that overlaps a live one is refused rather than recorded:
+    /// two records over the same address would make a fault's backing, and a
+    /// release's extent, a choice between them.
+    pub fn record_file_region(
+        &mut self,
+        task: ProcessId,
+        base: u64,
+        pages: u64,
+        region: FileRegion,
+    ) -> Result<(), RangeError> {
+        let extent = Self::page_extent(base, pages)?;
+        let refused = self
+            .file_regions
             .entry(task)
             .or_default()
-            .insert(region.base, region);
+            .insert(extent, region);
+        self.drop_empty_regions(task);
+        refused
     }
 
-    /// Resolve `task`'s file-mapping record whose `(base, len)` matches
-    /// exactly, without removing it.
+    /// Whether `task` holds a file mapping of exactly `(base, len)`.
     ///
     /// The `file_unmap` handler validates the caller-named pair against
     /// this before any teardown, so a mismatched or unknown pair fails
     /// closed touching nothing.
     #[must_use]
-    pub fn file_region_exact(&self, task: ProcessId, base: u64, len: u64) -> Option<FileRegion> {
-        let region = self.file_regions.get(&task)?.get(&base)?;
-        (region.len == len).then(|| region.clone())
+    pub fn file_region_exact(&self, task: ProcessId, base: u64, len: u64) -> bool {
+        Self::holds_extent(self.file_regions.get(&task), base, len)
     }
 
     /// Remove `task`'s file-mapping record based at `base`, returning it.
@@ -1652,29 +1664,42 @@ impl AddressSpaceRegistry {
     /// region, so record and reservation leave together.
     pub fn remove_file_region(&mut self, task: ProcessId, base: u64) -> Option<FileRegion> {
         let regions = self.file_regions.get_mut(&task)?;
-        let removed = regions.remove(&base);
+        let (_, removed) = regions.remove(base)?;
         if regions.is_empty() {
             self.file_regions.remove(&task);
         }
-        removed
+        Some(removed)
     }
 
-    /// Resolve the file-mapping record of `task`'s that covers the virtual
-    /// address `va`, if any.
+    /// Whether the virtual address `va` lies inside one of `task`'s file
+    /// mappings.
+    #[must_use]
+    pub fn file_region_covers(&self, task: ProcessId, va: u64) -> bool {
+        self.file_regions
+            .get(&task)
+            .is_some_and(|regions| regions.covering(va).is_some())
+    }
+
+    /// Where the page-aligned `page_va` reads from: the file byte offset of
+    /// that page, and the mapping's identity to read it under.
     ///
     /// The user-fault resolver calls this to decide whether a faulting
     /// address is demand-paged file backing (resolve and resume) or a
-    /// genuine wild access (terminate, fail closed). Returns a clone so no
-    /// registry lock is held across the filesystem read that follows.
+    /// genuine wild access (terminate, fail closed). The offset arithmetic
+    /// belongs here because the registry, not the caller, holds the
+    /// mapping's extent. Returns a clone so no registry lock is held across
+    /// the filesystem read that follows.
     #[must_use]
-    pub fn file_region_covering(&self, task: ProcessId, va: u64) -> Option<FileRegion> {
-        let regions = self.file_regions.get(&task)?;
-        let (_, region) = regions.range(..=va).next_back()?;
-        (va < region.base + region.len).then(|| region.clone())
+    pub fn file_page_source(&self, task: ProcessId, page_va: u64) -> Option<(u64, FileRegion)> {
+        let (extent, region) = self.file_regions.get(&task)?.covering(page_va)?;
+        // Cannot overflow: `file_map` validated `offset + page-rounded len`
+        // at map time, and `page_va` lies inside the extent.
+        let file_offset = region.offset + (page_va - extent.start);
+        Some((file_offset, region.clone()))
     }
 
-    /// Record `task`'s live demand-paged anonymous mapping: `page_count`
-    /// pages reserved at `base`, keyed by base.
+    /// Record `task`'s live demand-paged anonymous mapping: `pages` pages
+    /// reserved at `base`.
     ///
     /// Called by the `mem_map` handler *after* the producer has reserved
     /// the address-space range, so every record names address space the
@@ -1682,25 +1707,38 @@ impl AddressSpaceRegistry {
     /// a legitimate first-touch of reserved memory apart from a wild access
     /// (fail closed on a miss). The `task` argument is the kernel-trusted
     /// caller id.
-    pub fn record_anon_region(&mut self, task: ProcessId, base: u64, page_count: u64) {
-        self.anon_regions
+    ///
+    /// # Errors
+    ///
+    /// [`RangeError`], on the same terms as
+    /// [`record_file_region`](Self::record_file_region): an extent covering
+    /// nothing, one past the address space, or one overlapping a live
+    /// reservation of this task is refused rather than recorded.
+    pub fn record_anon_region(
+        &mut self,
+        task: ProcessId,
+        base: u64,
+        pages: u64,
+    ) -> Result<(), RangeError> {
+        let extent = Self::page_extent(base, pages)?;
+        let refused = self
+            .anon_regions
             .entry(task)
             .or_default()
-            .insert(base, page_count);
+            .insert(extent, ());
+        self.drop_empty_regions(task);
+        refused
     }
 
-    /// Resolve `task`'s anonymous-mapping record whose `(base, page_count)`
-    /// matches exactly, without removing it.
+    /// Whether `task` holds an anonymous reservation of exactly `base` and
+    /// `page_count` pages.
     ///
     /// The `mem_unmap` handler validates the caller-named pair against this
     /// before any teardown, so a mismatched or unknown pair fails closed
     /// touching nothing.
     #[must_use]
     pub fn anon_region_exact(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
-        self.anon_regions
-            .get(&task)
-            .and_then(|regions| regions.get(&base))
-            .is_some_and(|&pages| pages == page_count)
+        Self::holds_pages(self.anon_regions.get(&task), base, page_count)
     }
 
     /// Remove `task`'s anonymous-mapping record based at `base`, returning
@@ -1710,30 +1748,62 @@ impl AddressSpaceRegistry {
     /// region, so record and reservation leave together.
     pub fn remove_anon_region(&mut self, task: ProcessId, base: u64) -> Option<u64> {
         let regions = self.anon_regions.get_mut(&task)?;
-        let removed = regions.remove(&base);
+        let (extent, ()) = regions.remove(base)?;
         if regions.is_empty() {
             self.anon_regions.remove(&task);
         }
-        removed
+        Some(extent.end.distance_from(extent.start) / PAGE_SIZE as u64)
     }
 
-    /// Resolve whether the virtual address `va` lies inside one of `task`'s
+    /// Whether the virtual address `va` lies inside one of `task`'s
     /// reserved anonymous regions.
     ///
     /// The anonymous user-fault resolver calls this to decide whether a
     /// faulting address is demand-paged anonymous backing (back one zeroed
     /// page and resume) or a genuine wild access (terminate, fail closed).
     #[must_use]
-    pub fn anon_region_covering(&self, task: ProcessId, va: u64) -> bool {
-        let Some(regions) = self.anon_regions.get(&task) else {
-            return false;
-        };
-        let Some((&base, &pages)) = regions.range(..=va).next_back() else {
-            return false;
-        };
-        // `pages * PAGE_SIZE` cannot overflow: the reservation was validated
-        // to fit the address space at `mem_map` time.
-        va < base + pages * PAGE_SIZE as u64
+    pub fn anon_region_covers(&self, task: ProcessId, va: u64) -> bool {
+        self.anon_regions
+            .get(&task)
+            .is_some_and(|regions| regions.covering(va).is_some())
+    }
+
+    /// Drop either region map of `task`'s that a refused record left empty:
+    /// the residual check reads the presence of a map as leftover state, so a
+    /// refusal must leave the registry exactly as it found it.
+    fn drop_empty_regions(&mut self, task: ProcessId) {
+        if self.file_regions.get(&task).is_some_and(RangeMap::is_empty) {
+            self.file_regions.remove(&task);
+        }
+        if self.anon_regions.get(&task).is_some_and(RangeMap::is_empty) {
+            self.anon_regions.remove(&task);
+        }
+    }
+
+    /// `pages` pages from `base` as a byte extent, refusing an empty one or
+    /// one the address space cannot hold.
+    fn page_extent(base: u64, pages: u64) -> Result<Range<u64>, RangeError> {
+        pages
+            .checked_mul(PAGE_SIZE as u64)
+            .and_then(|bytes| base.span(bytes))
+            .ok_or(RangeError::Empty)
+    }
+
+    /// Whether `regions` holds an extent of exactly `base` and `len` bytes.
+    /// A zero length spans nothing, so it matches no live extent.
+    fn holds_extent<V>(regions: Option<&RangeMap<u64, V>>, base: u64, len: u64) -> bool {
+        regions
+            .and_then(|regions| regions.get(base))
+            .is_some_and(|(held, _)| held.end.distance_from(held.start) == len)
+    }
+
+    /// Whether `regions` holds an extent of exactly `base` and `pages` pages.
+    /// A page count whose byte span does not fit the address space names no
+    /// extent, so it fails closed rather than saturating into a false match.
+    fn holds_pages<V>(regions: Option<&RangeMap<u64, V>>, base: u64, pages: u64) -> bool {
+        pages
+            .checked_mul(PAGE_SIZE as u64)
+            .is_some_and(|len| Self::holds_extent(regions, base, len))
     }
 
     /// Describe where the fatal `access` landed relative to `task`'s own
@@ -1793,10 +1863,7 @@ impl AddressSpaceRegistry {
         let in_stack_span = self
             .stack_span(thread)
             .is_some_and(|span| va >= span.reserve_base() && va < span.top());
-        if in_stack_span
-            || self.anon_region_covering(task, va)
-            || self.file_region_covering(task, va).is_some()
-        {
+        if in_stack_span || self.anon_region_covers(task, va) || self.file_region_covers(task, va) {
             return FaultLocality::InRegion;
         }
         FaultLocality::Wild
@@ -1807,37 +1874,33 @@ impl AddressSpaceRegistry {
     /// the committed stack — or `None` when the task owns nothing ending at
     /// or below `va`.
     ///
-    /// Iterates the task's own regions only (bounded by its address-space
-    /// limits) and runs on the dying-task fault path, never a hot path. A
-    /// region that *covers* `va` (its end is strictly above `va`) is
-    /// excluded — that is a miss inside a live mapping, described by the
-    /// `fault_class`, not a run past a region end.
+    /// Each region map answers in two probes (its extents are disjoint, so
+    /// the highest one starting at or below `va` either ends there too or
+    /// covers `va`), so this runs on the dying-task fault path without a
+    /// walk of the task's mappings. A region that *covers* `va` (its end is
+    /// strictly above `va`) is excluded — that is a miss inside a live
+    /// mapping, described by the `fault_class`, not a run past a region end.
     fn nearest_region_end_at_or_below(
         &self,
         task: ProcessId,
         thread: TaskId,
         va: u64,
     ) -> Option<u64> {
-        let mut best: Option<u64> = None;
-        let mut consider = |end: u64| {
-            if end <= va {
-                best = Some(best.map_or(end, |b: u64| b.max(end)));
-            }
-        };
-        if let Some(regions) = self.file_regions.get(&task) {
-            for region in regions.values() {
-                consider(region.base.saturating_add(region.len));
-            }
-        }
-        if let Some(regions) = self.anon_regions.get(&task) {
-            for (&base, &pages) in regions {
-                consider(base.saturating_add(pages.saturating_mul(PAGE_SIZE as u64)));
-            }
-        }
-        if let Some(span) = self.stack_span(thread) {
-            consider(span.top());
-        }
-        best
+        let file_end = self
+            .file_regions
+            .get(&task)
+            .and_then(|regions| regions.ending_at_or_below(va))
+            .map(|held| held.end);
+        let anon_end = self
+            .anon_regions
+            .get(&task)
+            .and_then(|regions| regions.ending_at_or_below(va))
+            .map(|held| held.end);
+        let stack_top = self
+            .stack_span(thread)
+            .map(|span| span.top())
+            .filter(|&top| top <= va);
+        [file_end, anon_end, stack_top].into_iter().flatten().max()
     }
 
     /// Open a file/directory descriptor for `task`, recording the resolved
@@ -3214,10 +3277,8 @@ mod tests {
 
     // --- demand-paged file-mapping regions (file_map / file_unmap) --------
 
-    fn file_region(base: u64, len: u64) -> FileRegion {
+    fn file_region() -> FileRegion {
         FileRegion {
-            base,
-            len,
             path: String::from("/big"),
             offset: 0x1000,
             uid: 7,
@@ -3225,110 +3286,206 @@ mod tests {
         }
     }
 
-    #[test]
-    fn file_region_exact_matches_only_the_recorded_pair_of_the_owner() {
-        let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
-        // The exact `(base, len)` of the recording task resolves; a wrong
-        // base, a wrong length, and another task's lookup all fail closed.
-        assert!(reg
-            .file_region_exact(ProcessId(2), 0x10_0000, 0x4000)
-            .is_some());
-        assert!(reg
-            .file_region_exact(ProcessId(2), 0x10_1000, 0x4000)
-            .is_none());
-        assert!(reg
-            .file_region_exact(ProcessId(2), 0x10_0000, 0x3000)
-            .is_none());
-        assert!(reg
-            .file_region_exact(ProcessId(3), 0x10_0000, 0x4000)
-            .is_none());
+    /// Record `pages` pages at `base` for `task`, asserting it was accepted.
+    fn record_file(reg: &mut AddressSpaceRegistry, task: ProcessId, base: u64, pages: u64) {
+        reg.record_file_region(task, base, pages, file_region())
+            .expect("a disjoint extent is recorded");
     }
 
     #[test]
-    fn file_region_covering_resolves_only_addresses_inside_a_live_region() {
+    fn file_region_exact_matches_only_the_recorded_pair_of_the_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
-        reg.record_file_region(ProcessId(2), file_region(0x20_0000, 0x1000));
-        // Base, an interior byte, and the last byte are covered.
-        assert!(reg.file_region_covering(ProcessId(2), 0x10_0000).is_some());
-        assert!(reg.file_region_covering(ProcessId(2), 0x10_2fff).is_some());
-        assert!(reg.file_region_covering(ProcessId(2), 0x10_3fff).is_some());
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
+        // The exact `(base, len)` of the recording task resolves; a wrong
+        // base, a wrong length, and another task's lookup all fail closed.
+        assert!(reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
+        assert!(!reg.file_region_exact(ProcessId(2), 0x10_1000, 0x4000));
+        assert!(!reg.file_region_exact(ProcessId(2), 0x10_0000, 0x3000));
+        assert!(!reg.file_region_exact(ProcessId(3), 0x10_0000, 0x4000));
+        // A zero length names no extent, however it is spelled.
+        assert!(!reg.file_region_exact(ProcessId(2), 0x10_0000, 0));
+    }
+
+    #[test]
+    fn file_page_source_resolves_only_addresses_inside_a_live_region() {
+        let mut reg = AddressSpaceRegistry::new();
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
+        record_file(&mut reg, ProcessId(2), 0x20_0000, 1);
+        // Base, an interior page, and the last page are covered.
+        assert!(reg.file_region_covers(ProcessId(2), 0x10_0000));
+        assert!(reg.file_region_covers(ProcessId(2), 0x10_2fff));
+        assert!(reg.file_region_covers(ProcessId(2), 0x10_3fff));
         // The exclusive top, the gap between regions, an address below every
         // region, and another task's address space are not.
-        assert!(reg.file_region_covering(ProcessId(2), 0x10_4000).is_none());
-        assert!(reg.file_region_covering(ProcessId(2), 0x18_0000).is_none());
-        assert!(reg.file_region_covering(ProcessId(2), 0x0f_ffff).is_none());
-        assert!(reg.file_region_covering(ProcessId(3), 0x10_0000).is_none());
-        // The second region resolves independently and carries its record.
-        let hit = reg
-            .file_region_covering(ProcessId(2), 0x20_0abc)
+        assert!(!reg.file_region_covers(ProcessId(2), 0x10_4000));
+        assert!(!reg.file_region_covers(ProcessId(2), 0x18_0000));
+        assert!(!reg.file_region_covers(ProcessId(2), 0x0f_ffff));
+        assert!(!reg.file_region_covers(ProcessId(3), 0x10_0000));
+        // The file offset a page reads from is its distance into the region
+        // above the mapping's own file offset.
+        let (offset, region) = reg
+            .file_page_source(ProcessId(2), 0x10_2000)
+            .expect("inside the first region");
+        assert_eq!(offset, 0x1000 + 0x2000);
+        assert_eq!(region.path, "/big");
+        // The second region resolves independently, from its own base.
+        let (offset, _) = reg
+            .file_page_source(ProcessId(2), 0x20_0000)
             .expect("inside the second region");
-        assert_eq!(hit.base, 0x20_0000);
-        assert_eq!(hit.path, "/big");
+        assert_eq!(offset, 0x1000);
+        assert!(reg.file_page_source(ProcessId(2), 0x18_0000).is_none());
+    }
+
+    #[test]
+    fn a_file_region_overlapping_a_live_one_is_refused() {
+        let mut reg = AddressSpaceRegistry::new();
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
+        // Two records over one address would make a fault's backing, and a
+        // release's extent, a choice between them, so the second is refused
+        // and the first is untouched.
+        assert_eq!(
+            reg.record_file_region(ProcessId(2), 0x10_1000, 4, file_region()),
+            Err(RangeError::Overlap)
+        );
+        assert_eq!(
+            reg.record_file_region(ProcessId(2), 0x10_0000, 1, file_region()),
+            Err(RangeError::Overlap)
+        );
+        assert!(reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
+        // An extent covering nothing, or one past the address space, is
+        // refused too — and an abutting neighbour is not an overlap.
+        assert_eq!(
+            reg.record_file_region(ProcessId(2), 0x20_0000, 0, file_region()),
+            Err(RangeError::Empty)
+        );
+        assert_eq!(
+            reg.record_file_region(ProcessId(2), u64::MAX - 0xfff, 2, file_region()),
+            Err(RangeError::Empty)
+        );
+        record_file(&mut reg, ProcessId(2), 0x10_4000, 1);
+        // Another task's identical extent is its own address space.
+        record_file(&mut reg, ProcessId(3), 0x10_0000, 4);
+    }
+
+    #[test]
+    fn a_refused_record_leaves_the_registry_exactly_as_it_found_it() {
+        // The refusal must not leave an empty region map behind: the residual
+        // check reads the presence of one as a task's leftover state, so a
+        // withdrawn task would report a residual it does not have.
+        let mut reg = AddressSpaceRegistry::new();
+        assert_eq!(
+            reg.record_file_region(ProcessId(9), 0x10_0000, 0, file_region()),
+            Err(RangeError::Empty)
+        );
+        assert_eq!(
+            reg.record_anon_region(ProcessId(9), 0x20_0000, 0),
+            Err(RangeError::Empty)
+        );
+        assert!(!reg.withdraw(ProcessId(9)), "nothing was ever recorded");
+        // And once a record does land, a later refusal leaves it alone.
+        record_file(&mut reg, ProcessId(9), 0x10_0000, 4);
+        assert_eq!(
+            reg.record_file_region(ProcessId(9), 0x10_1000, 4, file_region()),
+            Err(RangeError::Overlap)
+        );
+        assert!(reg.file_region_exact(ProcessId(9), 0x10_0000, 0x4000));
+        assert!(reg.withdraw(ProcessId(9)));
+        assert!(!reg.withdraw(ProcessId(9)));
     }
 
     #[test]
     fn remove_file_region_returns_the_record_and_only_once() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
         let removed = reg
             .remove_file_region(ProcessId(2), 0x10_0000)
             .expect("recorded");
-        assert_eq!(removed.len, 0x4000);
+        assert_eq!(removed.path, "/big");
         // Gone: neither an exact lookup, a covering lookup, nor a second
         // removal can see it.
-        assert!(reg
-            .file_region_exact(ProcessId(2), 0x10_0000, 0x4000)
-            .is_none());
-        assert!(reg.file_region_covering(ProcessId(2), 0x10_0001).is_none());
+        assert!(!reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
+        assert!(!reg.file_region_covers(ProcessId(2), 0x10_0001));
         assert!(reg.remove_file_region(ProcessId(2), 0x10_0000).is_none());
+        // An interior address is not a base, so it removes nothing.
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
+        assert!(reg.remove_file_region(ProcessId(2), 0x10_1000).is_none());
+        assert!(reg.file_region_exact(ProcessId(2), 0x10_0000, 0x4000));
     }
 
     #[test]
     fn withdraw_drops_file_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_file_region(ProcessId(5), file_region(0x10_0000, 0x4000));
+        record_file(&mut reg, ProcessId(5), 0x10_0000, 4);
         assert!(reg.withdraw(ProcessId(5)));
-        assert!(reg.file_region_covering(ProcessId(5), 0x10_0000).is_none());
+        assert!(!reg.file_region_covers(ProcessId(5), 0x10_0000));
     }
 
     // --- reserved demand-paged anonymous regions (mem_map) ----------------
 
+    /// Reserve `pages` pages at `base` for `task`, asserting it was accepted.
+    fn record_anon(reg: &mut AddressSpaceRegistry, task: ProcessId, base: u64, pages: u64) {
+        reg.record_anon_region(task, base, pages)
+            .expect("a disjoint extent is recorded");
+    }
+
     #[test]
-    fn anon_region_covering_resolves_only_addresses_inside_a_live_region() {
+    fn anon_region_covers_only_addresses_inside_a_live_region() {
         let mut reg = AddressSpaceRegistry::new();
         // A four-page region based at 0x20_0000.
-        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
         // Inside the region (first byte, last byte of the fourth page).
-        assert!(reg.anon_region_covering(ProcessId(2), 0x20_0000));
-        assert!(reg.anon_region_covering(ProcessId(2), 0x20_0000 + 4 * 0x1000 - 1));
+        assert!(reg.anon_region_covers(ProcessId(2), 0x20_0000));
+        assert!(reg.anon_region_covers(ProcessId(2), 0x20_0000 + 4 * 0x1000 - 1));
         // One byte past the region is outside.
-        assert!(!reg.anon_region_covering(ProcessId(2), 0x20_0000 + 4 * 0x1000));
+        assert!(!reg.anon_region_covers(ProcessId(2), 0x20_0000 + 4 * 0x1000));
         // Below the base and another task both resolve to nothing.
-        assert!(!reg.anon_region_covering(ProcessId(2), 0x1F_FFFF));
-        assert!(!reg.anon_region_covering(ProcessId(3), 0x20_0000));
+        assert!(!reg.anon_region_covers(ProcessId(2), 0x1F_FFFF));
+        assert!(!reg.anon_region_covers(ProcessId(3), 0x20_0000));
     }
 
     #[test]
     fn anon_region_exact_matches_only_the_recorded_pair_of_the_owner() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
         assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
         // A wrong page count, a wrong base, or another task all fail closed.
         assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 3));
         assert!(!reg.anon_region_exact(ProcessId(2), 0x21_0000, 4));
         assert!(!reg.anon_region_exact(ProcessId(3), 0x20_0000, 4));
+        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 0));
+    }
+
+    #[test]
+    fn an_anon_region_overlapping_a_live_one_is_refused() {
+        let mut reg = AddressSpaceRegistry::new();
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
+        assert_eq!(
+            reg.record_anon_region(ProcessId(2), 0x20_1000, 4),
+            Err(RangeError::Overlap)
+        );
+        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
+        assert_eq!(
+            reg.record_anon_region(ProcessId(2), 0x30_0000, 0),
+            Err(RangeError::Empty)
+        );
+        // An abutting reservation is its own record, which is what lets the
+        // userland heap grow its arena a mapping at a time and still release
+        // each by the extent it was given.
+        record_anon(&mut reg, ProcessId(2), 0x20_4000, 2);
+        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
+        assert!(reg.anon_region_exact(ProcessId(2), 0x20_4000, 2));
+        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), Some(4));
+        assert!(reg.anon_region_exact(ProcessId(2), 0x20_4000, 2));
     }
 
     #[test]
     fn remove_anon_region_returns_the_page_count_and_only_once() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
         assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), Some(4));
         // Gone: neither a covering lookup, an exact lookup, nor a second
         // removal can see it.
-        assert!(!reg.anon_region_covering(ProcessId(2), 0x20_0000));
+        assert!(!reg.anon_region_covers(ProcessId(2), 0x20_0000));
         assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
         assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), None);
     }
@@ -3336,9 +3493,9 @@ mod tests {
     #[test]
     fn withdraw_drops_anon_regions_so_a_reused_id_starts_clean() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.record_anon_region(ProcessId(5), 0x20_0000, 4);
+        record_anon(&mut reg, ProcessId(5), 0x20_0000, 4);
         assert!(reg.withdraw(ProcessId(5)));
-        assert!(!reg.anon_region_covering(ProcessId(5), 0x20_0000));
+        assert!(!reg.anon_region_covers(ProcessId(5), 0x20_0000));
     }
 
     // --- reserved user-stack spans (demand-grown stack) -------------------
@@ -3669,7 +3826,7 @@ mod tests {
         let mut reg = AddressSpaceRegistry::new();
         // A file region [0x10_0000, 0x10_4000): a small run past its end
         // is reported as a region-relative offset, the region unnamed.
-        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000));
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4);
         assert_eq!(
             reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x10_4000 + 0x40)),
             FaultLocality::PastRegion { offset: 0x40 }
@@ -3705,7 +3862,7 @@ mod tests {
         // it that the resolver could not back (frame exhaustion) is a
         // deterministic OOM, reported as `in_region` with no leaked offset —
         // not `wild`, which would falsely read as a stray pointer.
-        reg.record_anon_region(ProcessId(2), 0x20_0000, 4);
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
         let locality = reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x20_2000));
         assert_eq!(locality, FaultLocality::InRegion);
         assert_eq!(locality.bucket(), "in_region");
@@ -3718,8 +3875,8 @@ mod tests {
         // Two regions and an anonymous mapping; the nearest end at or below
         // the fault wins, so the reported offset is the smallest true
         // distance.
-        reg.record_file_region(ProcessId(2), file_region(0x10_0000, 0x4000)); // end 0x104000
-        reg.record_anon_region(ProcessId(2), 0x20_0000, 4); // end 0x204000
+        record_file(&mut reg, ProcessId(2), 0x10_0000, 4); // end 0x104000
+        record_anon(&mut reg, ProcessId(2), 0x20_0000, 4); // end 0x204000
         assert_eq!(
             reg.classify_fault_locality(ProcessId(2), TaskId(2), data_at(0x20_4000 + 0x10)),
             FaultLocality::PastRegion { offset: 0x10 }

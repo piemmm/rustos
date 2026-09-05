@@ -103,7 +103,11 @@ pub enum Errno {
     /// when the wall clock already holds a reading from a better source than
     /// the write offers ([`crate::WallTimeState::supersedes`]): the existing
     /// reading is never overwritten, so a local counter cannot roll a
-    /// validated network sync backwards (`plans/TIMESYNC.md`).
+    /// validated network sync backwards (`plans/TIMESYNC.md`). Also emitted by
+    /// `mem_map` and `file_map` when the reservation they placed would overlap
+    /// a mapping the caller already holds: two records over one address would
+    /// make a fault's backing, and a release's extent, a choice between them,
+    /// so the reservation is handed straight back rather than recorded.
     AlreadyExists = 17,
     /// A user-space pointer handed to a syscall does not name memory the
     /// caller may access in the direction the call requires.

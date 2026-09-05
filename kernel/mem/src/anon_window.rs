@@ -25,34 +25,36 @@
 //! costs no RAM until the frame allocator backs a mapping (and that backing
 //! fails closed as a deterministic OOM). So the window may be sized
 //! generously, and the allocator's own memory is bounded by the number of
-//! *live + freed* regions — a bump cursor plus a free-list of returned holes
-//! — never by the page count of the window. A hand-picked per-page bitmap
-//! (which would cap the window or waste memory on a large machine) is
-//! deliberately avoided.
+//! *live* regions — never by the page count of the window. A hand-picked
+//! per-page bitmap (which would cap the window or waste memory on a large
+//! machine) is deliberately avoided.
 
-use alloc::collections::BTreeMap;
+use core::ops::Range;
+
+use tairix_collections::{RangeKey, RangeMap};
 
 use crate::anon::AnonError;
-use crate::frame::{PAGE_SHIFT, PAGE_SIZE};
+use crate::frame::PAGE_SIZE;
 use crate::vmm::VirtAddr;
 
 /// Per-task placement allocator over the virtual window
 /// `[base, base + capacity_pages * PAGE_SIZE)`.
 ///
-/// Allocations are served from the free-list of previously released holes
-/// (first-fit, split on a partial match) before the bump cursor advances, so
-/// a steady map/unmap workload reuses address space rather than exhausting
-/// the window. Both maps are keyed by slot index (pages above `base`); the
-/// public surface speaks user virtual addresses.
+/// The gaps between the ranges handed out *are* the free space, so a
+/// released range is available again the moment its record leaves and two
+/// released neighbours serve one larger request between them — there is no
+/// second free-list to fall out of step with the first. Placement is
+/// first-fit, so a steady map/unmap workload reuses address space rather
+/// than exhausting the window.
 pub struct AnonWindowMap {
-    base: VirtAddr,
+    /// The virtual byte range placements are drawn from, validated whole at
+    /// construction so no later arithmetic over it can overflow or wrap.
+    window: Range<u64>,
     capacity_pages: usize,
-    /// Next never-yet-allocated slot (the bump cursor).
-    next: usize,
-    /// Released holes available for reuse: start slot -> page count.
-    free: BTreeMap<usize, usize>,
-    /// Live allocations: base virtual address -> page count.
-    regions: BTreeMap<u64, usize>,
+    /// Live allocations, keyed by their user-virtual byte extent. Adjacent
+    /// allocations stay distinct entries, so a release names exactly the
+    /// range it was handed and can never take a neighbour's with it.
+    regions: RangeMap<u64, ()>,
 }
 
 impl AnonWindowMap {
@@ -73,18 +75,17 @@ impl AnonWindowMap {
             return Err(AnonError::Unaligned);
         }
         // The window must fit in the address space: both the byte span and
-        // the top address are validated up front so `va_of_slot` can never
+        // the top address are validated up front so no later placement can
         // overflow (fail closed before any state).
-        let span = (capacity_pages as u64)
-            .checked_mul(PAGE_SIZE as u64)
+        let span = u64::try_from(capacity_pages)
+            .ok()
+            .and_then(|pages| pages.checked_mul(PAGE_SIZE as u64))
             .ok_or(AnonError::Overflow)?;
-        base.as_u64().checked_add(span).ok_or(AnonError::Overflow)?;
+        let top = base.as_u64().checked_add(span).ok_or(AnonError::Overflow)?;
         Ok(Self {
-            base,
+            window: base.as_u64()..top,
             capacity_pages,
-            next: 0,
-            free: BTreeMap::new(),
-            regions: BTreeMap::new(),
+            regions: RangeMap::new(),
         })
     }
 
@@ -98,38 +99,25 @@ impl AnonWindowMap {
     /// # Errors
     ///
     /// * [`AnonError::ZeroLength`] if `page_count == 0`.
-    /// * [`AnonError::Overflow`] if `page_count` does not fit `usize`.
-    /// * [`AnonError::OutOfMemory`] if no free hole and no remaining bump
-    ///   space can satisfy the request (the window is exhausted — a
-    ///   deterministic, fail-closed refusal).
+    /// * [`AnonError::Overflow`] if the request's byte span does not fit the
+    ///   address space.
+    /// * [`AnonError::OutOfMemory`] if no gap in the window can satisfy the
+    ///   request (the window is exhausted — a deterministic, fail-closed
+    ///   refusal).
     pub fn allocate(&mut self, page_count: u64) -> Result<u64, AnonError> {
         if page_count == 0 {
             return Err(AnonError::ZeroLength);
         }
-        let n = usize::try_from(page_count).map_err(|_| AnonError::Overflow)?;
-
-        let slot = self.take_free_hole(n).map_or_else(
-            || {
-                // No reusable hole: advance the bump cursor, failing closed
-                // when the window cannot hold the request.
-                let end = self.next.checked_add(n).ok_or(AnonError::OutOfMemory)?;
-                if end > self.capacity_pages {
-                    return Err(AnonError::OutOfMemory);
-                }
-                let slot = self.next;
-                self.next = end;
-                Ok(slot)
-            },
-            Ok,
-        )?;
-
-        let base_va = self.va_of_slot(slot);
-        self.regions.insert(base_va, n);
-        Ok(base_va)
+        let bytes = Self::bytes_of(page_count)?;
+        let placed = self
+            .regions
+            .place(self.window.clone(), bytes, ())
+            .ok_or(AnonError::OutOfMemory)?;
+        Ok(placed.start)
     }
 
     /// Release the range based at `base_va` previously returned by
-    /// [`Self::allocate`], returning its slots to the free-list for reuse.
+    /// [`Self::allocate`], making its address space available again.
     ///
     /// `page_count` must equal the count the range was allocated with: a
     /// mismatch (or an unknown base) is rejected fail-closed and frees
@@ -139,15 +127,14 @@ impl AnonWindowMap {
     /// # Errors
     ///
     /// [`AnonError::NotMapped`] if `base_va` is not a live allocation of this
-    /// window, or `page_count` does not match its recorded extent.
+    /// window, or `page_count` does not match its recorded extent, and
+    /// [`AnonError::Overflow`] if that count's byte span does not fit the
+    /// address space.
     pub fn release(&mut self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
         // The match check is the same fail-closed test [`Self::validate`]
         // performs (one definition); only release mutates.
         self.validate(base_va, page_count)?;
-        let n = usize::try_from(page_count).map_err(|_| AnonError::Overflow)?;
-        self.regions.remove(&base_va);
-        let slot = self.slot_of_va(base_va);
-        self.free.insert(slot, n);
+        self.regions.remove(base_va);
         Ok(())
     }
 
@@ -162,11 +149,14 @@ impl AnonWindowMap {
     /// # Errors
     ///
     /// [`AnonError::NotMapped`] if `base_va` is not a live allocation, or
-    /// `page_count` does not match its recorded extent.
+    /// `page_count` does not match its recorded extent, and
+    /// [`AnonError::Overflow`] if that count's byte span does not fit the
+    /// address space.
     pub fn validate(&self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
-        let n = usize::try_from(page_count).map_err(|_| AnonError::Overflow)?;
-        match self.regions.get(&base_va) {
-            Some(&recorded) if recorded == n => Ok(()),
+        let bytes = Self::bytes_of(page_count)?;
+        match self.regions.get(base_va) {
+            // A zero page count spans nothing, so it matches no live range.
+            Some((held, ())) if held.end.distance_from(held.start) == bytes => Ok(()),
             _ => Err(AnonError::NotMapped),
         }
     }
@@ -176,8 +166,7 @@ impl AnonWindowMap {
     /// apart from a `FIXED` one the caller chose elsewhere.
     #[must_use]
     pub fn owns(&self, base_va: u64) -> bool {
-        let top = self.base.as_u64() + (self.capacity_pages as u64) * PAGE_SIZE as u64;
-        base_va >= self.base.as_u64() && base_va < top
+        self.window.contains(&base_va)
     }
 
     /// `true` iff `va` (any address, not only a base) lies inside a *live*
@@ -186,12 +175,7 @@ impl AnonWindowMap {
     /// every reserved region is refused rather than silently backed.
     #[must_use]
     pub fn covers(&self, va: u64) -> bool {
-        let Some((&base, &pages)) = self.regions.range(..=va).next_back() else {
-            return false;
-        };
-        // The base cannot overflow: the window's top was validated at
-        // construction, so `base + pages * PAGE_SIZE` stays in range.
-        va < base + (pages as u64) * PAGE_SIZE as u64
+        self.regions.covering(va).is_some()
     }
 
     /// Number of live allocations.
@@ -206,27 +190,12 @@ impl AnonWindowMap {
         self.capacity_pages
     }
 
-    // -----------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------
-
-    /// First-fit: claim a free hole of at least `n` slots, splitting any
-    /// remainder back onto the free-list, and return its start slot.
-    fn take_free_hole(&mut self, n: usize) -> Option<usize> {
-        let (&start, &len) = self.free.iter().find(|&(_, &len)| len >= n)?;
-        self.free.remove(&start);
-        if len > n {
-            self.free.insert(start + n, len - n);
-        }
-        Some(start)
-    }
-
-    fn va_of_slot(&self, slot: usize) -> u64 {
-        self.base.as_u64() + ((slot as u64) << PAGE_SHIFT)
-    }
-
-    fn slot_of_va(&self, base_va: u64) -> usize {
-        ((base_va - self.base.as_u64()) >> PAGE_SHIFT) as usize
+    /// `page_count` pages as a byte span, refusing one the address space
+    /// cannot hold.
+    fn bytes_of(page_count: u64) -> Result<u64, AnonError> {
+        page_count
+            .checked_mul(PAGE_SIZE as u64)
+            .ok_or(AnonError::Overflow)
     }
 }
 
@@ -293,6 +262,37 @@ mod tests {
         assert_eq!(reused, a, "first-fit reuses the freed region's base");
         // The 4-page hole split: 2 pages remain free and serve the next ask.
         assert_eq!(w.allocate(2), Ok(a + 2 * PAGE));
+    }
+
+    #[test]
+    fn two_released_neighbours_serve_one_request_between_them() {
+        // The defect the free-list this replaces carried: two ranges released
+        // side by side stayed two separate holes, so a request larger than
+        // either was refused while the address space for it sat free.
+        let mut w = window();
+        let a = w.allocate(4).expect("fits");
+        let b = w.allocate(4).expect("fits");
+        w.allocate(WINDOW_PAGES as u64 - 8).expect("the rest");
+        assert_eq!(b, a + 4 * PAGE);
+        w.release(a, 4).expect("a is live");
+        w.release(b, 4).expect("b is live");
+        assert_eq!(w.live(), 1);
+        assert_eq!(w.allocate(8), Ok(a), "the two ranges are now one gap");
+    }
+
+    #[test]
+    fn a_placement_never_overlaps_a_live_neighbour() {
+        // First-fit reuses the lowest gap, and a request too large for it
+        // moves above the live range rather than into it.
+        let mut w = window();
+        let a = w.allocate(2).expect("fits");
+        let b = w.allocate(2).expect("fits");
+        let c = w.allocate(2).expect("fits");
+        w.release(a, 2).expect("a is live");
+        w.release(c, 2).expect("c is live");
+        assert_eq!(w.allocate(3), Ok(c), "the 2-page hole cannot hold three");
+        assert!(w.covers(b), "the neighbour range is untouched");
+        assert_eq!(w.allocate(2), Ok(a), "the low hole still serves its size");
     }
 
     #[test]

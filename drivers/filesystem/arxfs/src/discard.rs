@@ -195,8 +195,8 @@ impl<B: Block> ARXFS<B> {
         self.map_fold_pending()?;
         let queued = core::mem::take(&mut self.allocator_mut()?.pending_discard);
         let mut issued = 0usize;
-        for (run_start, run_len) in queued.iter() {
-            let run_end = run_start.saturating_add(run_len);
+        for run in &queued {
+            let (run_start, run_end) = (run.start, run.end);
             let mut pos = run_start;
             while pos < run_end {
                 let Some((start, len)) = self.map_first_free_run(pos, run_end)? else {
@@ -284,7 +284,7 @@ impl<B: Block> ARXFS<B> {
     #[cfg(test)]
     pub(crate) fn pending_discard_count(&self) -> u64 {
         self.allocator()
-            .map_or(0, |alloc| alloc.pending_discard.blocks())
+            .map_or(0, |alloc| alloc.pending_discard.covered())
     }
 
     /// Runs currently queued for discard — the queue's memory cost, which the
@@ -292,6 +292,6 @@ impl<B: Block> ARXFS<B> {
     #[cfg(test)]
     pub(crate) fn pending_discard_runs(&self) -> usize {
         self.allocator()
-            .map_or(0, |alloc| alloc.pending_discard.run_count())
+            .map_or(0, |alloc| alloc.pending_discard.len())
     }
 }

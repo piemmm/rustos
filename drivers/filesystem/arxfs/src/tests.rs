@@ -6062,7 +6062,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
             "the previously committed root was freed while it may still be \
              selected (faulted {faulted})"
         );
-        let unpublished: alloc::vec::Vec<(u64, u64)> = fs
+        let unpublished: alloc::vec::Vec<core::ops::Range<u64>> = fs
             .allocator()
             .expect("allocator")
             .txn_private
@@ -6072,7 +6072,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         assert!(
             unpublished
                 .iter()
-                .flat_map(|&(start, len)| start..start + len)
+                .flat_map(core::clone::Clone::clone)
                 .all(|block| fs.is_used(block)),
             "the frozen handle released a block the unpublished root may name \
              (faulted {faulted})"
@@ -10238,7 +10238,7 @@ fn a_commit_that_loses_nothing_reported_leaves_the_handle_writable() {
 /// Runs and blocks the open transaction has deferred for freeing.
 fn deferred(fs: &ARXFS<MemBlock>) -> (usize, u64) {
     let alloc = fs.allocator().expect("writable");
-    (alloc.txn_freed.run_count(), alloc.txn_freed.blocks())
+    (alloc.txn_freed.len(), alloc.txn_freed.covered())
 }
 
 #[test]
@@ -10301,7 +10301,7 @@ fn a_failed_operation_undoes_only_the_deferred_runs_it_added() {
     fs.defer_free(base + 5, 15);
     assert_eq!(deferred(&fs), (1, 20), "the two runs coalesce");
     assert_eq!(
-        fs.allocator().expect("writable").op_deferred.blocks(),
+        fs.allocator().expect("writable").op_deferred.covered(),
         10,
         "the second operation added only the part the first had not"
     );
@@ -10473,17 +10473,17 @@ fn a_deferred_mark_over_a_long_run_costs_one_pending_entry() {
     let start = RING_BLOCKS + 64;
     fs.mark_run_free(start, 1 << 20);
     let alloc = fs.allocator().expect("writable");
-    assert_eq!(alloc.pending_free.run_count(), 1);
-    assert_eq!(alloc.pending_free.blocks(), 1 << 20);
+    assert_eq!(alloc.pending_free.len(), 1);
+    assert_eq!(alloc.pending_free.covered(), 1 << 20);
     assert!(alloc.pending_used.is_empty());
 
     // The opposite mark over part of the run displaces it rather than being
     // held alongside it, so the latest mark over a block is the only one.
     fs.mark_run_used(start + 16, 32);
     let alloc = fs.allocator().expect("writable");
-    assert_eq!(alloc.pending_used.blocks(), 32);
-    assert_eq!(alloc.pending_free.blocks(), (1 << 20) - 32);
-    assert_eq!(alloc.pending_free.run_count(), 2, "the free run split");
+    assert_eq!(alloc.pending_used.covered(), 32);
+    assert_eq!(alloc.pending_free.covered(), (1 << 20) - 32);
+    assert_eq!(alloc.pending_free.len(), 2, "the free run split");
 
     // Folding them in leaves the map exact and the pending sets empty.
     fs.map_fold_pending().expect("fold");

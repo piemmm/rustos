@@ -61,7 +61,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-collections",
         test: "fuzz_collections",
-        description: "lib/collections heap-backed tier (hash map, recency map, spilling small vector) against naive models",
+        description: "lib/collections heap-backed tier (hash map, recency map, range map and set, spilling small vector) against naive models",
     },
     Target {
         package: "tairix-fontface",

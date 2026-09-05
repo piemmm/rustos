@@ -16,6 +16,10 @@
 //!    the same victim on every eviction — across the same adversarial key
 //!    streams, with its node arena bounded by the peak occupancy however long
 //!    the churn runs.
+//! 6. A `RangeSet` agrees with a per-element set, and a `RangeMap` with a naive
+//!    entry list, over `(base, count)` streams whose lengths are the ones a
+//!    caller does not control — a `mem_map` page count, a run off a foreign
+//!    volume — including the counts that run past the top of the key space.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -24,7 +28,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use tairix_collections::{HashMap, LruMap, SmallVec};
+use tairix_collections::{HashMap, LruMap, RangeError, RangeKey, RangeMap, RangeSet, SmallVec};
 use tairix_fuzzseed::Lcg;
 use tairix_hash::{BuildSipHash13, HashSeed};
 
@@ -267,6 +271,203 @@ fn sweep_lru(rng: &mut Lcg, seed: HashSeed, live: &Rc<Cell<i64>>) {
     assert_eq!(live.get(), 0, "every value must be dropped exactly once");
 }
 
+/// Windows the range sweeps run over: at the bottom of the key space, deep
+/// inside it, and hard against the top, so a length that runs past `u64::MAX`
+/// is exercised rather than assumed impossible.
+///
+/// The per-step model check probes every query in the window, so the cost is
+/// quadratic in it. Miri gets a narrow one: the range tier has no `unsafe`
+/// core for the interpreter to find anything in, and the wide search is the
+/// ordinary and budgeted runs'.
+const RANGE_WINDOW: u64 = if cfg!(miri) { 6 } else { 64 };
+const RANGE_BASES: [u64; 3] = [0, 1 << 40, u64::MAX - RANGE_WINDOW];
+
+/// Draw a `(start, count)` pair, mostly inside the window and occasionally a
+/// count that overruns it — the shapes a caller supplies and the container
+/// must refuse rather than wrap. At the topmost base the window's end *is*
+/// `u64::MAX`, so an overrunning count is also one past the key space.
+fn draw_span(rng: &mut Lcg, base: u64) -> (u64, u64) {
+    let start = base + rng.below(usize::try_from(RANGE_WINDOW).expect("small")) as u64;
+    let count = match rng.below(8) {
+        0 => 0,
+        1 => u64::MAX,
+        2 => RANGE_WINDOW * 4,
+        _ => 1 + rng.below(9) as u64,
+    };
+    (start, count)
+}
+
+/// Drive a `RangeSet` against a per-element model: the definition of what a
+/// set of ranges holds.
+fn sweep_range_set(rng: &mut Lcg, base: u64) {
+    let mut set: RangeSet<u64> = RangeSet::new();
+    let mut model: Vec<bool> = std::vec![false; usize::try_from(RANGE_WINDOW).expect("small")];
+    let top = base + RANGE_WINDOW;
+
+    for step in 0..OPS_PER_ROUND {
+        let (start, count) = draw_span(rng, base);
+        // Both sides see the same range, clipped to the window the model can
+        // track. At the topmost base that clip is `u64::MAX`, so the extreme
+        // range is still exercised.
+        let run = start..start.saturating_add(count).min(top);
+        match rng.below(6) {
+            0..=2 => {
+                set.insert(run.clone());
+                for element in run {
+                    model[usize::try_from(element - base).expect("in window")] = true;
+                }
+            }
+            3..=4 => {
+                set.remove(run.clone());
+                for element in run {
+                    model[usize::try_from(element - base).expect("in window")] = false;
+                }
+            }
+            _ => {
+                let popped = set.pop_first();
+                let expected = (base..top)
+                    .find(|element| model[usize::try_from(element - base).expect("in window")]);
+                assert_eq!(popped.map(|run| run.start), expected, "step {step}");
+                if let Some(from) = expected {
+                    let mut element = from;
+                    while element < top
+                        && model[usize::try_from(element - base).expect("in window")]
+                    {
+                        model[usize::try_from(element - base).expect("in window")] = false;
+                        element += 1;
+                    }
+                }
+            }
+        }
+
+        // Membership, the covered count, and the canonical form must all agree
+        // with the model after every single operation.
+        let mut covered = 0u64;
+        let mut previous_end = None;
+        for element in base..top {
+            let held = model[usize::try_from(element - base).expect("in window")];
+            assert_eq!(set.contains(element), held, "step {step}, at {element}");
+            covered += u64::from(held);
+        }
+        assert_eq!(set.covered(), covered, "step {step}");
+        for held in &set {
+            assert!(held.start < held.end, "step {step}: an empty range");
+            if let Some(previous_end) = previous_end {
+                assert!(held.start > previous_end, "step {step}: not coalesced");
+            }
+            previous_end = Some(held.end);
+        }
+        // Both walk primitives answer what the model says about every query.
+        for probe in base..top {
+            let first = |held: bool| {
+                (probe..top)
+                    .find(|element| {
+                        model[usize::try_from(element - base).expect("in window")] == held
+                    })
+                    .map(|from| {
+                        let to = (from..top)
+                            .find(|element| {
+                                model[usize::try_from(element - base).expect("in window")] != held
+                            })
+                            .unwrap_or(top);
+                        from..to
+                    })
+            };
+            assert_eq!(set.first_overlap(probe..top), first(true), "step {step}");
+            assert_eq!(set.first_gap(probe..top), first(false), "step {step}");
+        }
+    }
+}
+
+/// Drive a `RangeMap` against a naive entry list, checking the disjointness
+/// refusal and that a refused value is dropped rather than leaked.
+fn sweep_range_map(rng: &mut Lcg, base: u64, live: &Rc<Cell<i64>>) {
+    let mut map: RangeMap<u64, Tracked> = RangeMap::new();
+    let mut model: Vec<(u64, u64)> = Vec::new();
+    let window = base..base + RANGE_WINDOW;
+
+    for step in 0..OPS_PER_ROUND {
+        let (start, count) = draw_span(rng, base);
+        match rng.below(8) {
+            0..=3 => {
+                // A count that runs past the key space has no range, so the
+                // degenerate empty one is what the map is handed.
+                let range = start.span(count).unwrap_or(start..start);
+                let overlaps = |&(held_start, held_end): &(u64, u64)| {
+                    held_start < range.end && range.start < held_end
+                };
+                let expected = if range.start >= range.end {
+                    Err(RangeError::Empty)
+                } else if model.iter().any(overlaps) {
+                    Err(RangeError::Overlap)
+                } else {
+                    Ok(())
+                };
+                let got = map.insert(range.clone(), Tracked::new(start, live));
+                assert_eq!(got, expected, "step {step}, {start}+{count}");
+                if got.is_ok() {
+                    model.push((range.start, range.end));
+                }
+            }
+            4 => {
+                let removed = map.remove(start).map(|(held, _)| (held.start, held.end));
+                let at = model.iter().position(|&(held, _)| held == start);
+                assert_eq!(removed.is_some(), at.is_some(), "step {step}");
+                if let Some(at) = at {
+                    assert_eq!(removed, Some(model.swap_remove(at)));
+                }
+            }
+            5 => {
+                let covering = map.covering(start).map(|(held, _)| (held.start, held.end));
+                let expected = model
+                    .iter()
+                    .copied()
+                    .find(|&(held_start, held_end)| held_start <= start && start < held_end);
+                assert_eq!(covering, expected, "step {step}, at {start}");
+            }
+            6 => {
+                let ending = map.ending_at_or_below(start).map(|held| held.end);
+                let expected = model
+                    .iter()
+                    .map(|&(_, held_end)| held_end)
+                    .filter(|&held_end| held_end <= start)
+                    .max();
+                assert_eq!(ending, expected, "step {step}, at {start}");
+            }
+            _ => {
+                // First-fit placement must land in a genuine gap of the
+                // window, never over a held range.
+                let placed = map.place(window.clone(), count, Tracked::new(start, live));
+                if let Some(ref held) = placed {
+                    assert!(held.start >= window.start && held.end <= window.end);
+                    assert!(
+                        !model.iter().any(|&(s, e)| s < held.end && held.start < e),
+                        "step {step}: placed over a held range"
+                    );
+                    model.push((held.start, held.end));
+                }
+            }
+        }
+
+        assert_eq!(map.len(), model.len(), "step {step}");
+        assert_eq!(
+            i64::try_from(map.len()).expect("fits"),
+            live.get(),
+            "step {step}: one undropped value per live entry",
+        );
+        // Iteration is ascending and disjoint, whatever the stream did.
+        let mut previous_end = None;
+        for (held, _) in &map {
+            if let Some(previous_end) = previous_end {
+                assert!(held.start >= previous_end, "step {step}: out of order");
+            }
+            previous_end = Some(held.end);
+        }
+    }
+    drop(map);
+    assert_eq!(live.get(), 0, "every value must be dropped exactly once");
+}
+
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Lcg::new(tairix_fuzzseed::start(
@@ -288,6 +489,12 @@ fn heap_backed_containers_agree_with_their_models() {
             let live = Rc::new(Cell::new(0i64));
             sweep_lru(&mut rng, key, &live);
             assert_eq!(live.get(), 0, "an `LruMap` leaked or double-dropped");
+
+            let base = RANGE_BASES[rng.below(RANGE_BASES.len())];
+            sweep_range_set(&mut rng, base);
+            let live = Rc::new(Cell::new(0i64));
+            sweep_range_map(&mut rng, base, &live);
+            assert_eq!(live.get(), 0, "a `RangeMap` leaked or double-dropped");
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 18 open, 70 closed, 88 total.
+table normalises all three to **closed**. 19 open, 71 closed, 90 total.
 
-### Open (18)
+### Open (19)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -45,8 +45,9 @@ table normalises all three to **closed**. 18 open, 70 closed, 88 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
+| D90 | `kernel/core`'s host test suite is order-dependent: several tests fail or hang under any order but the alphabetical one | reproduced at HEAD; the one instance reachable in the default order is fixed |
 
-### Closed (70)
+### Closed (71)
 
 | ID | Subject |
 |---|---|
@@ -120,7 +121,7 @@ table normalises all three to **closed**. 18 open, 70 closed, 88 total.
 | D86 | on x86_64 a ring-3 exception other than a page fault killed the machine |
 | D87 | an instruction-side fault kill is audited against the task's *data* mappings |
 | D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
-| D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate cannot build on any Tier-1 target (OPEN) |
+| D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate could not build on any Tier-1 target |
 
 ## Scope
 
@@ -2369,7 +2370,7 @@ on-disk structure, not an extension of the existing rebuildable cache.
 ## D28 — ARXFS per-transaction deferred-free and pending-mark sets were unbounded (FIXED)
 
 **Where.** `drivers/filesystem/arxfs/src/allocator.rs`, `lib.rs`'s free and
-transaction paths, `discard.rs`, and the new `runs.rs`.
+transaction paths, and `discard.rs`.
 
 **Mechanism.** Every set a transaction kept about blocks was a set of
 *blocks*: `txn_freed` (a `BTreeSet<u64>`) held every block released until the
@@ -2384,10 +2385,11 @@ as well: `release_block_ref` asked the chunk tree about every block of an
 extent, one B-tree descent each, and the commit then applied one map bit change
 per block.
 
-**Fix (item D28 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** One `RunSet` — an
-ordered set of `(start, length)` runs held maximally coalesced, with `insert` /
-`remove` / `contains` and the two walk primitives `first_overlap` /
-`first_gap` — replaces every one of those sets, so the bookkeeping costs one
+**Fix (item D28 of `plans/IMPLEMENT-OUTSTANDING-ARXFS.md`).** One ordered set
+of runs held maximally coalesced, with `insert` / `remove` / `contains` and the
+two walk primitives `first_overlap` / `first_gap` — since
+`plans/COLLECTIONS.md` C5 the shared `tairix_collections::RangeSet` — replaces
+every one of those sets, so the bookkeeping costs one
 entry per contiguous run a transaction touches. An extent is contiguous by
 construction, so releasing a file costs its extent count. Three paths became
 run-wise with it:
@@ -2435,8 +2437,7 @@ transaction — is D67 below, and is fixed.
 
 **Where.** `drivers/filesystem/arxfs/src/lib.rs` (`shrink_tail_step`,
 `drop_name`, `drain_pending_deletes`, `truncate_file`, the transaction
-lifecycle), `src/transaction.rs`, `src/runs.rs`, `src/allocator.rs`,
-`src/check.rs`.
+lifecycle), `src/transaction.rs`, `src/allocator.rs`, `src/check.rs`.
 
 **Mechanism.** D28 made a transaction's block bookkeeping proportional to the
 *runs* it releases rather than the blocks, which is what an ordinary delete
@@ -5477,7 +5478,7 @@ vertical (`tests/integration/wild_fault_qemu_x86_64`) now grades every
 honestly audited instruction-side kills — the exit status alone cannot
 catch a record lying about the cause.
 
-## D89 — sixteen QEMU verticals link an arch port with no allocator (OPEN)
+## D89 — sixteen QEMU verticals link an arch port with no allocator — FIXED
 
 `cargo xtask ci` cannot pass at `ff79c0b25`: the `test --qemu` stage fails its
 very first build with `no global memory allocator found but one is required`.
@@ -5515,8 +5516,68 @@ to settle:
   heap, the allocating path belongs behind something the port does not pull in
   unconditionally.
 
-Until it is fixed no change can be validated through the whole gate; the
-stages ahead of `test --qemu` (fmt, clippy, deps-check, cfg-check,
-charter-cite, c-header, devids, docs-check, font-atlas, help-lint,
-model-check, spec-review, supply-chain, abi-check) do pass, and the host test
-matrix can be run directly.
+**Closed by `plans/COLLECTIONS.md` C3, which removed the requirement at its
+root rather than satisfying it sixteen times.** Splitting the container tier
+into `lib/inline` (which links no allocator) and `lib/collections` let
+`lib/log` — the crate that had pulled `alloc` into every log-bearing port —
+depend on the allocation-free half, so these binaries have no `alloc` in
+their graph at all and need no `#[global_allocator]` to declare. The shared
+integration-test crate this section proposed is therefore not needed, and the
+question of where a shared test heap should sit does not arise.
+
+Verified while landing C5: `cargo xtask ci` builds and runs all 162 enrolled
+QEMU verticals — every one named above among them — and the log carries no
+occurrence of `no global memory allocator`.
+
+---
+
+## D90 — `kernel/core`'s host test suite only passes in alphabetical order (OPEN)
+
+Noticed while landing `plans/COLLECTIONS.md` C5, when one run of
+`cargo test -p tairix-kernel-core --lib` failed a single test and the next
+passed. The charter forbids closing that with a re-run, so it was diagnosed:
+the test harness runs 1 570 tests across 24 threads, and several of them
+share **process-global** state whose safety today rests entirely on the
+harness's default *alphabetical* start order.
+
+**The instance that was reachable in the default order is fixed.**
+`boot_id::tests` asserted `!tairix_hash::is_published()` — the per-boot
+hash-key cell, which is a one-shot process global — while
+`launch_cache_tests` legitimately publishes to it (`LaunchCache::new` keys its
+index through `BuildSipHash13::keyed()`, so its tests must). Alphabetically
+`boot_id` starts first and almost always wins; under load or a different
+order it does not. The fix split the fail-closed *decision* out as
+`boot_id::draw_hash_key`, so the test asserts what it owns — no entropy, no
+key; a seeded reserve, a non-zero key — and reads no global at all. No order
+can break it now.
+
+**The rest of the family is pre-existing and unfixed.** Replaying a shuffled
+order (`--shuffle-seed 1788601047185464875`) against the **unmodified tree at
+HEAD** fails four tests and hangs three more past sixty seconds:
+
+| Test | Manifestation |
+|---|---|
+| `console::tests::a_parking_read_resolves_the_live_cpu_at_every_park` | fails |
+| `fs::writeback::tests::the_host_reads_no_clock_until_the_flusher_arms_it` | fails |
+| `blockwait::tests::a_silent_line_times_out_instead_of_waiting_forever` | fails |
+| `blockwait::tests::{a_pre_fired_line_is_consumed_without_any_park, a_fire_during_the_wait_wakes_and_consumes, a_released_binding_fails_closed_as_not_found}` | hang |
+| `syscalls::tests::ipc_call_grant_restricted_with_grant_round_trips` | fails (`Interrupted`), under other seeds |
+
+The default order is clean: 810 consecutive full-suite runs, including 20
+under 24-core saturation, produced no failure once the `boot_id` instance was
+fixed. So the gate is not currently masking a live failure — but a suite that
+is correct only in one order is a latent one, and the hangs are worse than the
+failures: a hang has no timeout above it.
+
+**The fix.** Per shared global, one of three: give the test its own instance
+instead of the global (the shape the `boot_id` fix took, and the cheapest
+where the production type allows it); exercise the whole lifecycle in **one**
+test, as `cpuops::tests` already does deliberately for its three atomics; or,
+where neither is possible, make the dependency explicit rather than
+positional. Each of the hanging `blockwait` tests additionally needs its wait
+bounded, since a test that can hang has no budget of its own.
+
+**Done when:** the suite passes under repeated shuffled orders as reliably as
+it does alphabetically, with no test hanging; and every remaining
+process-global a test reads is either owned by that one test or explicitly
+sequenced.

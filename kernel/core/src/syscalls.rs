@@ -98,6 +98,7 @@ use tairix_abi::{
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
+use tairix_collections::RangeError;
 use tairix_kernel_ipc::{
     CallEndpoint, CallEndpointLimits, CallTicket, EndpointId, PortRegistry, RecvCall, ReplyOutcome,
 };
@@ -2026,9 +2027,9 @@ where
                         } else {
                             "stack"
                         }
-                    } else if aspaces.file_region_covering(process, va).is_some() {
+                    } else if aspaces.file_region_covers(process, va) {
                         "file_region"
-                    } else if aspaces.anon_region_covering(process, va) {
+                    } else if aspaces.anon_region_covers(process, va) {
                         // A miss inside a reserved anonymous region the
                         // resolver could not back (e.g. frame exhaustion) —
                         // deterministic OOM fatal to this task alone,
@@ -2274,13 +2275,11 @@ where
     /// never a caller-supplied value.
     #[must_use]
     pub fn resolve_file_fault(&self, process: ProcessId, fault_va: u64) -> bool {
-        let Some(region) = self.aspaces.read().file_region_covering(process, fault_va) else {
+        let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
+        let Some((file_offset, region)) = self.aspaces.read().file_page_source(process, page_va)
+        else {
             return false;
         };
-        let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
-        // Cannot overflow: `file_map` validated `offset + page-rounded len`
-        // at map time, and `page_va` lies inside the region.
-        let file_offset = region.offset + (page_va - region.base);
         let mut page = vec![0u8; PAGE_SIZE];
         let read = self.filesystem.read(
             region.uid,
@@ -2338,7 +2337,7 @@ where
     /// a caller-supplied value.
     #[must_use]
     pub fn resolve_anon_fault(&self, process: ProcessId, fault_va: u64) -> bool {
-        if !self.aspaces.read().anon_region_covering(process, fault_va) {
+        if !self.aspaces.read().anon_region_covers(process, fault_va) {
             return false;
         }
         let page_va = fault_va & !(PAGE_SIZE as u64 - 1);
@@ -4283,6 +4282,17 @@ fn records_that_fit(out_cap: usize, record_len: usize) -> Result<usize, Errno> {
 }
 
 /// The number of whole pages a `bytes`-byte region spans.
+/// Fold a refused region record onto the stable [`Errno`] a mapping call
+/// reports: an overlap is a collision with the caller's own live mapping, and
+/// an extent that covers nothing or runs past the address space is a malformed
+/// request.
+fn region_errno(err: RangeError) -> Errno {
+    match err {
+        RangeError::Overlap => Errno::AlreadyExists,
+        RangeError::Empty => Errno::OutOfRange,
+    }
+}
+
 fn pages_spanning(bytes: u64) -> u64 {
     bytes.div_ceil(PAGE_SIZE as u64)
 }
@@ -6265,7 +6275,17 @@ where
         let page_count = charged / PAGE_SIZE as u64;
         {
             let mut aspaces = self.aspaces.write();
-            aspaces.record_anon_region(caller.process(), base, page_count);
+            if let Err(refused) = aspaces.record_anon_region(caller.process(), base, page_count) {
+                // A reservation overlapping one the task already holds — or a
+                // caller-placed (`FIXED`) base whose extent runs past the
+                // address space — is refused and given straight back, exactly
+                // as `file_map` does: two records over one address would make
+                // a fault's backing, and a release's extent, a choice between
+                // them.
+                drop(aspaces);
+                let _ = self.mem_map.unmap(base, len);
+                return Err(region_errno(refused));
+            }
             aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         // The registry snapshot needs no republishing: `MemMap::reserve`
@@ -6646,8 +6666,6 @@ where
         // survives a later `fs_close` of `fd`. Charge the page-rounded
         // extent, the figure `file_unmap` later credits.
         let region = FileRegion {
-            base,
-            len: charged,
             path: String::from(authority.path),
             offset,
             uid: authority.uid,
@@ -6655,7 +6673,20 @@ where
         };
         {
             let mut aspaces = self.aspaces.write();
-            aspaces.record_file_region(caller.process(), region);
+            if let Err(refused) =
+                aspaces.record_file_region(caller.process(), base, pages_spanning(charged), region)
+            {
+                // The producer placed the region but it overlaps a mapping the
+                // task already holds, or its extent does not fit the address
+                // space, so it is handed straight back: two records over one
+                // address would make a fault's backing, and a release's
+                // extent, a choice between them. The release undoes exactly
+                // what the reserve above did; its own failure has no further
+                // recovery and leaves the record absent.
+                drop(aspaces);
+                let _ = self.file_map.release(base, len);
+                return Err(region_errno(refused));
+            }
             aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         Ok(base)
@@ -6737,11 +6768,10 @@ where
             .div_ceil(PAGE_SIZE as u64)
             .checked_mul(PAGE_SIZE as u64)
             .ok_or(Errno::OutOfRange)?;
-        if self
+        if !self
             .aspaces
             .read()
             .file_region_exact(caller.process(), base, charged)
-            .is_none()
         {
             return Err(Errno::NotFound);
         }
@@ -22428,6 +22458,64 @@ mod tests {
         );
     }
 
+    /// A reservation that would overlap one the caller already holds is
+    /// refused and handed straight back to the producer: two records over one
+    /// address would make a fault's backing, and a release's extent, a choice
+    /// between them. The accounting is untouched, and an abutting reservation
+    /// is still its own record.
+    #[test]
+    fn mem_map_refuses_a_reservation_overlapping_a_live_one() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // The recording producer echoes `0x5000_0000 | addr_hint`, so a
+        // `FIXED` hint chooses the base the record is keyed by.
+        let flags = tairix_abi::MapFlags::FIXED;
+        let base = 0x5000_0000 | 0x10_0000;
+        assert_eq!(h.mem_map(&ctx, 0x2000, flags, 0x10_0000), Ok(base));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
+
+        // A second reservation over the first page of the same region is
+        // refused, and the reservation the producer just made is released.
+        assert_eq!(
+            h.mem_map(&ctx, 0x1000, flags, 0x10_0000),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(*producer.release.lock(), Some((base, 0x1000)));
+        assert_eq!(
+            aspaces.read().mapped_aspace_bytes(ProcessId(2)),
+            0x2000,
+            "the refused reservation is charged nothing"
+        );
+        assert!(aspaces.read().anon_region_exact(ProcessId(2), base, 2));
+
+        // An abutting reservation is a distinct record, which is what lets a
+        // heap grow its arena a mapping at a time.
+        let above = 0x5000_0000 | 0x10_2000;
+        assert_eq!(h.mem_map(&ctx, 0x1000, flags, 0x10_2000), Ok(above));
+        assert!(aspaces.read().anon_region_exact(ProcessId(2), above, 1));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x3000);
+    }
+
     /// With no producer installed the handler holds `NULL_MEM_MAP` and
     /// fails closed with `NotImplemented`.
     #[test]
@@ -22720,12 +22808,16 @@ mod tests {
         assert_eq!(base, FILE_REGION_BASE);
         assert_eq!(*fm.reserves.lock(), std::vec![0x1001]);
         assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
-        let region = aspaces
+        assert!(
+            aspaces.read().file_region_exact(ProcessId(2), base, 0x2000),
+            "recorded page-rounded"
+        );
+        let (offset, region) = aspaces
             .read()
-            .file_region_exact(ProcessId(2), base, 0x2000)
-            .expect("recorded page-rounded");
+            .file_page_source(ProcessId(2), base)
+            .expect("the first page reads from the mapping's own offset");
         assert_eq!(region.path, "/big");
-        assert_eq!(region.offset, 0x3000);
+        assert_eq!(offset, 0x3000);
     }
 
     /// Only a readable, filesystem-backed descriptor can be mapped: a
@@ -22950,7 +23042,10 @@ mod tests {
 
         // A four-page anonymous region the task "reserved" via `mem_map`.
         let base = 0x30_0000;
-        aspaces.write().record_anon_region(ProcessId(2), base, 4);
+        aspaces
+            .write()
+            .record_anon_region(ProcessId(2), base, 4)
+            .expect("a disjoint extent is recorded");
 
         let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
@@ -23136,17 +23231,20 @@ mod tests {
         // A file region [0x0F00_0000, 0x0F00_1000) owned by task 3: a small
         // run past its end is a `region` locality with a bounded offset.
         let region_base = 0x0F00_0000u64;
-        aspaces.write().record_file_region(
-            ProcessId(3),
-            crate::aspace::FileRegion {
-                base: region_base,
-                len: PAGE_SIZE as u64,
-                path: String::from("/big"),
-                offset: 0,
-                uid: 1000,
-                caps: tairix_caps::CapabilitySet::empty(),
-            },
-        );
+        aspaces
+            .write()
+            .record_file_region(
+                ProcessId(3),
+                region_base,
+                1,
+                crate::aspace::FileRegion {
+                    path: String::from("/big"),
+                    offset: 0,
+                    uid: 1000,
+                    caps: tairix_caps::CapabilitySet::empty(),
+                },
+            )
+            .expect("a disjoint extent is recorded");
 
         // Task 2: a null-pointer write. Task 3: a bounded read run 0x40
         // past its region's end.
@@ -24244,7 +24342,8 @@ mod tests {
                 .expect("register snapshot");
             aspaces
                 .write()
-                .record_anon_region(ProcessId(2), 0x10_0000, 2);
+                .record_anon_region(ProcessId(2), 0x10_0000, 2)
+                .expect("a disjoint extent is recorded");
         }
 
         // No live space is published for this CPU — the case the wholesale
@@ -24397,7 +24496,8 @@ mod tests {
         // have recorded).
         aspaces
             .write()
-            .record_anon_region(ProcessId(2), 0x10_0000, 1);
+            .record_anon_region(ProcessId(2), 0x10_0000, 1)
+            .expect("a disjoint extent is recorded");
 
         // Region present but no producer → the validated range reaches the
         // (NULL) producer, which fails closed with NotImplemented.
@@ -31947,9 +32047,9 @@ mod tests {
         let base = h
             .file_map(&rctx, rfd, 0, u64::try_from(PAGE_SIZE).unwrap())
             .expect("delegated mapping reserves");
-        let region = aspaces
+        let (_, region) = aspaces
             .read()
-            .file_region_covering(ProcessId(3), base)
+            .file_page_source(ProcessId(3), base)
             .expect("region recorded");
         assert_eq!(region.path, "/blob");
         assert_eq!(region.uid, 1000);

@@ -66,24 +66,58 @@ pub fn mint_boot_id(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> BootI
 /// is what puts that state in the audit log instead of leaving it silent.
 #[must_use]
 pub fn publish_hash_key(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> bool {
-    let mut key = [0u8; HashSeed::LEN];
-    if rng.write().draw(&mut key, true).is_ok() {
-        let _ = tairix_hash::publish(HashSeed::from_bytes(key));
+    if let Some(key) = draw_hash_key(rng) {
+        let _ = tairix_hash::publish(key);
     }
-    wipe(&mut key);
     tairix_hash::is_published()
+}
+
+/// Draw a per-boot hash key from the reserve, or `None` when the reserve
+/// cannot serve the draw.
+///
+/// Split from the publication so the fail-closed decision — no entropy, no
+/// key — is observable on its own. The publication cell is process-global and
+/// one-shot, so whether *a* key exists is not evidence about what this call
+/// drew, and a test that reads the cell instead is asserting on state it does
+/// not own.
+fn draw_hash_key(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> Option<HashSeed> {
+    let mut key = [0u8; HashSeed::LEN];
+    let drawn = rng.write().draw(&mut key, true).is_ok();
+    let seed = drawn.then(|| HashSeed::from_bytes(key));
+    wipe(&mut key);
+    seed
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{mint_boot_id, publish_hash_key};
+    use super::{draw_hash_key, mint_boot_id};
     use crate::random::{BootReserve, RandomReserve};
     use alloc::boxed::Box;
     use tairix_abi::BootId;
+    use tairix_rng::{EntropyError, EntropySource, OutputReserve};
     use tairix_sync::RwLock;
 
     fn unseeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
         RwLock::new(Box::new(BootReserve::new()) as Box<dyn RandomReserve + Send + Sync>)
+    }
+
+    /// A deterministic entropy source, so the seeded half of a draw is
+    /// exercised without a platform source.
+    struct FixedEntropy;
+
+    impl EntropySource for FixedEntropy {
+        fn fill(&mut self, out: &mut [u8]) -> Result<(), EntropyError> {
+            out.fill(0xA5);
+            Ok(())
+        }
+    }
+
+    fn seeded_rng() -> RwLock<Box<dyn RandomReserve + Send + Sync>> {
+        let mut reserve = OutputReserve::<FixedEntropy>::new();
+        reserve
+            .seed(FixedEntropy)
+            .expect("a deterministic source seeds");
+        RwLock::new(Box::new(reserve) as Box<dyn RandomReserve + Send + Sync>)
     }
 
     #[test]
@@ -95,15 +129,18 @@ mod tests {
     }
 
     /// The hash key is the same draw and fails the same way: no entropy, no
-    /// key. Publishing a zero key here would hand every caller a predictable
-    /// bucket index while reporting success.
+    /// key. Handing over a zero key would give every caller a predictable
+    /// bucket index.
     ///
-    /// Nothing else in this test binary publishes, so the global cell is
-    /// untouched when this runs.
+    /// Asserted on the *draw*, never on `tairix_hash::is_published`: that
+    /// cell is process-global and one-shot, so another test in this binary
+    /// publishing to it legitimately — the launch cache's index is keyed
+    /// under it — would otherwise fail this one, in whichever order the
+    /// harness happened to run them.
     #[test]
-    fn an_unseeded_reserve_publishes_no_hash_key() {
-        let rng = unseeded_rng();
-        assert!(!publish_hash_key(&rng));
-        assert!(!tairix_hash::is_published());
+    fn the_hash_key_draw_fails_closed_without_entropy_and_serves_with_it() {
+        assert!(draw_hash_key(&unseeded_rng()).is_none());
+        let key = draw_hash_key(&seeded_rng()).expect("a seeded reserve serves");
+        assert_ne!(key.words(), (0, 0), "a published key is never all-zero");
     }
 }

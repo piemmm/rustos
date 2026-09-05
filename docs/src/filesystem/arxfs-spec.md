@@ -284,8 +284,8 @@ sized to the device.
 **Every block set is a set of runs.** The per-transaction bookkeeping (the
 blocks a not-yet-committed transaction has allocated or released, and the
 per-operation undo records over them), the map's deferred bit changes, and the
-pending-discard queue are all ordered sets of `(start, length)` runs held
-maximally coalesced (`RunSet`), never sets of individual blocks. A transaction
+pending-discard queue are all ordered sets of block runs held maximally
+coalesced (`tairix_collections::RangeSet`), never sets of individual blocks. A transaction
 releases *extents*, and an extent is contiguous by construction, so its
 bookkeeping costs one entry per run it touches: deleting a 100 TB file is a
 handful of entries where a per-block set asked for one per block of it. Two

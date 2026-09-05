@@ -14,6 +14,8 @@ depends on it for the inline half of its `SmallVec`.
 | `HashMap<K, V, S>` | expected O(1) lookup / insert / remove, one control byte + one `(K, V)` slot per bucket, no per-entry node |
 | `HashSet<T, S>` | the same, over a zero-sized value |
 | `LruMap<K, V, S>` | the same table with a recency order through it: expected O(1) lookup, touch, and eviction of the coldest entry |
+| `RangeMap<K, V>` | disjoint half-open ranges, each an identity: O(log n) covering lookup, insertion refusing overlap, and first-fit placement over the gaps |
+| `RangeSet<K>` | the same storage canonicalised — insertion absorbs what it touches, removal splits what it cuts — so the entry count is one per contiguous run |
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container
@@ -27,7 +29,10 @@ measured rather than assumed. Both arrive with a later tier.
 
 1. **Nothing that can fail panics.** Every allocating operation has a fallible
    form returning `TryReserveError`. No map has an `Index` implementation: a
-   subscript that panics on a missing key has no place in a kernel.
+   subscript that panics on a missing key has no place in a kernel. The one
+   allocation this crate does not control is the ordered tier's: `RangeMap`
+   stores its entries in `alloc`'s `BTreeMap`, whose insertion cannot be made
+   fallible from outside `alloc`.
 2. **No allocation on a read path.** Lookup, iteration, and removal allocate
    nothing; growth is amortised.
 3. **No fixed capacity ceiling.** A container here grows on demand and fails

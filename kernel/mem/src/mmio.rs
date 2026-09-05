@@ -35,10 +35,10 @@
 //! via a `SimPhysMap` standing in for the register
 //! block, exactly mirroring [`crate::dma::DmaPool`].
 
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 use core::fmt;
 use core::ptr::NonNull;
+
+use tairix_collections::RangeMap;
 
 use crate::frame::{Frame, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
 use crate::phys::PhysMap;
@@ -67,10 +67,6 @@ pub enum MmioError {
     /// The mapper was constructed with an invalid request (zero
     /// capacity, or a virtual base that is not page aligned).
     InvalidMapConfig,
-    /// The kernel heap could not extend the slot-occupancy bitmap for a
-    /// window this deep into the virtual span. Deterministic OOM: the
-    /// request is refused as a value and the mapper is unchanged.
-    OutOfMemory,
 }
 
 impl From<PageTableError> for MmioError {
@@ -88,7 +84,6 @@ impl fmt::Display for MmioError {
             Self::UnknownRegion => f.write_str("mmio region not from this mapper"),
             Self::DirectMap => f.write_str("mmio region outside the direct physical map"),
             Self::InvalidMapConfig => f.write_str("mmio mapper config invalid"),
-            Self::OutOfMemory => f.write_str("mmio mapper bookkeeping allocation failed"),
         }
     }
 }
@@ -135,15 +130,6 @@ impl MmioRegion {
     }
 }
 
-/// Per-live-mapping bookkeeping retained by the mapper.
-#[derive(Debug, Clone, Copy)]
-struct Record {
-    /// Index of the leading guard slot.
-    leading_guard_slot: usize,
-    /// Number of mapped data pages.
-    data_pages: usize,
-}
-
 /// Per-task guard-bracketed MMIO virtual-window allocator, **independent of
 /// the address space it maps into**.
 ///
@@ -171,8 +157,13 @@ struct Record {
 pub struct MmioWindowMap {
     base: VirtAddr,
     capacity_pages: usize,
-    slot_used: Vec<bool>,
-    regions: BTreeMap<u64, Record>,
+    /// Slot runs handed out — the two guard slots included — keyed by the
+    /// run's leading guard slot and valued by the register block's
+    /// within-page offset. The data-page count is the run's own length less
+    /// its guards, so it is not carried a second time, and the gaps between
+    /// runs are the free slots: no occupancy bitmap sized to the window
+    /// exists to scan or to grow.
+    regions: RangeMap<usize, u64>,
 }
 
 impl MmioWindowMap {
@@ -180,11 +171,10 @@ impl MmioWindowMap {
     /// `[base, base + capacity_pages * PAGE_SIZE)`.
     ///
     /// `capacity_pages` is the window's structural ceiling (the virtual
-    /// span the process layout reserves), not an up-front cost: the
-    /// slot-occupancy bitmap starts empty and grows on demand as mappings
-    /// land deeper into the window, so a task that maps a few small
-    /// register blocks pays a few bytes while the same window can also
-    /// carry a multi-megabyte scan-out surface.
+    /// span the process layout reserves), not an up-front cost: the mapper
+    /// records only the runs it has handed out, so a task that maps a few
+    /// small register blocks pays for a few entries while the same window can
+    /// also carry a multi-megabyte scan-out surface.
     ///
     /// # Errors
     ///
@@ -202,8 +192,7 @@ impl MmioWindowMap {
         Ok(Self {
             base,
             capacity_pages,
-            slot_used: Vec::new(),
-            regions: BTreeMap::new(),
+            regions: RangeMap::new(),
         })
     }
 
@@ -320,12 +309,13 @@ impl MmioWindowMap {
             return Err(MmioError::InvalidRegion);
         }
         // The within-page offset is always `< PAGE_SIZE`, so it fits a
-        // `usize` on every target; mask in `u64` then convert without
-        // a lossy `as` cast.
-        let page_offset = usize::try_from(phys_base & (PAGE_SIZE as u64 - 1))
-            .map_err(|_| MmioError::InvalidRegion)?;
-        let span = page_offset
-            .checked_add(len)
+        // `usize` on every target; the window arithmetic wants it in `u64`,
+        // the page-count arithmetic in `usize`, and neither conversion is
+        // lossy.
+        let page_offset = phys_base & (PAGE_SIZE as u64 - 1);
+        let span = usize::try_from(page_offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(len))
             .ok_or(MmioError::InvalidRegion)?;
         let data_pages = span.div_ceil(PAGE_SIZE);
         // Validate `phys_base + len` does not overflow the physical
@@ -334,8 +324,7 @@ impl MmioWindowMap {
         phys_base
             .checked_add(len_u64)
             .ok_or(MmioError::InvalidRegion)?;
-        let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
-        let leading_guard_slot = self.alloc_free_run(block_pages)?;
+        let leading_guard_slot = self.claim_run(data_pages, page_offset)?;
         let first_data_slot = leading_guard_slot + 1;
 
         // Frame number = phys_base >> PAGE_SHIFT, converted without a
@@ -351,12 +340,12 @@ impl MmioWindowMap {
             let page = match Page::from_addr(virt) {
                 Ok(p) => p,
                 Err(e) => {
-                    self.rollback_partial_map(space, first_data_slot, i);
+                    self.unwind_run(space, leading_guard_slot, i);
                     return Err(MmioError::PageTable(e));
                 }
             };
             if let Err(e) = space.map(page, frame, data_flags) {
-                self.rollback_partial_map(space, first_data_slot, i);
+                self.unwind_run(space, leading_guard_slot, i);
                 return Err(MmioError::PageTable(e));
             }
         }
@@ -366,7 +355,7 @@ impl MmioWindowMap {
         // on map would clobber live hardware state); for a shared-memory
         // region the owning registry already zeroed the frames on
         // allocation. The mapper only installs page-table entries.
-        Ok(self.finish_run(leading_guard_slot, data_pages, page_offset, phys_base, len))
+        Ok(self.region_of(leading_guard_slot, page_offset, phys_base, len))
     }
 
     /// Map an existing, kernel-owned **shared-memory region** whose backing
@@ -390,8 +379,7 @@ impl MmioWindowMap {
     /// * [`MmioError::InvalidRegion`] — the chunk list is empty, a chunk is
     ///   zero-length or not page-aligned, or the total or a chunk's extent
     ///   overflows.
-    /// * [`MmioError::NoVirtualSpace`] / [`MmioError::OutOfMemory`] — no free
-    ///   run of the required length, or the slot bookkeeping cannot grow.
+    /// * [`MmioError::NoVirtualSpace`] — no free run of the required length.
     /// * [`MmioError::PageTable`] — propagated from [`AddressSpace::map`]
     ///   (a partial map is rolled back before the error returns).
     pub fn map_cacheable_chunks_into<P: PageTable>(
@@ -423,8 +411,7 @@ impl MmioWindowMap {
             .checked_mul(PAGE_SIZE)
             .ok_or(MmioError::InvalidRegion)?;
 
-        let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
-        let leading_guard_slot = self.alloc_free_run(block_pages)?;
+        let leading_guard_slot = self.claim_run(data_pages, 0)?;
         let first_data_slot = leading_guard_slot + 1;
 
         // Walk the chunk list, mapping each chunk's frames into the next
@@ -441,14 +428,14 @@ impl MmioWindowMap {
                 usize::try_from(phys_base >> PAGE_SHIFT),
                 usize::try_from(pages),
             ) else {
-                self.rollback_partial_map(space, first_data_slot, gi);
+                self.unwind_run(space, leading_guard_slot, gi);
                 return Err(MmioError::InvalidRegion);
             };
             let virt = self.virt_of_slot(first_data_slot + gi);
             let page = match Page::from_addr(virt) {
                 Ok(page) => page,
                 Err(err) => {
-                    self.rollback_partial_map(space, first_data_slot, gi);
+                    self.unwind_run(space, leading_guard_slot, gi);
                     return Err(MmioError::PageTable(err));
                 }
             };
@@ -458,7 +445,7 @@ impl MmioWindowMap {
                 pages_usize,
                 MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
             ) {
-                self.rollback_partial_map(space, first_data_slot, gi);
+                self.unwind_run(space, leading_guard_slot, gi);
                 return Err(MmioError::PageTable(err));
             }
             gi += pages_usize;
@@ -468,41 +455,68 @@ impl MmioWindowMap {
         // base); a chunked region is not physically contiguous, so it is
         // never resolved through the direct map (`kernel_hold` refuses a
         // multi-chunk region — no kernel consumer maps one).
-        Ok(self.finish_run(leading_guard_slot, data_pages, 0, chunks[0].0, len))
+        Ok(self.region_of(leading_guard_slot, 0, chunks[0].0, len))
     }
 
-    /// Mark the guard + data slots of a mapped run used, record it keyed by
-    /// its base virtual address (offset into the first data page included),
-    /// and build the [`MmioRegion`]. The single tail shared by
+    /// Claim a free run of `data_pages` slots plus its two guard slots,
+    /// recording the register block's `page_offset` against it, and return
+    /// the leading guard slot.
+    ///
+    /// Placement is first-fit over the gaps between the runs already handed
+    /// out, so it costs one pass over those rather than a scan of the window
+    /// — and a released run's slots, guards included, are free again the
+    /// moment its record leaves.
+    fn claim_run(&mut self, data_pages: usize, page_offset: u64) -> Result<usize, MmioError> {
+        let block_pages = data_pages.checked_add(2).ok_or(MmioError::NoVirtualSpace)?;
+        let count = u64::try_from(block_pages).map_err(|_| MmioError::NoVirtualSpace)?;
+        self.regions
+            .place(0..self.capacity_pages, count, page_offset)
+            .map(|run| run.start)
+            .ok_or(MmioError::NoVirtualSpace)
+    }
+
+    /// Describe the run claimed at `leading_guard_slot` as the
+    /// [`MmioRegion`] its caller holds. The single tail shared by
     /// [`Self::map_with_flags`] and [`Self::map_cacheable_chunks_into`], so
-    /// the slot-bookkeeping / `Record` insertion has one definition.
-    fn finish_run(
-        &mut self,
+    /// the window address arithmetic has one definition.
+    fn region_of(
+        &self,
         leading_guard_slot: usize,
-        data_pages: usize,
-        page_offset: usize,
+        page_offset: u64,
         phys: u64,
         len: usize,
     ) -> MmioRegion {
-        let first_data_slot = leading_guard_slot + 1;
-        let trailing_guard_slot = leading_guard_slot + 1 + data_pages;
-        for s in leading_guard_slot..=trailing_guard_slot {
-            self.slot_used[s] = true;
-        }
-        let window_virt =
-            VirtAddr::new(self.virt_of_slot(first_data_slot).as_u64() + page_offset as u64);
-        self.regions.insert(
-            window_virt.as_u64(),
-            Record {
-                leading_guard_slot,
-                data_pages,
-            },
-        );
         MmioRegion {
-            virt: window_virt,
+            virt: self.window_virt(leading_guard_slot, page_offset),
             phys,
             len,
         }
+    }
+
+    /// The user-visible base of the run led by `leading_guard_slot`: its
+    /// first data page plus the register block's within-page offset.
+    fn window_virt(&self, leading_guard_slot: usize, page_offset: u64) -> VirtAddr {
+        let first_data_slot = leading_guard_slot + 1;
+        VirtAddr::new(self.virt_of_slot(first_data_slot).as_u64() + page_offset)
+    }
+
+    /// The run whose data pages begin at `virt`, as
+    /// `(leading guard slot, data pages)`.
+    ///
+    /// Only the exact base a `map` returned resolves: an interior address, a
+    /// wrong within-page offset, or an address outside the window all name no
+    /// run, so a release can never reach a mapping it was not handed.
+    fn locate(&self, virt: VirtAddr) -> Option<(usize, usize)> {
+        let offset_in_window = virt.as_u64().checked_sub(self.base.as_u64())?;
+        let data_slot = usize::try_from(offset_in_window >> PAGE_SHIFT).ok()?;
+        let (run, &page_offset) = self.regions.covering(data_slot)?;
+        let leading_guard_slot = run.start;
+        if self.window_virt(leading_guard_slot, page_offset) != virt {
+            return None;
+        }
+        // Every recorded run is its data pages bracketed by two guard slots,
+        // so a run too short to hold both is not one this mapper claimed.
+        Some((leading_guard_slot, (run.end - run.start).checked_sub(2)?))
     }
 
     /// Tear down a mapping previously returned by [`Self::map_into`] from the
@@ -540,13 +554,8 @@ impl MmioWindowMap {
         space: &mut AddressSpace<P>,
         virt: VirtAddr,
     ) -> Result<(), MmioError> {
-        let record = self
-            .regions
-            .remove(&virt.as_u64())
-            .ok_or(MmioError::UnknownRegion)?;
-        let data_pages = record.data_pages;
-        let first_data_slot = record.leading_guard_slot + 1;
-        let trailing_guard_slot = record.leading_guard_slot + 1 + data_pages;
+        let (leading_guard_slot, data_pages) = self.locate(virt).ok_or(MmioError::UnknownRegion)?;
+        let first_data_slot = leading_guard_slot + 1;
 
         for i in 0..data_pages {
             let virt = self.virt_of_slot(first_data_slot + i);
@@ -554,9 +563,9 @@ impl MmioWindowMap {
             let _ = space.unmap(page)?;
         }
 
-        for s in record.leading_guard_slot..=trailing_guard_slot {
-            self.slot_used[s] = false;
-        }
+        // The run's record leaves last: every slot it held, guards included,
+        // becomes free space the next placement can use.
+        self.regions.remove(leading_guard_slot);
         Ok(())
     }
 
@@ -577,7 +586,7 @@ impl MmioWindowMap {
         region: &MmioRegion,
         phys: &dyn PhysMap,
     ) -> Result<NonNull<u8>, MmioError> {
-        if !self.regions.contains_key(&region.virt.as_u64()) {
+        if self.locate(region.virt).is_none() {
             return Err(MmioError::UnknownRegion);
         }
         // The register block is reachable at its device physical base
@@ -621,53 +630,24 @@ impl MmioWindowMap {
         VirtAddr::new(self.base.as_u64() + ((slot as u64) << PAGE_SHIFT))
     }
 
-    /// `true` when `slot` is occupied. A slot the bitmap has not grown to
-    /// yet has never been allocated, so it is free.
-    fn slot_is_used(&self, slot: usize) -> bool {
-        self.slot_used.get(slot).copied().unwrap_or(false)
-    }
-
-    /// First-fit a run of `len` free slots inside the window's structural
-    /// ceiling and grow the occupancy bitmap to cover it, fallibly: an
-    /// exhausted kernel heap refuses the request as a value and leaves the
-    /// mapper unchanged.
-    fn alloc_free_run(&mut self, len: usize) -> Result<usize, MmioError> {
-        if len == 0 || len > self.capacity_pages {
-            return Err(MmioError::NoVirtualSpace);
-        }
-        let mut start = 0;
-        'candidate: while start + len <= self.capacity_pages {
-            for i in 0..len {
-                if self.slot_is_used(start + i) {
-                    start = start + i + 1;
-                    continue 'candidate;
-                }
-            }
-            let needed = start + len;
-            if needed > self.slot_used.len() {
-                let extra = needed - self.slot_used.len();
-                self.slot_used
-                    .try_reserve(extra)
-                    .map_err(|_| MmioError::OutOfMemory)?;
-                self.slot_used.resize(needed, false);
-            }
-            return Ok(start);
-        }
-        Err(MmioError::NoVirtualSpace)
-    }
-
-    fn rollback_partial_map<P: PageTable>(
-        &self,
+    /// Undo a run part-way through being mapped: unmap the `mapped_so_far`
+    /// data pages this call installed and release the run's record, so a
+    /// refused map leaves both the borrowed space and the mapper exactly as
+    /// they were (all-or-nothing).
+    fn unwind_run<P: PageTable>(
+        &mut self,
         space: &mut AddressSpace<P>,
-        first_data_slot: usize,
+        leading_guard_slot: usize,
         mapped_so_far: usize,
     ) {
+        let first_data_slot = leading_guard_slot + 1;
         for i in 0..mapped_so_far {
             let virt = self.virt_of_slot(first_data_slot + i);
             if let Ok(page) = Page::from_addr(virt) {
                 let _ = space.unmap(page);
             }
         }
+        self.regions.remove(leading_guard_slot);
     }
 }
 

@@ -182,9 +182,9 @@ fn exhausted_virtual_window_reports_no_space() {
 #[test]
 fn scanout_sized_window_maps_in_a_span_ceiling() {
     // A ~4 MiB linear scan-out surface (1024 data pages) maps out of a
-    // window whose ceiling is a whole reserved 1 GiB virtual span, and
-    // the occupancy bitmap grows only as far as the mapping actually
-    // reaches: the ceiling is structural, never an up-front cost.
+    // window whose ceiling is a whole reserved 1 GiB virtual span, and the
+    // mapper's bookkeeping is the one run it handed out: the ceiling is
+    // structural, never an up-front cost.
     let phys = sim();
     let span_pages = 0x4000_0000usize / PAGE_SIZE;
     let mut map = fresh(&phys, span_pages);
@@ -192,8 +192,10 @@ fn scanout_sized_window_maps_in_a_span_ceiling() {
     let region = map.map(0x8000_0000, len).expect("scan-out surface maps");
     assert_eq!(region.len(), len);
     assert_eq!(map.mapped_pages(), 1024);
-    // 1024 data slots plus the two guard slots — and nothing more.
-    assert_eq!(map.window.slot_used.len(), 1024 + 2);
+    // One record, holding 1024 data slots plus the two guard slots; nothing
+    // in the mapper is sized to the 1 GiB ceiling.
+    assert_eq!(map.window.regions.len(), 1);
+    assert_eq!(map.window.locate(region.virt()), Some((0, 1024)));
     assert_eq!(map.window.capacity_pages(), span_pages);
 }
 

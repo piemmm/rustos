@@ -20,6 +20,10 @@
 //! * [`LruMap`] — the same table with a recency order threaded through it, so
 //!   a cache finds and drops its coldest entry without a search. What every
 //!   hand-rolled `(tick -> key)` eviction index was standing in for.
+//! * [`RangeMap`] / [`RangeSet`] — disjoint half-open ranges, the map holding
+//!   each as an identity and the set canonicalising by absorbing everything it
+//!   touches. What every hand-rolled `base -> length` reservation table and
+//!   its own overlap arithmetic was standing in for.
 //! * [`SmallVec`] — inline while it is small, spilling to the heap beyond
 //!   that, for the paths that carry a handful of elements and pay an
 //!   allocation for it.
@@ -56,12 +60,16 @@ use core::fmt;
 pub mod group;
 pub mod lru;
 pub mod map;
+pub mod range;
+pub mod rangeset;
 mod raw;
 pub mod set;
 pub mod smallvec;
 
 pub use lru::LruMap;
 pub use map::HashMap;
+pub use range::{RangeError, RangeKey, RangeMap};
+pub use rangeset::RangeSet;
 pub use set::HashSet;
 pub use smallvec::SmallVec;
 

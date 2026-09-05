@@ -26,7 +26,7 @@
 //! beyond one transaction's worth and the free count is exact whenever the
 //! volume is at rest.
 //!
-//! Every set here is a set of **runs** ([`RunSet`]), so a transaction's
+//! Every set here is a set of **runs** ([`RangeSet`]), so a transaction's
 //! bookkeeping costs one entry per contiguous run it touches and never one per
 //! block: releasing a hundred-terabyte file releases its extents, each of which
 //! is contiguous by construction.
@@ -45,6 +45,8 @@ use alloc::vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
+use tairix_collections::{RangeKey, RangeSet};
+use tairix_reclaim::MAP_ENTRY_OVERHEAD;
 
 use crate::allocmap::{
     bit_get, clear_bit_range, find_free_bit, find_free_bit_rev, find_used_bit, set_bit_range,
@@ -53,7 +55,6 @@ use crate::allocmap::{
 use crate::dedupe::DedupeIndex;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache, MAX_CACHED_PAGES};
-use crate::runs::RunSet;
 use crate::superblock::RING_BLOCKS;
 use crate::wcache::WritePhase;
 use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE, METADATA_RESERVE};
@@ -104,11 +105,11 @@ pub(crate) struct Allocator {
     /// Runs marked **used** whose bitmap page or summary block was not
     /// resident when the mark was made, folded in at the next allocation or
     /// commit.
-    pub(crate) pending_used: RunSet,
+    pub(crate) pending_used: RangeSet<u64>,
     /// Runs marked **free** on the same terms, held apart from
     /// [`Self::pending_used`] so the two sets are disjoint and the latest mark
     /// over a block is the only one recorded.
-    pub(crate) pending_free: RunSet,
+    pub(crate) pending_free: RangeSet<u64>,
     /// Whether the validity stamp is clean, pending invalidation, or durably
     /// dirty.
     pub(crate) stamp: MapStampState,
@@ -121,23 +122,23 @@ pub(crate) struct Allocator {
     pub(crate) meta_cursor: u64,
     /// Runs this transaction allocated and has not published, so it may
     /// reuse or reclaim them immediately.
-    pub(crate) txn_private: RunSet,
+    pub(crate) txn_private: RangeSet<u64>,
     /// Runs the **running operation** claimed, so undoing that operation
     /// alone releases exactly them and leaves the rest of the transaction it
     /// joined intact.
-    pub(crate) op_claimed: RunSet,
+    pub(crate) op_claimed: RangeSet<u64>,
     /// Private runs the running operation freed that an *earlier* operation
     /// of the same transaction had claimed; undoing it reclaims them.
-    pub(crate) op_released: RunSet,
+    pub(crate) op_released: RangeSet<u64>,
     /// The part of [`Self::txn_freed`] the running operation added.
-    pub(crate) op_deferred: RunSet,
+    pub(crate) op_deferred: RangeSet<u64>,
     /// Runs inherited from a committed root that this transaction released;
     /// reclaimed only once the transaction commits. A set, so a block released
     /// twice by different paths counts once — the commit reads the blocks it
     /// holds to record the free count the committed volume will have.
-    pub(crate) txn_freed: RunSet,
+    pub(crate) txn_freed: RangeSet<u64>,
     /// Freed runs awaiting a device discard.
-    pub(crate) pending_discard: RunSet,
+    pub(crate) pending_discard: RangeSet<u64>,
     /// The bounded, rebuildable `(domain, length, logical hash) -> chunk`
     /// dedupe cache.
     pub(crate) dedupe_index: DedupeIndex,
@@ -163,6 +164,16 @@ fn move_bit_range(payload: &mut [u8], lo: u64, hi: u64, used: bool) -> u64 {
     }
 }
 
+/// Bytes one recorded run costs: its start and its end, plus the per-entry
+/// map bookkeeping every bounded pool in the tree charges on top of a
+/// payload.
+///
+/// This is what makes a set's entry count a *byte* figure the write-back
+/// ceiling can be compared against, so a transaction that dirties almost
+/// nothing while releasing millions of runs still meets the same bound as one
+/// that stages blocks.
+const RUN_ENTRY_BYTES: usize = 2 * size_of::<u64>() + MAP_ENTRY_OVERHEAD;
+
 impl Allocator {
     /// Whether any deferred bit change is outstanding.
     fn pending_any(&self) -> bool {
@@ -180,29 +191,35 @@ impl Allocator {
     /// Record `from..from + len` as a deferred mark, displacing any opposite
     /// mark over it so the latest mark is the only one held.
     fn pending_defer(&mut self, from: u64, len: u64, used: bool) {
+        let Some(run) = from.span(len) else {
+            return;
+        };
         let (set, cleared) = if used {
             (&mut self.pending_used, &mut self.pending_free)
         } else {
             (&mut self.pending_free, &mut self.pending_used)
         };
-        cleared.remove(from, len);
-        set.insert(from, len);
+        cleared.remove(run.clone());
+        set.insert(run);
     }
 
     /// Forget every deferred mark over `from..from + len`.
     fn pending_drop(&mut self, from: u64, len: u64) {
-        self.pending_used.remove(from, len);
-        self.pending_free.remove(from, len);
+        let Some(run) = from.span(len) else {
+            return;
+        };
+        self.pending_used.remove(run.clone());
+        self.pending_free.remove(run);
     }
 
     /// Take the lowest deferred mark, as `(start, len, used)`.
     fn pending_pop(&mut self) -> Option<(u64, u64, bool)> {
-        if let Some((start, len)) = self.pending_used.pop_first() {
-            return Some((start, len, true));
+        if let Some(run) = self.pending_used.pop_first() {
+            return Some((run.start, run.end - run.start, true));
         }
         self.pending_free
             .pop_first()
-            .map(|(start, len)| (start, len, false))
+            .map(|run| (run.start, run.end - run.start, false))
     }
 
     /// Forget every deferred mark.
@@ -232,8 +249,8 @@ impl Allocator {
         .into_iter()
         .fold((0, 0), |(bytes, runs), set| {
             (
-                bytes.saturating_add(set.bytes()),
-                runs.saturating_add(set.run_count() as u64),
+                bytes.saturating_add(set.len().saturating_mul(RUN_ENTRY_BYTES)),
+                runs.saturating_add(set.len() as u64),
             )
         })
     }
@@ -243,18 +260,18 @@ impl Allocator {
         Self {
             geom,
             cache: BlockCache::new(block_size),
-            pending_used: RunSet::new(),
-            pending_free: RunSet::new(),
+            pending_used: RangeSet::new(),
+            pending_free: RangeSet::new(),
             stamp: MapStampState::Dirty,
             needs_rebuild: true,
             alloc_cursor: RING_BLOCKS,
             meta_cursor: total_blocks.saturating_sub(1),
-            txn_private: RunSet::new(),
-            op_claimed: RunSet::new(),
-            op_released: RunSet::new(),
-            op_deferred: RunSet::new(),
-            txn_freed: RunSet::new(),
-            pending_discard: RunSet::new(),
+            txn_private: RangeSet::new(),
+            op_claimed: RangeSet::new(),
+            op_released: RangeSet::new(),
+            op_deferred: RangeSet::new(),
+            txn_freed: RangeSet::new(),
+            pending_discard: RangeSet::new(),
             dedupe_index: DedupeIndex::new(),
         }
     }
@@ -928,8 +945,11 @@ impl<B: Block> ARXFS<B> {
         let Ok(alloc) = self.allocator_mut() else {
             return;
         };
-        alloc.txn_private.insert(start, len);
-        alloc.op_claimed.insert(start, len);
+        let Some(run) = start.span(len) else {
+            return;
+        };
+        alloc.txn_private.insert(run.clone());
+        alloc.op_claimed.insert(run);
     }
 
     /// Allocate one data block, scanning **upward** from the low end.

@@ -360,7 +360,8 @@ assembled per mount by `kernel/tairix-kernel::writeback_bound`.
   the operation's end. `FilesystemWrite::write_all` is the one place the resume
   loop lives for every caller that needs the whole value stored.
 - **Over the transaction, not only its blocks.** The ceiling counts the
-  transaction's run bookkeeping (`RunSet::bytes`, `Allocator::txn_pinned_bytes`)
+  transaction's run bookkeeping (one `RUN_ENTRY_BYTES` per held run,
+  `Allocator::txn_pinned`)
   with its staged blocks, because both are pinned on the same terms and an
   operation that *frees* space holds almost all of its memory in the runs:
   freeing a maximally fragmented file dirties a spine's worth of blocks whatever
