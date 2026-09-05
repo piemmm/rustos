@@ -73,9 +73,9 @@ fn the_first_cycle_publishes_and_notes_each_degraded_measurement_once() {
             DegradedField::CpuTime,
             DegradedField::Uptime,
             DegradedField::LoadAverage,
+            DegradedField::CpuInfo,
             DegradedField::Identity,
             DegradedField::MemoryTotal,
-            DegradedField::CpuInfo,
             DegradedField::ResourceLimits,
             DegradedField::Mounts,
         ]

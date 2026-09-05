@@ -17,7 +17,7 @@ use tairix_abi::sysinfo::{
     MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
     MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
     SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord,
-    MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
+    CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, Time64};
 use tairix_procinfo::Transport;
@@ -294,6 +294,22 @@ fn cpu_load(cpu: u32) -> CpuLoadRecord {
     }
 }
 
+/// One CPU record whose clock is flagged as genuinely measured, so a
+/// consumer may trust the figure rather than discard it.
+fn measured_clock(cpu: u32, hz: u64) -> CpuInfoRecord {
+    CpuInfoRecord::new(
+        cpu,
+        CpuCoreClass::Performance,
+        CPU_INFO_FLAG_FREQ_MEASURED,
+        0,
+        0,
+        hz,
+        1_000_000,
+        b"Test Core",
+    )
+    .expect("a valid CPU record")
+}
+
 /// Encode `records` as one blob per record, the shape [`Fixture::serve`]
 /// takes for a paged reading.
 fn blobs<T>(records: &[T], encode: impl Fn(&T) -> Vec<u8>) -> Vec<Vec<u8>> {
@@ -431,11 +447,12 @@ fn process_with_io(pid: u64, proc_id: ProcId, read: u64, written: u64) -> Proces
 }
 
 /// The readings the cadence policy issues on every sample.
-const EVERY_SAMPLE: [SysinfoQueryId; 7] = [
+const EVERY_SAMPLE: [SysinfoQueryId; 8] = [
     SysinfoQueryId::GLOBAL_PROCESS_LIST,
     SysinfoQueryId::CPU_TIME_STATS,
     SysinfoQueryId::UPTIME,
     SysinfoQueryId::LOAD_AVERAGE,
+    SysinfoQueryId::CPU_INFO,
     SysinfoQueryId::CPU_LOAD,
     SysinfoQueryId::NET_INTERFACE_STATE,
     SysinfoQueryId::NET_INTERFACE_RATES,
@@ -457,9 +474,8 @@ const INVENTORY: [SysinfoQueryId; 5] = [
 ];
 
 /// The readings fetched once and cached for the sampler's life.
-const STATIC: [SysinfoQueryId; 4] = [
+const STATIC: [SysinfoQueryId; 3] = [
     SysinfoQueryId::SYSTEM_IDENTITY,
-    SysinfoQueryId::CPU_INFO,
     SysinfoQueryId::MEMORY_TOTAL,
     SysinfoQueryId::NET_INTERFACE_FACTS,
 ];
@@ -1084,9 +1100,63 @@ fn a_static_reading_is_read_once_and_reused() {
     // Read on the first sample and never again: the fact cannot change
     // while the process runs.
     assert_eq!(fixture.count_of(SysinfoQueryId::SYSTEM_IDENTITY), 1);
-    assert_eq!(fixture.count_of(SysinfoQueryId::CPU_INFO), 1);
     assert_eq!(fixture.count_of(SysinfoQueryId::MEMORY_TOTAL), 1);
     assert_eq!(fixture.count_of(SysinfoQueryId::NET_INTERFACE_FACTS), 1);
+    // The CPU inventory is deliberately not among them: its `current_freq_hz`
+    // is a live clock, so it is re-read every sample and a retained record
+    // could only report a stale one as live.
+    assert_eq!(fixture.count_of(SysinfoQueryId::CPU_INFO), 4);
+}
+
+#[test]
+fn the_cpu_inventorys_clock_is_a_live_reading_not_a_boot_fact() {
+    let fixture = Fixture::new();
+    fixture.serve(
+        SysinfoQueryId::CPU_INFO,
+        blobs(&[measured_clock(0, 2_000_000_000)], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    let mut sampler = Sampler::new(granted());
+    let first = sampler.sample(&fixture, 0);
+    assert_eq!(
+        first.cpu_info.expect("inventory read")[0].current_freq_hz,
+        2_000_000_000
+    );
+
+    // The clock moves. A reading cached for the boot would still report the
+    // first figure, which is the defect this cadence exists to prevent.
+    fixture.serve(
+        SysinfoQueryId::CPU_INFO,
+        blobs(&[measured_clock(0, 3_900_000_000)], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    let second = sampler.sample(&fixture, NS);
+    let cpus = second.cpu_info.expect("inventory re-read");
+    assert_eq!(cpus[0].current_freq_hz, 3_900_000_000);
+    assert!(cpus[0].freq_measured());
+}
+
+#[test]
+fn an_unreadable_cpu_inventory_is_absent_rather_than_a_stale_clock() {
+    let fixture = Fixture::new();
+    fixture.serve(
+        SysinfoQueryId::CPU_INFO,
+        blobs(&[measured_clock(0, 2_000_000_000)], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    let mut sampler = Sampler::new(granted());
+    assert!(sampler.sample(&fixture, 0).cpu_info.is_some());
+
+    // A failed re-read leaves no reading at all rather than carrying the
+    // previous clock forward: a stale live figure is worse than an honest
+    // absence, which the surface states as one.
+    fixture.answer(SysinfoQueryId::CPU_INFO, Answer::Fail);
+    let second = sampler.sample(&fixture, NS);
+    assert!(second.cpu_info.is_none());
+    assert_eq!(second.degradations, alloc::vec![DegradedField::CpuInfo]);
 }
 
 #[test]

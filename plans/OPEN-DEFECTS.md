@@ -120,6 +120,7 @@ table normalises all three to **closed**. 18 open, 70 closed, 88 total.
 | D86 | on x86_64 a ring-3 exception other than a page fault killed the machine |
 | D87 | an instruction-side fault kill is audited against the task's *data* mappings |
 | D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
+| D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate cannot build on any Tier-1 target (OPEN) |
 
 ## Scope
 
@@ -5475,3 +5476,47 @@ vertical (`tests/integration/wild_fault_qemu_x86_64`) now grades every
 `TaskFaultKilled` record its own children produce and PASSes only on three
 honestly audited instruction-side kills — the exit status alone cannot
 catch a record lying about the cause.
+
+## D89 — sixteen QEMU verticals link an arch port with no allocator (OPEN)
+
+`cargo xtask ci` cannot pass at `ff79c0b25`: the `test --qemu` stage fails its
+very first build with `no global memory allocator found but one is required`.
+Sixteen verticals link an architecture port (`tairix-arch-x86_64` /
+`-aarch64` / `-riscv64`) *without* linking `tairix-kernel`, and the ports now
+reach an allocating path — `lib/abi`, `lib/rng` and `lib/log` all name `alloc`
+— so each freestanding binary needs a `#[global_allocator]` it does not
+declare. Reproduced on all three Tier-1 targets, and against a clean `HEAD`
+with every unrelated change stashed, so it is neither environmental nor a
+stale artefact.
+
+The sixteen: `memory_isolation`, `cross_cpu_tlb_shootdown_qemu_x86_64`,
+`accessed_bit_qemu_x86_64`, `abi_sys_syscall_qemu_{aarch64,riscv64}`,
+`cross_cpu_tlb_shootdown_qemu_{aarch64,riscv64}`, `fiq_selfsample_qemu_aarch64`,
+`ipi_smp_qemu_{aarch64,riscv64}`, `memory_isolation_qemu_{aarch64,riscv64}`,
+`timer_preempt_qemu_{aarch64,riscv64}`, `uaccess_fault_qemu_{aarch64,riscv64}`,
+`uart_console_qemu_aarch64`.
+
+**The fix is a decision, not a transcription.** Roughly fourteen verticals
+*already* carry their own copy of the static heap plus `#[global_allocator]`
+(`accessed_bit_qemu_riscv64`, `enter_user_qemu_x86_64`, …), so adding sixteen
+more copies of the same block is the duplication the charter forbids: the one
+definition belongs in a shared integration-test crate every vertical depends
+on, with the existing copies collapsed into it. Two things that decision has
+to settle:
+
+- **Where the heap sits.** `accessed_bit_qemu_riscv64` places its arena in the
+  linker's NOLOAD `.heap` section so the boot trampoline neither zeroes it nor
+  counts it as usable memory; the x86_64 verticals use plain `.bss`. A shared
+  crate has to express that per-port difference, and `cfg(target_arch …)` is
+  not permitted in `tests/`.
+- **Whether the ports should demand it at all.** These verticals link a port
+  deliberately *without* the kernel, to prove an Arch HAL property in
+  isolation. If that is to stay possible without every such test carrying a
+  heap, the allocating path belongs behind something the port does not pull in
+  unconditionally.
+
+Until it is fixed no change can be validated through the whole gate; the
+stages ahead of `test --qemu` (fmt, clippy, deps-check, cfg-check,
+charter-cite, c-header, devids, docs-check, font-atlas, help-lint,
+model-check, spec-review, supply-chain, abi-check) do pass, and the host test
+matrix can be run directly.

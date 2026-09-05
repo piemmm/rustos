@@ -344,11 +344,13 @@ pub struct Sample {
     /// The per-CPU inventory: each core's class, model name, and measured
     /// frequency.
     ///
-    /// Read once ([`Cadence::Static`]): the set of CPUs and their models
-    /// cannot change while this process runs. `Some(empty)` is a service
-    /// that reported no CPUs; `None` is an absent reading (see
-    /// [`Self::absence`]) — the distinction the surface needs to avoid
-    /// showing "no CPUs" for "may not look".
+    /// Read on every sample ([`Cadence::EverySample`]) because
+    /// `current_freq_hz` is a live reading and a clock a reader watches move
+    /// is the point of the field; the immutable part (model, class, feature
+    /// bits, reference clock) is re-read with it because the query is not
+    /// field-selective. `Some(empty)` is a service that reported no CPUs;
+    /// `None` is an absent reading (see [`Self::absence`]) — the distinction
+    /// the surface needs to avoid showing "no CPUs" for "may not look".
     pub cpu_info: Option<Vec<CpuInfoRecord>>,
     /// Per-CPU scheduler load ([`Cadence::EverySample`]), which needs the
     /// kernel-statistics scope; absent without it.
@@ -627,7 +629,6 @@ pub struct Sampler {
     /// set rather than a bool per kind, since there are eighteen kinds.
     warned: BTreeSet<DegradedField>,
     identity: Option<SystemIdentity>,
-    cpu_info: Option<Vec<CpuInfoRecord>>,
     memory_total: Option<MemoryTotal>,
     net_facts: Option<Vec<NetInterfaceFactsRecord>>,
     kernel_memory: Option<KernelMemoryStats>,
@@ -652,7 +653,6 @@ impl Sampler {
             sample_index: 0,
             warned: BTreeSet::new(),
             identity: None,
-            cpu_info: None,
             memory_total: None,
             net_facts: None,
             kernel_memory: None,
@@ -685,6 +685,7 @@ impl Sampler {
         self.sample_memory_pressure(transport, &mut degradations);
         let uptime = self.read_uptime(transport, &mut degradations);
         let load_average = self.read_load_average(transport, &mut degradations);
+        let cpu_info = self.read_cpu_info(transport, &mut degradations);
         let cpu_load = self.read_cpu_load(transport, &mut degradations);
         let net_state = self.read_net_state(transport, &mut degradations);
         let net_rates = self.read_net_rates(transport, &mut degradations);
@@ -703,7 +704,7 @@ impl Sampler {
             identity: self.identity,
             uptime,
             load_average,
-            cpu_info: self.cpu_info.clone(),
+            cpu_info,
             cpu_load,
             kernel_memory: self.kernel_memory,
             memory_total: self.memory_total,
@@ -992,6 +993,34 @@ impl Sampler {
         )
     }
 
+    /// The per-CPU inventory: each core's class, model and measured clock.
+    ///
+    /// Read fresh every sample and never carried forward, exactly as the
+    /// other per-sample readings are: the record's `current_freq_hz` is a
+    /// live clock, so a retained record could only report a stale one as
+    /// live.
+    fn read_cpu_info(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<Vec<CpuInfoRecord>> {
+        if !self.due(DegradedField::CpuInfo, false) {
+            return None;
+        }
+        self.read_paged(
+            transport,
+            PagedRead {
+                query: SysinfoQueryId::CPU_INFO,
+                field: DegradedField::CpuInfo,
+                record_len: CpuInfoRecord::WIRE_LEN,
+                cap: CPU_RECORD_CAP,
+            },
+            degradations,
+            page_payload,
+            CpuInfoRecord::from_bytes,
+        )
+    }
+
     /// Per-CPU scheduler load.
     fn read_cpu_load(
         &mut self,
@@ -1089,8 +1118,8 @@ impl Sampler {
     }
 
     /// Refresh the readings that cannot change while the machine is up — the
-    /// installation's identity, its RAM total, and the CPU and network
-    /// hardware it presents.
+    /// installation's identity, its RAM total, and the network hardware it
+    /// presents.
     ///
     /// Each is read once and kept, and re-read only while it is still
     /// missing, so a reading that was refused or unavailable at start-up is
@@ -1121,22 +1150,6 @@ impl Sampler {
                 MemoryTotal::from_bytes,
             ) {
                 self.memory_total = Some(total);
-            }
-        }
-        if self.due(DegradedField::CpuInfo, self.cpu_info.is_some()) {
-            if let Some(records) = self.read_paged(
-                transport,
-                PagedRead {
-                    query: SysinfoQueryId::CPU_INFO,
-                    field: DegradedField::CpuInfo,
-                    record_len: CpuInfoRecord::WIRE_LEN,
-                    cap: CPU_RECORD_CAP,
-                },
-                degradations,
-                page_payload,
-                CpuInfoRecord::from_bytes,
-            ) {
-                self.cpu_info = Some(records);
             }
         }
         if self.due(DegradedField::NetInterfaceFacts, self.net_facts.is_some()) {
@@ -1271,6 +1284,7 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::CpuTime
         | DegradedField::Uptime
         | DegradedField::LoadAverage
+        | DegradedField::CpuInfo
         | DegradedField::CpuLoad
         | DegradedField::NetInterfaceState
         | DegradedField::NetInterfaceRates => Cadence::EverySample,
@@ -1280,10 +1294,9 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::Seats
         | DegradedField::ResourceLimits
         | DegradedField::CrashRecords => Cadence::Inventory,
-        DegradedField::Identity
-        | DegradedField::CpuInfo
-        | DegradedField::MemoryTotal
-        | DegradedField::NetInterfaceFacts => Cadence::Static,
+        DegradedField::Identity | DegradedField::MemoryTotal | DegradedField::NetInterfaceFacts => {
+            Cadence::Static
+        }
     }
 }
 

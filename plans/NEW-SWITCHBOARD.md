@@ -32,7 +32,7 @@ lie about.
 | **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | planned |
 | **Q3** | `GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`: per-engine `busy_ns`/`idle_ns`, device memory, and the device's `AccelCaps` | `plans/FIX-DISPLAY-ACCELERATION.md` accel path | S8 | planned |
 | **Q4** | `ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`: `busy_ns`/`idle_ns`, device memory, `in_flight` | D1 | S8 | planned |
-| **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | planned |
+| **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | done |
 | **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | planned |
 | **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | planned |
 | **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | planned |
@@ -57,6 +57,17 @@ lie about.
 | — | The shared selection-identity rule, `select_pressed_card`, `PressureClock`, `FaultClock`, the `ProcId` crash match | — | S4 | done |
 | — | Recovery's interior: fault cards, detail tabs, impact stack, action rail, resolved tally | — | S4 | done |
 | — | The eight controls this surface already contributed to `lib/controls` | — | S7 | done |
+
+**A1 through X4 are one change, and it is a large one.** A1 deletes four
+sections, so every pane that absorbs their readings has to exist in the same
+tree, and the four sections' own test modules go with them — the bulk of the
+change is `view/{background,pressure,activities,system,system_data}.rs` and
+their tests plus the references to `Section::{Jobs,Pressure,Activities,System}`,
+`SystemReport`, `SystemPage`, `JobSummary`, `ActivitySummary` and
+`PressureCause` in `view/mod_tests.rs`, `view/test_support.rs`, `panel_tests.rs`
+and `model_tests.rs`. Plan it as one change over several sittings against a
+branch, not as one sitting: a partially built Resources section cannot be
+landed, because A1 leaves the surface with no home for the readings it deletes.
 
 The reference storyboard is `plans/switchboard/`:
 
@@ -376,7 +387,10 @@ reading; a fact list cannot carry it.
   - **Graphics** (`06-graphics.png`) — the frame-work breakdown, the
     compositing path, and the graphics device.
   - **An accelerator** (`07-accelerator.png`) — what the node's discovery
-    genuinely reports, and the readings awaiting S8's query.
+    genuinely reports, and the readings awaiting S8's query. This pane lands
+    with **D1**, not before: there is no `HwDeviceClass` for an accelerator
+    yet, so discovery reports no such node, the rail grows no `Accelerators`
+    group, and a pane written ahead of it would be code nothing can reach.
   - **Machine** — identity and uptime; the seats and logged-in census; the
     authority summary with the resource limits and their live usage.
 
@@ -420,6 +434,52 @@ reading; a fact list cannot carry it.
   of a vertical list and Enter/Space commits. The `Tabs` control's own
   vertical navigation is deliberately not fed the same keys, which would give
   them two meanings.
+
+**How a pane is laid out, so every pane scrolls the same way.** A pane
+compiles to a flat run of short, self-contained drawables, each knowing its
+row, its row span and its column *before* any paint, so a paint allocates
+nothing and lays nothing out — it walks the items the viewport covers. Spans
+are fixed and width-independent, which is what makes the scroll range exact
+and lets a pane taller than its viewport scroll a row at a time. Two
+consequences:
+
+- **The blocks flow in one or two columns**, a `Half` block pairing with the
+  next one and the pair advancing by the taller side. A `Full` block closes an
+  unpaired half first, so a column can never overhang the block below it.
+- **The per-core grid's cells-per-row is a *layout input* to the compile, not
+  a constant**, because the grid re-wraps rather than squeezing: a pane too
+  narrow for six cells draws fewer per row and scrolls. A width change
+  therefore has to *recompile* the flow, and `SectionView::render` and
+  `list_info` are both `&self` — so this needs one `&mut` relayout hook on
+  `SectionView`, called from `Switchboard::render` before `sync_scroll`.
+  Recompiling per paint instead is the §28 defect (work scaling with the
+  surface rather than with the change).
+
+**The memory composition's parts are the ones the kernel accounts.** The board
+sketches a Linux-shaped anonymous / file-cache / slab split; no reading behind
+it exists. The honest segments are what user address spaces hold, what the
+kernel's own heaps hold, what the reclaimable classes hold, what the
+compressed tier holds, whatever those named parts do not account for, and the
+free remainder — which closes the whole exactly, so the bar cannot
+under-report where the memory went.
+
+**A device command is labelled, not glyphed, and almost none has an
+endpoint.** The vocabulary these rails need — scrub, trim, renew a lease, drop
+a cache, unmount — has no shipped `IconKind`, and an icon with no built-in
+glyph behind it is not one this desktop may draw (§10), so the rail is
+labelled like the machine-actions rail already is. Of the commands the boards
+name, only "sort tasks by *resource*" is a command this service can carry out:
+it is a view transition, the same shape as the pressure card's "Show tasks".
+Every other one is plainly disabled for want of an endpoint — never marked for
+authority, because acquiring a capability would not make an absent endpoint
+appear.
+
+**Two rail entries carry no trace, and that is a reading about them.**
+A volume's capacity is a level rather than a rate, and there is no per-volume
+byte counter to delta; the interface rates query serves an already-averaged
+reading rather than a counter, so a trace would plot someone else's averaging
+window. Both entries therefore show their reading without an instrument until
+Q1 lands.
 
 **The Graphics pane is named for the display path, not for a GPU.** A
 framebuffer-only or headless machine has no GPU and would read an empty *GPU*
@@ -506,6 +566,43 @@ source whose delta is the reading:
 | `VOLUME_IO_QUEUE` | `EverySample` | a volume's in-flight count and mean queue depth |
 | `GPU_DEVICE_STATS` | `EverySample` | graphics engine busy share, device memory, `AccelCaps` |
 | `ACCEL_DEVICE_STATS` | `EverySample` | an accelerator's busy share, memory and queue |
+
+**The panes need ten readings the sampler does not take yet, all of them
+already served by an existing query.** S8's four are the ones that need *new*
+queries; these need only sampling, and `lib/procinfo` already has a helper for
+each, so the work is a `DegradedField`, a `Sample` field, a cadence entry and a
+scope entry apiece:
+
+| Reading | Tier | Scope | What it backs |
+|---|---|---|---|
+| `MEMORY_PRESSURE_BAND` | `EverySample` | ungated | the band and the banner, on a ceiling without kernel readings |
+| `RECLAIM_STATS` | `Memory` | kernel | the composition's reclaimable share |
+| `RAMZIP_STATS` | `Memory` | kernel | the compressed tier |
+| `CACHE_LEDGERS` | `Memory` | kernel | the bounded-cache reclaim ledger |
+| `NET_INTERFACE_COUNTERS` | `EverySample` | global | the interface counters block |
+| `NET_SOCKETS` | `EverySample` | global | the socket census (folded to two counts as it walks) |
+| `NET_RESOLVER_SERVERS` | `Inventory` | ungated | the stack block's resolvers |
+| `NET_TIME_SERVERS` | `Inventory` | ungated | the stack block's time servers |
+| `NET_STACK_DEFENCE` | `EverySample` | global | the SYN-backlog defence reading |
+| `HARDWARE_TREE` | `Inventory` | hardware | the graphics device's identity |
+
+`CACHE_REPORT` is **not** among them: it is how a process *submits* its own
+cache rows, not a reading, so the ledger is `CACHE_LEDGERS` alone.
+
+**Per-core busy is a `CPU_TIME_STATS` walk, not a new query.** The aggregate
+the sampler already derives is a sum over per-CPU records that each carry
+their own `busy_ns`/`idle_ns`, so walking the records instead of the existing
+aggregate helper yields both readings from one read. A core first seen this
+sample contributes no share — a cumulative total is not a share.
+
+**The rail's traces and the per-core cells need a rolling store the sample
+does not carry**, the per-device counterpart of `TaskMeters`: each core's own
+bounded busy history, and each device's previous cumulative counters with the
+rates they produce. Keyed on the subject's own identity (a CPU index, a volume
+id, an interface name) rather than a rail position, and rebuilt from the
+sample so an unmounted volume leaks neither history nor counters. A byte rate
+needs a shared full-scale reference to be plotted in permille at all; one
+reference across every device is what makes two rail traces comparable by eye.
 
 **`CPU_INFO` moves from `Static` to `EverySample`.** Its `current_freq_hz` is
 a live reading and `CPU_INFO_FLAG_FREQ_MEASURED` exists precisely so a
@@ -731,6 +828,15 @@ Superseded code is deleted, not renamed or left dead.
   nothing will ever fill is the compatibility debt the charter forbids.
 - Any `TileInstrument`/`HeadlineTile` machinery that only served the old
   four-tile System header, once the pane heroes carry their own instruments.
+
+**The shared reading vocabulary needs a surviving home before
+`system_data.rs` goes.** `Reading`, `Unmeasured`, `absence_statement`,
+`reading_text`, `selection_prompt`, `HealthSeverity` and the labelled-reading
+pair are read by Recovery and Tasks as well, so they move to their own module
+first; only the System-specific types (`SystemPage`, `SystemReport`,
+`HeadlineTile`, `TileInstrument`, `PageLine`, `SystemAction`) are deleted.
+`SystemFact` is renamed with the move — a type named after a deleted section
+misleads every later reader.
 
 `docs/src/desktop/switchboard.md` is rewritten in the same change: it
 describes the section set, so it cannot survive the section set changing.
