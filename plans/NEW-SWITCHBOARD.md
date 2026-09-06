@@ -958,6 +958,23 @@ this wrong on.
   instruments whose readings moved and the rows whose cells moved — not the
   whole client. Re-deriving the pane because *a* sample landed is the defect,
   and it is worst exactly where the machine is slowest and the rail longest.
+  - **`SectionView::adopt` becomes a damage-reporting entry point.** It takes
+    only the model today, so it has no geometry to damage *in*; the
+    layout inputs `on_pointer`/`on_key` already carry (bounds, scale, theme,
+    font) have to reach it, and each of the three concrete `adopt` impls
+    (`resources`, `tasks`, `recovery`) compares its old reading against the new
+    one to damage just the instruments and cells that moved.
+  - **`Panel::refresh`'s `repaint_whole()` is what this replaces**, and
+    `Panel`'s `Presented` record — a deep compare *and* deep clone of the whole
+    composition on every `flush`, purely to decide whether a present would draw
+    anything — is what it **deletes**: with damage authoritative, an empty
+    damage region is that same answer for free. The stall-trace facility
+    measured the cost of not having this: 250 ms and 739 syscalls spent
+    *dropping* the previous `PanelModel` on one 2 s sample.
+  - **The risk this moves.** Today an unreported change can only ever
+    over-cover. Making damage authoritative puts that correctness burden on
+    every section's `adopt`, so each needs a test that a moved reading damages
+    its instrument and an unmoved one damages nothing.
 - **Auto-refresh holds the sample the reader is reading**, and toggling it
   changes only that: it does not re-query, reset a history or resize anything.
 - **The frame report never measures this window.** The suppression rule in S4

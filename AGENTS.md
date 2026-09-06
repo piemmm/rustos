@@ -3175,9 +3175,24 @@ one writes a second.
   can supply neither an arena page nor a metadata page — returns null per the
   `GlobalAlloc` contract. Allocation failure is never a panic.
 - **Reallocation resizes in place where it can (§2.16).** `realloc` shrinks in
-  place (returning the tail to the free list, unmapping whole freed top pages)
-  and grows in place when the following bytes are free or the block abuts the
-  growable arena top, copying only as a last resort.
+  place (returning the tail to the free list, unmapping freed top pages above
+  the retention below) and grows in place when the following bytes are free or
+  the block abuts the growable arena top, copying only as a last resort.
+- **Free top pages are retained, not surrendered per free (§2.16, §26.3).**
+  Unmapping every free page at the arena top on each `free` costs that
+  `mem_unmap` plus the next `mem_map` — two page-table walks, two kernel
+  zeroing passes and a TLB shootdown to every other CPU — for pages the heap
+  is about to want again, and every allocation high-water that oscillates
+  across a page boundary pays it. The heap keeps free top pages mapped up to a
+  retention and unmaps only the excess. The retention is the shared reclaim
+  policy's own figure — `shrink_target` for `ReclaimClass::RuntimeCache` over a
+  `CacheBudget::from_backing(arena_bytes)`, floored at one page — so it scales
+  with the process rather than resting on a hand-picked ceiling (§24.1/§24.2)
+  and reaches zero from moderate pressure onward. An unreported band reads as
+  critical and retains nothing, so a process that never wires the pressure
+  protocol behaves exactly as one with no retention at all (fail closed);
+  `pressure::report` releases the retention on a band change, so a process that
+  has stopped allocating still gives it back.
 - **The free-span table is a growable capacity, not a fixed ceiling (§24.1).**
   It maps further metadata pages on demand rather than capping a fragmented
   workload at a hand-picked `const`.

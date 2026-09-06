@@ -1039,6 +1039,18 @@ weaker policy:
   would not protect anything — it would only make cooperative reclaim
   impossible. The gated, audited `MEMORY_PRESSURE` view (bytes,
   watermarks, transition history) is unchanged.
+- **The userland heap's retained top pages.** `lib/rt`'s allocator keeps
+  free pages at its arena top mapped instead of surrendering them on
+  every `free`, and the retention is this model's own figure —
+  `shrink_target` for `ReclaimClass::RuntimeCache` over a
+  `CacheBudget::from_backing(arena_bytes)`, floored at one page. Not a
+  `ReclaimCache`: it holds no entries and needs no ledger, because the
+  retained pages are ordinary mapped anonymous memory the frame
+  allocator already counts, so the retention lowers free frames
+  directly, which deepens the band, which shrinks the retention. An
+  unwired process retains nothing, and `pressure::report` releases the
+  retention on a band change so a process that has stopped allocating
+  still gives it back.
 - **The desktop caches.** Every rasterised desktop asset is a
   `ReclaimCache`: the window manager's cursor rasters, the taskbar's
   notification glyphs, the session's pinned-application artwork, the

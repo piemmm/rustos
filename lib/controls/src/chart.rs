@@ -274,32 +274,34 @@ fn paint_series(
     kind: PressureKind,
     theme: &Theme,
 ) {
-    let Some((points, close)) = plot(samples, band, weight) else {
+    let Some(poly) = plot(samples, band, weight) else {
+        return;
+    };
+    // The filled area is the whole polygon and the trace is its interior, so
+    // the stroke reads the same vertices rather than a second copy of them.
+    let Some(trace) = poly.len().checked_sub(1).and_then(|end| poly.get(1..end)) else {
         return;
     };
     let color = signal_color(theme, kind);
-    let mut area: Vec<(i32, i32)> = Vec::with_capacity(points.len() + 2);
-    area.push((points[0].0, close));
-    area.extend_from_slice(&points);
-    area.push((points[points.len() - 1].0, close));
     surface.fill_polygon_subpixel(
-        &area,
+        &poly,
         Color {
             a: AREA_ALPHA,
             ..color
         },
     );
-    surface.stroke_polyline(&points, weight, color);
+    surface.stroke_polyline(trace, weight, color);
 }
 
-/// `samples`' trace vertices in device sub-pixel units, and the y its filled
-/// area closes on — the band's own edge against the zero line, so a
-/// single-series chart still fills to its floor. `None` when there is nothing
-/// to plot.
+/// `samples` as one closed polygon in device sub-pixel units: the band's own
+/// edge against the zero line, then the trace vertices, then that edge again,
+/// so the fill is the whole vector and the trace is `[1 .. len - 1]`. One
+/// vector serves both, because a chart draws the same shape twice.
+/// `None` when there is nothing to plot.
 ///
 /// A single reading is a real measurement, so it plots as a flat line across
 /// the band at its own height rather than as an invisible point.
-fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<(Vec<(i32, i32)>, i32)> {
+fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<Vec<(i32, i32)>> {
     let count = samples.len();
     if count == 0 {
         return None;
@@ -327,7 +329,9 @@ fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<(Vec<(i32, i32)>, i
     };
 
     let last = count.saturating_sub(1);
-    let mut points = Vec::with_capacity(count.max(2));
+    // Closed at both ends in place: two extra vertices, one vector.
+    let mut points = Vec::with_capacity(count.max(2) + 2);
+    points.push((left, close));
     for (i, &permille) in samples.iter().enumerate() {
         let along = if last == 0 {
             0
@@ -345,10 +349,11 @@ fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<(Vec<(i32, i32)>, i
     }
     if last == 0 {
         // One reading: hold it across the whole band.
-        let (_, only) = points[0];
+        let only = points.last().map_or(zero, |&(_, y)| y);
         points.push((left.saturating_add(span_x), only));
     }
-    Some((points, close))
+    points.push((left.saturating_add(span_x), close));
+    Some(points)
 }
 
 /// The trace's line weight in sub-pixel units: the theme's instrument-seam

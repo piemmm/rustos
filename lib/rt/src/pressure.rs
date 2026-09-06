@@ -54,8 +54,19 @@ pub fn gauge() -> &'static ReportedPressure {
 ///
 /// A caller shrinks its caches on `true` and does nothing on `false`, so
 /// a spurious wake costs one atomic and no eviction work.
+///
+/// The process heap's own retained pages are given back here rather than by
+/// each caller: they are the runtime's cache, so remembering them is the
+/// runtime's job, not something every program has to be told to do.
 pub fn report(band: PressureBand) -> bool {
-    PROCESS_PRESSURE.report(band)
+    let changed = PROCESS_PRESSURE.report(band);
+    // Gated exactly as the module is: a plain host build registers no global
+    // allocator, so there is no process heap to trim there.
+    #[cfg(any(rt_native, test))]
+    if changed {
+        crate::heap::trim_retained();
+    }
+    changed
 }
 
 #[cfg(test)]

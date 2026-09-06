@@ -49,10 +49,12 @@ with `MapFlags::FIXED` at the arena's current top; freed regions are tracked as
 a coalesced, address-sorted free list held inside the allocator (not as
 intrusive links in user memory), so every returned pointer is bounds-checked
 before it is handed out (`AGENTS.md` §4). When coalescing frees whole trailing
-pages they are returned to the kernel with `mem_unmap` (the arena shrinks).
-`realloc` resizes in place wherever it can, avoiding the copy (`AGENTS.md`
-§2.16): a shrink always succeeds in place (the surrendered tail returns to the
-free list, and whole top pages are unmapped if it reaches the arena top), and a
+pages they are returned to the kernel with `mem_unmap` above a **retention**
+(below), so the arena shrinks without trading a syscall pair for every
+allocation cycle. `realloc` resizes in place wherever it can, avoiding the copy
+(`AGENTS.md` §2.16): a shrink always succeeds in place (the surrendered tail
+returns to the free list, and top pages above the retention are unmapped if it
+reaches the arena top), and a
 grow succeeds in place when the bytes immediately after the block are free or
 the block abuts the growable arena top. Only when neither holds does it fall
 back to allocate-copy-free (copying just the overlapping prefix, leaving the
@@ -69,6 +71,39 @@ pages on map and on free, so the heap does not re-zero on free; a process
 reusing its own freed bytes is not a security boundary (`AGENTS.md` §2.16). The
 arena and metadata bases are fixed virtual addresses documented in
 `src/heap.rs`.
+
+### Retained top pages
+
+Unmapping every free page at the arena top on each `free` costs a `mem_unmap`
+plus the next `mem_map` — two page-table walks, two kernel page-zeroing passes
+and a TLB shootdown to every other CPU — for pages the heap is about to want
+again. Any allocation high-water that oscillates across a page boundary pays
+it, which is every paint loop with a transient buffer: measured at two
+syscalls per allocation cycle, and visible in the desktop's frame-budget
+reports as hundreds to thousands of syscalls per frame.
+
+The heap therefore keeps free top pages mapped up to a retention, and unmaps
+only what exceeds it. The retained pages stay recorded as free, so they are the
+next allocation's first fit at the top — which is why they are worth keeping.
+
+The retention is not a constant of the heap's own: it is
+`tairix_reclaim::shrink_target` for `ReclaimClass::RuntimeCache` over a
+`CacheBudget::from_backing(arena_bytes)`, floored at one page (the granule the
+syscall is charged at, so a sub-page budget would be no cache at all). It
+therefore scales with the process's own arena rather than a hand-picked ceiling
+(`AGENTS.md` §24.1/§24.2), is bounded by that budget's documented fraction, and
+reaches zero from moderate pressure onward, shrinking with every other cache in
+the process (`AGENTS.md` §26.3).
+
+Because `pressure::gauge()` answers `Critical` until told otherwise, a process
+that never wires the pressure protocol (below) retains **nothing** and gives
+every free page straight back — fail-closed by construction, so opting in is
+what earns the retention. `pressure::report` gives the retained pages back on a
+band change, which covers a process that has stopped allocating and would
+otherwise hold them until its next `free`. The retention is ordinary mapped
+anonymous memory the kernel already accounts for, so it needs no cache-report
+ledger: it lowers the free-frame count directly, which deepens the band, which
+shrinks the retention.
 
 ## I/O abstraction (`io` module)
 

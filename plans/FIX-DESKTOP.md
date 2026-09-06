@@ -1018,6 +1018,51 @@ Each stage is independently reviewable and must leave the whole-project
   still end with every glyph resident. Output is bit-identical — the existing
   blit-reference tests are unchanged.
 
+### DESK-19 — A client's `Present` must not carry the desktop's frame work
+- **Planned.** The desktop session serves window clients and composites on one
+  thread, and `WindowServer::present` runs the whole `winframe::decode` of the
+  client's frame — and, behind it, whatever composite the session owes — before
+  the reply goes out. So every application's `present` measures the desktop's
+  *worst* frame, not its own work.
+- **The witness.** The stall-trace facility caught both ends of one call at the
+  same instant: the session blocked 997 ms in `Pool::await_workers` under
+  `window_presented` → `winframe::decode`, and the switchboard blocked 1002 ms
+  in `ipc_call` under `WindowClient::present`. Six of that run's eight
+  switchboard overrun reports are this coupling rather than anything the
+  switchboard does.
+- **The prerequisite, which is most of the work.** Every app window is
+  single-buffered (`FRAME_COUNT = 1` in all seven app crates) and
+  `tairix_window::present_damage`'s soundness *depends* on it: presenting less
+  than the whole window is sound only where the presented frame already holds
+  the rest of the window's current pixels, "never an alternate buffer whose
+  other pixels are a frame behind". Replying before the decode therefore needs
+  double buffering plus per-buffer damage catch-up, in this order:
+  1. **One shared per-buffer staleness mechanism.** `lib/display`'s display-side
+     `stale: [Region; _]` / `mark` / `stale_budget` is hoisted beside `Region`
+     in `lib/geometry` and consumed by both sides; a second copy is forbidden.
+  2. **A ring in `WindowFrames`.** `pixels()` hands back the back frame, and the
+     buffer's accumulated stale region is caught up from the other frame before
+     the app paints — the rectangle-sized copy
+     `plans/FIX-DESKTOP-SPEEDUP.md` anticipates, not a whole-window one.
+  3. **Deferred decode with real back-pressure.** `present` records the pending
+     frame and replies. A second `Present` while one pends may not coalesce
+     (the buffers differ) and may not spin: the engine holds the caller's
+     `ticket` and answers it when the frame is consumed. The session's window
+     endpoint is already a `call_recv`/`call_reply` pair with an explicit
+     ticket, so no new mechanism is needed — one frame of pipelining, and a
+     client blocks only when it genuinely outruns the compositor.
+  4. **Drained on the frame path**, inside the existing `pacer.admit` gate,
+     immediately before `compositor.present`.
+  5. **Ring depth threaded into the per-client bound.**
+     `client_frame_budget_bytes` is already derived from discovered RAM, so the
+     doubled footprint is bounded — but it *is* doubled, which is a real cost
+     at the §26.7 floor and the reason this is staged rather than incidental.
+- **What it does not fix.** The session's own composite cost. The 1 s frames in
+  that run are a dev-profile (unoptimised) build under QEMU TCG; this decouples
+  a client's loop from the compositor's frame time, which is an architectural
+  property that holds on any machine, and is worth doing for that reason rather
+  than for those milliseconds.
+
 ### DESK-11 — The file manager's reads off its loop
 - **Done.** Every unbounded read the file manager makes now runs on one reader
   thread, and the window keeps drawing throughout. The three kinds share a
@@ -1283,6 +1328,7 @@ Each stage is independently reviewable and must leave the whole-project
   worker's answer arrives on can end without an event, which also closed a
   busy-spin in the file manager.
 - **DESK-5 … DESK-7 — planned.**
+- **DESK-19 — planned.**
 
 ---
 
