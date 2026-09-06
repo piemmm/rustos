@@ -117,6 +117,19 @@ pub const fn coarsen_clock_ns(ns: u64) -> u64 {
     ns - (ns % COARSE_CLOCK_GRANULARITY_NS)
 }
 
+/// The monotonic clock behind a seam, so an engine that *measures* elapsed
+/// time is host-testable against a clock a test advances by hand.
+///
+/// Only differences between two readings are meaningful — the epoch is
+/// unspecified — and a reading that fails to advance yields a zero-length
+/// span rather than a negative one. The production implementation is the
+/// unprivileged `clock_get` syscall, coarsened to
+/// [`COARSE_CLOCK_GRANULARITY_NS`] for a caller without `CAP_TIME_HIRES`.
+pub trait MonotonicClock {
+    /// A monotonically non-decreasing nanosecond reading.
+    fn now_ns(&self) -> u64;
+}
+
 /// An absolute instant: signed seconds since the Unix epoch plus a
 /// nanosecond field in `0..NANOS_PER_SEC`.
 ///

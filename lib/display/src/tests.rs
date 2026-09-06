@@ -10,14 +10,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::display_ipc::{DamageList, DisplayRequest, DISPLAY_MAX_FRAMES};
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::display_ipc::{decode_stats_reply, DamageList, DisplayRequest, DISPLAY_MAX_FRAMES};
+use tairix_abi::driver::display::{
+    AccelCaps, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode,
+};
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::{DriverError, Errno};
+use tairix_abi::time::MonotonicClock;
+use tairix_abi::{CapabilityId, DriverError, Errno};
 
 use crate::client::{DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
-use crate::server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
+use crate::server::{DisplayServer, FrameRegion, PeerFacts, ShmMapper, DISPLAY_REPLY_MAX};
 
 /// 4×3 BGRA test mode, stride == one scanline.
 const MODE: DisplayMode = DisplayMode {
@@ -33,32 +36,79 @@ const FRAME_LEN: usize = 48;
 const SEAT: u64 = 0;
 const TICKET: u64 = 7;
 
-/// A seat oracle scripted per test: `Ok(generation)` or a typed refusal.
+/// A caller oracle scripted per test: a lease answer (`Ok(generation)` or a
+/// typed refusal) and whether the caller holds the hardware-inventory
+/// authority the device read needs.
 struct MockSeat {
     answer: Result<u64, Errno>,
+    holds: Result<bool, Errno>,
     asked: Vec<(u64, u64)>,
+    caps_asked: Vec<(u64, CapabilityId)>,
 }
 
 impl MockSeat {
     fn live(generation: u64) -> Self {
         Self {
             answer: Ok(generation),
+            holds: Ok(false),
             asked: Vec::new(),
+            caps_asked: Vec::new(),
         }
     }
 
     fn refusing(err: Errno) -> Self {
         Self {
             answer: Err(err),
+            holds: Ok(false),
             asked: Vec::new(),
+            caps_asked: Vec::new(),
+        }
+    }
+
+    /// The same oracle, answering the capability question with `holds`.
+    fn holding(mut self, holds: Result<bool, Errno>) -> Self {
+        self.holds = holds;
+        self
+    }
+}
+
+impl PeerFacts for MockSeat {
+    fn live_generation(&mut self, ticket: u64, seat_id: u64) -> Result<u64, Errno> {
+        self.asked.push((ticket, seat_id));
+        self.answer
+    }
+
+    fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+        self.caps_asked.push((ticket, cap));
+        self.holds
+    }
+}
+
+/// A clock a test advances by hand, so a measured occupancy is asserted as a
+/// value rather than as "some elapsed time".
+#[derive(Clone)]
+struct StepClock {
+    now: Rc<RefCell<u64>>,
+    /// Nanoseconds every reading advances by, so bracketing one present costs
+    /// exactly one step.
+    step: u64,
+}
+
+impl StepClock {
+    fn new(step: u64) -> Self {
+        Self {
+            now: Rc::new(RefCell::new(0)),
+            step,
         }
     }
 }
 
-impl SeatCheck for MockSeat {
-    fn live_generation(&mut self, ticket: u64, seat_id: u64) -> Result<u64, Errno> {
-        self.asked.push((ticket, seat_id));
-        self.answer
+impl MonotonicClock for StepClock {
+    fn now_ns(&self) -> u64 {
+        let mut now = self.now.borrow_mut();
+        let reading = *now;
+        *now = reading.saturating_add(self.step);
+        reading
     }
 }
 
@@ -168,9 +218,13 @@ impl Display for RecordingDisplay {
 
 const GRANT: u64 = 42;
 
-/// A server rig: engine + display + seat oracle + the shared region.
+/// Nanoseconds the rig's clock advances per reading, so one bracketed present
+/// costs exactly this much device-busy time.
+const CLOCK_STEP_NS: u64 = 1_000;
+
+/// A server rig: engine + display + caller oracle + the shared region.
 struct Rig {
-    server: DisplayServer<MockMapper>,
+    server: DisplayServer<MockMapper, StepClock>,
     display: RecordingDisplay,
     seat: MockSeat,
     bytes: SharedBytes,
@@ -182,11 +236,14 @@ impl Rig {
         let bytes: SharedBytes = Rc::new(RefCell::new(vec![0u8; FRAME_LEN * frames as usize]));
         let maps = Rc::new(RefCell::new(0));
         Self {
-            server: DisplayServer::new(MockMapper {
-                handle: GRANT,
-                bytes: Rc::clone(&bytes),
-                maps: Rc::clone(&maps),
-            }),
+            server: DisplayServer::new(
+                MockMapper {
+                    handle: GRANT,
+                    bytes: Rc::clone(&bytes),
+                    maps: Rc::clone(&maps),
+                },
+                StepClock::new(CLOCK_STEP_NS),
+            ),
             display: RecordingDisplay::new(),
             seat: MockSeat::live(generation),
             bytes,
@@ -252,6 +309,158 @@ fn query_returns_the_mode_to_the_live_owner_only() {
         tairix_abi::display_ipc::decode_mode_reply(&reply),
         Err(Errno::SeatNotOwner)
     );
+}
+
+#[test]
+fn a_device_read_is_gated_on_hardware_authority_not_on_a_lease() {
+    // The reader holds no lease and never will; a monitor's authority is
+    // CAP_SYSINFO_HW, which is what the hardware inventory this read details
+    // is served under.
+    let mut rig = Rig::new(2, 1);
+    rig.seat = MockSeat::refusing(Errno::SeatNotOwner).holding(Ok(true));
+    let reply = rig.serve(&DisplayRequest::QueryStats);
+    let stats = decode_stats_reply(&reply).expect("a holder reads the device");
+    assert_eq!(stats.mode, MODE);
+    assert_eq!(stats.device, DisplayDeviceReport::SOFTWARE);
+    assert_eq!(stats.seat_id, 0, "nothing is configured yet");
+    // The lease oracle was not consulted at all: a device read acts for no
+    // seat, so the question never arises.
+    assert!(rig.seat.asked.is_empty());
+    assert_eq!(
+        rig.seat.caps_asked,
+        vec![(TICKET, CapabilityId::SYSINFO_HW)]
+    );
+
+    // A caller without the authority learns nothing, even holding the lease.
+    rig.seat = MockSeat::live(1).holding(Ok(false));
+    assert_eq!(
+        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
+        Err(Errno::PermissionDenied)
+    );
+
+    // An attestation the kernel could not answer is a refusal, never a
+    // reading.
+    rig.seat = MockSeat::live(1).holding(Err(Errno::NotFound));
+    assert_eq!(
+        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn device_busy_time_counts_only_the_drivers_own_present() {
+    let mut rig = Rig::new(2, 1);
+    rig.configure(2).expect("configure");
+    rig.present(0, &[full()]).expect("present");
+    rig.seat = MockSeat::live(1).holding(Ok(true));
+    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
+    assert_eq!(
+        stats.busy_ns, CLOCK_STEP_NS,
+        "one present, bracketed by two readings one step apart"
+    );
+    assert_eq!(
+        stats.seat_id, SEAT,
+        "the seat the frames are configured for"
+    );
+
+    // A refused present never reached the driver, so it adds no busy time.
+    let before = stats.busy_ns;
+    assert_eq!(rig.present(9, &[full()]), Err(Errno::OutOfRange));
+    rig.seat = MockSeat::live(1).holding(Ok(true));
+    let after = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
+    assert_eq!(after.busy_ns, before, "the device was never driven");
+}
+
+#[test]
+fn a_refused_device_read_moves_no_state_the_engine_holds() {
+    // The measurement window opens when the device is first *driven*, not
+    // when a request arrives, so a caller without the authority cannot shift
+    // its epoch by asking. Were it latched before the capability answer, the
+    // refused read below would start the window and the authorised read after
+    // it would report idle time that nothing had spent.
+    let mut rig = Rig::new(2, 1);
+    rig.seat = MockSeat::live(1).holding(Ok(false));
+    assert_eq!(
+        decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)),
+        Err(Errno::PermissionDenied)
+    );
+    rig.seat = MockSeat::live(1).holding(Ok(true));
+    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("stats");
+    assert_eq!(stats.busy_ns, 0);
+    assert_eq!(
+        stats.idle_ns, 0,
+        "no present has reached the driver, so there is no window to be idle in"
+    );
+}
+
+#[test]
+fn busy_and_idle_partition_the_window_the_engine_measured() {
+    let mut rig = Rig::new(2, 1);
+    rig.configure(2).expect("configure");
+    rig.present(0, &[full()]).expect("present");
+    rig.seat = MockSeat::live(1).holding(Ok(true));
+    let reply = rig.serve(&DisplayRequest::QueryStats);
+    let stats = decode_stats_reply(&reply).expect("stats");
+    // The window is however many readings the clock has served since the
+    // first request, minus one for the reading this stats call took; busy is
+    // the bracketed present inside it. The two must sum to the window rather
+    // than to a total the engine chose.
+    let window = stats.busy_ns + stats.idle_ns;
+    assert!(window >= stats.busy_ns);
+    assert_eq!(window % CLOCK_STEP_NS, 0);
+    assert!(
+        stats.idle_ns > 0,
+        "more elapsed than the one present occupied"
+    );
+}
+
+#[test]
+fn an_accelerated_device_publishes_its_own_capabilities() {
+    // The driver is the only thing that can state what its compositor does;
+    // the engine passes its report through rather than inventing one.
+    struct AcceleratedDisplayStub;
+    impl Display for AcceleratedDisplayStub {
+        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+            Ok(MODE)
+        }
+        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+            Ok(())
+        }
+        fn device_report(&self) -> DisplayDeviceReport {
+            DisplayDeviceReport {
+                mem_resident_bytes: 4 << 20,
+                mem_total_bytes: 64 << 20,
+                accel: Some(AccelCaps {
+                    max_layers: 4,
+                    max_width_px: 1920,
+                    max_height_px: 1080,
+                    per_layer_opacity: true,
+                }),
+            }
+        }
+    }
+
+    let bytes: SharedBytes = Rc::new(RefCell::new(vec![0u8; FRAME_LEN]));
+    let mut server = DisplayServer::new(
+        MockMapper {
+            handle: GRANT,
+            bytes,
+            maps: Rc::new(RefCell::new(0)),
+        },
+        StepClock::new(CLOCK_STEP_NS),
+    );
+    let mut display = AcceleratedDisplayStub;
+    let mut seat = MockSeat::live(1).holding(Ok(true));
+    let mut reply = [0u8; DISPLAY_REPLY_MAX];
+    let len = server.serve(
+        &mut display,
+        &mut seat,
+        TICKET,
+        &DisplayRequest::QueryStats.to_le_bytes(),
+        &mut reply,
+    );
+    let stats = decode_stats_reply(&reply[..len]).expect("stats");
+    assert_eq!(stats.device, display.device_report());
 }
 
 #[test]

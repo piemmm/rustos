@@ -45,6 +45,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::HwNode;
 use tairix_abi::net_ipc::{
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
@@ -52,12 +53,12 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-    CpuTimeRecord, CrashRecord, CrashRecordRequest, KernelMemoryStats, LoadAverage,
-    MemoryPressureBand, MemoryTotal, MountListRequest, MountRecord, NetInterfaceListRequest,
-    NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
-    ReclaimClassRecord, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest,
-    VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
+    CpuTimeRecord, CrashRecord, CrashRecordRequest, DeviceStatsRequest, KernelMemoryStats,
+    LoadAverage, MemoryPressureBand, MemoryTotal, MountListRequest, MountRecord,
+    NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord,
+    ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatListRequest,
+    SeatRecord, SysinfoQueryId, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoRequest, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_procinfo::{
@@ -196,6 +197,8 @@ pub enum DegradedField {
     VolumeIoStats,
     /// Per-volume queue occupancy could not be read.
     VolumeIoQueue,
+    /// Per-graphics-device statistics could not be read.
+    GpuDeviceStats,
     /// The network interface inventory could not be read.
     NetInterfaceFacts,
     /// Live network interface link/address state could not be read.
@@ -281,6 +284,14 @@ const CPU_RECORD_CAP: usize = 512;
 /// a server's disk shelves, and the panel names only the volumes a user can
 /// act on.
 const VOLUME_RECORD_CAP: usize = 256;
+
+/// Records the sampler retains from the per-graphics-device reading.
+///
+/// A machine has one display path per seat, and a seat is a physical place a
+/// person sits: eight covers every multi-head and multi-seat machine this
+/// desktop is built for, while refusing to grow for a service claiming a
+/// device count no hardware has.
+const GPU_RECORD_CAP: usize = 8;
 
 /// Records the sampler retains from each of the three network interface
 /// readings.
@@ -472,6 +483,12 @@ pub struct Sample {
     /// Per-volume queue occupancy and the budget bounding it
     /// ([`Cadence::EverySample`], kernel-statistics scope).
     pub volume_io_queue: Option<Vec<VolumeIoQueueRecord>>,
+    /// Per-graphics-device statistics ([`Cadence::EverySample`], hardware
+    /// scope): the occupancy the display service measured over its own
+    /// present path, the memory the driver reports the device owns, what its
+    /// compositor can do, and the mode it scans out. Cumulative, so the
+    /// pane's utilisation is a delta over its own interval.
+    pub gpu_stats: Option<Vec<DisplayStats>>,
     /// The network interface inventory — the interfaces that exist and
     /// their fixed properties ([`Cadence::Static`], hardware scope).
     pub net_facts: Option<Vec<NetInterfaceFactsRecord>>,
@@ -633,6 +650,7 @@ impl ScopeVerdicts {
             | DegradedField::NetStackDefence => self.global_process_scope,
             DegradedField::NetInterfaceFacts
             | DegradedField::HardwareTree
+            | DegradedField::GpuDeviceStats
             | DegradedField::Seats => self.hardware_scope,
         }
     }
@@ -709,6 +727,7 @@ const _: () = assert!(
     MountListRequest::WIRE_LEN == CpuInfoListRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == CpuLoadRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == VolumeIoRequest::WIRE_LEN
+        && MountListRequest::WIRE_LEN == DeviceStatsRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == SeatListRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == CrashRecordRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == NetInterfaceListRequest::WIRE_LEN,
@@ -777,6 +796,7 @@ pub struct Sampler {
     volume_health: Option<Vec<VolumeIoHealthRecord>>,
     volume_io_stats: Option<Vec<VolumeIoStatsRecord>>,
     volume_io_queue: Option<Vec<VolumeIoQueueRecord>>,
+    gpu_stats: Option<Vec<DisplayStats>>,
     seats: Option<Vec<SeatRecord>>,
     resource_limits: Option<Vec<ResourceLimitRecord>>,
     crashes: Option<Vec<CrashRecord>>,
@@ -810,6 +830,7 @@ impl Sampler {
             volume_health: None,
             volume_io_stats: None,
             volume_io_queue: None,
+            gpu_stats: None,
             seats: None,
             resource_limits: None,
             crashes: None,
@@ -875,6 +896,7 @@ impl Sampler {
             volume_health: self.volume_health.clone(),
             volume_io_stats: self.volume_io_stats.clone(),
             volume_io_queue: self.volume_io_queue.clone(),
+            gpu_stats: self.gpu_stats.clone(),
             net_facts: self.net_facts.clone(),
             net_state,
             net_rates,
@@ -1652,6 +1674,26 @@ impl Sampler {
                 self.volume_io_queue = Some(records);
             }
         }
+        // The graphics device's occupancy is a rate source on the same
+        // footing: cumulative busy and idle nanoseconds whose delta is the
+        // reading, so a sparse cadence would leave the pane with a total it
+        // cannot divide.
+        if self.due(DegradedField::GpuDeviceStats, self.gpu_stats.is_some()) {
+            if let Some(records) = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::GPU_DEVICE_STATS,
+                    field: DegradedField::GpuDeviceStats,
+                    record_len: DisplayStats::WIRE_LEN,
+                    cap: GPU_RECORD_CAP,
+                },
+                degradations,
+                page_payload,
+                DisplayStats::from_bytes,
+            ) {
+                self.gpu_stats = Some(records);
+            }
+        }
     }
 
     /// Refresh the memory readings behind the composition bar and the
@@ -1776,7 +1818,8 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::NetSockets
         | DegradedField::NetStackDefence
         | DegradedField::VolumeIoStats
-        | DegradedField::VolumeIoQueue => Cadence::EverySample,
+        | DegradedField::VolumeIoQueue
+        | DegradedField::GpuDeviceStats => Cadence::EverySample,
         DegradedField::MemoryPressure
         | DegradedField::KernelMemory
         | DegradedField::ReclaimStats

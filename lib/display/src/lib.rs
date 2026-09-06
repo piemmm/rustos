@@ -5,7 +5,7 @@
 //! validated, what is refused — have exactly one definition:
 //!
 //! * [`server::DisplayServer`] — the engine a display driver's `Run`
-//!   binary hosts: decode → live-lease check ([`server::SeatCheck`]) →
+//!   binary hosts: decode → caller-authority check ([`server::PeerFacts`]) →
 //!   geometry/bounds validation → blit through the
 //!   [`Display`](tairix_abi::driver::display::Display) trait.
 //! * [`client::DisplayClient`] / [`client::RemoteDisplay`] — the
@@ -54,7 +54,7 @@ pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
 // names, re-exported so a program that converts its own frame does not take a
 // second dependency to spell one constant (one definition, as `tairix_wm`
 // re-exports the pointer vocabulary it consumes).
-pub use server::{DisplayServer, FrameRegion, SeatCheck, ShmMapper, DISPLAY_REPLY_MAX};
+pub use server::{DisplayServer, FrameRegion, PeerFacts, ShmMapper, DISPLAY_REPLY_MAX};
 pub use tairix_parallel::{JobRunner, SERIAL};
 
 use tairix_abi::{DriverError, Errno};

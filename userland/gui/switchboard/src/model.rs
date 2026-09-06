@@ -13,6 +13,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkIoCounters, BlkQueueCounters};
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::net_ipc::NetCounters;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
 use tairix_abi::sysinfo::{
@@ -235,6 +236,16 @@ struct DeviceTrack {
     /// which the awaits and utilisation delta against. [`None`] for a device
     /// that serves none (an interface, the compositor).
     volume_io: Option<BlkIoCounters>,
+    /// The graphics device's cumulative busy nanoseconds as of the last
+    /// sample, which its utilisation deltas against, or [`None`] where that
+    /// sample carried none.
+    ///
+    /// An absence **breaks the series** for the same reason the byte
+    /// counters' does: deltaing a fresh reading against a stale one would
+    /// report a whole service lifetime's occupancy as one interval's share.
+    gpu_busy_ns: Option<u64>,
+    /// The share of the last interval the graphics device was busy.
+    gpu_busy_permille: Option<u16>,
     /// A volume's cumulative queue accumulators as of the last sample, which
     /// the mean depth deltas against.
     volume_queue: Option<BlkQueueCounters>,
@@ -354,6 +365,57 @@ impl DeviceMeters {
         self.devices.insert(id, track);
     }
 
+    /// Fold the compositor's last reported frame in as one point of the
+    /// display path's trace.
+    ///
+    /// The point is the frame's *damaged* pixels as a permille of that same
+    /// frame's screen — the only full scale a per-frame pixel count has, and
+    /// the one the pane's own context line already states the reading
+    /// against, so the trace and the words cannot disagree. It is not a
+    /// rate, so an absent report breaks nothing: it contributes no point,
+    /// exactly as an unmeasured core does, rather than plotting a nought
+    /// that would read as an idle frame.
+    pub fn record_graphics(
+        &mut self,
+        id: DeviceId,
+        frame: Option<FrameReport>,
+        stats: Option<&DisplayStats>,
+        elapsed_ns: Option<u64>,
+    ) {
+        let (previous, mut track) = self.take(id);
+        if let Some(frame) = frame {
+            // A screen of no pixels has no frame to divide by; the report's
+            // own validation already keeps the damage inside it.
+            let share = frame.damaged_px.saturating_mul(1_000) / frame.screen_px.max(1);
+            push_bounded(&mut track.primary_history, clamp_permille(share));
+        }
+        let busy_ns = stats.map(|stats| stats.busy_ns);
+        track.gpu_busy_permille = match (
+            busy_ns,
+            previous.as_ref().and_then(|prev| prev.gpu_busy_ns),
+            elapsed_ns,
+        ) {
+            (Some(now), Some(earlier), Some(interval)) => {
+                permille_of(now.saturating_sub(earlier), interval)
+            }
+            // A first sample, a sample that carried no reading, and a sample
+            // after one that carried none each yield no share: a cumulative
+            // total is not a share.
+            _ => None,
+        };
+        track.gpu_busy_ns = busy_ns;
+        self.devices.insert(id, track);
+    }
+
+    /// The share of the last interval this graphics device was busy, absent
+    /// where the interval could not be measured.
+    #[must_use]
+    pub fn graphics_busy(&self, id: DeviceId) -> Option<u16> {
+        self.devices
+            .get(&id)
+            .and_then(|track| track.gpu_busy_permille)
+    }
+
     /// This volume's derived interval readings, all-absent for a device the
     /// sample carried no counters for.
     #[must_use]
@@ -468,7 +530,12 @@ const fn mean(total: u64, count: u64) -> Option<u64> {
 /// A byte rate as the permille of [`TRACE_FULL_SCALE_BYTES`] its trace plots
 /// at, clamped at full rather than wrapping past the box.
 fn trace_permille(bytes_per_sec: u64) -> u16 {
-    let permille = bytes_per_sec.saturating_mul(1_000) / TRACE_FULL_SCALE_BYTES;
+    clamp_permille(bytes_per_sec.saturating_mul(1_000) / TRACE_FULL_SCALE_BYTES)
+}
+
+/// A computed share as a chart permille, clamped at full rather than wrapping
+/// past the box — the one clamp every trace point passes through.
+fn clamp_permille(permille: u64) -> u16 {
     u16::try_from(permille.min(1_000)).unwrap_or(1_000)
 }
 

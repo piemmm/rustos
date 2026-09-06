@@ -42,7 +42,7 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayMode, SeatGate,
+    AccelCaps, AccelLayer, AcceleratedDisplay, Display, DisplayDeviceReport, DisplayMode, SeatGate,
 };
 use tairix_abi::driver::mmio::{MmioMapError, WindowError};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost, MmioMapper, RegisterWindow};
@@ -213,6 +213,17 @@ impl Display for RpiHvs<'_> {
             return Err(DriverError::BufferTooSmall);
         }
         self.blit_scanout(frame)
+    }
+
+    fn device_report(&self) -> DisplayDeviceReport {
+        DisplayDeviceReport {
+            // The HVS sources from the firmware's own memory split rather
+            // than from a dedicated aperture this driver can size, so it
+            // reports no memory of its own instead of a figure it guessed.
+            mem_resident_bytes: 0,
+            mem_total_bytes: 0,
+            accel: self.accel_caps().ok(),
+        }
     }
 }
 

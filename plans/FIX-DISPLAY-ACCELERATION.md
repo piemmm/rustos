@@ -174,6 +174,13 @@ can cross a process boundary and be mapped once by the driver:
   stride/height cannot wrap (fail closed, §5.4).
 
 ### A.2 `AccelCaps` — only fields with a live producer and consumer
+`AccelCaps` now has a **published reader**: the display service answers it
+(with the memory the driver reports and the mode it scans out) on the seatless
+`DisplayRequest::QueryStats`, which `sysinfod` serves as `GPU_DEVICE_STATS`
+for the Switchboard's Graphics pane (`plans/NEW-SWITCHBOARD.md` Q3). A cap
+this plan adds therefore reaches a user-visible reading the moment its
+producer lands, and the wire flag for it goes in the same change.
+
 Add capability bits **only** as the stages that consume them land, never
 ahead (§2.4). This plan's consumers are:
 - `hw_scaling: bool` (Stage E) — source rect ≠ dest rect, so DPI/window

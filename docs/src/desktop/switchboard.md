@@ -306,6 +306,29 @@ assertable. A frame that recomposed nothing reads *idle* rather than a row of
 zeros pretending a frame was drawn, and a frame nobody has reported yet reads
 unavailable — only the session that owns the compositor can count one.
 
+**The rail entry states the damage, and its trace plots the damage per
+frame.** The rail's figure is what changed on screen; the hero's is the layer
+contributions blended to resolve it, two magnitudes apart, so the two are
+different readings rather than one stated twice. The trace's full scale is the
+frame's own screen: the only reference a per-frame pixel count has, and the
+one the hero's context line already spells the reading against, so a
+full-screen repaint fills the box and a cursor-sized frame sits near the
+bottom because that is what it cost. A byte reference would be the wrong
+dimension, and the sample that carries no report contributes no point rather
+than a nought that would read as an idle frame.
+
+**The device's own readings come from the display service that drives it**
+(`GPU_DEVICE_STATS`, gated with the hardware tree it details). Its
+compositor's layer limits and per-layer opacity fill the compositing-path
+block; its scan-out mode, its interval utilisation, and the memory it owns
+fill the device block. Utilisation is a delta over the sample's own interval,
+never the service lifetime's average, so a first sample states no share; a
+device with no memory of its own says so in words, because that is a different
+statement from none being free. A **per-engine** breakdown still has no
+producer — no display driver reports its engines separately — so that row
+carries the honest unmeasured mark rather than one device's occupancy dressed
+as an engine's.
+
 **A device's commands are labelled, not glyphed**, and almost none has an
 endpoint. Of the commands the panes offer, only "sort tasks by *resource*" is
 one this service can carry out: it is a view transition onto the Tasks table,

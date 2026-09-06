@@ -528,15 +528,20 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `lib/abi/src/display_ipc.rs` (the fixed-width, fail-closed,
   fuzzed protocol: `Query` → mode reply, `Configure { shm_handle,
   frame_count, frame geometry }`, `Present { frame_index, damage rect }`,
-  every reserved tail zero-checked) and the reserved `DISPLAY_ENDPOINT`
+  `QueryStats` → the device's own `DisplayStats` (the one seatless
+  operation: it describes the *device*, so it is gated on the caller's
+  attested `CAP_SYSINFO_HW` and serves the Switchboard's graphics reading
+  through `sysinfod`, `plans/NEW-SWITCHBOARD.md` Q3), every reserved tail
+  zero-checked) and the reserved `DISPLAY_ENDPOINT`
   (`0x0D15_1001`, in `is_reserved_endpoint`; one endpoint — the service
   carries seat ids in-protocol, so a later multi-GPU broker is additive,
   not a v2); the shared `lib/abi::reply` status frame (hoisted from the
   seatmgr module, §2.2); the `lib/display` crate hosting **both** halves
   over injected seams so the protocol semantics have one definition
   (§2.2): the server engine (`DisplayServer`: decode → lease check via
-  the `SeatCheck` seam over `call_peer_seat` on **every** request, `Query`
-  included — only the seat owner learns the mode → exact-mode geometry
+  the `PeerFacts` seam over `call_peer_seat` on every request that acts for
+  a seat, `Query` included — only the seat owner learns the mode → exact-mode
+  geometry
   validation → map-once `ShmMapper` → blit through the `Display` trait;
   the configure state is bound to the granting lease's *generation*, so a
   revoked or re-acquired seat must reconfigure before it can present, and
@@ -567,7 +572,8 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `virtio_kbd` shape)
   wiring `RtDriverHost` grants → `sole_framebuffer` → surface, the
   reserved `DISPLAY_ENDPOINT` bind under `CAP_IPC_BIND_PRIVILEGED`, an
-  `RtSeatCheck` over `call_peer_seat`, and an `RtShmMapper` over
+  `RtPeerFacts` over `call_peer_seat`/`call_peer_origin`, an `RtClock` over
+  `clock_get`, and an `RtShmMapper` over
   `shm_map` into a waitset-parked `DisplayServer::serve` loop
   (fail-loud reserved exit codes; never a busy poll). `shm_map`
   (`abi-v1` 41) reports the mapped region's byte length through a

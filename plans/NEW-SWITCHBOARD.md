@@ -30,16 +30,16 @@ lie about.
 | **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | planned |
 | **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | done |
 | **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | done |
-| **Q3** | `GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`: per-engine `busy_ns`/`idle_ns`, device memory, and the device's `AccelCaps` | `plans/FIX-DISPLAY-ACCELERATION.md` accel path | S8 | planned |
+| **Q3** | `GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`: the device's `busy_ns`/`idle_ns`, its memory, its `AccelCaps` and its scan-out mode | `plans/FIX-DISPLAY-ACCELERATION.md` accel path | S8 | done |
 | **Q4** | `ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`: `busy_ns`/`idle_ns`, device memory, `in_flight` | D1 | S8 | planned |
 | **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | done |
-| **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | in progress — Q1/Q2 landed with their queries; Q3/Q4 remain |
+| **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | in progress — Q1–Q3 landed with their queries; Q4 remains |
 | **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | done |
 | **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | done |
 | **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
 | **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
 | **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | done |
-| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | in progress — two board mismatches remain, below |
+| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4 | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
 | **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
@@ -482,23 +482,26 @@ both: its reading is how full it is (a level, so no trace would say it) and
 its trace is the throughput Q1's byte counters delta into, against the one
 shared full-scale reference every device trace plots at.
 
-**Two `06-graphics.png` mismatches remain open on this pane, and they land
-with Q3.** Both need a decision the prose does not fix, so neither is guessed
-at:
+**Both `06-graphics.png` mismatches are closed, and the trace's reference is
+the frame's own screen.** The rail entry reads `damaged_px` — what changed on
+screen — where the hero reads `blended_px`, the contributions blended to
+resolve it; the two are orders of magnitude apart, so they are different
+readings rather than one stated twice.
 
-- **The rail entry reads the wrong count.** The board's `Compositor 3.2k px`
-  is the frame's *damaged* pixels (3,200); the code reads `blended_px`, which
-  is the hero's figure (4.2 M) and would make the rail entry and the hero the
-  same reading at two magnitudes.
-- **The hero's trace and the rail's trace have no series behind them.**
-  `DeviceMeters` is read for `DeviceId::Graphics` but nothing records it, so
-  both plot an empty chart for ever. The series the board captions is *damaged
-  pixels per frame*, and a per-frame pixel count needs its own full-scale
-  reference — the byte reference every other device trace plots against is
-  the wrong dimension, and permille-of-screen would draw a flat line at the
-  bottom of the box for the board's own 3,200-of-2.07 M frame. Choose that
-  reference with Q3, which is the change that revisits this pane, and record
-  it here.
+The trace plots the frame's damage as a permille of *that frame's*
+`screen_px`. It is the only full scale a per-frame pixel count has, and it is
+the one the hero's own context line already states the reading against
+("3,200 of 2.07 M on screen"), so the instrument and the words cannot
+disagree. The alternatives were rejected: the shared byte reference every
+device trace plots against is the wrong dimension, and a rolling maximum over
+the chart window would make an idle desktop's few-pixel jitter fill the box.
+That a cursor-only frame plots near the bottom is the truth about a frame that
+recomposed 0.15% of the screen — the hero carries the absolute counts, and the
+trace exists to show *screen-scale* work: a window drag reads a few hundred
+permille, a wallpaper change fills the box, and a desktop repainting the whole
+screen every frame pins there, which is the pathology this pane exists to
+expose. A sample carrying no report contributes no point rather than a nought
+that would read as an idle frame.
 
 **The Graphics pane is named for the display path, not for a GPU.** A
 framebuffer-only or headless machine has no GPU and would read an empty *GPU*
@@ -583,7 +586,7 @@ source whose delta is the reading:
 |---|---|---|
 | `VOLUME_IO_STATS` | `EverySample` | a volume's throughput, IOPS, utilisation and await |
 | `VOLUME_IO_QUEUE` | `EverySample` | a volume's in-flight count and mean queue depth |
-| `GPU_DEVICE_STATS` | `EverySample` | graphics engine busy share, device memory, `AccelCaps` |
+| `GPU_DEVICE_STATS` | `EverySample` | the graphics device's busy share, memory, `AccelCaps` and scan-out mode |
 | `ACCEL_DEVICE_STATS` | `EverySample` | an accelerator's busy share, memory and queue |
 
 **The panes need ten readings the sampler does not take yet, all of them
@@ -792,19 +795,46 @@ defers field choice to it. A monotonic high-water mark is also a poor reading
 — after a day of uptime it pins at the ceiling and stays — and a windowed peak
 is state no counter carries. The row reads `N.NN mean`.
 
-**`GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`.** Gated with `HARDWARE_TREE`, whose
-device inventory it details. One record per graphics device, plus one per
-engine so a machine that reports engines separately is not flattened:
+**`GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`. Landed.** Gated with
+`HARDWARE_TREE`, whose device inventory it details, and audited with it. One
+record per graphics device a display service drives, paged by a
+`DeviceStatsRequest`:
 
-- `busy_ns`, `idle_ns` per engine, with an engine class (render, blit, video
-  decode, video encode) — the same busy/idle vocabulary as the CPU, so
+- `busy_ns`, `idle_ns` — the same busy/idle vocabulary as the CPU, so
   utilisation derives the same way and no new averaging convention appears.
+  Both are cumulative and partition the window since the device was first
+  *driven* — opened inside the same bracket that measures `busy_ns`, so no
+  request an unauthorised caller can send moves its epoch — and a reader takes
+  a two-sample delta, so a first sample yields no share.
 - `mem_resident_bytes`, `mem_total_bytes` — device memory, `0` total meaning
   the device has no memory of its own rather than none free.
 - the device's `AccelCaps` (`max_layers`, `max_width_px`, `max_height_px`,
-  `per_layer_opacity`), which exists in the display driver ABI today with no
-  query publishing it. Publishing it here is what lets the Graphics pane's
+  `per_layer_opacity`), which existed in the display driver ABI with no query
+  publishing it. Publishing it here is what lets the Graphics pane's
   compositing-path facts stop being unmeasured.
+- the `DisplayMode` being scanned out, which fills the board's `Scan-out` row
+  from the one component that knows it.
+
+**The record is the display service's own `DisplayStats`, not a second
+spelling of it** — the same shape `RAID_ARRAYS` serves the composer's own
+`RaidArrayRecord` in. The producer is the process bound to `DISPLAY_ENDPOINT`,
+which is the only component that owns the device: it answers a new seatless
+`QueryStats` operation gated on the *caller's* attested `CAP_SYSINFO_HW` (a
+monitor holds no seat lease and never will, so a lease is the wrong question
+about a device read), measures `busy_ns` by bracketing the driver's own
+present call, and reads memory and capabilities from a `Display::device_report`
+whose default is honest for a firmware framebuffer. It is a **pull**: nothing
+is pushed per frame, so an unwatched device costs nothing.
+
+**Deliberate deviation: no per-engine record.** The plan's field list said
+"one per engine so a machine that reports engines separately is not flattened",
+and no display driver in the tree reports engines at all — a framebuffer has
+none, and the HVS is one fixed-function compositor. A per-engine record would
+therefore be an interface with no producer, which the charter forbids adding
+ahead of one. The device-level busy/idle is a real measurement with a live
+producer; the Graphics pane's `Decode / encode engines` row states the
+per-engine absence honestly instead. A device that genuinely reports its
+engines separately brings the per-engine read with it.
 
 **`ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`.** The same shape for a
 general-purpose accelerator: `busy_ns`/`idle_ns`, `mem_resident_bytes`/

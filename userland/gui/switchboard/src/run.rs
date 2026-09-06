@@ -622,6 +622,9 @@ mod program {
                 DegradedField::VolumeIoQueue => {
                     "notice: volume queue occupancy is unavailable; depth and in-flight requests are not shown"
                 }
+                DegradedField::GpuDeviceStats => {
+                    "notice: graphics device statistics are unavailable; utilisation, memory and hardware layers are not shown"
+                }
                 DegradedField::NetInterfaceFacts => {
                     "notice: the network interface inventory is unavailable; interfaces are not named"
                 }

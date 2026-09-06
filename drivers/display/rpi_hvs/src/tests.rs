@@ -227,6 +227,14 @@ fn open_reports_mode_and_caps() {
     assert_eq!(caps.max_width_px, 4);
     assert_eq!(caps.max_height_px, 2);
     assert!(caps.per_layer_opacity);
+
+    // The monitor's device read publishes those same capabilities, and
+    // reports no memory of its own rather than a firmware split this driver
+    // cannot size.
+    let report = hvs.device_report();
+    assert_eq!(report.accel, Some(caps));
+    assert_eq!(report.mem_total_bytes, 0);
+    assert_eq!(report.mem_resident_bytes, 0);
 }
 
 #[test]

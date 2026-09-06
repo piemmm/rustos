@@ -70,6 +70,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_TIME_SERVERS`      | none                   | no      |
 | `VOLUME_IO_STATS`       | none                   | no      |
 | `VOLUME_IO_QUEUE`       | `CAP_SYSINFO_KERNEL`   | yes     |
+| `GPU_DEVICE_STATS`      | `CAP_SYSINFO_HW`       | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -217,6 +218,26 @@ kernel-wide operational state:
   because a depth alone does not say whether a device is saturated —
   the reading is `in_flight` against the ceiling its discovered
   `BlkDeviceClass` permits, never a global constant.
+- `GPU_DEVICE_STATS` — one packed `display_ipc::DisplayStats` per graphics
+  device a display service drives (paged by a `DeviceStatsRequest`): the
+  cumulative `busy_ns` / `idle_ns` the service measured around its own
+  present calls, the `mem_resident_bytes` / `mem_total_bytes` the driver
+  reports the device owns, the `AccelCaps` of its hardware compositor (or
+  their absence, where it has none), and the `DisplayMode` it scans out.
+  The record is the display service's own reply type rather than a second
+  spelling of it, exactly as `RAID_ARRAYS` serves the composer's own
+  `RaidArrayRecord`: the service that measures a reading defines it once.
+  Gated with `HARDWARE_TREE` and audited with it, because it details a node
+  that inventory already names. **Nothing is served pre-derived**:
+  utilisation is a `busy_ns` delta over the reader's own interval, so a
+  first sample yields no share and a service lifetime's average never
+  masquerades as a live one. `mem_total_bytes == 0` states that the device
+  has **no memory of its own** — a firmware framebuffer scanning out of
+  system RAM — which is a different statement from none being free.
+  A **per-engine** split is deliberately absent: no display driver in the
+  tree reports its engines separately, so publishing a per-engine record
+  would be an interface with no producer, and the Switchboard's
+  Decode / encode engines row states that absence instead.
 - `VOLUME_IO_HEALTH` — one `VolumeIoHealthRecord` per fault-aware
   block-backed volume the kernel serves (paged by the same
   `VolumeIoRequest`): the volume's durable id, the serving

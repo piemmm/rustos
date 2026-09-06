@@ -35,10 +35,14 @@
 //! * The reserved `DISPLAY_ENDPOINT` bind (`call_create`): binding a
 //!   reserved rendezvous requires the manifest's `CAP_IPC_BIND_PRIVILEGED`
 //!   (kernel-enforced), so a squatter cannot intercept presents.
-//! * `RtSeatCheck` over `call_peer_seat`: the engine asks the kernel, per
-//!   request, whether the *in-flight caller* holds the seat's live lease —
-//!   never a claimed lease, and only about a task this server is actively
-//!   servicing.
+//! * `RtPeerFacts` over `call_peer_seat` / `call_peer_origin`: the engine
+//!   asks the kernel, per request, whether the *in-flight caller* holds the
+//!   seat's live lease — never a claimed lease, and only about a task this
+//!   server is actively servicing — and, for the device-statistics read that
+//!   acts for no seat, whether that caller holds `CAP_SYSINFO_HW`.
+//! * `RtClock` over the unprivileged `clock_get`: the engine brackets each
+//!   present so the utilisation a monitor reads is measured here rather than
+//!   estimated anywhere else.
 //! * `RtShmMapper` over `shm_map`/`shm_unmap`: a `Configure` maps the
 //!   client's granted frame region **once**, sized from the kernel's own
 //!   record of the region length (never the client's claimed geometry);
@@ -64,10 +68,12 @@
 mod program {
     use tairix_abi::display_ipc::{DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
     use tairix_abi::driver::sole_framebuffer;
+    use tairix_abi::origin::{Origin, ORIGIN_WIRE_LEN};
+    use tairix_abi::time::MonotonicClock;
     use tairix_abi::{CapabilityId, Errno, WaitSetOp, WaitSourceKind};
     use tairix_caps::CapabilitySet;
     use tairix_display::{
-        DisplayServer, Framebuffer, FramebufferConfig, RtShmMapper, SeatCheck, DISPLAY_REPLY_MAX,
+        DisplayServer, Framebuffer, FramebufferConfig, PeerFacts, RtShmMapper, DISPLAY_REPLY_MAX,
     };
     use tairix_drv_display_framebuffer::{FIRST_PRESENT, FIRST_PRESENT_MESSAGE};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -120,12 +126,13 @@ mod program {
         caps
     }
 
-    /// The production [`SeatCheck`]: the kernel's `call_peer_seat` on the
-    /// served endpoint, so the lease fact is always about the in-flight
-    /// caller of *this* service — never a claim the request carried.
-    struct RtSeatCheck;
+    /// The production [`PeerFacts`]: the kernel's `call_peer_seat` and
+    /// `call_peer_origin` on the served endpoint, so every authority fact is
+    /// about the in-flight caller of *this* service — never a claim the
+    /// request carried.
+    struct RtPeerFacts;
 
-    impl SeatCheck for RtSeatCheck {
+    impl PeerFacts for RtPeerFacts {
         fn live_generation(&mut self, ticket: u64, seat_id: u64) -> Result<u64, Errno> {
             let ret = tairix_rt::call_peer_seat(DISPLAY_ENDPOINT, ticket, seat_id);
             if ret >= 1 {
@@ -134,6 +141,27 @@ mod program {
             } else {
                 Err(Errno::from_syscall(ret))
             }
+        }
+
+        fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
+            let mut bytes = [0u8; ORIGIN_WIRE_LEN];
+            let len = tairix_rt::call_peer_origin(DISPLAY_ENDPOINT, ticket, &mut bytes)
+                .map_err(Errno::from_syscall)?;
+            if len != bytes.len() {
+                return Err(Errno::BufferTooSmall);
+            }
+            Ok(Origin::from_bytes(&bytes)?.capabilities().holds_cap(cap))
+        }
+    }
+
+    /// The production monotonic clock: the unprivileged `clock_get`, which
+    /// needs no capability and is coarsened to a microsecond for a caller
+    /// without `CAP_TIME_HIRES` — far finer than any present takes.
+    struct RtClock;
+
+    impl MonotonicClock for RtClock {
+        fn now_ns(&self) -> u64 {
+            tairix_rt::clock_get()
         }
     }
 
@@ -205,8 +233,8 @@ mod program {
             return EXIT_WAIT_FAILED;
         }
 
-        let mut server = DisplayServer::new(RtShmMapper);
-        let mut seat = RtSeatCheck;
+        let mut server = DisplayServer::new(RtShmMapper, RtClock);
+        let mut peer = RtPeerFacts;
         let mut request = [0u8; DISPLAY_MAX_REQUEST];
         let mut reply = [0u8; DISPLAY_REPLY_MAX];
         let mut token = 0u64;
@@ -234,7 +262,7 @@ mod program {
             };
             // Every outcome — including a malformed request — is a
             // well-formed reply; the engine never leaves a caller parked.
-            let n = server.serve(&mut surface, &mut seat, ticket, &request[..len], &mut reply);
+            let n = server.serve(&mut surface, &mut peer, ticket, &request[..len], &mut reply);
             let _ = tairix_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
             if !first_present_logged && server.has_presented() {
                 first_present_logged = true;

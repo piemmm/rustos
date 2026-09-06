@@ -12,6 +12,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
@@ -487,4 +488,21 @@ pub trait SysinfoSource {
     /// list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn raid_members(&self, caller: &Caller) -> Result<Vec<RaidMemberRecord>, Errno>;
+
+    /// Return the per-graphics-device statistics: one [`DisplayStats`] per
+    /// device a display service drives, carrying the occupancy that service
+    /// measured over its own present path, the memory the driver reports the
+    /// device owns, what its compositor can do, and the mode it scans out.
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: this details
+    /// a node [`hardware_tree`](Self::hardware_tree) already names, so it is
+    /// read under the same authority. On a running system the source forwards
+    /// to the display service's endpoint. A machine with no display service —
+    /// a headless install, or one whose display node found no driver — fails
+    /// closed with the transport's typed error, never a fabricated empty
+    /// table: "none" would be a claim about the *hardware*, and
+    /// [`hardware_tree`](Self::hardware_tree) is what answers that. The owned
+    /// list is returned whole and [`crate::serve`] applies the
+    /// `offset`/`limit` paging; ordering must be stable across paged calls.
+    fn gpu_device_stats(&self, caller: &Caller) -> Result<Vec<DisplayStats>, Errno>;
 }

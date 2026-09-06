@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_abi::blkio::BlkHealthCounters;
+use tairix_abi::display_ipc::DisplayStats;
+use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{
@@ -116,6 +118,7 @@ impl Fixture {
             SysinfoQueryId::VOLUME_IO_HEALTH,
             SysinfoQueryId::VOLUME_IO_STATS,
             SysinfoQueryId::VOLUME_IO_QUEUE,
+            SysinfoQueryId::GPU_DEVICE_STATS,
             SysinfoQueryId::NET_INTERFACE_FACTS,
             SysinfoQueryId::NET_INTERFACE_STATE,
             SysinfoQueryId::NET_INTERFACE_RATES,
@@ -550,8 +553,34 @@ fn process_with_io(pid: u64, proc_id: ProcId, read: u64, written: u64) -> Proces
     .expect("valid record")
 }
 
+/// One accelerated graphics device with memory of its own, so the fold and
+/// the pane both see every optional part of the reading populated.
+fn graphics_device() -> DisplayStats {
+    DisplayStats {
+        seat_id: 1,
+        busy_ns: 250_000_000,
+        idle_ns: 750_000_000,
+        device: DisplayDeviceReport {
+            mem_resident_bytes: 8 << 20,
+            mem_total_bytes: 256 << 20,
+            accel: Some(AccelCaps {
+                max_layers: 4,
+                max_width_px: 1920,
+                max_height_px: 1080,
+                per_layer_opacity: true,
+            }),
+        },
+        mode: DisplayMode {
+            width_px: 1920,
+            height_px: 1080,
+            stride_bytes: 7680,
+            format: DisplayFormat::Bgra8888,
+        },
+    }
+}
+
 /// The readings the cadence policy issues on every sample.
-const EVERY_SAMPLE: [SysinfoQueryId; 10] = [
+const EVERY_SAMPLE: [SysinfoQueryId; 11] = [
     SysinfoQueryId::GLOBAL_PROCESS_LIST,
     SysinfoQueryId::CPU_TIME_STATS,
     SysinfoQueryId::UPTIME,
@@ -562,6 +591,7 @@ const EVERY_SAMPLE: [SysinfoQueryId; 10] = [
     SysinfoQueryId::NET_INTERFACE_RATES,
     SysinfoQueryId::VOLUME_IO_STATS,
     SysinfoQueryId::VOLUME_IO_QUEUE,
+    SysinfoQueryId::GPU_DEVICE_STATS,
 ];
 
 /// The readings on the audited memory cadence.
@@ -1048,6 +1078,10 @@ fn the_resource_pane_readings_are_present_and_decoded() {
             HwDeviceClass::Display
         )])],
     );
+    fixture.serve(
+        SysinfoQueryId::GPU_DEVICE_STATS,
+        blobs(&[graphics_device()], |r| r.to_le_bytes().to_vec()),
+    );
 
     let mut sampler = Sampler::new(granted());
     let sample = sampler.sample(&fixture, 0);
@@ -1077,6 +1111,9 @@ fn the_resource_pane_readings_are_present_and_decoded() {
     assert_eq!(ledgers[0].label_bytes(), b"glyph atlas");
     let nodes = sample.hardware.expect("hardware tree read");
     assert_eq!(nodes[0].class(), Some(HwDeviceClass::Display));
+    let gpu = sample.gpu_stats.expect("graphics statistics read");
+    assert_eq!(gpu[0].busy_ns, 250_000_000);
+    assert_eq!(gpu[0].device.accel.expect("accelerated").max_layers, 4);
     assert!(sample.degradations.is_empty());
 }
 

@@ -135,13 +135,30 @@ until a discovered backend can guarantee bounded pan or true wrap.
 
 The service binds the reserved `DISPLAY_ENDPOINT` (its manifest's
 `CAP_IPC_BIND_PRIVILEGED` — a squatter cannot intercept presents) and
-serves the `lib/display` protocol from a wait-set park: every request
-— `Query` included — is gated on the in-flight caller's live seat
-lease through `call_peer_seat`, a `Configure` maps the client's
+serves the `lib/display` protocol from a wait-set park: every request that
+acts *for a seat* — `Query` included — is gated on the in-flight caller's
+live seat lease through `call_peer_seat`, a `Configure` maps the client's
 `shm_grant`ed frame region once (sized from the kernel's own record of
 the region length via `shm_map`'s `len_out`, never the client's
 claimed geometry), and a `Present` blits by frame index — zero frame
 bytes ever cross the IPC.
+
+`QueryStats` is the one operation that acts for no seat: it describes the
+*device* this service drives, for the monitor that draws graphics
+utilisation (`GPU_DEVICE_STATS`, served by `sysinfod` over this endpoint).
+A lease is the wrong question about a device read — a monitor holds none
+and never will — so it is gated instead on the caller's kernel-attested
+`CAP_SYSINFO_HW` through `call_peer_origin`, the authority the hardware
+inventory it details is already read under. It answers the cumulative
+`busy_ns` / `idle_ns` the engine measured *around the driver's own present
+call* — which is also where the window they partition opens, so a refused
+present adds nothing to either and no request an unauthorised caller can send
+moves the epoch —
+the memory and compositor capabilities the driver reports through
+`Display::device_report`, and the mode being scanned out. The default
+`device_report` is honest for a firmware framebuffer — no memory of its
+own, no hardware compositor — and an `AcceleratedDisplay` driver overrides
+it with its real `AccelCaps`.
 
 Lifecycle: the signed-bundle load gate clears `CAP_DRV_LOAD`;
 `Framebuffer::open` maps the surface; dropping the `Framebuffer`

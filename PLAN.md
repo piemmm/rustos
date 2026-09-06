@@ -4033,7 +4033,7 @@ transfer, landed in increments:
   and the framebuffer service `Run` binary itself
   (`drivers/display/framebuffer`, bin-only on the `virtio_kbd` shape:
   grants → `sole_framebuffer` → surface; `DISPLAY_ENDPOINT` bind under
-  `CAP_IPC_BIND_PRIVILEGED`; `RtSeatCheck`/`RtShmMapper` seams; a
+  `CAP_IPC_BIND_PRIVILEGED`; `RtPeerFacts`/`RtClock`/`RtShmMapper` seams; a
   waitset-parked serve loop with fail-loud reserved exit codes — its
   image bundle + bind keys ride the D7d autoload world). **D7c (the
   desktop session binary) is done:** `userland/gui/session` ships its

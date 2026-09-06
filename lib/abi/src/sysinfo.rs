@@ -543,6 +543,28 @@ impl SysinfoQueryId {
     /// against a number a reader had to guess.
     pub const VOLUME_IO_QUEUE: Self = Self(39);
 
+    /// List per-graphics-device statistics: one packed
+    /// [`DisplayStats`](crate::display_ipc::DisplayStats) per device a
+    /// display service drives, paged by a [`DeviceStatsRequest`].
+    ///
+    /// The record is the display service's own reply type rather than a
+    /// second spelling of it, exactly as [`Self::RAID_ARRAYS`] serves the
+    /// composer's own `RaidArrayRecord`: the service that measures a reading
+    /// defines it once.
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited, the same authority
+    /// [`Self::HARDWARE_TREE`] is read under and for the same reason: this
+    /// details a node that inventory already names — its occupancy, the
+    /// memory it owns, what its compositor can do, and the mode it scans
+    /// out. It is hardware topology, not a per-principal fact, and it holds
+    /// no secret: no pixel, no window, and no client identity crosses it.
+    ///
+    /// Nothing is served pre-derived. `busy_ns` and `idle_ns` are cumulative,
+    /// so utilisation is a two-sample delta the reader takes over its own
+    /// interval — the same vocabulary [`Self::CPU_TIME_STATS`] uses, so no
+    /// second averaging convention appears.
+    pub const GPU_DEVICE_STATS: Self = Self(40);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -1000,6 +1022,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         id: SysinfoQueryId::VOLUME_IO_QUEUE,
         name: "volume_io_queue",
         required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::GPU_DEVICE_STATS,
+        name: "gpu_device_stats",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
         audit: true,
     },
 ];
@@ -5328,6 +5356,59 @@ impl VolumeIoRequest {
     }
 }
 
+/// Request payload for the per-device statistics reads —
+/// [`SysinfoQueryId::GPU_DEVICE_STATS`].
+///
+/// The same shape as every other paged read: `offset` names the first record
+/// index to return and `limit` bounds the page, so a fixed transport buffer
+/// never bounds how many graphics devices a machine may have.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub struct DeviceStatsRequest {
+    /// Index of the first record to return.
+    pub offset: u32,
+    /// Maximum number of records to return.
+    pub limit: u16,
+    /// Reserved; must be zero in `sysinfo-v1`.
+    pub flags: u16,
+}
+
+impl DeviceStatsRequest {
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.offset);
+        put_u16(&mut out, 4, self.limit);
+        put_u16(&mut out, 6, self.flags);
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if short, or [`Errno::BadMagic`] if a
+    /// reserved flag bit is set (fail closed on an unknown request shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, 6);
+        if flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        Ok(Self {
+            offset: read_u32(bytes, 0),
+            limit: read_u16(bytes, 4),
+            flags,
+        })
+    }
+}
+
 /// Request payload for [`SysinfoQueryId::RAID_ARRAYS`] and
 /// [`SysinfoQueryId::RAID_MEMBERS`].
 ///
@@ -6331,16 +6412,16 @@ impl CrashRecord {
 mod tests {
     use super::{
         encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeListRequest,
-        CpuTimeRecord, HardwareTreeRequest, KernelMemoryStats, LoadAverage, MemoryTotal,
-        MountAvailability, MountListRequest, MountRecord, MountVolumeState, ProcessListRequest,
-        ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord,
-        SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord,
-        UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE, ENCODED_QUERY_TABLE_LEN,
-        HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX,
-        MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN,
-        SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-        USER_DIRECTORY_NAME_MAX,
+        CpuTimeRecord, DeviceStatsRequest, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
+        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState,
+        ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
+        SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
+        UserDirectoryRecord, UserDirectoryRequest, VolumeStats, ENCODED_QUERY_TABLE,
+        ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MOUNT_FSTYPE_MAX,
+        MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
+        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERIES,
+        SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+        SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, USER_DIRECTORY_NAME_MAX,
     };
     use super::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED,
@@ -6459,7 +6540,40 @@ mod tests {
             Some(CapabilityId::SYSINFO_GLOBAL)
         );
         assert!(spec_for(SysinfoQueryId::NET_STACK_DEFENCE).unwrap().audit);
+        assert_eq!(SysinfoQueryId::GPU_DEVICE_STATS.as_u16(), 40);
+        // A graphics device's occupancy, memory and compositor capability
+        // detail a node the hardware tree already names, so they are read
+        // under the same authority and audited with it.
+        assert_eq!(
+            spec_for(SysinfoQueryId::GPU_DEVICE_STATS)
+                .unwrap()
+                .required_capability,
+            Some(CapabilityId::SYSINFO_HW)
+        );
+        assert!(spec_for(SysinfoQueryId::GPU_DEVICE_STATS).unwrap().audit);
         assert_eq!(SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1);
+    }
+
+    #[test]
+    fn device_stats_request_pages_and_fails_closed_on_a_reserved_flag() {
+        let request = DeviceStatsRequest {
+            offset: 9,
+            limit: 4,
+            flags: 0,
+        };
+        let bytes = request.to_le_bytes();
+        assert_eq!(bytes.len(), DeviceStatsRequest::WIRE_LEN);
+        assert_eq!(DeviceStatsRequest::from_bytes(&bytes), Ok(request));
+        assert_eq!(
+            DeviceStatsRequest::from_bytes(&bytes[..DeviceStatsRequest::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut reserved = bytes;
+        reserved[6] = 1;
+        assert_eq!(
+            DeviceStatsRequest::from_bytes(&reserved),
+            Err(Errno::BadMagic)
+        );
     }
 
     #[test]

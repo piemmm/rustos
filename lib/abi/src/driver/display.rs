@@ -73,6 +73,17 @@ impl DisplayFormat {
         }
     }
 
+    /// The format's short display spelling, for a reader naming a scan-out
+    /// mode. One definition, so the command line and the desktop monitor
+    /// cannot spell the same mode differently.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rgba8888 => "RGBA8888",
+            Self::Bgra8888 => "BGRA8888",
+        }
+    }
+
     /// Bytes per pixel in this format.
     #[must_use]
     pub const fn bytes_per_pixel(self) -> u32 {
@@ -198,6 +209,40 @@ pub struct DisplayMode {
     pub format: DisplayFormat,
 }
 
+/// What a display device reports about *itself*, beyond the mode it is
+/// scanning out: the memory it owns and what its hardware compositor can do.
+///
+/// The device half of the graphics reading a monitor draws. It is deliberately
+/// separate from [`AccelCaps`]: a device with no hardware compositor still has
+/// (or has not) memory of its own, and both facts are the driver's to state —
+/// nothing above it can measure them.
+///
+/// An in-process driver-trait value, not a wire record: the monitor's
+/// on-the-wire form is [`DisplayStats`](crate::display_ipc::DisplayStats).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DisplayDeviceReport {
+    /// Bytes of the device's own memory currently holding scan-out or layer
+    /// sources. Necessarily `0` when [`Self::mem_total_bytes`] is.
+    pub mem_resident_bytes: u64,
+    /// Bytes of memory the device owns. `0` means the device has **no memory
+    /// of its own** — a firmware framebuffer scanning out of system RAM — not
+    /// that none is free.
+    pub mem_total_bytes: u64,
+    /// What the hardware compositor can do, or [`None`] where the device has
+    /// none and every frame is composited in software.
+    pub accel: Option<AccelCaps>,
+}
+
+impl DisplayDeviceReport {
+    /// A device with no memory of its own and no hardware compositor: what a
+    /// firmware framebuffer honestly is.
+    pub const SOFTWARE: Self = Self {
+        mem_resident_bytes: 0,
+        mem_total_bytes: 0,
+        accel: None,
+    };
+}
+
 /// Trait every display driver implements.
 ///
 /// # Capabilities
@@ -224,6 +269,17 @@ pub trait Display {
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
     fn mode_info(&self) -> Result<DisplayMode, DriverError>;
+
+    /// Report what this device owns and what its compositor can do.
+    ///
+    /// The default is [`DisplayDeviceReport::SOFTWARE`] — no memory of its
+    /// own, no hardware compositor — which is the truth for a firmware
+    /// framebuffer and for any driver that scans out of system RAM. A device
+    /// with dedicated memory or an [`AcceleratedDisplay`] engine overrides it;
+    /// the default never overstates what the silicon can do.
+    fn device_report(&self) -> DisplayDeviceReport {
+        DisplayDeviceReport::SOFTWARE
+    }
 
     /// Present a fully-rendered frame.
     ///

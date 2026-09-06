@@ -92,9 +92,23 @@ pub fn build_resource_report(
         recorded.push(id);
     }
 
+    // The compositor's last frame is one point of the display path's trace,
+    // and the device's cumulative busy time is a rate source like any other:
+    // both are folded here so the pane spells a series and a share the
+    // meters derived rather than reading an empty chart and a lifetime
+    // average.
+    let gpu = sample
+        .gpu_stats
+        .as_ref()
+        .and_then(|records| records.first());
+    meters
+        .devices
+        .record_graphics(DeviceId::Graphics, session.frame, gpu, sample.elapsed_ns);
     devices.push(graphics::device(
         sample,
         session.frame,
+        gpu,
+        meters.devices.graphics_busy(DeviceId::Graphics),
         meters.devices.primary_history(DeviceId::Graphics),
     ));
     recorded.push(DeviceId::Graphics);

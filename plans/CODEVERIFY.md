@@ -1077,6 +1077,34 @@ device. Probed both ways — restoring the drivers' old inline decode fails it o
 the abort, and restoring just the `NotFound` fallback fails it on the
 misattribution.
 
+### Open — two duplications too large for the change that found them
+
+Both were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3 and are recorded
+here rather than left silent (§2.18). Neither is a behaviour defect; both are
+§2.2 duplications whose fix touches far more than the change that found them.
+
+- **Seventeen identical paged-list request types in `lib/abi::sysinfo`.**
+  `ProcessListRequest`, `MountListRequest`, `SeatListRequest`,
+  `HardwareTreeRequest`, `CpuTimeListRequest`, `CpuLoadRequest`,
+  `CpuInfoListRequest`, `IrqListRequest`, `CrashRecordRequest`,
+  `UserDirectoryRequest`, `ReclaimListRequest`, `CacheLedgerListRequest`,
+  `NetInterfaceListRequest`, `NetInterfaceRatesRequest` (its prefix),
+  `DesktopFrameStatsRequest`, `VolumeIoRequest`, `RaidListRequest` and
+  `DeviceStatsRequest` are byte-identical `{offset: u32, limit: u16, flags:
+  u16}` types with byte-identical encoders and decoders. The tree already
+  *knows* it: `userland/gui/switchboard/src/sample.rs` spells the payload once
+  and pins the agreement with a compile-time assertion. The fix is one shared
+  request type with every query, consumer, fixture and C-header reference
+  updated in the same change (§2.13, no `v2` beside it) — a large mechanical
+  diff across `lib/abi`, `sysinfod`, the `sysinfo` CLI, `lib/procinfo`, the
+  Switchboard sampler and the fuzz corpus.
+- **Three monotonic-clock seams.** `tairix_abi::time::MonotonicClock` is now
+  the shared home (created for `lib/display`'s device-occupancy measurement),
+  but `lib/appload::Clock` and `lib/rt`'s private `cachereport::Clock` are the
+  same one-method abstraction and still define their own. Migrating
+  `lib/appload` reaches `kernel/core`, `userland/system/appmgr` and six
+  integration fixtures, so it is its own change.
+
 ### Note for the next context — a text sweep needs its own audit
 
 Nothing in the validation gate can tell you a comment sweep broke a sentence:

@@ -23,8 +23,13 @@ the real seams:
   resolved fail-closed from the delivered grants — a missing,
   ambiguous, or malformed surface grant exits rather than scanning out
   a guessed geometry.
-- `RtSeatCheck` over `call_peer_seat`: the kernel-attested, per-request
-  live-lease check on the in-flight caller — never a claimed lease.
+- `RtPeerFacts` over `call_peer_seat` / `call_peer_origin`: the
+  kernel-attested, per-request live-lease check on the in-flight caller —
+  never a claimed lease — and, for the seatless device-statistics read,
+  whether that caller holds `CAP_SYSINFO_HW`.
+- `RtClock` over the unprivileged `clock_get`: the engine brackets each
+  driver present, so the utilisation a monitor reads is measured where the
+  presents happen.
 - `RtShmMapper` over `shm_map`/`shm_unmap`: a `Configure` maps the
   client's granted frame region once, sized from the kernel's own
   record of the region length (never the client's claimed geometry);

@@ -11,11 +11,12 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::{HwDeviceClass, HwNode};
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_controls::PressureKind;
 
-use crate::format::format_pixels;
+use crate::format::{format_bytes, format_pixels, percent};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
@@ -27,21 +28,27 @@ use crate::view::resources::{
 pub(super) fn device(
     sample: &Sample,
     frame: Option<FrameReport>,
+    stats: Option<&DisplayStats>,
+    busy_permille: Option<u16>,
     history: &[u16],
 ) -> ResourceDevice {
-    let blended = frame.map(|frame| frame.blended_px);
+    // The rail states the frame's *damage* — what changed on screen — where
+    // the hero states the contributions blended to resolve it. The two are
+    // orders of magnitude apart, so showing the hero's figure here would say
+    // one reading twice at two magnitudes.
+    let damaged = frame.map(|frame| frame.damaged_px);
     ResourceDevice {
         id: DeviceId::Graphics,
         group: DeviceGroup::Graphics,
         name: String::from("Compositor"),
         kind: PressureKind::Gpu,
-        reading: blended.map_or_else(
+        reading: damaged.map_or_else(
             || Reading::Absent(Unmeasured::Unavailable),
             |px| Reading::measured(format_pixels(px)),
         ),
         trend: history.to_vec(),
         hero: hero(frame, history),
-        blocks: blocks(sample, frame),
+        blocks: blocks(sample, frame, stats, busy_permille),
         banner: None,
         actions: actions(),
     }
@@ -97,14 +104,22 @@ fn overdraw_line(frame: &FrameReport) -> String {
 }
 
 /// The frame-work breakdown, the compositing path, and the device.
-fn blocks(sample: &Sample, frame: Option<FrameReport>) -> Vec<PaneBlock> {
+fn blocks(
+    sample: &Sample,
+    frame: Option<FrameReport>,
+    stats: Option<&DisplayStats>,
+    busy_permille: Option<u16>,
+) -> Vec<PaneBlock> {
     alloc::vec![
         PaneBlock::half("FRAME WORK — COUNTS ONLY", frame_block(frame)).with_note(
             "No wall-clock figure rides this path: a duration is neither reproducible nor assertable, so the compositor reports work and the reader draws the conclusion.",
         ),
-        PaneBlock::half("COMPOSITING PATH", BlockBody::Facts(path_facts())),
-        PaneBlock::full("GRAPHICS DEVICE", device_block(sample)).with_note(
-            "Identity comes from the hardware tree; engine utilisation and device memory need a per-device graphics statistics query.",
+        PaneBlock::half(
+            "COMPOSITING PATH",
+            BlockBody::Facts(path_facts(sample, stats)),
+        ),
+        PaneBlock::full("GRAPHICS DEVICE", device_block(sample, stats, busy_permille)).with_note(
+            "Identity comes from the hardware tree; the device's own occupancy, memory and compositor capability come from the display service that drives it. A per-engine breakdown awaits a device that reports its engines separately.",
         ),
     ]
 }
@@ -139,22 +154,61 @@ fn frame_block(frame: Option<FrameReport>) -> BlockBody {
     ])
 }
 
-/// How the desktop composites, and what it cannot yet report about hardware
-/// layers.
-fn path_facts() -> Vec<ReadingFact> {
-    alloc::vec![
-        ReadingFact::text("Compositing path", "software · lib/raster"),
-        // The accelerated-layer capabilities exist in the display driver ABI
-        // but no query publishes them, so each is marked rather than guessed.
-        ReadingFact::absent("Accelerated layers", Unmeasured::NoInterface),
-        ReadingFact::absent("Max hardware layers", Unmeasured::NoInterface),
-        ReadingFact::absent("Per-layer opacity", Unmeasured::NoInterface),
-        ReadingFact::absent("Vsync / flip model", Unmeasured::NoInterface),
-    ]
+/// How the desktop composites, and what the device it composites onto can do
+/// in hardware.
+fn path_facts(sample: &Sample, stats: Option<&DisplayStats>) -> Vec<ReadingFact> {
+    let mut facts = alloc::vec![ReadingFact::text(
+        "Compositing path",
+        "software · lib/raster",
+    )];
+    match stats.map(|stats| stats.device.accel) {
+        // A device with a hardware compositor still composites in software
+        // here: the desktop's layer path is a separate stage, so the row
+        // states what the device offers and that the desktop is not taking
+        // it — one row, because a reader asking either question wants both.
+        Some(Some(caps)) => {
+            facts.push(ReadingFact::text(
+                "Accelerated layers",
+                "available · not in use",
+            ));
+            facts.push(ReadingFact::text(
+                "Max hardware layers",
+                caps.max_layers.to_string(),
+            ));
+            facts.push(ReadingFact::text(
+                "Max layer size",
+                format!("{}×{}", caps.max_width_px, caps.max_height_px),
+            ));
+            facts.push(ReadingFact::text(
+                "Per-layer opacity",
+                if caps.per_layer_opacity { "yes" } else { "no" },
+            ));
+        }
+        Some(None) => facts.push(ReadingFact::text(
+            "Accelerated layers",
+            "none · the device has no hardware compositor",
+        )),
+        None => {
+            let absence = Unmeasured::from_absence(sample.absence(DegradedField::GpuDeviceStats));
+            facts.push(ReadingFact::absent("Accelerated layers", absence));
+        }
+    }
+    // Which flip model the scan-out uses is the driver's own business and no
+    // reading publishes it, so it is marked rather than guessed.
+    facts.push(ReadingFact::absent(
+        "Vsync / flip model",
+        Unmeasured::NoInterface,
+    ));
+    facts
 }
 
-/// The graphics device the display path runs on, as discovery reports it.
-fn device_block(sample: &Sample) -> BlockBody {
+/// The graphics device the display path runs on: what discovery reports about
+/// the node, and what the service driving it measured.
+fn device_block(
+    sample: &Sample,
+    stats: Option<&DisplayStats>,
+    busy_permille: Option<u16>,
+) -> BlockBody {
     let Some(nodes) = sample.hardware.as_ref() else {
         return BlockBody::Absence(absence_statement(
             "the graphics device",
@@ -182,13 +236,55 @@ fn device_block(sample: &Sample) -> BlockBody {
     // no query publishes it, so the pane states that rather than naming a
     // driver it inferred from the class.
     facts.push(ReadingFact::absent("Bound driver", Unmeasured::NoInterface));
-    facts.push(ReadingFact::absent("Scan-out", Unmeasured::NoInterface));
+    let absence = Unmeasured::from_absence(sample.absence(DegradedField::GpuDeviceStats));
+    if let Some(stats) = stats {
+        facts.push(ReadingFact::text(
+            "Scan-out",
+            format!(
+                "{}×{} · {}",
+                stats.mode.width_px,
+                stats.mode.height_px,
+                stats.mode.format.name()
+            ),
+        ));
+        // The share of the *interval*, not of the service's lifetime: a
+        // cumulative total presented as utilisation would read as busy long
+        // after the work stopped. A first sample has nothing to delta against
+        // and says so.
+        facts.push(match busy_permille {
+            Some(permille) => ReadingFact::text("Device utilisation", percent(permille)),
+            None => ReadingFact::absent("Device utilisation", Unmeasured::Unavailable),
+        });
+        facts.push(ReadingFact::text("Video memory", memory_line(stats)));
+    } else {
+        facts.push(ReadingFact::absent("Scan-out", absence));
+        facts.push(ReadingFact::absent("Device utilisation", absence));
+        facts.push(ReadingFact::absent("Video memory", absence));
+    }
+    // A per-engine split needs a device that reports its engines separately;
+    // no display driver does, so the row states the absence rather than
+    // folding one device's occupancy into an invented engine.
     facts.push(ReadingFact::absent(
-        "Engine utilisation",
+        "Decode / encode engines",
         Unmeasured::NoInterface,
     ));
-    facts.push(ReadingFact::absent("Video memory", Unmeasured::NoInterface));
     BlockBody::Facts(facts)
+}
+
+/// The device's own memory, or the statement that it has none.
+///
+/// `0` total means the device owns no memory — a firmware framebuffer scans
+/// out of system RAM — which is a different statement from none being free,
+/// so it is spelled in words rather than as `0 B of 0 B`.
+fn memory_line(stats: &DisplayStats) -> String {
+    if stats.device.mem_total_bytes == 0 {
+        return String::from("none of its own · scans out of system RAM");
+    }
+    format!(
+        "{} of {}",
+        format_bytes(stats.device.mem_resident_bytes),
+        format_bytes(stats.device.mem_total_bytes)
+    )
 }
 
 /// The keys the device manager binds this node against.

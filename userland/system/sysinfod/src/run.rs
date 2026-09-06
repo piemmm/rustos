@@ -48,6 +48,9 @@ mod program {
 
     use alloc::vec::Vec;
 
+    use tairix_abi::display_ipc::{
+        decode_stats_reply, DisplayRequest, DisplayStats, DISPLAY_ENDPOINT, DISPLAY_STATS_REPLY_LEN,
+    };
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
         NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
@@ -387,6 +390,10 @@ mod program {
             page_raid(&RaidMembersPage)
         }
 
+        fn gpu_device_stats(&self, _caller: &Caller) -> Result<Vec<DisplayStats>, Errno> {
+            read_graphics_devices()
+        }
+
         fn resource_limits(
             &self,
             caller: &Caller,
@@ -573,6 +580,29 @@ mod program {
             }
             offset = offset.saturating_add(u32::from(count));
         }
+    }
+
+    /// Read the graphics devices' statistics from the display service.
+    ///
+    /// One call, because one display service drives one device and answers
+    /// about the device it drives; the vector is the shape the paged query
+    /// serves rather than a list this reader assembles.
+    ///
+    /// A machine with no display service — headless, or a display node that
+    /// found no driver — fails closed with the transport's typed error,
+    /// exactly as an absent `netstack` or array composer does. It is not
+    /// reported as an empty list: "none" would be a claim about the hardware,
+    /// and the hardware tree is what answers that. A short or oversized reply
+    /// is refused rather than zero-filled.
+    fn read_graphics_devices() -> Result<Vec<DisplayStats>, Errno> {
+        let mut reply = [0u8; DISPLAY_STATS_REPLY_LEN];
+        let request = DisplayRequest::QueryStats.to_le_bytes();
+        let n = tairix_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply)
+            .map_err(Errno::from_syscall)?;
+        if n != DISPLAY_STATS_REPLY_LEN {
+            return Err(Errno::BadMagic);
+        }
+        Ok(alloc::vec![decode_stats_reply(&reply)?])
     }
 
     /// Read the stack-wide connection-defence counters from `netstack`.

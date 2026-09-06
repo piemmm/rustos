@@ -31,7 +31,9 @@ use tairix_abi::appdata_ipc::{
     APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN,
     APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
-use tairix_abi::display_ipc::{decode_mode_reply, DisplayRequest};
+use tairix_abi::display_ipc::{
+    decode_mode_reply, decode_stats_reply, DisplayRequest, DisplayStats,
+};
 use tairix_abi::driver::display::{DamageRect, DisplayFormat};
 use tairix_abi::driver::net_channel::{
     decode_facts_reply, decode_service_reply, NetChannelNotify, NetChannelRequest,
@@ -71,10 +73,11 @@ use tairix_abi::switchboard_ipc::{
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
     CacheReportRequest, CpuLoadRecord, CpuLoadRequest, DesktopFrameRecord,
-    DesktopFrameStatsRequest, DesktopFrameTotals, IntrospectDomain, KernelMemoryStats,
-    MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
-    RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest,
-    SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, SYSINFO_REPLY_STATUS_LEN,
+    DesktopFrameStatsRequest, DesktopFrameTotals, DeviceStatsRequest, IntrospectDomain,
+    KernelMemoryStats, MemoryPressureStats, MountListRequest, MountRecord, ProcessListRequest,
+    ProcessRecord, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
+    SeatListRequest, SeatRecord, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoQueueRecord,
+    VolumeIoRequest, VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::users_admin::{
@@ -292,6 +295,32 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
     }
 }
 
+/// The per-device statistics decoders — the paged per-volume and
+/// per-graphics-device reads — split out so the sysinfo sweep above stays
+/// inside one screen.
+fn exercise_device_stat_records(bytes: &[u8]) {
+    if let Ok(req) = VolumeIoRequest::from_bytes(bytes) {
+        let redecoded = VolumeIoRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(req) = DeviceStatsRequest::from_bytes(bytes) {
+        let redecoded = DeviceStatsRequest::from_bytes(&req.to_le_bytes())
+            .expect("round-trip of an accepted request must succeed");
+        assert_eq!(req, redecoded);
+    }
+    if let Ok(rec) = VolumeIoStatsRecord::from_bytes(bytes) {
+        let redecoded = VolumeIoStatsRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(rec) = VolumeIoQueueRecord::from_bytes(bytes) {
+        let redecoded = VolumeIoQueueRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+}
+
 /// The desktop frame-accounting decoders, split out so the sysinfo sweep above
 /// stays inside one screen.
 fn exercise_desktop_frame_records(bytes: &[u8]) {
@@ -473,6 +502,15 @@ fn exercise_display_ipc(bytes: &[u8]) {
         assert_eq!(request, redecoded);
     }
     let _ = decode_mode_reply(bytes);
+    let _ = decode_stats_reply(bytes);
+    // The statistics record is also a packed `GPU_DEVICE_STATS` record a
+    // monitor decodes straight out of a paged reply, so it is driven as a
+    // record in its own right and must round-trip once accepted.
+    if let Ok(stats) = DisplayStats::from_bytes(bytes) {
+        let redecoded = DisplayStats::from_bytes(&stats.to_le_bytes())
+            .expect("round-trip of accepted statistics must succeed");
+        assert_eq!(stats, redecoded);
+    }
 }
 
 /// Drive the font-service protocol decoders on `bytes` (one arm of
@@ -782,6 +820,7 @@ fn exercise(bytes: &[u8]) {
     exercise_service_control(bytes);
     exercise_users_admin(bytes);
     exercise_sysinfo_records(bytes);
+    exercise_device_stat_records(bytes);
     exercise_desktop_frame_records(bytes);
     exercise_seatmgr(bytes);
     exercise_display_ipc(bytes);

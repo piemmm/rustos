@@ -6,10 +6,17 @@
 //! `shm_create` region holding its frames, hands the service the
 //! endpoint-directed `shm_grant` handle once (`Configure`), and thereafter
 //! presents by **frame index** (`Present`) — no pixel bytes ever cross the
-//! IPC. Every request carries the seat id it acts for; the service gates
-//! each one (including `Query`) on the caller's live seat lease through
-//! the kernel's `call_peer_seat` oracle-free check, so only the seat owner
-//! can learn the mode, configure frames, or scan out.
+//! IPC. Every request that acts *for a seat* carries that seat's id, and the
+//! service gates each one (including `Query`) on the caller's live seat lease
+//! through the kernel's `call_peer_seat` oracle-free check, so only the seat
+//! owner can learn the mode, configure frames, or scan out.
+//!
+//! [`DisplayRequest::QueryStats`] is the one operation that acts for no seat:
+//! it describes the *device* this service drives, for the monitor that draws
+//! graphics utilisation. It is gated on the caller's kernel-attested
+//! `CAP_SYSINFO_HW` instead — a reader that holds no lease, and never will,
+//! must still be able to read hardware utilisation, and that is the authority
+//! the hardware inventory it details is already read under.
 //!
 //! A `Present` names a whole frame's damage in one call: it carries a
 //! [`DamageList`] of up to [`MAX_DAMAGE_RECTS`] rectangles inline, so a
@@ -22,12 +29,16 @@
 //! ([`crate::reply::encode_status_reply`] /
 //! [`crate::reply::decode_status_reply`]); `Query` answers with the
 //! [`DISPLAY_MODE_REPLY_LEN`]-byte mode reply ([`encode_mode_reply`] /
-//! [`decode_mode_reply`]). Every decode fails closed: an unknown magic,
+//! [`decode_mode_reply`]); `QueryStats` with the
+//! [`DISPLAY_STATS_REPLY_LEN`]-byte statistics reply ([`encode_stats_reply`] /
+//! [`decode_stats_reply`]). Every decode fails closed: an unknown magic,
 //! version, operation, format, an out-of-bounds frame count, an empty
 //! damage rectangle, or a dirty reserved field refuses rather than
 //! guessing.
 
-use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
+use crate::driver::display::{
+    AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::Errno;
 
@@ -61,9 +72,10 @@ pub const DISPLAY_MAX_REQUEST: usize = DisplayRequest::WIRE_LEN;
 
 /// One display-service operation (`plans/DISPLAY.md` D7b).
 ///
-/// Every variant names the seat it acts for; the service derives the
+/// Every variant that acts for a seat names it, and the service derives the
 /// right to perform it from the caller's **live lease** on that seat
-/// (`call_peer_seat`), never from a claimed handle.
+/// (`call_peer_seat`), never from a claimed handle. [`Self::QueryStats`] acts
+/// for no seat and carries its own authority.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DisplayRequest {
     /// Report the active mode of `seat_id`'s display.
@@ -93,6 +105,16 @@ pub enum DisplayRequest {
         /// Pixel encoding; must equal the active mode's.
         format: DisplayFormat,
     },
+    /// Report the device's own graphics statistics: how long it has been
+    /// driven, the memory it owns, what its compositor can do, and the mode
+    /// it scans out.
+    ///
+    /// The one operation that names **no seat**: it describes the device this
+    /// service drives, not an act on anybody's screen, so a monitor that
+    /// holds no lease can read it. Its authority is `CAP_SYSINFO_HW` — the
+    /// same the hardware inventory it details is read under — checked against
+    /// the caller's kernel-attested capabilities.
+    QueryStats,
     /// Scan out configured frame `frame_index`, of which only `damage`
     /// changed since the previously presented frame.
     Present {
@@ -177,6 +199,8 @@ const OP_QUERY: u16 = 1;
 const OP_CONFIGURE: u16 = 2;
 /// Wire operation discriminant of [`DisplayRequest::Present`].
 const OP_PRESENT: u16 = 3;
+/// Wire operation discriminant of [`DisplayRequest::QueryStats`].
+const OP_QUERY_STATS: u16 = 4;
 
 /// Offset of a `Present`'s first damage rectangle.
 const PRESENT_RECTS_AT: usize = 24;
@@ -220,6 +244,7 @@ impl DisplayRequest {
                 put_u32(&mut out, 36, stride_bytes);
                 out[40] = format.as_u8();
             }
+            Self::QueryStats => put_u16(&mut out, 6, OP_QUERY_STATS),
             Self::Present {
                 seat_id,
                 frame_index,
@@ -301,6 +326,13 @@ impl DisplayRequest {
                     stride_bytes,
                     format,
                 })
+            }
+            OP_QUERY_STATS => {
+                // The common seat slot is part of this operation's reserved
+                // tail: a stats read names no seat, so a seat smuggled into
+                // one is refused rather than ignored.
+                reserved_zero(bytes, 8)?;
+                Ok(Self::QueryStats)
             }
             OP_PRESENT => {
                 let frame_index = read_u32(bytes, 16);
@@ -425,15 +457,228 @@ pub fn decode_mode_reply(bytes: &[u8]) -> Result<DisplayMode, Errno> {
     })
 }
 
+/// A display device's own graphics statistics, as
+/// [`DisplayRequest::QueryStats`] answers them.
+///
+/// Composed of the two types that already define its parts — the driver's own
+/// [`DisplayDeviceReport`] and the [`DisplayMode`] it scans out — plus the
+/// service-measured occupancy, so no field here is a second spelling of one
+/// defined elsewhere.
+///
+/// `busy_ns` and `idle_ns` partition the window since the device was first
+/// driven: the same busy/idle vocabulary the CPU reading uses, so utilisation
+/// derives the same way and no new averaging convention appears. Both are
+/// cumulative and never reset, so a reader takes a two-sample delta over its
+/// own interval; a first sample therefore yields no utilisation, and a device
+/// nothing has presented to reports both as `0` rather than an idle share of a
+/// window that never opened.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DisplayStats {
+    /// The seat whose frames the device is currently configured for, or `0`
+    /// when nothing is configured. A fact about the device, not a key.
+    pub seat_id: u64,
+    /// Cumulative nanoseconds the device had a present in flight.
+    pub busy_ns: u64,
+    /// Cumulative nanoseconds it did not, over the same window.
+    pub idle_ns: u64,
+    /// What the driver reports about the device itself.
+    pub device: DisplayDeviceReport,
+    /// The mode being scanned out.
+    pub mode: DisplayMode,
+}
+
+/// Set in a statistics reply when the device has a hardware compositor, so
+/// the accelerated-capability fields carry a reading rather than a nought.
+const STATS_FLAG_ACCELERATED: u16 = 1 << 0;
+/// Set when that compositor can scale a whole layer by a constant opacity
+/// ([`AccelCaps::per_layer_opacity`]).
+const STATS_FLAG_PER_LAYER_OPACITY: u16 = 1 << 1;
+/// Every flag bit this ABI defines; any other set bit fails the decode
+/// closed rather than being ignored.
+const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED | STATS_FLAG_PER_LAYER_OPACITY;
+
+impl DisplayStats {
+    /// Encoded size on the wire, and the size of one packed
+    /// `GPU_DEVICE_STATS` record.
+    ///
+    /// Layout: `busy_ns` (8), `idle_ns` (8), `mem_resident_bytes` (8),
+    /// `mem_total_bytes` (8), `seat_id` (8), `max_layers` (4),
+    /// `max_width_px` (4), `max_height_px` (4), mode width (4), height (4),
+    /// stride (4), format (1), reserved (1), flags (2), reserved (4). Every
+    /// field is naturally aligned within the record and every reserved byte
+    /// must be zero on the wire.
+    pub const WIRE_LEN: usize = 72;
+
+    /// Byte offset of the accelerated-capability block.
+    const ACCEL_AT: usize = 40;
+    /// Byte offset of the mode block.
+    const MODE_AT: usize = 52;
+    /// Byte offset of the capability flags.
+    const FLAGS_AT: usize = 66;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        let mut flags = 0u16;
+        if let Some(caps) = self.device.accel {
+            flags |= STATS_FLAG_ACCELERATED;
+            if caps.per_layer_opacity {
+                flags |= STATS_FLAG_PER_LAYER_OPACITY;
+            }
+            put_u32(&mut out, Self::ACCEL_AT, caps.max_layers);
+            put_u32(&mut out, Self::ACCEL_AT + 4, caps.max_width_px);
+            put_u32(&mut out, Self::ACCEL_AT + 8, caps.max_height_px);
+        }
+        put_u16(&mut out, Self::FLAGS_AT, flags);
+        put_u64(&mut out, 0, self.busy_ns);
+        put_u64(&mut out, 8, self.idle_ns);
+        put_u64(&mut out, 16, self.device.mem_resident_bytes);
+        put_u64(&mut out, 24, self.device.mem_total_bytes);
+        put_u64(&mut out, 32, self.seat_id);
+        put_u32(&mut out, Self::MODE_AT, self.mode.width_px);
+        put_u32(&mut out, Self::MODE_AT + 4, self.mode.height_px);
+        put_u32(&mut out, Self::MODE_AT + 8, self.mode.stride_bytes);
+        out[Self::MODE_AT + 12] = self.mode.format.as_u8();
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// Every relation the producer must have honoured is re-checked here, so
+    /// a reader never renders a service's arithmetic: a device with no memory
+    /// of its own cannot claim resident bytes, an unaccelerated device cannot
+    /// carry compositor limits, and an accelerated one must be able to
+    /// composite at least one layer of at least one pixel.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than
+    ///   [`Self::WIRE_LEN`].
+    /// * [`Errno::OutOfRange`] — an unknown pixel format.
+    /// * [`Errno::BadMagic`] — an unknown flag bit or a dirty reserved field.
+    /// * [`Errno::LengthOutOfRange`] — a nonsensical mode (zero extent, or a
+    ///   stride too small for one scanline), resident bytes above the memory
+    ///   the device owns, or an accelerated-capability block that contradicts
+    ///   its flag.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let flags = read_u16(bytes, Self::FLAGS_AT);
+        if flags & !STATS_FLAGS_KNOWN != 0
+            || bytes[Self::MODE_AT + 13] != 0
+            || bytes[Self::FLAGS_AT + 2..Self::WIRE_LEN]
+                .iter()
+                .any(|&b| b != 0)
+        {
+            return Err(Errno::BadMagic);
+        }
+        let mem_resident_bytes = read_u64(bytes, 16);
+        let mem_total_bytes = read_u64(bytes, 24);
+        if mem_resident_bytes > mem_total_bytes {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let max_layers = read_u32(bytes, Self::ACCEL_AT);
+        let max_width_px = read_u32(bytes, Self::ACCEL_AT + 4);
+        let max_height_px = read_u32(bytes, Self::ACCEL_AT + 8);
+        let accel = if flags & STATS_FLAG_ACCELERATED != 0 {
+            if max_layers == 0 || max_width_px == 0 || max_height_px == 0 {
+                return Err(Errno::LengthOutOfRange);
+            }
+            Some(AccelCaps {
+                max_layers,
+                max_width_px,
+                max_height_px,
+                per_layer_opacity: flags & STATS_FLAG_PER_LAYER_OPACITY != 0,
+            })
+        } else {
+            if max_layers != 0
+                || max_width_px != 0
+                || max_height_px != 0
+                || flags & STATS_FLAG_PER_LAYER_OPACITY != 0
+            {
+                return Err(Errno::LengthOutOfRange);
+            }
+            None
+        };
+        let format = DisplayFormat::from_u8(bytes[Self::MODE_AT + 12])?;
+        let mode = DisplayMode {
+            width_px: read_u32(bytes, Self::MODE_AT),
+            height_px: read_u32(bytes, Self::MODE_AT + 4),
+            stride_bytes: read_u32(bytes, Self::MODE_AT + 8),
+            format,
+        };
+        if mode.width_px == 0
+            || mode.height_px == 0
+            || u64::from(mode.stride_bytes)
+                < u64::from(mode.width_px) * u64::from(format.bytes_per_pixel())
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self {
+            seat_id: read_u64(bytes, 32),
+            busy_ns: read_u64(bytes, 0),
+            idle_ns: read_u64(bytes, 8),
+            device: DisplayDeviceReport {
+                mem_resident_bytes,
+                mem_total_bytes,
+                accel,
+            },
+            mode,
+        })
+    }
+}
+
+/// Reply length, in bytes, of a `QueryStats`: the status word followed by one
+/// [`DisplayStats`] record.
+pub const DISPLAY_STATS_REPLY_LEN: usize = 4 + DisplayStats::WIRE_LEN;
+
+/// Encode a `QueryStats` outcome: the status word plus the statistics record
+/// on success, the status frame zero-padded to the same length on refusal, so
+/// a client always issues one fixed-size receive.
+#[must_use]
+pub fn encode_stats_reply(result: Result<DisplayStats, Errno>) -> [u8; DISPLAY_STATS_REPLY_LEN] {
+    let mut out = [0u8; DISPLAY_STATS_REPLY_LEN];
+    out[..4].copy_from_slice(&crate::reply::encode_status_reply(result.map(|_| ())));
+    if let Ok(stats) = result {
+        out[4..].copy_from_slice(&stats.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a `QueryStats` reply frame.
+///
+/// # Errors
+///
+/// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
+/// * [`Errno::OutOfRange`] — a corrupt status word.
+/// * The decoded [`Errno`] itself, when the service refused the read.
+/// * Everything [`DisplayStats::from_bytes`] can return.
+pub fn decode_stats_reply(bytes: &[u8]) -> Result<DisplayStats, Errno> {
+    if bytes.len() < DISPLAY_STATS_REPLY_LEN {
+        return Err(Errno::BufferTooSmall);
+    }
+    crate::reply::decode_status_reply(&bytes[..4])?;
+    DisplayStats::from_bytes(&bytes[4..DISPLAY_STATS_REPLY_LEN])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_mode_reply, encode_mode_reply, DamageList, DisplayRequest, DAMAGE_RECT_LEN,
-        DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN, DISPLAY_REQUEST_MAGIC, NO_RECT,
-        PRESENT_RECTS_AT,
+        decode_mode_reply, decode_stats_reply, encode_mode_reply, encode_stats_reply, DamageList,
+        DisplayRequest, DisplayStats, DAMAGE_RECT_LEN, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
+        DISPLAY_REQUEST_MAGIC, DISPLAY_STATS_REPLY_LEN, NO_RECT, PRESENT_RECTS_AT,
     };
-    use crate::driver::display::{DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS};
+    use crate::driver::display::{
+        AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+    };
     use crate::Errno;
+
+    /// Byte offset of the statistics record inside its reply frame: the
+    /// status word precedes it, so a test that dirties a record field aims
+    /// past that word.
+    const STATS_BODY_AT: usize = 4;
 
     /// The bound as a `u32`, for the tests that count rectangles.
     fn max_rects() -> u32 {
@@ -739,6 +984,135 @@ mod tests {
         thin_stride[12..16].copy_from_slice(&2559u32.to_le_bytes());
         assert_eq!(
             decode_mode_reply(&thin_stride),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+    /// The mode every statistics test reports, so a decode failure is always
+    /// about the field the test dirtied.
+    fn stats_mode() -> DisplayMode {
+        DisplayMode {
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        }
+    }
+
+    /// An accelerated device with memory of its own: every optional part of
+    /// the reply populated, so a round trip exercises all of them.
+    fn accelerated_stats() -> DisplayStats {
+        DisplayStats {
+            seat_id: 3,
+            busy_ns: 4_000_000,
+            idle_ns: 96_000_000,
+            device: DisplayDeviceReport {
+                mem_resident_bytes: 8 << 20,
+                mem_total_bytes: 256 << 20,
+                accel: Some(AccelCaps {
+                    max_layers: 6,
+                    max_width_px: 1920,
+                    max_height_px: 1080,
+                    per_layer_opacity: true,
+                }),
+            },
+            mode: stats_mode(),
+        }
+    }
+
+    #[test]
+    fn query_stats_round_trips_and_names_no_seat() {
+        let encoded = DisplayRequest::QueryStats.to_le_bytes();
+        assert_eq!(
+            DisplayRequest::from_bytes(&encoded),
+            Ok(DisplayRequest::QueryStats)
+        );
+        // The common seat slot is this operation's reserved tail: a seat
+        // smuggled into a stats read is refused, never ignored.
+        let mut with_seat = encoded;
+        with_seat[8] = 1;
+        assert_eq!(DisplayRequest::from_bytes(&with_seat), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn stats_reply_round_trips_both_device_shapes() {
+        let accelerated = accelerated_stats();
+        assert_eq!(
+            decode_stats_reply(&encode_stats_reply(Ok(accelerated))),
+            Ok(accelerated)
+        );
+        // A firmware framebuffer: no memory of its own, no hardware
+        // compositor. `mem_total_bytes == 0` is the statement "none of its
+        // own", and it round trips as `accel: None` rather than as zeroed
+        // capabilities.
+        let software = DisplayStats {
+            seat_id: 0,
+            busy_ns: 0,
+            idle_ns: 0,
+            device: DisplayDeviceReport::SOFTWARE,
+            mode: stats_mode(),
+        };
+        let decoded = decode_stats_reply(&encode_stats_reply(Ok(software)));
+        assert_eq!(decoded, Ok(software));
+        assert!(decoded.expect("decoded").device.accel.is_none());
+    }
+
+    #[test]
+    fn stats_reply_carries_a_refusal_at_full_length() {
+        let refused = encode_stats_reply(Err(Errno::PermissionDenied));
+        assert_eq!(refused.len(), DISPLAY_STATS_REPLY_LEN);
+        assert_eq!(decode_stats_reply(&refused), Err(Errno::PermissionDenied));
+    }
+
+    #[test]
+    fn stats_reply_decode_fails_closed() {
+        let good = encode_stats_reply(Ok(accelerated_stats()));
+
+        assert_eq!(
+            decode_stats_reply(&good[..DISPLAY_STATS_REPLY_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A corrupt (positive) status word.
+        let mut bad_status = good;
+        bad_status[0] = 1;
+        assert_eq!(decode_stats_reply(&bad_status), Err(Errno::OutOfRange));
+        // An undefined flag bit.
+        let mut unknown_flag = good;
+        unknown_flag[STATS_BODY_AT + 66] |= 1 << 4;
+        assert_eq!(decode_stats_reply(&unknown_flag), Err(Errno::BadMagic));
+        // A dirty reserved word, and a dirty reserved tail.
+        let mut dirty_word = good;
+        dirty_word[STATS_BODY_AT + 65] = 1;
+        assert_eq!(decode_stats_reply(&dirty_word), Err(Errno::BadMagic));
+        let mut dirty_tail = good;
+        dirty_tail[DISPLAY_STATS_REPLY_LEN - 1] = 1;
+        assert_eq!(decode_stats_reply(&dirty_tail), Err(Errno::BadMagic));
+        // More resident than the device owns.
+        let mut over_resident = good;
+        over_resident[STATS_BODY_AT + 16..STATS_BODY_AT + 24]
+            .copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            decode_stats_reply(&over_resident),
+            Err(Errno::LengthOutOfRange)
+        );
+        // Compositor limits on a device whose flag says it has none.
+        let mut unflagged_caps = good;
+        unflagged_caps[STATS_BODY_AT + 66] = 0;
+        assert_eq!(
+            decode_stats_reply(&unflagged_caps),
+            Err(Errno::LengthOutOfRange)
+        );
+        // An accelerated device that can composite no layer.
+        let mut no_layers = good;
+        no_layers[STATS_BODY_AT + 40..STATS_BODY_AT + 44].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(decode_stats_reply(&no_layers), Err(Errno::LengthOutOfRange));
+        // An unknown format byte, and a nonsensical mode.
+        let mut bad_format = good;
+        bad_format[STATS_BODY_AT + 64] = 9;
+        assert_eq!(decode_stats_reply(&bad_format), Err(Errno::OutOfRange));
+        let mut thin_stride = good;
+        thin_stride[STATS_BODY_AT + 60..STATS_BODY_AT + 64].copy_from_slice(&2559u32.to_le_bytes());
+        assert_eq!(
+            decode_stats_reply(&thin_stride),
             Err(Errno::LengthOutOfRange)
         );
     }

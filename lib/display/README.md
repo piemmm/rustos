@@ -8,10 +8,13 @@ shared by both ends of the `DISPLAY_ENDPOINT` rendezvous, so the server
 and the client can never drift apart.
 
 - **Server** (`DisplayServer`): the engine a display driver's `Run`
-  binary hosts. It decodes each fixed-width `DisplayRequest`, gates it —
-  `Query` included — on the caller's **live seat lease** through the
-  injected `SeatCheck` seam (the kernel's `call_peer_seat`, an
-  oracle-free fact about the in-flight caller), maps the client's
+  binary hosts. It decodes each fixed-width `DisplayRequest`, gates each
+  request that acts for a seat — `Query` included — on the caller's **live
+  seat lease** through the injected `PeerFacts` seam (the kernel's
+  `call_peer_seat`, an oracle-free fact about the in-flight caller), and
+  gates the seatless `QueryStats` device read on that same seam's
+  capability question (`CAP_SYSINFO_HW`, since a monitor holds no lease).
+  It maps the client's
   endpoint-directed `shm_grant` region **once** at `Configure` through
   the injected `ShmMapper` seam, and scans out on `Present` by frame
   index through the `Display` trait — damage-aware via

@@ -7,16 +7,18 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::raid::{ArrayHealth, RaidLevel};
 use tairix_abi::raid_admin::{
     RaidArrayRecord, RaidMemberDisposition, RaidMemberRecord, RAID_SLOT_NONE,
 };
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
-    KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats, ReclaimClassRecord,
-    ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest,
-    VolumeIoStatsRecord, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
+    DeviceStatsRequest, KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats,
+    ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord,
+    SysinfoQueryId, SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoRequest, VolumeIoStatsRecord, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT,
+    RECLAIM_CLASS_NAMES,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, LimitKind};
@@ -359,7 +361,86 @@ fn run_memory(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinfo
 /// are `lspci`'s and `lsusb`'s job.
 fn run_hardware(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     let nodes = fetch_tree(transport).map_err(SysinfoError::from)?;
-    emit(out, &format!("hardware tree: {} nodes", nodes.len()))
+    emit(out, &format!("hardware tree: {} nodes", nodes.len()))?;
+    run_graphics_devices(transport, out)
+}
+
+/// Fetch and render the per-graphics-device statistics the display service
+/// measured, one aligned row per device: the mode it scans out, the share of
+/// its window it was busy, the memory it owns, and what its compositor can
+/// composite.
+///
+/// Rendered under `hardware` because it details a node that inventory already
+/// names, and is read under the same `CAP_SYSINFO_HW` authority. A device with
+/// no memory of its own reads `none`, which is a different statement from
+/// `0 B` free; one with no hardware compositor reads `software`.
+fn run_graphics_devices(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "graphics device   scan-out              busy%   vram-used     vram      layers",
+    )?;
+    let mut offset: u32 = 0;
+    loop {
+        let request = DeviceStatsRequest {
+            offset,
+            limit: DEVICE_PAGE,
+            flags: 0,
+        };
+        let reply = service_call(
+            transport,
+            SysinfoQueryId::GPU_DEVICE_STATS,
+            &request.to_le_bytes(),
+        )?;
+        if reply.len() % DisplayStats::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / DisplayStats::WIRE_LEN;
+        for chunk in reply.as_chunks::<{ DisplayStats::WIRE_LEN }>().0 {
+            let stats = DisplayStats::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            emit(out, &graphics_row(&stats))?;
+        }
+        if records < usize::from(DEVICE_PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(DEVICE_PAGE));
+    }
+}
+
+/// One graphics device's row.
+///
+/// The busy share is a whole percent of the window the two counters
+/// partition; a device whose window has not advanced has no share to state
+/// rather than a nought that would read as an idle device.
+fn graphics_row(stats: &DisplayStats) -> String {
+    let window = stats.busy_ns.saturating_add(stats.idle_ns);
+    let busy = stats
+        .busy_ns
+        .saturating_mul(100)
+        .checked_div(window)
+        .map_or_else(|| String::from("-"), |share| format!("{share}%"));
+    let (used, total) = if stats.device.mem_total_bytes == 0 {
+        (String::from("-"), String::from("none"))
+    } else {
+        (
+            format!("{}", stats.device.mem_resident_bytes),
+            format!("{}", stats.device.mem_total_bytes),
+        )
+    };
+    let layers = stats.device.accel.map_or_else(
+        || String::from("software"),
+        |caps| format!("{}", caps.max_layers),
+    );
+    format!(
+        "seat {:<11}  {:>4}x{:<4} {:<7}  {:>5}  {:>10}  {:>9}  {:>6}",
+        stats.seat_id,
+        stats.mode.width_px,
+        stats.mode.height_px,
+        stats.mode.format.name(),
+        busy,
+        used,
+        total,
+        layers,
+    )
 }
 
 /// Fetch and render the machine identity.
@@ -881,6 +962,11 @@ fn availability_name(availability: MountAvailability) -> &'static str {
 /// bounding how many volumes may be mounted.
 const VOLUME_PAGE: u16 = 64;
 
+/// Records one page of the per-device statistics read asks for. A machine has
+/// far fewer graphics devices than volumes, so one page always suffices in
+/// practice while the loop stays paged.
+const DEVICE_PAGE: u16 = 8;
+
 /// Fetch and render the per-volume storage report: the cumulative service
 /// counters every user may read, then the queue occupancy and the folded
 /// outcome counters the kernel scope gates.
@@ -1209,6 +1295,8 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
     use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
+    use tairix_abi::display_ipc::DisplayStats;
+    use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::raid::{ArrayHealth, RaidLevel};
     use tairix_abi::raid_admin::{
@@ -1280,6 +1368,47 @@ mod tests {
         out: &dyn Output,
     ) -> Result<(), SysinfoError> {
         engine_run(command, None, NOW, transport, &NoHelp, out)
+    }
+
+    /// Two graphics devices a display service would report: an accelerated
+    /// one with memory of its own, and a firmware framebuffer with neither —
+    /// so both spellings of the memory and layer columns are covered.
+    fn fixture_graphics_devices() -> Vec<DisplayStats> {
+        alloc::vec![
+            DisplayStats {
+                seat_id: 1,
+                busy_ns: 250_000_000,
+                idle_ns: 750_000_000,
+                device: DisplayDeviceReport {
+                    mem_resident_bytes: 8 << 20,
+                    mem_total_bytes: 256 << 20,
+                    accel: Some(AccelCaps {
+                        max_layers: 4,
+                        max_width_px: 1920,
+                        max_height_px: 1080,
+                        per_layer_opacity: true,
+                    }),
+                },
+                mode: DisplayMode {
+                    width_px: 1920,
+                    height_px: 1080,
+                    stride_bytes: 7680,
+                    format: DisplayFormat::Bgra8888,
+                },
+            },
+            DisplayStats {
+                seat_id: 0,
+                busy_ns: 0,
+                idle_ns: 0,
+                device: DisplayDeviceReport::SOFTWARE,
+                mode: DisplayMode {
+                    width_px: 800,
+                    height_px: 600,
+                    stride_bytes: 3200,
+                    format: DisplayFormat::Rgba8888,
+                },
+            },
+        ]
     }
 
     /// Two arrays the composer would report: an idle mirror and a parity
@@ -1663,6 +1792,10 @@ mod tests {
                     )],
                     |record| record.to_le_bytes().to_vec(),
                 )
+            } else if header.query == SysinfoQueryId::GPU_DEVICE_STATS {
+                page(payload, &fixture_graphics_devices(), |record| {
+                    record.to_le_bytes().to_vec()
+                })
             } else if header.query == SysinfoQueryId::RAID_ARRAYS {
                 page(payload, &fixture_arrays(), |record| {
                     record.to_le_bytes().to_vec()
@@ -2293,7 +2426,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_reports_the_node_count() {
+    fn hardware_reports_the_node_count_and_each_graphics_device() {
         let nodes = [
             HwNode::new(0, HW_NODE_ROOT, HwDeviceClass::Root),
             HwNode::new(1, 0, HwDeviceClass::Serial),
@@ -2307,10 +2440,21 @@ mod tests {
         }
         let out = Recorder::new();
         assert_eq!(run(Command::Hardware, &fixture, &out), Ok(()));
-        assert_eq!(
-            out.lines(),
-            alloc::vec!["hardware tree: 2 nodes".to_string()]
-        );
+        let lines = out.lines();
+        assert_eq!(lines[0], "hardware tree: 2 nodes");
+        assert!(lines[1].starts_with("graphics device"));
+        // The accelerated device: a quarter of its window busy, its own
+        // memory, and the layers its compositor can source.
+        assert!(lines[2].contains("1920x1080"));
+        assert!(lines[2].contains("BGRA8888"));
+        assert!(lines[2].contains("25%"));
+        assert!(lines[2].contains("268435456"));
+        assert!(lines[2].ends_with('4'));
+        // The framebuffer: no window measured yet, no memory of its own, and
+        // no hardware compositor — each stated rather than shown as a nought.
+        assert!(lines[3].contains("none"));
+        assert!(lines[3].ends_with("software"));
+        assert_eq!(lines.len(), 4);
     }
 
     #[test]

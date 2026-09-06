@@ -7,8 +7,12 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
+use tairix_abi::display_ipc::DisplayStats;
+use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
+use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, KernelMemoryStats, MountAvailability, MountRecord,
     MountVolumeState, VolumeIoQueueRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
@@ -115,6 +119,46 @@ fn iface(name: &str) -> NetInterfaceFactsRecord {
         kind: NetIfKind::Ethernet,
         offloads: 0,
         rx_queues: 1,
+    }
+}
+
+/// The board's own frame: 3,200 damaged pixels of a 2.07 M screen, resolved
+/// by blending 4.2 M layer contributions.
+fn frame_report() -> FrameReport {
+    FrameReport {
+        screen_px: 2_073_600,
+        damaged_px: 3_200,
+        blended_px: 4_203_904,
+        opaque_px: 1_842_110,
+        dirty_rects: 7,
+        present_calls: 1,
+        chrome_hits: 124,
+        chrome_misses: 2,
+    }
+}
+
+/// One accelerated graphics device with memory of its own.
+fn graphics_device() -> DisplayStats {
+    DisplayStats {
+        seat_id: 1,
+        busy_ns: 250_000_000,
+        idle_ns: 750_000_000,
+        device: DisplayDeviceReport {
+            mem_resident_bytes: 8 << 20,
+            mem_total_bytes: 256 << 20,
+            accel: Some(AccelCaps {
+                max_layers: 4,
+                max_width_px: 1_920,
+                max_height_px: 1_080,
+                per_layer_opacity: true,
+            }),
+        },
+        mode: DisplayMode {
+            width_px: 1_920,
+            height_px: 1_080,
+            stride_bytes: 7_680,
+            format: DisplayFormat::Bgra8888,
+        },
     }
 }
 
@@ -535,6 +579,62 @@ fn a_sample_with_no_counters_breaks_the_series_rather_than_deltaing_over_the_gap
 }
 
 #[test]
+fn the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap() {
+    // `busy_ns` is cumulative since the display service started, so the share
+    // must be a delta over the sample's own interval. A cycle the query could
+    // not answer makes the next one a first sample again, rather than
+    // reporting a whole service lifetime's occupancy as this interval's.
+    let mut meters = RollingMeters::new();
+    let graphics = |busy_ns: u64, elapsed_ns: Option<u64>, present: bool| Sample {
+        hardware: Some(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )]),
+        gpu_stats: present.then(|| {
+            alloc::vec![DisplayStats {
+                busy_ns,
+                ..graphics_device()
+            }]
+        }),
+        elapsed_ns,
+        ..permitted()
+    };
+    let step = |meters: &mut RollingMeters, sample: &Sample| {
+        build_resource_report(sample, meters, &SessionReport::HEALTHY, &NoAuthority)
+    };
+
+    let _ = step(&mut meters, &graphics(1_000_000_000, None, true));
+    // A quarter of a one-second interval spent busy.
+    let report = step(
+        &mut meters,
+        &graphics(1_250_000_000, Some(1_000_000_000), true),
+    );
+    assert_eq!(
+        fact(device(&report, DeviceId::Graphics), "Device utilisation"),
+        &Reading::measured("25%")
+    );
+
+    // The query does not answer, then answers a far larger total: the share
+    // must be absent both times rather than deltaing over the gap.
+    let report = step(&mut meters, &graphics(0, Some(1_000_000_000), false));
+    assert_eq!(
+        fact(device(&report, DeviceId::Graphics), "Device utilisation"),
+        &Reading::Absent(Unmeasured::Unavailable),
+        "permitted but unanswered: a fault to show, not a refusal"
+    );
+    let report = step(
+        &mut meters,
+        &graphics(9_000_000_000, Some(1_000_000_000), true),
+    );
+    assert_eq!(
+        fact(device(&report, DeviceId::Graphics), "Device utilisation"),
+        &Reading::Absent(Unmeasured::Unavailable),
+        "the sample after an absent one is a first sample again"
+    );
+}
+
+#[test]
 fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
     // Two samples give the volume a rate. It is then unmounted, and the same
     // id returns: its first sample after the return must again yield no rate,
@@ -650,6 +750,121 @@ fn the_graphics_pane_reads_absent_until_the_session_reports_a_frame() {
     assert_eq!(
         graphics.hero.value,
         Reading::Absent(Unmeasured::Unavailable)
+    );
+}
+
+#[test]
+fn the_graphics_rail_entry_reads_the_frames_damage_not_the_hero_figure() {
+    // The board's `Compositor 3.2k px` is the damage; the hero's 4.2 M is the
+    // contributions blended to resolve it. Showing the hero's figure in the
+    // rail would state one reading twice, two magnitudes apart.
+    let mut meters = RollingMeters::new();
+    let session = SessionReport {
+        frame: Some(frame_report()),
+        ..SessionReport::HEALTHY
+    };
+    let report = build_resource_report(&permitted(), &mut meters, &session, &NoAuthority);
+    let graphics = device(&report, DeviceId::Graphics);
+    assert_eq!(graphics.reading, Reading::measured("3.2k px"));
+    assert_eq!(graphics.hero.value, Reading::measured("4.2M px"));
+    // And the trace now has a series behind it: the frame's damage as a
+    // permille of its own screen.
+    assert_eq!(graphics.trend, alloc::vec![1]);
+}
+
+#[test]
+fn the_graphics_pane_publishes_the_devices_own_capability_and_memory() {
+    let sample = Sample {
+        hardware: Some(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )]),
+        gpu_stats: Some(alloc::vec![graphics_device()]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let graphics = device(&report, DeviceId::Graphics);
+    assert_eq!(
+        fact(graphics, "Max hardware layers"),
+        &Reading::measured("4")
+    );
+    assert_eq!(
+        fact(graphics, "Per-layer opacity"),
+        &Reading::measured("yes")
+    );
+    assert_eq!(
+        fact(graphics, "Scan-out"),
+        &Reading::measured("1920×1080 · BGRA8888")
+    );
+    assert_eq!(
+        fact(graphics, "Video memory"),
+        &Reading::measured("8.0 MiB of 256.0 MiB")
+    );
+    // A first sample has no interval to divide the cumulative busy time by,
+    // so the utilisation is absent rather than a service lifetime's average
+    // dressed as this moment.
+    assert_eq!(
+        fact(graphics, "Device utilisation"),
+        &Reading::Absent(Unmeasured::Unavailable)
+    );
+    // A per-engine split still has no producer, and says so.
+    assert_eq!(
+        fact(graphics, "Decode / encode engines"),
+        &Reading::Absent(Unmeasured::NoInterface)
+    );
+}
+
+#[test]
+fn a_device_with_no_memory_of_its_own_says_so_rather_than_reading_zero() {
+    let sample = Sample {
+        hardware: Some(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )]),
+        gpu_stats: Some(alloc::vec![DisplayStats {
+            seat_id: 0,
+            busy_ns: 0,
+            idle_ns: 0,
+            device: DisplayDeviceReport::SOFTWARE,
+            mode: DisplayMode {
+                width_px: 800,
+                height_px: 600,
+                stride_bytes: 3_200,
+                format: DisplayFormat::Bgra8888,
+            },
+        }]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let graphics = device(&report, DeviceId::Graphics);
+    assert_eq!(
+        fact(graphics, "Video memory"),
+        &Reading::measured("none of its own · scans out of system RAM")
+    );
+    assert_eq!(
+        fact(graphics, "Accelerated layers"),
+        &Reading::measured("none · the device has no hardware compositor")
+    );
+}
+
+#[test]
+fn a_withheld_hardware_scope_marks_the_graphics_device_not_permitted() {
+    let refused = Sample {
+        hardware: None,
+        scopes: ScopeVerdicts {
+            global_process_scope: true,
+            memory_pressure: true,
+            hardware_scope: false,
+        },
+        ..Sample::default()
+    };
+    let report = report_of(&refused);
+    let graphics = device(&report, DeviceId::Graphics);
+    assert_eq!(
+        fact(graphics, "Accelerated layers"),
+        &Reading::Absent(Unmeasured::NotPermitted)
     );
 }
 

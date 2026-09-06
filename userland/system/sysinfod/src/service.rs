@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -13,12 +14,12 @@ use tairix_abi::sysinfo::{
     fold_cache_ledgers, spec_for, CacheLedgerListRequest, CacheLedgerRecord, CacheReportRequest,
     CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CpuTimeListRequest,
     CpuTimeRecord, CrashRecord, CrashRecordRequest, DesktopFrameRecord, DesktopFrameStatsRequest,
-    DesktopFrameTotals, HardwareTreeRequest, IrqListRequest, IrqRecord, MountListRequest,
-    MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest,
-    ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
-    SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord,
-    UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest,
-    VolumeIoStatsRecord,
+    DesktopFrameTotals, DeviceStatsRequest, HardwareTreeRequest, IrqListRequest, IrqRecord,
+    MountListRequest, MountRecord, NetInterfaceListRequest, NetInterfaceRatesRequest,
+    ProcessListRequest, ProcessRecord, RaidListRequest, ReclaimClassRecord, ReclaimListRequest,
+    ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader,
+    UserDirectoryRecord, UserDirectoryRequest, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoRequest, VolumeIoStatsRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -246,6 +247,8 @@ fn dispatch(
         raid_array_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::RAID_MEMBERS {
         raid_member_list(source, caller, payload, response)
+    } else if query == SysinfoQueryId::GPU_DEVICE_STATS {
+        gpu_device_stats_list(source, caller, payload, response)
     } else if query == SysinfoQueryId::PROCESS_IDENTITY {
         // The answer is the caller's own kernel-attested origin, which the
         // dispatcher already holds: it is the attested principal, not state a
@@ -780,6 +783,26 @@ fn volume_io_queue_list(
     )
 }
 
+/// Decode the [`DeviceStatsRequest`], apply paging, and pack the selected
+/// [`DisplayStats`] records into `response`.
+fn gpu_device_stats_list(
+    source: &dyn SysinfoSource,
+    caller: &Caller,
+    payload: &[u8],
+    response: &mut [u8],
+) -> Result<usize, Errno> {
+    let request = DeviceStatsRequest::from_bytes(payload)?;
+    let records = source.gpu_device_stats(caller)?;
+    page_records(
+        response,
+        request.offset as usize,
+        request.limit as usize,
+        records.len(),
+        DisplayStats::WIRE_LEN,
+        |index, slot| slot.copy_from_slice(&records[index].to_le_bytes()),
+    )
+}
+
 /// Decode the [`RaidListRequest`], apply paging, and pack the selected
 /// [`RaidArrayRecord`]s into `response`.
 fn raid_array_list(
@@ -969,6 +992,8 @@ mod tests {
     use crate::testing::{kernel_caller, user_caller};
     use core::cell::RefCell;
     use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
+    use tairix_abi::display_ipc::DisplayStats;
+    use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
@@ -997,7 +1022,9 @@ mod tests {
         SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
         SYSINFO_VERSION_CURRENT,
     };
-    use tairix_abi::sysinfo::{NetInterfaceListRequest, NetInterfaceRatesRequest};
+    use tairix_abi::sysinfo::{
+        DeviceStatsRequest, NetInterfaceListRequest, NetInterfaceRatesRequest,
+    };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{
         CapabilityId, Errno, LimitKind, Origin, ProcId, ResourceLimit, SchedPriority, TrustDomain,
@@ -1593,6 +1620,46 @@ mod tests {
                     BlkQueueCounters::default(),
                     BlkDeviceClass::Rotational.budget(),
                 ),
+            ])
+        }
+        fn gpu_device_stats(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<DisplayStats>, Errno> {
+            Ok(alloc::vec![
+                DisplayStats {
+                    seat_id: 1,
+                    busy_ns: 250_000_000,
+                    idle_ns: 9_750_000_000,
+                    device: DisplayDeviceReport {
+                        mem_resident_bytes: 8 << 20,
+                        mem_total_bytes: 256 << 20,
+                        accel: Some(AccelCaps {
+                            max_layers: 4,
+                            max_width_px: 1920,
+                            max_height_px: 1080,
+                            per_layer_opacity: true,
+                        }),
+                    },
+                    mode: DisplayMode {
+                        width_px: 1920,
+                        height_px: 1080,
+                        stride_bytes: 7680,
+                        format: DisplayFormat::Bgra8888,
+                    },
+                },
+                DisplayStats {
+                    seat_id: 0,
+                    busy_ns: 0,
+                    idle_ns: 0,
+                    device: DisplayDeviceReport::SOFTWARE,
+                    mode: DisplayMode {
+                        width_px: 800,
+                        height_px: 600,
+                        stride_bytes: 3200,
+                        format: DisplayFormat::Bgra8888,
+                    },
+                },
             ])
         }
         fn raid_arrays(&self, _caller: &Caller) -> Result<alloc::vec::Vec<RaidArrayRecord>, Errno> {
@@ -2959,6 +3026,73 @@ mod tests {
             flags: 0,
         };
         let req_end = request_bytes(SysinfoQueryId::VOLUME_IO_QUEUE, &end.to_le_bytes());
+        assert_eq!(
+            serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn gpu_device_stats_is_gated_on_hw_audited_and_pages() {
+        // The served record is `Debug` (below the default `Info` filter),
+        // so widen the global filter to observe it.
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let sink = RecordingSink::new();
+        let request = DeviceStatsRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+        };
+        let req = request_bytes(SysinfoQueryId::GPU_DEVICE_STATS, &request.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        // Denied without `CAP_SYSINFO_HW`: a graphics device's occupancy and
+        // memory detail a node the hardware inventory names, so they are read
+        // under the inventory's own authority — not the kernel-state one.
+        let denied = Caps(&[CapabilityId::SYSINFO_KERNEL]);
+        assert_eq!(
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        // Served (and audited) for a holder: both devices, the accelerated
+        // one publishing its compositor's limits and the framebuffer stating
+        // it has none rather than zeroed capabilities.
+        let granted = Caps(&[CapabilityId::SYSINFO_HW]);
+        let sink = RecordingSink::new();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, 2 * DisplayStats::WIRE_LEN);
+        let first =
+            DisplayStats::from_bytes(&resp[..DisplayStats::WIRE_LEN]).expect("decode first");
+        let second =
+            DisplayStats::from_bytes(&resp[DisplayStats::WIRE_LEN..n]).expect("decode second");
+        assert_eq!(first.busy_ns, 250_000_000);
+        assert_eq!(first.device.mem_total_bytes, 256 << 20);
+        assert_eq!(
+            first.device.accel.expect("accelerated").max_layers,
+            4,
+            "the driver's own capability report reaches the reader"
+        );
+        assert_eq!(first.mode.width_px, 1920);
+        assert!(second.device.accel.is_none());
+        assert_eq!(second.device.mem_total_bytes, 0, "no memory of its own");
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+
+        // Paging past the last device returns the empty terminator.
+        let end = DeviceStatsRequest {
+            offset: 2,
+            limit: 8,
+            flags: 0,
+        };
+        let req_end = request_bytes(SysinfoQueryId::GPU_DEVICE_STATS, &end.to_le_bytes());
         assert_eq!(
             serve_once(&source, &caller(&granted), &sink, &req_end, &mut resp),
             Ok(0)

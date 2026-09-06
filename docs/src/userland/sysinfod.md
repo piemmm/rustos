@@ -81,6 +81,7 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `NET_TIME_SERVERS`       | none                 | no      | packed `NetServerAddr`s             |
 | `VOLUME_IO_STATS`        | none                 | no      | packed `VolumeIoStatsRecord`s       |
 | `VOLUME_IO_QUEUE`        | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoQueueRecord`s       |
+| `GPU_DEVICE_STATS`       | `CAP_SYSINFO_HW`     | yes     | packed `DisplayStats` records       |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -113,6 +114,20 @@ health, member tallies, geometry, endpoint, published node, scrub/resync
 cursors, generation — and `RAID_MEMBERS` one `RaidMemberRecord` per
 device the composer holds, including the unaffiliated candidates a new
 array can be built from. Both page with a `RaidListRequest`.
+
+`GPU_DEVICE_STATS` is gated the same way and for the same reason: it
+details a graphics node `HARDWARE_TREE` already names. The broker forwards
+to the display service over the reserved `DISPLAY_ENDPOINT`, whose
+`QueryStats` operation acts for no seat and is itself gated on the
+*caller's* kernel-attested `CAP_SYSINFO_HW` — a monitor holds no seat
+lease and never will, so a lease would be the wrong question about a
+device read. A machine with no display service fails closed with the
+transport's typed error rather than reporting an empty list: "none" would
+be a claim about the hardware, and the hardware tree is what answers that.
+The reply carries the occupancy the service measured around its own
+present calls, the memory its driver reports the device owns, the
+compositor capabilities that driver publishes, and the mode being scanned
+out; the record pages with a `DeviceStatsRequest`.
 
 ## Reported cache ledgers
 
