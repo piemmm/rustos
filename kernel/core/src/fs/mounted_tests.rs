@@ -15,7 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU8;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs as _, FilesystemRead, FilesystemWrite, MountFlags, NodeKind, NodeSecurity,
 };
@@ -31,7 +31,7 @@ use tairix_kernel_sec::{
 use tairix_log::{Event, Sink};
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
-use crate::fs::blkclient::{BlkHealthCountersAtomic, VolumeHealthSource};
+use crate::fs::blkclient::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
@@ -1231,21 +1231,27 @@ fn mount_snapshot_overlays_reported_block_health() {
     // With no health source the volume reads plainly available.
     assert_eq!(vol_availability(&svc), MountAvailability::Available);
 
-    // With no health source the volume-health query lists no device.
+    // With no I/O source the three per-volume queries list no device.
     assert!(svc.volume_io_health_snapshot().is_empty());
+    assert!(svc.volume_io_stats_snapshot().is_empty());
+    assert!(svc.volume_io_queue_snapshot().is_empty());
 
     // A live block-health overlay reporting a blip surfaces as recovering.
     let availability = Arc::new(AtomicU8::new(MountAvailability::Recovering.as_u8()));
     let counters = Arc::new(BlkHealthCountersAtomic::default());
-    cell.set_health_source(
+    let stats = Arc::new(BlkIoStatsAtomic::default());
+    let budget = BlkDeviceClass::Rotational.budget();
+    cell.set_io_source(
         handle,
-        VolumeHealthSource {
+        VolumeIoSource {
             dev: 0x42,
             availability: Arc::clone(&availability),
             counters: Arc::clone(&counters),
+            stats: Arc::clone(&stats),
+            budget,
         },
     )
-    .expect("attach health source");
+    .expect("attach I/O source");
     assert_eq!(vol_availability(&svc), MountAvailability::Recovering);
 
     // The volume-health query now lists exactly this device, naming its
@@ -1259,6 +1265,23 @@ fn mount_snapshot_overlays_reported_block_health() {
         MountAvailability::Recovering
     );
     assert_eq!(health_records[0].counters().completions, 0);
+
+    // The service and queue queries list the same one device, keyed and
+    // ordered identically, so a client can join the three by volume id — and
+    // the queue record carries the budget the depth is read against, from the
+    // device's own class rather than a global constant.
+    let stats_records = svc.volume_io_stats_snapshot();
+    let queue_records = svc.volume_io_queue_snapshot();
+    assert_eq!(stats_records.len(), 1);
+    assert_eq!(queue_records.len(), 1);
+    assert_eq!(stats_records[0].volume_id(), health_records[0].volume_id());
+    assert_eq!(queue_records[0].volume_id(), health_records[0].volume_id());
+    assert_eq!(stats_records[0].dev(), 0x42);
+    assert_eq!(queue_records[0].dev(), 0x42);
+    assert_eq!(stats_records[0].counters(), BlkIoCounters::default());
+    assert_eq!(queue_records[0].queue(), BlkQueueCounters::default());
+    assert_eq!(queue_records[0].budget_depth(), budget.queue_depth);
+    assert_eq!(queue_records[0].budget_deadline_ns(), budget.deadline_ns);
 
     // A surprise-removal state is authoritative: even with the overlay now
     // claiming the device is fine, the vanished state stands.

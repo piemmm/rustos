@@ -15,8 +15,8 @@ use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
     KernelMemoryStats, MemoryPressureStats, MountAvailability, RamzipStats, ReclaimClassRecord,
     ReclaimListRequest, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest, PRESSURE_BAND_NAMES,
-    RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
+    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest,
+    VolumeIoStatsRecord, PRESSURE_BAND_NAMES, RECLAIM_CLASS_COUNT, RECLAIM_CLASS_NAMES,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{Errno, LimitKind};
@@ -877,23 +877,141 @@ fn availability_name(availability: MountAvailability) -> &'static str {
     }
 }
 
+/// Records requested per page of a per-volume list: bounds the reply without
+/// bounding how many volumes may be mounted.
+const VOLUME_PAGE: u16 = 64;
+
+/// Fetch and render the per-volume storage report: the cumulative service
+/// counters every user may read, then the queue occupancy and the folded
+/// outcome counters the kernel scope gates.
+///
+/// The ungated table is rendered first, so a caller without
+/// `CAP_SYSINFO_KERNEL` still gets the throughput and utilisation figures
+/// before the gated reads report their refusal.
+fn run_storage(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    run_volume_service(transport, out)?;
+    run_volume_queue(transport, out)?;
+    run_volume_health(transport, out)
+}
+
+/// Fetch and render the cumulative per-volume service counters, one aligned
+/// row per fault-aware block-backed volume: a short prefix of its durable id,
+/// the serving block-service endpoint, and the raw tallies a reader deltas
+/// into throughput, IOPS, utilisation and await. Nothing is pre-derived here,
+/// so two readers never inherit one averaging window. Ungated.
+fn run_volume_service(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "volume            dev                    read-B     write-B  read-ops  write-ops     busy-ms",
+    )?;
+    let mut offset: u32 = 0;
+    loop {
+        let request = VolumeIoRequest {
+            offset,
+            limit: VOLUME_PAGE,
+            flags: 0,
+        };
+        let reply = service_call(
+            transport,
+            SysinfoQueryId::VOLUME_IO_STATS,
+            &request.to_le_bytes(),
+        )?;
+        if reply.len() % VolumeIoStatsRecord::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / VolumeIoStatsRecord::WIRE_LEN;
+        for chunk in reply.as_chunks::<{ VolumeIoStatsRecord::WIRE_LEN }>().0 {
+            let record = VolumeIoStatsRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            let volume_id = record.volume_id();
+            let counters = record.counters();
+            emit(
+                out,
+                &format!(
+                    "{:<16}  {:#018x}  {:>10}  {:>10}  {:>8}  {:>9}  {:>10}",
+                    hex(&volume_id[..8]),
+                    record.dev(),
+                    counters.read_bytes,
+                    counters.write_bytes,
+                    counters.read_ops,
+                    counters.write_ops,
+                    counters.busy_ns / 1_000_000,
+                ),
+            )?;
+        }
+        if records < usize::from(VOLUME_PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(VOLUME_PAGE));
+    }
+}
+
+/// Fetch and render the per-volume queue occupancy against the budget in
+/// force: what is outstanding now, the accumulators a mean depth deltas out
+/// of, and the device class's own depth and deadline. The service gates the
+/// query on `CAP_SYSINFO_KERNEL`.
+fn run_volume_queue(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(
+        out,
+        "volume            dev                 in-flight   depth-sum    arrivals  max-depth  deadline-ms",
+    )?;
+    let mut offset: u32 = 0;
+    loop {
+        let request = VolumeIoRequest {
+            offset,
+            limit: VOLUME_PAGE,
+            flags: 0,
+        };
+        let reply = service_call(
+            transport,
+            SysinfoQueryId::VOLUME_IO_QUEUE,
+            &request.to_le_bytes(),
+        )?;
+        if reply.len() % VolumeIoQueueRecord::WIRE_LEN != 0 {
+            return Err(SysinfoError::Service(Errno::BufferTooSmall));
+        }
+        let records = reply.len() / VolumeIoQueueRecord::WIRE_LEN;
+        for chunk in reply.as_chunks::<{ VolumeIoQueueRecord::WIRE_LEN }>().0 {
+            let record = VolumeIoQueueRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
+            let volume_id = record.volume_id();
+            let queue = record.queue();
+            emit(
+                out,
+                &format!(
+                    "{:<16}  {:#018x}  {:>9}  {:>10}  {:>10}  {:>9}  {:>11}",
+                    hex(&volume_id[..8]),
+                    record.dev(),
+                    queue.in_flight,
+                    queue.queue_depth_sum,
+                    queue.queue_samples,
+                    record.budget_depth(),
+                    record.budget_deadline_ns() / 1_000_000,
+                ),
+            )?;
+        }
+        if records < usize::from(VOLUME_PAGE) {
+            return Ok(());
+        }
+        offset = offset.saturating_add(u32::from(VOLUME_PAGE));
+    }
+}
+
 /// Fetch and render the per-volume storage I/O health, one aligned row per
 /// fault-aware block-backed volume: a short prefix of its durable id, the
 /// serving block-service endpoint, its current availability, and the folded
 /// outcome counters that a failing or flapping disk becomes visible on. The
 /// paged walk and fail-closed decode mirror [`run_cpu_load`]; the service
 /// gates the query on `CAP_SYSINFO_KERNEL`.
-fn run_storage(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+fn run_volume_health(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     /// Records requested per page: bounds the reply without bounding how
     /// many volumes may be mounted.
-    const PAGE: u16 = 64;
+    const PAGE: u16 = VOLUME_PAGE;
     emit(
         out,
         "volume            dev                 health      done  resets  tmout  medium  reissue",
     )?;
     let mut offset: u32 = 0;
     loop {
-        let request = VolumeIoHealthRequest {
+        let request = VolumeIoRequest {
             offset,
             limit: PAGE,
             flags: 0,
@@ -1089,7 +1207,7 @@ mod tests {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::blkio::BlkHealthCounters;
+    use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
     use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::raid::{ArrayHealth, RaidLevel};
@@ -1103,7 +1221,8 @@ mod tests {
         MemoryPressureStats, MountAvailability, ProcessListRequest, ProcessRecord, ProcessState,
         RaidListRequest, RamzipStats, ReclaimClassRecord, ReclaimListRequest, ResourceLimitRecord,
         SeatListRequest, SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
-        VolumeIoHealthRecord, VolumeIoHealthRequest, CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
+        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+        CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
     use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, SchedPriority, RLIMIT_INFINITY};
@@ -1238,6 +1357,8 @@ mod tests {
         records: &[T],
         encode: impl Fn(&T) -> Vec<u8>,
     ) -> Result<Vec<u8>, Errno> {
+        // Every paged list query shares one paging-header layout, so one
+        // decode serves them all.
         let request = RaidListRequest::from_bytes(payload)?;
         let offset = request.offset as usize;
         if offset >= records.len() {
@@ -1491,31 +1612,57 @@ mod tests {
                 }
                 Ok(out)
             } else if header.query == SysinfoQueryId::VOLUME_IO_HEALTH {
-                let req = VolumeIoHealthRequest::from_bytes(payload)?;
-                let records = [VolumeIoHealthRecord::new(
-                    [0xAB; 16],
-                    0x5953_2001,
-                    MountAvailability::Recovering,
-                    BlkHealthCounters {
-                        completions: 4096,
-                        ok: 4000,
-                        resets: 30,
-                        timeouts: 3,
-                        medium_errors: 5,
-                        reissues: 12,
-                        ..BlkHealthCounters::default()
-                    },
-                )];
-                let offset = req.offset as usize;
-                if offset >= records.len() {
-                    return Ok(Vec::new());
-                }
-                let take = core::cmp::min(records.len() - offset, req.limit as usize);
-                let mut out = Vec::new();
-                for record in &records[offset..offset + take] {
-                    out.extend_from_slice(&record.to_le_bytes());
-                }
-                Ok(out)
+                page(
+                    payload,
+                    &[VolumeIoHealthRecord::new(
+                        [0xAB; 16],
+                        0x5953_2001,
+                        MountAvailability::Recovering,
+                        BlkHealthCounters {
+                            completions: 4096,
+                            ok: 4000,
+                            resets: 30,
+                            timeouts: 3,
+                            medium_errors: 5,
+                            reissues: 12,
+                            ..BlkHealthCounters::default()
+                        },
+                    )],
+                    |record| record.to_le_bytes().to_vec(),
+                )
+            } else if header.query == SysinfoQueryId::VOLUME_IO_STATS {
+                page(
+                    payload,
+                    &[VolumeIoStatsRecord::new(
+                        [0xAB; 16],
+                        0x5953_2001,
+                        BlkIoCounters {
+                            read_bytes: 4 << 20,
+                            write_bytes: 1 << 20,
+                            read_ops: 1024,
+                            write_ops: 256,
+                            busy_ns: 500_000_000,
+                            read_wait_ns: 128_000_000,
+                            write_wait_ns: 64_000_000,
+                        },
+                    )],
+                    |record| record.to_le_bytes().to_vec(),
+                )
+            } else if header.query == SysinfoQueryId::VOLUME_IO_QUEUE {
+                page(
+                    payload,
+                    &[VolumeIoQueueRecord::new(
+                        [0xAB; 16],
+                        0x5953_2001,
+                        BlkQueueCounters {
+                            in_flight: 3,
+                            queue_depth_sum: 2560,
+                            queue_samples: 1280,
+                        },
+                        BlkDeviceClass::SolidState.budget(),
+                    )],
+                    |record| record.to_le_bytes().to_vec(),
+                )
             } else if header.query == SysinfoQueryId::RAID_ARRAYS {
                 page(payload, &fixture_arrays(), |record| {
                     record.to_le_bytes().to_vec()
@@ -2277,38 +2424,73 @@ mod tests {
     }
 
     #[test]
-    fn storage_renders_rows_and_fails_closed_on_denial() {
+    fn storage_renders_service_queue_and_health_rows() {
         let fixture = Fixture::new(Vec::new());
         let out = Recorder::new();
         run(Command::Storage, &fixture, &out).expect("storage renders");
         let lines = out.lines();
-        assert!(lines[0].starts_with("volume"));
-        assert!(lines[0].contains("health"));
-        // The one fixture volume: its recovering health, serving endpoint,
-        // and folded outcome counters.
-        assert_eq!(lines.len(), 2, "header plus one volume");
+        // Three tables, one volume each: the ungated service counters, then
+        // the two the kernel scope gates.
+        assert_eq!(
+            lines.len(),
+            6,
+            "three headers plus one volume each: {lines:?}"
+        );
+        for (header, row) in [(0, 1), (2, 3), (4, 5)] {
+            assert!(lines[header].starts_with("volume"), "{}", lines[header]);
+            assert!(
+                lines[row].starts_with("abababababababab"),
+                "row: {}",
+                lines[row]
+            );
+        }
+        // The service row carries the raw tallies, never a derived rate: a
+        // reader deltas them over its own interval.
+        assert!(lines[1].contains("4194304"), "read bytes: {}", lines[1]);
+        assert!(lines[1].contains("1024"), "read ops: {}", lines[1]);
+        assert!(lines[1].contains("500"), "busy ms: {}", lines[1]);
+        // The queue row reads its occupancy against the class's own ceiling.
+        assert!(lines[3].contains("2560"), "depth sum: {}", lines[3]);
+        assert!(
+            lines[3].contains(&BlkDeviceClass::SolidState.budget().queue_depth.to_string()),
+            "budget depth: {}",
+            lines[3]
+        );
+        // The health row is unchanged.
+        assert!(lines[5].contains("recovering"), "row: {}", lines[5]);
+        assert!(lines[5].contains("4096"), "completions: {}", lines[5]);
+        for query in [
+            SysinfoQueryId::VOLUME_IO_STATS,
+            SysinfoQueryId::VOLUME_IO_QUEUE,
+            SysinfoQueryId::VOLUME_IO_HEALTH,
+        ] {
+            assert!(fixture.seen.borrow().contains(&query), "{query:?}");
+        }
+    }
+
+    #[test]
+    fn storage_prints_the_ungated_service_table_before_a_gated_denial() {
+        // The service counters are ungated, so a caller without the kernel
+        // scope still gets them; the gated read then fails closed with the
+        // CLI's permission error rather than the whole report vanishing.
+        let mut denied = Fixture::new(Vec::new());
+        denied.deny = Some(SysinfoQueryId::VOLUME_IO_QUEUE);
+        let out = Recorder::new();
+        assert_eq!(
+            run(Command::Storage, &denied, &out),
+            Err(SysinfoError::PermissionDenied)
+        );
+        let lines = out.lines();
+        // The service table and its row, then the heading of the table that
+        // was refused — which names *which* table the reported refusal is
+        // about — and nothing fabricated under it.
+        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(
             lines[1].starts_with("abababababababab"),
             "row: {}",
             lines[1]
         );
-        assert!(lines[1].contains("recovering"), "row: {}", lines[1]);
-        assert!(lines[1].contains("4096"), "completions: {}", lines[1]);
-        assert!(lines[1].contains("30"), "resets: {}", lines[1]);
-        assert!(lines[1].contains("12"), "reissues: {}", lines[1]);
-        // The query routed to VOLUME_IO_HEALTH.
-        assert!(fixture
-            .seen
-            .borrow()
-            .contains(&SysinfoQueryId::VOLUME_IO_HEALTH));
-
-        // A denial maps to the CLI's permission error.
-        let mut denied = Fixture::new(Vec::new());
-        denied.deny = Some(SysinfoQueryId::VOLUME_IO_HEALTH);
-        assert_eq!(
-            run(Command::Storage, &denied, &Recorder::new()),
-            Err(SysinfoError::PermissionDenied)
-        );
+        assert!(lines[2].contains("in-flight"), "heading: {}", lines[2]);
     }
 
     #[test]

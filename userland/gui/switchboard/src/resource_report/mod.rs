@@ -22,6 +22,7 @@ use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetIfKind, Net
 use tairix_abi::rlimit::{LimitKind, RLIMIT_INFINITY};
 use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, MountAvailability, MountRecord, VolumeIoHealthRecord,
+    VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
@@ -57,25 +58,36 @@ pub fn build_resource_report(
     let mut recorded = alloc::vec![DeviceId::Cpu, DeviceId::Memory];
 
     for mount in sample.mounts.iter().flatten() {
+        // The counters are cumulative, so this volume's rates are the delta
+        // this fold produces rather than anything one sample carries. The two
+        // blocks are separately gated: a denied queue costs the queue reading
+        // alone.
+        let id = DeviceId::Volume(mount.volume_id());
+        meters.devices.record_volume(
+            id,
+            find_volume(sample.volume_io_stats.as_deref(), &mount.volume_id()),
+            find_volume(sample.volume_io_queue.as_deref(), &mount.volume_id()),
+            sample.elapsed_ns,
+        );
         devices.push(volume::device(sample, meters, mount));
-        recorded.push(DeviceId::Volume(mount.volume_id()));
+        recorded.push(id);
     }
     for iface in sample.net_facts.iter().flatten() {
         // The counters are cumulative, so the interface's own rate is the
         // delta this fold produces rather than anything one sample carries.
         let id = DeviceId::Interface(iface.name);
-        if let Some(counters) = sample
-            .net_counters
-            .as_ref()
-            .and_then(|records| records.iter().find(|r| r.name == iface.name))
-        {
-            meters.devices.record_device(
-                id,
-                counters.counters.rx_bytes,
-                counters.counters.tx_bytes,
-                sample.elapsed_ns,
-            );
-        }
+        // Recorded even when the counters are absent, so a sample that could
+        // not read them breaks the series: the next one that can is a first
+        // sample again rather than a delta over a gap.
+        meters.devices.record_interface(
+            id,
+            sample
+                .net_counters
+                .as_ref()
+                .and_then(|records| records.iter().find(|r| r.name == iface.name))
+                .map(|record| record.counters),
+            sample.elapsed_ns,
+        );
         devices.push(interface::device(sample, iface));
         recorded.push(id);
     }
@@ -154,6 +166,42 @@ impl VolumeBytes {
     /// service reporting more available than total reads as nothing used.
     pub(super) const fn used(self) -> u64 {
         self.total.saturating_sub(self.available)
+    }
+}
+
+/// The record for `volume_id` in one of the per-volume lists, or [`None`]
+/// where the list did not carry it.
+///
+/// The three per-volume queries are keyed and ordered alike, so one lookup
+/// serves all of them and no pane can join two of them differently.
+fn find_volume<'a, R: VolumeKeyed>(
+    records: Option<&'a [R]>,
+    volume_id: &[u8; 16],
+) -> Option<&'a R> {
+    records?.iter().find(|record| &record.key() == volume_id)
+}
+
+/// A per-volume record that names the volume it describes.
+trait VolumeKeyed {
+    /// The volume's durable 16-byte identity.
+    fn key(&self) -> [u8; 16];
+}
+
+impl VolumeKeyed for VolumeIoStatsRecord {
+    fn key(&self) -> [u8; 16] {
+        self.volume_id()
+    }
+}
+
+impl VolumeKeyed for VolumeIoQueueRecord {
+    fn key(&self) -> [u8; 16] {
+        self.volume_id()
+    }
+}
+
+impl VolumeKeyed for VolumeIoHealthRecord {
+    fn key(&self) -> [u8; 16] {
+        self.volume_id()
     }
 }
 

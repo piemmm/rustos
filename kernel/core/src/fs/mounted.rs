@@ -46,7 +46,10 @@ use tairix_abi::driver::filesystem::{
     NodeInfo, NodeKind as DriverNodeKind, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
-use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord};
+use tairix_abi::sysinfo::{
+    MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord,
+};
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
@@ -59,7 +62,7 @@ use tairix_sync::{OnceCell, RwLock, SpinLock};
 use crate::fswatch;
 use crate::sleeplock::SleepLock;
 
-use super::blkclient::VolumeHealthSource;
+use super::blkclient::VolumeIoSource;
 
 use super::delegate::FinalLink;
 use super::path::Path;
@@ -115,10 +118,11 @@ struct DriverEntry<F: 'static> {
     /// mounts, a boot volume over a non-block backing).
     ///
     /// Besides the availability overlay it also carries the serving
-    /// block-service endpoint id and the cumulative I/O-health counters the
-    /// block client folds, so the `sysinfo` volume-health query can report a
-    /// device's live health and tallies (`plans/FIX-IO.md` IO5).
-    health: Option<VolumeHealthSource>,
+    /// block-service endpoint id and every counter the block client folds —
+    /// the outcome tallies, the service counters, the queue occupancy and
+    /// the budget bounding it — so the three `sysinfo` per-volume queries can
+    /// report a device's live readings (`plans/FIX-IO.md` IO5).
+    io: Option<VolumeIoSource>,
     /// When this volume's batched filesystem transaction must be published,
     /// as the driver last reported it ([`super::writeback`]). Empty for a
     /// driver that publishes at every operation, and for one that holds
@@ -151,13 +155,13 @@ struct SnapshotEntry<F: 'static> {
 /// health state), never a fabricated unavailable reading.
 fn overlaid_availability(
     stored: MountAvailability,
-    health: Option<&VolumeHealthSource>,
+    health: Option<&VolumeIoSource>,
 ) -> MountAvailability {
     if !matches!(stored, MountAvailability::Available) {
         return stored;
     }
     health
-        .and_then(VolumeHealthSource::live_availability)
+        .and_then(VolumeIoSource::live_availability)
         .unwrap_or(MountAvailability::Available)
 }
 
@@ -285,7 +289,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 fstype: String::from(fstype),
                 volume_id,
                 availability: MountAvailability::Available,
-                health: None,
+                io: None,
                 writeback: WritebackDue::empty(),
             });
             shared
@@ -425,31 +429,28 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Ok(())
     }
 
-    /// Attach the live block-health overlay `health` to the volume registered
+    /// Attach the served device's live readings `io` to the volume registered
     /// for `handle`, so the mount snapshot reflects the backing device's
     /// reported health (`Degraded`/`Recovering`) while the volume is still
-    /// [`MountAvailability::Available`] (`plans/FIX-IO.md` IO2/IO3).
+    /// [`MountAvailability::Available`] (`plans/FIX-IO.md` IO2/IO3) and the
+    /// per-volume queries can report its counters.
     ///
-    /// The handle carries a [`MountAvailability`] wire byte the block client
-    /// updates on every completion; the registry only reads it. Idempotent —
-    /// re-registering a recovered volume replaces the overlay.
+    /// The handle carries a [`MountAvailability`] wire byte and the counters
+    /// the block client updates on every attempt; the registry only reads
+    /// them. Idempotent — re-registering a recovered volume replaces them.
     ///
     /// # Errors
     ///
     /// [`Errno::NotImplemented`] when `handle` names no registered volume
     /// (fail closed — nothing is attached).
-    pub fn set_health_source(
-        &self,
-        handle: DriverHandle,
-        health: VolumeHealthSource,
-    ) -> Result<(), Errno> {
+    pub fn set_io_source(&self, handle: DriverHandle, io: VolumeIoSource) -> Result<(), Errno> {
         let handle = handle.as_u64();
         let mut drivers = self.drivers.lock();
         let entry = drivers
             .iter_mut()
             .find(|e| e.handle == handle)
             .ok_or(Errno::NotImplemented)?;
-        entry.health = Some(health);
+        entry.io = Some(io);
         Ok(())
     }
 
@@ -467,17 +468,59 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// serving endpoint, and carries the counters snapshot; it holds no
     /// secret.
     fn volume_io_health_records(&self) -> Vec<VolumeIoHealthRecord> {
+        self.io_records(|entry, source| {
+            VolumeIoHealthRecord::new(
+                entry.volume_id,
+                source.dev,
+                overlaid_availability(entry.availability, Some(source)),
+                source.counters.snapshot(),
+            )
+        })
+    }
+
+    /// A snapshot of every fault-aware block-backed volume's cumulative I/O
+    /// service counters, one [`VolumeIoStatsRecord`] per volume with a block
+    /// I/O source, in the same order and with the same omissions as
+    /// [`volume_io_health_records`](Self::volume_io_health_records).
+    fn volume_io_stats_records(&self) -> Vec<VolumeIoStatsRecord> {
+        self.io_records(|entry, source| {
+            VolumeIoStatsRecord::new(entry.volume_id, source.dev, source.stats.io_snapshot())
+        })
+    }
+
+    /// A snapshot of every fault-aware block-backed volume's live queue
+    /// occupancy and the budget bounding it, one [`VolumeIoQueueRecord`] per
+    /// volume with a block I/O source, in the same order and with the same
+    /// omissions as
+    /// [`volume_io_health_records`](Self::volume_io_health_records).
+    fn volume_io_queue_records(&self) -> Vec<VolumeIoQueueRecord> {
+        self.io_records(|entry, source| {
+            VolumeIoQueueRecord::new(
+                entry.volume_id,
+                source.dev,
+                source.stats.queue_snapshot(),
+                source.budget,
+            )
+        })
+    }
+
+    /// Walk the driver registry once and build one record per registered
+    /// volume that has a block I/O source, through `record`.
+    ///
+    /// The one definition of that walk, so the three per-volume queries
+    /// cannot diverge in which volumes they list or in what order: a volume
+    /// with no fault-aware block source (the in-RAM layout mounts, a boot
+    /// volume over a non-block backing) is omitted from all three rather than
+    /// reported with fabricated readings, and the order is the registry's
+    /// registration order, stable across a walk. A client can therefore join
+    /// the three lists by `volume_id`.
+    fn io_records<R>(&self, record: impl Fn(&DriverEntry<F>, &VolumeIoSource) -> R) -> Vec<R> {
         self.drivers
             .lock()
             .iter()
             .filter_map(|entry| {
-                let source = entry.health.as_ref()?;
-                Some(VolumeIoHealthRecord::new(
-                    entry.volume_id,
-                    source.dev,
-                    overlaid_availability(entry.availability, Some(source)),
-                    source.counters.snapshot(),
-                ))
+                let source = entry.io.as_ref()?;
+                Some(record(entry, source))
             })
             .collect()
     }
@@ -510,7 +553,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         let drivers = self.drivers.lock();
         let busy = drivers
             .iter()
-            .filter_map(|entry| entry.health.as_ref())
+            .filter_map(|entry| entry.io.as_ref())
             .any(|source| endpoints.contains(&source.dev));
         if busy {
             return Err(Errno::Busy);
@@ -604,7 +647,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 fstype: e.fstype.clone(),
                 driver: Arc::clone(&e.driver),
                 volume_id: e.volume_id,
-                availability: overlaid_availability(e.availability, e.health.as_ref()),
+                availability: overlaid_availability(e.availability, e.io.as_ref()),
             })
     }
 }
@@ -1527,9 +1570,17 @@ where
 
     fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
         // Served straight from the driver registry, which holds each volume's
-        // block-health source; a system with no mount table registers no
-        // driver and so truthfully reports no volumes.
+        // block I/O source; a system with no mount table registers no driver
+        // and so truthfully reports no volumes.
         self.mount.volume_io_health_records()
+    }
+
+    fn volume_io_stats_snapshot(&self) -> Vec<VolumeIoStatsRecord> {
+        self.mount.volume_io_stats_records()
+    }
+
+    fn volume_io_queue_snapshot(&self) -> Vec<VolumeIoQueueRecord> {
+        self.mount.volume_io_queue_records()
     }
 
     fn remove_if_endpoints_idle(

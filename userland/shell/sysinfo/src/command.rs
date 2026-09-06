@@ -74,10 +74,14 @@ pub enum Command<'a> {
     /// `CAP_SYSINFO_GLOBAL`: a row names another principal — the session
     /// process — and its work).
     Frames,
-    /// List per-volume storage I/O health, one row per fault-aware
-    /// block-backed volume — its durable id, the serving block-service
-    /// endpoint, its current availability, and the folded outcome counters
-    /// (`VOLUME_IO_HEALTH`, which the service gates on `CAP_SYSINFO_KERNEL`).
+    /// List the per-volume storage report: three tables over the same
+    /// volumes, keyed by durable id and naming the serving block-service
+    /// endpoint — the cumulative service counters
+    /// (`VOLUME_IO_STATS`, ungated), the queue occupancy against the class
+    /// budget in force (`VOLUME_IO_QUEUE`), and the availability plus folded
+    /// outcome counters (`VOLUME_IO_HEALTH`). The service gates the last two
+    /// on `CAP_SYSINFO_KERNEL`, and the ungated table is rendered first so a
+    /// caller without it still reads the utilisation figures.
     Storage,
     /// List the composed RAID arrays and the devices the array composer
     /// holds — each array's level, health, member tally and rebuild/scrub

@@ -22,7 +22,7 @@ use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashRecord, IrqRecord,
     KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
     MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity,
-    Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
+    Uptime, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
@@ -428,6 +428,34 @@ pub trait SysinfoSource {
     /// the `offset`/`limit` paging; ordering must be stable across paged
     /// calls.
     fn volume_io_health(&self, caller: &Caller) -> Result<Vec<VolumeIoHealthRecord>, Errno>;
+
+    /// Return the per-volume storage **service** counters: one record per
+    /// fault-aware block-backed volume the kernel serves, in the same order
+    /// and keyed the same way as
+    /// [`volume_io_health`](Self::volume_io_health), carrying the cumulative
+    /// bytes, completed requests, device-busy time and summed waits the
+    /// kernel block client folded (`plans/FIX-IO.md` IO5).
+    ///
+    /// **Ungated**, exactly like [`cpu_times`](Self::cpu_times) and for the
+    /// same reason: a machine-wide throughput and utilisation figure is one
+    /// every user may see, and it exposes strictly less than the ungated
+    /// mount table. Nothing is served pre-derived, so no consumer inherits
+    /// another's averaging window. The owned list is returned whole and
+    /// [`crate::serve`] applies the `offset`/`limit` paging.
+    fn volume_io_stats(&self, caller: &Caller) -> Result<Vec<VolumeIoStatsRecord>, Errno>;
+
+    /// Return the per-volume storage **queue** occupancy: one record per
+    /// fault-aware block-backed volume, in the same order and keyed the same
+    /// way as [`volume_io_health`](Self::volume_io_health), carrying the live
+    /// in-flight count, the mean-depth accumulators, and the per-device
+    /// budget bounding them.
+    ///
+    /// Reached only after the `CAP_SYSINFO_KERNEL` gate has passed: a queue
+    /// depth is a driver and scheduler internal — the same boundary
+    /// [`cpu_load`](Self::cpu_load) draws — not the utilisation split
+    /// [`volume_io_stats`](Self::volume_io_stats) serves ungated. The owned
+    /// list is returned whole and [`crate::serve`] applies the paging.
+    fn volume_io_queue(&self, caller: &Caller) -> Result<Vec<VolumeIoQueueRecord>, Errno>;
 
     /// Return the live RAID arrays the composer serves: one
     /// [`RaidArrayRecord`] per array (its identity, level, health, width,

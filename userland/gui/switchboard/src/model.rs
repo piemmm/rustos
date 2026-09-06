@@ -12,15 +12,20 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::blkio::{BlkIoCounters, BlkQueueCounters};
+use tairix_abi::net_ipc::NetCounters;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
-use tairix_abi::sysinfo::{CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState};
+use tairix_abi::sysinfo::{
+    CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState, VolumeIoQueueRecord,
+    VolumeIoStatsRecord,
+};
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, Signal};
 use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
 
 use crate::derive::{memory_pressured, Hysteresis};
 use crate::format::{format_bytes, format_duration, format_rate, percent};
 use crate::resource_report::{build_resource_report, reading};
-use crate::sample::{DegradedField, ProcessSummary, Sample};
+use crate::sample::{permille_of, DegradedField, ProcessSummary, Sample};
 use crate::view::resources::DeviceId;
 use crate::view::{
     ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem,
@@ -154,15 +159,70 @@ pub struct DeviceMeters {
     devices: BTreeMap<DeviceId, DeviceTrack>,
 }
 
+/// One volume's readings derived over the interval between two samples.
+///
+/// Every field is `None` where its own source was absent — the ungated
+/// service counters, the separately-gated queue counters, or a measurable
+/// interval — so a denied queue never blanks a throughput a reader may see,
+/// and a first sample yields no rate at all (a cumulative total is not a
+/// rate).
+///
+/// Derived once per sample here rather than at paint, and stated as raw
+/// nanoseconds and bytes so the pane chooses only how to spell them.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct VolumeService {
+    /// Bytes read per second over the interval.
+    pub read_bps: Option<u64>,
+    /// Bytes written per second over the interval.
+    pub write_bps: Option<u64>,
+    /// Read requests completed per second.
+    pub read_iops: Option<u64>,
+    /// Write requests completed per second.
+    pub write_iops: Option<u64>,
+    /// The share of the interval the device had a request outstanding.
+    pub utilisation_permille: Option<u16>,
+    /// Mean issue-to-completion time of the interval's reads.
+    pub read_await_ns: Option<u64>,
+    /// Mean issue-to-completion time of the interval's writes.
+    pub write_await_ns: Option<u64>,
+    /// Mean device-busy time per read or write completed in the interval —
+    /// what the device itself spent, where the awaits above include queueing.
+    /// A data-less operation the interval also carried (a flush) belongs to
+    /// neither direction, so it is not in the divisor.
+    pub service_ns: Option<u64>,
+    /// Mean queue depth an arriving request met, in hundredths of a
+    /// request.
+    pub mean_depth_centi: Option<u64>,
+    /// Requests outstanding at the sample instant.
+    pub in_flight: Option<u64>,
+    /// The depth the device's own class permits, so the occupancy above is
+    /// read against the ceiling that applies to its medium.
+    pub budget_depth: Option<u32>,
+    /// The per-request deadline the device's class is served with.
+    pub budget_deadline_ns: Option<u64>,
+}
+
+/// One device's two cumulative directional byte counters as of a sample.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+struct DirectedBytes {
+    /// Bytes in the primary direction: received, or read.
+    primary: u64,
+    /// Bytes in the opposing direction: sent, or written.
+    opposing: u64,
+}
+
 /// What one device's tracking holds between samples: the cumulative
 /// counters the next sample deltas against, and the rates those produced.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct DeviceTrack {
-    /// The device's cumulative primary-direction counter as of the last
-    /// sample (bytes received, bytes read).
-    primary: u64,
-    /// Its cumulative opposing-direction counter (bytes sent, written).
-    opposing: u64,
+    /// The device's cumulative byte counters as of the last sample, or
+    /// [`None`] where that sample carried none.
+    ///
+    /// An absence **breaks the series**: the next sample that does carry
+    /// them is a first sample again and yields no rate, rather than deltaing
+    /// against a counter from an interval other than the one it would divide
+    /// by.
+    bytes: Option<DirectedBytes>,
     /// The primary direction's recent rates, oldest first.
     primary_history: Vec<u16>,
     /// The opposing direction's recent rates, oldest first.
@@ -171,6 +231,15 @@ struct DeviceTrack {
     primary_rate: Option<u64>,
     /// The opposing direction's latest rate, in bytes per second.
     opposing_rate: Option<u64>,
+    /// A volume's whole cumulative service counters as of the last sample,
+    /// which the awaits and utilisation delta against. [`None`] for a device
+    /// that serves none (an interface, the compositor).
+    volume_io: Option<BlkIoCounters>,
+    /// A volume's cumulative queue accumulators as of the last sample, which
+    /// the mean depth deltas against.
+    volume_queue: Option<BlkQueueCounters>,
+    /// The volume readings the last fold derived.
+    service: VolumeService,
 }
 
 /// The rate a device's trace is plotted against, in bytes per second.
@@ -215,48 +284,129 @@ impl DeviceMeters {
         self.cores.get(&cpu).map_or(&[], Vec::as_slice)
     }
 
-    /// Fold one device's cumulative counters in.
+    /// Fold one interface's cumulative received/sent byte counters in.
     ///
     /// A device first seen this sample, and an interval the service could
     /// not measure, each yield no rate: a cumulative total is not a rate.
-    pub fn record_device(
+    pub fn record_interface(
         &mut self,
         id: DeviceId,
-        primary: u64,
-        opposing: u64,
+        counters: Option<NetCounters>,
         elapsed_ns: Option<u64>,
     ) {
+        let (previous, mut track) = self.take(id);
+        Self::fold_bytes(
+            &mut track,
+            previous.as_ref(),
+            counters.map(|counters| DirectedBytes {
+                primary: counters.rx_bytes,
+                opposing: counters.tx_bytes,
+            }),
+            elapsed_ns,
+        );
+        self.devices.insert(id, track);
+    }
+
+    /// Fold one volume's cumulative service and queue counters in, deriving
+    /// its whole interval reading.
+    ///
+    /// The two counter blocks are separately gated, so either may be absent
+    /// without costing the other its reading; a volume the sample names with
+    /// neither still gets its entry, and simply reads unmeasured.
+    pub fn record_volume(
+        &mut self,
+        id: DeviceId,
+        io: Option<&VolumeIoStatsRecord>,
+        queue: Option<&VolumeIoQueueRecord>,
+        elapsed_ns: Option<u64>,
+    ) {
+        let (previous, mut track) = self.take(id);
+        let io = io.map(VolumeIoStatsRecord::counters);
+        Self::fold_bytes(
+            &mut track,
+            previous.as_ref(),
+            io.map(|counters| DirectedBytes {
+                primary: counters.read_bytes,
+                opposing: counters.write_bytes,
+            }),
+            elapsed_ns,
+        );
+        track.service = VolumeService {
+            read_bps: track.primary_rate,
+            write_bps: track.opposing_rate,
+            ..VolumeService::default()
+        };
+        if let (Some(io), Some(earlier)) = (io, previous.as_ref().and_then(|prev| prev.volume_io)) {
+            fold_service(&mut track.service, &io, &earlier, elapsed_ns);
+        }
+        if let Some(record) = queue {
+            let queue = record.queue();
+            track.service.in_flight = Some(queue.in_flight);
+            track.service.budget_depth = Some(record.budget_depth());
+            track.service.budget_deadline_ns = Some(record.budget_deadline_ns());
+            track.service.mean_depth_centi = previous
+                .as_ref()
+                .and_then(|prev| prev.volume_queue)
+                .and_then(|earlier| queue.mean_depth_centi(&earlier));
+        }
+        track.volume_io = io;
+        track.volume_queue = queue.map(VolumeIoQueueRecord::queue);
+        self.devices.insert(id, track);
+    }
+
+    /// This volume's derived interval readings, all-absent for a device the
+    /// sample carried no counters for.
+    #[must_use]
+    pub fn volume_service(&self, id: DeviceId) -> VolumeService {
+        self.devices
+            .get(&id)
+            .map_or_else(VolumeService::default, |track| track.service)
+    }
+
+    /// Lift `id`'s previous track out of the map, with a fresh clone of it to
+    /// fold this sample into — so an entry is rebuilt rather than mutated and
+    /// a device the caller stops recording leaves nothing behind.
+    fn take(&mut self, id: DeviceId) -> (Option<DeviceTrack>, DeviceTrack) {
         let previous = self.devices.remove(&id);
-        let mut track = previous.clone().unwrap_or_default();
-        track.primary_rate = previous
-            .as_ref()
-            .and_then(|prev| rate_per_sec(primary, prev.primary, elapsed_ns));
-        track.opposing_rate = previous
-            .as_ref()
-            .and_then(|prev| rate_per_sec(opposing, prev.opposing, elapsed_ns));
-        track.primary = primary;
-        track.opposing = opposing;
+        let track = previous.clone().unwrap_or_default();
+        (previous, track)
+    }
+
+    /// Fold this sample's directional byte counters in: the rates they
+    /// produce and the bounded traces those rates plot.
+    ///
+    /// The one definition of that fold, so a volume's trace and an
+    /// interface's are the same arithmetic against the same full scale and
+    /// stay comparable by eye. A rate needs both ends of an interval, so a
+    /// device first seen this sample, a sample that carried no counters, and
+    /// a sample after one that carried none each yield no rate and contribute
+    /// no trace point — never a delta against a gap.
+    fn fold_bytes(
+        track: &mut DeviceTrack,
+        previous: Option<&DeviceTrack>,
+        now: Option<DirectedBytes>,
+        elapsed_ns: Option<u64>,
+    ) {
+        let earlier = previous.and_then(|prev| prev.bytes);
+        let rate = |select: fn(DirectedBytes) -> u64| {
+            let (now, earlier) = (now?, earlier?);
+            rate_per_sec(select(now), select(earlier), elapsed_ns)
+        };
+        track.primary_rate = rate(|bytes| bytes.primary);
+        track.opposing_rate = rate(|bytes| bytes.opposing);
+        track.bytes = now;
         if let Some(rate) = track.primary_rate {
             push_bounded(&mut track.primary_history, trace_permille(rate));
         }
         if let Some(rate) = track.opposing_rate {
             push_bounded(&mut track.opposing_history, trace_permille(rate));
         }
-        self.devices.insert(id, track);
     }
 
     /// Drop every device the caller did not record this sample, so an
     /// unmounted volume or a removed interface leaves nothing behind.
     pub fn retain_recorded(&mut self, recorded: &[DeviceId]) {
         self.devices.retain(|id, _| recorded.contains(id));
-    }
-
-    /// One device's latest primary and opposing rates, in bytes per second.
-    #[must_use]
-    pub fn device_rates(&self, id: DeviceId) -> (Option<u64>, Option<u64>) {
-        self.devices.get(&id).map_or((None, None), |track| {
-            (track.primary_rate, track.opposing_rate)
-        })
     }
 
     /// One device's recorded primary-direction rates, oldest first.
@@ -274,6 +424,45 @@ impl DeviceMeters {
             .get(&id)
             .map_or(&[], |track| track.opposing_history.as_slice())
     }
+}
+
+/// Derive one volume's IOPS, utilisation, awaits and service time from the
+/// cumulative counters either side of an interval.
+///
+/// Each is the delta ratio the counters were designed for, so no consumer
+/// inherits another's averaging window. A ratio with no denominator — an
+/// unmeasurable interval, an interval in which nothing completed — is left
+/// absent rather than reported as nought, which would read as a fast device
+/// when the truth is an idle one.
+fn fold_service(
+    service: &mut VolumeService,
+    now: &BlkIoCounters,
+    earlier: &BlkIoCounters,
+    elapsed_ns: Option<u64>,
+) {
+    let reads = now.read_ops.saturating_sub(earlier.read_ops);
+    let writes = now.write_ops.saturating_sub(earlier.write_ops);
+    service.read_iops = rate_per_sec(now.read_ops, earlier.read_ops, elapsed_ns);
+    service.write_iops = rate_per_sec(now.write_ops, earlier.write_ops, elapsed_ns);
+    service.utilisation_permille = elapsed_ns
+        .and_then(|interval| permille_of(now.busy_ns.saturating_sub(earlier.busy_ns), interval));
+    service.read_await_ns = mean(now.read_wait_ns.saturating_sub(earlier.read_wait_ns), reads);
+    service.write_await_ns = mean(
+        now.write_wait_ns.saturating_sub(earlier.write_wait_ns),
+        writes,
+    );
+    service.service_ns = mean(
+        now.busy_ns.saturating_sub(earlier.busy_ns),
+        reads.saturating_add(writes),
+    );
+}
+
+/// `total` shared over `count`, or [`None`] where nothing was counted.
+const fn mean(total: u64, count: u64) -> Option<u64> {
+    if count == 0 {
+        return None;
+    }
+    Some(total / count)
 }
 
 /// A byte rate as the permille of [`TRACE_FULL_SCALE_BYTES`] its trace plots

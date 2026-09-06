@@ -56,8 +56,8 @@ use tairix_abi::sysinfo::{
     MemoryPressureBand, MemoryTotal, MountListRequest, MountRecord, NetInterfaceListRequest,
     NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
     ReclaimClassRecord, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
-    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
-    RESOURCE_LIMITS_REPORT_LEN,
+    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest,
+    VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_procinfo::{
@@ -192,6 +192,10 @@ pub enum DegradedField {
     Mounts,
     /// Per-volume I/O health could not be read.
     VolumeHealth,
+    /// Per-volume cumulative I/O service counters could not be read.
+    VolumeIoStats,
+    /// Per-volume queue occupancy could not be read.
+    VolumeIoQueue,
     /// The network interface inventory could not be read.
     NetInterfaceFacts,
     /// Live network interface link/address state could not be read.
@@ -460,6 +464,14 @@ pub struct Sample {
     /// Per-volume I/O health ([`Cadence::Inventory`], kernel-statistics
     /// scope): the fault/latency counters that say a disk is failing.
     pub volume_health: Option<Vec<VolumeIoHealthRecord>>,
+    /// Per-volume cumulative I/O service counters ([`Cadence::EverySample`],
+    /// ungated): bytes, completed requests, device-busy time and summed
+    /// waits, from which the pane derives throughput, IOPS, utilisation and
+    /// await over its own interval.
+    pub volume_io_stats: Option<Vec<VolumeIoStatsRecord>>,
+    /// Per-volume queue occupancy and the budget bounding it
+    /// ([`Cadence::EverySample`], kernel-statistics scope).
+    pub volume_io_queue: Option<Vec<VolumeIoQueueRecord>>,
     /// The network interface inventory — the interfaces that exist and
     /// their fixed properties ([`Cadence::Static`], hardware scope).
     pub net_facts: Option<Vec<NetInterfaceFactsRecord>>,
@@ -586,9 +598,9 @@ impl ScopeVerdicts {
     ///
     /// The ungated readings — the process list in its self scope, CPU time,
     /// identity, uptime, load average, the CPU inventory, installed-memory
-    /// totals, the mount table, and this process's own resource limits —
-    /// are always permitted, so their absence is always a failure to
-    /// report rather than a refusal.
+    /// totals, the mount table, per-volume service counters, and this
+    /// process's own resource limits — are always permitted, so their
+    /// absence is always a failure to report rather than a refusal.
     #[must_use]
     pub const fn permits(self, field: DegradedField) -> bool {
         match field {
@@ -601,6 +613,7 @@ impl ScopeVerdicts {
             | DegradedField::MemoryTotal
             | DegradedField::MemoryPressureBand
             | DegradedField::Mounts
+            | DegradedField::VolumeIoStats
             | DegradedField::NetResolverServers
             | DegradedField::NetTimeServers
             | DegradedField::ResourceLimits => true,
@@ -611,6 +624,7 @@ impl ScopeVerdicts {
             | DegradedField::RamzipStats
             | DegradedField::CacheLedgers
             | DegradedField::VolumeHealth
+            | DegradedField::VolumeIoQueue
             | DegradedField::CrashRecords => self.memory_pressure,
             DegradedField::NetInterfaceState
             | DegradedField::NetInterfaceRates
@@ -694,7 +708,7 @@ fn page_payload(offset: u32, limit: u16) -> Vec<u8> {
 const _: () = assert!(
     MountListRequest::WIRE_LEN == CpuInfoListRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == CpuLoadRequest::WIRE_LEN
-        && MountListRequest::WIRE_LEN == VolumeIoHealthRequest::WIRE_LEN
+        && MountListRequest::WIRE_LEN == VolumeIoRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == SeatListRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == CrashRecordRequest::WIRE_LEN
         && MountListRequest::WIRE_LEN == NetInterfaceListRequest::WIRE_LEN,
@@ -704,7 +718,7 @@ const _: () = assert!(
 /// The busy share of `delta_ns` over `interval_ns`, in permille
 /// (`0..=1000`), or `None` when `interval_ns` is zero (an unmeasurable
 /// interval — the honest absence, never a fabricated rate).
-fn permille_of(delta_ns: u64, interval_ns: u64) -> Option<u16> {
+pub(crate) fn permille_of(delta_ns: u64, interval_ns: u64) -> Option<u16> {
     if interval_ns == 0 {
         return None;
     }
@@ -761,6 +775,8 @@ pub struct Sampler {
     kernel_memory: Option<KernelMemoryStats>,
     mounts: Option<Vec<MountRecord>>,
     volume_health: Option<Vec<VolumeIoHealthRecord>>,
+    volume_io_stats: Option<Vec<VolumeIoStatsRecord>>,
+    volume_io_queue: Option<Vec<VolumeIoQueueRecord>>,
     seats: Option<Vec<SeatRecord>>,
     resource_limits: Option<Vec<ResourceLimitRecord>>,
     crashes: Option<Vec<CrashRecord>>,
@@ -792,6 +808,8 @@ impl Sampler {
             kernel_memory: None,
             mounts: None,
             volume_health: None,
+            volume_io_stats: None,
+            volume_io_queue: None,
             seats: None,
             resource_limits: None,
             crashes: None,
@@ -855,6 +873,8 @@ impl Sampler {
             memory_total: self.memory_total,
             mounts: self.mounts.clone(),
             volume_health: self.volume_health.clone(),
+            volume_io_stats: self.volume_io_stats.clone(),
+            volume_io_queue: self.volume_io_queue.clone(),
             net_facts: self.net_facts.clone(),
             net_state,
             net_rates,
@@ -1576,6 +1596,7 @@ impl Sampler {
             }
         }
         self.refresh_memory_detail(transport, degradations);
+        self.refresh_volume_io(transport, degradations);
         self.refresh_net_config(transport, degradations);
         if self.due(DegradedField::HardwareTree, self.hardware.is_some()) {
             let read = fetch_tree(transport).ok();
@@ -1583,6 +1604,52 @@ impl Sampler {
             if let Some(mut nodes) = read {
                 nodes.truncate(HW_NODE_CAP);
                 self.hardware = Some(nodes);
+            }
+        }
+    }
+
+    /// Refresh the per-volume service and queue counters every sample: each
+    /// is a rate source whose delta between two samples *is* the reading, so
+    /// unlike the mount table beside it neither can be read on a sparse
+    /// cadence and still yield a rate.
+    ///
+    /// Both are keyed and ordered like the health list the inventory refresh
+    /// holds, so the volume pane joins the three by volume id.
+    fn refresh_volume_io(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) {
+        if self.due(DegradedField::VolumeIoStats, self.volume_io_stats.is_some()) {
+            if let Some(records) = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::VOLUME_IO_STATS,
+                    field: DegradedField::VolumeIoStats,
+                    record_len: VolumeIoStatsRecord::WIRE_LEN,
+                    cap: VOLUME_RECORD_CAP,
+                },
+                degradations,
+                page_payload,
+                VolumeIoStatsRecord::from_bytes,
+            ) {
+                self.volume_io_stats = Some(records);
+            }
+        }
+        if self.due(DegradedField::VolumeIoQueue, self.volume_io_queue.is_some()) {
+            if let Some(records) = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::VOLUME_IO_QUEUE,
+                    field: DegradedField::VolumeIoQueue,
+                    record_len: VolumeIoQueueRecord::WIRE_LEN,
+                    cap: VOLUME_RECORD_CAP,
+                },
+                degradations,
+                page_payload,
+                VolumeIoQueueRecord::from_bytes,
+            ) {
+                self.volume_io_queue = Some(records);
             }
         }
     }
@@ -1707,7 +1774,9 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::NetInterfaceRates
         | DegradedField::NetInterfaceCounters
         | DegradedField::NetSockets
-        | DegradedField::NetStackDefence => Cadence::EverySample,
+        | DegradedField::NetStackDefence
+        | DegradedField::VolumeIoStats
+        | DegradedField::VolumeIoQueue => Cadence::EverySample,
         DegradedField::MemoryPressure
         | DegradedField::KernelMemory
         | DegradedField::ReclaimStats

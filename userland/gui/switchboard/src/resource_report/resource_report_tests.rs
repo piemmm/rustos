@@ -3,16 +3,20 @@
 //! sample it claims, and that an absent one names the reason the sample
 //! itself resolved.
 
+use alloc::format;
+use alloc::vec::Vec;
+
+use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, KernelMemoryStats, MountAvailability, MountRecord,
-    MountVolumeState, MOUNT_VOLUME_ID_LEN,
+    MountVolumeState, VolumeIoQueueRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
 use super::{build_resource_report, used_permille};
-use crate::model::{RollingMeters, SessionReport};
+use crate::model::{RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
 use crate::view::resources::{BlockBody, DeviceGroup, DeviceId, HeroInstrument};
 use crate::view::{Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured};
@@ -306,26 +310,271 @@ fn a_volume_reporting_more_available_than_total_does_not_underflow() {
     assert_eq!(used_permille(u64::MAX, 0), 1_000);
 }
 
-#[test]
-fn a_volumes_service_block_states_the_absent_interface_in_every_row() {
-    let sample = Sample {
+/// A volume's cumulative service counters, as one sample reports them.
+fn io_stats(
+    read_bytes: u64,
+    write_bytes: u64,
+    read_ops: u64,
+    write_ops: u64,
+    busy_ns: u64,
+    read_wait_ns: u64,
+    write_wait_ns: u64,
+) -> VolumeIoStatsRecord {
+    VolumeIoStatsRecord::new(
+        [7; MOUNT_VOLUME_ID_LEN],
+        0x5953_2001,
+        BlkIoCounters {
+            read_bytes,
+            write_bytes,
+            read_ops,
+            write_ops,
+            busy_ns,
+            read_wait_ns,
+            write_wait_ns,
+        },
+    )
+}
+
+/// A volume's queue occupancy on a solid-state device's budget.
+fn io_queue(in_flight: u64, depth_sum: u64, samples: u64) -> VolumeIoQueueRecord {
+    VolumeIoQueueRecord::new(
+        [7; MOUNT_VOLUME_ID_LEN],
+        0x5953_2001,
+        BlkQueueCounters {
+            in_flight,
+            queue_depth_sum: depth_sum,
+            queue_samples: samples,
+        },
+        BlkDeviceClass::SolidState.budget(),
+    )
+}
+
+/// A one-volume sample carrying `stats` and `queue` over a one-second
+/// interval.
+fn volume_sample(stats: VolumeIoStatsRecord, queue: Option<VolumeIoQueueRecord>) -> Sample {
+    Sample {
         mounts: Some(alloc::vec![mount("System:", 4_096, 100, 40)]),
+        volume_io_stats: Some(alloc::vec![stats]),
+        volume_io_queue: queue.map(|queue| alloc::vec![queue]),
+        elapsed_ns: Some(1_000_000_000),
         ..permitted()
-    };
+    }
+}
+
+#[test]
+fn a_volumes_first_sample_yields_no_rate_at_all() {
+    // A cumulative total is not a rate: with only one reading there is no
+    // interval to divide by, so every derived row states its absence rather
+    // than reading as an idle disk.
+    let sample = volume_sample(
+        io_stats(1 << 20, 0, 256, 0, 100_000_000, 40_000_000, 0),
+        Some(io_queue(1, 256, 256)),
+    );
     let report = report_of(&sample);
     let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
-    for label in [
-        "Utilisation",
-        "Queue depth",
-        "Await, read",
-        "In-flight requests",
-    ] {
+    for label in ["Utilisation", "Await, read", "Service time", "Queue depth"] {
         assert_eq!(
             fact(volume, label),
-            &Reading::Absent(Unmeasured::NoInterface),
-            "{label} needs a per-volume I/O statistics query, and says so"
+            &Reading::Absent(Unmeasured::Unavailable),
+            "{label} has no interval to derive over on a first sample"
         );
     }
+    assert_eq!(volume.hero.value, Reading::Absent(Unmeasured::Unavailable));
+    // The instant gauge needs no interval, so it reads on the first sample —
+    // against the ceiling the device's own class permits.
+    assert_eq!(
+        fact(volume, "In-flight requests"),
+        &Reading::measured(format!(
+            "1 of {}",
+            BlkDeviceClass::SolidState.budget().queue_depth
+        ))
+    );
+}
+
+#[test]
+fn a_volumes_service_block_derives_every_row_from_two_samples() {
+    // Between the two samples: 4 MiB read in 512 ops, 1 MiB written in 128,
+    // the device busy for half the second, reads waiting 64 ms in total and
+    // writes 32 ms. Every row below is one of those deltas over another.
+    let mut meters = RollingMeters::new();
+    let first = volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), Some(io_queue(0, 0, 0)));
+    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let second = volume_sample(
+        io_stats(
+            4 << 20,
+            1 << 20,
+            512,
+            128,
+            500_000_000,
+            64_000_000,
+            32_000_000,
+        ),
+        Some(io_queue(3, 1_280, 640)),
+    );
+    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+
+    // busy_ns delta over the interval.
+    assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
+    // wait_ns delta over the matching ops delta: 64 ms / 512 = 125 us.
+    assert_eq!(fact(volume, "Await, read"), &Reading::measured("125.0 us"));
+    // 32 ms / 128 = 250 us.
+    assert_eq!(fact(volume, "Await, write"), &Reading::measured("250.0 us"));
+    // busy_ns delta over every request that completed: 500 ms / 640.
+    assert_eq!(fact(volume, "Service time"), &Reading::measured("781.2 us"));
+    // depth sum delta over arrivals delta: 1280 / 640 = 2.00.
+    assert_eq!(fact(volume, "Queue depth"), &Reading::measured("2.00 mean"));
+    assert_eq!(
+        fact(volume, "In-flight requests"),
+        &Reading::measured("3 of 32")
+    );
+    // The queue record carries the budget, so the capacity block states the
+    // envelope the device is really served with.
+    assert_eq!(
+        fact(volume, "Device class budget"),
+        &Reading::measured("32 deep · 5.0 s deadline")
+    );
+
+    // The hero is the rate, split by direction and traced duplex.
+    assert_eq!(volume.hero.value, Reading::measured("5.0 MiB/s"));
+    assert!(volume
+        .hero
+        .context
+        .iter()
+        .any(|line| line.contains("4.0 MiB/s read") && line.contains("1.0 MiB/s write")));
+    assert!(volume
+        .hero
+        .context
+        .iter()
+        .any(|line| line.contains("640 IOPS") && line.contains("50% utilised")));
+    match &volume.hero.instrument {
+        HeroInstrument::Trend { samples, opposing } => {
+            assert_eq!(samples.len(), 1);
+            assert_eq!(opposing.as_ref().map(Vec::len), Some(1));
+        }
+        other => panic!("a rate's instrument is a duplex trend, not {other:?}"),
+    }
+    // The rail states how full the volume is; its trace carries the rate.
+    assert_eq!(volume.reading, Reading::measured("60%"));
+    assert_eq!(volume.trend.len(), 1);
+}
+
+#[test]
+fn a_denied_queue_scope_costs_the_queue_rows_alone() {
+    // The service counters are ungated and the queue counters are not, so a
+    // caller without the kernel scope still reads its utilisation and await
+    // while the two queue rows state that they were not permitted.
+    let mut meters = RollingMeters::new();
+    let denied = ScopeVerdicts {
+        memory_pressure: false,
+        ..PERMITTED
+    };
+    let first = Sample {
+        scopes: denied,
+        ..volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None)
+    };
+    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let second = Sample {
+        scopes: denied,
+        ..volume_sample(
+            io_stats(4 << 20, 0, 512, 0, 500_000_000, 64_000_000, 0),
+            None,
+        )
+    };
+    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
+    assert_eq!(fact(volume, "Await, read"), &Reading::measured("125.0 us"));
+    for label in ["Queue depth", "In-flight requests"] {
+        assert_eq!(
+            fact(volume, label),
+            &Reading::Absent(Unmeasured::NotPermitted),
+            "{label} is gated on the kernel scope and says which refusal"
+        );
+    }
+}
+
+#[test]
+fn a_sample_with_no_counters_breaks_the_series_rather_than_deltaing_over_the_gap() {
+    // The counters are cumulative since attach, so deltaing a fresh reading
+    // against a stale one — or against nought — would report a whole
+    // lifetime's transfer as one interval's rate. A sample the query could
+    // not answer therefore makes the next one a first sample again.
+    let mut meters = RollingMeters::new();
+    let low = io_stats(1 << 20, 0, 128, 0, 100_000_000, 16_000_000, 0);
+    let high = io_stats(64 << 20, 0, 8_192, 0, 900_000_000, 512_000_000, 0);
+    let steps = [
+        volume_sample(low, None),
+        // The query did not answer this cycle.
+        Sample {
+            volume_io_stats: None,
+            ..volume_sample(low, None)
+        },
+        volume_sample(high, None),
+    ];
+    let mut last = None;
+    for sample in steps {
+        last = Some(build_resource_report(
+            &sample,
+            &mut meters,
+            &SessionReport::HEALTHY,
+            &NoAuthority,
+        ));
+    }
+    let report = last.expect("three samples were folded");
+    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    assert_eq!(volume.hero.value, Reading::Absent(Unmeasured::Unavailable));
+    assert_eq!(
+        fact(volume, "Utilisation"),
+        &Reading::Absent(Unmeasured::Unavailable)
+    );
+    assert!(
+        volume.trend.is_empty(),
+        "no interval was measurable, so no point was plotted"
+    );
+}
+
+#[test]
+fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
+    // Two samples give the volume a rate. It is then unmounted, and the same
+    // id returns: its first sample after the return must again yield no rate,
+    // which is only true if the fold dropped its counters and its history
+    // with the mount.
+    let mut meters = RollingMeters::new();
+    let stats = io_stats(4 << 20, 0, 512, 0, 500_000_000, 64_000_000, 0);
+    for sample in [
+        volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None),
+        volume_sample(stats, None),
+    ] {
+        let _ = build_resource_report(&sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    }
+    let id = DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]);
+    assert!(!meters.devices.primary_history(id).is_empty());
+
+    // Unmounted: the sample names no volume at all.
+    let _ = build_resource_report(
+        &permitted(),
+        &mut meters,
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
+    assert!(meters.devices.primary_history(id).is_empty());
+    assert_eq!(meters.devices.volume_service(id), VolumeService::default());
+
+    // Back again, with the counters the departed volume left behind: the
+    // first sample after the return is a first sample, so there is no rate.
+    let report = build_resource_report(
+        &volume_sample(stats, None),
+        &mut meters,
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
+    let volume = device(&report, id);
+    assert_eq!(volume.hero.value, Reading::Absent(Unmeasured::Unavailable));
+    assert_eq!(
+        fact(volume, "Utilisation"),
+        &Reading::Absent(Unmeasured::Unavailable)
+    );
 }
 
 #[test]

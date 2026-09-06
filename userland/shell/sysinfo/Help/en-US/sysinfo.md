@@ -53,13 +53,21 @@ The queries:
   holding a compositor can count pixels — so each row names the
   publisher the service attested it to, and a session that has published
   nothing prints no row (needs `CAP_SYSINFO_GLOBAL`).
-- `storage`, `io` — per-volume storage I/O health: one row per
-  fault-aware block-backed volume — a prefix of its durable id, the
-  serving block-service endpoint, its current availability
-  (available/degraded/recovering/lost), and the cumulative outcome
-  counters (completions, resets, timeouts, medium errors, reissues) a
-  failing or flapping disk becomes visible on (needs
-  `CAP_SYSINFO_KERNEL`).
+- `storage`, `io` — three per-volume tables, one row per fault-aware
+  block-backed volume in each, keyed by a prefix of the volume's durable
+  id and naming the serving block-service endpoint. **Service** carries
+  the cumulative bytes, completed requests and device-busy time a reader
+  deltas into throughput, IOPS, utilisation and await — nothing is
+  pre-derived, so two readers never inherit one averaging window (no
+  capability needed). **Queue** carries what is outstanding now, the
+  accumulators a mean depth deltas out of, and the depth and deadline
+  the device's own class permits. **Health** carries the volume's
+  current availability (available/degraded/recovering/lost) and the
+  cumulative outcome counters (completions, resets, timeouts, medium
+  errors, reissues) a failing or flapping disk becomes visible on. The
+  last two need `CAP_SYSINFO_KERNEL`; the service table is printed
+  first, so a caller without it still reads the utilisation figures
+  before the refusal is reported.
 - `raid`, `arrays` — the composed RAID arrays and the devices the array
   composer holds: one row per array — a prefix of its identity, its
   level, its health (optimal/degraded/recovering/failed), its in-sync

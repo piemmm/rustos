@@ -78,6 +78,9 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `NET_STACK_DEFENCE`      | `CAP_SYSINFO_GLOBAL` | yes     | `NetStackDefenceCounters`           |
 | `DESKTOP_FRAME_REPORT`   | none                 | no      | empty (a submission)                |
 | `DESKTOP_FRAME_STATS`    | `CAP_SYSINFO_GLOBAL` | yes     | packed `DesktopFrameRecord`s        |
+| `NET_TIME_SERVERS`       | none                 | no      | packed `NetServerAddr`s             |
+| `VOLUME_IO_STATS`        | none                 | no      | packed `VolumeIoStatsRecord`s       |
+| `VOLUME_IO_QUEUE`        | `CAP_SYSINFO_KERNEL` | yes     | packed `VolumeIoQueueRecord`s       |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the

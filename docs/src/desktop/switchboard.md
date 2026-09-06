@@ -274,6 +274,19 @@ behind it — nothing timestamps a band change — so the service clocks it off
 the monotonic uptime reading and reads unmeasured where there is none, never a
 fabricated zero.
 
+**A volume's service readings are two-sample deltas, never a served
+average.** `VOLUME_IO_STATS` publishes the device's cumulative bytes,
+completed requests, busy time and summed waits, and `VOLUME_IO_QUEUE` its
+occupancy and the `BlkDeviceClass` budget bounding it; the pane derives
+throughput, IOPS, utilisation, await, service time and mean queue depth over
+its *own* sample interval, so no consumer inherits another's averaging window.
+A first sample, an unmeasurable interval, and an interval in which nothing
+completed each state their absence rather than reading as an idle disk. The
+two queries carry different gates on purpose — a utilisation figure is one
+every user may see, a queue depth is a driver internal — so a session without
+`CAP_SYSINFO_KERNEL` still reads its throughput and await while the two queue
+rows say which refusal they met.
+
 **The CPU, Memory and volume panes each carry the five tasks costing that
 resource most**, from the per-task readings the process record already
 provides, so a pane and the Tasks table can never disagree. **Summing them is
@@ -377,10 +390,6 @@ the pointer.
   `Type` column on Tasks the day a registry lands, not as a section.
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
   no service-enumeration query, so nothing claims to list them.
-- **A volume's rate, utilisation, queue depth and await** — no per-volume
-  I/O statistics query exists yet, so the volume pane's service-and-queue
-  block marks every row rather than deriving a figure. Its health block is a
-  real measurement today.
 - **A graphics device's engine utilisation and video memory** — the hardware
   tree names the device, but no query publishes its per-engine busy time or
   its memory, so those facts are marked. The pane leads with the compositor's

@@ -25,7 +25,9 @@ use alloc::vec::Vec;
 
 use super::delegate::FinalLink;
 
-use tairix_abi::sysinfo::{MountRecord, VolumeIoHealthRecord};
+use tairix_abi::sysinfo::{
+    MountRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+};
 use tairix_abi::time::Time64;
 use tairix_abi::{
     CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
@@ -497,6 +499,36 @@ pub trait FilesystemService: Send + Sync {
     /// mount table (the fail-closed [`NullFilesystemService`]) truthfully
     /// reports "no volumes" rather than fabricating one.
     fn volume_io_health_snapshot(&self) -> Vec<VolumeIoHealthRecord> {
+        Vec::new()
+    }
+
+    /// Snapshot every fault-aware block-backed volume's cumulative I/O
+    /// service counters as wire-ready [`VolumeIoStatsRecord`]s, in the same
+    /// order and keyed the same way as
+    /// [`volume_io_health_snapshot`](Self::volume_io_health_snapshot), for
+    /// the `sysinfo` per-volume service query.
+    ///
+    /// A read-only, system-wide, secret-free observation like its health
+    /// sibling — cumulative bytes, completed requests, device-busy time and
+    /// summed waits, never file contents — and ungated at the broker for the
+    /// same reason `CPU_TIME_STATS` is: a utilisation figure is one every
+    /// user may see. The default returns an empty snapshot, so a service
+    /// owning no mount table truthfully reports "no volumes".
+    fn volume_io_stats_snapshot(&self) -> Vec<VolumeIoStatsRecord> {
+        Vec::new()
+    }
+
+    /// Snapshot every fault-aware block-backed volume's live queue occupancy
+    /// and the per-device budget it is bounded by, as wire-ready
+    /// [`VolumeIoQueueRecord`]s in the same order and keyed the same way as
+    /// [`volume_io_health_snapshot`](Self::volume_io_health_snapshot), for
+    /// the `sysinfo` per-volume queue query.
+    ///
+    /// Read-only and secret-free, but a queue depth is a driver and
+    /// scheduler internal, so the broker gates it on `CAP_SYSINFO_KERNEL`
+    /// where the service counters are ungated. The default returns an empty
+    /// snapshot.
+    fn volume_io_queue_snapshot(&self) -> Vec<VolumeIoQueueRecord> {
         Vec::new()
     }
 

@@ -86,6 +86,33 @@ pub fn percent(permille: u16) -> String {
     format!("{}%", permille / 10)
 }
 
+/// The decimal units a latency is scaled through, smallest first.
+const LATENCY_UNITS: [&str; 4] = ["ns", "us", "ms", "s"];
+
+/// A nanosecond latency in the largest decimal unit that keeps it under four
+/// digits, with one decimal place above nanoseconds (`"140.0 us"`).
+///
+/// Scaled like a byte count and for the same reason: a reader comparing two
+/// volumes needs the magnitude and one significant place, and more digits
+/// would imply an accuracy a figure derived from one interval's delta does
+/// not have.
+#[must_use]
+pub fn format_latency(nanos: u64) -> String {
+    let mut scale = 1u64;
+    let mut unit = 0usize;
+    while nanos / scale >= 1000 && unit + 1 < LATENCY_UNITS.len() {
+        scale = scale.saturating_mul(1000);
+        unit = unit.saturating_add(1);
+    }
+    let name = LATENCY_UNITS.get(unit).copied().unwrap_or("ns");
+    if unit == 0 {
+        return format!("{nanos} {name}");
+    }
+    let whole = nanos / scale;
+    let tenths = (nanos % scale).saturating_mul(10) / scale;
+    format!("{whole}.{tenths} {name}")
+}
+
 /// An elapsed duration in days, hours and minutes, dropping the units that
 /// are nought so a machine up for four minutes does not read
 /// `"0d 0h 4m"`.

@@ -615,6 +615,12 @@ mod program {
                 DegradedField::VolumeHealth => {
                     "notice: volume I/O health is unavailable; a failing disk cannot be reported"
                 }
+                DegradedField::VolumeIoStats => {
+                    "notice: volume I/O counters are unavailable; throughput, utilisation and await are not shown"
+                }
+                DegradedField::VolumeIoQueue => {
+                    "notice: volume queue occupancy is unavailable; depth and in-flight requests are not shown"
+                }
                 DegradedField::NetInterfaceFacts => {
                     "notice: the network interface inventory is unavailable; interfaces are not named"
                 }

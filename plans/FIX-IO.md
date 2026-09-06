@@ -886,6 +886,31 @@ Remaining deliverables:
   seam and `sysinfod` fronts the query, exposed by `sysinfo storage`. Proven
   host-side end to end (ABI round-trip/fail-closed, the `BlkClient` fold, the
   mount-registry snapshot, the gated/audited/paged broker, and the CLI render).
+  Beside the health tallies the same `BlkClient` fold now also carries the
+  device's **service and queue** counters, published by two further queries
+  over the same one registry walk (so all three lists are keyed and ordered
+  alike and a client joins them by `volume_id`): `VOLUME_IO_STATS` (id 38,
+  **ungated** — a machine-wide throughput and utilisation figure is one every
+  user may see, the same boundary `CPU_TIME_STATS` draws) carrying
+  `blkio::BlkIoCounters` — cumulative `read_bytes`/`write_bytes`,
+  `read_ops`/`write_ops`, `busy_ns` and `read_wait_ns`/`write_wait_ns`; and
+  `VOLUME_IO_QUEUE` (id 39, `CAP_SYSINFO_KERNEL`, audited — a queue depth is
+  a driver internal, the same boundary `CPU_LOAD` draws) carrying
+  `blkio::BlkQueueCounters` plus the `IoBudget` in force, so a depth is read
+  against the ceiling that device's discovered `BlkDeviceClass` permits.
+  Nothing is served pre-derived: throughput, IOPS, utilisation and await are
+  the consumer's own two-sample deltas, so no consumer inherits another's
+  averaging window. The three counter populations differ deliberately —
+  `busy_ns` covers every attempt the device held (including one it never
+  answered, whose dead time utilisation must show), the `ops`/`wait_ns` pairs
+  cover the attempts it *answered* so await is a mean over requests that have
+  a latency, and the byte tallies count only what a completion moved. Like
+  the health counters these are shared `lib/abi` value types with a
+  lock-free atomic mirror in the kernel (`BlkIoStatsAtomic`), so the I/O-path
+  fold and the snapshot cannot diverge. Proven host-side end to end (ABI
+  round-trip/fail-closed, the `BlkClient` fold over a scripted device, the
+  mount-registry walk, the ungated/gated/audited/paged broker, the CLI
+  render, and the Switchboard volume pane's derivation).
   Retry/reset *ladder* counts the driver performs on the hardware, and the
   fault-domain **node** identity, are **not** in this record: they need the
   endpoint→hardware-tree-node association and the live serving-driver ladder,

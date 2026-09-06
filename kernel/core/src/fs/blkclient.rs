@@ -22,9 +22,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkHealthCounters, BlkOp, BlkOutcome,
-    BlkRequest, BlkStatus, IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY,
-    BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkOp,
+    BlkOutcome, BlkQueueCounters, BlkRequest, BlkStatus, IoBudget, BLK_COMPLETION_LEN,
+    BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
@@ -112,30 +112,149 @@ impl BlkHealthCountersAtomic {
     }
 }
 
-/// One served block device's live health handles, shared by [`Arc`] with the
-/// mount registry so the `sysinfo` volume-health query and the mount snapshot
-/// can read a live device's health without holding any I/O-path lock
-/// (`plans/FIX-IO.md` IO2/IO3/IO5).
+/// Lock-free cumulative service and queue counters for one served block
+/// device.
+///
+/// The atomic mirror of [`BlkIoCounters`] and [`BlkQueueCounters`]: the block
+/// client folds every attempt into these on the I/O path (never a lock — a
+/// driver may park across a completion), and the mount registry snapshots
+/// them for the `sysinfo` per-volume service and queue queries. The two
+/// counter blocks live in one type because one attempt touches both: issuing
+/// it samples the queue depth and may open the device-busy interval, and its
+/// end closes that interval and folds its bytes and wait. The field order and
+/// the read/write field mapping are *not* duplicated here — they are the
+/// shared [`BlkIoCounters::direction`] and `from_fields` definitions, so the
+/// atomic tallies and the pure value types cannot disagree.
+#[derive(Debug, Default)]
+pub struct BlkIoStatsAtomic {
+    /// The cumulative service tallies, in [`BlkIoCounters`] wire order.
+    io: [AtomicU64; BlkIoCounters::FIELD_COUNT],
+    /// The queue gauge and its mean-depth accumulators, in
+    /// [`BlkQueueCounters`] wire order.
+    queue: [AtomicU64; BlkQueueCounters::FIELD_COUNT],
+    /// The monotonic reading the open device-busy interval started at, read
+    /// only on the edge that closes it.
+    busy_since_ns: AtomicU64,
+}
+
+impl BlkIoStatsAtomic {
+    /// Record one attempt being issued at `now_ns`: take the queue-depth
+    /// observation the arriving request sees (itself included, so a device
+    /// served one request at a time reads a mean depth of `1` rather than
+    /// `0`) and open the device-busy interval if the device was idle.
+    fn note_issue(&self, now_ns: u64) {
+        let depth = self.queue[BlkQueueCounters::IN_FLIGHT].fetch_add(1, Ordering::AcqRel) + 1;
+        add(&self.queue[BlkQueueCounters::QUEUE_DEPTH_SUM], depth);
+        add(&self.queue[BlkQueueCounters::QUEUE_SAMPLES], 1);
+        if depth == 1 {
+            self.busy_since_ns.store(now_ns, Ordering::Release);
+        }
+    }
+
+    /// Record one attempt leaving the device at `now_ns`, answered or not:
+    /// drop it from the in-flight count and, if it was the last outstanding
+    /// request, close the device-busy interval into `busy_ns`.
+    ///
+    /// A timed-out or cancelled attempt reaches here too — the device held it
+    /// for the whole deadline, and utilisation has to show that dead time.
+    ///
+    /// The interval is exact while the device is served serially, which the
+    /// shared-data-window discipline guarantees: were two attempts ever to
+    /// overlap, an interval could be attributed slightly short. That is
+    /// observability drift, never a torn or invalid value.
+    fn note_done(&self, now_ns: u64) {
+        if self.queue[BlkQueueCounters::IN_FLIGHT].fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let since = self.busy_since_ns.load(Ordering::Acquire);
+        add(
+            &self.io[BlkIoCounters::BUSY_NS],
+            now_ns.saturating_sub(since),
+        );
+    }
+
+    /// Fold one attempt the device **answered**: its direction's completed
+    /// count, the `bytes` its completion actually moved, and the `wait_ns` it
+    /// spent between issue and completion.
+    ///
+    /// A data-less operation folds nothing — it belongs to neither direction
+    /// — and an attempt the device never answered never reaches here, so
+    /// await stays a mean over requests that have a latency at all.
+    fn note_answered(&self, op: BlkOp, bytes: u64, wait_ns: u64) {
+        let Some(direction) = BlkIoCounters::direction(op) else {
+            return;
+        };
+        add(&self.io[direction.bytes], bytes);
+        add(&self.io[direction.ops], 1);
+        add(&self.io[direction.wait_ns], wait_ns);
+    }
+
+    /// A consistent-enough point-in-time snapshot of the service tallies,
+    /// rebuilt through the shared [`BlkIoCounters::from_fields`]. The reads
+    /// are individually atomic and observability-only, so a snapshot taken
+    /// during a concurrent fold may straddle a single increment — never a
+    /// torn or invalid value.
+    #[must_use]
+    pub fn io_snapshot(&self) -> BlkIoCounters {
+        BlkIoCounters::from_fields(snapshot_fields(&self.io))
+    }
+
+    /// The same for the queue gauge and its accumulators, through
+    /// [`BlkQueueCounters::from_fields`].
+    #[must_use]
+    pub fn queue_snapshot(&self) -> BlkQueueCounters {
+        BlkQueueCounters::from_fields(snapshot_fields(&self.queue))
+    }
+}
+
+/// Add `delta` to `counter`, saturating: a tally is operational
+/// observability, so an implausibly-long-lived device pins at [`u64::MAX`]
+/// rather than wrapping to a smaller, misleading value — the same discipline
+/// the pure value types' folds keep.
+fn add(counter: &AtomicU64, delta: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(delta))
+    });
+}
+
+/// Read `counters` into a plain array in the same order, for the shared
+/// `from_fields` rebuild.
+fn snapshot_fields<const N: usize>(counters: &[AtomicU64; N]) -> [u64; N] {
+    core::array::from_fn(|i| counters[i].load(Ordering::Relaxed))
+}
+
+/// One served block device's live I/O readings, shared by [`Arc`] with the
+/// mount registry so the `sysinfo` per-volume health, service and queue
+/// queries and the mount snapshot can read a live device without holding any
+/// I/O-path lock (`plans/FIX-IO.md` IO2/IO3/IO5).
 ///
 /// It names the serving block-service endpoint (`dev`), the availability
-/// overlay the client updates on every completion, and the cumulative
-/// [`BlkHealthCountersAtomic`] the client folds. It carries no capability
-/// token and no secret.
+/// overlay the client updates on every completion, the cumulative
+/// [`BlkHealthCountersAtomic`] outcome tallies, the [`BlkIoStatsAtomic`]
+/// service and queue counters, and the [`IoBudget`] those are read against.
+/// It carries no capability token and no secret.
 ///
-/// It is cloneable because a device's health is a property of the *device*,
+/// It is cloneable because every reading here is a property of the *device*,
 /// not of a mount: every volume on one disk registers the same handles, so
 /// they all read one fold rather than a divergent copy each.
 #[derive(Clone)]
-pub struct VolumeHealthSource {
+pub struct VolumeIoSource {
     /// The block-service call-endpoint id serving this volume's device.
     pub dev: u64,
     /// The volume-availability overlay (a [`MountAvailability`] wire byte).
     pub availability: Arc<AtomicU8>,
     /// The cumulative I/O-health tallies folded from every completion.
     pub counters: Arc<BlkHealthCountersAtomic>,
+    /// The cumulative service tallies and live queue occupancy folded from
+    /// every attempt.
+    pub stats: Arc<BlkIoStatsAtomic>,
+    /// The per-device budget in force, derived once at connect from the
+    /// device's declared class, so a reported depth is read against the
+    /// ceiling that applies to that medium.
+    pub budget: IoBudget,
 }
 
-impl VolumeHealthSource {
+impl VolumeIoSource {
     /// The live health state the block client last reflected onto this
     /// device's overlay, or [`None`] when the byte names no live state.
     #[must_use]
@@ -224,6 +343,11 @@ pub struct BlkClient {
     /// live counters the client observes (`plans/FIX-IO.md` IO5). Lock-free,
     /// like `health`.
     counters: Arc<BlkHealthCountersAtomic>,
+    /// The cumulative service tallies and live queue occupancy this client
+    /// folds from every attempt, shared by [`Arc`] with the mount registry so
+    /// the `sysinfo` per-volume service and queue queries report the same
+    /// live counters the client observes. Lock-free, like `counters`.
+    stats: Arc<BlkIoStatsAtomic>,
 }
 
 impl BlkClient {
@@ -287,6 +411,7 @@ impl BlkClient {
             budget: BlkDeviceClass::served_as(None).budget(),
             health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
             counters: Arc::new(BlkHealthCountersAtomic::default()),
+            stats: Arc::new(BlkIoStatsAtomic::default()),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -336,19 +461,22 @@ impl BlkClient {
         self.declared_class
     }
 
-    /// The shared live-health handles for this device (the serving endpoint
-    /// id, the volume-availability overlay, and the cumulative I/O-health
-    /// counters), for the mount registry to consult when building the mount
-    /// snapshot and answering the `sysinfo` volume-health query
+    /// The shared live-reading handles for this device — the serving endpoint
+    /// id, the volume-availability overlay, the cumulative I/O-health
+    /// counters, the service and queue counters, and the budget they are read
+    /// against — for the mount registry to consult when building the mount
+    /// snapshot and answering the `sysinfo` per-volume queries
     /// (`plans/FIX-IO.md` IO2/IO3/IO5). The availability handle carries a
-    /// [`MountAvailability`] wire byte and the counters the folded tallies,
-    /// both updated on every completion this client folds.
+    /// [`MountAvailability`] wire byte; every counter is updated on the I/O
+    /// path as this client folds each attempt.
     #[must_use]
-    pub fn health_source(&self) -> VolumeHealthSource {
-        VolumeHealthSource {
+    pub fn io_source(&self) -> VolumeIoSource {
+        VolumeIoSource {
             dev: self.endpoint.id().0,
             availability: Arc::clone(&self.health),
             counters: Arc::clone(&self.counters),
+            stats: Arc::clone(&self.stats),
+            budget: self.budget,
         }
     }
 
@@ -486,12 +614,17 @@ impl BlkClient {
         // a spin. Absent a live clock hook (a host test of this path) there
         // is no deadline and the cooperative fallback below stands in.
         let poster = sched.map_or(0, |(_, task)| task);
-        let deadline_abs = wait_arch().map_or(NO_DEADLINE, |hook| {
-            hook.now_ns().saturating_add(self.budget.deadline_ns)
+        let issued_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
+        let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
+            issued_ns.saturating_add(self.budget.deadline_ns)
         });
         let ticket =
             self.endpoint
                 .post(&self.caps, poster, &frame[..len], deadline_abs, self.audit)?;
+        // Only now is the attempt genuinely outstanding to the device: a
+        // refused post never reached it and must not read as queue occupancy
+        // or as busy time.
+        self.stats.note_issue(issued_ns);
 
         // Wake the serving driver parked between requests — exactly the
         // endpoint's recorded server where known, the broadcast fallback
@@ -540,7 +673,35 @@ impl BlkClient {
                 hook.set_wakeup(nearest_timed_deadline());
             }
         }
-        Ok(decode_outcome(&outcome?))
+        // The attempt has left the device either way: a deadline miss and a
+        // torn-down endpoint both consumed device time, so both close the
+        // busy interval. Only an answered attempt has a latency to average,
+        // so only that folds its wait, and only a completion the data
+        // survived moved bytes.
+        let done_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
+        self.stats.note_done(done_ns);
+        let outcome = decode_outcome(&outcome?);
+        self.stats.note_answered(
+            request.op,
+            self.transferred_bytes(request, outcome.status),
+            done_ns.saturating_sub(issued_ns),
+        );
+        Ok(outcome)
+    }
+
+    /// How many bytes one attempt of `request` moved, given the device
+    /// answered it with `status`.
+    ///
+    /// A request is all-or-nothing at this layer — the completion carries no
+    /// partial-transfer count — so a data-valid status moved the whole extent
+    /// and any other moved none. The extent is the request's own block count
+    /// against the connect-time geometry, which is why a `Geometry` probe
+    /// (issued before the geometry is known) names no blocks and reads zero.
+    fn transferred_bytes(&self, request: BlkRequest, status: BlkStatus) -> u64 {
+        if !status.data_valid() {
+            return 0;
+        }
+        u64::from(request.blocks) * u64::from(self.geometry.block_size)
     }
 
     /// Copy `data` into the shared window (a write's payload).
@@ -1235,7 +1396,7 @@ mod tests {
 
     /// The shared volume-availability overlay the client currently reports.
     fn health(client: &BlkClient) -> MountAvailability {
-        MountAvailability::from_u8(client.health_source().availability.load(Ordering::Relaxed))
+        MountAvailability::from_u8(client.io_source().availability.load(Ordering::Relaxed))
             .expect("overlay holds a valid availability byte")
     }
 
@@ -1256,7 +1417,7 @@ mod tests {
         client.read_blocks(0, &mut buf).expect("read after reissue");
         server.join().unwrap();
 
-        let counters = client.health_source().counters.snapshot();
+        let counters = client.io_source().counters.snapshot();
         // Geometry + two resets + the successful read = four completions.
         assert_eq!(counters.completions, 4);
         // Geometry and the final read answered `Ok`.
@@ -1277,6 +1438,96 @@ mod tests {
                 + counters.faults,
             counters.completions
         );
+    }
+
+    #[test]
+    fn the_client_folds_bytes_ops_waits_and_queue_depth_for_every_attempt() {
+        // Geometry, a good read, then a good write: the client folds each
+        // direction's own bytes and completed count, and takes one queue-depth
+        // observation per issued request.
+        let (mut client, _device, server) = connected(64, 3);
+        let mut buf = [0u8; BLOCK_SIZE];
+        client.read_blocks(0, &mut buf).expect("read");
+        client.write_blocks(1, &buf).expect("write");
+        server.join().unwrap();
+
+        let source = client.io_source();
+        let io = source.stats.io_snapshot();
+        assert_eq!(io.read_ops, 1);
+        assert_eq!(io.write_ops, 1);
+        assert_eq!(io.read_bytes, BLOCK_SIZE as u64);
+        assert_eq!(io.write_bytes, BLOCK_SIZE as u64);
+
+        // A host test has no clock hook, so no interval is measurable and
+        // nothing is attributed: an unmeasurable wait is zero, never a
+        // fabricated duration.
+        assert_eq!(io.busy_ns, 0);
+        assert_eq!(io.read_wait_ns, 0);
+        assert_eq!(io.write_wait_ns, 0);
+
+        // Geometry, the read, and the write are three issued requests; the
+        // shared data window serialises them, so each saw a depth of exactly
+        // itself and nothing is left outstanding.
+        let queue = source.stats.queue_snapshot();
+        assert_eq!(queue.queue_samples, 3);
+        assert_eq!(queue.queue_depth_sum, 3);
+        assert_eq!(queue.in_flight, 0);
+        assert_eq!(
+            queue.mean_depth_centi(&BlkQueueCounters::default()),
+            Some(100)
+        );
+
+        // The budget the depth is read against is the device's own class's,
+        // not a global constant.
+        assert_eq!(source.budget, MEM_DEVICE_CLASS.budget());
+    }
+
+    #[test]
+    fn a_failed_attempt_counts_an_op_but_moves_no_bytes() {
+        // Two reissuable resets ridden out inside the budget, then a good
+        // read. Each answered attempt has a latency, so each counts an op;
+        // only the completion the data survived moved bytes.
+        let (mut client, server) = connect_scripted(
+            vec![
+                Some(Errno::EndpointStalled),
+                Some(Errno::EndpointStalled),
+                None,
+            ],
+            4,
+        );
+        let mut buf = [0u8; BLOCK_SIZE];
+        client.read_blocks(0, &mut buf).expect("read after reissue");
+        server.join().unwrap();
+
+        let io = client.io_source().stats.io_snapshot();
+        assert_eq!(io.read_ops, 3);
+        assert_eq!(io.read_bytes, BLOCK_SIZE as u64);
+        assert_eq!(io.write_ops, 0);
+    }
+
+    #[test]
+    fn an_unanswered_attempt_leaves_no_wait_to_average() {
+        // The endpoint is torn down under the client, so the attempt never
+        // gets a completion. It is not an answered request and folds no op or
+        // wait — an average over a request with no latency is not a number —
+        // while the outcome tallies still record the failure.
+        let (mut client, server) = connect_scripted(vec![Some(Errno::DeviceOffline)], 2);
+        let mut buf = [0u8; BLOCK_SIZE];
+        assert_eq!(
+            client.read_blocks(0, &mut buf),
+            Err(DriverError::DeviceOffline)
+        );
+        server.join().unwrap();
+
+        // The device *answered* — offline is a completion, not silence — so
+        // the op is counted with no bytes.
+        let source = client.io_source();
+        let io = source.stats.io_snapshot();
+        assert_eq!(io.read_ops, 1);
+        assert_eq!(io.read_bytes, 0);
+        assert_eq!(source.counters.snapshot().offline, 1);
+        // Nothing is left outstanding either way.
+        assert_eq!(source.stats.queue_snapshot().in_flight, 0);
     }
 
     #[test]
@@ -1438,7 +1689,7 @@ mod tests {
         // so the two can never disagree about one device.
         client.note_health(BlkStatus::Degraded);
         assert_eq!(
-            client.health_source().live_availability(),
+            client.io_source().live_availability(),
             Some(MountAvailability::Degraded)
         );
     }

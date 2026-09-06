@@ -67,6 +67,9 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `NET_STACK_DEFENCE`     | `CAP_SYSINFO_GLOBAL`   | yes     |
 | `DESKTOP_FRAME_REPORT`  | none (self-scoped)     | no      |
 | `DESKTOP_FRAME_STATS`   | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_TIME_SERVERS`      | none                   | no      |
+| `VOLUME_IO_STATS`       | none                   | no      |
+| `VOLUME_IO_QUEUE`       | `CAP_SYSINFO_KERNEL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
@@ -182,9 +185,41 @@ kernel-wide operational state:
   observation — so it moves under load even on the tickless default
   policy (EEVDF), which takes no periodic scheduler tick. All are kernel
   internals, hence the gate the utilisation split does not carry.
+- `VOLUME_IO_STATS` — one `VolumeIoStatsRecord` per fault-aware
+  block-backed volume the kernel serves (paged by a `VolumeIoRequest`):
+  the volume's durable id, the serving block-service endpoint, and the
+  cumulative `blkio::BlkIoCounters` the kernel filesystem client folds
+  from every attempt — `read_bytes`/`write_bytes`,
+  `read_ops`/`write_ops`, `busy_ns`, and `read_wait_ns`/`write_wait_ns`.
+  The storage analogue of `CPU_TIME_STATS`, and ungated for the same
+  reason: a machine-wide throughput and utilisation figure is one every
+  user may see, and it exposes strictly less than the ungated
+  `MOUNT_LIST`. **Nothing is served pre-derived** — throughput is a
+  bytes delta over the reader's own interval, IOPS an ops delta,
+  utilisation a `busy_ns` delta, and await a `wait_ns` delta over the
+  matching `ops` delta — so no consumer inherits another's averaging
+  window and a first sample yields no rate. The three populations differ
+  deliberately: `busy_ns` covers every attempt the device held including
+  one it never answered (a wedged disk's dead time is what utilisation
+  must show), the `ops`/`wait_ns` pairs cover the attempts it *answered*
+  (so await is a mean over requests that have a latency at all), and the
+  byte tallies count only what a completion actually moved. A data-less
+  operation (geometry, flush) belongs to neither direction.
+- `VOLUME_IO_QUEUE` — one `VolumeIoQueueRecord` per fault-aware
+  block-backed volume (paged by the same `VolumeIoRequest`, keyed and
+  ordered identically so a client joins the three per-volume lists by
+  `volume_id`): the live `in_flight` count, the `queue_depth_sum` /
+  `queue_samples` accumulators a *mean* depth is a delta ratio of, and
+  the `budget_depth` / `budget_deadline_ns` of the `IoBudget` in force.
+  The exact analogue of `CPU_LOAD` and gated for the same reason: a
+  queue depth is a driver and scheduler internal, not the utilisation
+  split every user may see above. The budget travels with the depth
+  because a depth alone does not say whether a device is saturated —
+  the reading is `in_flight` against the ceiling its discovered
+  `BlkDeviceClass` permits, never a global constant.
 - `VOLUME_IO_HEALTH` — one `VolumeIoHealthRecord` per fault-aware
-  block-backed volume the kernel serves (paged by a
-  `VolumeIoHealthRequest`): the volume's durable id, the serving
+  block-backed volume the kernel serves (paged by the same
+  `VolumeIoRequest`): the volume's durable id, the serving
   block-service endpoint, its current `MountAvailability` (the same live
   reading the mount table overlays), and the cumulative
   `BlkHealthCounters` the kernel filesystem client folds from every

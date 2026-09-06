@@ -28,18 +28,18 @@ lie about.
 | **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | done |
 | **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | done |
 | **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | planned |
-| **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | planned |
-| **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | planned |
+| **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | done |
+| **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | done |
 | **Q3** | `GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`: per-engine `busy_ns`/`idle_ns`, device memory, and the device's `AccelCaps` | `plans/FIX-DISPLAY-ACCELERATION.md` accel path | S8 | planned |
 | **Q4** | `ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`: `busy_ns`/`idle_ns`, device memory, `in_flight` | D1 | S8 | planned |
 | **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | done |
-| **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | planned |
+| **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | in progress — Q1/Q2 landed with their queries; Q3/Q4 remain |
 | **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | done |
 | **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | done |
 | **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
 | **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
 | **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | done |
-| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
+| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | in progress — two board mismatches remain, below |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4 | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
 | **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
@@ -77,7 +77,7 @@ The reference storyboard is `plans/switchboard/`:
 | `01-tasks.png` | Tasks — the table and its per-task trace |
 | `02-cpu.png` | Resources → CPU, with the per-core grid |
 | `03-memory.png` | Resources → Memory, with the pressure banner |
-| `04-disk.png` | Resources → a volume: health measured, rates pending |
+| `04-disk.png` | Resources → a volume: its rates, capacity and bucketed health |
 | `05-network.png` | Resources → an interface |
 | `06-graphics.png` | Resources → Graphics (compositor work, then the device) |
 | `07-accelerator.png` | Resources → the accelerator slot, and what it costs |
@@ -474,12 +474,31 @@ Every other one is plainly disabled for want of an endpoint — never marked for
 authority, because acquiring a capability would not make an absent endpoint
 appear.
 
-**Two rail entries carry no trace, and that is a reading about them.**
-A volume's capacity is a level rather than a rate, and there is no per-volume
-byte counter to delta; the interface rates query serves an already-averaged
-reading rather than a counter, so a trace would plot someone else's averaging
-window. Both entries therefore show their reading without an instrument until
-Q1 lands.
+**The interface rail entry carries no trace, and that is a reading about
+it.** The interface rates query serves an already-averaged reading rather
+than a counter, so a trace would plot someone else's averaging window; the
+entry therefore shows its reading without an instrument. A volume's entry has
+both: its reading is how full it is (a level, so no trace would say it) and
+its trace is the throughput Q1's byte counters delta into, against the one
+shared full-scale reference every device trace plots at.
+
+**Two `06-graphics.png` mismatches remain open on this pane, and they land
+with Q3.** Both need a decision the prose does not fix, so neither is guessed
+at:
+
+- **The rail entry reads the wrong count.** The board's `Compositor 3.2k px`
+  is the frame's *damaged* pixels (3,200); the code reads `blended_px`, which
+  is the hero's figure (4.2 M) and would make the rail entry and the hero the
+  same reading at two magnitudes.
+- **The hero's trace and the rail's trace have no series behind them.**
+  `DeviceMeters` is read for `DeviceId::Graphics` but nothing records it, so
+  both plot an empty chart for ever. The series the board captions is *damaged
+  pixels per frame*, and a per-frame pixel count needs its own full-scale
+  reference — the byte reference every other device trace plots against is
+  the wrong dimension, and permille-of-screen would draw a flat line at the
+  bottom of the box for the board's own 3,200-of-2.07 M frame. Choose that
+  reference with Q3, which is the change that revisits this pane, and record
+  it here.
 
 **The Graphics pane is named for the display path, not for a GPU.** A
 framebuffer-only or headless machine has no GPU and would read an empty *GPU*
@@ -753,6 +772,25 @@ internal, not the utilisation split every user may see. Per volume:
   rather than one instant's snapshot, which is what a reader actually wants.
 - `budget_depth`, `budget_deadline_ns` — the `BlkDeviceClass` budget in force,
   so a depth is read against the ceiling that applies to that medium.
+
+Q1 and Q2 are **landed**, over `IntrospectDomain::{VolumeIoStats, VolumeIoQueue}`
+and one shared `VolumeIoRequest` all three per-volume reads page by. Their
+counters are folded in the kernel `BlkClient` beside the health tallies
+(`plans/FIX-IO.md` IO5) as `BlkIoCounters` / `BlkQueueCounters` — shared
+`lib/abi` value types with a lock-free atomic mirror, so the fold and the
+snapshot cannot diverge — and the mount registry walks the driver registry
+**once** for all three lists, so they are keyed and ordered alike and a client
+joins them by `volume_id`. The three counter populations differ on purpose:
+`busy_ns` covers every attempt the device held (including one it never
+answered, whose dead time utilisation must show), the `ops`/`wait_ns` pairs
+cover the attempts it *answered* so await is a mean over requests that have a
+latency, and the byte tallies count only what a completion moved.
+
+**One deviation from `04-disk.png`: the queue-depth row reads a mean, not a
+mean and a peak.** S8's field list is explicit and the board's own annotation
+defers field choice to it. A monotonic high-water mark is also a poor reading
+— after a day of uptime it pins at the ceiling and stays — and a windowed peak
+is state no counter carries. The row reads `N.NN mean`.
 
 **`GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`.** Gated with `HARDWARE_TREE`, whose
 device inventory it details. One record per graphics device, plus one per

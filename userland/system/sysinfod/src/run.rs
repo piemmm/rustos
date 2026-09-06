@@ -64,8 +64,8 @@ mod program {
         CpuTimeRecord, CrashRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
         MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
         RamzipStats, ResourceLimitRecord, SeatRecord, SystemIdentity, Uptime, UserDirectoryRecord,
-        VolumeIoHealthRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
-        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
+        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN,
+        SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -351,6 +351,30 @@ mod program {
             let mut records = Vec::new();
             for chunk in bytes.as_chunks::<{ VolumeIoHealthRecord::WIRE_LEN }>().0 {
                 records.push(VolumeIoHealthRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn volume_io_stats(&self, _caller: &Caller) -> Result<Vec<VolumeIoStatsRecord>, Errno> {
+            let bytes = read_list(
+                IntrospectDomain::VolumeIoStats,
+                VolumeIoStatsRecord::WIRE_LEN,
+            )?;
+            let mut records = Vec::new();
+            for chunk in bytes.as_chunks::<{ VolumeIoStatsRecord::WIRE_LEN }>().0 {
+                records.push(VolumeIoStatsRecord::from_bytes(chunk)?);
+            }
+            Ok(records)
+        }
+
+        fn volume_io_queue(&self, _caller: &Caller) -> Result<Vec<VolumeIoQueueRecord>, Errno> {
+            let bytes = read_list(
+                IntrospectDomain::VolumeIoQueue,
+                VolumeIoQueueRecord::WIRE_LEN,
+            )?;
+            let mut records = Vec::new();
+            for chunk in bytes.as_chunks::<{ VolumeIoQueueRecord::WIRE_LEN }>().0 {
+                records.push(VolumeIoQueueRecord::from_bytes(chunk)?);
             }
             Ok(records)
         }

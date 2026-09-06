@@ -84,6 +84,33 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn volume_io_health(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
+    /// Encode up to `max_records`
+    /// [`tairix_abi::sysinfo::VolumeIoStatsRecord`]s beginning at record
+    /// index `offset`, in the same stable order and keyed the same way as
+    /// [`volume_io_health`](Self::volume_io_health) — the cumulative service
+    /// counters (bytes, completed requests, device-busy time and summed
+    /// waits) of every fault-aware block-backed volume the kernel serves.
+    /// An `offset` past the end returns an empty `Vec` (the paging
+    /// terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn volume_io_stats(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
+    /// Encode up to `max_records`
+    /// [`tairix_abi::sysinfo::VolumeIoQueueRecord`]s beginning at record
+    /// index `offset`, in the same stable order and keyed the same way as
+    /// [`volume_io_health`](Self::volume_io_health) — each volume's live
+    /// queue occupancy, its mean-depth accumulators, and the per-device
+    /// budget that occupancy is bounded by. An `offset` past the end returns
+    /// an empty `Vec` (the paging terminator), never an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn volume_io_queue(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
     /// The wire image of the current
     /// [`tairix_abi::sysinfo::SystemIdentity`] (machine id, OS version,
     /// hostname).
@@ -275,6 +302,14 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn volume_io_health(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn volume_io_stats(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn volume_io_queue(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

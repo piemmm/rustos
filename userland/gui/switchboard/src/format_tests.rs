@@ -1,6 +1,6 @@
 //! Unit tests for the crate's one set of display formatters.
 
-use super::{format_bytes, format_duration, format_pixels, format_rate};
+use super::{format_bytes, format_duration, format_latency, format_pixels, format_rate};
 use tairix_abi::Duration64;
 
 #[test]
@@ -71,4 +71,15 @@ fn a_negative_duration_reads_as_no_elapsed_time() {
         "0s",
         "a clock that moved backwards must not read as an enormous uptime"
     );
+}
+
+#[test]
+fn a_latency_is_scaled_to_the_unit_that_keeps_it_readable() {
+    assert_eq!(format_latency(0), "0 ns");
+    assert_eq!(format_latency(999), "999 ns");
+    assert_eq!(format_latency(125_000), "125.0 us");
+    assert_eq!(format_latency(5_000_000_000), "5.0 s");
+    // A figure beyond the last unit saturates in that unit rather than
+    // wrapping to a smaller, misleading number.
+    assert_eq!(format_latency(u64::MAX), "18446744073.7 s");
 }

@@ -82,7 +82,8 @@ use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
     CrashFaultClass, CrashNamedReg, CrashRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord,
-    UserDirectoryRecord, VolumeIoHealthRecord, CRASH_MAX_FRAMES,
+    UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    CRASH_MAX_FRAMES,
 };
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
@@ -7277,6 +7278,14 @@ where
             IntrospectDomain::VolumeIoHealth => self.introspect.volume_io_health(
                 arg,
                 records_that_fit(out_cap, VolumeIoHealthRecord::WIRE_LEN)?,
+            )?,
+            IntrospectDomain::VolumeIoStats => self.introspect.volume_io_stats(
+                arg,
+                records_that_fit(out_cap, VolumeIoStatsRecord::WIRE_LEN)?,
+            )?,
+            IntrospectDomain::VolumeIoQueue => self.introspect.volume_io_queue(
+                arg,
+                records_that_fit(out_cap, VolumeIoQueueRecord::WIRE_LEN)?,
             )?,
             IntrospectDomain::KernelMemory => self.introspect.kernel_memory()?,
             IntrospectDomain::Identity => self.introspect.identity()?,
@@ -28378,6 +28387,20 @@ mod tests {
             Ok(alloc::vec::Vec::new())
         }
         fn volume_io_health(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn volume_io_stats(
+            &self,
+            _offset: u64,
+            _max_records: usize,
+        ) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn volume_io_queue(
             &self,
             _offset: u64,
             _max_records: usize,

@@ -18,7 +18,8 @@
 //! no privileged path that bypasses the capability check.
 
 use crate::blkio::{
-    BlkDeviceClass, BlkHealthCounters, BlkHealthState, BlkStatus, BLK_HEALTH_COUNTERS_LEN,
+    BlkDeviceClass, BlkHealthCounters, BlkHealthState, BlkIoCounters, BlkQueueCounters, BlkStatus,
+    IoBudget, BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
 };
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -325,7 +326,7 @@ impl SysinfoQueryId {
     /// endpoint serving it, its current live availability, and the cumulative
     /// [`BlkHealthCounters`] the kernel
     /// filesystem client folded from every completion), paged by a
-    /// [`VolumeIoHealthRequest`].
+    /// [`VolumeIoRequest`].
     ///
     /// Requires `CAP_SYSINFO_KERNEL` and is audited: the per-device outcome
     /// tallies (resets, timeouts, reissues, medium errors) are kernel-wide
@@ -515,6 +516,33 @@ impl SysinfoQueryId {
     /// one, after validating it.
     pub const NET_TIME_SERVERS: Self = Self(37);
 
+    /// List per-volume storage **service** counters: one
+    /// [`VolumeIoStatsRecord`] per fault-aware block-backed volume, paged by
+    /// a [`VolumeIoRequest`].
+    ///
+    /// Ungated for the same reason as [`Self::CPU_TIME_STATS`]: a
+    /// machine-wide throughput and utilisation figure is one every user may
+    /// see, and it exposes strictly less than the already-ungated
+    /// [`Self::MOUNT_LIST`] — no per-task, per-user, or kernel-internal
+    /// detail crosses it. Nothing is served pre-derived: throughput, IOPS,
+    /// utilisation and await are two-sample deltas of the cumulative
+    /// [`BlkIoCounters`], so no consumer
+    /// inherits another's averaging window.
+    pub const VOLUME_IO_STATS: Self = Self(38);
+
+    /// List per-volume storage **queue** occupancy: one
+    /// [`VolumeIoQueueRecord`] per fault-aware block-backed volume, paged by
+    /// a [`VolumeIoRequest`].
+    ///
+    /// Requires `CAP_SYSINFO_KERNEL` and is audited, the exact analogue of
+    /// [`Self::CPU_LOAD`] and for the same reason: a queue depth is a driver
+    /// and scheduler internal, not the utilisation split every user may see
+    /// on [`Self::VOLUME_IO_STATS`]. It carries the
+    /// [`IoBudget`] in force with it, so a depth is
+    /// read against the ceiling that applies to that medium rather than
+    /// against a number a reader had to guess.
+    pub const VOLUME_IO_QUEUE: Self = Self(39);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -631,6 +659,19 @@ pub enum IntrospectDomain {
     /// `KernelMemoryStats::total_bytes` reports, threaded from the one
     /// frame-allocator source so the two views can never disagree.
     MemoryTotalBytes = 19,
+    /// Per-volume storage service counters: every mounted block-backed
+    /// volume, one packed [`VolumeIoStatsRecord`] (durable volume id,
+    /// serving block-service endpoint, and the cumulative
+    /// [`BlkIoCounters`]), with the syscall's
+    /// `arg` naming the record offset to page from.
+    VolumeIoStats = 20,
+    /// Per-volume storage queue occupancy: every mounted block-backed
+    /// volume, one packed [`VolumeIoQueueRecord`] (durable volume id,
+    /// serving block-service endpoint, the
+    /// [`BlkQueueCounters`], and the
+    /// [`IoBudget`] in force), with the syscall's
+    /// `arg` naming the record offset to page from.
+    VolumeIoQueue = 21,
 }
 
 impl IntrospectDomain {
@@ -665,6 +706,8 @@ impl IntrospectDomain {
             17 => Ok(Self::VolumeIoHealth),
             18 => Ok(Self::MemoryPressureBand),
             19 => Ok(Self::MemoryTotalBytes),
+            20 => Ok(Self::VolumeIoStats),
+            21 => Ok(Self::VolumeIoQueue),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -946,6 +989,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "net_time_servers",
         required_capability: None,
         audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::VOLUME_IO_STATS,
+        name: "volume_io_stats",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::VOLUME_IO_QUEUE,
+        name: "volume_io_queue",
+        required_capability: Some(CapabilityId::SYSINFO_KERNEL),
+        audit: true,
     },
 ];
 
@@ -5221,14 +5276,17 @@ impl IrqRecord {
     }
 }
 
-/// Request payload for [`SysinfoQueryId::VOLUME_IO_HEALTH`].
+/// Request payload for the three per-volume I/O reads —
+/// [`SysinfoQueryId::VOLUME_IO_STATS`], [`SysinfoQueryId::VOLUME_IO_QUEUE`]
+/// and [`SysinfoQueryId::VOLUME_IO_HEALTH`].
 ///
-/// Identical paging shape to [`IrqListRequest`]: `offset` names the first
-/// volume-health-record index to return and `limit` bounds the page.
+/// One request type serves all three because they page identically over the
+/// same volume set: `offset` names the first record index to return and
+/// `limit` bounds the page, the same shape [`IrqListRequest`] uses.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct VolumeIoHealthRequest {
-    /// Index of the first volume-health record to return.
+pub struct VolumeIoRequest {
+    /// Index of the first record to return.
     pub offset: u32,
     /// Maximum number of records to return.
     pub limit: u16,
@@ -5236,7 +5294,7 @@ pub struct VolumeIoHealthRequest {
     pub flags: u16,
 }
 
-impl VolumeIoHealthRequest {
+impl VolumeIoRequest {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = 8;
 
@@ -5434,6 +5492,229 @@ impl VolumeIoHealthRecord {
             dev: read_u64(bytes, 16),
             availability,
             counters,
+        })
+    }
+}
+
+/// One mounted block-backed volume's cumulative I/O **service** counters
+/// inside a [`SysinfoQueryId::VOLUME_IO_STATS`] response.
+///
+/// The storage analogue of [`CpuTimeRecord`]: raw cumulative tallies since
+/// the volume was attached, never reset and never pre-derived, so throughput,
+/// IOPS, utilisation and await are two-sample deltas the reader computes over
+/// its own interval (see [`BlkIoCounters`] for each derivation). A first
+/// sample therefore yields no rate, exactly as the per-task disk rate does.
+///
+/// There is one record per attached block-backed volume, in the same stable
+/// order and keyed by the same 16-byte `volume_id` as
+/// [`VolumeIoHealthRecord`], so a client walking either list never skips or
+/// repeats a record and can join the two. Every volume on one disk shares
+/// that disk's counters — service is a property of the device, not of a
+/// mount — which is why the serving endpoint is named alongside the id. It
+/// holds no secret.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeIoStatsRecord {
+    /// The volume's durable 16-byte identity (the mount registry's
+    /// `volume_id`), zero when the volume has no published identity.
+    volume_id: [u8; 16],
+    /// The block-service call-endpoint id serving this volume's device.
+    dev: u64,
+    /// The cumulative service counters folded from every attempt.
+    counters: BlkIoCounters,
+}
+
+impl VolumeIoStatsRecord {
+    /// Encoded size on the wire: `volume_id(16) || dev(8) || counters`.
+    pub const WIRE_LEN: usize = 16 + 8 + BLK_IO_COUNTERS_LEN;
+
+    /// Build a record from its parts.
+    #[must_use]
+    pub const fn new(volume_id: [u8; 16], dev: u64, counters: BlkIoCounters) -> Self {
+        Self {
+            volume_id,
+            dev,
+            counters,
+        }
+    }
+
+    /// The volume's durable 16-byte identity.
+    #[must_use]
+    pub const fn volume_id(&self) -> [u8; 16] {
+        self.volume_id
+    }
+
+    /// The block-service endpoint id serving the volume's device.
+    #[must_use]
+    pub const fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    /// The cumulative service counters folded for the volume's device.
+    #[must_use]
+    pub const fn counters(&self) -> BlkIoCounters {
+        self.counters
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..16].copy_from_slice(&self.volume_id);
+        put_u64(&mut out, 16, self.dev);
+        out[24..].copy_from_slice(&self.counters.to_le_bytes());
+        out
+    }
+
+    /// Decode from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    /// [`Self::WIRE_LEN`]. Every counter value is valid (a tally is any
+    /// `u64`), so there is no further shape to fail closed on.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut volume_id = [0u8; 16];
+        volume_id.copy_from_slice(&bytes[0..16]);
+        Ok(Self {
+            volume_id,
+            dev: read_u64(bytes, 16),
+            counters: BlkIoCounters::from_bytes(&bytes[24..Self::WIRE_LEN])?,
+        })
+    }
+}
+
+/// One mounted block-backed volume's request-queue occupancy inside a
+/// [`SysinfoQueryId::VOLUME_IO_QUEUE`] response, together with the per-device
+/// budget that occupancy is bounded by.
+///
+/// Keyed and ordered exactly like [`VolumeIoStatsRecord`], so the gated queue
+/// view joins the ungated service view by `volume_id`. The budget travels
+/// with the depth because a depth alone does not say whether a device is
+/// saturated: the reading is `in_flight` *against* `budget_depth`, and
+/// `budget_deadline_ns` is the deadline a request is failed closed on. Both
+/// are derived from the device's discovered
+/// [`BlkDeviceClass`], so the record reports
+/// the envelope actually in force rather than a global constant. It holds no
+/// secret.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VolumeIoQueueRecord {
+    /// The volume's durable 16-byte identity (the mount registry's
+    /// `volume_id`), zero when the volume has no published identity.
+    volume_id: [u8; 16],
+    /// The block-service call-endpoint id serving this volume's device.
+    dev: u64,
+    /// The live queue occupancy and its mean-depth accumulators.
+    queue: BlkQueueCounters,
+    /// The per-request deadline in force, in nanoseconds
+    /// ([`IoBudget::deadline_ns`](crate::blkio::IoBudget::deadline_ns)).
+    budget_deadline_ns: u64,
+    /// How many requests may be outstanding to the device at once
+    /// ([`IoBudget::queue_depth`](crate::blkio::IoBudget::queue_depth)).
+    budget_depth: u32,
+}
+
+impl VolumeIoQueueRecord {
+    /// Encoded size on the wire: `volume_id(16) || dev(8) || queue ||
+    /// budget_deadline_ns(8) || budget_depth(4) || reserved(4)`. The four
+    /// reserved bytes keep the record eight-byte aligned and must be zero on
+    /// the wire.
+    pub const WIRE_LEN: usize = 16 + 8 + BLK_QUEUE_COUNTERS_LEN + 8 + 8;
+
+    /// Offset of the `budget_deadline_ns` field.
+    const BUDGET_OFF: usize = 16 + 8 + BLK_QUEUE_COUNTERS_LEN;
+
+    /// Build a record from its parts.
+    #[must_use]
+    pub const fn new(
+        volume_id: [u8; 16],
+        dev: u64,
+        queue: BlkQueueCounters,
+        budget: IoBudget,
+    ) -> Self {
+        Self {
+            volume_id,
+            dev,
+            queue,
+            budget_deadline_ns: budget.deadline_ns,
+            budget_depth: budget.queue_depth,
+        }
+    }
+
+    /// The volume's durable 16-byte identity.
+    #[must_use]
+    pub const fn volume_id(&self) -> [u8; 16] {
+        self.volume_id
+    }
+
+    /// The block-service endpoint id serving the volume's device.
+    #[must_use]
+    pub const fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    /// The live queue occupancy and its mean-depth accumulators.
+    #[must_use]
+    pub const fn queue(&self) -> BlkQueueCounters {
+        self.queue
+    }
+
+    /// The per-request deadline in force, in nanoseconds.
+    #[must_use]
+    pub const fn budget_deadline_ns(&self) -> u64 {
+        self.budget_deadline_ns
+    }
+
+    /// How many requests may be outstanding to the device at once.
+    #[must_use]
+    pub const fn budget_depth(&self) -> u32 {
+        self.budget_depth
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[0..16].copy_from_slice(&self.volume_id);
+        put_u64(&mut out, 16, self.dev);
+        out[24..Self::BUDGET_OFF].copy_from_slice(&self.queue.to_le_bytes());
+        put_u64(&mut out, Self::BUDGET_OFF, self.budget_deadline_ns);
+        put_u32(&mut out, Self::BUDGET_OFF + 8, self.budget_depth);
+        // The four bytes after `budget_depth` are the reserved padding, left
+        // zero.
+        out
+    }
+
+    /// Decode from `bytes`, validating the reserved padding.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than
+    ///   [`Self::WIRE_LEN`].
+    /// * [`Errno::BadMagic`] if any reserved padding byte is non-zero (fail
+    ///   closed on an unknown record shape).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[Self::BUDGET_OFF + 12..Self::WIRE_LEN]
+            .iter()
+            .any(|&b| b != 0)
+        {
+            return Err(Errno::BadMagic);
+        }
+        let mut volume_id = [0u8; 16];
+        volume_id.copy_from_slice(&bytes[0..16]);
+        Ok(Self {
+            volume_id,
+            dev: read_u64(bytes, 16),
+            queue: BlkQueueCounters::from_bytes(&bytes[24..Self::BUDGET_OFF])?,
+            budget_deadline_ns: read_u64(bytes, Self::BUDGET_OFF),
+            budget_depth: read_u32(bytes, Self::BUDGET_OFF + 8),
         })
     }
 }
@@ -6071,8 +6352,11 @@ mod tests {
     };
     use super::{DesktopFrameRecord, DesktopFrameStatsRequest, DesktopFrameTotals};
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
-    use super::{VolumeIoHealthRecord, VolumeIoHealthRequest};
-    use crate::blkio::{BlkDeviceClass, BlkHealthCounters, BLK_HEALTH_COUNTERS_LEN};
+    use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord};
+    use crate::blkio::{
+        BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
+        BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
+    };
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
     use crate::process::SchedPriority;
@@ -6236,12 +6520,14 @@ mod tests {
             (17, IntrospectDomain::VolumeIoHealth),
             (18, IntrospectDomain::MemoryPressureBand),
             (19, IntrospectDomain::MemoryTotalBytes),
+            (20, IntrospectDomain::VolumeIoStats),
+            (21, IntrospectDomain::VolumeIoQueue),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(20), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(22), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -8242,23 +8528,17 @@ mod tests {
 
     #[test]
     fn volume_io_health_request_round_trips_and_rejects_reserved() {
-        let req = VolumeIoHealthRequest {
+        let req = VolumeIoRequest {
             offset: 2,
             limit: 8,
             flags: 0,
         };
-        assert_eq!(
-            VolumeIoHealthRequest::from_bytes(&req.to_le_bytes()),
-            Ok(req)
-        );
+        assert_eq!(VolumeIoRequest::from_bytes(&req.to_le_bytes()), Ok(req));
         let mut bytes = req.to_le_bytes();
         bytes[6] = 1;
+        assert_eq!(VolumeIoRequest::from_bytes(&bytes), Err(Errno::BadMagic));
         assert_eq!(
-            VolumeIoHealthRequest::from_bytes(&bytes),
-            Err(Errno::BadMagic)
-        );
-        assert_eq!(
-            VolumeIoHealthRequest::from_bytes(&[0u8; VolumeIoHealthRequest::WIRE_LEN - 1]),
+            VolumeIoRequest::from_bytes(&[0u8; VolumeIoRequest::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
     }
@@ -8326,6 +8606,77 @@ mod tests {
         bytes[28] = 1;
         assert_eq!(
             VolumeIoHealthRecord::from_bytes(&bytes),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn volume_io_stats_record_round_trips_and_preserves_every_counter() {
+        let counters = BlkIoCounters {
+            read_bytes: 8 << 20,
+            write_bytes: 3 << 20,
+            read_ops: 2048,
+            write_ops: 512,
+            busy_ns: 1_500_000_000,
+            read_wait_ns: 900_000_000,
+            write_wait_ns: 300_000_000,
+        };
+        let volume_id = [0x5Au8; 16];
+        let record = VolumeIoStatsRecord::new(volume_id, 0x5953_2001, counters);
+        let decoded = VolumeIoStatsRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.volume_id(), volume_id);
+        assert_eq!(decoded.dev(), 0x5953_2001);
+        assert_eq!(decoded.counters(), counters);
+        // Keyed like its health sibling — volume id first — with the counters
+        // block as the tail, so the two lists join by the same bytes.
+        let bytes = record.to_le_bytes();
+        assert_eq!(&bytes[0..16], &volume_id);
+        assert_eq!(&bytes[24..], &counters.to_le_bytes());
+        assert_eq!(VolumeIoStatsRecord::WIRE_LEN, 24 + BLK_IO_COUNTERS_LEN);
+        // Short buffer fails closed rather than half-reading a record.
+        assert_eq!(
+            VolumeIoStatsRecord::from_bytes(&[0u8; VolumeIoStatsRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn volume_io_queue_record_round_trips_and_fails_closed_on_a_corrupt_wire() {
+        let queue = BlkQueueCounters {
+            in_flight: 3,
+            queue_depth_sum: 4096,
+            queue_samples: 1024,
+        };
+        let budget = BlkDeviceClass::SolidState.budget();
+        let volume_id = [0xA5u8; 16];
+        let record = VolumeIoQueueRecord::new(volume_id, 0x5953_2002, queue, budget);
+        let decoded = VolumeIoQueueRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.volume_id(), volume_id);
+        assert_eq!(decoded.dev(), 0x5953_2002);
+        assert_eq!(decoded.queue(), queue);
+        // The budget travels with the depth, so a reader never has to guess
+        // the ceiling the occupancy is measured against.
+        assert_eq!(decoded.budget_depth(), budget.queue_depth);
+        assert_eq!(decoded.budget_deadline_ns(), budget.deadline_ns);
+        let bytes = record.to_le_bytes();
+        assert_eq!(&bytes[0..16], &volume_id);
+        assert_eq!(
+            &bytes[24..24 + BLK_QUEUE_COUNTERS_LEN],
+            &queue.to_le_bytes()
+        );
+
+        // Short buffer.
+        assert_eq!(
+            VolumeIoQueueRecord::from_bytes(&[0u8; VolumeIoQueueRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        // A non-zero reserved padding byte fails closed on an unknown shape.
+        let mut bytes = record.to_le_bytes();
+        bytes[VolumeIoQueueRecord::WIRE_LEN - 1] = 1;
+        assert_eq!(
+            VolumeIoQueueRecord::from_bytes(&bytes),
             Err(Errno::BadMagic)
         );
     }

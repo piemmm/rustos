@@ -114,6 +114,8 @@ impl Fixture {
             SysinfoQueryId::CPU_LOAD,
             SysinfoQueryId::MOUNT_LIST,
             SysinfoQueryId::VOLUME_IO_HEALTH,
+            SysinfoQueryId::VOLUME_IO_STATS,
+            SysinfoQueryId::VOLUME_IO_QUEUE,
             SysinfoQueryId::NET_INTERFACE_FACTS,
             SysinfoQueryId::NET_INTERFACE_STATE,
             SysinfoQueryId::NET_INTERFACE_RATES,
@@ -549,7 +551,7 @@ fn process_with_io(pid: u64, proc_id: ProcId, read: u64, written: u64) -> Proces
 }
 
 /// The readings the cadence policy issues on every sample.
-const EVERY_SAMPLE: [SysinfoQueryId; 8] = [
+const EVERY_SAMPLE: [SysinfoQueryId; 10] = [
     SysinfoQueryId::GLOBAL_PROCESS_LIST,
     SysinfoQueryId::CPU_TIME_STATS,
     SysinfoQueryId::UPTIME,
@@ -558,6 +560,8 @@ const EVERY_SAMPLE: [SysinfoQueryId; 8] = [
     SysinfoQueryId::CPU_LOAD,
     SysinfoQueryId::NET_INTERFACE_STATE,
     SysinfoQueryId::NET_INTERFACE_RATES,
+    SysinfoQueryId::VOLUME_IO_STATS,
+    SysinfoQueryId::VOLUME_IO_QUEUE,
 ];
 
 /// The readings on the audited memory cadence.

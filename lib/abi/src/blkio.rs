@@ -1193,6 +1193,305 @@ impl BlkHealthCounters {
     }
 }
 
+/// Encoded length of a [`BlkIoCounters`] snapshot: seven little-endian `u64`
+/// tallies.
+pub const BLK_IO_COUNTERS_LEN: usize = 7 * 8;
+
+/// The three [`BlkIoCounters`] field indices one direction of transfer folds
+/// into.
+///
+/// Returned by [`BlkIoCounters::direction`] so the read/write field mapping
+/// has one definition: the pure [`BlkIoCounters::fold_transfer`] and any
+/// lock-free mirror of these tallies (the kernel filesystem client's atomics)
+/// place a completion's bytes, count and wait in the same fields and cannot
+/// diverge.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BlkIoDirection {
+    /// Index of the cumulative-bytes tally for this direction.
+    pub bytes: usize,
+    /// Index of the completed-request tally for this direction.
+    pub ops: usize,
+    /// Index of the summed issue-to-completion tally for this direction.
+    pub wait_ns: usize,
+}
+
+/// Cumulative, monotonic service counters for one served block device since
+/// it was attached: the bytes and requests it has carried in each direction,
+/// how long it was busy, and how long its requests waited.
+///
+/// This is the single shared definition of the storage *service* counters, so
+/// every consumer of a served block device folds a transfer into the same
+/// fields and cannot drift apart in what a byte or an op counts as. It is a
+/// pure value type: the live counters are held as atomics by whichever
+/// component owns the I/O path, and a [`BlkIoCounters`] is the point-in-time
+/// snapshot the System Information API reports — never `/proc`-style scraped.
+///
+/// **Nothing here is pre-derived.** Throughput, IOPS, utilisation and await
+/// are all two-sample deltas a reader computes over its own interval, so no
+/// consumer inherits another's averaging window:
+///
+/// | Reading | Derivation |
+/// |---|---|
+/// | throughput | `read_bytes`/`write_bytes` delta over the interval |
+/// | IOPS | `read_ops`/`write_ops` delta over the interval |
+/// | utilisation | `busy_ns` delta over the interval |
+/// | await | `read_wait_ns`/`write_wait_ns` delta over the matching `ops` delta |
+///
+/// The three populations are deliberately not identical, and each is the one
+/// its reading needs:
+///
+/// * `busy_ns` covers every attempt the device held, **including** one it
+///   never answered — a wedged disk's dead time is exactly what utilisation
+///   must show.
+/// * `read_ops`/`write_ops` and the matching `*_wait_ns` cover the attempts
+///   the device **answered**, so await is a mean over requests that have a
+///   latency at all. An unanswered request is counted by
+///   [`BlkHealthCounters::timeouts`], not averaged into a wait.
+/// * `read_bytes`/`write_bytes` count the bytes a completion actually moved,
+///   so a failed transfer contributes an op and a wait but no bytes.
+///
+/// A data-less operation ([`BlkOp::Geometry`], [`BlkOp::Flush`]) belongs to
+/// neither direction: it moves no bytes and is counted in neither `ops`
+/// tally, though the device is busy for it. Every tally saturates rather than
+/// wrapping: a counter is operational observability, never a security or
+/// format bound, so an implausibly-long-lived device pins a tally at
+/// [`u64::MAX`] instead of silently wrapping to a smaller, misleading value.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlkIoCounters {
+    /// Bytes read completions actually moved out of the device.
+    pub read_bytes: u64,
+    /// Bytes write completions actually moved into the device.
+    pub write_bytes: u64,
+    /// Read requests the device answered.
+    pub read_ops: u64,
+    /// Write requests the device answered.
+    pub write_ops: u64,
+    /// Wall-clock time the device had at least one request outstanding.
+    pub busy_ns: u64,
+    /// Issue-to-completion time of every answered read, summed per request.
+    pub read_wait_ns: u64,
+    /// Issue-to-completion time of every answered write, summed per request.
+    pub write_wait_ns: u64,
+}
+
+impl BlkIoCounters {
+    /// Number of `u64` tallies a snapshot carries.
+    pub const FIELD_COUNT: usize = 7;
+
+    /// Index of the `read_bytes` tally in wire order.
+    pub const READ_BYTES: usize = 0;
+    /// Index of the `write_bytes` tally in wire order.
+    pub const WRITE_BYTES: usize = 1;
+    /// Index of the `read_ops` tally in wire order.
+    pub const READ_OPS: usize = 2;
+    /// Index of the `write_ops` tally in wire order.
+    pub const WRITE_OPS: usize = 3;
+    /// Index of the `busy_ns` tally in wire order.
+    pub const BUSY_NS: usize = 4;
+    /// Index of the `read_wait_ns` tally in wire order.
+    pub const READ_WAIT_NS: usize = 5;
+    /// Index of the `write_wait_ns` tally in wire order.
+    pub const WRITE_WAIT_NS: usize = 6;
+
+    /// The wire-order field indices `op` folds a transfer into, or [`None`]
+    /// for a data-less operation that belongs to neither direction.
+    #[must_use]
+    pub const fn direction(op: BlkOp) -> Option<BlkIoDirection> {
+        match op {
+            BlkOp::Read => Some(BlkIoDirection {
+                bytes: Self::READ_BYTES,
+                ops: Self::READ_OPS,
+                wait_ns: Self::READ_WAIT_NS,
+            }),
+            BlkOp::Write => Some(BlkIoDirection {
+                bytes: Self::WRITE_BYTES,
+                ops: Self::WRITE_OPS,
+                wait_ns: Self::WRITE_WAIT_NS,
+            }),
+            BlkOp::Geometry | BlkOp::Flush => None,
+        }
+    }
+
+    /// Fold one answered attempt of `op` that moved `bytes` and waited
+    /// `wait_ns` between issue and completion.
+    ///
+    /// A data-less `op` folds nothing: it has no direction to be counted in.
+    /// The device-busy time it still cost is [`fold_busy`](Self::fold_busy)'s,
+    /// which every attempt reaches regardless of direction or outcome.
+    pub const fn fold_transfer(&mut self, op: BlkOp, bytes: u64, wait_ns: u64) {
+        let Some(direction) = Self::direction(op) else {
+            return;
+        };
+        let mut fields = self.fields();
+        fields[direction.bytes] = fields[direction.bytes].saturating_add(bytes);
+        fields[direction.ops] = fields[direction.ops].saturating_add(1);
+        fields[direction.wait_ns] = fields[direction.wait_ns].saturating_add(wait_ns);
+        *self = Self::from_fields(fields);
+    }
+
+    /// Add `busy_ns` to the device-busy tally: one interval over which the
+    /// device held at least one request, closed when its last outstanding
+    /// request left.
+    pub const fn fold_busy(&mut self, busy_ns: u64) {
+        self.busy_ns = self.busy_ns.saturating_add(busy_ns);
+    }
+
+    /// The seven tallies in wire order, for encode/decode.
+    const fn fields(&self) -> [u64; Self::FIELD_COUNT] {
+        [
+            self.read_bytes,
+            self.write_bytes,
+            self.read_ops,
+            self.write_ops,
+            self.busy_ns,
+            self.read_wait_ns,
+            self.write_wait_ns,
+        ]
+    }
+
+    /// Rebuild a snapshot from the wire-order tallies, so a lock-free mirror
+    /// can snapshot its atomics into one value without duplicating that
+    /// order.
+    #[must_use]
+    pub const fn from_fields(fields: [u64; Self::FIELD_COUNT]) -> Self {
+        Self {
+            read_bytes: fields[0],
+            write_bytes: fields[1],
+            read_ops: fields[2],
+            write_ops: fields[3],
+            busy_ns: fields[4],
+            read_wait_ns: fields[5],
+            write_wait_ns: fields[6],
+        }
+    }
+
+    /// Encode the snapshot as [`BLK_IO_COUNTERS_LEN`] little-endian bytes.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; BLK_IO_COUNTERS_LEN] {
+        let mut out = [0u8; BLK_IO_COUNTERS_LEN];
+        for (i, value) in self.fields().iter().enumerate() {
+            put_u64(&mut out, i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode a snapshot from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `bytes` is shorter than
+    /// [`BLK_IO_COUNTERS_LEN`]. Every field value is valid (a tally is any
+    /// `u64`), so there is no further shape to fail closed on.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < BLK_IO_COUNTERS_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut fields = [0u64; Self::FIELD_COUNT];
+        for (i, slot) in fields.iter_mut().enumerate() {
+            *slot = read_u64(bytes, i * 8);
+        }
+        Ok(Self::from_fields(fields))
+    }
+}
+
+/// Encoded length of a [`BlkQueueCounters`] snapshot: three little-endian
+/// `u64` tallies.
+pub const BLK_QUEUE_COUNTERS_LEN: usize = 3 * 8;
+
+/// One served block device's request-queue occupancy: what is outstanding
+/// right now, and enough to derive a *mean* depth over any interval.
+///
+/// The single shared definition of the queue readings, mirrored by whichever
+/// component owns the I/O path exactly as [`BlkIoCounters`] is. `in_flight`
+/// is an instantaneous gauge — the only field here that is not cumulative —
+/// while `queue_depth_sum` and `queue_samples` are monotonic, so
+/// `queue_depth_sum` delta over `queue_samples` delta is the mean depth an
+/// arriving request met over the reader's own interval. One instant's
+/// `in_flight` cannot give that, which is why both are carried.
+///
+/// A sample is taken once per issued request, counting the arriving request
+/// itself, so a device serving one request at a time reads a mean depth of
+/// exactly `1` rather than a misleading `0`.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlkQueueCounters {
+    /// Requests outstanding to the device at the sample instant.
+    pub in_flight: u64,
+    /// Sum of the queue depths observed, one observation per issued request.
+    pub queue_depth_sum: u64,
+    /// How many depth observations `queue_depth_sum` accumulates.
+    pub queue_samples: u64,
+}
+
+impl BlkQueueCounters {
+    /// Number of `u64` tallies a snapshot carries.
+    pub const FIELD_COUNT: usize = 3;
+
+    /// Index of the `in_flight` gauge in wire order.
+    pub const IN_FLIGHT: usize = 0;
+    /// Index of the `queue_depth_sum` tally in wire order.
+    pub const QUEUE_DEPTH_SUM: usize = 1;
+    /// Index of the `queue_samples` tally in wire order.
+    pub const QUEUE_SAMPLES: usize = 2;
+
+    /// The three tallies in wire order, for encode/decode.
+    const fn fields(&self) -> [u64; Self::FIELD_COUNT] {
+        [self.in_flight, self.queue_depth_sum, self.queue_samples]
+    }
+
+    /// Rebuild a snapshot from the wire-order tallies.
+    #[must_use]
+    pub const fn from_fields(fields: [u64; Self::FIELD_COUNT]) -> Self {
+        Self {
+            in_flight: fields[0],
+            queue_depth_sum: fields[1],
+            queue_samples: fields[2],
+        }
+    }
+
+    /// The mean queue depth over the interval between `earlier` and `self`,
+    /// in hundredths of a request, or [`None`] when no request was issued in
+    /// it (a ratio with no denominator is not a number).
+    ///
+    /// The one definition of that ratio, so every reader that plots a mean
+    /// depth plots the same arithmetic.
+    #[must_use]
+    pub const fn mean_depth_centi(&self, earlier: &Self) -> Option<u64> {
+        let samples = self.queue_samples.saturating_sub(earlier.queue_samples);
+        if samples == 0 {
+            return None;
+        }
+        let depth = self.queue_depth_sum.saturating_sub(earlier.queue_depth_sum);
+        Some(depth.saturating_mul(100) / samples)
+    }
+
+    /// Encode the snapshot as [`BLK_QUEUE_COUNTERS_LEN`] little-endian bytes.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; BLK_QUEUE_COUNTERS_LEN] {
+        let mut out = [0u8; BLK_QUEUE_COUNTERS_LEN];
+        for (i, value) in self.fields().iter().enumerate() {
+            put_u64(&mut out, i * 8, *value);
+        }
+        out
+    }
+
+    /// Decode a snapshot from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `bytes` is shorter than
+    /// [`BLK_QUEUE_COUNTERS_LEN`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < BLK_QUEUE_COUNTERS_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut fields = [0u64; Self::FIELD_COUNT];
+        for (i, slot) in fields.iter_mut().enumerate() {
+            *slot = read_u64(bytes, i * 8);
+        }
+        Ok(Self::from_fields(fields))
+    }
+}
+
 /// The shared recovery **grace-window** timer: a bounded, event-timed window a
 /// stalling storage element — a single served device ([`BlkHealth`]) or a
 /// whole interior fault domain ([`FaultDomain`]) — is held open before it is
@@ -2999,6 +3298,105 @@ mod tests {
         assert_eq!(counters.completions, u64::MAX);
         assert_eq!(counters.ok, u64::MAX);
         assert_eq!(counters.reissues, u64::MAX);
+    }
+
+    #[test]
+    fn io_counters_fold_each_direction_into_its_own_fields() {
+        let mut counters = BlkIoCounters::default();
+        counters.fold_transfer(BlkOp::Read, 4096, 700);
+        counters.fold_transfer(BlkOp::Write, 512, 200);
+        counters.fold_busy(1_000);
+        assert_eq!(counters.read_bytes, 4096);
+        assert_eq!(counters.read_ops, 1);
+        assert_eq!(counters.read_wait_ns, 700);
+        assert_eq!(counters.write_bytes, 512);
+        assert_eq!(counters.write_ops, 1);
+        assert_eq!(counters.write_wait_ns, 200);
+        assert_eq!(counters.busy_ns, 1_000);
+
+        // A failed attempt the device answered has a latency but moved
+        // nothing, so it counts an op and a wait with no bytes.
+        counters.fold_transfer(BlkOp::Read, 0, 300);
+        assert_eq!(counters.read_ops, 2);
+        assert_eq!(counters.read_bytes, 4096);
+        assert_eq!(counters.read_wait_ns, 1_000);
+
+        // A data-less operation belongs to neither direction: it moves no
+        // bytes and is counted in neither op tally, though the device was
+        // busy for it.
+        let before = counters;
+        counters.fold_transfer(BlkOp::Geometry, 0, 500);
+        counters.fold_transfer(BlkOp::Flush, 0, 500);
+        assert_eq!(counters, before);
+        assert!(BlkIoCounters::direction(BlkOp::Geometry).is_none());
+        assert!(BlkIoCounters::direction(BlkOp::Flush).is_none());
+    }
+
+    #[test]
+    fn io_counters_round_trip_on_the_wire_and_saturate_rather_than_wrap() {
+        let counters = BlkIoCounters {
+            read_bytes: 1 << 40,
+            write_bytes: 1 << 30,
+            read_ops: 9_000,
+            write_ops: 700,
+            busy_ns: 12_345_678_901,
+            read_wait_ns: 5_000_000_000,
+            write_wait_ns: 400_000_000,
+        };
+        let bytes = counters.to_le_bytes();
+        assert_eq!(bytes.len(), BLK_IO_COUNTERS_LEN);
+        assert_eq!(BlkIoCounters::from_bytes(&bytes), Ok(counters));
+        assert_eq!(
+            BlkIoCounters::from_bytes(&bytes[..BLK_IO_COUNTERS_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // A tally pinned at the ceiling stays pinned rather than rolling to a
+        // misleadingly-small value.
+        let mut pinned = BlkIoCounters {
+            read_bytes: u64::MAX,
+            read_ops: u64::MAX,
+            read_wait_ns: u64::MAX,
+            busy_ns: u64::MAX,
+            ..BlkIoCounters::default()
+        };
+        pinned.fold_transfer(BlkOp::Read, 4096, 700);
+        pinned.fold_busy(1_000);
+        assert_eq!(pinned.read_bytes, u64::MAX);
+        assert_eq!(pinned.read_ops, u64::MAX);
+        assert_eq!(pinned.read_wait_ns, u64::MAX);
+        assert_eq!(pinned.busy_ns, u64::MAX);
+    }
+
+    #[test]
+    fn queue_counters_round_trip_and_derive_a_mean_depth_only_from_samples() {
+        let earlier = BlkQueueCounters {
+            in_flight: 1,
+            queue_depth_sum: 100,
+            queue_samples: 50,
+        };
+        let later = BlkQueueCounters {
+            in_flight: 4,
+            queue_depth_sum: 400,
+            queue_samples: 150,
+        };
+        let bytes = later.to_le_bytes();
+        assert_eq!(bytes.len(), BLK_QUEUE_COUNTERS_LEN);
+        assert_eq!(BlkQueueCounters::from_bytes(&bytes), Ok(later));
+        assert_eq!(
+            BlkQueueCounters::from_bytes(&bytes[..BLK_QUEUE_COUNTERS_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // 300 depth over 100 arrivals is a mean of 3.00, in hundredths.
+        assert_eq!(later.mean_depth_centi(&earlier), Some(300));
+        // An interval with no arrival has no denominator, so it is no number
+        // at all rather than a fabricated zero.
+        assert_eq!(later.mean_depth_centi(&later), None);
+        assert_eq!(
+            BlkQueueCounters::default().mean_depth_centi(&BlkQueueCounters::default()),
+            None
+        );
     }
 
     #[test]

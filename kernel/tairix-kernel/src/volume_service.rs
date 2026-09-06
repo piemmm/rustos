@@ -93,7 +93,7 @@ use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
-use tairix_kernel_core::fs::blkclient::{BlkClient, VolumeHealthSource};
+use tairix_kernel_core::fs::blkclient::{BlkClient, VolumeIoSource};
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
@@ -700,7 +700,7 @@ fn mount_storage_volume(
 /// place both the attach and recover paths register a served volume so the
 /// health wiring cannot diverge between them. Returns `Err(())` when the
 /// handle is already registered (fail closed — the caller unwinds); the
-/// `set_health_source` cannot miss, the handle having just been registered
+/// `set_io_source` cannot miss, the handle having just been registered
 /// under the operation lock.
 fn register_with_health(
     handle: DriverHandle,
@@ -708,12 +708,12 @@ fn register_with_health(
     source: &str,
     fstype: &'static str,
     volume_id: [u8; 16],
-    health: VolumeHealthSource,
+    health: VolumeIoSource,
 ) -> Result<(), ()> {
     LATE_FILESYSTEM
         .register(handle, driver, source, fstype, volume_id)
         .map_err(|_| ())?;
-    let _ = LATE_FILESYSTEM.set_health_source(handle, health);
+    let _ = LATE_FILESYSTEM.set_io_source(handle, health);
     Ok(())
 }
 
@@ -750,7 +750,7 @@ struct SharedDevice {
     class: Option<BlkDeviceClass>,
     /// The device's reported-health overlay, folded once for every volume
     /// on the device.
-    health: VolumeHealthSource,
+    health: VolumeIoSource,
 }
 
 impl SharedDevice {
@@ -784,7 +784,7 @@ fn connect_device(
         .map_err(|err| ("endpoint_unusable", err))?;
     let read_only = client.read_only();
     let class = client.declared_class();
-    let health = client.health_source();
+    let health = client.io_source();
     // Wrapping caches the geometry, so the shared device answers it
     // lock-free; a device whose geometry cannot be read is never wrapped.
     let device = SharedBlock::new(client).map_err(|err| ("geometry_unreadable", err.as_errno()))?;

@@ -78,6 +78,7 @@ fn the_first_cycle_publishes_and_notes_each_degraded_measurement_once() {
             DegradedField::MemoryTotal,
             DegradedField::ResourceLimits,
             DegradedField::Mounts,
+            DegradedField::VolumeIoStats,
             DegradedField::NetResolverServers,
             DegradedField::NetTimeServers,
         ]
