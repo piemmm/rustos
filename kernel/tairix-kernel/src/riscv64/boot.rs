@@ -495,74 +495,12 @@ const PREEMPT_TICK_HZ: u64 = tairix_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ;
 static PREEMPT_STORAGE: tairix_arch_riscv64::preempt::PreemptStorage<1> =
     tairix_arch_riscv64::preempt::PreemptStorage::new();
 
-/// The U-mode-preemption callback the trap path invokes on
-/// return-to-U-mode for **any** interrupt (installed via
-/// [`tairix_arch_riscv64::preempt::set_preempt_callback`]).
-///
-/// It reschedules **only** when this hart owes one — i.e. the per-hart
-/// need-resched latch ([`tairix_kernel_core::take_preempt_pending`]) is
-/// set. A timer quantum expiry, a directed reschedule IPI, and a device
-/// (external) interrupt that woke a higher-priority task all latch it
-/// (respectively [`production_tick_dispatch`], the IPI callback, and the
-/// external-IRQ dispatcher); an interrupt that woke nothing leaves it
-/// clear, so the common case returns straight to U-mode with **no**
-/// gratuitous context switch. Consuming the latch here also means an
-/// S-mode tick — which never reaches this U-mode-only path — keeps its
-/// latch until the interrupted syscall's completion honours it.
-///
-/// When a reschedule is owed it suspends the user task currently running
-/// on `cpu` back to the scheduler with
-/// [`tairix_kernel_core::RescheduleAction::Yield`] — the *involuntary*
-/// analogue of a `yield` syscall: the task is re-enqueued at its priority
-/// and the scheduler picks the next runnable task, giving EEVDF-ordered
-/// time-slicing and, crucially, running `drain_pending_wakes` so work a
-/// device IRQ just woke actually gets dispatched.
-/// [`tairix_kernel_core::reschedule_current`] returns `false` when no
-/// resumable user kthread is published on `cpu` (unreachable from U-mode
-/// with none switched in, but the fail-closed return means a stray
-/// invocation is a harmless no-op rather than an unsound switch). The call
-/// only ever runs after the source's handler acknowledged its pending bit
-/// (the SBI timer disarmed, `sip.STIP`/`sip.SSIP` cleared, the external
-/// claim complete), so no interrupt line is pending across the context
-/// switch; the scheduler re-arms the next one-shot on its following
-/// dispatch (tickless).
-#[cfg(all(freestanding, kernel_isa = "riscv64"))]
-extern "C" fn production_preempt_dispatch(cpu: tairix_arch_api::CpuId) {
-    let _ = tairix_kernel_core::preempt_current(cpu);
-}
-
-/// The per-tick callback the timer trap path invokes on **every** tick
-/// (U-mode *or* idle S-mode), installed via
-/// [`tairix_arch_riscv64::preempt::set_timer_callback`].
-///
-/// It latches the fired tick as this hart's pending preemption
-/// ([`tairix_kernel_core::note_preempt_tick`]) and runs the blocking-wait
-/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
-/// elapsed is unparked and the one-shot is re-armed to the next pending
-/// deadline ([`tairix_kernel_core::timed_wake_sweep`]), so a finite
-/// `hw_tree_wait` timeout fires even when the hart is otherwise idle
-/// (every task parked) and takes no preemption tick. Both halves are pure
-/// accounting (they never context-switch), so they are safe on a tick
-/// taken in S-mode; the *immediate* preemption of a U-mode task is the
-/// separate [`production_preempt_dispatch`] U-mode-only callback, while a
-/// tick taken in S-mode is honoured through the latch at the interrupted
-/// syscall's completion — the running task's quantum is never silently
-/// lost to a tick the non-preemptible kernel could not act on.
-#[cfg(all(freestanding, kernel_isa = "riscv64"))]
-extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
-    tairix_kernel_core::note_preempt_tick(cpu);
-    tairix_kernel_core::timed_wake_sweep();
-    // Sample the stall watchdog: a tick still fires on a hart whose task
-    // is looping without returning to the scheduler (interrupts stay
-    // deliverable in S-mode), so this is where a soft lockup on `cpu`
-    // becomes observable and is reported.
-    tairix_kernel_core::check_stall(cpu);
-}
-
 /// Set up tickless supervisor-timer preemption on the boot hart: register
-/// the per-hart preempt storage, install the U-mode-preemption callback,
-/// record the per-quantum interval from [`PREEMPT_TICK_HZ`], and enable
-/// `sie.STIE` — but leave the timer disarmed. The scheduler arms the
+/// the per-hart preempt storage, install the trap callbacks
+/// ([`crate::riscv64_preempt_wiring::install_callbacks`]), record the
+/// per-quantum interval from [`PREEMPT_TICK_HZ`], and enable the timer and
+/// reschedule-IPI sources (`sie.STIE` / `sie.SSIE`) — but leave the timer
+/// disarmed. The scheduler arms the
 /// one-shot to one quantum only when it dispatches onto a contended hart
 /// (`RiscvArch::set_preemption`), and disarms otherwise (tickless / `NO_HZ`).
 ///
@@ -571,16 +509,16 @@ extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
 /// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
 /// tick is *taken* until a U-mode task runs (the privilege rule U < S),
 /// so this is **additive and non-regressing**: a tick taken in U-mode
-/// drives [`production_preempt_dispatch`] immediately, and a one-shot
+/// drives [`crate::riscv64_preempt_wiring::preempt_dispatch`] immediately, and a one-shot
 /// that fires in S-mode disarms without context-switching (the kernel is
-/// non-preemptible) but is latched by [`production_tick_dispatch`] and
+/// non-preemptible) but is latched by [`crate::riscv64_preempt_wiring::tick_dispatch`] and
 /// honoured when the interrupted syscall completes — an expired quantum
 /// is never silently lost.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// ([`production_tick_dispatch`]) latches the pending preemption and runs
+/// ([`crate::riscv64_preempt_wiring::tick_dispatch`]) latches the pending preemption and runs
 /// the blocking-wait timed-wake sweep (Design D P-2): it releases any
 /// elapsed `hw_tree_wait`-style waiter and re-arms the one-shot to the
 /// next deadline, so the SBI timer is armed only for a real pending
@@ -607,26 +545,23 @@ fn arm_preemption(timebase_hz: u64) {
             halt_current_hart();
         }
 
-        // Install the U-mode-preemption callback *before* arming the timer,
-        // so the first tick taken from U-mode already has a handler.
-        preempt::set_preempt_callback(production_preempt_dispatch);
-
-        // Install the per-tick timed-wake sweep callback (Design D P-2), so
-        // every tick — including one taken on an idle S-mode hart armed
-        // solely for a blocking-wait deadline — releases any elapsed waiter
-        // and re-arms the one-shot to the next deadline.
-        preempt::set_timer_callback(production_tick_dispatch);
+        // Install every trap callback before any source is unmasked, so a
+        // delivered trap already has a handler.
+        crate::riscv64_preempt_wiring::install_callbacks();
 
         let interval = preempt::interval_for_hz(timebase_hz, PREEMPT_TICK_HZ);
 
-        // SAFETY: this is the boot hart (id 0); the preempt callback is
-        // installed (above), the per-hart storage is registered (above),
-        // and the trap vector is installed (`enable_mmu_and_vectors`, run
-        // before `kernel_main`). It records the quantum, enables
-        // `sie.STIE`, and leaves the timer disarmed; it does not set
-        // `sstatus.SIE`, so no tick is taken until a U-mode task runs, and
-        // the scheduler arms the first one-shot on its next dispatch.
+        // SAFETY: this is the boot hart (id 0); the callbacks are installed
+        // (above), the per-hart storage is registered (above), and the trap
+        // vector is installed (`enable_mmu_and_vectors`, before
+        // `kernel_main`). Neither call sets `sstatus.SIE`, so no trap is
+        // taken until a U-mode task runs.
+        //
+        // `enable_ipi` is not optional: `wfi` resumes only for *locally*
+        // enabled sources, so without `sie.SSIE` a `send_ipi` neither wakes
+        // the idle park nor ever traps to be acknowledged.
         unsafe {
+            preempt::enable_ipi();
             preempt::init_local_preempt(0, interval);
         }
     }

@@ -350,7 +350,7 @@ mod program {
         /// not its), so login owns collecting them. Each is joined to the
         /// wait-set under [`TOKEN_LAUNCHED`], so an exit wakes whichever
         /// supervision is parked and the sweep reaps it.
-        launched: RefCell<Vec<i32>>,
+        launched: RefCell<Vec<i64>>,
     }
 
     impl ConsoleServer {
@@ -549,12 +549,12 @@ mod program {
         /// wake rather than a poll. A child the kernel refuses to add is
         /// still tracked: the sweep also runs whenever supervision starts,
         /// so it is collected then instead of never.
-        fn track_launched(&self, pid: i32) {
+        fn track_launched(&self, pid: i64) {
             let _ = tairix_rt::waitset_ctl(
                 self.waitset,
                 WaitSetOp::Add,
                 WaitSourceKind::Child,
-                u64::from(pid.unsigned_abs()),
+                pid.unsigned_abs(),
                 TOKEN_LAUNCHED,
             );
             self.launched.borrow_mut().push(pid);
@@ -579,7 +579,7 @@ mod program {
                     self.waitset,
                     WaitSetOp::Del,
                     WaitSourceKind::Child,
-                    u64::from(pid.unsigned_abs()),
+                    pid.unsigned_abs(),
                     TOKEN_LAUNCHED,
                 );
                 false
@@ -603,14 +603,14 @@ mod program {
         /// A wake naming a child an elevated launch started is collected
         /// here rather than handed to `serve`: reaping login's own children
         /// is login's business on every watch, not each caller's.
-        fn supervise_child<F>(&self, pid: i32, mut serve: F) -> Result<Watched, Errno>
+        fn supervise_child<F>(&self, pid: i64, mut serve: F) -> Result<Watched, Errno>
         where
             F: FnMut(u64) -> Watch,
         {
             // A launch whose exit landed between watches has no pending
             // wake left to deliver it, so start by collecting.
             self.reap_launched();
-            let child_id = u64::from(pid.unsigned_abs());
+            let child_id = pid.unsigned_abs();
             let observed = tairix_rt::waitset_ctl(
                 self.waitset,
                 WaitSetOp::Add,
@@ -706,7 +706,7 @@ mod program {
     }
 
     /// The targeted blocking reap of a child login started.
-    fn plain_wait(pid: i32) -> Result<i32, Errno> {
+    fn plain_wait(pid: i64) -> Result<i32, Errno> {
         let mut status = 0i32;
         let wret = tairix_rt::wait_exit(pid, &mut status);
         if wret < 0 {
@@ -733,7 +733,7 @@ mod program {
     /// collect. A stop is not an exit and is unreachable without the
     /// stopped-report flag, so it counts as still running rather than
     /// inventing an exit code.
-    fn try_reap(pid: i32) -> Reaped {
+    fn try_reap(pid: i64) -> Reaped {
         let mut status = WaitStatus::Exited(0);
         let ret = tairix_rt::try_wait(pid, &mut status);
         if ret < 0 {
@@ -758,7 +758,7 @@ mod program {
     /// ended, and their `stderr` is login's own console — invisible behind a
     /// desktop — so nothing else can state the reason. One that is no longer
     /// login's child has no status to state.
-    fn launch_collected(pid: i32, sink: LogSink) -> bool {
+    fn launch_collected(pid: i64, sink: LogSink) -> bool {
         match try_reap(pid) {
             Reaped::Exited(status) => {
                 audit_launch_ended_abnormally(&sink, pid, status);
@@ -771,7 +771,7 @@ mod program {
 
     /// Reap `pid` and report its exit code if it has already exited, without
     /// blocking. `None` means it is still running (or is not ours to reap).
-    fn reap_if_exited(pid: i32) -> Option<i32> {
+    fn reap_if_exited(pid: i64) -> Option<i32> {
         match try_reap(pid) {
             Reaped::Exited(code) => Some(code),
             Reaped::Running | Reaped::Gone => None,
@@ -795,7 +795,7 @@ mod program {
     /// resolves the full credential from the authoritative identity table —
     /// login chooses *which* user but never fabricates the identity. The
     /// child stays on login's own console.
-    fn spawn_session(user: &AuthenticatedUser, kind: SessionKind) -> Result<i32, Errno> {
+    fn spawn_session(user: &AuthenticatedUser, kind: SessionKind) -> Result<i64, Errno> {
         // Allocating here is safe: a successful authentication already
         // parsed the database, so the heap is live well before this launch.
         let env_owned = session_environment(user);
@@ -805,10 +805,7 @@ mod program {
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
-        // `ret >= 0` here, so the cast preserves the PID value; PIDs fit an
-        // `i32` on this ABI.
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(ret as i32)
+        Ok(ret)
     }
 
     /// Runs one re-authenticated elevated command: `spawn_as` the target
@@ -836,7 +833,7 @@ mod program {
             Ok(status)
         }
 
-        fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
+        fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
             let pid = spawn_elevated(program, uid)?;
             self.server.track_launched(pid);
             Ok(pid)
@@ -848,15 +845,12 @@ mod program {
     ///
     /// The single spawn both elevation forms take, so a blocking run and a
     /// non-blocking launch can never start a program under different terms.
-    fn spawn_elevated(program: &str, uid: u32) -> Result<i32, Errno> {
+    fn spawn_elevated(program: &str, uid: u32) -> Result<i64, Errno> {
         let ret = tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid);
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
-        // `ret >= 0` here, so the cast preserves the PID value; PIDs fit an
-        // `i32` on this ABI.
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(ret as i32)
+        Ok(ret)
     }
 
     /// Launches the authenticated record's shell of choice **as the
@@ -1046,9 +1040,7 @@ mod program {
             if ret < 0 {
                 return;
             }
-            // `ret >= 0` here, so the cast preserves the PID value.
-            #[allow(clippy::cast_possible_truncation)]
-            let pid = ret as i32;
+            let pid = ret;
             let _ = self.server.supervise_child(pid, |token| {
                 match token {
                     TOKEN_SESSION => {
@@ -1103,7 +1095,7 @@ mod program {
                 .get(&user.username)
                 .map(|session| (session.pid(), session.wake_endpoint()))
             {
-                let Ok(pid) = i32::try_from(task) else {
+                let Ok(pid) = i64::try_from(task) else {
                     self.audit(
                         Level::Warn,
                         events::SESSION_LAUNCH_FAILED,
@@ -1148,7 +1140,7 @@ mod program {
                 };
                 // The resume branch above owns the case where an entry
                 // already exists, so this insert cannot collide.
-                let _ = live.insert(&user.username, user.uid.0, u64::from(pid.unsigned_abs()));
+                let _ = live.insert(&user.username, user.uid.0, pid.unsigned_abs());
                 self.audit(
                     Level::Info,
                     events::SESSION_STARTED,

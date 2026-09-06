@@ -225,8 +225,8 @@ pub use introspect_source::KernelIntrospectSource;
 pub use kthread::{
     reschedule_current, spawn_kthread, spawn_kthread_with_stack, spawn_kthread_with_stack_parked,
     spawn_user_kthread, spawn_user_kthread_with_stack, spawn_user_kthread_with_stack_live,
-    with_current_live_space, BoxStack, KernelServiceBody, KernelStack, YieldHandle, Yielder,
-    YielderHandle, KTHREAD_STACK_BYTES,
+    with_current_live_space, Admission, BoxStack, KernelServiceBody, KernelStack, YieldHandle,
+    Yielder, YielderHandle, KTHREAD_STACK_BYTES,
 };
 pub use kthread_irq::{CooperativeYield, KthreadIrqWaiter};
 pub use launch_cache::LaunchCache;

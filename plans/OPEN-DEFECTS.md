@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 18 open, 72 closed, 90 total.
+table normalises all three to **closed**. 19 open, 75 closed, 94 total.
 
-### Open (18)
+### Open (19)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -43,10 +43,11 @@ table normalises all three to **closed**. 18 open, 72 closed, 90 total.
 | D60 | the window-content release has no end-to-end vertical | — |
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
-| D76 | three riscv64 verticals blow their absolute ceiling under the loaded matrix | — |
+| D76 | a family of riscv64 verticals blow their absolute ceiling under the loaded matrix | set varies per run (1-6 rows seen); **both** quantitative legs are now shown to be harness artifacts, so the degradation claim is withdrawn — the bimodal ~8.7s-or-never completion is the only surviving measurement |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
+| D94 | the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan + a doc claimed it did | claim corrected; the witness pair was never enrolled — `sc=fd_grant` is in no `.rs` file |
 
-### Closed (72)
+### Closed (75)
 
 | ID | Subject |
 |---|---|
@@ -122,6 +123,9 @@ table normalises all three to **closed**. 18 open, 72 closed, 90 total.
 | D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
 | D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate could not build on any Tier-1 target |
 | D90 | the host test suite passed only in the harness's alphabetical order |
+| D91 | a leader thread that exits first stranded its process id, which the draw could then reissue |
+| D92 | `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number |
+| D93 | riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor be acknowledged |
 
 ## Scope
 
@@ -1177,14 +1181,17 @@ found two more read-only writes on the same path).
     glyph cache) and holds it within what that render retains: 218,312 bytes
     against 286,480 retained for a 1880×1000 window, where the transient
     asked for 7,753,840.
-- **D76 — three riscv64 QEMU verticals blow their absolute ceiling only under
-  the loaded matrix (OPEN).** `autoload-input`, `netstack-autoload` and
-  `netstack-dhcp` on riscv64 leave the guest alive and parked in WFI at the
-  *absolute* ceiling, with 17×–91× headroom on a lone run. Two sub-mechanisms:
-  the keyboard driver's load step never completes, and (for the netstack pair)
-  the guest provably finishes but the harness's host-side peer observer never
-  confirms. Diagnosed, not fixed; the fix is bounded guest concurrency or a
-  real completion signal, never a ceiling bump. Detail below. D65 joined them and is now fixed: ARXFS's
+- **D76 — a family of riscv64 QEMU verticals blow their absolute ceiling only
+  under the loaded matrix (OPEN).** The riscv64 netstack family plus
+  `autoload-input` and `rtc-goldfish` leave the guest alive and parked in WFI
+  at the *absolute* ceiling; membership varies per run, so treat any list of
+  names as a sample. Completion is bimodal — ~8.7 s or never — which says a
+  lost race, not slowness; both quantitative degradation figures are harness
+  artifacts and are withdrawn. Two sub-mechanisms: the keyboard driver's load
+  step never completes, and (for the netstack rows) the guest provably
+  finishes but the harness's host-side peer observer never confirms.
+  Diagnosed, not fixed; the fix is bounded guest concurrency or a real
+  completion signal, never a ceiling bump. Detail below. D65 joined them and is now fixed: ARXFS's
 B-tree insert recursed 8 KiB of stack per tree level, overflowing a release
 kernel's 32 KiB stack — measured at 48 KiB for one write to a fragmented file,
 and 34 KiB for one to a single-leaf tree, so it was reachable without any depth
@@ -4766,13 +4773,14 @@ must not.
 
 ---
 
-## D76 — three riscv64 QEMU verticals blow their absolute ceiling only under the loaded matrix (OPEN)
+## D76 — a family of riscv64 QEMU verticals blow their absolute ceiling only under the loaded matrix (OPEN)
 
 **State:** open, diagnosed, not fixed. Surfaced by a whole-project
 `cargo xtask ci` run; the tree was fingerprinted identical either side of the
-run, and the change under test (`lib/icon`'s deferred-decode desk, `lib/window`'s
-`EventSource` split, the file manager's and the chooser's loops) is in none of
-the three verticals' dependency closures.
+run, and the change under test at the time (`lib/icon`'s deferred-decode desk,
+`lib/window`'s `EventSource` split, the file manager's and the chooser's loops)
+is in none of the affected verticals' dependency closures. It has since
+reproduced on unrelated trees, so it is not attributable to any one change.
 
 **What fails.** In the concurrent QEMU matrix, at 8/8 in-flight weight
 alongside `desktop-pressure-qemu-aarch64`:
@@ -4782,8 +4790,25 @@ alongside `desktop-pressure-qemu-aarch64`:
 | `autoload-input-qemu-riscv64` | 120 s | UNFINISHED | 42.5 s | 6.9 s |
 | `netstack-autoload-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | 9.6 s |
 | `netstack-dhcp-qemu-riscv64` | 720 s | UNFINISHED | 179.5 s | 7.9 s |
+| `netstack-dhcp6-qemu-riscv64` | 720 s | UNFINISHED | 179.4 s | 8.8 s |
 | `netstack-bond-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | — |
-| `netstack-static-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | — |
+| `netstack-static-qemu-riscv64` | 480 s | UNFINISHED | 200.5 s | 8.7 s |
+| `rtc-goldfish-qemu-riscv64` | 600 s | UNFINISHED | 59.4 s | 6.9 s |
+
+The `silent at kill` column is kept only because the numbers are quoted
+elsewhere; it is **not** a measurement of the guest, and the section below
+shows why (it is a per-ceiling constant). The `solo` column is a real
+measurement.
+
+`rtc-goldfish-qemu-riscv64` carries the widest solo-to-ceiling ratio — 87× —
+and it fails a *third* way: its guest
+reaches `id=23015` (no real-time clock answered within the start-up window)
+rather than binding the chip, and its login loops on a console read that
+answers `NotFound` while the transcript records in-guest stalls of 101 s and
+224 s. Its two sibling verticals — the aarch64 `pl031` and x86_64 `mc146818`
+halves of the same TIMESYNC stage, on the same `rtc-root` disk — passed in the
+same loaded run with no stall record at all, which is what puts the cause on
+the riscv64 side rather than in the shared clock path.
 
 `netstack-static-qemu-riscv64` matters more than another row: it had
 previously been observed *passing* the loaded matrix, which is what made it
@@ -4804,10 +4829,9 @@ off each run's transcript rather than off the row.
 
 All three are the *absolute* runtime ceiling, not the inactivity deadline, and
 all three leave the guest alive and parked in `wait_for_interrupt` with nothing
-runnable. Solo headroom is 17×, 50× and 91× respectively — so the loaded
-degradation exceeds 50×, far beyond the ~7× D22 measured under deliberate 2×
-host oversubscription (where every run still passed). Proportional starvation
-does not explain it; something stalls.
+runnable. Solo headroom is 17×, 50× and 91×, which bounds how much slower a
+loaded run may be before it is killed — it is not a measurement of how much
+slower it actually was (see the withdrawn degradation claim below).
 
 **Two distinct sub-mechanisms, from the serial transcripts.**
 
@@ -4826,12 +4850,170 @@ does not explain it; something stalls.
 
 Both sub-mechanisms are accompanied by in-guest lockup-watchdog records of
 implausible magnitude on the single vCPU — `stalled_ms=224057`, `101047`,
-`42011` — i.e. hundreds of seconds of *guest-observed* stall, which the
-watchdog measures in guest time.
+`42011`. **These are survivorship, not stall magnitude; see below.**
 
 **What is *not* the diagnosis.** "Machine load" is not an accepted cause
 (§7) and a green solo re-run is not a fix. The solo numbers above are
 diagnostic evidence that the failure is load-dependent, nothing more.
+
+**`silent at kill` is a function of the ceiling, not of the guest — so it is
+not evidence of stall magnitude and the numbers above must not be read as
+such.** Measured across three independent loaded runs, every row reproduces
+its own figure to within 0.05%, and — decisively — **rows sharing a ceiling
+produce the same figure**:
+
+| ceiling | rows | silent at kill |
+|---|---|---|
+| 120 s | `autoload-input` | 42.5 (42.517, 42.536) |
+| 480 s | `netstack-static`, `netstack-bond` | 200.49, 200.50 |
+| 600 s | `rtc-goldfish` | 59.45 |
+| 720 s | `netstack-dhcp`, `netstack-dhcp6` | 179.446, 179.463 |
+
+Two unrelated verticals cannot independently stall for an identical 179.45 s;
+a per-ceiling constant is a property of the harness's own measurement, not of
+guest behaviour.
+
+**The `stalled_ms` records are the same kind of artifact, so the degradation
+claim is withdrawn rather than re-derived.** They were the remaining
+candidate for a guest-time measurement of the stall, and they do not support
+one:
+
+- *They are survivorship.* `DEFAULT_SOFT_LOCKUP_THRESHOLD_NS` is 10 s and the
+  cadence sample fires ~once per second, so the first record cannot land
+  before ~14 s of guest time. Every riscv64 vertical that **passes** completes
+  in ~8.7 s, so it can never be sampled — and indeed **only the six failing
+  verticals carry any `stalled_ms` record at all; every passing riscv64
+  vertical has zero.** The correlation with failure is entirely explained by
+  which guests lived long enough to be observed.
+- *The record count tracks the ceiling, not the guest.* 4 records at the 120 s
+  ceiling (`autoload-input`), 12 at the 480 s ceilings (`netstack-static`,
+  `netstack-bond`), 16 at the 600–720 s ceilings (`rtc-goldfish`,
+  `netstack-dhcp`, `netstack-dhcp6`) — i.e. how long the harness let the guest
+  run, sampled on one escalating schedule.
+- *The magnitudes reproduce across unrelated verticals*, exactly as the
+  `silent at kill` column does: the series 14.04, 14.99, 22.0, 26.9, 31.9,
+  42.0, 101.0, 224.1 s appears in vertical after vertical.
+- *Decisively, every stall cleared.* Each `id=4080 cpu stall detected` is
+  immediately followed by `id=4081 cpu stall cleared` at the same magnitude,
+  in every affected vertical. The CPU resumed each time, so these are
+  transient gaps in scheduler progress in a long-lived guest — not a hang, and
+  consistent with the host descheduling a TCG vCPU thread whose clock is
+  host-derived.
+
+So **neither** quantitative leg survives: `silent at kill` is a per-ceiling
+harness constant and `stalled_ms` is the sampler's own survivorship. The
+"loaded degradation exceeds 50×, far beyond D22's ~7×" argument is
+**withdrawn**; do not reinstate it from either column. What remains is the
+bimodal completion below, which is a real measurement and points at a race
+rather than at degradation — so nothing is lost by dropping the claim.
+
+**The failures are bimodal, which says race and not slowdown.** A netstack
+riscv64 vertical either completes in ~8.7 s or never completes at all, against
+a 480–720 s ceiling; there is no middle. Nothing that merely made the guest
+slower would produce that.
+
+**riscv64 is not broadly slow, and D93 did not change its speed.** Every
+riscv64 vertical that *completes* takes the same time either side of the D93
+fix, to within ~1%: `kernel-arch-boot` 301.11 → 301.25 ms, `preempt-el0`
+377.39 → 377.00 ms, `threads` 201.38 → 201.03 ms,
+`supervisor-memtest-takeover` 29.29 → 29.64 s, `netstack-autoload` 8.60 →
+8.75 s. Enabling `sie.SSIE` makes every unpark take a real trap on a
+single-hart guest, so this was worth measuring rather than assuming.
+
+**Membership is provably not a function of the tree.** Two consecutive gate
+runs whose *source* was byte-identical — only `.md` files differed between
+them, confirmed with `find kernel lib userland drivers tools tests include
+-newer` — produced **different** failing sets: `{autoload-input,
+netstack-static, rtc-goldfish}` then `{netstack-autoload, rtc-goldfish}`.
+`netstack-autoload` completed in 8.64 s in the first and never completed in
+the second. So no amount of bisecting the tree will find this, and any run's
+set is a sample of host conditions on the day.
+
+That pair also shows **one vertical changing sub-mechanism between runs**: in
+the run where `netstack-autoload` failed it failed the *autoload* way — only
+`id=7001` present, with `id=4180` (channel published), `id=16009`/`id=13010`
+(interface bound) and `id=16012` (echo served) all absent, so the guest did
+**not** succeed — whereas the same vertical had passed outright hours
+earlier. Read the sub-mechanism off each run's transcript, never off the
+vertical's name.
+
+**`rtc-goldfish-qemu-riscv64` is the one constant member.** It has failed in
+every set recorded so far, always at the same `id=23015` (no real-time clock
+answered within the start-up window). Every other row has been observed on
+both sides. If the campaign needs one target to instrument first, this is the
+row that will actually reproduce — and it is already the row that fails a
+*third* way (below), so it is the most informative as well as the most
+reliable.
+
+**Observed counts.** One row, two, three, four, and six across runs of the
+same tree;
+`netstack-dhcp6` is a row not previously recorded, and `netstack-static` and
+`netstack-dhcp6` have each been seen passing at ~8.7 s in one run and
+unfinished in the next. The set is the riscv64 netstack family plus
+`autoload-input` and `rtc-goldfish`; treat any list of names as a sample, and
+re-establish controls per run.
+
+**Ruled out, with the evidence, so they are not re-derived.**
+
+- *Not a lost reschedule-IPI wake.* The riscv64 port did leave `sie.SSIE`
+  clear in production, so a `send_ipi` raised `sip.SSIP` on a hart that
+  neither enabled the source nor installed a handler — `wfi` resumes only
+  for *locally* enabled interrupts (the global `sstatus.SIE` is what it
+  ignores), so the bit latched unacknowledged for the boot. A hang dump
+  shows exactly that: `sip=0x2` with `sie=0x220` (STIE|SEIE, SSIE clear),
+  parked at `wait_for_interrupt+0xc`. That is a real defect and is fixed
+  under D93 — but it is **not this failure**: inside the park window
+  `sstatus.SIE` is clear so no handler runs, and on a single-hart guest the
+  parked hart is the only IPI source, so nothing can raise `SSIP` there.
+  The production riscv64 image is single-hart, so the lost wake was latent.
+  Confirmed after the D93 fix: the same vertical's dump now reads
+  `sie=0x222` (SSIE enabled) and `sip=0x0` (the IPI taken and acknowledged),
+  and it still goes quiet after the same 42.5 s with the hang unchanged in
+  shape — `sstatus.SIE` clear, parked, one-shot armed ~4.4 s out.
+- *Not a gratuitous self-IPI on the uniprocessor guest.* riscv64's `send_ipi`
+  permits the calling CPU as "a self-reschedule", which reads at first like
+  pure overhead on a single-hart guest. It is not a defect and must not be
+  elided: the Arch-HAL contract states `send_ipi` "must arrange for the target
+  CPU to enter the scheduler's preemption entry point", and that sending to
+  self "is allowed and is a no-op equivalent to **setting a self-reschedule
+  flag**" — i.e. it must still take effect, not do nothing. The conformance
+  vertical `send_ipi_to_self_is_a_noop` only asserts it does not panic, so
+  there is no contradiction to resolve. Eliding it would silently drop a
+  requested reschedule, and the measured cost (~1%) is inside the noise of the
+  D93 before/after figures below — changing shared scheduler code on evidence
+  that thin is the blind micro-optimisation the charter forbids.
+
+- *Not the login respawn loop.* riscv64 installs `NULL_CONSOLE_READ` (the
+  SBI legacy console exposes no non-blocking drain), so fd 0 always answers
+  `NotFound`; `login` fails at `stage=username` with `errno=7` and exits 1.
+  `init`'s `SESSION_SPAWN_BUDGET = 3` bounds the relaunch and then abandons
+  the slot, which is what the transcripts show — exactly three exits, then
+  quiet. Correct fail-loud-degrade-gracefully behaviour, not a spin.
+
+**Where the live candidate now points.** In a *passing* run
+(`netstack-autoload-qemu-riscv64`) `virtio_kbd` and `framebuffer` are both
+accepted as candidates (`id=7030`) and neither is ever loaded — only
+`virtio_net` reaches `id=7001`. So "candidate accepted" does not imply
+"will load": the load waits on a hardware-tree node match, and the
+affected verticals blow their ceiling when that match does not land inside
+a window. That is the same conclusion as the autoload regression cover
+owed below, reached from the transcripts rather than from the harness. The
+next step is instrumenting `devmgr`'s discovery/match path against the
+loaded matrix — a reproduction campaign, not a code reading, since the
+failing vertical differs per run.
+
+**What the campaign costs, and why it has not been run.** Each observation is
+a whole-matrix `cargo xtask ci` (~15 min warm) on a *frozen* tree, the
+affected set varies per run (one, four, and six rows have all been seen on
+one tree), and `netstack-static` has been observed on both sides — so
+controls must be re-established per run rather than assumed, and a single run
+can neither confirm nor refute a hypothesis. Instrumenting the match path
+then re-running enough times to separate signal from set-membership variance
+is several hours of serialised wall clock during which no other edit may land
+(a mid-run edit invalidates the result). It is not a step to start without
+the User choosing to spend that, particularly now that both quantitative legs
+of the original evidence have been withdrawn above and the *shape* of the
+question has changed from "why is it slow" to "what race does it lose".
 
 **Where the fix has to come from** (§7 names the three shapes; the first two
 are the live candidates):
@@ -5255,6 +5437,213 @@ already exercise.
   and should not be fatal. D85.
 
 ---
+
+## D91 — a leader thread that exits first stranded its process id, which the draw could then reissue (FIXED)
+
+**Mechanism.** A process *is* its leader thread's `TaskId`
+(`plans/THREADS.md` decision 1), so `ProcessId(N)` and the leader's
+scheduler task share the number `N`. When the *leader* called
+`thread_exit` while a sibling was still live, `threads::retire` dropped
+only the leader's alias: `land_thread_down` returned `false`, no process
+teardown ran, and `CapTable::entries[ProcessId(N)]` stayed live under the
+surviving sibling. The scheduler, meanwhile, reaped the leader's task on
+the next dispatch and removed `N` from its registry — so
+`choose_task_id`'s liveness predicate stopped seeing `N` and could draw it
+for a new process. That process was admitted at `ProcessId::leader(N)`,
+where `CapTable::insert` *overwrites* the entry (adopting the old record's
+I/O counters and adding the newcomer to the surviving sibling's member
+set): two unrelated processes sharing one capability record.
+
+**Fix — the zombie leader, as one shared rule rather than a policy
+operation.** The id is held against the *draw* while the identity outlives
+the task that carried it. `kernel/sched/api` owns a process-wide reserved
+set beside the generator it already owns, and `choose_task_id` composes it
+with the policy's own liveness predicate (`is_live(id) || reserved(id)`),
+so every policy inherits the rule through the one call each already makes.
+`threads::retire` owns **both** halves, because it is the per-thread
+half of every death and so is the one place the group's member count
+crosses: it holds the number when a retiring thread is its process's
+leader and siblings remain, and returns it when the count reaches zero.
+Releasing from the process teardown instead needed a second call site —
+the driver-store unload tears a driver down inline rather than through
+`reclaim_process_bookkeeping`, so it would have held a number for the
+rest of the boot — and a third teardown path would have forgotten again.
+
+Two designs were rejected, and are recorded so they are not re-derived:
+
+- **A new `SchedulerPolicy` operation** (what this entry originally
+  proposed) would need three implementations plus conformance, and the
+  reservation is not a scheduling decision — it is the id rule, which
+  already has one home.
+- **Holding the leader as a zombie inside each policy's `tasks` map** is
+  Linux's literal shape but wrong here: `live_task_count() == 0` is what
+  ends the boot CPU's dispatch loop, so a zombie in `tasks` would keep it
+  dispatching forever after the last real task exited, and would also be
+  visible to `step`, work-stealing, and the placement scan in all three
+  policies.
+
+Reserving in `retire` rather than in `land_thread_down` is deliberate:
+`retire` is the per-thread half of *every* death, so the driver-store
+unload path (`init.rs`) is covered by the same definition.
+
+**Regression cover:** `kernel/core` —
+`a_leader_retiring_before_its_siblings_holds_its_id_against_the_draw`
+covers the whole lifecycle (the id is refused to an admission while held,
+and admissible again once the last sibling retires, so a hold cannot leak
+pid space for the boot), and `a_sibling_retiring_holds_no_id` pins the
+hold as the leader's alone. Each half of the fix, removed independently,
+fails the first test.
+
+## D92 — `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number (FIXED)
+
+**Mechanism.** `fd_grant(fd, pid, write_ceiling)` minted a one-shot file
+delegation keyed by `ProcessId(pid)`. The grantor learned that pid from a
+kernel-attested source (`call_peer_origin`) at some earlier point. If the
+requester exited in between and a new process drew its id,
+`registry.contains(recipient)` was satisfied by the *newcomer* and the
+delegation was minted to it; the newcomer could redeem a descriptor the user
+picked for someone else. The check and the mint were already atomic against
+each other; the window was between *learning* the pid and *granting*.
+
+**Fix: the recipient is named by its attested `ProcId`, and the pid leaves
+the ABI entirely.** `fd_grant(fd, write_ceiling, recipient, recipient_len)`
+takes a user pointer to the 16-byte instance the grantor read from an
+`Origin`. The kernel resolves it through the new `CapTable::process_of_instance`
+— the inverse of `instance_of` — to the number its per-process tables are
+keyed by, records the instance with the delegation
+(`PendingFdDelegation.recipient`), and `fd_redeem` admits that instance
+alone. There is no longer a number in the request that can go stale.
+
+**The enforcement point is redemption, not the mint, and that is the whole
+point.** A check at the mint cannot be made atomic without nesting
+`caps.read()` inside `aspaces.write()`, and that order is the reverse of the
+one `introspect_source::processes` already takes (`caps.read()` held across
+`aspaces.read()`); with `lib/sync`'s **writer-preference** `RwLock` a pending
+writer blocks new readers, so the pair is an ABBA deadlock. Enforcing at
+redemption needs no atomicity argument at all: the redeemer's instance is
+`caller.caps.proc_id()`, the dispatcher's own capability snapshot, so it
+costs no lock and cannot change under the check. A mint that raced its
+recipient's exit is therefore *inert* in a newcomer's hands rather than
+merely unlikely.
+
+**Two failure shapes fail closed at the mint as well**, so the grantor gets
+an honest immediate answer instead of a handle that would never redeem (the
+picker delivers `PickCancelled` rather than `FilePicked`): an instance no
+live record holds, and the `ProcId::KERNEL` sentinel. The sentinel guard is
+load-bearing rather than tidiness — every kernel thread reads as it, so
+sixteen caller-supplied zero bytes would otherwise resolve to whichever
+record was scanned first.
+
+**Why the in-flight-call option was rejected: the picker holds no call
+open.** `shm_grant` and `call_grant` resolve their recipient as an
+endpoint's live server, which is why neither has this window, and naming the
+peer of an in-flight call (endpoint + ticket) would have kept the 16-byte
+identity off the ABI. confd does qualify — its `fd_grant` sits strictly
+between `call_recv` and `call_reply`. The picker does **not**: `PickFile` is
+answered with only an *acceptance* (`status_call` returns at once), the pick
+concludes when the **user** chooses an arbitrary time later, and the outcome
+travels as a `FilePicked` event on the app's *event* endpoint. At mint time
+the app is parked on its ordinary event wait, not blocked in `ipc_call`, so
+there is no ticket to name. Do not re-derive this.
+
+**What the fix deleted.** The session's `pid_of` lookup is gone from the
+picker's delegation tail: the owner the compositor records *is* the attested
+`ProcId`, so the grant names it directly, and `route_outcome`/`conclude_pick`
+no longer thread `RtWindowIdentity` at all. confd threads
+`origin.proc_id()` in place of `origin.pid()` through `Storage::grant`,
+`bulk::mint`, `BlobStore::grant`, and `TempStore::create`.
+
+**Regression cover** (each verified failing with its half of the fix
+removed): `aspace::a_delegation_is_redeemable_only_by_the_instance_it_names`
+and `syscalls::fd_redeem_is_owner_bound_and_one_shot` (a newcomer holding
+the recorded *number* is refused, and the refusal consumes nothing, so the
+chosen instance can still redeem) fail without the redemption filter;
+`captable::process_of_instance_inverts_the_mint_and_refuses_the_sentinel`
+fails without the sentinel guard — it seeds a table that genuinely holds a
+`ProcId::KERNEL` record, which the handler-level assertion could not, since
+the captable is empty at that point in its setup.
+
+## D93 — riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor ever be acknowledged (FIXED)
+
+**Mechanism.** `arm_preemption` installed the U-mode-preemption and
+per-tick callbacks and enabled `sie.STIE`, but never installed an IPI
+callback and never called `preempt::enable_ipi()` — the aarch64 boot path
+does both, for the boot CPU and every secondary. So `sie.SSIE` stayed
+clear, and `RiscvArch::send_ipi` (the SBI IPI the scheduler uses to say
+"work landed on this CPU") raised `sip.SSIP` on a hart that had neither
+enabled the source nor installed a handler. Two consequences:
+
+- **`wfi` does not resume on it.** The privileged spec resumes `wfi` for
+  *locally* enabled interrupts "regardless of the global interrupt enable"
+  — `sstatus.SIE` is what it ignores, `sie.<bit>` is not. So the dispatch
+  loop's documented park/wake contract ("any later IPI remains pending
+  while masked and wakes `KernelArch::wait_for_interrupt`") was false on
+  riscv64.
+- **`sip.SSIP` latched for the boot.** `on_software_interrupt` is the only
+  thing that clears it and it never ran, leaving an unacknowledged pending
+  interrupt in the hart's register for the life of the boot.
+
+The fatal-report peer stop (`kernel/core/src/panic.rs`) and the pre-boot
+Supervisor takeover's quiesce handshake both complete only through
+`on_software_interrupt`, so both were inert on riscv64 — a fail-open the
+moment a second hart exists.
+
+**Why it was latent rather than observed.** The production riscv64 image is
+single-hart, and inside the park window `sstatus.SIE` is clear, so no
+handler runs and the parked hart is the only IPI source — nothing can raise
+`SSIP` there. The QEMU verticals that exercise the IPI path
+(`ipi_smp_qemu_riscv64`, `sched_drive_qemu_riscv64`) call `enable_ipi`
+*themselves* in their test kernels, which is precisely what hid the
+production omission. This is the shape the charter warns about: the fix
+existed on aarch64 and its riscv64 twin was never written.
+
+**Fix.** The three trap callbacks and the one step that installs them are
+hoisted into `kernel/tairix-kernel/src/riscv64_preempt_wiring.rs` —
+host-buildable for the same reason `riscv64_plic_irq` is — and
+`arm_preemption` calls `install_callbacks()` then `enable_ipi()` before
+`init_local_preempt`. Installing every callback in one step is what makes a
+forgotten source a compile error at the call site rather than a silent lost
+wakeup.
+
+**Regression cover:** a host test that the wiring step installs all three
+callbacks (`the_wiring_step_installs_the_preempt_tick_and_ipi_callbacks`);
+it fails with the IPI install removed.
+
+## D94 — the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan and a doc both claimed it did (OPEN)
+
+**Mechanism.** `plans/NEW-FILEMANAGER.md` FM9-b recorded that the aarch64
+`autoload_input` vertical "latches two new guest PASS witnesses —
+`SyscallInvoked sc=fd_grant` then `sc=fd_redeem`", and
+`docs/src/desktop/apps.md` stated the picker hand-off was "proven end to end"
+with the run's PASS keyed on those records. Neither is true: **`sc=fd_grant`
+appears in no `.rs` file in the tree**, and `qemu_tests.rs` contains no
+`fd_grant`, `fd_redeem`, or file-picker witness at all (its only `picker`
+mention is the taskbar's unrelated hover-window picker). Both claims are
+corrected in the change that found this; what is missing is the vertical.
+
+**Why it matters more than an ordinary stale doc.** The claim asserted guest
+coverage of a *security* path — a capability-bearing descriptor delegation
+between two principals — so a reviewer reading either document would conclude
+the click-through was verified against a running kernel when only the host
+unit tests and the model cover it. That is the shape of gap that lets a real
+regression through, and it is why the correction is not merely cosmetic.
+
+**What does hold today.** The kernel path is host-tested (mint, the D92
+instance gate, one-shot redemption, the grantor-identity re-check, the
+extent ceiling), the picker's browse model is host-tested, the fixture plants
+a readable document in `/Users/root`, and the picker opens at the session's
+home. Every guest-side consumer compiles and links for all three Tier-1
+targets. What is absent is a run that drives launcher → Viewer → picker →
+document-row click and asserts the two audit records.
+
+**What the vertical needs.** The witness pair, plus the pick-click gate that
+must precede it — a test-kernel picker-open marker (the session's first
+post-rename `comm=desktop sc=fs_open`, the picker's `open_at` home read),
+because no `MessageDelivered` fires for the session-internal picker and the
+user-authority session cannot `log_emit`. It would extend the aarch64
+`autoload_input` vertical, which carries its own open intermittency (D15), so
+the two should be weighed together rather than stacking a new click-through on
+a vertical that already freezes.
 
 ## D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with no record, and a spurious LAPIC interrupt is treated as fatal (OPEN)
 

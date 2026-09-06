@@ -18,7 +18,7 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{
-    CapabilityId, CapabilityQuery, Errno, Signal, SignalIntakeOp, SyscallNumber, WaitFlags,
+    CapabilityId, CapabilityQuery, Errno, ProcId, Signal, SignalIntakeOp, SyscallNumber, WaitFlags,
     WaitStatus, WaitStatusRecord, SYSCALL_MAX_ARGS,
 };
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
@@ -35,6 +35,7 @@ use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
+use tairix_kernel_core::foreground::ForegroundOwner;
 use tairix_kernel_core::{
     drain_pending_foreground, install_foreground_signal, intake_enable, intake_take,
     reschedule_current, spawn_image, spawn_user_kthread, ConsoleDevice, ConsoleInput,
@@ -281,10 +282,9 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Some(s) => s,
             None => qemu_exit::exit_failure(FAIL_NO_PRODUCER),
         };
-        // The slot is decoded exactly as the dispatcher decodes it: the
-        // register carries the argument sign-extended to 32 bits.
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = args[0] as i32;
+        // The slot is decoded exactly as the dispatcher decodes it: a pid
+        // occupies the whole register.
+        let pid = args[0].cast_signed();
         // The slot is a 32-bit word, and the typed decode below refuses any
         // value it does not name.
         #[allow(clippy::cast_possible_truncation)]
@@ -303,10 +303,9 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             Some(p) => p,
             None => qemu_exit::exit_failure(FAIL_NO_PRODUCER),
         };
-        // The slot is decoded exactly as the dispatcher decodes it: the
-        // register carries the argument sign-extended to 32 bits.
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = args[0] as i32;
+        // The slot is decoded exactly as the dispatcher decodes it: a pid
+        // occupies the whole register.
+        let pid = args[0].cast_signed();
         // Decode the flags fail-closed, exactly as the production dispatcher
         // does (a reserved bit never reaches the producer).
         #[allow(clippy::cast_possible_truncation)]
@@ -565,7 +564,7 @@ fn drive_intake_saga(wait_producer: &KernelProcessWait<Aarch64Arch>) {
         2 => push_ctrl_c(3),
         3 => {
             let intake_tid = INTAKE_TID.load(Ordering::SeqCst);
-            let Ok(pid) = i32::try_from(intake_tid) else {
+            let Ok(pid) = i64::try_from(intake_tid) else {
                 qemu_exit::exit_failure(FAIL_INTAKE_BAD_REAP);
             };
             match wait_producer.poll(ProcessId(SUPERVISOR), pid, WaitFlags::NONBLOCK) {
@@ -684,8 +683,18 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if install_foreground_signal(signal_producer).is_err() {
         qemu_exit::exit_failure(FAIL_FOREGROUND);
     }
+    // No capability table is wired here, so the intake role has no distinct
+    // process instance: the kernel sentinel is what the delivery gate will
+    // resolve for it, and recording the same value is what lets the `^C`
+    // through to the mechanics this vertical proves.
     if CONSOLE
-        .grant_foreground(ProcessId(SUPERVISOR), ProcessId(intake_tid))
+        .grant_foreground(
+            ProcessId(SUPERVISOR),
+            ForegroundOwner {
+                process: ProcessId(intake_tid),
+                instance: ProcId::KERNEL,
+            },
+        )
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_FOREGROUND);

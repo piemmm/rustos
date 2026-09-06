@@ -210,7 +210,7 @@ impl SyscallNumber {
     /// Wait for a child process to exit, reaping it and reporting its
     /// exit code (`plans/SPAWN.md` SP6).
     ///
-    /// Arguments: `pid: i32` (the child to wait for, or [`WAIT_PID_ANY`] to
+    /// Arguments: `pid: i64` (the child to wait for, or [`WAIT_PID_ANY`] to
     /// wait for any of the caller's children), `status: *mut
     /// tairix_wait_status_t` (a non-null user pointer the kernel writes the
     /// typed [`crate::WaitStatusRecord`] into — an exited record carrying
@@ -1172,7 +1172,7 @@ impl SyscallNumber {
     /// Deliver a control signal to another process (`plans/SPAWN.md` SP7,
     /// `plans/NEW-TASKBAR.md` T11).
     ///
-    /// Arguments: `pid: i32` (the target) and `signal: u32` (a
+    /// Arguments: `pid: i64` (the target) and `signal: u32` (a
     /// [`crate::Signal`] discriminant). Returns `0`, or `-errno`. The kernel
     /// identifies the sender from its own per-CPU current-task slot (never a
     /// caller-supplied identity) and settles the target rule in precedence
@@ -1352,7 +1352,7 @@ impl SyscallNumber {
     /// Arguments: `fd: u32` (a readable inherited standard-stream
     /// descriptor of the **caller's own** table — the console it names is
     /// the one whose ownership changes, the same fd-scoped authority
-    /// [`Self::STREAM_INPUT_MODE`] uses) and `pid: i32` (a **live child of
+    /// [`Self::STREAM_INPUT_MODE`] uses) and `pid: i64` (a **live child of
     /// the caller** to make the owner, or `0` to release). While an owner
     /// is recorded, **only the owner** drains the console's input
     /// ([`Self::STREAM_READ`]) or changes its line discipline
@@ -1711,8 +1711,7 @@ impl SyscallNumber {
     /// by a filesystem path — a pipe, resource, or already-delegated
     /// descriptor is refused, so delegation never chains) and `pid` (the
     /// recipient's kernel task id, taken from a kernel-attested source such
-    /// as `call_peer_origin` — task ids are never reused, so the grant can
-    /// never land on a recycled identity). The kernel captures the
+    /// as `call_peer_origin`). The kernel captures the
     /// *caller's* identity and effective capability set with the
     /// descriptor's path and open flags, and mints the recipient an
     /// unforgeable handle that resolves only when presented by the
@@ -2432,7 +2431,7 @@ pub const RESOURCE_REF_MAX: usize = 1024;
 /// caller's children exits next (the POSIX `waitpid(-1, …)` convention).
 /// A named constant keeps the sentinel from appearing as a bare `-1` at
 /// every call site.
-pub const WAIT_PID_ANY: i32 = -1;
+pub const WAIT_PID_ANY: i64 = -1;
 
 /// Flags accepted by [`SyscallNumber::WAIT`].
 ///

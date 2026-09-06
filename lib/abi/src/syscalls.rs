@@ -92,6 +92,12 @@ pub enum AbiType {
     IpcEndpoint = 8,
     /// Generic kernel-issued handle (opaque `u64`).
     Handle = 9,
+    /// Full-width 64-bit signed integer, carried in the whole register.
+    ///
+    /// Unlike [`Self::I32`] there is no reserved half to police: every bit
+    /// pattern is a value. Task ids are drawn over the whole 64-bit space,
+    /// so a pid selector is this width rather than `I32`.
+    I64 = 10,
 }
 
 impl AbiType {
@@ -115,6 +121,15 @@ pub const fn i32_register_is_canonical(raw: u64) -> bool {
         0xFFFF_FFFF
     };
     raw >> 32 == sign_extension
+}
+
+/// Recover the `i64` an [`AbiType::I64`] slot carries.
+///
+/// The whole register is the value, so — unlike [`i32_from_register`] —
+/// there is no canonical-encoding question to ask first.
+#[must_use]
+pub const fn i64_from_register(raw: u64) -> i64 {
+    raw.cast_signed()
 }
 
 /// Recover the `i32` an [`AbiType::I32`] slot carries.
@@ -497,7 +512,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         name: "wait",
         arg_count: 3,
         args: [
-            AbiType::I32,
+            AbiType::I64,
             AbiType::UserPtr,
             AbiType::U32,
             AbiType::Unit,
@@ -1646,7 +1661,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // The target PID to signal (an `I32`, sign-extended in the
             // register per the ABI convention), then the `Signal`
             // discriminant. The handler validates both.
-            AbiType::I32,
+            AbiType::I64,
             AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
@@ -1849,7 +1864,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // then the child PID to mark foreground (`I32`, sign-extended
             // per the ABI convention; `0` clears the slot).
             AbiType::U32,
-            AbiType::I32,
+            AbiType::I64,
             AbiType::Unit,
             AbiType::Unit,
             AbiType::Unit,
@@ -2267,19 +2282,23 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::FD_GRANT,
         name: "fd_grant",
-        arg_count: 3,
+        arg_count: 4,
         args: [
-            // The caller's own path-backed descriptor, then the recipient's
-            // kernel task id (from a kernel-attested source; task ids are
-            // never reused), then the write-extent ceiling.
+            // The caller's own path-backed descriptor, then the write-extent
+            // ceiling, then the recipient's attested process *instance*.
             AbiType::U32,
-            AbiType::U64,
             // The highest file length the recipient may write or truncate
             // the delegation to. Zero for a read-only delegation, which has
             // no extent to bound, and non-zero for a writable one — so an
             // unbounded writable delegation is not a representable request.
             AbiType::U64,
-            AbiType::Unit,
+            // The recipient's kernel-attested `ProcId`, as the grantor read
+            // it from an `Origin`. A task id is redrawn once its task is
+            // gone, so a number could name a later holder by the time the
+            // mint runs; the 128-bit instance is minted once and never
+            // reissued, so it names one process for all time.
+            AbiType::UserPtr,
+            AbiType::Len,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -2616,7 +2635,7 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // The target PID (an `I32`, sign-extended in the register per
             // the ABI convention), then the `SchedPriority` discriminant.
             // The handler validates both.
-            AbiType::I32,
+            AbiType::I64,
             AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,

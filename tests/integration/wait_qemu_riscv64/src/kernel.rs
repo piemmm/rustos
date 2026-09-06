@@ -239,10 +239,9 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     let cur = current_task_id();
 
     if call == Some(SyscallNumber::WAIT) {
-        // The slot is decoded exactly as the dispatcher decodes it: the
-        // register carries the argument sign-extended to 32 bits.
-        #[allow(clippy::cast_possible_truncation)]
-        let pid = args[0] as i32;
+        // The slot is decoded exactly as the dispatcher decodes it: a pid
+        // occupies the whole register.
+        let pid = args[0].cast_signed();
         // Decode the flags fail-closed, exactly as the production dispatcher
         // does (a reserved bit never reaches the producer).
         #[allow(clippy::cast_possible_truncation)]

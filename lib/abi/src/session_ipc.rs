@@ -577,10 +577,12 @@ pub const SESSION_WAKE_MAGIC: u32 = u32::from_le_bytes(*b"SEW1");
 pub const SESSION_WAKE_LEN: usize = 8;
 
 /// The wake-mailbox endpoint id a desktop session binds for the authority's
-/// messages: the session's own kernel task id (never reused) under a fixed
-/// high tag, so every session binds a distinct, collision-free, unreserved
-/// id — the same naming rule the Switchboard command mailbox and the window
-/// channel's event mailboxes follow.
+/// messages: the session's own kernel task id under a fixed high tag, so
+/// every session binds a distinct, collision-free, unreserved id — the same
+/// naming rule the Switchboard command mailbox and the window channel's
+/// event mailboxes follow. A pid is bounded to [`crate::PID_MAX`] precisely
+/// so it fits beneath the tag, which is what makes the derivation lossless
+/// and the four tagged namespaces mutually disjoint.
 ///
 /// The session parks on this mailbox as a member of the wait-set it already
 /// drains, so a switched-away session is woken by an event and never polls.
@@ -592,7 +594,7 @@ pub const SESSION_WAKE_LEN: usize = 8;
 /// this message.
 #[must_use]
 pub const fn session_wake_endpoint(pid: u64) -> u64 {
-    WAKE_ENDPOINT_TAG | pid
+    WAKE_ENDPOINT_TAG | (pid & crate::PID_MAX)
 }
 
 /// What the session authority tells a desktop session to do.

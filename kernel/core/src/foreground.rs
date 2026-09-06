@@ -23,46 +23,47 @@
 //!
 //! # Interrupt safety
 //!
-//! [`ForegroundOwnership::current`] reads the owner through a single atomic
-//! load and takes no lock, so the console input filter can call it from the
-//! UART RX interrupt handler without risking a self-deadlock against a lock the
-//! interrupted task holds. The compound transitions
-//! ([`ForegroundOwnership::grant`], [`ForegroundOwnership::release`],
-//! [`ForegroundOwnership::clear_dead`]) run under the internal lock, which the
-//! interrupt path never takes.
+//! The console input filter reads the owner from the UART receive interrupt
+//! handler, so the state sits behind an [`IrqSafeSpinLock`]: the hold masks the
+//! holding CPU, and every critical section here is a handful of field accesses
+//! that call nothing, so a handler can never find the lock held by the task it
+//! interrupted and no lock order can invert through it.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_kernel_sec::ProcessId;
-use tairix_sync::SpinLock;
+use tairix_sync::IrqSafeSpinLock;
 
-/// The [`ForegroundOwnership`] sentinel for "no foreground owner".
+/// A terminal's foreground owner: the process, and *which instance of it*.
 ///
-/// Scheduler task ids are small monotonically increasing values that can never
-/// reach `u64::MAX`, so the sentinel is unambiguous.
-const FOREGROUND_NONE: u64 = u64::MAX;
+/// A pid alone does not name a process for longer than that process lives —
+/// task ids are drawn at random, and an id whose task is gone may be drawn
+/// again. The ownership therefore records the process-instance identity the
+/// owner had when it was granted, and a `^C`/`^Z` aimed at this owner is
+/// refused at delivery unless the process holding the pid is still that same
+/// instance.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct ForegroundOwner {
+    /// The owning process.
+    pub process: ProcessId,
+    /// The instance [`Self::process`] named when the ownership was granted.
+    /// [`ProcId::KERNEL`] for a principal the capability table holds no
+    /// distinct process instance for.
+    pub instance: ProcId,
+}
+
+/// A held ownership: who owns the terminal, and who handed it to them.
+#[derive(Debug, Copy, Clone)]
+struct Ownership {
+    owner: ForegroundOwner,
+    /// The task that granted the ownership. Only it or the owner itself may
+    /// release or re-target, so a background task can never steal the drain
+    /// right by clearing the slot.
+    granter: ProcessId,
+}
 
 /// The controlling (foreground) ownership of one terminal.
-///
-/// Records the current owner and the task that granted it, guarding the
-/// compound transitions with an internal lock while keeping the owner readable
-/// lock-free from an interrupt handler (see the module docs).
-#[derive(Debug)]
 pub struct ForegroundOwnership {
-    /// The controlling owner's scheduler task id, or [`FOREGROUND_NONE`] while
-    /// unowned. Read lock-free by the interrupt-path input filter; written only
-    /// under [`Self::lock`] through the checked transitions below.
-    owner: AtomicU64,
-    /// The task that granted the current ownership (the parent that handed the
-    /// terminal to [`Self::owner`]), or [`FOREGROUND_NONE`] while unowned. Only
-    /// this task or the owner itself may release or re-target the ownership, so
-    /// a background task can never steal the drain right by clearing the slot.
-    granter: AtomicU64,
-    /// Serialises the compound transitions (read owner + granter, decide, write
-    /// both). The interrupt-path filter never takes this lock — it reads
-    /// [`Self::owner`] alone — so the interrupt-safety constraint holds.
-    lock: SpinLock<()>,
+    state: IrqSafeSpinLock<Option<Ownership>>,
 }
 
 impl Default for ForegroundOwnership {
@@ -76,9 +77,7 @@ impl ForegroundOwnership {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            owner: AtomicU64::new(FOREGROUND_NONE),
-            granter: AtomicU64::new(FOREGROUND_NONE),
-            lock: SpinLock::new(()),
+            state: IrqSafeSpinLock::new(None),
         }
     }
 
@@ -93,17 +92,17 @@ impl ForegroundOwnership {
     ///
     /// [`Errno::NotForeground`] when another task's ownership is in place and
     /// `caller` is neither its granter nor the owner.
-    pub fn grant(&self, caller: ProcessId, owner: ProcessId) -> Result<(), Errno> {
-        let _guard = self.lock.lock();
-        let current = self.owner.load(Ordering::Acquire);
-        let permitted = current == FOREGROUND_NONE
-            || current == caller.0
-            || self.granter.load(Ordering::Acquire) == caller.0;
-        if !permitted {
-            return Err(Errno::NotForeground);
+    pub fn grant(&self, caller: ProcessId, owner: ForegroundOwner) -> Result<(), Errno> {
+        let mut state = self.state.lock();
+        if let Some(held) = *state {
+            if held.owner.process != caller && held.granter != caller {
+                return Err(Errno::NotForeground);
+            }
         }
-        self.granter.store(caller.0, Ordering::Release);
-        self.owner.store(owner.0, Ordering::Release);
+        *state = Some(Ownership {
+            owner,
+            granter: caller,
+        });
         Ok(())
     }
 
@@ -122,16 +121,14 @@ impl ForegroundOwnership {
     /// [`Errno::NotForeground`] when another task's ownership is in place and
     /// `caller` is neither its granter nor the owner.
     pub fn release(&self, caller: ProcessId) -> Result<(), Errno> {
-        let _guard = self.lock.lock();
-        let current = self.owner.load(Ordering::Acquire);
-        if current == FOREGROUND_NONE {
+        let mut state = self.state.lock();
+        let Some(held) = *state else {
             return Ok(());
-        }
-        if current != caller.0 && self.granter.load(Ordering::Acquire) != caller.0 {
+        };
+        if held.owner.process != caller && held.granter != caller {
             return Err(Errno::NotForeground);
         }
-        self.owner.store(FOREGROUND_NONE, Ordering::Release);
-        self.granter.store(FOREGROUND_NONE, Ordering::Release);
+        *state = None;
         Ok(())
     }
 
@@ -139,26 +136,22 @@ impl ForegroundOwnership {
     ///
     /// The exit path calls this for every terminal when a task ends, and the
     /// read gate calls it when it proves a recorded owner dead, so a terminal is
-    /// never wedged behind a task that can no longer read it. Task ids are never
-    /// reused, so clearing on a proven-dead owner can never displace a live one.
-    /// A slot naming any other task is left untouched (idempotent).
+    /// never wedged behind a task that can no longer read it. Keyed on the pid
+    /// alone, which is enough: the slot is cleared while the dying process is
+    /// still reclaiming, before its task id is released back to the draw, so no
+    /// live successor can be holding it. A slot naming any other task is left
+    /// untouched (idempotent).
     pub fn clear_dead(&self, dead: ProcessId) {
-        let _guard = self.lock.lock();
-        if self.owner.load(Ordering::Acquire) == dead.0 {
-            self.owner.store(FOREGROUND_NONE, Ordering::Release);
-            self.granter.store(FOREGROUND_NONE, Ordering::Release);
+        let mut state = self.state.lock();
+        if state.is_some_and(|held| held.owner.process == dead) {
+            *state = None;
         }
     }
 
     /// The terminal's current controlling (foreground) owner, if any.
-    ///
-    /// A single lock-free atomic load, safe to call from an interrupt handler.
     #[must_use]
-    pub fn current(&self) -> Option<ProcessId> {
-        match self.owner.load(Ordering::Acquire) {
-            FOREGROUND_NONE => None,
-            raw => Some(ProcessId(raw)),
-        }
+    pub fn current(&self) -> Option<ForegroundOwner> {
+        self.state.lock().map(|held| held.owner)
     }
 }
 
@@ -170,6 +163,15 @@ mod tests {
         ProcessId(n)
     }
 
+    /// An owner at instance `n`, so a test can tell two occupants of one pid
+    /// apart the way the delivery gate does.
+    fn owner(process: u64, instance: u8) -> ForegroundOwner {
+        ForegroundOwner {
+            process: ProcessId(process),
+            instance: ProcId::from_raw([instance; 16]),
+        }
+    }
+
     #[test]
     fn a_fresh_ownership_is_unowned() {
         let fg = ForegroundOwnership::new();
@@ -179,55 +181,55 @@ mod tests {
     #[test]
     fn granting_an_unowned_terminal_records_owner_and_granter() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
-        assert_eq!(fg.current(), Some(pid(2)));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
+        assert_eq!(fg.current(), Some(owner(2, 0xA1)));
     }
 
     #[test]
     fn the_granter_can_retarget_between_its_children() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
         // The same granter re-targets to another child.
-        assert_eq!(fg.grant(pid(1), pid(3)), Ok(()));
-        assert_eq!(fg.current(), Some(pid(3)));
+        assert_eq!(fg.grant(pid(1), owner(3, 0xA2)), Ok(()));
+        assert_eq!(fg.current(), Some(owner(3, 0xA2)));
     }
 
     #[test]
     fn the_owner_can_delegate_onward() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
         // The owner (2) delegates to its own child (4); 2 becomes the granter.
-        assert_eq!(fg.grant(pid(2), pid(4)), Ok(()));
-        assert_eq!(fg.current(), Some(pid(4)));
+        assert_eq!(fg.grant(pid(2), owner(4, 0xA3)), Ok(()));
+        assert_eq!(fg.current(), Some(owner(4, 0xA3)));
         // …and can re-target as the granter now.
-        assert_eq!(fg.grant(pid(2), pid(5)), Ok(()));
-        assert_eq!(fg.current(), Some(pid(5)));
+        assert_eq!(fg.grant(pid(2), owner(5, 0xA4)), Ok(()));
+        assert_eq!(fg.current(), Some(owner(5, 0xA4)));
     }
 
     #[test]
     fn a_bystander_cannot_take_or_retarget_the_ownership() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
-        assert_eq!(fg.grant(pid(9), pid(9)), Err(Errno::NotForeground));
-        assert_eq!(fg.current(), Some(pid(2)));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
+        assert_eq!(fg.grant(pid(9), owner(9, 0xA5)), Err(Errno::NotForeground));
+        assert_eq!(fg.current(), Some(owner(2, 0xA1)));
     }
 
     #[test]
     fn a_bystander_cannot_release_the_ownership() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
         assert_eq!(fg.release(pid(9)), Err(Errno::NotForeground));
-        assert_eq!(fg.current(), Some(pid(2)));
+        assert_eq!(fg.current(), Some(owner(2, 0xA1)));
     }
 
     #[test]
     fn the_owner_and_the_granter_can_each_release() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
         assert_eq!(fg.release(pid(2)), Ok(()));
         assert_eq!(fg.current(), None);
 
-        assert_eq!(fg.grant(pid(1), pid(2)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(2, 0xA1)), Ok(()));
         assert_eq!(fg.release(pid(1)), Ok(()));
         assert_eq!(fg.current(), None);
     }
@@ -242,12 +244,24 @@ mod tests {
     #[test]
     fn clear_dead_clears_only_the_matching_owner() {
         let fg = ForegroundOwnership::new();
-        assert_eq!(fg.grant(pid(1), pid(7)), Ok(()));
+        assert_eq!(fg.grant(pid(1), owner(7, 0xA6)), Ok(()));
         // A different task ending leaves the slot untouched.
         fg.clear_dead(pid(9));
-        assert_eq!(fg.current(), Some(pid(7)));
+        assert_eq!(fg.current(), Some(owner(7, 0xA6)));
         // The owner ending clears it.
         fg.clear_dead(pid(7));
         assert_eq!(fg.current(), None);
+    }
+
+    /// The recorded owner carries the instance the grant saw, so a later
+    /// occupant of the same pid is distinguishable from it.
+    #[test]
+    fn the_owner_carries_the_instance_it_was_granted_at() {
+        let fg = ForegroundOwnership::new();
+        assert_eq!(fg.grant(pid(1), owner(4, 0xB1)), Ok(()));
+        let held = fg.current().expect("an owner is recorded");
+        assert_eq!(held.process, pid(4));
+        assert_ne!(held.instance, owner(4, 0xB2).instance);
+        assert_ne!(held.instance, ProcId::KERNEL);
     }
 }

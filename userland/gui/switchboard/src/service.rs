@@ -157,7 +157,7 @@ pub trait ServiceHost {
     ///
     /// The kernel's typed refusal — notably a target this service holds no
     /// authority over.
-    fn signal(&mut self, pid: i32, signal: Signal) -> Result<(), Errno>;
+    fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno>;
 
     /// Lower the process `pid`'s time-shared scheduling priority.
     ///
@@ -165,7 +165,7 @@ pub trait ServiceHost {
     ///
     /// The kernel's typed refusal — notably a target this service holds no
     /// authority over.
-    fn lower_priority(&mut self, pid: i32) -> Result<(), Errno>;
+    fn lower_priority(&mut self, pid: i64) -> Result<(), Errno>;
 
     /// Ask the kernel to move the machine to the power state `action`
     /// names.

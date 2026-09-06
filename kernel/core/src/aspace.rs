@@ -66,7 +66,9 @@ use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::hwtree::{GrantedResource, HwResource, HwResourceKind};
-use tairix_abi::{DescriptorTable, Errno, LimitKind, OpenFlags, ResourceLimit, STD_STREAM_COUNT};
+use tairix_abi::{
+    DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit, STD_STREAM_COUNT,
+};
 use tairix_caps::CapabilitySet;
 use tairix_collections::{RangeError, RangeKey, RangeMap};
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
@@ -814,9 +816,27 @@ struct TaskGrants {
 struct TaskFdDelegations {
     /// The next handle value to issue. Starts at `1`; only ever increases.
     next_handle: u64,
-    /// The pending delegation behind each issued handle, with the open
-    /// flags the grantor's descriptor carried.
-    by_handle: BTreeMap<u64, (DelegatedFile, OpenFlags)>,
+    /// The pending delegation behind each issued handle.
+    by_handle: BTreeMap<u64, PendingFdDelegation>,
+}
+
+/// One minted, unredeemed file delegation.
+///
+/// `recipient` is the process *instance* the grantor named, and redemption
+/// re-checks it: the table is keyed by a task id, which is redrawn once its
+/// task is gone, so a delegation minted moments before its recipient exited
+/// could otherwise be redeemed by whoever draws that number next. The
+/// instance is minted once and never reissued, so the recorded value admits
+/// exactly the process the grantor chose.
+#[derive(Clone, PartialEq, Eq)]
+struct PendingFdDelegation {
+    /// The path and the grantor's captured authority every later operation
+    /// on the redeemed descriptor is re-authorised under.
+    file: DelegatedFile,
+    /// The read/write access the grantor's own descriptor carried.
+    flags: OpenFlags,
+    /// The process instance the grantor delegated to.
+    recipient: ProcId,
 }
 
 /// The handle already naming `value` in `by_handle`, if any — the
@@ -1984,14 +2004,22 @@ impl AddressSpaceRegistry {
     /// ([`Self::redeem_fd_delegation`] is keyed by the kernel-trusted
     /// caller id, so another task presenting the same numeric value
     /// resolves to nothing).
+    ///
+    /// `instance` is the process instance the grantor named, recorded so
+    /// redemption admits that process and no later holder of `recipient`.
     pub fn mint_fd_delegation(
         &mut self,
         recipient: ProcessId,
+        instance: ProcId,
         file: DelegatedFile,
         flags: OpenFlags,
     ) -> u64 {
         let entry = self.fd_delegations.entry(recipient).or_default();
-        let pending = (file, flags);
+        let pending = PendingFdDelegation {
+            file,
+            flags,
+            recipient: instance,
+        };
         // A delegation still pending conveys exactly one right: "open this
         // path under this captured authority". Re-granting it while the
         // first is unredeemed adds nothing — descriptors here carry no
@@ -2020,24 +2048,36 @@ impl AddressSpaceRegistry {
     /// only when the descriptor allocation succeeds, so a refused
     /// redemption (descriptor-space exhaustion) leaves the grant intact
     /// for a retry after the holder closes descriptors, and a redeemed
-    /// handle can never be redeemed twice. The `task` argument is the
-    /// kernel-trusted caller id, never a caller-supplied value.
+    /// handle can never be redeemed twice. `task` and `instance` are both
+    /// the kernel-trusted caller identity, never caller-supplied values.
+    ///
+    /// `instance` is what makes the delegation land on the process the
+    /// grantor chose: a task id is redrawn once its task is gone, so a
+    /// redeemer holding the recorded number is admitted only when it is
+    /// also the recorded instance.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — no such handle minted to `task` (unknown,
-    ///   already redeemed, or minted to a different task — forgery answers
-    ///   exactly like absence, so the handle space leaks nothing).
+    ///   already redeemed, minted to a different task, or minted to an
+    ///   earlier instance of `task`'s number — forgery and staleness both
+    ///   answer exactly like absence, so the handle space leaks nothing).
     /// * [`Errno::OutOfRange`] — descriptor-space exhaustion; the grant
     ///   stays pending.
-    pub fn redeem_fd_delegation(&mut self, task: ProcessId, handle: u64) -> Result<u32, Errno> {
-        let (file, flags) = self
+    pub fn redeem_fd_delegation(
+        &mut self,
+        task: ProcessId,
+        instance: ProcId,
+        handle: u64,
+    ) -> Result<u32, Errno> {
+        let pending = self
             .fd_delegations
             .get(&task)
             .and_then(|entry| entry.by_handle.get(&handle))
+            .filter(|pending| pending.recipient == instance)
             .cloned()
             .ok_or(Errno::NotFound)?;
-        let fd = self.open_backed(task, OpenBacking::Delegated(file), flags)?;
+        let fd = self.open_backed(task, OpenBacking::Delegated(pending.file), pending.flags)?;
         // The allocation succeeded; consume the grant (one-shot). The
         // entry provably exists — it was read above under the same
         // exclusive borrow — so the removes cannot miss.
@@ -2966,10 +3006,11 @@ mod tests {
             caps: CapabilitySet::empty(),
             write_ceiling: 0,
         };
-        let first = reg.mint_fd_delegation(ProcessId(2), file.clone(), OpenFlags::READ);
+        let who = ProcId::from_raw([0x2Au8; tairix_abi::PROC_ID_LEN]);
+        let first = reg.mint_fd_delegation(ProcessId(2), who, file.clone(), OpenFlags::READ);
         for _ in 0..1_000 {
             assert_eq!(
-                reg.mint_fd_delegation(ProcessId(2), file.clone(), OpenFlags::READ),
+                reg.mint_fd_delegation(ProcessId(2), who, file.clone(), OpenFlags::READ),
                 first,
                 "repetition must not append a second pending delegation"
             );
@@ -2982,20 +3023,60 @@ mod tests {
             write_ceiling: 0,
         };
         assert_ne!(
-            reg.mint_fd_delegation(ProcessId(2), other, OpenFlags::READ),
+            reg.mint_fd_delegation(ProcessId(2), who, other, OpenFlags::READ),
             first
         );
         // One redemption consumes the one pending right; the duplicate
         // suppression never turned two grants into one *redeemable*
         // descriptor that outlives its consumption.
-        assert!(reg.redeem_fd_delegation(ProcessId(2), first).is_ok());
+        assert!(reg.redeem_fd_delegation(ProcessId(2), who, first).is_ok());
         assert_eq!(
-            reg.redeem_fd_delegation(ProcessId(2), first),
+            reg.redeem_fd_delegation(ProcessId(2), who, first),
             Err(Errno::NotFound)
         );
         // With nothing pending, granting the same file again mints anew.
-        let renewed = reg.mint_fd_delegation(ProcessId(2), file, OpenFlags::READ);
+        let renewed = reg.mint_fd_delegation(ProcessId(2), who, file, OpenFlags::READ);
         assert_ne!(renewed, first);
+    }
+
+    /// A delegation is redeemable only by the process *instance* it was
+    /// minted to, so a later holder of that task id cannot take it.
+    ///
+    /// The delegation table is keyed by a task id, and an id whose task is
+    /// gone may be drawn again. Naming the recipient by number alone let a
+    /// grant minted moments before its recipient exited be redeemed by
+    /// whoever drew that number next — a descriptor the user chose for
+    /// someone else. The recorded instance is what refuses it.
+    #[test]
+    fn a_delegation_is_redeemable_only_by_the_instance_it_names() {
+        let mut reg = AddressSpaceRegistry::new();
+        let file = DelegatedFile {
+            path: String::from("/Users/ada/Documents/report.txt"),
+            uid: 1000,
+            caps: CapabilitySet::empty(),
+            write_ceiling: 0,
+        };
+        let chosen = ProcId::from_raw([0xA1u8; tairix_abi::PROC_ID_LEN]);
+        let newcomer = ProcId::from_raw([0xB2u8; tairix_abi::PROC_ID_LEN]);
+        let handle = reg.mint_fd_delegation(ProcessId(7), chosen, file, OpenFlags::READ);
+
+        // The newcomer holds the recorded *number* and presents the handle:
+        // refused exactly like a handle that never existed, so the number
+        // space leaks nothing either.
+        assert_eq!(
+            reg.redeem_fd_delegation(ProcessId(7), newcomer, handle),
+            Err(Errno::NotFound)
+        );
+        // The refusal consumed nothing: the process the grantor chose can
+        // still redeem.
+        assert!(reg
+            .redeem_fd_delegation(ProcessId(7), chosen, handle)
+            .is_ok());
+        // And one-shot still holds.
+        assert_eq!(
+            reg.redeem_fd_delegation(ProcessId(7), chosen, handle),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]

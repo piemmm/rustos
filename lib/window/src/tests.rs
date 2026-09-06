@@ -2671,11 +2671,13 @@ fn event_endpoint_ids_are_distinct_per_task_and_never_reserved() {
     // embeds the pid recoverably (tag in the high bits, pid in the low).
     assert_ne!(event_endpoint_for(1), event_endpoint_for(2));
     assert_eq!(event_endpoint_for(0x1234) & 0xFFFF, 0x1234);
-    // No app mailbox may land on a reserved well-known rendezvous.
-    for pid in [0u64, 1, 7, 0x0000_FFFF_FFFF] {
-        assert!(!tairix_abi::ipc::is_reserved_endpoint(event_endpoint_for(
-            pid
-        )));
+    // No app mailbox may land on a reserved well-known rendezvous, and the
+    // pid stays recoverable right up to the widest one the kernel can draw —
+    // the bound that keeps this derivation lossless.
+    for pid in [0u64, 1, 7, 0x0000_FFFF_FFFF, tairix_abi::PID_MAX] {
+        let endpoint = event_endpoint_for(pid);
+        assert!(!tairix_abi::ipc::is_reserved_endpoint(endpoint));
+        assert_eq!(endpoint & tairix_abi::PID_MAX, pid);
     }
 }
 

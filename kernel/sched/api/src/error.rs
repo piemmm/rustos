@@ -37,6 +37,18 @@ pub enum SchedError {
     InvalidState,
     /// The requested CPU identifier is outside the configured range.
     NoSuchCpu,
+    /// No free task id could be drawn for a new task.
+    ///
+    /// Admission draws a random id and rejects one a live task already
+    /// holds; every candidate in its bounded run of draws was rejected, so
+    /// the task is refused rather than admitted at an id in use.
+    NoTaskIdAvailable,
+    /// A caller-chosen task id is already held by a live task.
+    ///
+    /// Only the reserved well-known identities are admitted by number
+    /// ([`crate::SchedulerPolicy::spawn_parked_as`]); a second admission at
+    /// the same one is refused rather than displacing the first.
+    TaskIdInUse,
 }
 
 impl fmt::Display for SchedError {
@@ -46,6 +58,8 @@ impl fmt::Display for SchedError {
             Self::NoSuchTask => "no such task",
             Self::InvalidState => "task is not in a state that permits this transition",
             Self::NoSuchCpu => "no such cpu",
+            Self::NoTaskIdAvailable => "no free task id could be drawn",
+            Self::TaskIdInUse => "task id is already held by a live task",
         };
         f.write_str(s)
     }
@@ -70,6 +84,8 @@ mod tests {
             SchedError::NoSuchTask,
             SchedError::InvalidState,
             SchedError::NoSuchCpu,
+            SchedError::NoTaskIdAvailable,
+            SchedError::TaskIdInUse,
         ] {
             let s = format!("{v}");
             assert!(!s.is_empty(), "Display for {v:?} must not be empty");

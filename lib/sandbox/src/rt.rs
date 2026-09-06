@@ -134,7 +134,7 @@ impl Launcher for RtLauncher {
             return Err(Errno::from_syscall(pid));
         }
         Ok(RtChannel {
-            pid: pid_from(pid),
+            pid,
             write_fd: request_write,
             read_fd: reply_read,
         })
@@ -152,15 +152,10 @@ impl Launcher for RtLauncher {
     }
 }
 
-/// Narrow a non-negative spawn result to the wait-facing PID type.
-fn pid_from(pid: i64) -> i32 {
-    i32::try_from(pid).unwrap_or(i32::MAX)
-}
-
 /// The parent's channel to one spawned worker: the request pipe's write
 /// end and the reply pipe's read end in the parent's own descriptor table.
 pub struct RtChannel {
-    pid: i32,
+    pid: i64,
     write_fd: u32,
     read_fd: u32,
 }

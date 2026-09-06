@@ -465,6 +465,13 @@ pub mod riscv64;
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 
+// Hoisted out of the freestanding-only `riscv64` port module for the same
+// reason as `riscv64_plic_irq`: the production preemption/IPI callback
+// wiring carries a host regression test, and a missing install is a silent
+// lost wakeup rather than a build failure.
+#[cfg(any(kernel_isa = "riscv64", test))]
+pub mod riscv64_preempt_wiring;
+
 // The data every port's PID 1 spawn seam and runtime spawn producer share
 // by definition — the user-space layout constants (stack/MMIO-window offsets
 // and page counts, canary seeds), the embedded-program registry the `spawn`

@@ -619,10 +619,11 @@ pub fn decode_publish_reply(bytes: &[u8]) -> Result<ProcId, Errno> {
 const COMMAND_ENDPOINT_TAG: u64 = 0x5747_0000_0000_0000;
 
 /// The command-mailbox endpoint id a Switchboard instance binds for the
-/// session's commands: the service's own kernel task id (never reused)
-/// under a fixed high tag, so every instance binds a distinct, collision-
-/// free, unreserved id — the same naming rule the window channel's event
-/// mailboxes follow, so the two id spaces can never disagree.
+/// session's commands: the service's own kernel task id under a fixed high
+/// tag, so every instance binds a distinct, collision-free, unreserved id —
+/// the same naming rule the window channel's event mailboxes follow, so the
+/// two id spaces can never disagree. A pid is bounded to [`crate::PID_MAX`]
+/// precisely so it fits beneath the tag.
 ///
 /// The mailbox is owner-only to receive and every message carries its
 /// sender's kernel-attested origin, so the id needs no secrecy: the session
@@ -631,7 +632,7 @@ const COMMAND_ENDPOINT_TAG: u64 = 0x5747_0000_0000_0000;
 /// attested sender is not the session that answered its publish.
 #[must_use]
 pub const fn command_endpoint_for(pid: u64) -> u64 {
-    COMMAND_ENDPOINT_TAG | pid
+    COMMAND_ENDPOINT_TAG | (pid & crate::PID_MAX)
 }
 
 /// Which panel section a [`SwitchboardCommand::OpenPanel`] opens on.

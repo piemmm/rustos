@@ -453,7 +453,7 @@ mod program {
     /// error-path unwind, so a half-spawned pipeline never leaves a running
     /// orphan or a zombie behind. Best-effort: a child that already exited
     /// is simply reaped, and a refusal leaves nothing more to do.
-    fn kill_and_reap(pids: &[i32]) {
+    fn kill_and_reap(pids: &[i64]) {
         for &pid in pids {
             let _ = tairix_rt::signal(pid, tairix_abi::Signal::Kill);
             let mut status = tairix_abi::WaitStatus::Exited(0);
@@ -475,7 +475,7 @@ mod program {
         command: &ResolvedCommand,
         wires: &[PlannedWire; tairix_abi::STD_STREAM_COUNT],
         fds: &[u32],
-    ) -> Result<i32, Errno> {
+    ) -> Result<i64, Errno> {
         let Some(word) = command.argv.first() else {
             return Err(Errno::NotImplemented);
         };
@@ -528,10 +528,7 @@ mod program {
             let ret =
                 tairix_rt::spawn_attached(candidate.as_bytes(), &attach, &arg_bytes, &env_bytes);
             if ret >= 0 {
-                // PIDs fit an `i32` on this ABI and `ret >= 0` here, so the
-                // cast preserves the PID value.
-                #[allow(clippy::cast_possible_truncation)]
-                return Ok(ret as i32);
+                return Ok(ret);
             }
             let err = Errno::from_syscall(ret);
             if err != Errno::NotFound {
@@ -716,7 +713,7 @@ mod program {
         /// leader's PID; reaped after the leader's terminal wait so no
         /// member is left a zombie. The shell is single-threaded, so a
         /// `RefCell` suffices.
-        members: RefCell<Vec<(u64, Vec<i32>)>>,
+        members: RefCell<Vec<(u64, Vec<i64>)>>,
     }
 
     impl RtProcessHost {
@@ -739,7 +736,7 @@ mod program {
             // phase refuses a target that will not open.
             let plan = tairix_elsh::lower_wire_plan(spec).map_err(LaunchError::Redirection)?;
             let fds = open_planned(&plan.opens).map_err(LaunchError::Redirection)?;
-            let mut pids: Vec<i32> = Vec::with_capacity(plan.members.len());
+            let mut pids: Vec<i64> = Vec::with_capacity(plan.members.len());
             for member in &plan.members {
                 let command = &spec.commands[member.command];
                 match spawn_member(spec, command, &member.wires, &fds) {
@@ -771,11 +768,10 @@ mod program {
             let leader = *pids
                 .last()
                 .ok_or(LaunchError::Spawn(Errno::NotImplemented))?;
-            // Spawn returned the PID as a non-negative register, so the
-            // widening cast preserves the value.
-            #[allow(clippy::cast_sign_loss)]
-            let leader_pid = Pid::new(leader as u64);
-            let others: Vec<i32> = pids[..pids.len() - 1].to_vec();
+            // Spawn returned the PID as a non-negative register, so
+            // reinterpreting it preserves the value.
+            let leader_pid = Pid::new(leader.cast_unsigned());
+            let others: Vec<i64> = pids[..pids.len() - 1].to_vec();
             if !others.is_empty() {
                 self.members
                     .borrow_mut()
@@ -785,9 +781,10 @@ mod program {
         }
 
         fn wait(&self, pid: Pid) -> Result<WaitOutcome, Errno> {
-            // PIDs fit an `i32` on this ABI; `wait` takes a signed PID.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let pid_i32 = pid.as_u64() as i32;
+            // A pid is drawn inside the non-negative signed range, so
+            // reinterpreting it for the signed `wait`/`console_foreground`
+            // argument preserves the value.
+            let signed_pid = pid.as_u64().cast_signed();
             // Mark the child as this console's foreground job before
             // blocking (the `tcsetpgrp` analogue): the kernel's cooked-mode
             // line discipline then delivers `^C`/`^Z` to the child while
@@ -795,11 +792,11 @@ mod program {
             // console backing, an unwired kernel) is not fatal — the wait
             // proceeds without interactive signal routing, exactly as a
             // non-interactive session should.
-            let marked = tairix_rt::console_foreground(tairix_abi::STDIN, pid_i32) >= 0;
+            let marked = tairix_rt::console_foreground(tairix_abi::STDIN, signed_pid) >= 0;
             let mut status = tairix_abi::WaitStatus::Exited(0);
             // `STOPPED` opts into stop reports, so a `^Z`-stopped foreground
             // job returns control to the shell instead of blocking forever.
-            let ret = tairix_rt::wait(pid_i32, &mut status, tairix_abi::WaitFlags::STOPPED);
+            let ret = tairix_rt::wait(signed_pid, &mut status, tairix_abi::WaitFlags::STOPPED);
             if marked {
                 // Reclaim the terminal: back at the prompt (or handling a
                 // stop), bytes flow to the shell again.
@@ -854,9 +851,7 @@ mod program {
                 Signal::Terminate => tairix_abi::Signal::Terminate,
                 Signal::Kill => tairix_abi::Signal::Kill,
             };
-            // PIDs fit an `i32` on this ABI; `signal` takes a signed PID.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let ret = tairix_rt::signal(pid.as_u64() as i32, abi_signal);
+            let ret = tairix_rt::signal(pid.as_u64().cast_signed(), abi_signal);
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));
             }

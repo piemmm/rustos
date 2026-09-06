@@ -182,7 +182,7 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, _pid: i32) -> SyscallResult {
+    fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, _pid: i64) -> SyscallResult {
         self.bump();
         Ok(0)
     }
@@ -256,7 +256,7 @@ impl SyscallHandlers for CountingHandlers {
     fn wait(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _status: u64,
         _flags: tairix_abi::WaitFlags,
     ) -> SyscallResult {
@@ -266,7 +266,7 @@ impl SyscallHandlers for CountingHandlers {
     fn signal(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _signal: tairix_abi::Signal,
     ) -> SyscallResult {
         self.bump();
@@ -275,7 +275,7 @@ impl SyscallHandlers for CountingHandlers {
     fn sched_set_priority(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _priority: tairix_abi::SchedPriority,
     ) -> SyscallResult {
         self.bump();
@@ -918,8 +918,9 @@ impl SyscallHandlers for CountingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _fd: u32,
-        _pid: u64,
         _write_ceiling: u64,
+        _recipient: u64,
+        _recipient_len: usize,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -961,7 +962,7 @@ fn populate_valid_args(spec: &SyscallSpec, args: &mut [u64; SYSCALL_MAX_ARGS]) {
             AbiType::Cap => u64::from(CapabilityId::FS_MOUNT.as_u16()),
             AbiType::UserPtr => 0x1000,
             AbiType::Len => 64,
-            AbiType::I32 | AbiType::Unit | AbiType::Errno => 0,
+            AbiType::I32 | AbiType::I64 | AbiType::Unit | AbiType::Errno => 0,
         };
     }
 }

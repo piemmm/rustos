@@ -180,11 +180,11 @@ mod program {
     }
 
     /// Deliver `signal` to `pid`, mapping the kernel's `-errno` to a typed
-    /// [`Errno`]. A pid that does not fit the syscall's `i32` argument is
+    /// [`Errno`]. A pid that does not fit the syscall's signed argument is
     /// out of range (fail closed) rather than truncated.
     fn signal_pid(pid: Pid, signal: Signal) -> Result<(), Errno> {
-        let pid_i32 = i32::try_from(pid.as_u64()).map_err(|_| Errno::OutOfRange)?;
-        let ret = tairix_rt::signal(pid_i32, signal);
+        let signed = i64::try_from(pid.as_u64()).map_err(|_| Errno::OutOfRange)?;
+        let ret = tairix_rt::signal(signed, signal);
         if ret < 0 {
             Err(Errno::from_syscall(ret))
         } else {

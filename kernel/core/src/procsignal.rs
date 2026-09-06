@@ -23,14 +23,15 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use tairix_abi::{Errno, Signal};
+use tairix_abi::{Errno, ProcId, Signal};
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
 use tairix_kernel_sec::{CapTable, ProcessId, TaskId};
 use tairix_sync::once::OnceCell;
-use tairix_sync::{RwLock, SpinLock};
+use tairix_sync::{IrqSafeSpinLock, RwLock, SpinLock};
 
+use crate::foreground::ForegroundOwner;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 
 /// Scheduler task ids currently stopped by [`Signal::Stop`].
@@ -131,8 +132,8 @@ pub fn intake_ready(task: u64) -> bool {
 
 /// Drop `task`'s intake state on teardown. Idempotent; driven by the one
 /// shared task-reclaim path so an exited or killed task leaves no stale
-/// opt-in or pending slot behind (task ids are never reused, so a leaked
-/// entry could never be reclaimed later).
+/// opt-in or pending slot behind — the entry goes before the id can be drawn
+/// again, so a later task never inherits one.
 pub fn clear_intake(task: u64) {
     SIGNAL_INTAKE.lock().remove(&task);
 }
@@ -235,7 +236,7 @@ pub fn kill_pending(task: u64) -> bool {
 /// Drop `task`'s kill-gate state on teardown. Idempotent; driven by the
 /// one shared task-reclaim path exactly like [`clear_intake`], so a task
 /// that exits on its own while a kill is deferred against it leaves no
-/// stale entry behind (task ids are never reused).
+/// stale entry a later holder of its id could be killed by.
 pub fn clear_kill_gate(task: u64) {
     let mut gate = KILL_GATE.lock();
     gate.in_syscall.remove(&task);
@@ -442,20 +443,23 @@ pub(crate) fn try_intake(target: u64, signal: Signal) -> bool {
 /// directly, because the queueing side may run in interrupt context where
 /// scheduler locks must not be taken.
 pub trait ForegroundSignal: Sync {
-    /// Deliver `signal` to the console's recorded foreground task.
+    /// Deliver `signal` to the terminal's recorded foreground owner.
     ///
     /// The authority was established when the parent marked the task
     /// foreground through `console_foreground` (a live child of the caller
     /// on that console); by delivery time the task may already have exited,
     /// in which case the delivery fails closed with [`Errno::NotFound`] and
-    /// signals no one — task ids are never reused, so a stale target can
-    /// never resolve to a different task.
+    /// signals no one. `owner` carries the process *instance* the ownership
+    /// was granted at, not merely its pid, because an id whose task is gone
+    /// may be drawn again: an implementation must refuse rather than signal
+    /// whichever process holds the number at delivery time.
     ///
     /// # Errors
     ///
-    /// [`Errno::NotFound`] when the target no longer exists;
-    /// [`Errno::OutOfRange`] for a signal the line discipline never maps.
-    fn deliver(&self, target: ProcessId, signal: Signal) -> Result<(), Errno>;
+    /// [`Errno::NotFound`] when the target no longer exists, or the pid now
+    /// names a different process instance; [`Errno::OutOfRange`] for a signal
+    /// the line discipline never maps.
+    fn deliver(&self, owner: ForegroundOwner, signal: Signal) -> Result<(), Errno>;
 }
 
 /// The boot-installed [`ForegroundSignal`] hook (set-once per boot).
@@ -516,30 +520,38 @@ pub trait TaskReclaim: Sync {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TaskReclaimAlreadyInstalled;
 
-/// The one pending foreground signal, packed `(task id << 32) | signal`.
+/// The one pending foreground signal and the owner it is aimed at.
 ///
-/// `0` means empty (a defined signal discriminant is never `0`). A single
-/// slot, not a queue: a later `^C`/`^Z` typed before the previous one was
-/// delivered simply replaces it, which matches what the keystrokes mean —
-/// the newest request wins, and a terminated target makes the older one
-/// moot. Written from interrupt context with one atomic store (no lock),
-/// drained in dispatcher context where scheduler locks are safe.
-static PENDING_FOREGROUND: AtomicU64 = AtomicU64::new(0);
+/// A single slot, not a queue: a later `^C`/`^Z` typed before the previous
+/// one was delivered simply replaces it, which matches what the keystrokes
+/// mean — the newest request wins, and a terminated target makes the older
+/// one moot.
+///
+/// Written from the UART receive interrupt and drained in dispatcher
+/// context, so the lock masks the writing CPU for the store rather than
+/// risking a self-deadlock against the task it interrupted.
+static PENDING_FOREGROUND: IrqSafeSpinLock<Option<(ForegroundOwner, Signal)>> =
+    IrqSafeSpinLock::new(None);
+
+/// Whether [`PENDING_FOREGROUND`] holds a signal, for the preemption gate's
+/// per-tick peek.
+///
+/// Advisory and lock-free on purpose: the gate consults it on every timer
+/// tick, where an uncontended lock acquire would still cost a mask/unmask
+/// pair. A spurious `true` costs one extra reschedule that finds the slot
+/// empty; the delivery itself always reads the slot under the lock.
+static FOREGROUND_QUEUED: AtomicBool = AtomicBool::new(false);
 
 /// Record a foreground signal for delivery at the next dispatcher-context
 /// drain ([`drain_pending_foreground`]).
 ///
-/// Interrupt-safe: a single atomic store, no locks — the same discipline as
-/// `waitq`'s deferred wakes, because the UART RX handler that maps `^C`
-/// runs in interrupt context where taking scheduler locks could deadlock
-/// against the interrupted task. A target id that does not fit the packed
-/// slot is refused (fail closed) — scheduler ids stay well below that.
-pub fn queue_foreground_signal(target: ProcessId, signal: Signal) {
-    let Ok(narrow) = u32::try_from(target.0) else {
-        return;
-    };
-    let packed = (u64::from(narrow) << 32) | u64::from(signal.as_u32());
-    PENDING_FOREGROUND.store(packed, Ordering::Release);
+/// Interrupt-safe: the slot's lock masks the writing CPU for one store, so
+/// the UART RX handler that maps `^C` cannot deadlock against the task it
+/// interrupted, and it takes no scheduler lock at all — the delivery that
+/// does runs later, in dispatcher context.
+pub fn queue_foreground_signal(owner: ForegroundOwner, signal: Signal) {
+    *PENDING_FOREGROUND.lock() = Some((owner, signal));
+    FOREGROUND_QUEUED.store(true, Ordering::Release);
 }
 
 /// Non-consuming peek: whether a foreground signal (`^C`/`^Z`) is queued
@@ -550,7 +562,7 @@ pub fn queue_foreground_signal(target: ProcessId, signal: Signal) {
 /// only runs once the dispatch loop regains control.
 #[must_use]
 pub fn has_pending_foreground() -> bool {
-    PENDING_FOREGROUND.load(Ordering::Acquire) != 0
+    FOREGROUND_QUEUED.load(Ordering::Acquire)
 }
 
 /// Deliver the pending foreground signal, if any, through the installed
@@ -559,27 +571,21 @@ pub fn has_pending_foreground() -> bool {
 /// Called from the dispatch loop between task dispatches (the same slot
 /// `drain_pending_wakes` runs in), where taking scheduler locks is safe.
 /// Returns `true` when a delivery was attempted, so the idle path knows
-/// work happened. A failed delivery (the target already exited) is dropped:
-/// the signal has no one left to go to, and ids are never reused.
+/// work happened. A failed delivery is dropped: the aimed-at process
+/// instance is gone, so the signal has no one left to go to and is never
+/// re-aimed at whoever holds its pid now.
 pub fn drain_pending_foreground() -> bool {
-    let packed = PENDING_FOREGROUND.swap(0, Ordering::Acquire);
-    if packed == 0 {
+    FOREGROUND_QUEUED.store(false, Ordering::Release);
+    let Some((owner, signal)) = PENDING_FOREGROUND.lock().take() else {
         return false;
-    }
+    };
     let Ok(Some(hook)) = FOREGROUND_SIGNAL.get() else {
         // No producer installed (or the cell poisoned): nothing can be
         // delivered — fail closed. The slot is already cleared, never
         // retried into a later boot phase.
         return false;
     };
-    let target = ProcessId(packed >> 32);
-    // The packed low word was a defined discriminant when stored; decode
-    // fail-closed anyway rather than trusting the round-trip.
-    #[allow(clippy::cast_possible_truncation)] // Low 32 bits by construction.
-    let Ok(signal) = Signal::from_u32(packed as u32) else {
-        return false;
-    };
-    let _ = hook.deliver(target, signal);
+    let _ = hook.deliver(owner, signal);
     true
 }
 
@@ -610,7 +616,7 @@ pub trait ProcessSignal: Sync {
     /// `sender` — the answer that sends the handler on to its
     /// cross-principal rule. The default producer ([`NullProcessSignal`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
-    fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno>;
+    fn resolve_child(&self, sender: ProcessId, pid: i64) -> Result<ProcessId, Errno>;
 
     /// Deliver `signal` to an **already-authorised** `target`.
     ///
@@ -669,7 +675,7 @@ pub trait ProcessSignal: Sync {
 pub struct NullProcessSignal;
 
 impl ProcessSignal for NullProcessSignal {
-    fn resolve_child(&self, _sender: ProcessId, _pid: i32) -> Result<ProcessId, Errno> {
+    fn resolve_child(&self, _sender: ProcessId, _pid: i64) -> Result<ProcessId, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -806,6 +812,19 @@ where
         } else {
             listed
         }
+    }
+
+    /// Which process instance holds `process` right now.
+    ///
+    /// [`ProcId::KERNEL`] both for a principal that is not a distinct user
+    /// process and for a record the table no longer holds, so a comparison
+    /// against a real minted instance fails closed on a dead target. A
+    /// producer wired with no table has no process instances to tell apart at
+    /// all and answers the sentinel for every target, matching the sentinel a
+    /// grant on such a build recorded.
+    fn instance_of(&self, process: ProcessId) -> ProcId {
+        self.caps
+            .map_or(ProcId::KERNEL, |caps| caps.read().instance_of(process))
     }
 
     /// Publish the [`TaskReclaim`] seam a terminating signal drives (the
@@ -1145,7 +1164,7 @@ where
         self.caps.is_some()
     }
 
-    fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
+    fn resolve_child(&self, sender: ProcessId, pid: i64) -> Result<ProcessId, Errno> {
         // The `wait` producer already owns the parent/child bookkeeping, so
         // who-parents-whom is answered in one place for both syscalls. A
         // live child of `sender` resolves; anything else is `NotFound`.
@@ -1162,7 +1181,14 @@ where
     A: SchedulerArch + Send + Sync + 'static,
     P: SchedulerPolicy<A> + Send + Sync + 'static,
 {
-    fn deliver(&self, target: ProcessId, signal: Signal) -> Result<(), Errno> {
+    fn deliver(&self, owner: ForegroundOwner, signal: Signal) -> Result<(), Errno> {
+        // The ownership was granted to one *instance* of that pid, and an id
+        // whose task is gone may be drawn again, so a target whose pid now
+        // names a different instance is refused outright: a `^C` must never
+        // land on whoever inherited the number.
+        if self.instance_of(owner.process) != owner.instance {
+            return Err(Errno::NotFound);
+        }
         // No parent/child authorisation here: the authority was checked when
         // the parent marked the target foreground on its own console, and
         // the console line discipline is the kernel acting on the terminal
@@ -1175,7 +1201,7 @@ where
         // intake and its escalation rule) and the delivery still fails
         // closed on a target the scheduler no longer knows.
         match signal {
-            Signal::Interrupt | Signal::Stop => self.deliver_signal(target, signal),
+            Signal::Interrupt | Signal::Stop => self.deliver_signal(owner.process, signal),
             Signal::Continue | Signal::Terminate | Signal::Kill => Err(Errno::OutOfRange),
         }
     }
@@ -1219,19 +1245,13 @@ pub(crate) fn running_kill_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Test-only: consume and decode the pending foreground slot, so the console
+/// Test-only: consume the pending foreground slot, so the console
 /// line-discipline tests can assert what the filter queued without invoking
 /// whichever process-global hook another test may have installed.
 #[cfg(test)]
-pub(crate) fn take_pending_foreground_for_test() -> Option<(ProcessId, Signal)> {
-    let packed = PENDING_FOREGROUND.swap(0, Ordering::Acquire);
-    if packed == 0 {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation)] // Low 32 bits by construction.
-    Signal::from_u32(packed as u32)
-        .ok()
-        .map(|signal| (ProcessId(packed >> 32), signal))
+pub(crate) fn take_pending_foreground_for_test() -> Option<(ForegroundOwner, Signal)> {
+    FOREGROUND_QUEUED.store(false, Ordering::Release);
+    PENDING_FOREGROUND.lock().take()
 }
 
 /// Test-only: whether some [`ForegroundSignal`] hook is installed, and if
@@ -1241,7 +1261,7 @@ pub(crate) fn take_pending_foreground_for_test() -> Option<(ProcessId, Signal)> 
 pub(crate) fn ensure_foreground_hook_for_test() {
     struct InertHook;
     impl ForegroundSignal for InertHook {
-        fn deliver(&self, _target: ProcessId, _signal: Signal) -> Result<(), Errno> {
+        fn deliver(&self, _owner: ForegroundOwner, _signal: Signal) -> Result<(), Errno> {
             Ok(())
         }
     }
@@ -1313,13 +1333,24 @@ mod tests {
         }
     }
 
-    /// Admit a task on `scheduler` and return its id as an `i32` pid, failing
-    /// the test if the id does not fit (host ids always do).
-    fn spawn_child(scheduler: &Scheduler<TestArch>) -> (u64, i32) {
+    /// The foreground owner a producer with no capability table records and
+    /// resolves: no distinct process instances exist on such a build, so both
+    /// sides carry the kernel sentinel and the delivery gate lets the signal
+    /// through to the mechanics under test.
+    fn fg(process: u64) -> ForegroundOwner {
+        ForegroundOwner {
+            process: ProcessId(process),
+            instance: ProcId::KERNEL,
+        }
+    }
+
+    /// A live child task, as both the scheduler's `u64` id and the signed pid
+    /// spelling the syscall surface names it by.
+    fn spawn_child(scheduler: &Scheduler<TestArch>) -> (u64, i64) {
         let id = scheduler
             .spawn(0, Priority::Normal, |_ctx| TaskAction::Exit)
             .expect("task admitted");
-        (id, i32::try_from(id).expect("host task id fits i32"))
+        (id, id.cast_signed())
     }
 
     /// Drive the two halves of the producer in the order the syscall
@@ -1332,7 +1363,7 @@ mod tests {
     fn signal_child(
         signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>>,
         sender: ProcessId,
-        pid: i32,
+        pid: i64,
         signal: Signal,
     ) -> Result<(), Errno> {
         let target = signaller.resolve_child(sender, pid)?;
@@ -1399,7 +1430,7 @@ mod tests {
         assert_eq!(scheduler.live_task_count(), 0);
         // ... and reaps with Terminate's POSIX-familiar 143 status, exactly
         // as if it had exited with that code itself.
-        let pid = u32::try_from(child).expect("host task id fits u32");
+        let pid = child;
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
@@ -1770,7 +1801,7 @@ mod tests {
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
         );
-        let pid = u32::try_from(child).expect("host task id fits u32");
+        let pid = child;
         // Kill surfaces as SIGKILL's familiar 137, distinct from Terminate.
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
@@ -1794,7 +1825,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(scheduler.live_task_count(), 0);
-        let pid = u32::try_from(child).expect("host task id fits u32");
+        let pid = child;
         // Interrupt surfaces as the `^C` 130 every POSIX shell reports.
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
@@ -1830,7 +1861,7 @@ mod tests {
                     .expect("defined bits")
             ),
             Ok(WaitedChild {
-                pid: u32::try_from(child).expect("host task id fits u32"),
+                pid: child,
                 status: WaitStatus::Stopped(Signal::Stop)
             })
         );
@@ -1894,7 +1925,7 @@ mod tests {
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::STOPPED),
             Ok(WaitedChild {
-                pid: u32::try_from(child).expect("host task id fits u32"),
+                pid: child,
                 status: WaitStatus::Exited(137)
             })
         );
@@ -1910,25 +1941,19 @@ mod tests {
 
         // The console path never delivers Continue/Terminate/Kill.
         for signal in [Signal::Continue, Signal::Terminate, Signal::Kill] {
-            assert_eq!(
-                signaller.deliver(ProcessId(child), signal),
-                Err(Errno::OutOfRange)
-            );
+            assert_eq!(signaller.deliver(fg(child), signal), Err(Errno::OutOfRange));
         }
         // `^Z` stops the foreground task …
-        assert_eq!(signaller.deliver(ProcessId(child), Signal::Stop), Ok(()));
+        assert_eq!(signaller.deliver(fg(child), Signal::Stop), Ok(()));
         assert!(task_is_stopped(child));
         assert_eq!(scheduler.live_task_count(), 1);
         // … and `^C` terminates it with the 130 status.
-        assert_eq!(
-            signaller.deliver(ProcessId(child), Signal::Interrupt),
-            Ok(())
-        );
+        assert_eq!(signaller.deliver(fg(child), Signal::Interrupt), Ok(()));
         assert_eq!(scheduler.live_task_count(), 0);
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
-                pid: u32::try_from(child).expect("host task id fits u32"),
+                pid: child,
                 status: WaitStatus::Exited(130)
             })
         );
@@ -1940,15 +1965,94 @@ mod tests {
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         // Task 9999 was never admitted: the delivery reaches no one.
         assert_eq!(
-            signaller.deliver(ProcessId(9999), Signal::Interrupt),
+            signaller.deliver(fg(9999), Signal::Interrupt),
             Err(Errno::NotFound)
         );
         assert_eq!(
-            signaller.deliver(ProcessId(9999), Signal::Stop),
+            signaller.deliver(fg(9999), Signal::Stop),
             Err(Errno::NotFound)
         );
         // A refused stop leaves no overlay entry behind.
         assert!(!task_is_stopped(9999));
+    }
+
+    /// Register `process` in `caps` as a live process instance, so the
+    /// foreground delivery gate can resolve an instance for it.
+    fn admit_instance(
+        caps: &RwLock<CapTable>,
+        process: ProcessId,
+        instance: ProcId,
+    ) -> ForegroundOwner {
+        let sink = crate::test_sink::TestSink::new();
+        let record = tairix_kernel_sec::TaskCapabilities::derive(
+            process,
+            tairix_kernel_sec::UserId(0),
+            tairix_caps::CapabilitySet::empty(),
+            tairix_caps::CapabilitySet::empty(),
+            &sink,
+        )
+        .with_proc_id(instance);
+        caps.write().insert(record);
+        ForegroundOwner { process, instance }
+    }
+
+    /// A `^C` aimed at one process instance is refused once the pid names a
+    /// different one — the id may be drawn again after its task is gone, and
+    /// a mis-delivered kill would land on whoever inherited the number.
+    #[test]
+    fn foreground_deliver_refuses_a_stale_process_instance() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let (child, _child_pid) = spawn_child(scheduler);
+        wait.register_child(ProcessId(7), ProcessId(child));
+        let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
+            Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+
+        // The keystroke was aimed at the instance the grant saw …
+        let aimed_at = admit_instance(caps, ProcessId(child), ProcId::from_raw([0x11; 16]));
+        // … but by delivery time the pid names a different one.
+        admit_instance(caps, ProcessId(child), ProcId::from_raw([0x22; 16]));
+        assert_eq!(
+            signaller.deliver(aimed_at, Signal::Interrupt),
+            Err(Errno::NotFound)
+        );
+        // The successor is untouched: neither killed nor stopped.
+        assert_eq!(scheduler.live_task_count(), 1);
+        assert!(!task_is_stopped(child));
+        assert_eq!(
+            signaller.deliver(aimed_at, Signal::Stop),
+            Err(Errno::NotFound)
+        );
+        assert!(!task_is_stopped(child));
+
+        // A record the table no longer holds is equally refused: an absent
+        // instance never matches a real one.
+        caps.write().remove(ProcessId(child));
+        assert_eq!(
+            signaller.deliver(aimed_at, Signal::Interrupt),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(scheduler.live_task_count(), 1);
+    }
+
+    /// The same gate passes the signal through when the pid still names the
+    /// instance the ownership was granted at.
+    #[test]
+    fn foreground_deliver_reaches_the_instance_it_was_aimed_at() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let (child, _child_pid) = spawn_child(scheduler);
+        wait.register_child(ProcessId(7), ProcessId(child));
+        let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
+            Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+
+        let aimed_at = admit_instance(caps, ProcessId(child), ProcId::from_raw([0x33; 16]));
+        assert_eq!(signaller.deliver(aimed_at, Signal::Stop), Ok(()));
+        assert!(task_is_stopped(child));
+        assert_eq!(signaller.deliver(aimed_at, Signal::Interrupt), Ok(()));
+        assert_eq!(scheduler.live_task_count(), 0);
     }
 
     #[test]
@@ -1956,7 +2060,7 @@ mod tests {
         // The pending slot is process-global, so serialise against the
         // console line-discipline tests that share it.
         let _guard = foreground_test_lock();
-        queue_foreground_signal(ProcessId(77), Signal::Interrupt);
+        queue_foreground_signal(fg(77), Signal::Interrupt);
         // The drain consumes the slot (delivering only if a boot-style hook
         // was installed by another test; either way the slot empties).
         drain_pending_foreground();
@@ -2089,7 +2193,7 @@ mod tests {
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
-                pid: u32::try_from(child).expect("host task id fits u32"),
+                pid: child,
                 status: WaitStatus::Exited(137)
             })
         );
@@ -2123,7 +2227,7 @@ mod tests {
         assert_eq!(
             wait.wait(ProcessId(7), tairix_abi::WAIT_PID_ANY, WaitFlags::empty()),
             Ok(WaitedChild {
-                pid: u32::try_from(child).expect("host task id fits u32"),
+                pid: child,
                 status: WaitStatus::Exited(130)
             })
         );
@@ -2142,21 +2246,15 @@ mod tests {
 
         intake_enable(child);
         // The console `^C` is observed, not fatal …
-        assert_eq!(
-            signaller.deliver(ProcessId(child), Signal::Interrupt),
-            Ok(())
-        );
+        assert_eq!(signaller.deliver(fg(child), Signal::Interrupt), Ok(()));
         assert_eq!(scheduler.live_task_count(), 1);
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         // … and `^Z` still stops the opted-in target (only termination
         // requests are observable; `Stop` stays scheduler-side).
-        assert_eq!(signaller.deliver(ProcessId(child), Signal::Stop), Ok(()));
+        assert_eq!(signaller.deliver(fg(child), Signal::Stop), Ok(()));
         assert!(task_is_stopped(child));
         // Lift the overlay so the shared set holds no stale entry.
-        assert_eq!(
-            signaller.deliver(ProcessId(child), Signal::Interrupt),
-            Ok(())
-        );
+        assert_eq!(signaller.deliver(fg(child), Signal::Interrupt), Ok(()));
         assert_eq!(intake_take(child), Ok(Signal::Interrupt));
         STOPPED_TASKS.lock().remove(&child);
         clear_intake(child);

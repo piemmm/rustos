@@ -79,16 +79,16 @@ mod program {
     /// Parse `bytes` as a non-negative decimal `i32`, or `None` on an empty
     /// string, a non-digit byte, or overflow. Fail closed — the parent turns
     /// `None` into a distinct diagnostic rather than signalling a guessed PID.
-    fn parse_pid(bytes: &[u8]) -> Option<i32> {
+    fn parse_pid(bytes: &[u8]) -> Option<i64> {
         if bytes.is_empty() {
             return None;
         }
-        let mut acc: i32 = 0;
+        let mut acc: i64 = 0;
         for &b in bytes {
             if !b.is_ascii_digit() {
                 return None;
             }
-            let digit = i32::from(b - b'0');
+            let digit = i64::from(b - b'0');
             acc = acc.checked_mul(10)?.checked_add(digit)?;
         }
         Some(acc)
@@ -170,7 +170,7 @@ mod program {
         if ret < 0 {
             return 22;
         }
-        if ret != i64::from(child_pid) {
+        if ret != child_pid {
             return 23;
         }
         if status != WaitStatus::Stopped(Signal::Stop) {

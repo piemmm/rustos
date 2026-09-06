@@ -514,7 +514,7 @@ mod program {
             Ok(())
         }
 
-        fn signal(&mut self, pid: i32, signal: Signal) -> Result<(), Errno> {
+        fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {
             let ret = tairix_rt::signal(pid, signal);
             if ret == 0 {
                 Ok(())
@@ -523,7 +523,7 @@ mod program {
             }
         }
 
-        fn lower_priority(&mut self, pid: i32) -> Result<(), Errno> {
+        fn lower_priority(&mut self, pid: i64) -> Result<(), Errno> {
             let ret = tairix_rt::sched_set_priority(pid, SchedPriority::Low);
             if ret == 0 {
                 Ok(())

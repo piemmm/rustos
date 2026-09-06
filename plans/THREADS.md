@@ -23,7 +23,15 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
 
 1. **A process is a thread group, identified by its leader's `TaskId`** — the
    `tgid` model. That id is the PID; each thread is its own scheduler task with
-   its own `TaskId` (the TID). No new id space.
+   its own `TaskId` (the TID). No new id space. A `TaskId` is drawn at random
+   from the ABI's pid range (`tairix_abi::PID_MAX`), so a dead thread's id may
+   be drawn again; where a stale reference must be told apart from a fresh
+   occupant of the same number, the process-instance `ProcId` in decision 2 is
+   what distinguishes them. A *leader* that exits while its siblings live is
+   the case where the identity outlives its task: `threads::retire` holds the
+   number against the id draw and returns it when the group's last thread
+   lands, so the group keeps using it as its `ProcessId` for as long as it
+   lives and no admission can be issued it (`plans/OPEN-DEFECTS.md` D91).
 2. **One capability record per process, with a thread alias map.** `CapTable`
    holds `threads: BTreeMap<TaskId, ProcessId>`; `caps_for` resolves through it.
    Credentials, `proc_id`, attested name, and I/O counters are therefore

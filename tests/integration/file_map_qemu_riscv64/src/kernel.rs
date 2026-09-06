@@ -737,8 +737,9 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // the whole verify / wild / store sequence through production spawn +
     // wait; a parent exit of 0 is the PASS, anything else names the failing
     // site through its diagnostic code.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let parent_pid = parent_pid as i32;
+    // A task id never exceeds the ABI's pid bound, so reinterpreting it as
+    // the signed pid the wait ABI carries is exact.
+    let parent_pid = parent_pid.cast_signed();
     let mut steps = 0u64;
     while steps < MAX_STEPS {
         let _ = sys.sched.step(BOOT_CPU);

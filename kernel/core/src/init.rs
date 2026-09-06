@@ -1482,12 +1482,13 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // 5d-0-ii (b′)); otherwise admit the plain form and those syscalls
         // fail closed.
         //
-        // PID 1 is admitted **parked** (the trailing `true`): the secondary
-        // CPUs are already online by the time this runs, so a Ready
-        // admission could be work-stolen onto another core and take its
-        // first syscall before the caps/aspace/streams below exist. It is
-        // made runnable only by the `unpark` just before the dispatch loop,
-        // once that state is installed.
+        // PID 1 is admitted **parked**: the secondary CPUs are already
+        // online by the time this runs, so a Ready admission could be
+        // work-stolen onto another core and take its first syscall before
+        // the caps/aspace/streams below exist. It is made runnable only by
+        // the `unpark` just before the dispatch loop, once that state is
+        // installed. It is also the one admission that names its id rather
+        // than drawing one: `init` is expected at PID 1.
         let admitted = match live {
             Some(live) => crate::kthread::spawn_user_kthread_with_stack_live(
                 self.scheduler,
@@ -1498,7 +1499,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 pre_resume,
                 live,
                 work,
-                true,
+                crate::kthread::Admission::ParkedAs(tairix_kernel_sched_api::INIT_TASK_ID),
             ),
             None => crate::kthread::spawn_user_kthread_with_stack(
                 self.scheduler,
@@ -1508,7 +1509,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
                 Priority::Normal,
                 pre_resume,
                 work,
-                true,
+                crate::kthread::Admission::ParkedAs(tairix_kernel_sched_api::INIT_TASK_ID),
             ),
         };
         let Ok(task_id) = admitted else {
@@ -2148,6 +2149,10 @@ fn run_phases<A: KernelArch>(
         },
         &[],
     );
+
+    // Seed the scheduler's task-id generator from the same reserve, before
+    // any task but the kernel's own services has been admitted.
+    crate::boot_id::seed_task_ids(&state.rng);
 
     // Build the scheduler-side process-wait producer the `wait` syscall
     // drives (`plans/SPAWN.md` SP6b). It owns the parent/child + exit-status

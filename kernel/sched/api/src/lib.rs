@@ -37,4 +37,7 @@ pub use config::SchedulerConfig;
 pub use error::{SchedError, SchedResult};
 pub use outcome::{ExitDisposition, StepOutcome};
 pub use policy::SchedulerPolicy;
-pub use task::{Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
+pub use task::{
+    choose_task_id, release_task_id, reserve_task_id, seed_task_ids, task_id_reserved, Priority,
+    SchedClass, TaskAction, TaskContext, TaskId, TaskState, INIT_TASK_ID, MAX_TASK_ID, NO_TASK,
+};

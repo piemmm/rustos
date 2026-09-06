@@ -164,11 +164,15 @@ use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
 /// selector it names: the [`WAITSET_CHILD_ANY`] sentinel maps to
 /// [`WAIT_PID_ANY`], any other value must be a representable pid. An
 /// unrepresentable id names no child (fail closed).
-fn child_selector(id: u64) -> Option<i32> {
+///
+/// A pid is signed, so the top of the unsigned member space cannot be a pid;
+/// a task id drawn there names no child rather than aliasing a negative
+/// selector.
+fn child_selector(id: u64) -> Option<i64> {
     if id == WAITSET_CHILD_ANY {
         Some(WAIT_PID_ANY)
     } else {
-        i32::try_from(id).ok()
+        i64::try_from(id).ok()
     }
 }
 
@@ -2890,6 +2894,20 @@ where
         self.check_terminal_foreground(caller, device.foreground_ownership())
     }
 
+    /// Bind `process` to the instance that holds it now, so the ownership
+    /// names a process rather than a number.
+    ///
+    /// A task id whose task is gone may be drawn again, so a `^C` resolved
+    /// only by pid could reach whoever inherited it; recording the instance
+    /// at the grant — the moment the parent's authority over the target was
+    /// checked — is what lets the delivery refuse a stale target instead.
+    fn foreground_owner(&self, process: ProcessId) -> crate::foreground::ForegroundOwner {
+        crate::foreground::ForegroundOwner {
+            process,
+            instance: self.caps.read().instance_of(process),
+        }
+    }
+
     /// The one controlling-terminal owner gate every terminal — the console
     /// and the pseudo-terminal — shares (`plans/DISPLAY.md` D5,
     /// `plans/PTY.md`).
@@ -2897,11 +2915,10 @@ where
     /// Admits the caller when the terminal is unowned or the caller is the
     /// recorded controlling owner. A different **live** owner refuses the
     /// caller with the typed [`Errno::NotForeground`]; an owner the process
-    /// bookkeeping proves dead is cleared in place (task ids are never
-    /// reused, so a terminal is never wedged behind a vanished owner) and
-    /// the caller proceeds. The inert bookkeeping default reports every task
-    /// live, so an unproven death keeps denying — the gate can heal, never
-    /// widen.
+    /// bookkeeping proves dead is cleared in place, so a terminal is never
+    /// wedged behind a vanished owner, and the caller proceeds. The inert
+    /// bookkeeping default reports every task live, so an unproven death
+    /// keeps denying — the gate can heal, never widen.
     fn check_terminal_foreground(
         &self,
         caller: &CallerContext<'_>,
@@ -2910,13 +2927,13 @@ where
         let Some(owner) = fg.current() else {
             return Ok(());
         };
-        if owner == caller.process() {
+        if owner.process == caller.process() {
             return Ok(());
         }
-        if self.process_wait.is_live(owner) {
+        if self.process_wait.is_live(owner.process) {
             return Err(Errno::NotForeground);
         }
-        fg.clear_dead(owner);
+        fg.clear_dead(owner.process);
         Ok(())
     }
 
@@ -3846,7 +3863,7 @@ where
     fn authorise_cross_principal(
         &self,
         caller: &CallerContext<'_>,
-        pid: i32,
+        pid: i64,
         signal: Signal,
     ) -> Result<ProcessId, Errno> {
         let (target, rule) = self.cross_principal_rule(caller, pid)?;
@@ -3876,13 +3893,13 @@ where
     fn cross_principal_rule(
         &self,
         caller: &CallerContext<'_>,
-        pid: i32,
+        pid: i64,
     ) -> Result<(ProcessId, CrossPrincipalRule), Errno> {
         // Both callers name exactly one process — neither has a wildcard
         // selector — so a non-positive `pid` is not a task id and is refused
         // before any table is consulted.
-        let target = match u32::try_from(pid) {
-            Ok(raw) if raw != 0 => ProcessId(u64::from(raw)),
+        let target = match u64::try_from(pid) {
+            Ok(raw) if raw != 0 => ProcessId(raw),
             _ => return Err(Errno::NotFound),
         };
 
@@ -3919,7 +3936,7 @@ where
     fn audit_priority_change(
         &self,
         caller: ProcessId,
-        pid: i32,
+        pid: i64,
         target: ProcessId,
         priority: SchedPriority,
         decision: PriorityDecision,
@@ -3939,7 +3956,7 @@ where
                 },
                 Field {
                     key: "pid",
-                    value: tairix_log::FieldValue::SignedInt(i64::from(pid)),
+                    value: tairix_log::FieldValue::SignedInt(pid),
                 },
                 Field {
                     key: "target",
@@ -3972,7 +3989,7 @@ where
     fn audit_cross_principal_signal(
         &self,
         caller: ProcessId,
-        pid: i32,
+        pid: i64,
         target: ProcessId,
         signal: Signal,
         rule: CrossPrincipalRule,
@@ -3992,7 +4009,7 @@ where
                 },
                 Field {
                     key: "pid",
-                    value: tairix_log::FieldValue::SignedInt(i64::from(pid)),
+                    value: tairix_log::FieldValue::SignedInt(pid),
                 },
                 Field {
                     key: "target",
@@ -5366,10 +5383,9 @@ where
         // consumed — fail closed, with no `SIGTTIN`-style asynchronous
         // signal to race. An unowned console reads openly (the shell at
         // its prompt; single-tenant bring-up). A recorded owner that is
-        // provably dead (task ids are never reused) is cleared here so a
-        // granter that vanished before releasing can never wedge the
-        // console; a liveness oracle that cannot prove death keeps
-        // denying.
+        // provably dead is cleared here so a granter that vanished before
+        // releasing can never wedge the console; a liveness oracle that
+        // cannot prove death keeps denying.
         self.check_console_foreground(caller, device)?;
         // The dispatcher already checked that
         // `buf` is non-null (`UserPtr`). A zero-length read touches
@@ -5879,21 +5895,42 @@ where
         Ok(0)
     }
 
-    fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i32) -> SyscallResult {
+    fn console_foreground(&self, caller: &CallerContext<'_>, fd: u32, pid: i64) -> SyscallResult {
         // A pty slave is a *tty*: if `fd` is a pty-slave descriptor of the
         // caller, its controlling ownership lives on the `Pty`. The
         // transition rules are the shared `ForegroundOwnership`'s, so the
         // grant/release below is identical to the console path — only the
         // slot's home differs.
+        //
+        // The kind of `fd` is settled under a read of its own, and the
+        // authority and instance resolved with no registry lock held: the
+        // introspection source reads the capability table and *then* the
+        // address-space registry, so holding them the other way round would
+        // let two readers of two writer-preferring locks wait on each other.
+        // The re-read then resolves `fd` again and fails closed if it has
+        // gone, which is what a concurrent close should produce anyway.
+        if self
+            .aspaces
+            .read()
+            .pty_slave(caller.process(), fd)
+            .is_some()
         {
+            let owner = (pid != 0)
+                .then(|| {
+                    self.process_wait
+                        .authorise_child(caller.process(), pid)
+                        .map(|child| self.foreground_owner(child))
+                })
+                .transpose()?;
             let aspaces = self.aspaces.read();
-            if let Some(pty) = aspaces.pty_slave(caller.process(), fd) {
-                if pid == 0 {
-                    return pty.foreground().release(caller.process()).map(|()| 0);
-                }
-                let child = self.process_wait.authorise_child(caller.process(), pid)?;
-                return pty.foreground().grant(caller.process(), child).map(|()| 0);
+            let Some(pty) = aspaces.pty_slave(caller.process(), fd) else {
+                return Err(Errno::NotFound);
+            };
+            return match owner {
+                Some(owner) => pty.foreground().grant(caller.process(), owner),
+                None => pty.foreground().release(caller.process()),
             }
+            .map(|()| 0);
         }
         // Resolve `fd` against the caller's per-process descriptor table
         // exactly as `stream_input_mode` does: the foreground slot is a
@@ -5924,7 +5961,9 @@ where
         // the drain right only ever moves down the spawn chain and is
         // never taken from a live foreground job by a bystander.
         let child = self.process_wait.authorise_child(caller.process(), pid)?;
-        device.grant_foreground(caller.process(), child).map(|()| 0)
+        device
+            .grant_foreground(caller.process(), self.foreground_owner(child))
+            .map(|()| 0)
     }
 
     fn key_inject(
@@ -6798,7 +6837,7 @@ where
     fn wait(
         &self,
         caller: &CallerContext<'_>,
-        pid: i32,
+        pid: i64,
         status: u64,
         flags: WaitFlags,
     ) -> SyscallResult {
@@ -6835,13 +6874,13 @@ where
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(status), &status_bytes)
         }) {
-            Some(Ok(())) => Ok(u64::from(reported.pid)),
+            Some(Ok(())) => Ok(reported.pid),
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
     }
 
-    fn signal(&self, caller: &CallerContext<'_>, pid: i32, signal: Signal) -> SyscallResult {
+    fn signal(&self, caller: &CallerContext<'_>, pid: i64, signal: Signal) -> SyscallResult {
         // The dispatcher already validated that `pid` is a sign-extended
         // `i32` and that `signal` is a defined `Signal`. Who may signal whom
         // is decided *here*, before any delivery, from the kernel-trusted
@@ -6920,7 +6959,7 @@ where
     fn sched_set_priority(
         &self,
         caller: &CallerContext<'_>,
-        pid: i32,
+        pid: i64,
         priority: SchedPriority,
     ) -> SyscallResult {
         // The dispatcher already validated that `pid` is a sign-extended
@@ -9448,8 +9487,9 @@ where
         &self,
         caller: &CallerContext<'_>,
         fd: u32,
-        pid: u64,
         write_ceiling: u64,
+        recipient: u64,
+        recipient_len: usize,
     ) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the
         // `fd_grant` spec carries `CAP_FS_ACCESS`, and the mint is
@@ -9500,20 +9540,46 @@ where
             caps: *caller.caps.effective(),
             write_ceiling,
         };
+        // The recipient is named by its attested process *instance*, not by
+        // a task id: a number is redrawn once its task is gone, so one the
+        // grantor read from an `Origin` may name a later holder by now,
+        // whereas an instance is minted once and never reissued. A buffer
+        // too short to hold a whole identity fails closed rather than
+        // decoding a partial one.
+        if recipient_len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut instance_bytes = [0u8; PROC_ID_LEN];
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(
+                space,
+                physmap,
+                VirtAddr::new(recipient),
+                &mut instance_bytes,
+            )
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        let instance = ProcId::from_raw(instance_bytes);
+        // Resolve the instance to the number the per-process tables are
+        // keyed by. The kernel sentinel and an instance no live record names
+        // both resolve to nothing, so a delegation can be aimed neither at a
+        // kernel thread nor at a process that has already gone.
+        let Some(recipient) = self.caps.read().process_of_instance(instance) else {
+            return Err(Errno::NotFound);
+        };
         // Confirm the recipient is a live task and mint under the same
         // write lock, so the grant cannot land on a task that exited
-        // between check and mint. Task ids are never reused, so a pid
-        // taken from a kernel-attested source (`call_peer_origin`)
-        // resolves to the intended process or to nothing — never to a
-        // recycled identity. An unknown recipient is the same `NotFound`
-        // as an unopened descriptor, so the reply shape confirms nothing
-        // about foreign task ids.
-        let recipient = ProcessId(pid);
+        // between check and mint. An unknown recipient is the same
+        // `NotFound` as an unopened descriptor, so the reply shape confirms
+        // nothing about foreign task ids.
         let mut registry = self.aspaces.write();
         if !registry.contains(recipient) {
             return Err(Errno::NotFound);
         }
-        Ok(registry.mint_fd_delegation(recipient, file, access))
+        Ok(registry.mint_fd_delegation(recipient, instance, file, access))
     }
 
     fn fd_redeem(&self, caller: &CallerContext<'_>, handle: u64) -> SyscallResult {
@@ -9523,10 +9589,16 @@ where
         // **to the calling task** (`caller.task_id` is kernel-trusted) and
         // consumes it only once the descriptor allocation succeeds —
         // one-shot, atomic, fail closed.
-        let fd = self
-            .aspaces
-            .write()
-            .redeem_fd_delegation(caller.process(), handle)?;
+        //
+        // The instance comes from the dispatcher's own capability snapshot,
+        // so it costs no lock and cannot be forged; it is what makes the
+        // redemption land on the process the grantor chose rather than on
+        // whoever drew its number next.
+        let fd = self.aspaces.write().redeem_fd_delegation(
+            caller.process(),
+            caller.caps.proc_id(),
+            handle,
+        )?;
         Ok(u64::from(fd))
     }
 
@@ -10264,9 +10336,10 @@ where
 /// loading child that failed before entering user mode provably never
 /// acquired.
 ///
-/// The three registry mutations take separate write locks: a task being
-/// reclaimed is never concurrently admitted under the same id (ids are
-/// never reused), so there is no cross-lock invariant to hold.
+/// The three registry mutations take separate write locks: the scheduler
+/// holds the id until this reclaim has run, so a task being reclaimed is
+/// never concurrently admitted under the same id and there is no cross-lock
+/// invariant to hold.
 fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
@@ -10275,8 +10348,8 @@ fn reclaim_process_bookkeeping(
 ) {
     // Drop the signal-intake state of every thread of the process (its opt-in
     // and any pending observed signal): a dead thread's intake must never
-    // linger, and task ids are never reused, so a leaked entry could never be
-    // reclaimed. The gates below are the same story, and all three are keyed
+    // linger, or a later task drawing its id would inherit one. The gates
+    // below are the same story, and all three are keyed
     // by the individual thread — so the thread set is read once, before the
     // capability record that holds it is dropped.
     let threads: Vec<u64> = {
@@ -20032,7 +20105,10 @@ mod tests {
 
         // Marking the caller's live child records it on the console.
         assert_eq!(h.console_foreground(&ctx, STDIN, 9), Ok(0));
-        assert_eq!(consoles[0].foreground(), Some(ProcessId(9)));
+        assert_eq!(
+            consoles[0].foreground().map(|owner| owner.process),
+            Some(ProcessId(9))
+        );
         // `pid == 0` clears the slot (the shell back at its prompt).
         assert_eq!(h.console_foreground(&ctx, STDIN, 0), Ok(0));
         assert_eq!(consoles[0].foreground(), None);
@@ -20197,7 +20273,10 @@ mod tests {
             h.console_foreground(&bg, STDIN, 0),
             Err(Errno::NotForeground)
         );
-        assert_eq!(consoles[0].foreground(), Some(ProcessId(9)));
+        assert_eq!(
+            consoles[0].foreground().map(|owner| owner.process),
+            Some(ProcessId(9))
+        );
 
         // The granter's explicit handoff transfers the drain right: the
         // old owner is now the refused background reader.
@@ -25788,8 +25867,8 @@ mod tests {
     /// assert the arguments reached it and the result flowed back without a
     /// real scheduler-side wait path.
     struct RecordingProcessWait {
-        last: tairix_sync::SpinLock<Option<(u64, i32)>>,
-        last_poll: tairix_sync::SpinLock<Option<(u64, i32)>>,
+        last: tairix_sync::SpinLock<Option<(u64, i64)>>,
+        last_poll: tairix_sync::SpinLock<Option<(u64, i64)>>,
         last_flags: tairix_sync::SpinLock<Option<WaitFlags>>,
         last_exit: tairix_sync::SpinLock<Option<(u64, i32)>>,
         last_register: tairix_sync::SpinLock<Option<(u64, u64)>>,
@@ -25811,7 +25890,7 @@ mod tests {
         fn wait(
             &self,
             parent: ProcessId,
-            pid: i32,
+            pid: i64,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             *self.last.lock() = Some((parent.0, pid));
@@ -25821,7 +25900,7 @@ mod tests {
         fn poll(
             &self,
             parent: ProcessId,
-            pid: i32,
+            pid: i64,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             // Record the poll arguments in a *separate* slot so a test can
@@ -26013,7 +26092,7 @@ mod tests {
     /// *which* task the handler authorised without a real scheduler-side
     /// delivery path.
     struct RecordingProcessSignal {
-        child: Option<(u64, i32)>,
+        child: Option<(u64, i64)>,
         last: tairix_sync::SpinLock<Option<(u64, Signal)>>,
         result: Result<(), Errno>,
     }
@@ -26029,7 +26108,7 @@ mod tests {
         }
 
         /// A producer for which `pid` is `sender`'s live child.
-        fn with_child(sender: u64, pid: i32, result: Result<(), Errno>) -> Self {
+        fn with_child(sender: u64, pid: i64, result: Result<(), Errno>) -> Self {
             Self {
                 child: Some((sender, pid)),
                 last: tairix_sync::SpinLock::new(None),
@@ -26038,7 +26117,7 @@ mod tests {
         }
     }
     impl crate::procsignal::ProcessSignal for RecordingProcessSignal {
-        fn resolve_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
+        fn resolve_child(&self, sender: ProcessId, pid: i64) -> Result<ProcessId, Errno> {
             match self.child {
                 Some((s, p)) if s == sender.0 && p == pid => {
                     Ok(ProcessId(u64::try_from(pid).unwrap_or_default()))
@@ -26320,7 +26399,7 @@ mod tests {
         )
         .with_process_signal(producer);
 
-        for pid in [0, -1, -9, i32::MIN] {
+        for pid in [0, -1, -9, i64::MIN] {
             assert_eq!(h.signal(&ctx, pid, Signal::Kill), Err(Errno::NotFound));
         }
         assert_eq!(*producer.last.lock(), None);
@@ -26370,12 +26449,12 @@ mod tests {
 
     /// Admit one parked task so the scheduler genuinely knows the target,
     /// returning its id as both the scheduler's `u64` and the syscall's
-    /// `i32` pid spelling.
-    fn spawn_priority_target(sched: &Scheduler<TestArch>) -> (u64, i32) {
+    /// signed pid spelling.
+    fn spawn_priority_target(sched: &Scheduler<TestArch>) -> (u64, i64) {
         let id = sched
             .spawn_parked(0, Priority::Normal, |_| TaskAction::Park)
             .expect("spawn target");
-        (id, i32::try_from(id).expect("test task id fits i32"))
+        (id, id.cast_signed())
     }
 
     /// Lowering a caller's own live child needs no capability and stays off
@@ -26646,7 +26725,7 @@ mod tests {
         )
         .with_process_signal(producer);
 
-        for pid in [9, 0, -1, i32::MIN] {
+        for pid in [9, 0, -1, i64::MIN] {
             assert_eq!(
                 h.sched_set_priority(&ctx, pid, SchedPriority::Low),
                 Err(Errno::NotFound)
@@ -31600,10 +31679,68 @@ mod tests {
         crate::callreg::unregister(EndpointId(registry));
     }
 
+    /// Offsets within a [`grant_page`] of the identities it stages: the
+    /// recipient, an instance no live process holds, and sixteen zero bytes
+    /// — the [`ProcId::KERNEL`] sentinel, which names no one process.
+    const GRANT_RECIPIENT_AT: usize = 0x10;
+    const GRANT_STRANGER_AT: usize = 0x20;
+    const GRANT_SENTINEL_AT: usize = 0x30;
+
+    /// The user address a [`grant_page`] offset appears at, the page being
+    /// mapped where `send_aspace` puts it.
+    const fn grant_addr(offset: usize) -> u64 {
+        0x1000 + offset as u64
+    }
+
+    /// The instance an `fd_grant` test's recipient runs as.
+    fn grant_recipient_instance() -> ProcId {
+        ProcId::from_raw([0xA1; PROC_ID_LEN])
+    }
+
+    /// A caller page holding `path` at its base and the three identities at
+    /// their offsets — everything an `fd_grant` request names, staged where
+    /// the handler's copy-in will find it.
+    fn grant_page(path: &[u8]) -> Vec<u8> {
+        let mut page = alloc::vec![0u8; 0x40];
+        page[..path.len()].copy_from_slice(path);
+        page[GRANT_RECIPIENT_AT..][..PROC_ID_LEN]
+            .copy_from_slice(grant_recipient_instance().as_bytes());
+        page[GRANT_STRANGER_AT..][..PROC_ID_LEN].copy_from_slice(&[0xB2; PROC_ID_LEN]);
+        page
+    }
+
+    /// Register the recipient of an `fd_grant` test: an address space under
+    /// `ProcessId(3)` and the capability record that binds its number to
+    /// [`grant_recipient_instance`], which is what the handler resolves the
+    /// request's instance through.
+    fn register_grant_recipient(
+        table: &RwLock<CapTable>,
+        aspaces: &RwLock<AddressSpaceRegistry>,
+        space: Box<dyn UserAddressSpace + Send + Sync>,
+        physmap: Box<dyn PhysMap + Send + Sync>,
+        sink: &'static (dyn Sink + Sync),
+    ) -> TaskCapabilities {
+        aspaces
+            .write()
+            .register(ProcessId(3), space, physmap)
+            .expect("recipient registers");
+        let caps = TaskCapabilities::derive(
+            ProcessId(3),
+            UserId(2000),
+            caps_with(&[]),
+            caps_with(&[]),
+            sink,
+        )
+        .with_proc_id(grant_recipient_instance());
+        table.write().insert(caps.clone());
+        caps
+    }
+
     /// `fd_grant` delegates only a descriptor the caller itself holds, only
-    /// a plain non-directory filesystem backing, only to a live recipient
-    /// task, and only with an extent ceiling that matches the descriptor's
-    /// own access (`plans/CAPABILITY_USE.md` CU6, `plans/APPDATA.md` §3.8).
+    /// a plain non-directory filesystem backing, only to a recipient named
+    /// by an attested live instance, and only with an extent ceiling that
+    /// matches the descriptor's own access (`plans/CAPABILITY_USE.md` CU6,
+    /// `plans/APPDATA.md` §3.8).
     #[test]
     fn fd_grant_delegates_only_a_held_bounded_path_descriptor() {
         install_trace_filter();
@@ -31612,7 +31749,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -31631,9 +31768,18 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_filesystem(fs);
+        let to_recipient = |fd: u32, ceiling: u64| {
+            h.fd_grant(
+                &ctx,
+                fd,
+                ceiling,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+            )
+        };
 
         // An unopened descriptor is refused before any state is read.
-        assert_eq!(h.fd_grant(&ctx, 99, 3, 0), Err(Errno::NotFound));
+        assert_eq!(to_recipient(99, 0), Err(Errno::NotFound));
 
         // A directory handle and a pipe end are outside the delegation
         // surface: neither is a delegatable byte descriptor.
@@ -31647,12 +31793,12 @@ mod tests {
             .expect("open directory"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, dir, 3, 0), Err(Errno::OutOfRange));
+        assert_eq!(to_recipient(dir, 0), Err(Errno::OutOfRange));
         let (pipe_read, _pipe_write) = aspaces
             .write()
             .open_pipe(ProcessId(2))
             .expect("pipe allocates");
-        assert_eq!(h.fd_grant(&ctx, pipe_read, 3, 0), Err(Errno::OutOfRange));
+        assert_eq!(to_recipient(pipe_read, 0), Err(Errno::OutOfRange));
 
         // A resolve-only handle conveys neither reading nor writing, so
         // there is nothing to delegate.
@@ -31661,26 +31807,42 @@ mod tests {
                 .expect("open resolve-only"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, bare, 3, 0), Err(Errno::OutOfRange));
+        assert_eq!(to_recipient(bare, 0), Err(Errno::OutOfRange));
 
-        // A read-only file descriptor delegates — but only to a live
-        // recipient task; an unknown pid is the same `NotFound` as an
-        // unopened descriptor.
+        // A read-only file descriptor delegates — but only to an instance a
+        // live process holds. An instance nobody holds, and the sentinel that
+        // names no one process, are both the same `NotFound` as an unopened
+        // descriptor, so the reply shape confirms nothing about who exists.
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
                 .expect("open read-only"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, fd, 99, 0), Err(Errno::NotFound));
+        assert_eq!(
+            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_STRANGER_AT), PROC_ID_LEN),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_SENTINEL_AT), PROC_ID_LEN),
+            Err(Errno::NotFound)
+        );
+        // A buffer too short to hold a whole identity fails closed rather
+        // than decoding a partial one.
+        assert_eq!(
+            h.fd_grant(&ctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        // An unreadable identity is a fault, never a guess.
+        assert_eq!(
+            h.fd_grant(&ctx, fd, 0, 0xDEAD_0000, PROC_ID_LEN),
+            Err(Errno::BadAddress)
+        );
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
-        aspaces
-            .write()
-            .register(ProcessId(3), rspace, rphysmap)
-            .expect("recipient registers");
+        let _recipient = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
         // A read-only delegation has no extent to bound, so naming one is a
         // frame that does not mean what it says.
-        assert_eq!(h.fd_grant(&ctx, fd, 3, 4096), Err(Errno::OutOfRange));
-        let handle = h.fd_grant(&ctx, fd, 3, 0).expect("grant mints a handle");
+        assert_eq!(to_recipient(fd, 4096), Err(Errno::OutOfRange));
+        let handle = to_recipient(fd, 0).expect("grant mints a handle");
         assert!(handle >= 1, "handle 0 is the reserved invalid value");
 
         // A writable descriptor delegates too — but never unbounded: the
@@ -31696,16 +31858,17 @@ mod tests {
             .expect("open read-write"),
         )
         .unwrap();
-        assert_eq!(h.fd_grant(&ctx, rw, 3, 0), Err(Errno::OutOfRange));
-        assert!(
-            h.fd_grant(&ctx, rw, 3, 4096)
-                .expect("bounded writable grant mints")
-                >= 1
-        );
+        assert_eq!(to_recipient(rw, 0), Err(Errno::OutOfRange));
+        assert!(to_recipient(rw, 4096).expect("bounded writable grant mints") >= 1);
     }
 
     /// An `fd_grant` handle redeems only for the recipient it was minted
     /// to, exactly once, into a read-only delegated descriptor.
+    ///
+    /// Regression cover for the delegation landing on a later holder of the
+    /// recipient's task id: a task id is redrawn once its task is gone, so
+    /// the redemption admits the recorded *instance* and refuses a newcomer
+    /// running under the same number.
     #[test]
     fn fd_redeem_is_owner_bound_and_one_shot() {
         install_trace_filter();
@@ -31714,7 +31877,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -31722,10 +31885,6 @@ mod tests {
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
         let (rspace, rphysmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"");
-        aspaces
-            .write()
-            .register(ProcessId(3), rspace, rphysmap)
-            .expect("recipient registers");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -31738,28 +31897,49 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_filesystem(fs);
+        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
 
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
                 .expect("open read-only"),
         )
         .unwrap();
-        let handle = h.fd_grant(&ctx, fd, 3, 0).expect("grant mints a handle");
+        let handle = h
+            .fd_grant(&ctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("grant mints a handle");
 
         // The grantor itself cannot redeem the handle it minted for the
         // recipient — a foreign handle answers exactly like one that never
         // existed.
         assert_eq!(h.fd_redeem(&ctx, handle), Err(Errno::NotFound));
 
-        // The recipient redeems once: the installed descriptor is a
-        // read-only delegated backing carrying the grantor's identity.
-        let recipient_caps = TaskCapabilities::derive(
+        // A later holder of the recipient's *number* cannot redeem it
+        // either: the delegation names the instance the grantor chose, and a
+        // newcomer that drew the same id is a different process.
+        let newcomer_caps = TaskCapabilities::derive(
             ProcessId(3),
             UserId(2000),
             caps_with(&[]),
             caps_with(&[]),
             sink,
+        )
+        .with_proc_id(ProcId::from_raw([0xC3; PROC_ID_LEN]));
+        assert_eq!(
+            h.fd_redeem(
+                &CallerContext {
+                    task_id: SecTaskId(3),
+                    caps: &newcomer_caps,
+                },
+                handle
+            ),
+            Err(Errno::NotFound),
+            "a delegation must never land on a later holder of the number"
         );
+
+        // The recipient redeems once: the installed descriptor is a
+        // read-only delegated backing carrying the grantor's identity. That
+        // the refusal above consumed nothing is what makes it a refusal
+        // rather than a theft.
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -31793,7 +31973,7 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/f"));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -31804,10 +31984,6 @@ mod tests {
         // copy-out; its page also holds a path for the contrast open below.
         let (rspace, rphysmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
-        aspaces
-            .write()
-            .register(ProcessId(3), rspace, rphysmap)
-            .expect("recipient registers");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -31817,13 +31993,7 @@ mod tests {
         };
         // The recipient runs as a different user and holds **no**
         // capability at all.
-        let recipient_caps = TaskCapabilities::derive(
-            ProcessId(3),
-            UserId(2000),
-            caps_with(&[]),
-            caps_with(&[]),
-            sink,
-        );
+        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -31841,7 +32011,9 @@ mod tests {
                 .expect("grantor opens"),
         )
         .unwrap();
-        let handle = h.fd_grant(&gctx, fd, 3, 0).expect("grant mints a handle");
+        let handle = h
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("grant mints a handle");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
         // The delegated read succeeds for the capability-less holder and
@@ -31878,10 +32050,14 @@ mod tests {
         // An exited recipient's pending delegations are reclaimed with the
         // rest of its records: a second grant minted to the recipient dies
         // with it and can never be redeemed by a later task.
-        let second = h.fd_grant(&gctx, fd, 3, 0).expect("second grant mints");
+        let second = h
+            .fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("second grant mints");
         aspaces.write().withdraw(ProcessId(3));
         assert_eq!(
-            aspaces.write().redeem_fd_delegation(ProcessId(3), second),
+            aspaces
+                .write()
+                .redeem_fd_delegation(ProcessId(3), grant_recipient_instance(), second),
             Err(Errno::NotFound),
             "withdraw reclaimed the pending delegation"
         );
@@ -31900,19 +32076,17 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/blob");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/blob"));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        let (rspace, rphysmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/blob");
-        aspaces
-            .write()
-            .register(ProcessId(3), rspace, rphysmap)
-            .expect("recipient registers");
+        let (rspace, rphysmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &grant_page(b"/blob"),
+        );
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -31922,13 +32096,7 @@ mod tests {
         };
         // The holder runs as a different user and holds no capability at
         // all: the delegation is its whole filesystem authority.
-        let recipient_caps = TaskCapabilities::derive(
-            ProcessId(3),
-            UserId(2000),
-            caps_with(&[]),
-            caps_with(&[]),
-            sink,
-        );
+        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -31950,7 +32118,13 @@ mod tests {
         )
         .unwrap();
         let handle = h
-            .fd_grant(&gctx, fd, 3, CEILING)
+            .fd_grant(
+                &gctx,
+                fd,
+                CEILING,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+            )
             .expect("bounded writable grant mints");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
@@ -32009,19 +32183,17 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/blob");
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &grant_page(b"/blob"));
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        let (rspace, rphysmap) =
-            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/blob");
-        aspaces
-            .write()
-            .register(ProcessId(3), rspace, rphysmap)
-            .expect("recipient registers");
+        let (rspace, rphysmap) = send_aspace(
+            MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            &grant_page(b"/blob"),
+        );
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let grantor_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
@@ -32031,13 +32203,7 @@ mod tests {
         };
         // The holder runs as a different user and holds no capability at
         // all: the delegation is its whole filesystem authority.
-        let recipient_caps = TaskCapabilities::derive(
-            ProcessId(3),
-            UserId(2000),
-            caps_with(&[]),
-            caps_with(&[]),
-            sink,
-        );
+        let recipient_caps = register_grant_recipient(&table, &aspaces, rspace, rphysmap, sink);
         let rctx = CallerContext {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
@@ -32061,7 +32227,13 @@ mod tests {
         )
         .unwrap();
         let handle = h
-            .fd_grant(&gctx, fd, 3, CEILING)
+            .fd_grant(
+                &gctx,
+                fd,
+                CEILING,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+            )
             .expect("bounded writable grant mints");
         let rfd = u32::try_from(h.fd_redeem(&rctx, handle).expect("redeem installs")).unwrap();
 
@@ -32104,7 +32276,16 @@ mod tests {
         // Delegation never chains: the holder cannot pass its delegation on,
         // so the captured authority a descriptor exercises always names one
         // grantor rather than a chain no audit record could attribute.
-        assert_eq!(h.fd_grant(&rctx, rfd, 2, CEILING), Err(Errno::OutOfRange));
+        assert_eq!(
+            h.fd_grant(
+                &rctx,
+                rfd,
+                CEILING,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN
+            ),
+            Err(Errno::OutOfRange)
+        );
     }
 
     /// `call_peer_seat` answers only while the ticket is in service, only
@@ -32464,7 +32645,7 @@ mod tests {
         fn wait(
             &self,
             _parent: ProcessId,
-            _pid: i32,
+            _pid: i64,
             _flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             Err(Errno::NotImplemented)
@@ -32473,7 +32654,7 @@ mod tests {
         fn poll(
             &self,
             parent: ProcessId,
-            pid: i32,
+            pid: i64,
             flags: WaitFlags,
         ) -> Result<crate::procwait::WaitedChild, Errno> {
             match self.0.lock().reap(parent, pid, flags.is_stopped()) {
@@ -32491,7 +32672,7 @@ mod tests {
             self.0.lock().record_exit(task, code);
         }
 
-        fn child_state(&self, parent: ProcessId, pid: i32) -> ChildPeek {
+        fn child_state(&self, parent: ProcessId, pid: i64) -> ChildPeek {
             self.0.lock().peek(parent, pid)
         }
     }

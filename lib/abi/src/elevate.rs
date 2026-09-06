@@ -51,7 +51,7 @@
 //! login prompt); both ends zeroise their copies as soon as the exchange
 //! resolves.
 
-use crate::le::{put_i32, read_i32};
+use crate::le::{put_i32, put_i64, read_i32, read_i64};
 use crate::process::CONSOLE_INDEX_MAX;
 use crate::Errno;
 
@@ -67,7 +67,7 @@ pub const ELEVATE_MAX_REQUEST: usize = 1024;
 
 /// Exact byte length of an encoded [`ElevateReply`] — also the endpoint's
 /// maximum reply size: a status word and an exit code.
-pub const ELEVATE_REPLY_LEN: usize = 8;
+pub const ELEVATE_REPLY_LEN: usize = 12;
 
 /// Base of the reserved per-console elevation endpoint-id range; console
 /// `n`'s supervisor serves `ELEVATE_ENDPOINT_BASE + n`. (`b"ELV"` spelled in
@@ -298,7 +298,7 @@ pub enum ElevateReply {
     /// cannot wait on it — the broker reaps it.
     Launched {
         /// Process id of the started program, always non-negative.
-        pid: i32,
+        pid: i64,
     },
     /// The request was refused. Authentication failures (wrong password,
     /// unknown account, locked account) are all
@@ -331,8 +331,11 @@ impl ElevateReply {
         if out.len() < ELEVATE_REPLY_LEN {
             return Err(Errno::BufferTooSmall);
         }
+        // The word is `i64`-wide because it carries a pid, and a pid is a
+        // task id drawn over the whole 64-bit space; an exit code merely
+        // widens into it.
         let (status, word) = match *self {
-            Self::Completed { exit_code } => (0, exit_code),
+            Self::Completed { exit_code } => (0, i64::from(exit_code)),
             Self::Verified => (STATUS_VERIFIED, 0),
             Self::Launched { pid } => {
                 if pid < 0 {
@@ -343,7 +346,7 @@ impl ElevateReply {
             Self::Refused(err) => (-err.as_i32(), 0),
         };
         put_i32(out, 0, status);
-        put_i32(out, 4, word);
+        put_i64(out, 4, word);
         Ok(ELEVATE_REPLY_LEN)
     }
 
@@ -361,9 +364,11 @@ impl ElevateReply {
             return Err(Errno::LengthOutOfRange);
         }
         let status = read_i32(bytes, 0);
-        let word = read_i32(bytes, 4);
+        let word = read_i64(bytes, 4);
         match status {
-            0 => Ok(Self::Completed { exit_code: word }),
+            0 => Ok(Self::Completed {
+                exit_code: i32::try_from(word).map_err(|_| Errno::OutOfRange)?,
+            }),
             STATUS_VERIFIED => Ok(Self::Verified),
             STATUS_LAUNCHED if word >= 0 => Ok(Self::Launched { pid: word }),
             s if s < 0 => {
@@ -723,13 +728,13 @@ mod tests {
         assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));
         // A launched reply whose pid word is negative names no process.
         buf[..4].copy_from_slice(&2i32.to_le_bytes());
-        buf[4..].copy_from_slice(&(-1i32).to_le_bytes());
+        buf[4..].copy_from_slice(&(-1i64).to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));
         assert_eq!(
             ElevateReply::Launched { pid: -1 }.encode(&mut buf),
             Err(Errno::OutOfRange)
         );
-        buf[4..].copy_from_slice(&0i32.to_le_bytes());
+        buf[4..].copy_from_slice(&0i64.to_le_bytes());
         // An unknown negated errno is refused, never guessed.
         buf[..4].copy_from_slice(&(-9999i32).to_le_bytes());
         assert_eq!(ElevateReply::decode(&buf), Err(Errno::OutOfRange));

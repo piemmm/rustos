@@ -253,9 +253,7 @@ mod program {
     /// with `expected`. Returns `0` on success or `fail_code` on any
     /// mismatch or syscall failure.
     fn run_child(path: &[u8], expected: i32, fail_code: i32) -> i32 {
-        let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
-            return fail_code;
-        };
+        let pid = tairix_rt::spawn(path);
         if pid <= 0 {
             return fail_code;
         }

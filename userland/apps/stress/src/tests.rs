@@ -392,7 +392,7 @@ fn scratch_paths_cover_every_disk_worker_and_nothing_else() {
 // ------------------------------------------------------------ controller
 
 /// Drain a machine to done by reaping every live child with `code`.
-fn reap_all(machine: &mut Controller, pids: &[i32], code: i32) {
+fn reap_all(machine: &mut Controller, pids: &[i64], code: i32) {
     for &pid in pids {
         let _ = machine.on_event(Event::ChildExited { pid, code });
     }

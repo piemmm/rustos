@@ -848,7 +848,15 @@ where
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_control(
-        scheduler, home_cpu, priority, cs, stack, work, None, None, false,
+        scheduler,
+        home_cpu,
+        priority,
+        cs,
+        stack,
+        work,
+        None,
+        None,
+        Admission::Runnable,
     )
 }
 
@@ -883,7 +891,15 @@ where
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
     spawn_control(
-        scheduler, home_cpu, priority, cs, stack, work, None, None, true,
+        scheduler,
+        home_cpu,
+        priority,
+        cs,
+        stack,
+        work,
+        None,
+        None,
+        Admission::Parked,
     )
 }
 
@@ -929,7 +945,7 @@ where
         priority,
         pre_resume,
         work,
-        false,
+        Admission::Runnable,
     )
 }
 
@@ -956,7 +972,7 @@ pub fn spawn_user_kthread_with_stack<C, A, P, S, R, W>(
     priority: Priority,
     pre_resume: R,
     work: W,
-    parked: bool,
+    admission: Admission,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -975,7 +991,7 @@ where
         work,
         Some(Box::new(pre_resume)),
         None,
-        parked,
+        admission,
     )
 }
 
@@ -1010,7 +1026,7 @@ pub fn spawn_user_kthread_with_stack_live<C, A, P, S, R, W>(
     pre_resume: R,
     live: Arc<ProcessSpace>,
     work: W,
-    parked: bool,
+    admission: Admission,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -1029,7 +1045,7 @@ where
         work,
         Some(Box::new(pre_resume)),
         Some(live),
-        parked,
+        admission,
     )
 }
 
@@ -1053,7 +1069,7 @@ fn spawn_control<C, A, P, S, W>(
     work: W,
     pre_resume: Option<PreResume>,
     live: Option<Arc<ProcessSpace>>,
-    parked: bool,
+    admission: Admission,
 ) -> SchedResult<TaskId>
 where
     C: ContextSwitch + Copy + Send + 'static,
@@ -1117,16 +1133,28 @@ where
         );
         action
     };
-    // A `parked` admission is born suspended: the caller installs the
-    // task's per-task kernel state (capabilities, address space, streams,
-    // …) under the returned id and only then unparks it, so no CPU can
-    // dispatch — and take a syscall from — the task before that state
-    // exists. Otherwise the task is enqueued runnable immediately.
-    if parked {
-        scheduler.spawn_parked(home_cpu, priority, body)
-    } else {
-        scheduler.spawn(home_cpu, priority, body)
+    match admission {
+        Admission::Runnable => scheduler.spawn(home_cpu, priority, body),
+        Admission::Parked => scheduler.spawn_parked(home_cpu, priority, body),
+        Admission::ParkedAs(id) => scheduler.spawn_parked_as(id, home_cpu, priority, body),
     }
+}
+
+/// How a new kthread is admitted to the scheduler.
+///
+/// Named rather than a boolean flag because there are three answers, and a
+/// bare `true` at the end of an eight-argument call says nothing about which.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Admission {
+    /// Enqueued runnable at once.
+    Runnable,
+    /// Registered parked, so the caller installs the task's per-task kernel
+    /// state (capabilities, address space, streams, …) under the returned id
+    /// before any CPU can dispatch — and take a syscall from — it.
+    Parked,
+    /// As [`Self::Parked`], at a reserved well-known id rather than a drawn
+    /// one: PID 1, which a user expects to find `init` at.
+    ParkedAs(TaskId),
 }
 
 /// Run one dispatch step of the kthread whose control block is `control`.

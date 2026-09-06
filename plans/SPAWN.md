@@ -628,7 +628,7 @@ landing).
 
 **Binding decisions:**
 
-1. **`waitpid`-style, not a global reaper (§2.13).** `wait(pid: i32,
+1. **`waitpid`-style, not a global reaper (§2.13).** `wait(pid: i64,
    status: *mut i32) -> i64`: `pid` selects a specific child or
    `tairix_abi::WAIT_PID_ANY` (`-1`) for any child; on success the kernel writes
    the child's exit code to `status` and returns the reaped child's PID
@@ -905,9 +905,13 @@ clears the foreground job. Binding design decisions:
   (implemented by `KernelProcessSignal`, installed beside
   `with_process_signal`). All other bytes — and every byte in raw/secret
   mode, or with no foreground set — flow to the input queue exactly as
-  before. A delivery whose target has already exited is dropped fail-closed
-  (task ids are never reused, so a stale slot can never reach a different
-  task).
+  before. The slot carries the foreground owner's *process instance*
+  (`ForegroundOwner { process, instance }`, recorded when
+  `console_foreground` authorised it) alongside the signal, and the delivery
+  refuses a target whose pid now names a different instance: an id whose task
+  is gone may be drawn again, so a stale slot must never reach whoever
+  inherited the number. A delivery whose target has exited is dropped
+  fail-closed.
 - **Stop overlay.** The scheduler's park/unpark state is shared with every
   blocking wait, so a broadcast wake (a console byte waking all parked
   readers) could resume a "stopped" task. `procsignal` owns a
@@ -916,7 +920,7 @@ clears the foreground job. Binding design decisions:
   only `Continue` (or termination) lifts the entry — so a stopped job stays
   genuinely stopped across spurious wakes.
 - **Foreground marking.** New unprivileged-beyond-console syscall
-  `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i32)`; `fd`
+  `SyscallNumber::CONSOLE_FOREGROUND` (**70**): `(fd: u32, pid: i64)`; `fd`
   must be a `StreamMode::Read` descriptor of the caller's own table (the
   same fd-scoped authority `stream_input_mode` uses, same dispatcher
   capability gate), `pid` must be a **live child of the caller**

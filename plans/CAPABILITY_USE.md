@@ -670,11 +670,24 @@ there).**
   asks over the window channel (`PickFile`), the session browses and
   opens the chosen file under **its own** identity (its manifest gained
   `CAP_FS_ACCESS` for exactly this), and the kernel's `fd_grant` mints a
-  one-shot, recipient-owner-bound **read-only** delegation the app
-  redeems with the unprivileged `fd_redeem` — every later operation is
-  re-authorised under the *grantor's* captured uid + effective set, the
-  grant is audited, delegation never chains, and an exited recipient's
-  pending grants are reclaimed. The `viewer.app` consumer holds no
+  one-shot, recipient-bound **read-only** delegation the app redeems with
+  the unprivileged `fd_redeem` — every later operation is re-authorised
+  under the *grantor's* captured uid + effective set, the grant is audited,
+  delegation never chains, and an exited recipient's pending grants are
+  reclaimed.
+
+  **The recipient is named by its attested `ProcId`, never by a task id.**
+  `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the
+  16-byte instance the grantor read from an `Origin`; the kernel resolves it
+  to the number its per-process tables are keyed by, records it with the
+  delegation, and `fd_redeem` admits that instance alone. A pick concludes
+  when the *user* chooses, an arbitrary time after the app asked and after
+  its request was answered, so a task id learned back then can have changed
+  hands by the mint — and enforcing at redemption needs no atomicity
+  argument at all, because the redeemer's instance is the dispatcher's own
+  capability snapshot. That is why the picker (unlike `shm_grant` and
+  `call_grant`, which resolve their recipient as an endpoint's live server)
+  cannot name the peer of an in-flight call: it holds none. The `viewer.app` consumer holds no
   filesystem capability at all and reads exactly the one user-chosen
   file: spawn-time narrowing plus user-mediated widening, with no new
   capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already

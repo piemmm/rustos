@@ -603,8 +603,9 @@ fn install_echo_server(sys: &Subsystems) {
 fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid: u64) -> i32 {
     // A kernel-minted process id round-trips through the `i32` the wait ABI
     // carries.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let pid = pid as i32;
+    // A task id never exceeds the ABI's pid bound, so reinterpreting it as
+    // the signed pid the wait ABI carries is exact.
+    let pid = pid.cast_signed();
     for _ in 0..MAX_STEPS {
         let _ = sys.sched.step(BOOT_CPU);
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
@@ -885,10 +886,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     #[cfg(migration_smp)]
     let (ipc_code, observed_cpus) = {
-        // A kernel-minted process id round-trips through the `i32` the wait
-        // ABI carries.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let poll_pid = ipc_pid as i32;
+        // A task id never exceeds the ABI's pid bound, so reinterpreting it
+        // as the signed pid the wait ABI carries is exact.
+        let poll_pid = ipc_pid.cast_signed();
         let mut observed = 0u32;
         let mut last_cpu = None;
         let mut migrations = 0u32;

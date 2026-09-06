@@ -76,9 +76,9 @@ mod runqueue;
 // (`tairix_kernel_sched_mlfq::{Scheduler, Priority, …}`) keep resolving to
 // the single canonical definitions in `kernel/sched/api` (no duplication).
 pub use tairix_kernel_sched_api::{
-    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
-    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
-    TaskState,
+    choose_task_id, CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError,
+    SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction,
+    TaskContext, TaskId, TaskState,
 };
 
 #[cfg(any(test, feature = "test-arch"))]

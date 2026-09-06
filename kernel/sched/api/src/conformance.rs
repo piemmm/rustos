@@ -40,6 +40,8 @@ use crate::task::{Priority, SchedClass, TaskAction, TaskState};
 pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     spawn_runs_and_exits::<S>();
     spawn_parked_stays_parked_until_unpark::<S>();
+    drawn_ids_carry_no_sequence::<S>();
+    a_reserved_admission_takes_its_id_and_refuses_a_second::<S>();
     block_wake_roundtrip::<S>();
     unpark_before_park_is_not_lost::<S>();
     cross_cpu_ipc_reply_wakes_the_caller_without_delay::<S>();
@@ -57,6 +59,74 @@ pub fn run_all<S: SchedulerPolicy<TestArch>>() {
     priority_reports_changes_and_fails_closed::<S>();
     smp_stress_four_cores::<S>();
     heterogeneous_topology_preserves_liveness::<S>();
+}
+
+/// An admission's id is drawn, not counted: the ids a policy hands out
+/// disclose neither how many tasks it has admitted nor in what order, and it
+/// never reissues one a live task holds.
+fn drawn_ids_carry_no_sequence<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+    let mut ids = alloc::vec::Vec::new();
+    for _ in 0..32 {
+        ids.push(
+            sched
+                .spawn_parked(0, Priority::Normal, |_ctx| TaskAction::Exit)
+                .expect("spawn_parked"),
+        );
+    }
+    for id in &ids {
+        assert_ne!(*id, crate::NO_TASK, "no task is admitted at the reserved 0");
+        assert_ne!(
+            *id,
+            crate::INIT_TASK_ID,
+            "a draw never takes the reserved init id"
+        );
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "a live id is never handed out twice"
+    );
+    let successors = ids
+        .windows(2)
+        .filter(|w| w[1] == w[0].wrapping_add(1))
+        .count();
+    assert_eq!(
+        successors, 0,
+        "ids must carry no sequence, but one followed its predecessor"
+    );
+}
+
+/// The reserved-identity admission takes the id it is given, and a second
+/// admission at that same live id is refused rather than displacing it.
+fn a_reserved_admission_takes_its_id_and_refuses_a_second<S: SchedulerPolicy<TestArch>>() {
+    let (arch, sched) = make::<S>(1, 64);
+    arch.set_current_cpu(0);
+    let id = sched
+        .spawn_parked_as(crate::INIT_TASK_ID, 0, Priority::Normal, |_ctx| {
+            TaskAction::Exit
+        })
+        .expect("the reserved id is admitted");
+    assert_eq!(id, crate::INIT_TASK_ID);
+    assert_eq!(sched.state_of(id), TaskState::Parked, "born parked");
+    assert_eq!(
+        sched.spawn_parked_as(crate::INIT_TASK_ID, 0, Priority::Normal, |_ctx| {
+            TaskAction::Exit
+        }),
+        Err(crate::SchedError::TaskIdInUse),
+        "a live id is never displaced"
+    );
+    assert_eq!(
+        sched.spawn_parked_as(crate::NO_TASK, 0, Priority::Normal, |_ctx| {
+            TaskAction::Exit
+        }),
+        Err(crate::SchedError::NoTaskIdAvailable),
+        "the reserved 0 names no task"
+    );
 }
 
 /// Build a policy with `cpus` cores and the given per-band capacity.

@@ -517,8 +517,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // wakes a handler deferred, and poll the wait producer for the fixture's
     // exit between steps. A fixture exit of 0 is the PASS; anything else names
     // the failing step in the finisher.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fixture_pid = fixture_pid as i32;
+    // A task id never exceeds the ABI's pid bound, so reinterpreting it as
+    // the signed pid the wait ABI carries is exact.
+    let fixture_pid = fixture_pid.cast_signed();
     let started_ns = KernelArch::monotonic_ns(sys.arch, BOOT_CPU);
     let mut steps = 0u64;
     loop {

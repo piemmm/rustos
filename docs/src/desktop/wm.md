@@ -1806,8 +1806,10 @@ The channel also carries the desktop's **trusted file picker**
 `WindowRequest::PickFile` asks the session to browse on the app's
 behalf, and the engine keys the pick to the attested window owner,
 enforces one pending pick per window, and requires exactly one
-conclusion — a `WindowEvent::FilePicked` carrying the kernel's one-shot,
-recipient-owner-bound `fd_grant` delegation handle, or a
+conclusion — a `WindowEvent::FilePicked` carrying the kernel's one-shot
+`fd_grant` delegation handle, bound to the owner's attested process
+*instance* so a pick that concludes after the app exited can never be
+redeemed by a later holder of its task id, or a
 `WindowEvent::PickCancelled` — per accepted request. The picker UI is a
 session-owned window driving the same shared `lib/browse` engine as the
 files app; the requesting app receives only the redeemable handle, never

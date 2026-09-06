@@ -865,10 +865,12 @@ Confirmed sound, and needing no further pass:
   hide, or case-fold; the wire's foreign identifier and every bulk name pass
   the same store-name grammar, re-stated inside `bulk` rather than trusted from
   the decoder.
-- **The descriptor delegation cannot land on the wrong task.** `fd_grant`
-  resolves the recipient under the same write lock that mints, and scheduler
-  task ids come from a monotonic counter, so the kernel-attested `origin.pid()`
-  resolves to the intended process or to nothing.
+- **The descriptor delegation cannot land on the wrong process.** `fd_grant`
+  names its recipient by the attested `ProcId` rather than by a task id — an
+  id whose task is gone *is* redrawn, so the earlier claim here that a
+  monotonic counter made `origin.pid()` safe was wrong (`plans/OPEN-DEFECTS.md`
+  D92). The instance is recorded with the delegation and `fd_redeem` admits it
+  alone, so a mint that raced its recipient's exit is inert.
 
 ### Done — the app-data module docs are terse, and the design lives in the book
 

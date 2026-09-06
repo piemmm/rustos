@@ -28,11 +28,11 @@ struct SplitMix64 {
 }
 
 impl SplitMix64 {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -56,8 +56,10 @@ impl FastRng {
     /// Seed a generator from a single `u64`, expanding it to the full 256-bit
     /// state with `SplitMix64`. Every seed — including `0` — yields a valid,
     /// non-degenerate state.
+    ///
+    /// `const` so a consumer can seed a generator held in a `static`.
     #[must_use]
-    pub fn seed_from_u64(seed: u64) -> Self {
+    pub const fn seed_from_u64(seed: u64) -> Self {
         let mut sm = SplitMix64::new(seed);
         Self {
             s: [sm.next(), sm.next(), sm.next(), sm.next()],

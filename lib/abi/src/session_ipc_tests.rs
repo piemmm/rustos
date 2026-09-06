@@ -570,9 +570,23 @@ fn a_wake_mailbox_id_is_per_session_and_never_a_reserved_rendezvous() {
     // One distinct, collision-free id per session task, and never a
     // reserved id a squatter could be mistaken for.
     assert_ne!(session_wake_endpoint(1), session_wake_endpoint(2));
-    for pid in [1u64, 2, 4096, u64::from(u32::MAX)] {
+    for pid in [1u64, 2, 4096, u64::from(u32::MAX), crate::PID_MAX] {
         assert!(!is_reserved_endpoint(session_wake_endpoint(pid)));
         assert_ne!(session_wake_endpoint(pid), SESSION_ENDPOINT);
+        // The tag is a pure prefix even at the widest pid the kernel can
+        // draw, so the task id is recoverable and no derivation can fold two
+        // sessions onto one mailbox.
+        assert_eq!(session_wake_endpoint(pid) & crate::PID_MAX, pid);
+    }
+    // The tagged namespaces are disjoint: no pid pair can make a session's
+    // wake mailbox collide with a Switchboard command mailbox.
+    for pid in [1u64, crate::PID_MAX] {
+        for other in [1u64, crate::PID_MAX] {
+            assert_ne!(
+                session_wake_endpoint(pid),
+                crate::switchboard_ipc::command_endpoint_for(other)
+            );
+        }
     }
 }
 

@@ -234,14 +234,7 @@ mod program {
     /// kernel-minted PID, known non-negative here.
     fn reap_shell(shell_pid: i64) -> Option<&'static str> {
         let mut status = WaitStatus::Exited(0);
-        let _ = tairix_rt::try_wait(
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            // The kernel-minted PID round-trips through the i32 wait ABI.
-            {
-                shell_pid as i32
-            },
-            &mut status,
-        );
+        let _ = tairix_rt::try_wait(shell_pid, &mut status);
         shell_load_failure(status)
     }
 

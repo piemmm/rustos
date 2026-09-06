@@ -467,13 +467,14 @@ fn publish_reply_fails_closed_on_a_refusal_short_buffer_and_the_kernel_sentinel(
 #[test]
 fn command_endpoint_is_derived_from_the_task_id_and_is_never_reserved() {
     assert_ne!(command_endpoint_for(1), command_endpoint_for(2));
-    for pid in [1u64, 2, 97, u64::from(u32::MAX)] {
+    for pid in [1u64, 2, 97, u64::from(u32::MAX), crate::PID_MAX] {
         let endpoint = command_endpoint_for(pid);
         assert!(!crate::ipc::is_reserved_endpoint(endpoint));
         assert!(!crate::ipc::is_seat_scoped_endpoint(endpoint));
-        // The tag is a pure prefix: the task id is recoverable, so two
-        // instances can never collide on one mailbox.
-        assert_eq!(endpoint & 0x0000_FFFF_FFFF_FFFF, pid);
+        // The tag is a pure prefix, right up to the widest pid the kernel can
+        // draw: the task id is recoverable, so two instances can never
+        // collide on one mailbox.
+        assert_eq!(endpoint & crate::PID_MAX, pid);
     }
 }
 

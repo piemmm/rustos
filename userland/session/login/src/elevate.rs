@@ -80,7 +80,7 @@ pub trait ElevateLauncher {
     ///
     /// Returns the implementation's [`Errno`] verbatim when the program
     /// cannot be spawned.
-    fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno>;
+    fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno>;
 }
 
 /// Decide one elevation request, returning the reply to post.
@@ -319,7 +319,7 @@ fn audit_refused(sink: &dyn Sink, cause: &str, username: Option<&str>, err: Errn
     );
 }
 
-fn audit_launch_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, pid: i32) {
+fn audit_launch_granted(sink: &dyn Sink, username: &str, program: &str, uid: u32, pid: i64) {
     let mut uid_buf = DecBuf::new();
     let mut pid_buf = DecBuf::new();
     emit(
@@ -385,7 +385,7 @@ fn audit_launch_refused(sink: &dyn Sink, cause: &str, username: &str, err: Errno
 /// the one shared reverse map ([`tairix_abi::load_failure_reason`]); any
 /// other code is stated as the number alone, the most login can honestly say
 /// about a program it did not write.
-pub fn audit_launch_ended_abnormally(sink: &dyn Sink, pid: i32, status: i32) {
+pub fn audit_launch_ended_abnormally(sink: &dyn Sink, pid: i64, status: i32) {
     if status == 0 {
         return;
     }
@@ -530,9 +530,9 @@ mod tests {
             self.outcome
         }
 
-        fn launch_as(&self, program: &str, uid: u32) -> Result<i32, Errno> {
+        fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
             self.launches.borrow_mut().push((program.to_string(), uid));
-            self.outcome
+            self.outcome.map(i64::from)
         }
     }
 

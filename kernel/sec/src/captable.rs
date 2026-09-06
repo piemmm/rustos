@@ -1248,6 +1248,48 @@ impl CapTable {
         self.entries.get_mut(&process)
     }
 
+    /// The process-instance identity currently registered for `process`, or
+    /// [`ProcId::KERNEL`] when no record names it.
+    ///
+    /// The one definition of "which instance holds this pid now", so a stale
+    /// reference can be told apart from a fresh occupant of the same number
+    /// without each consumer inventing its own absent-record rule. A gone
+    /// record answering with the kernel sentinel is what makes that comparison
+    /// fail closed: a caller holding a real minted instance never matches it.
+    #[must_use]
+    pub fn instance_of(&self, process: ProcessId) -> ProcId {
+        self.caps_of_process(process)
+            .map_or(ProcId::KERNEL, TaskCapabilities::proc_id)
+    }
+
+    /// The process currently registered under the instance `instance`, or
+    /// [`None`] when none is.
+    ///
+    /// The inverse of [`Self::instance_of`], for a caller that holds an
+    /// attested instance and needs the number the per-process kernel tables
+    /// are keyed by. An instance is minted once and never reissued, so the
+    /// answer names one process for all time — which is what lets a request
+    /// name its subject by instance instead of by a number that can change
+    /// hands. [`ProcId::KERNEL`] resolves to [`None`]: it is the sentinel for
+    /// "no distinct process instance" and every kernel thread shares it, so it
+    /// names no one process (fail closed).
+    ///
+    /// Linear over the live records, and deliberately not indexed: the one
+    /// caller is `fd_grant`, which mints once per picker choice or blob open
+    /// and is audited, so a second map keyed the other way would be a copy of
+    /// a fact this table already holds. A caller that needs this per
+    /// dispatch has the wrong shape, not a missing index.
+    #[must_use]
+    pub fn process_of_instance(&self, instance: ProcId) -> Option<ProcessId> {
+        if instance.is_kernel() {
+            return None;
+        }
+        self.entries
+            .values()
+            .find(|record| record.proc_id() == instance)
+            .map(TaskCapabilities::process)
+    }
+
     /// Detach one exiting `thread` from its process, returning the process it
     /// left and how many of its threads remain.
     ///
@@ -1633,6 +1675,53 @@ mod tests {
             origin.capabilities().as_bytes(),
             &proc.effective().to_le_bytes()
         );
+    }
+
+    /// `process_of_instance` resolves a minted instance to its process and
+    /// refuses the kernel sentinel, even when live records carry it.
+    ///
+    /// The sentinel is what every kernel thread and every boot-floor task
+    /// with no minted instance reads as, so a caller-supplied identity of
+    /// sixteen zero bytes must never resolve: it names no *one* process, and
+    /// answering with whichever record happened to be scanned first would
+    /// hand a caller a process it never attested (fail closed).
+    #[test]
+    fn process_of_instance_inverts_the_mint_and_refuses_the_sentinel() {
+        use tairix_abi::ProcId;
+        let grant = caps_of(&[CapabilityId::FS_ACCESS]);
+        let sink = RecordingSink::new();
+        let mut table = CapTable::new();
+
+        let minted = ProcId::from_raw([0x5A; 16]);
+        table.insert(
+            TaskCapabilities::derive(ProcessId(42), UserId(1000), grant, grant, &sink)
+                .with_proc_id(minted),
+        );
+        // A record with no minted instance — a kernel thread — reads as the
+        // sentinel, so the table genuinely holds one to be matched.
+        table.insert(TaskCapabilities::derive(
+            ProcessId(3),
+            UserId(0),
+            grant,
+            grant,
+            &sink,
+        ));
+        assert!(table.instance_of(ProcessId(3)).is_kernel());
+
+        assert_eq!(table.process_of_instance(minted), Some(ProcessId(42)));
+        assert_eq!(
+            table.process_of_instance(ProcId::KERNEL),
+            None,
+            "the sentinel names no one process, so it must resolve to nothing"
+        );
+        // An instance nothing holds is refused exactly like the sentinel, so
+        // the answer confirms nothing about who exists.
+        assert_eq!(
+            table.process_of_instance(ProcId::from_raw([0xB2; 16])),
+            None
+        );
+        // The inverse round-trips for every live record.
+        assert_eq!(table.instance_of(ProcessId(42)), minted);
     }
 
     #[test]

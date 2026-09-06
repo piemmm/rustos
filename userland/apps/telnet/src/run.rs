@@ -412,7 +412,7 @@ mod program {
 
         fn suspend(&mut self) -> Result<(), Errno> {
             let origin = tairix_rt::self_origin().map_err(Errno::from_syscall)?;
-            let pid = i32::try_from(origin.pid()).map_err(|_| Errno::OutOfRange)?;
+            let pid = i64::try_from(origin.pid()).map_err(|_| Errno::OutOfRange)?;
             let ret = tairix_rt::signal(pid, Signal::Stop);
             if ret < 0 {
                 return Err(Errno::from_syscall(ret));

@@ -11033,12 +11033,12 @@ const ELEVATE_PURPOSE: &str = "Setting the clock needs an account that may.";
 /// prompt offered exactly what was typed, once.
 #[derive(Default)]
 struct ScriptedElevator {
-    outcome: Option<Result<i32, Errno>>,
+    outcome: Option<Result<i64, Errno>>,
     offers: Vec<(String, String, String)>,
 }
 
 impl ScriptedElevator {
-    fn accepting(pid: i32) -> Self {
+    fn accepting(pid: i64) -> Self {
         Self {
             outcome: Some(Ok(pid)),
             offers: Vec::new(),
@@ -11054,7 +11054,7 @@ impl ScriptedElevator {
 }
 
 impl Elevator for ScriptedElevator {
-    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno> {
         self.offers.push((
             username.to_string(),
             password.to_string(),

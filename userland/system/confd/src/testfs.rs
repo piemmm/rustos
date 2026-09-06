@@ -11,7 +11,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_users::CONFD_UID;
 
 use crate::{DirEntry, NodeInfo, Storage};
@@ -46,8 +46,8 @@ pub struct Grant {
     pub write: bool,
     /// The extent ceiling it carries.
     pub ceiling: u64,
-    /// The task it was minted to.
-    pub task: u64,
+    /// The process instance it was minted to.
+    pub recipient: ProcId,
 }
 
 impl TestFs {
@@ -244,7 +244,13 @@ impl Storage for TestFs {
         Ok(entries)
     }
 
-    fn grant(&mut self, path: &str, write: bool, ceiling: u64, task: u64) -> Result<u64, Errno> {
+    fn grant(
+        &mut self,
+        path: &str,
+        write: bool,
+        ceiling: u64,
+        recipient: ProcId,
+    ) -> Result<u64, Errno> {
         self.offline()?;
         if !self.files.contains_key(path) {
             if !write {
@@ -261,7 +267,7 @@ impl Storage for TestFs {
             path: path.to_string(),
             write,
             ceiling,
-            task,
+            recipient,
         });
         // Handle 0 is the reserved invalid value, exactly as the kernel's mint
         // treats it, so a test that reads a handle back proves it was minted.

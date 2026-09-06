@@ -231,9 +231,9 @@ pub(crate) struct RecordingHost {
     /// Every summary publish attempted, in order.
     pub(crate) published: Vec<TraySummary>,
     /// Every signal attempted, in order.
-    pub(crate) signals: Vec<(i32, Signal)>,
+    pub(crate) signals: Vec<(i64, Signal)>,
     /// Every priority lowering attempted, in order.
-    pub(crate) lowered: Vec<i32>,
+    pub(crate) lowered: Vec<i64>,
     /// Every power transition attempted, in order.
     pub(crate) powered: Vec<PowerAction>,
     /// Every refusal stated, in order.
@@ -368,12 +368,12 @@ impl ServiceHost for RecordingHost {
         self.publish_refusal.map_or(Ok(()), Err)
     }
 
-    fn signal(&mut self, pid: i32, signal: Signal) -> Result<(), Errno> {
+    fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {
         self.signals.push((pid, signal));
         self.signal_refusal.map_or(Ok(()), Err)
     }
 
-    fn lower_priority(&mut self, pid: i32) -> Result<(), Errno> {
+    fn lower_priority(&mut self, pid: i64) -> Result<(), Errno> {
         self.lowered.push(pid);
         self.lower_refusal.map_or(Ok(()), Err)
     }

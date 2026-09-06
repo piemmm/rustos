@@ -92,6 +92,36 @@ pub trait SchedulerPolicy<A: SchedulerArch>: Sized {
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
 
+    /// [`spawn_parked`](Self::spawn_parked) at a **caller-chosen** id, for
+    /// the reserved well-known identities.
+    ///
+    /// Every ordinary admission draws its id at random
+    /// ([`crate::choose_task_id`]), which is what keeps an id from
+    /// disclosing how many tasks the system has started. One identity must
+    /// nevertheless be stable across boots — PID 1, which a user expects to
+    /// find `init` at ([`crate::INIT_TASK_ID`]) — and the boot path admits it
+    /// through this form. The reserved ids are excluded from the random draw,
+    /// so a drawn id can never collide with one.
+    ///
+    /// This is not a general id-choosing entry point: the boot path admitting
+    /// a reserved identity is its only legitimate caller.
+    ///
+    /// # Errors
+    /// * [`crate::SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`crate::SchedError::TaskIdInUse`] if a live task already holds
+    ///   `id` — the admission is refused rather than displacing it.
+    /// * [`crate::SchedError::NoTaskIdAvailable`] if `id` is
+    ///   [`crate::NO_TASK`], which names no task and is never admitted.
+    fn spawn_parked_as<F>(
+        &self,
+        id: TaskId,
+        home_cpu: CpuId,
+        priority: Priority,
+        body: F,
+    ) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static;
+
     /// Block a task. Cancellation-safe.
     ///
     /// # Errors

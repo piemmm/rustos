@@ -45,7 +45,7 @@ The default policy is **CFQ — Completely Fair Queuing**, modelled on
 Linux's Completely Fair Scheduler (Molnar, 2007). Each task carries a
 virtual runtime `vruntime`; on each CPU the ready task with the
 *smallest* `vruntime` is dispatched next — the leftmost node of Linux
-CFS's red-black tree, here an ordered `BTreeSet<(vruntime, TaskId)>`
+CFS's red-black tree, here an ordered `BTreeSet<(vruntime, seq, TaskId)>`
 (`O(log n)` pick/insert/remove). A dispatch charges the running task
 `elapsed_ticks * SCALE / weight` of virtual runtime. Equal-weight tasks
 therefore receive equal CPU time even when an interrupt-driven task runs
@@ -59,10 +59,13 @@ monotonic `min_vruntime` floor places a joining or migrated task one
 CPU's timeline — the CFS `place_entity` sleeper credit. The credit is what
 makes a woken task sort **strictly** before the population that has been
 running: placing it merely level with the leftmost ready entry leaves the
-`(vruntime, TaskId)` tie-break to settle the pick, which hands the CPU to
-the lower id, so a task that wakes among CPU-bound tasks it was spawned
-after loses a full scheduling round on *every* wake and an I/O-bound task
-pays that round per round trip. Because the floor advances only to a
+`(vruntime, seq, TaskId)` tie-break to settle the pick, which hands the CPU to
+the task enqueued first, so a task that wakes among CPU-bound tasks already
+queued loses a full scheduling round on *every* wake and an I/O-bound task
+pays that round per round trip. The tie-break is an enqueue sequence rather
+than the task id precisely because ids are drawn at random: ordering by id
+would make the loser of a tie arbitrary rather than the task that has waited
+longest. Because the floor advances only to a
 *picked* task's `vruntime` and every dispatch charges at least one credit
 back, the head start stays bounded by that one unit however long the task
 slept: it cannot leap the running population, and a stolen task carries no
@@ -187,8 +190,9 @@ Each CPU keeps its own fixed-point **virtual time** `V`. Each task has a
 
 Admission (spawn / unpark / migration) sets `ve = V` (zero initial lag)
 and `vd = ve + request/weight`. On each dispatch the CPU runs the
-**eligible** task with the **earliest** `vd` (ties broken by `TaskId`
-for determinism); the task's fulfilled request then rolls `ve` forward
+**eligible** task with the **earliest** `vd` (ties broken by `TaskId`,
+which is arbitrary but total, so the pick is deterministic); the task's
+fulfilled request then rolls `ve` forward
 to its old `vd` and computes the next `vd`. `V` advances by
 `service / total_weight` of the tasks competing on that CPU, so a task
 accrues virtual time inversely to its weight and receives a CPU share
@@ -1100,9 +1104,37 @@ These hold at every API boundary:
    the signal-terminate path and the driver-unload path both branch on the
    disposition; see the kernel signals doc.
 
-6. **Task identity is stable.** `TaskId` values are never recycled
-   within a single scheduler instance. Stale references therefore
-   produce `SchedError::NoSuchTask` rather than waking the wrong task.
+6. **Task identity is drawn, not counted.** A `TaskId` comes from one
+   process-wide random generator (`choose_task_id`), never a per-policy
+   counter, so an id discloses nothing about how many tasks the system has
+   admitted or when, and two policies in one image can never mint the same
+   id. The draw spans the ABI's pid range (`tairix_abi::PID_MAX`) because a
+   task id is also the pid the `wait`/`signal` surface names it by and the
+   value peers pack under a tag to derive an IPC endpoint id; a candidate a
+   policy already holds is redrawn past under the same write lock the
+   registration takes, so a *live* id is never issued twice, and a bounded
+   run of rejected candidates fails closed rather than registering a
+   duplicate. A dead task's id may be drawn again: state keyed by a task id
+   is dropped before the id is released, so a stale reference produces
+   `SchedError::NoSuchTask`, and where a stale reference must be told apart
+   from a fresh occupant of the same number the 128-bit `ProcId`
+   process-instance identity is what distinguishes them.
+
+   An identity may nevertheless outlive its task, and the draw respects it.
+   A process *is* its leader thread's task, so reaping the leader of a group
+   whose siblings still run would return a live process's number to the draw.
+   `reserve_task_id` holds such a number and `release_task_id` returns it, and
+   `choose_task_id` composes the held set with the policy's own liveness
+   predicate — so the hold is part of the one id rule every policy already
+   calls rather than an addition to the `SchedulerPolicy` contract. The
+   per-thread retire rule owns both halves — it takes the hold when a leader
+   goes with siblings alive and returns the number when the group's member
+   count reaches zero — so every teardown path inherits it.
+
+7. **A reserved identity is admitted, never drawn.** `spawn_parked_as` is
+   the birth form the boot path uses to admit PID 1 at `INIT_TASK_ID`; the
+   reserved ids (`NO_TASK`, `INIT_TASK_ID`) are never candidates for a draw,
+   and admitting one a live task already holds is `SchedError::TaskIdInUse`.
 
 ## Crate layout (§17.1)
 

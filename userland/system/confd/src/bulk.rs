@@ -42,7 +42,7 @@ use tairix_abi::appdata_ipc::{
     validate_bulk_name, BlobEntry, BlobMode, BulkQuota, APPDATA_BLOB_MAX_COUNT,
     APPDATA_BULK_FILE_MAX_BYTES, APPDATA_TEMP_MAX_COUNT,
 };
-use tairix_abi::{BootId, Errno, BOOT_ID_HEX_LEN};
+use tairix_abi::{BootId, Errno, ProcId, BOOT_ID_HEX_LEN};
 use tairix_users::AppDataTree;
 
 use crate::store::{AppStore, RootCache, StoreError, STORE_DIR_MODE};
@@ -271,26 +271,31 @@ impl Scope {
         }
     }
 
-    /// Mint the one-shot delegation for `name` to the live task `task`,
-    /// carrying the shared extent ceiling on a writable one and no extent at
-    /// all on a read.
+    /// Mint the one-shot delegation for `name` to the process instance
+    /// `recipient`, carrying the shared extent ceiling on a writable one and
+    /// no extent at all on a read.
     fn mint<S: Storage + ?Sized>(
         &self,
         fs: &mut S,
         name: &str,
         write: bool,
-        task: u64,
+        recipient: ProcId,
     ) -> Result<u64, StoreError> {
         let ceiling = if write {
             APPDATA_BULK_FILE_MAX_BYTES
         } else {
             0
         };
-        fs.grant(&crate::store::join(&self.dir, name), write, ceiling, task)
-            .map_err(|err| match err {
-                Errno::NotFound => StoreError::BlobNotFound,
-                _ => StoreError::Unavailable,
-            })
+        fs.grant(
+            &crate::store::join(&self.dir, name),
+            write,
+            ceiling,
+            recipient,
+        )
+        .map_err(|err| match err {
+            Errno::NotFound => StoreError::BlobNotFound,
+            _ => StoreError::Unavailable,
+        })
     }
 }
 
@@ -329,8 +334,8 @@ impl BlobStore {
         Scope::open(fs, store, BLOBS_DIR, create).map(Self)
     }
 
-    /// Mint a one-shot descriptor delegation for the blob `name`, to the live
-    /// task `task`.
+    /// Mint a one-shot descriptor delegation for the blob `name`, to the
+    /// process instance `recipient`.
     ///
     /// A read-only open of a blob the application does not hold answers
     /// [`StoreError::BlobNotFound`]; a read-write open creates it, which is what
@@ -347,7 +352,7 @@ impl BlobStore {
         fs: &mut S,
         name: &str,
         mode: BlobMode,
-        task: u64,
+        recipient: ProcId,
     ) -> Result<u64, StoreError> {
         // The name arrived inside the store-name grammar at decode; re-stating
         // it here is what makes a path this module composes safe on its own
@@ -364,7 +369,7 @@ impl BlobStore {
                 return Err(StoreError::BlobLimit);
             }
         }
-        self.0.mint(fs, name, mode.is_write(), task)
+        self.0.mint(fs, name, mode.is_write(), recipient)
     }
 
     /// Delete the blob `name`.
@@ -451,7 +456,7 @@ impl TempStore {
         &self,
         fs: &mut S,
         entropy: &mut E,
-        task: u64,
+        recipient: ProcId,
     ) -> Result<(u64, String), StoreError> {
         if !self.scope.present {
             // A create always opens the scope with `create`, so the directory
@@ -474,7 +479,7 @@ impl TempStore {
         if self.scope.exists(fs, &name)? {
             return Err(StoreError::TempUnavailable);
         }
-        let handle = self.scope.mint(fs, &name, true, task)?;
+        let handle = self.scope.mint(fs, &name, true, recipient)?;
         Ok((handle, name))
     }
 

@@ -206,6 +206,14 @@ const fn i32_arg(value: i32) -> u64 {
     value as i64 as u64
 }
 
+/// Marshal a full-width signed argument (a pid) into its register.
+///
+/// The whole register is the value, so — unlike [`i32_arg`] — there is no
+/// half to sign-extend into.
+const fn i64_arg(value: i64) -> u64 {
+    value.cast_unsigned()
+}
+
 /// Decode the kernel's raw result register as an `Errno`/`int32_t` (`TAIRIX_E_*`)
 /// return value: the low 32 bits reinterpreted as a signed 32-bit code.
 #[inline]
@@ -1204,14 +1212,14 @@ pub extern "C" fn sys_sched_set_realtime(realtime: u32) -> i32 {
 /// with `TAIRIX_E_OUT_OF_RANGE`.
 #[must_use]
 #[export_name = "tairix_sys_sched_set_priority"]
-pub extern "C" fn sys_sched_set_priority(pid: i32, priority: u32) -> i32 {
+pub extern "C" fn sys_sched_set_priority(pid: i64, priority: u32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel authorises the target and validates the level on the far side
     // of the trap.
     unsafe {
         ret_i32(raw_syscall(
             NUM_SCHED_SET_PRIORITY,
-            [i32_arg(pid), u64::from(priority), 0, 0, 0, 0],
+            [i64_arg(pid), u64::from(priority), 0, 0, 0, 0],
         ))
     }
 }
@@ -1346,13 +1354,13 @@ pub extern "C" fn sys_volume_detach(request: *const u8, request_len: usize) -> i
 /// closed (`plans/SPAWN.md` SP6/SP9).
 #[must_use]
 #[export_name = "tairix_sys_wait"]
-pub extern "C" fn sys_wait(pid: i32, status: *mut c_void, flags: u32) -> u64 {
+pub extern "C" fn sys_wait(pid: i64, status: *mut c_void, flags: u32) -> u64 {
     // SAFETY: see `sys_ipc_send`; the kernel validates the `status` pointer
     // against the caller's address space before writing the exit code to it.
     unsafe {
         raw_syscall(
             NUM_WAIT,
-            [i32_arg(pid), ptr_arg(status), u64::from(flags), 0, 0, 0],
+            [i64_arg(pid), ptr_arg(status), u64::from(flags), 0, 0, 0],
         )
     }
 }
@@ -2805,14 +2813,14 @@ pub extern "C" fn sys_port_resolve(name: *mut c_void, name_len: usize) -> u64 {
 /// SP7). No capability is required.
 #[must_use]
 #[export_name = "tairix_sys_signal"]
-pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
+pub extern "C" fn sys_signal(pid: i64, signal: u32) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // validates the target child and the signal value on the far side of the
     // trap.
     unsafe {
         ret_i32(raw_syscall(
             NUM_SIGNAL,
-            [i32_arg(pid), u64::from(signal), 0, 0, 0, 0],
+            [i64_arg(pid), u64::from(signal), 0, 0, 0, 0],
         ))
     }
 }
@@ -2834,14 +2842,14 @@ pub extern "C" fn sys_signal(pid: i32, signal: u32) -> i32 {
 /// clear the ownership), and fails closed (`plans/SPAWN.md` SP9).
 #[must_use]
 #[export_name = "tairix_sys_console_foreground"]
-pub extern "C" fn sys_console_foreground(fd: u32, pid: i32) -> i32 {
+pub extern "C" fn sys_console_foreground(fd: u32, pid: i64) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
     // resolves `fd` against the caller's own descriptor table and
     // authorises `pid` on the far side of the trap.
     unsafe {
         ret_i32(raw_syscall(
             NUM_CONSOLE_FOREGROUND,
-            [u64::from(fd), i32_arg(pid), 0, 0, 0, 0],
+            [u64::from(fd), i64_arg(pid), 0, 0, 0, 0],
         ))
     }
 }
@@ -2922,9 +2930,10 @@ pub extern "C" fn sys_resource_open(
 }
 
 /// `fd_grant`: delegate the caller's own filesystem descriptor `fd` to the
-/// live task `pid` as a one-shot grant, bounded above by `write_ceiling`
-/// bytes (`SyscallNumber::FD_GRANT`). Returns the minted, unforgeable grant
-/// handle (>= 1), or a `TAIRIX_E_*` code reinterpreted into the result.
+/// process instance at `recipient` as a one-shot grant, bounded above by
+/// `write_ceiling` bytes (`SyscallNumber::FD_GRANT`). Returns the minted,
+/// unforgeable grant handle (>= 1), or a `TAIRIX_E_*` code reinterpreted
+/// into the result.
 ///
 /// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
 /// holds `fd` as a plain non-directory filesystem descriptor (a pipe,
@@ -2935,20 +2944,44 @@ pub extern "C" fn sys_resource_open(
 /// read-only descriptor, which has no extent to bound, and non-zero for a
 /// writable one, so an unbounded writable delegation cannot be minted.
 ///
+/// `(recipient, recipient_len)` is the attested `tairix_proc_id_t` the
+/// grantor read from an origin record — never a task id, which is redrawn
+/// once its task is gone and so may name a later holder by the time the
+/// grant is minted. The kernel validates the pair against the caller's
+/// address space, refuses an instance no live process holds
+/// (`TAIRIX_E_NOT_FOUND`) and a short buffer
+/// (`TAIRIX_E_BUFFER_TOO_SMALL`), and records the instance so only that
+/// process can redeem.
+///
 /// The caller's identity and effective capability set are captured with the
-/// descriptor's path, and the recipient task must be live (task ids are
-/// never reused, so a pid from a kernel-attested source lands on exactly
-/// the intended process). The caller forwards the handle in-band; it
-/// resolves only through the recipient's own [`sys_fd_redeem`], so the
-/// number is useless to a bystander. Audited.
+/// descriptor's path. The caller forwards the handle in-band; it resolves
+/// only through the recipient's own [`sys_fd_redeem`], so the number is
+/// useless to a bystander. Audited.
 #[must_use]
 #[export_name = "tairix_sys_fd_grant"]
-pub extern "C" fn sys_fd_grant(fd: u32, pid: u64, write_ceiling: u64) -> u64 {
-    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
-    // validates the capability, the caller's own descriptor, the extent
-    // ceiling against that descriptor's access, and the recipient's
-    // liveness before minting anything.
-    unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, write_ceiling, 0, 0, 0]) }
+pub extern "C" fn sys_fd_grant(
+    fd: u32,
+    write_ceiling: u64,
+    recipient: *mut c_void,
+    recipient_len: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(recipient,
+    // recipient_len)` against the caller's address space, along with the
+    // capability, the caller's own descriptor, and the extent ceiling
+    // against that descriptor's access, before minting anything.
+    unsafe {
+        raw_syscall(
+            NUM_FD_GRANT,
+            [
+                u64::from(fd),
+                write_ceiling,
+                ptr_arg(recipient),
+                recipient_len as u64,
+                0,
+                0,
+            ],
+        )
+    }
 }
 
 /// `fd_redeem`: redeem an `fd_grant` handle minted to the calling task,
@@ -3094,7 +3127,7 @@ mod tests {
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
-        (NUM_FD_GRANT, "fd_grant", 3),
+        (NUM_FD_GRANT, "fd_grant", 4),
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
@@ -3874,15 +3907,18 @@ mod tests {
     }
 
     #[test]
-    fn fd_grant_marshals_descriptor_recipient_and_ceiling() {
+    fn fd_grant_marshals_descriptor_ceiling_and_recipient_instance() {
+        let mut instance = [0x5Au8; tairix_abi::PROC_ID_LEN];
+        let ptr = instance.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
-            assert_eq!(sys_fd_grant(4, 0x2A, 4096), 7);
+            assert_eq!(sys_fd_grant(4, 4096, ptr, instance.len()), 7);
         });
         assert_eq!(number, NUM_FD_GRANT);
         assert_eq!(args[0], 4);
-        assert_eq!(args[1], 0x2A);
-        assert_eq!(args[2], 4096);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[1], 4096);
+        assert_eq!(args[2], ptr as usize as u64);
+        assert_eq!(args[3], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

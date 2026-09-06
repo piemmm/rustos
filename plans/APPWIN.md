@@ -280,11 +280,15 @@ Done. What now holds:
 Done (code + host coverage). What now holds:
 
 - **Kernel one-shot read delegation** (`fd_grant` 90 / `fd_redeem` 91,
-  in-place `abi-v1` additions): `fd_grant(fd, pid)` delegates the
-  caller's **own** plain read-only, non-directory filesystem descriptor
-  to a live task (pid from a kernel-attested source; task ids never
-  reused), capturing the grantor's uid + effective capability set beside
-  the path; the recipient-owner-bound handle travels in-band and
+  in-place `abi-v1` additions): `fd_grant(fd, write_ceiling, recipient,
+  len)` delegates the caller's **own** plain read-only, non-directory
+  filesystem descriptor to the process *instance* `recipient` names — the
+  attested `ProcId` the grantor read from an `Origin`, never a task id,
+  which is redrawn once its task is gone. The instance is recorded with
+  the delegation and `fd_redeem` admits it alone, so a pick that concludes
+  after the requesting app exited cannot land on a later holder of its
+  number. The grantor's uid + effective capability set are captured beside
+  the path; the recipient-bound handle travels in-band and
   `fd_redeem` consumes it **once** (atomically — only after the
   descriptor allocation succeeds) into an
   `OpenBacking::Delegated` entry. Delegated reads (`fs_read` and the
@@ -318,7 +322,8 @@ Done (code + host coverage). What now holds:
   pick), a session-owned window at the deterministic `PICKER_ORIGIN`,
   key (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared
   hit-test) navigation, conclusions delivered by the `Run` binary's
-  privileged tail (`fs_open` → `fd_grant` to the owner's attested pid →
+  privileged tail (`fs_open` → `fd_grant` to the owner's attested
+  instance, which is what the compositor records as a window's owner →
   `fs_close` → `FilePicked`, any refusal honestly `PickCancelled`), and
   a requesting window's death aborts its pick via the
   `ShellWindowHost` bridge. The session's manifest gained

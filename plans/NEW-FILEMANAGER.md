@@ -219,7 +219,8 @@ full `applications_for` result and launches the picked bundle through the same
 **FM6b is complete. FM9-pre (the `FsNodeMutated`/
 `FsMutationDenied` filesystem-mutation audit events every write syscall emits,
 the robust serial witnesses the vertical keys on and a §5.4/§19.4 requirement
-in their own right), FM9-a, FM9-b, and FM9-c are all landed.** FM9-a appends the New-Folder +
+in their own right), FM9-a and FM9-c are landed; FM9-b's picker-at-home and
+planted document landed but its guest witnesses did not (D94).** FM9-a appends the New-Folder +
 inline-rename click-through to the aarch64 `autoload_input` QEMU vertical after
 the AW4 terminal round trip: it descends into `/Users/root` by
 layout-reconstructed pointer clicks (`render::selection_rect` for rows, the new
@@ -234,14 +235,18 @@ picker now opens at the user's home (`Browser::open_at` over the session's
 `/Users/root`, and the aarch64 `autoload_input` vertical launches the Viewer
 from the desktop's launcher (today the program-library popup,
 `plans/NEW-TASKBAR.md`), lets the auto-opened picker read the home, clicks the
-document row, and latches two new guest PASS witnesses — `SyscallInvoked
-sc=fd_grant` then `sc=fd_redeem` (after the FM9-a rename, so no earlier
-delegation can satisfy them). The pick-click is gated on a test-kernel
-picker-open marker (the session's first post-rename `comm=desktop sc=fs_open`,
-the picker's `open_at` home read), so it lands only once the picker is
-composited — no `MessageDelivered` fires for the session-internal picker and
-the user-authority session cannot `log_emit`, so the test sink turns that
-unique read into the deterministic gate. **FM9-c (delete with confirm) is now
+document row. **The guest witnesses were never enrolled, so this half is
+*not* landed** — `sc=fd_grant` appears in no `.rs` file in the tree, and no
+vertical asserts the delegation records. What remains is the witness pair
+(`SyscallInvoked sc=fd_grant` then `sc=fd_redeem`, after the FM9-a rename so
+no earlier delegation can satisfy them) and the pick-click gate that must
+precede it: a test-kernel picker-open marker (the session's first post-rename
+`comm=desktop sc=fs_open`, the picker's `open_at` home read), so the click
+lands only once the picker is composited — no `MessageDelivered` fires for the
+session-internal picker and the user-authority session cannot `log_emit`, so
+the test sink is what can turn that unique read into a deterministic gate.
+Tracked as `plans/OPEN-DEFECTS.md` D94; note it would extend the aarch64
+`autoload_input` vertical, which carries its own open intermittency (D15). **FM9-c (delete with confirm) is now
 fully landed.** A clickable **Delete** joins the context menu (its
 `begin_delete` action already existed, so this is not speculative surface,
 §2.4), routed through `dispatch_context_command` to the same confirm-and-remove

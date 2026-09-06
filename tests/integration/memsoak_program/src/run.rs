@@ -79,9 +79,6 @@ mod program {
         if pid < 0 {
             return Err("memsoak: child spawn refused");
         }
-        let Ok(pid) = i32::try_from(pid) else {
-            return Err("memsoak: child PID out of range");
-        };
         let mut status = 0i32;
         if tairix_rt::wait_exit(pid, &mut status) < 0 {
             return Err("memsoak: child wait refused");

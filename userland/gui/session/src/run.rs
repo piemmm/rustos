@@ -428,9 +428,10 @@ mod program {
 
         /// The kernel task id the attested client `id` called as, if it
         /// has called this session. The delegation target of a concluded
-        /// pick: the pid came from `call_peer_origin`, never a wire claim,
-        /// and task ids are never reused, so `fd_grant` lands on exactly
-        /// the process whose window asked.
+        /// pick: the pid came from `call_peer_origin`, never a wire claim.
+        /// The instance it was attested under is held beside it, which is
+        /// what a pid-only `fd_grant` cannot yet carry
+        /// (`plans/OPEN-DEFECTS.md` D92).
         fn pid_of(&self, id: ProcId) -> Option<u64> {
             self.peers
                 .iter()
@@ -2523,7 +2524,6 @@ mod program {
                         &mut shell,
                         &mut compositor,
                         &mut windows,
-                        &identity,
                         &mut picker,
                         &mut apps,
                         &mut menu,
@@ -2830,7 +2830,6 @@ mod program {
                         &mut windows,
                         &mut server,
                         &mut sink,
-                        &identity,
                         &mut picker,
                         &mut confirm,
                         &mut elevate,
@@ -2910,7 +2909,6 @@ mod program {
                                 &mut windows,
                                 &mut server,
                                 &mut sink,
-                                &identity,
                                 &mut picker,
                                 &mut confirm,
                                 &mut elevate,
@@ -4473,7 +4471,6 @@ mod program {
         windows: &mut SessionWindows,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
-        identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         confirm: &mut ConfirmPrompt,
         elevate: &mut ElevatePrompt,
@@ -4563,8 +4560,8 @@ mod program {
                     if picker.wm_id() == Some(window) {
                         if let Some(concluded) = picker.handle_click(local, shell, compositor) {
                             conclude_pick(
-                                concluded, server, sink, shell, compositor, windows, identity,
-                                picker, apps, menu,
+                                concluded, server, sink, shell, compositor, windows, picker, apps,
+                                menu,
                             );
                         }
                     }
@@ -4683,8 +4680,8 @@ mod program {
                         if let Some(record) = key {
                             if let Some(concluded) = picker.handle_key(&record, shell, compositor) {
                                 conclude_pick(
-                                    concluded, server, sink, shell, compositor, windows, identity,
-                                    picker, apps, menu,
+                                    concluded, server, sink, shell, compositor, windows, picker,
+                                    apps, menu,
                                 );
                             }
                         }
@@ -5116,7 +5113,7 @@ mod program {
     struct RtElevator;
 
     impl Elevator for RtElevator {
-        fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i32, Errno> {
+        fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno> {
             match tairix_rt::elevate(&ElevateRequest::Launch {
                 username,
                 password,
@@ -5852,7 +5849,6 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         windows: &mut SessionWindows,
-        identity: &RtWindowIdentity,
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
@@ -5861,7 +5857,7 @@ mod program {
         let event = match concluded.conclusion {
             PickConclusion::Cancelled => WindowEvent::PickCancelled { window_id },
             PickConclusion::Chosen(path) => {
-                if let Some(handle) = delegate(&path, window_id, server, identity) {
+                if let Some(handle) = delegate(&path, window_id, server) {
                     WindowEvent::FilePicked { window_id, handle }
                 } else {
                     io::write_stderr_line("desktop: picker delegation refused");
@@ -5890,17 +5886,17 @@ mod program {
     ///
     /// The delegation carries no write extent: what the user chose is a
     /// document to read, and a read-only grant has no length to bound.
-    fn delegate(
-        path: &str,
-        window_id: u64,
-        server: &WindowServer<RtShmMapper>,
-        identity: &RtWindowIdentity,
-    ) -> Option<u64> {
+    ///
+    /// The owner the compositor records *is* the attested instance, so the
+    /// grant names it directly. A pick concludes an arbitrary time after the
+    /// app asked for it, so a task id learned back then could name a later
+    /// holder by now; an instance names one process for all time, and a
+    /// window whose app has since exited simply resolves to nothing.
+    fn delegate(path: &str, window_id: u64, server: &WindowServer<RtShmMapper>) -> Option<u64> {
         let owner = server.owner_of(window_id)?;
-        let pid = identity.pid_of(owner)?;
         let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
         let fd = u32::try_from(fd).ok()?;
-        let handle = tairix_rt::fd_grant(fd, pid, 0);
+        let handle = tairix_rt::fd_grant(fd, 0, owner);
         let _ = tairix_rt::fs_close(fd);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
     }

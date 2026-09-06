@@ -9,7 +9,7 @@ use tairix_abi::appdata_ipc::{
     BlobMode, APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_MAX_COUNT, APPDATA_BULK_FILE_MAX_BYTES,
     APPDATA_TEMP_MAX_COUNT,
 };
-use tairix_abi::{AppIdentity, BootId, Errno, BOOT_ID_LEN};
+use tairix_abi::{AppIdentity, BootId, Errno, ProcId, BOOT_ID_LEN};
 
 use super::{render_listing, BlobStore, TempNames, TempStore, BLOBS_DIR, TEMP_DIR};
 use crate::bulk;
@@ -18,9 +18,12 @@ use crate::store::{AppStore, RootCache, StoreError};
 use crate::testfs::{Grant, TestFs, ACCOUNT_UID, HOME};
 use crate::vault::tests::CountingEntropy;
 
-/// The task a grant is minted to in these tests — an attested `pid`, never a
-/// value the caller supplied.
-const TASK: u64 = 42;
+/// The process instance a grant is minted to in these tests — attested by
+/// the kernel, never a value the caller supplied.
+const TASK: ProcId = ProcId::from_raw([42u8; tairix_abi::PROC_ID_LEN]);
+
+/// A second, distinct instance, so a test can show two recipients apart.
+const OTHER_TASK: ProcId = ProcId::from_raw([43u8; tairix_abi::PROC_ID_LEN]);
 
 /// Resolve the configuration store, then the blob store beside it.
 fn open(fs: &mut TestFs, create: bool) -> Result<BlobStore, StoreError> {
@@ -75,7 +78,7 @@ fn a_writable_open_creates_the_blob_and_bounds_the_delegation() {
             path: blob_path("mail.index"),
             write: true,
             ceiling: APPDATA_BULK_FILE_MAX_BYTES,
-            task: TASK,
+            recipient: TASK,
         }],
         "a writable delegation is bounded by the per-blob extent ceiling"
     );
@@ -91,25 +94,26 @@ fn a_writable_open_creates_the_blob_and_bounds_the_delegation() {
             path: blob_path("mail.index"),
             write: false,
             ceiling: 0,
-            task: TASK,
+            recipient: TASK,
         }
     );
 }
 
 #[test]
-fn a_grant_is_minted_only_to_the_task_it_was_asked_for() {
-    // The recipient is the caller's kernel-attested task id, never anything
-    // on the wire, so a handle that leaks is useless to whoever holds it.
+fn a_grant_is_minted_only_to_the_instance_it_was_asked_for() {
+    // The recipient is the caller's kernel-attested process instance, never
+    // anything on the wire and never a task id that could change hands, so a
+    // handle that leaks is useless to whoever holds it.
     let mut fs = TestFs::provisioned();
     let blobs = open(&mut fs, true).expect("resolves");
-    for task in [TASK, TASK + 1] {
+    for task in [TASK, OTHER_TASK] {
         blobs
             .grant(&mut fs, "index", BlobMode::ReadWrite, task)
             .expect("mints");
     }
     assert_eq!(
-        fs.grants().iter().map(|g| g.task).collect::<Vec<_>>(),
-        [TASK, TASK + 1]
+        fs.grants().iter().map(|g| g.recipient).collect::<Vec<_>>(),
+        [TASK, OTHER_TASK]
     );
 }
 
@@ -397,7 +401,7 @@ fn a_created_file_is_named_for_this_boot_and_granted_writable() {
             path: temp_path(&name),
             write: true,
             ceiling: APPDATA_BULK_FILE_MAX_BYTES,
-            task: TASK,
+            recipient: TASK,
         }]
     );
 

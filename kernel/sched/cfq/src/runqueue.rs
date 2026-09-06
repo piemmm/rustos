@@ -89,10 +89,25 @@ struct Inner {
     /// only [`Self::total_weight`] counts them (for load-balanced
     /// placement). Bounded by [`Self::capacity`] exactly like the fair set.
     rt_ready: VecDeque<TaskId>,
-    /// Ready set keyed by `(vruntime, id)` so the leftmost element is the
-    /// smallest-vruntime task (ties broken by the smaller id for
-    /// determinism — no flaky ordering). The CFS red-black tree analog.
-    ready: BTreeSet<(u64, TaskId)>,
+    /// Ready set keyed by `(vruntime, seq, id)` so the leftmost element is
+    /// the smallest-vruntime task, ties broken by arrival order. The CFS
+    /// red-black tree analog.
+    ///
+    /// The tie-break is the enqueue sequence rather than the task id
+    /// because equal virtual runtimes are not rare — every task admitted
+    /// before the floor has advanced is placed at the same point, so a whole
+    /// burst of fresh tasks ties — and ordering those by identity would let
+    /// an id decide who runs first. Task ids are drawn at random, so that
+    /// would be an arbitrary winner; even ordered ids would systematically
+    /// favour one task over another. Arrival order is the fair answer and
+    /// the one a reader expects of a run queue.
+    ready: BTreeSet<(u64, u64, TaskId)>,
+    /// Monotonic enqueue counter supplying the FIFO half of a `ready` key.
+    ///
+    /// One increment per enqueue, so it cannot wrap in any real uptime; a
+    /// wrap would only reorder entries that share a virtual runtime, never
+    /// lose one.
+    next_seq: u64,
     /// Monotonic floor tracking the front of the CPU's timeline. A task
     /// joining or re-joining this CPU is placed one [`SLEEPER_CREDIT`] ahead
     /// of it, so a task that slept at a low vruntime gets a bounded head
@@ -128,6 +143,7 @@ impl RunQueue {
             inner: SpinLock::new(Inner {
                 rt_ready: VecDeque::new(),
                 ready: BTreeSet::new(),
+                next_seq: 0,
                 min_vruntime: 0,
                 total_weight: 0,
                 capacity,
@@ -188,7 +204,9 @@ impl RunQueue {
         if g.ready.len() >= g.capacity {
             return Err(entry.id);
         }
-        g.ready.insert((entry.vruntime, entry.id));
+        let seq = g.next_seq;
+        g.next_seq = g.next_seq.wrapping_add(1);
+        g.ready.insert((entry.vruntime, seq, entry.id));
         Ok(())
     }
 
@@ -216,8 +234,9 @@ impl RunQueue {
         if let Some(id) = g.rt_ready.pop_front() {
             return Some(Entry { id, vruntime: 0 });
         }
-        let &(vruntime, id) = g.ready.iter().next()?;
-        g.ready.remove(&(vruntime, id));
+        let &key = g.ready.iter().next()?;
+        g.ready.remove(&key);
+        let (vruntime, _seq, id) = key;
         if vruntime > g.min_vruntime {
             g.min_vruntime = vruntime;
         }
@@ -234,8 +253,9 @@ impl RunQueue {
         if let Some(id) = g.rt_ready.pop_front() {
             return Some(Entry { id, vruntime: 0 });
         }
-        let &(vruntime, id) = g.ready.iter().next()?;
-        g.ready.remove(&(vruntime, id));
+        let &key = g.ready.iter().next()?;
+        g.ready.remove(&key);
+        let (vruntime, _seq, id) = key;
         Some(Entry { id, vruntime })
     }
 
@@ -281,12 +301,18 @@ mod tests {
         assert_eq!(q.pick(), None);
     }
 
+    /// Equal virtual runtimes are picked in arrival order, so identity
+    /// never decides who runs first — task ids are drawn at random, and an
+    /// id-ordered tie-break would hand the choice to the draw.
     #[test]
-    fn pick_ties_break_on_id() {
+    fn pick_ties_break_on_arrival_order() {
         let q = RunQueue::try_new(8).expect("q");
         q.push(e(5, 7)).expect("push");
         q.push(e(2, 7)).expect("push");
-        assert_eq!(q.pick().map(|x| x.id), Some(2), "smaller id wins a tie");
+        q.push(e(9, 7)).expect("push");
+        assert_eq!(q.pick().map(|x| x.id), Some(5), "first in, first picked");
+        assert_eq!(q.pick().map(|x| x.id), Some(2));
+        assert_eq!(q.pick().map(|x| x.id), Some(9));
     }
 
     #[test]
@@ -296,27 +322,26 @@ mod tests {
         // Picking advances the floor to the picked task's vruntime.
         assert_eq!(q.pick().map(|x| x.vruntime), Some(100 * SCALE));
         // A joiner lands one credit ahead of that floor — never a stale zero,
-        // and never level with it, which would leave the id tie-break to
-        // decide the pick.
+        // and never level with it, which would leave arrival order to decide
+        // the pick and put the joiner behind the queued population.
         assert_eq!(q.admit_weight(1), 100 * SCALE - SLEEPER_CREDIT);
     }
 
     #[test]
     fn a_joiner_sorts_ahead_of_every_ready_entry_at_the_floor() {
         let q = RunQueue::try_new(8).expect("q");
-        // A population parked at the floor, each with a lower id than the
-        // joiner below.
+        // A population parked at the floor, every one of them enqueued
+        // before the joiner below.
         for id in 1..=4 {
             q.push(e(id, 100 * SCALE)).expect("push");
         }
-        q.push(e(0, 100 * SCALE)).expect("push");
-        assert_eq!(q.pick().map(|x| x.id), Some(0), "the floor is established");
+        assert_eq!(q.pick().map(|x| x.id), Some(1), "the floor is established");
         let joiner = q.admit_weight(1);
         q.push(e(9, joiner)).expect("push");
         assert_eq!(
             q.pick().map(|x| x.id),
             Some(9),
-            "a joiner outranks entries level with the floor whatever its id"
+            "a joiner outranks entries level with the floor despite arriving last"
         );
     }
 

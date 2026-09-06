@@ -254,7 +254,7 @@ where
         pre_resume,
         Arc::clone(&space),
         work,
-        true,
+        crate::kthread::Admission::Parked,
     );
     let Ok(task_id) = admitted else {
         release_reservation(handlers, &space, process, reserve_base, reserve_pages);
@@ -359,12 +359,17 @@ where
 /// (`KernelSyscallHandlers::land_thread_down`) and the driver-store unload both
 /// reach it. What it retires is the thread's own and nothing the group shares —
 /// its signal-intake, kill-gate and running-kill overlays, its user-stack span,
-/// and its capability alias. Task ids are never reused, so an entry left behind
-/// could never be reclaimed later.
+/// and its capability alias. Every one goes before the scheduler releases the
+/// id, so a later task drawing it inherits nothing.
 ///
 /// Dropping the capability alias is what makes the count fall, so a thread the
 /// table never knew leaves it where it was and reads as the group's last — the
 /// single-threaded shape every process had before threads existed.
+///
+/// A retiring *leader* whose siblings survive additionally holds its number
+/// against the id draw (`reserve_task_id`), because the process it names is
+/// still alive; the same rule returns it when the group's last thread lands,
+/// so no teardown path can hold a number without releasing it.
 pub fn retire(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
@@ -376,7 +381,27 @@ pub fn retire(
     aspaces.write().withdraw_thread(thread);
     caps.write()
         .remove_thread(thread)
-        .map_or(0, |(_, remaining)| remaining)
+        .map_or(0, |(process, remaining)| {
+            // A process is its leader thread's task, so the two share a
+            // number, and the group's member count crossing is exactly when
+            // that number's fate is decided.
+            let leader = process.leader_task();
+            if remaining == 0 {
+                // Last thread out: the identity is gone with it, so the
+                // number returns to the draw. Idempotent, so the ordinary
+                // case that held nothing pays a no-op.
+                tairix_kernel_sched_api::release_task_id(leader.0);
+            } else if thread == leader {
+                // The leader went while siblings survive, so the process
+                // lives on under them — but the scheduler still reaps the
+                // leader's task, returning a *live* process's id to the draw
+                // where a later admission would be issued it and overwrite
+                // the capability record. Hold it until the count reaches zero
+                // above.
+                let _ = tairix_kernel_sched_api::reserve_task_id(leader.0);
+            }
+            remaining
+        })
 }
 
 /// The process's shared execution context on the CPU this thread is running on,
@@ -448,6 +473,80 @@ fn release_reservation<A>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process id no other test names, so the process-wide reserved-id set
+    /// stays independent of the suite's randomised order.
+    const LEADER: u64 = 0x05ee_dd91;
+
+    /// Register a process at [`LEADER`] plus one sibling thread, and return
+    /// the tables `retire` operates on.
+    fn group_with_a_sibling(sibling: u64) -> (RwLock<CapTable>, RwLock<AddressSpaceRegistry>) {
+        let sink = crate::test_sink::TestSink::new();
+        let process = ProcessId(LEADER);
+        let record = tairix_kernel_sec::TaskCapabilities::derive(
+            process,
+            tairix_kernel_sec::UserId(0),
+            tairix_caps::CapabilitySet::empty(),
+            tairix_caps::CapabilitySet::empty(),
+            &sink,
+        );
+        let caps = RwLock::new(CapTable::new());
+        caps.write().insert(record);
+        caps.write()
+            .register_thread(SecTaskId(sibling), process)
+            .expect("sibling registers");
+        (caps, RwLock::new(AddressSpaceRegistry::new()))
+    }
+
+    /// A leader thread that exits before its siblings leaves the process alive
+    /// under them, so its number must not return to the id draw: the scheduler
+    /// reaps the leader's task, and an admission issued that number would be
+    /// admitted at the live process's `ProcessId` and overwrite its capability
+    /// record.
+    #[test]
+    fn a_leader_retiring_before_its_siblings_holds_its_id_against_the_draw() {
+        tairix_kernel_sched_api::release_task_id(LEADER);
+        let sibling = LEADER + 1;
+        let (caps, aspaces) = group_with_a_sibling(sibling);
+
+        // The leader goes first; the sibling keeps the process alive.
+        assert_eq!(retire(&caps, &aspaces, SecTaskId(LEADER)), 1);
+        assert!(
+            tairix_kernel_sched_api::task_id_reserved(LEADER),
+            "a live process's id returned to the draw"
+        );
+        // "Not drawable" is the load-bearing property: an admission at the
+        // held number is refused even though no live task holds it.
+        assert_eq!(
+            tairix_kernel_sched_api::choose_task_id(Some(LEADER), |_| false),
+            Err(tairix_kernel_sched_api::SchedError::TaskIdInUse)
+        );
+
+        // The group's last thread lands, which is what returns the number:
+        // the same per-thread rule owns both halves, so no teardown path can
+        // hold an id without releasing it.
+        assert_eq!(retire(&caps, &aspaces, SecTaskId(sibling)), 0);
+        assert!(
+            !tairix_kernel_sched_api::task_id_reserved(LEADER),
+            "the last thread out left the leader id withheld from the draw"
+        );
+        assert_eq!(
+            tairix_kernel_sched_api::choose_task_id(Some(LEADER), |_| false),
+            Ok(LEADER)
+        );
+    }
+
+    /// A non-leader thread's id names no process, so retiring one holds
+    /// nothing — the reservation is the leader's alone.
+    #[test]
+    fn a_sibling_retiring_holds_no_id() {
+        let sibling = LEADER + 2;
+        tairix_kernel_sched_api::release_task_id(sibling);
+        let (caps, aspaces) = group_with_a_sibling(sibling);
+
+        assert_eq!(retire(&caps, &aspaces, SecTaskId(sibling)), 1);
+        assert!(!tairix_kernel_sched_api::task_id_reserved(sibling));
+    }
 
     /// The default request is the caller's own effective bound, so a tightened
     /// `ulimit` sizes its threads too with no second definition of the number.

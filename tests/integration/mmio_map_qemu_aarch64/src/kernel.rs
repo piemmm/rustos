@@ -34,7 +34,7 @@ use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
-    spawn_image, spawn_user_kthread_with_stack_live, with_current_live_space, BoxStack,
+    spawn_image, spawn_user_kthread_with_stack_live, with_current_live_space, Admission, BoxStack,
     ProcessSpace, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{
@@ -639,7 +639,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         pre_resume,
         live,
         work,
-        false,
+        Admission::Runnable,
     )
     .is_err()
     {

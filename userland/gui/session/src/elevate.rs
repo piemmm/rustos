@@ -133,7 +133,7 @@ pub trait Elevator {
     /// gives one indistinguishable answer for a wrong password, an unknown
     /// account, and a locked one. Any other code reports a mechanical
     /// failure, such as a program that would not start.
-    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i32, Errno>;
+    fn launch(&mut self, username: &str, password: &str, program: &str) -> Result<i64, Errno>;
 }
 
 /// How the prompt ended, or that it has not.
@@ -146,7 +146,7 @@ pub enum PromptOutcome {
     /// already down and its secret erased.
     Started {
         /// The started program's pid, as the broker reported it.
-        pid: i32,
+        pid: i64,
     },
     /// The user cancelled, dismissed, or the prompt was abandoned. Nothing
     /// was started and nothing was offered.
@@ -592,7 +592,7 @@ impl ElevatePrompt {
         &mut self,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        started: Option<i32>,
+        started: Option<i64>,
     ) -> PromptOutcome {
         let Some(active) = self.active.take() else {
             return PromptOutcome::Pending;

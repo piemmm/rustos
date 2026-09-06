@@ -575,6 +575,25 @@ pub const STD_STREAM_COUNT: usize = 4;
 /// field.
 pub const ENV_SHOWN_NAME: &str = "FULLNAME";
 
+/// The largest process id the kernel may issue.
+///
+/// A pid is not merely a number a caller quotes back: peers *derive* IPC
+/// endpoint ids from it, packing it under a 16-bit namespace tag and, in the
+/// device-channel namespace, above an 8-bit per-interface index
+/// ([`crate::session_ipc::session_wake_endpoint`],
+/// [`crate::switchboard_ipc::command_endpoint_for`],
+/// [`crate::driver::net_channel::notify_endpoint_for`], and the window
+/// client's `event_endpoint_for`). Bounding a pid to the low 40 bits is what
+/// keeps every one of those packings lossless: two principals can never
+/// derive the same endpoint id, a derived id can never fold into a reserved
+/// one, and no derivation needs a mask that could alias two pids together.
+///
+/// Forty bits is far more pid space than a workload can consume — a thousand
+/// spawns a second for a century draws fewer than 2^42 — so the bound costs
+/// an id none of what it must be: unguessable, free of sequence, and never
+/// held by two live tasks at once.
+pub const PID_MAX: u64 = (1 << 40) - 1;
+
 /// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
 /// the child to the **caller's own** descriptor table instead of naming an
 /// installed console index.

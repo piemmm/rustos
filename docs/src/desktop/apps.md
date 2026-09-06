@@ -1068,15 +1068,20 @@ instead of drilling down from `/` every time — and the read-only picker still
 composes the exact same `Browser` (it only chose a different starting
 directory, `AGENTS.md` §2.2).
 
-Opening a file into a viewer through this picker is proven end to end on the
-aarch64 desktop QEMU vertical (`plans/NEW-FILEMANAGER.md` FM9-b): the session
-launches the Viewer, the Viewer (handed no document) asks
-the picker, the picker opens at `/Users/root`, a scripted click on the planted
-document row concludes the pick, and the session delegates the chosen file to
-the Viewer through the CU6 one-shot `fd_grant` / `fd_redeem` — the Viewer then
-reads exactly that one file with no filesystem capability of its own. The
-run's guest PASS keys on the kernel-attested `sc=fd_grant` then `sc=fd_redeem`
-audit records.
+Opening a file into a viewer through this picker works as follows
+(`plans/NEW-FILEMANAGER.md` FM9-b): the session launches the Viewer, the
+Viewer (handed no document) asks the picker, the picker opens at
+`/Users/root`, a click on the planted document row concludes the pick, and
+the session delegates the chosen file to the Viewer through the CU6 one-shot
+`fd_grant` / `fd_redeem` — the Viewer then reads exactly that one file with no
+filesystem capability of its own.
+
+**Coverage: host-proven, no guest vertical yet.** The kernel delegation path
+(mint, the instance gate, one-shot redemption, the grantor-identity re-check)
+and the picker's own model are unit-tested on the host; the aarch64 desktop
+QEMU vertical plants the document and opens the picker at the home, but **no
+enrolled vertical asserts the `fd_grant`/`fd_redeem` audit records**, so the
+click-through is not proven end to end (`plans/OPEN-DEFECTS.md` D94).
 
 ### Multi-selection and the clipboard model
 

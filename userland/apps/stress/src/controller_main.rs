@@ -136,8 +136,6 @@ pub fn run(spec: &RunSpec) -> i32 {
     if spec.monitor {
         let pid = tairix_rt::spawn(format!("{SYSTEM_COMMAND_STORE}/sysmon.app/Run").as_bytes());
         if pid >= 0 {
-            #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
-            let pid = pid as i32;
             machine.add_monitor(pid);
             // Hand the console to the monitor so its keys (and the
             // console ^C) reach it; the console clears the grant when it
@@ -218,8 +216,7 @@ fn drive(
             if ret < 0 {
                 break;
             }
-            #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
-            let pid = ret as i32;
+            let pid = ret;
             let code = match status {
                 WaitStatus::Exited(code) => code,
                 WaitStatus::Stopped(_) => continue,
@@ -279,8 +276,7 @@ fn drive(
                 // nothing further can happen.
                 break;
             }
-            #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
-            let pid = ret as i32;
+            let pid = ret;
             if let WaitStatus::Exited(code) = status {
                 let actions = machine.on_event(Event::ChildExited { pid, code });
                 execute(&actions, started_ns, &mut grace_deadline_ns);
@@ -321,15 +317,14 @@ fn next_timeout(now: u64, deadline_ns: Option<u64>, grace_ns: Option<u64>) -> u6
 }
 
 /// Spawn one worker through the `@self` token, returning its PID.
-fn spawn_worker(worker: &WorkerSpec) -> Result<i32, &'static str> {
+fn spawn_worker(worker: &WorkerSpec) -> Result<i64, &'static str> {
     let argv = worker.encode_argv();
     let words: Vec<&[u8]> = argv.iter().map(String::as_bytes).collect();
     let ret = tairix_rt::spawn_with(SPAWN_SELF, CONSOLE_INHERIT, SPAWN_UID_INHERIT, &words, &[]);
     if ret < 0 {
         return Err("worker spawn refused");
     }
-    #[allow(clippy::cast_possible_truncation)] // The kernel bounds PIDs to i32 range.
-    Ok(ret as i32)
+    Ok(ret)
 }
 
 /// Resolve and create the scratch directory: `--temp-path` verbatim, or

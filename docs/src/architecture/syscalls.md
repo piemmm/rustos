@@ -69,7 +69,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  13 | `stream_read`  | `u32 fd`, `user_ptr`, `len`, `u64 timeout_ns` | `u64` | — (console arm: `CAP_CONSOLE_READ`) | no |
 |  14 | `mem_map`      | `len`, `u32 flags`, `u64 addr_hint`     | `u64` (base) | —                  | no      |
 |  15 | `mem_unmap`    | `u64 base`, `len`                       | `errno` | —                       | no      |
-|  16 | `wait`         | `i32 pid`, `user_ptr` (status), `u32 flags` | `u64` (pid) | —               | yes     |
+|  16 | `wait`         | `i64 pid`, `user_ptr` (status), `u32 flags` | `u64` (pid) | —               | yes     |
 |  17 | `rlimit_get`   | `u32 kind`, `user_ptr` (out)            | `errno` | —                       | no      |
 |  18 | `rlimit_set`   | `u32 kind`, `user_ptr` (value)          | `errno` | —                       | yes     |
 |  19 | `users_db_read`| `user_ptr` (buf), `len`                 | `u64` (bytes) | `CAP_USERS_READ`  | yes     |
@@ -110,7 +110,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  61 | `boot_id_get`  | `user_ptr` (out), `len`                | `u64` (bytes) | — | no |
 |  62 | `sysinfo_introspect` | `u32 domain`, `u64 arg`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_SYSINFO_INTROSPECT` | no |
 |  63 | `terminal_size` | `u32 fd`, `user_ptr` (out), `len`      | `u64` (bytes) | — | no |
-|  64 | `signal`       | `i32 pid`, `u32 signal`                 | `errno`       | —               | yes   |
+|  64 | `signal`       | `i64 pid`, `u32 signal`                 | `errno`       | —               | yes   |
 |  65 | `fs_chdir`     | `user_ptr` (path), `len`                | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  66 | `fs_getcwd`    | `user_ptr` (buf), `len`                 | `u64` (bytes) | —               | no    |
 |  67 | `resource_open` | `user_ptr` (ref), `len`, `u32 flags`   | `u64` (fd)    | —               | yes   |
@@ -118,7 +118,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  69 | `users_admin`  | `user_ptr` (req), `len`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_USER_ADMIN` | yes |
 |  70 | `seat_switch`  | `u64 seat`, `u32 console`               | `errno`       | `CAP_SEAT_ADMIN` | yes |
 |  71 | `seat_revoke`  | `u64 seat`                              | `errno`       | `CAP_SEAT_ADMIN` | yes |
-|  72 | `console_foreground` | `u32 fd`, `i32 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
+|  72 | `console_foreground` | `u32 fd`, `i64 pid`               | `errno`       | `CAP_CONSOLE_READ` | yes |
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
 |  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
@@ -133,7 +133,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  86 | `fs_attr_list` | `user_ptr` (path), `len`, `u64 index`, `user_ptr` (out), `len` | `u64` (bytes) | `CAP_FS_ACCESS` | no |
 |  87 | `fs_attr_remove` | `user_ptr` (path), `len`, `user_ptr` (key), `len` | `errno` | `CAP_FS_ACCESS` | yes |
 |  89 | `boot_facts_get` | `user_ptr` (out), `len`                | `u64` (bytes) | —             | no    |
-|  90 | `fd_grant`     | `u32 fd`, `u64 pid`, `u64 write_ceiling` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
+|  90 | `fd_grant`     | `u32 fd`, `u64 write_ceiling`, `*const ProcId recipient`, `usize len` | `u64` (handle) | `CAP_FS_ACCESS` | yes  |
 |  91 | `fd_redeem`    | `Handle` (grant)                        | `u64` (fd)    | —             | yes   |
 |  92 | `mem_pin`      | —                                       | `errno`       | `CAP_MEM_PIN` | yes   |
 |  93 | `mem_unpin`    | —                                       | `errno`       | —             | yes   |
@@ -147,7 +147,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 101 | `call_cancel`  | `IpcEndpoint`, `Handle` (ticket)        | `errno` | — | no |
 | 102 | `hw_node_health` | `u64 state` (`FaultDomainState`)      | `errno`       | `CAP_HW_EMIT` | yes   |
 | 103 | `hw_self_node` | —                                       | `u64` (node id) | —           | no    |
-| 104 | `sched_set_priority` | `i32 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
+| 104 | `sched_set_priority` | `i64 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
 | 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
 | 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
 | 107 | `boot_session_get` | —                                   | `u64` (session) | —           | no    |
@@ -908,13 +908,25 @@ repeating a delegation cannot grow a recipient's kernel-side grant table.
 `fd_grant` (no. 90) and `fd_redeem` (no. 91) are the one-shot,
 user-mediated **file** delegation (`plans/CAPABILITY_USE.md` CU6,
 `plans/APPWIN.md` AW5 — the desktop's trusted-picker hand-off).
-`fd_grant(fd, pid, write_ceiling)` requires `CAP_FS_ACCESS` and delegates
-the caller's **own** plain non-directory filesystem descriptor to the live
-task `pid` (taken from a kernel-attested source such as
-`call_peer_origin`; task ids are never reused, so the grant lands on
-exactly the intended process or fails closed `NotFound`). A pipe,
-resource, pty, directory, or already-delegated descriptor is refused —
+`fd_grant(fd, write_ceiling, recipient, len)` requires `CAP_FS_ACCESS` and
+delegates the caller's **own** plain non-directory filesystem descriptor. A
+pipe, resource, pty, directory, or already-delegated descriptor is refused —
 delegation never chains.
+
+**The recipient is named by its process instance, never by its task id.**
+`recipient` points at the attested `ProcId` the grantor read from an
+`Origin` (`call_peer_origin`, `self_origin`), and `len` must be at least
+`PROC_ID_LEN` — a shorter buffer answers `BufferTooSmall` rather than
+decoding a partial identity. A task id is redrawn once its task is gone, and
+a grantor learns one an arbitrary time before it grants (a pick concludes
+when the *user* chooses, not when the app asked), so a number could name a
+later holder by the time the mint runs; an instance is minted once and never
+reissued. The kernel resolves the instance to the number its per-process
+tables are keyed by, records it with the delegation, and `fd_redeem` admits
+only that instance — so even a mint that raced a recipient's exit is inert
+in a newcomer's hands. An instance no live process holds, and the
+`ProcId::KERNEL` sentinel that names no one process, both fail closed
+`NotFound`, indistinguishable from an unopened descriptor.
 
 **A delegation attenuates by mode and by extent, and never widens.** It
 carries the grantor descriptor's *own* read/write access and nothing more;
@@ -1744,6 +1756,7 @@ declared in the source table:
 | -------------- | ------------------------------------------------------------------------ | ---------------------- |
 | `Unit`         | Slot must be exactly zero.                                               | `LengthOutOfRange`     |
 | `I32`          | Upper 32 bits equal the sign extension of the low 32.                    | `OutOfRange`           |
+| `I64`          | Any value — the whole register is the value, so there is no reserved half to police. | — |
 | `U32`          | Upper 32 bits are zero.                                                  | `OutOfRange`           |
 | `U64`          | Any value.                                                               | —                      |
 | `Cap`          | `>> 16 == 0` and within `CAPABILITY_ID_MAX` (`= 255`).                   | `OutOfRange`           |
@@ -1761,10 +1774,22 @@ declared arity.
 The `I32` rule has one definition, in `lib/abi`:
 `i32_register_is_canonical` is the acceptance above, and
 `i32_from_register` recovers the value the accepted register carries.
-Every arm that reads an `I32` slot — `exit`, `wait`, `signal`,
-`sched_set`, `console_foreground` — recovers through it, as do the QEMU
-test kernels that stand in for the dispatcher, so the reserved upper bits
-cannot mean one thing to production and another to a fixture.
+Every arm that reads an `I32` slot — `exit` chief among them — recovers
+through it, as do the QEMU test kernels that stand in for the dispatcher, so
+the reserved upper bits cannot mean one thing to production and another to a
+fixture.
+
+**A pid is `I64`, not `I32`.** Task ids are drawn at random across the ABI's
+pid range (`tairix_abi::PID_MAX`, the low 40 bits) rather than counted up
+from one, so the four pid-bearing slots — `wait`, `signal`,
+`console_foreground`, `sched_set_priority` — carry the whole register and
+recover through `i64_from_register`. The range is bounded rather than the
+full signed space because a pid is also packed under a namespace tag to
+derive an IPC endpoint id (the session wake mailbox, the Switchboard command
+mailbox, a window client's event mailbox, a device channel's notify port);
+bounding it is what keeps those derivations lossless and their namespaces
+disjoint. `WAIT_PID_ANY` is `-1`, which is why a pid is signed and why the
+draw never yields a value a signed slot could not state.
 
 ## Error map
 

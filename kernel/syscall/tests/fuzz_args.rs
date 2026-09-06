@@ -182,7 +182,7 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, _pid: i32) -> SyscallResult {
+    fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, _pid: i64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -256,7 +256,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn wait(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _status: u64,
         _flags: WaitFlags,
     ) -> SyscallResult {
@@ -266,7 +266,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn signal(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _signal: tairix_abi::Signal,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
@@ -287,7 +287,7 @@ impl SyscallHandlers for AcceptingHandlers {
     fn sched_set_priority(
         &self,
         _c: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _priority: tairix_abi::SchedPriority,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
@@ -895,8 +895,9 @@ impl SyscallHandlers for AcceptingHandlers {
         &self,
         _c: &CallerContext<'_>,
         _fd: u32,
-        _pid: u64,
         _write_ceiling: u64,
+        _recipient: u64,
+        _recipient_len: usize,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -1146,7 +1147,10 @@ fn narrow_for(ty: AbiType, raw: u64) -> u64 {
                 raw
             }
         }
-        AbiType::Len | AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint => raw,
+        // Every bit pattern is already a valid full-width slot, `I64`
+        // included, so the raw draw is well-typed and narrowing it would only
+        // shrink the space explored.
+        AbiType::Len | AbiType::U64 | AbiType::I64 | AbiType::Handle | AbiType::IpcEndpoint => raw,
     }
 }
 
@@ -1165,10 +1169,10 @@ fn arg_is_well_typed(ty: AbiType, raw: u64) -> bool {
             raw == extended
         }
         AbiType::U32 => raw >> 32 == 0,
-        // U64, Handle, IpcEndpoint and Len all accept any 64-bit
-        // value verbatim on a 64-bit host — the dispatcher's
-        // `usize::try_from` for Len is infallible there.
-        AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint | AbiType::Len => true,
+        // I64, U64, Handle, IpcEndpoint and Len all accept any 64-bit value
+        // verbatim on a 64-bit host — there is no reserved half to police,
+        // and the dispatcher's `usize::try_from` for Len is infallible there.
+        AbiType::I64 | AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint | AbiType::Len => true,
         AbiType::Cap => raw >> 16 == 0 && raw <= u64::from(tairix_abi::CAPABILITY_ID_MAX),
         AbiType::UserPtr => raw != 0,
         AbiType::Errno => false,

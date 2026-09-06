@@ -264,6 +264,12 @@ captured authority — so it needs no filesystem capability of its own, and the
 service makes the policy decision once at open and never touches a byte of
 payload.
 
+The delegation names the caller by the process *instance* the kernel attested
+on the request's own ticket (`origin.proc_id()`), never by its task id: an id
+is redrawn once its task is gone, and the instance is minted once and never
+reissued, so the handle is redeemable by the application that asked and by no
+later holder of its number.
+
 The two scopes differ in exactly one thing: who names the file. `Blobs/<name>`
 is durable and the application names it. `Temp/` is the scratch of one run and
 the **service** names it — see [Scratch](#scratch) below.

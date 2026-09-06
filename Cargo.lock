@@ -1993,9 +1993,12 @@ dependencies = [
 name = "tairix-kernel-sched-api"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-arch-api",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-mlfq",
+ "tairix-rng",
+ "tairix-sync",
 ]
 
 [[package]]

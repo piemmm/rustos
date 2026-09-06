@@ -64,7 +64,7 @@ pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
-    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PortWidth, PowerAction, RandomFlags,
+    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PortWidth, PowerAction, ProcId, RandomFlags,
     ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
     WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
     ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
@@ -439,6 +439,14 @@ const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
 #[allow(clippy::cast_sign_loss)] // Reinterpreting the sign-extended bit pattern is the documented I32 convention.
 const fn i32_arg(value: i32) -> u64 {
     value as i64 as u64
+}
+
+/// Marshal a full-width signed argument (a pid) into its register.
+///
+/// The whole register is the value, so — unlike [`i32_arg`] — there is no
+/// half to sign-extend into.
+const fn i64_arg(value: i64) -> u64 {
+    value.cast_unsigned()
 }
 
 /// Terminate the calling process with exit code `code` (`SyscallNumber::EXIT`).
@@ -2188,7 +2196,7 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
 /// caller decides how to react; it adds no authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 wait-result encoding (PID ≥ 0, else -errno).
-pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
+pub fn wait(pid: i64, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
     let mut record = tairix_abi::WaitStatusRecord::default();
     let ptr = core::ptr::addr_of_mut!(record) as usize as u64;
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
@@ -2199,7 +2207,7 @@ pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
     let ret = unsafe {
         raw_syscall(
             NUM_WAIT,
-            [i32_arg(pid), ptr, u64::from(flags.bits()), 0, 0, 0],
+            [i64_arg(pid), ptr, u64::from(flags.bits()), 0, 0, 0],
         )
     };
     let ret = ret as i64;
@@ -2232,7 +2240,7 @@ pub fn wait(pid: i32, status: &mut WaitStatus, flags: WaitFlags) -> i64 {
 /// wrapper surfaces that raw signed value so the caller decides how to react;
 /// it adds no authority and hides no error.
 #[must_use]
-pub fn try_wait(pid: i32, status: &mut WaitStatus) -> i64 {
+pub fn try_wait(pid: i64, status: &mut WaitStatus) -> i64 {
     wait(pid, status, WaitFlags::NONBLOCK)
 }
 
@@ -2245,7 +2253,7 @@ pub fn try_wait(pid: i32, status: &mut WaitStatus) -> i64 {
 /// `-errno` encoding exactly as [`wait`] does; `code` is untouched on a
 /// negative result.
 #[must_use]
-pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
+pub fn wait_exit(pid: i64, code: &mut i32) -> i64 {
     wait_exit_with(pid, code, WaitFlags::empty())
 }
 
@@ -2259,14 +2267,14 @@ pub fn wait_exit(pid: i32, code: &mut i32) -> i64 {
 /// encoding exactly as [`wait`] does — `Errno::WouldBlock` when no child has
 /// terminated yet; `code` is untouched on a negative result.
 #[must_use]
-pub fn try_wait_exit(pid: i32, code: &mut i32) -> i64 {
+pub fn try_wait_exit(pid: i64, code: &mut i32) -> i64 {
     wait_exit_with(pid, code, WaitFlags::NONBLOCK)
 }
 
 /// The one status-to-exit-code path [`wait_exit`] and [`try_wait_exit`] share,
 /// so the blocking and non-blocking forms cannot disagree on how a stop report
 /// is refused.
-fn wait_exit_with(pid: i32, code: &mut i32, flags: WaitFlags) -> i64 {
+fn wait_exit_with(pid: i64, code: &mut i32, flags: WaitFlags) -> i64 {
     let mut status = WaitStatus::Exited(0);
     let ret = wait(pid, &mut status, flags);
     if ret >= 0 {
@@ -2302,14 +2310,14 @@ fn wait_exit_with(pid: i32, code: &mut i32, flags: WaitFlags) -> i64 {
 /// no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn signal(pid: i32, signal: Signal) -> i64 {
+pub fn signal(pid: i64, signal: Signal) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel authorises
     // the target and validates the signal value on the far side of the trap.
     // `signal` dereferences no user pointer.
     let ret = unsafe {
         raw_syscall(
             NUM_SIGNAL,
-            [i32_arg(pid), u64::from(signal.as_u32()), 0, 0, 0, 0],
+            [i64_arg(pid), u64::from(signal.as_u32()), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -2341,14 +2349,14 @@ pub fn signal(pid: i32, signal: Signal) -> i64 {
 /// value; it adds no authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn sched_set_priority(pid: i32, priority: SchedPriority) -> i64 {
+pub fn sched_set_priority(pid: i64, priority: SchedPriority) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel authorises
     // the target and validates the level value on the far side of the trap.
     // `sched_set_priority` dereferences no user pointer.
     let ret = unsafe {
         raw_syscall(
             NUM_SCHED_SET_PRIORITY,
-            [i32_arg(pid), u64::from(priority.as_u32()), 0, 0, 0, 0],
+            [i64_arg(pid), u64::from(priority.as_u32()), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -2412,7 +2420,7 @@ pub fn system_power(action: PowerAction) -> i64 {
 /// authority and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
-pub fn console_foreground(fd: u32, pid: i32) -> i64 {
+pub fn console_foreground(fd: u32, pid: i64) -> i64 {
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel resolves
     // `fd` against the caller's own descriptor table and authorises `pid`
     // on the far side of the trap. `console_foreground` dereferences no
@@ -2420,7 +2428,7 @@ pub fn console_foreground(fd: u32, pid: i32) -> i64 {
     let ret = unsafe {
         raw_syscall(
             NUM_CONSOLE_FOREGROUND,
-            [u64::from(fd), i32_arg(pid), 0, 0, 0, 0],
+            [u64::from(fd), i64_arg(pid), 0, 0, 0, 0],
         )
     };
     ret as i64
@@ -3809,19 +3817,22 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
     ret as i64
 }
 
-/// Delegate the caller's own filesystem descriptor `fd` to the live task
-/// `pid` as a one-shot grant bounded above by `write_ceiling` bytes,
-/// returning the minted handle (≥ 1) or `-errno`
+/// Delegate the caller's own filesystem descriptor `fd` to the process
+/// instance `recipient` as a one-shot grant bounded above by
+/// `write_ceiling` bytes, returning the minted handle (≥ 1) or `-errno`
 /// (`SyscallNumber::FD_GRANT`, `plans/CAPABILITY_USE.md` CU6 — the file
 /// picker's user-mediated hand-off; `plans/APPDATA.md` §3.8 — the app-data
 /// service's blob descriptor).
 ///
-/// Requires `CAP_FS_ACCESS`; the mint is audited. `pid` must come from a
-/// kernel-attested source (`call_peer_origin`) — task ids are never
-/// reused, so the grant lands on the intended process or fails closed
-/// (`NotFound`). The kernel captures the *caller's* identity and effective
-/// capability set with the descriptor's path, so every operation on the
-/// redeemed descriptor is re-authorised under the grantor's authority.
+/// Requires `CAP_FS_ACCESS`; the mint is audited. `recipient` is the
+/// attested `ProcId` the grantor read from an `Origin` (`call_peer_origin`,
+/// `self_origin`) — never a task id, which is redrawn once its task is gone
+/// and so may name a later holder by the time the grant is minted. An
+/// instance no live process holds fails closed (`NotFound`), and the
+/// instance is recorded with the delegation so only that process can redeem
+/// it. The kernel captures the *caller's* identity and effective capability
+/// set with the descriptor's path, so every operation on the redeemed
+/// descriptor is re-authorised under the grantor's authority.
 ///
 /// The delegation carries the descriptor's **own** read/write access and no
 /// more, so it never widens what the grantor opened. `write_ceiling` is the
@@ -3837,12 +3848,26 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 /// bystander. [`File::from_delegation`] is the owned redemption.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-errno encoding (handle ≥ 1, else -errno).
-pub fn fd_grant(fd: u32, pid: u64, write_ceiling: u64) -> i64 {
-    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
-    // pointers, and the kernel validates `CAP_FS_ACCESS`, the caller's own
-    // descriptor, the ceiling against that descriptor's access, and the
-    // recipient's liveness before minting anything.
-    let ret = unsafe { raw_syscall(NUM_FD_GRANT, [u64::from(fd), pid, write_ceiling, 0, 0, 0]) };
+pub fn fd_grant(fd: u32, write_ceiling: u64, recipient: ProcId) -> i64 {
+    let instance = recipient.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke. The one pointer is to
+    // this frame's `instance` array, live across the call and exactly the
+    // length passed; the kernel validates `CAP_FS_ACCESS`, the caller's own
+    // descriptor, the ceiling against that descriptor's access, and that the
+    // instance names a live process before minting anything.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FD_GRANT,
+            [
+                u64::from(fd),
+                write_ceiling,
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                0,
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 

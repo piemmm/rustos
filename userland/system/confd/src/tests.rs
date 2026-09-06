@@ -1754,9 +1754,9 @@ fn a_blob_open_answers_a_bounded_grant_and_never_bytes() {
     assert!(minted.write);
     assert_eq!(minted.ceiling, APPDATA_BULK_FILE_MAX_BYTES);
     assert_eq!(
-        minted.task,
-        ada.pid(),
-        "the grant is minted to the caller's attested task, never a wire value"
+        minted.recipient,
+        ada.proc_id(),
+        "the grant is minted to the caller's attested instance, never a wire value"
     );
     assert!(
         minted.path.starts_with(&alloc::format!(
@@ -1999,7 +1999,11 @@ fn a_temporary_file_is_reached_only_by_the_process_that_created_it() {
     assert!(grant.path.ends_with(&alloc::format!("/Temp/{name}")));
     assert!(grant.write, "scratch is written, so the grant conveys it");
     assert_eq!(grant.ceiling, APPDATA_BULK_FILE_MAX_BYTES);
-    assert_eq!(grant.task, 1, "minted to the attested task and no other");
+    assert_eq!(
+        grant.recipient,
+        ada.proc_id(),
+        "minted to the attested instance and no other"
+    );
 
     // A second create is a different file, so two instances of one application
     // cannot land on each other's scratch.

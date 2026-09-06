@@ -531,10 +531,10 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         "x86_64 wild-fault test: parent spawned through the production seam",
     );
 
-    // The spawn seam hands back a `u64` id and the wait ABI takes an
-    // `i32`; convert rather than cast, so an id that could not be reaped
-    // fails the run instead of being silently wrapped.
-    let Ok(parent_pid) = i32::try_from(parent_pid) else {
+    // The spawn seam hands back a `u64` id and the wait ABI takes a signed
+    // pid; convert rather than cast, so an id that could not be reaped fails
+    // the run instead of being silently wrapped.
+    let Ok(parent_pid) = i64::try_from(parent_pid) else {
         fail("wild-fault test: parent pid does not fit the wait ABI");
     };
     drive_to_parent_exit(sys.sched, wait_producer, parent_pid)
@@ -549,7 +549,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
 fn drive_to_parent_exit(
     sched: &Scheduler<BinArch>,
     wait_producer: &KernelProcessWait<BinArch>,
-    parent_pid: i32,
+    parent_pid: i64,
 ) -> ! {
     let mut steps = 0u64;
     while steps < MAX_STEPS {

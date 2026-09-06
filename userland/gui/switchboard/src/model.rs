@@ -56,10 +56,11 @@ pub const fn map_section(command: CommandSection) -> Section {
 ///
 /// A truncated id would name a *different*, arbitrary process, so an id
 /// beyond the syscall's width yields [`None`] and the action is not
-/// attempted at all.
+/// attempted at all. The kernel draws every id inside the signed range, so
+/// this refuses only a sample that was already impossible.
 #[must_use]
-pub fn signal_pid(owner: u64) -> Option<i32> {
-    i32::try_from(owner).ok()
+pub fn signal_pid(owner: u64) -> Option<i64> {
+    i64::try_from(owner).ok()
 }
 
 /// A process name rendered as display text: valid UTF-8 with a lossy

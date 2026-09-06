@@ -1356,13 +1356,15 @@ fn a_scroll_action_has_no_effect() {
 fn a_task_id_within_the_syscall_width_narrows_unchanged() {
     assert_eq!(signal_pid(0), Some(0));
     assert_eq!(signal_pid(4321), Some(4321));
-    let widest = u64::try_from(i32::MAX).expect("i32::MAX fits a u64");
-    assert_eq!(signal_pid(widest), Some(i32::MAX));
+    // The widest id the kernel can draw still round-trips: pids span the
+    // whole non-negative signed range, not a 32-bit window.
+    let widest = i64::MAX.cast_unsigned();
+    assert_eq!(signal_pid(widest), Some(i64::MAX));
 }
 
 #[test]
 fn a_task_id_beyond_the_syscall_width_is_refused_never_truncated() {
-    let beyond = u64::try_from(i32::MAX).expect("i32::MAX fits a u64") + 1;
+    let beyond = i64::MAX.cast_unsigned() + 1;
     assert_eq!(signal_pid(beyond), None);
     assert_eq!(signal_pid(u64::MAX), None);
 }

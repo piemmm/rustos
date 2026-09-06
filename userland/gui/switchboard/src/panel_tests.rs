@@ -590,7 +590,9 @@ fn a_force_action_is_never_attempted_without_the_capability() {
 
 #[test]
 fn a_force_action_on_an_id_beyond_the_syscall_width_is_refused_not_truncated() {
-    let beyond = u64::try_from(i32::MAX).expect("i32::MAX fits a u64") + 1;
+    // Past the signed range no pid exists, so a sample claiming one is
+    // refused rather than folded onto a different, arbitrary process.
+    let beyond = i64::MAX.cast_unsigned() + 1;
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, stopped_model(beyond, true));
 

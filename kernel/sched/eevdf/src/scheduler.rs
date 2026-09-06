@@ -17,9 +17,9 @@ use tairix_sync::{RwLock, SpinLock};
 use crate::runqueue::{Entry, RunQueue, SCALE, SERVICE_PER_DISPATCH};
 use crate::task::{TaskBody, TaskInner};
 use crate::{
-    CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError, SchedResult,
-    SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction, TaskContext, TaskId,
-    TaskState,
+    choose_task_id, CoreClass, CpuId, ExitDisposition, Priority, SchedClass, SchedError,
+    SchedResult, SchedulerArch, SchedulerConfig, SchedulerPolicy, StepOutcome, TaskAction,
+    TaskContext, TaskId, TaskState,
 };
 
 /// Per-CPU scheduler state: the virtual-time run queue plus the timer
@@ -53,7 +53,6 @@ pub struct Scheduler<A: SchedulerArch> {
     arch: Arc<A>,
     cpus: Box<[CpuState]>,
     tasks: RwLock<BTreeMap<TaskId, Arc<TaskInner>>>,
-    next_id: AtomicU64,
     config: SchedulerConfig,
     /// Per-CPU fast, non-cryptographic generators for work-stealing
     /// victim selection. This is a "scheduler decision" in the sense of
@@ -129,7 +128,6 @@ impl<A: SchedulerArch> Scheduler<A> {
             arch,
             cpus: cpus.into_boxed_slice(),
             tasks: RwLock::new(BTreeMap::new()),
-            next_id: AtomicU64::new(1),
             config,
             victim_rng: victim_rng.into_boxed_slice(),
             overflow: SpinLock::new(Vec::new()),
@@ -349,16 +347,20 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.cpu_state(home_cpu)?;
         let placed = self.placement_for(priority, home_cpu);
         let cpu = self.cpu_state(placed)?;
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = if id == 0 {
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        } else {
-            id
-        };
         let boxed: Box<TaskBody> = Box::new(body);
-        let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
+        // The id is chosen and registered under one write lock, so a
+        // concurrent admission cannot take it in between; the queue work
+        // below then runs with the lock released, preserving the
+        // tasks-before-queue order every other path takes.
+        let inner = {
+            let mut tasks = self.tasks.write();
+            let id = choose_task_id(None, |c| tasks.contains_key(&c))?;
+            let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
+            tasks.insert(id, Arc::clone(&inner));
+            inner
+        };
+        let id = inner.id;
         let entry = Self::admit(&inner, &cpu.queue);
-        self.tasks.write().insert(id, inner);
         if cpu.queue.push(entry).is_err() {
             self.overflow.lock().push(id);
         }
@@ -388,22 +390,53 @@ impl<A: SchedulerArch> Scheduler<A> {
     where
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
+        self.register_parked(None, home_cpu, priority, body)
+    }
+
+    /// Admit a parked task at the reserved id `id` — see
+    /// [`SchedulerPolicy::spawn_parked_as`].
+    ///
+    /// # Errors
+    /// * [`SchedError::NoSuchCpu`] if `home_cpu` is out of range.
+    /// * [`SchedError::TaskIdInUse`] if a live task already holds `id`.
+    /// * [`SchedError::NoTaskIdAvailable`] if `id` names no task.
+    pub fn spawn_parked_as<F>(
+        &self,
+        id: TaskId,
+        home_cpu: CpuId,
+        priority: Priority,
+        body: F,
+    ) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        self.register_parked(Some(id), home_cpu, priority, body)
+    }
+
+    /// Register a parked task under a drawn id (`requested` is `None`) or the
+    /// caller's reserved one, so both birth forms share one registration.
+    fn register_parked<F>(
+        &self,
+        requested: Option<TaskId>,
+        home_cpu: CpuId,
+        priority: Priority,
+        body: F,
+    ) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
         self.cpu_state(home_cpu)?;
         let placed = self.placement_for(priority, home_cpu);
         self.cpu_state(placed)?;
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = if id == 0 {
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        } else {
-            id
-        };
         let boxed: Box<TaskBody> = Box::new(body);
+        let mut tasks = self.tasks.write();
+        let id = choose_task_id(requested, |c| tasks.contains_key(&c))?;
         let inner = Arc::new(TaskInner::new(id, placed, priority, boxed));
         // Born parked: no queue entry and no competing weight are admitted
         // now, so no CPU can pick the task up. The later `unpark` performs
         // the placement, weight admission, enqueue, and IPI.
         inner.store_state(TaskState::Parked);
-        self.tasks.write().insert(id, inner);
+        tasks.insert(id, inner);
         Ok(id)
     }
 
@@ -1210,6 +1243,19 @@ impl<A: SchedulerArch> SchedulerPolicy<A> for Scheduler<A> {
         F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
     {
         Scheduler::spawn_parked(self, home_cpu, priority, body)
+    }
+
+    fn spawn_parked_as<F>(
+        &self,
+        id: TaskId,
+        home_cpu: CpuId,
+        priority: Priority,
+        body: F,
+    ) -> SchedResult<TaskId>
+    where
+        F: FnMut(&mut TaskContext) -> TaskAction + Send + 'static,
+    {
+        Scheduler::spawn_parked_as(self, id, home_cpu, priority, body)
     }
 
     fn park(&self, id: TaskId) -> SchedResult<()> {

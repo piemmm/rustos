@@ -10,11 +10,11 @@
 
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    i32_from_register, i32_register_is_canonical, spec_for, AbiType, CallRecvFlags, CapabilityId,
-    Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags,
-    RealpathMode, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags,
-    WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN,
-    SYSCALL_MAX_ARGS,
+    i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
+    CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth,
+    PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
+    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -520,7 +520,7 @@ pub trait SyscallHandlers {
     fn wait(
         &self,
         caller: &CallerContext<'_>,
-        pid: i32,
+        pid: i64,
         status: u64,
         flags: WaitFlags,
     ) -> SyscallResult;
@@ -541,7 +541,7 @@ pub trait SyscallHandlers {
     /// The default implementation fails closed with [`Errno::NotImplemented`]:
     /// a kernel build with no process-signal service wired never pretends the
     /// signal landed. The producer is installed in `kernel/core`.
-    fn signal(&self, _caller: &CallerContext<'_>, _pid: i32, _signal: Signal) -> SyscallResult {
+    fn signal(&self, _caller: &CallerContext<'_>, _pid: i64, _signal: Signal) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -731,7 +731,7 @@ pub trait SyscallHandlers {
     fn sched_set_priority(
         &self,
         _caller: &CallerContext<'_>,
-        _pid: i32,
+        _pid: i64,
         _priority: SchedPriority,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
@@ -894,7 +894,7 @@ pub trait SyscallHandlers {
         &self,
         _caller: &CallerContext<'_>,
         _fd: u32,
-        _pid: i32,
+        _pid: i64,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -2034,11 +2034,20 @@ pub trait SyscallHandlers {
     /// any backing that is not a plain filesystem path (a pipe, pty,
     /// resource, or already-delegated descriptor answers
     /// [`Errno::OutOfRange`], so delegation never chains) and any directory,
-    /// confirms the recipient task `pid` is live (task ids are never reused,
-    /// so the grant can never land on a recycled identity), captures the
-    /// caller's uid and effective capability set beside the descriptor's
-    /// path, and mints the recipient an unforgeable handle that resolves
-    /// only when the recipient itself presents it to [`Self::fd_redeem`].
+    /// captures the caller's uid and effective capability set beside the
+    /// descriptor's path, and mints the recipient an unforgeable handle that
+    /// resolves only when the recipient itself presents it to
+    /// [`Self::fd_redeem`].
+    ///
+    /// The recipient is named by the attested `ProcId` at `recipient`
+    /// (`recipient_len` bytes, at least [`PROC_ID_LEN`](tairix_abi::PROC_ID_LEN)),
+    /// as the grantor read it from an [`Origin`](tairix_abi::Origin) — never
+    /// by a task id, which is redrawn once its task is gone and so could
+    /// name a later holder by the time the mint runs. An instance no live
+    /// process holds, and the kernel sentinel, both fail closed with
+    /// [`Errno::NotFound`]; a short buffer answers
+    /// [`Errno::BufferTooSmall`]. The instance is recorded with the
+    /// delegation, so redemption admits that process alone.
     ///
     /// The delegation carries the descriptor's **own** read/write access and
     /// nothing more, so it never widens what the grantor opened.
@@ -2054,8 +2063,9 @@ pub trait SyscallHandlers {
         &self,
         _caller: &CallerContext<'_>,
         _fd: u32,
-        _pid: u64,
         _write_ceiling: u64,
+        _recipient: u64,
+        _recipient_len: usize,
     ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
@@ -3039,7 +3049,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[1] is the `SchedPriority` discriminant, rejected
                 // before dispatch if it is not one of the closed set (fail
                 // closed on an unknown or zeroed value).
-                let pid = i32_from_register(args.0[0]);
+                let pid = i64_from_register(args.0[0]);
                 let priority = SchedPriority::from_u32(decode_u32(args.0[1]))?;
                 self.handlers.sched_set_priority(caller, pid, priority)
             }
@@ -3054,7 +3064,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::WAIT => {
                 // `validate_arg` guarantees args[1] is a non-null `UserPtr`;
                 // `from_bits` rejects any reserved flag bit.
-                let pid = i32_from_register(args.0[0]);
+                let pid = i64_from_register(args.0[0]);
                 let flags = WaitFlags::from_bits(decode_u32(args.0[2]))?;
                 self.handlers.wait(caller, pid, args.0[1], flags)
             }
@@ -3062,7 +3072,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[1] is the `Signal` discriminant, rejected before
                 // dispatch if it is not one of the closed set (fail closed on
                 // an unknown or zeroed value).
-                let pid = i32_from_register(args.0[0]);
+                let pid = i64_from_register(args.0[0]);
                 let signal = Signal::from_u32(decode_u32(args.0[1]))?;
                 self.handlers.signal(caller, pid, signal)
             }
@@ -3104,7 +3114,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::CONSOLE_FOREGROUND => {
                 // args[0] is the readable descriptor naming the console;
                 // a `0` PID clears the slot.
-                let pid = i32_from_register(args.0[1]);
+                let pid = i64_from_register(args.0[1]);
                 self.handlers
                     .console_foreground(caller, decode_u32(args.0[0]), pid)
             }
@@ -3676,13 +3686,16 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.boot_facts_get(caller, args.0[0], out_cap)
             }
             SyscallNumber::FD_GRANT => {
-                // args[0] is the caller's own path-backed descriptor;
-                // args[1] is the recipient's kernel task id (both resolved
-                // and owner-/liveness-checked by the handler); args[2] is
-                // the write-extent ceiling, which the handler checks against
-                // the descriptor's own access.
+                // args[0] is the caller's own path-backed descriptor
+                // (resolved owner-checked by the handler); args[1] is the
+                // write-extent ceiling, which the handler checks against the
+                // descriptor's own access; args[2] is the non-null
+                // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
+                // recipient, and args[3] is its length in bytes.
                 let fd = decode_u32(args.0[0]);
-                self.handlers.fd_grant(caller, fd, args.0[1], args.0[2])
+                let recipient_len = decode_len(args.0[3])?;
+                self.handlers
+                    .fd_grant(caller, fd, args.0[1], args.0[2], recipient_len)
             }
             SyscallNumber::FD_REDEEM => {
                 // args[0] is the grant handle minted to the calling task
@@ -3894,7 +3907,9 @@ fn validate_arg(ty: AbiType, raw: u64) -> Result<(), Errno> {
                 Err(Errno::OutOfRange)
             }
         }
-        AbiType::U64 | AbiType::Handle | AbiType::IpcEndpoint => Ok(()),
+        // `I64` joins the full-width arms: every bit pattern is a value,
+        // so there is no reserved half to police.
+        AbiType::U64 | AbiType::I64 | AbiType::Handle | AbiType::IpcEndpoint => Ok(()),
         AbiType::Cap => decode_capability(raw).map(|_| ()),
         AbiType::UserPtr => {
             if raw == 0 {
@@ -4219,7 +4234,7 @@ mod tests {
         fn wait(
             &self,
             _c: &CallerContext<'_>,
-            pid: i32,
+            pid: i64,
             _status: u64,
             _flags: WaitFlags,
         ) -> SyscallResult {
@@ -4227,17 +4242,15 @@ mod tests {
             // Echo the requested pid back as a fabricated reaped PID so the
             // reachability test can assert the dispatcher decoded the
             // `(pid, status, flags)` arguments without wiring a real wait
-            // service here. The reachability test passes pid 0 (a valid I32).
-            #[allow(clippy::cast_sign_loss)]
-            Ok(u64::from(pid as u32))
+            // service here.
+            Ok(pid.cast_unsigned())
         }
-        fn signal(&self, _c: &CallerContext<'_>, pid: i32, _signal: Signal) -> SyscallResult {
+        fn signal(&self, _c: &CallerContext<'_>, pid: i64, _signal: Signal) -> SyscallResult {
             self.record("signal");
             // Echo the requested pid back so the reachability test can assert
             // the dispatcher decoded the `(pid, signal)` arguments without
             // wiring a real signal service here.
-            #[allow(clippy::cast_sign_loss)]
-            Ok(u64::from(pid as u32))
+            Ok(pid.cast_unsigned())
         }
         fn rlimit_get(&self, _c: &CallerContext<'_>, kind: u32, _out: u64) -> SyscallResult {
             self.record("rlimit_get");
@@ -4275,15 +4288,14 @@ mod tests {
         fn sched_set_priority(
             &self,
             _c: &CallerContext<'_>,
-            pid: i32,
+            pid: i64,
             priority: SchedPriority,
         ) -> SyscallResult {
             self.record("sched_set_priority");
             // Echo the decoded pid and level back so the reachability test
             // can assert the dispatcher decoded `(pid, priority)` without
             // wiring the real scheduler control here.
-            #[allow(clippy::cast_sign_loss)]
-            Ok(u64::from(pid as u32) + u64::from(priority.as_u32()))
+            Ok(pid.cast_unsigned() + u64::from(priority.as_u32()))
         }
         fn users_db_read(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
             self.record("users_db_read");
@@ -4333,13 +4345,12 @@ mod tests {
             // decoded `(fd, mode)` without wiring a real console here.
             Ok(0)
         }
-        fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, pid: i32) -> SyscallResult {
+        fn console_foreground(&self, _c: &CallerContext<'_>, _fd: u32, pid: i64) -> SyscallResult {
             self.record("console_foreground");
             // Echo the decoded pid back so the decode test can assert the
-            // dispatcher recovered the sign-extended `i32` without wiring a
+            // dispatcher recovered the full-width signed pid without wiring a
             // real console list here.
-            #[allow(clippy::cast_sign_loss)]
-            Ok(u64::from(pid as u32))
+            Ok(pid.cast_unsigned())
         }
         fn thread_create(
             &self,
@@ -5190,12 +5201,13 @@ mod tests {
             &self,
             _c: &CallerContext<'_>,
             fd: u32,
-            _pid: u64,
             _write_ceiling: u64,
+            _recipient: u64,
+            _recipient_len: usize,
         ) -> SyscallResult {
             self.record("fd_grant");
             // Echo the descriptor so the reachability test can assert the
-            // dispatcher decoded both arguments without a real grant table.
+            // dispatcher decoded the arguments without a real grant table.
             Ok(u64::from(fd))
         }
 
@@ -5267,7 +5279,7 @@ mod tests {
                 AbiType::Cap => u64::from(CapabilityId::FS_MOUNT.as_u16()),
                 AbiType::UserPtr => 0x1000,
                 AbiType::Len => 64,
-                AbiType::I32 | AbiType::Unit | AbiType::Errno => 0,
+                AbiType::I32 | AbiType::I64 | AbiType::Unit | AbiType::Errno => 0,
             };
         }
     }
@@ -6370,6 +6382,40 @@ mod tests {
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
     }
 
+    /// Regression: a pid wider than 32 bits reaches the handler intact. The
+    /// slot was an `I32` while task ids were small and counted; a drawn id
+    /// exceeds that, and a surviving narrow decode would have delivered every
+    /// `wait`, `signal`, `console_foreground` and priority change to the
+    /// wrong process.
+    #[test]
+    fn a_pid_wider_than_32_bits_reaches_the_handler_intact() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        // The widest pid the kernel can draw, and one just past the 32-bit
+        // window a narrowing decode would have folded.
+        for pid in [
+            tairix_abi::PID_MAX,
+            u64::from(u32::MAX) + 1,
+            u64::from(u32::MAX),
+        ] {
+            let mut args = RawArgs::ZERO;
+            args.0[0] = pid;
+            args.0[1] = 0x1000; // status
+            assert_eq!(
+                d.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), args),
+                Ok(pid),
+                "the wait pid slot must carry {pid} unchanged"
+            );
+        }
+    }
+
     #[test]
     fn wait_recovers_a_negative_pid_and_rejects_a_null_status() {
         let sink = RecordingSink::new();
@@ -6381,19 +6427,15 @@ mod tests {
         let h = MockHandlers::default();
         let d = Dispatcher::new(&h, &sink);
 
-        // `WAIT_PID_ANY` (-1) is sign-extended through all 64 bits; the
-        // dispatcher must recover it as `i32::-1` and forward it. The Mock
-        // echoes the pid back reinterpreted as `u32`, i.e. `u32::MAX`.
+        // `WAIT_PID_ANY` (-1) occupies the whole register; the dispatcher
+        // must recover it as `-1` and forward it. The Mock echoes the pid
+        // back reinterpreted as `u64`, i.e. `u64::MAX`.
         let mut args = RawArgs::ZERO;
-        // The test builds the register a caller would pass: a sign-extended
-        // `i32` reinterpreted as the raw `u64`.
-        #[allow(clippy::cast_sign_loss)]
-        let extended = i64::from(tairix_abi::WAIT_PID_ANY) as u64;
-        args.0[0] = extended;
+        args.0[0] = tairix_abi::WAIT_PID_ANY.cast_unsigned();
         args.0[1] = 0x1000; // status
         assert_eq!(
             d.dispatch(&ctx, u64::from(SyscallNumber::WAIT.as_u16()), args),
-            Ok(u64::from(u32::MAX))
+            Ok(u64::MAX)
         );
 
         // A null `status` pointer is rejected by the per-arg `UserPtr`

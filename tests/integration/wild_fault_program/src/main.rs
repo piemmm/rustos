@@ -93,9 +93,7 @@ mod program {
     /// with [`FAULT_EXIT_CODE`]. Returns `0` on success or a code derived
     /// from `fail_code` naming which step failed.
     fn run_child(path: &[u8], fail_code: i32) -> i32 {
-        let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
-            return fail_code;
-        };
+        let pid = tairix_rt::spawn(path);
         if pid <= 0 {
             return fail_code;
         }

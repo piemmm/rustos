@@ -42,7 +42,7 @@ mod program {
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::random::RandomFlags;
-    use tairix_abi::{BootId, Errno, Origin, UnlinkFlags, ORIGIN_WIRE_LEN};
+    use tairix_abi::{BootId, Errno, Origin, ProcId, UnlinkFlags, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{ORIGIN_UNREADABLE, SERVICE_READY, SERVICE_UNAVAILABLE};
     use tairix_confd::{AppData, DirEntry, Entropy, NodeInfo, Storage};
@@ -229,7 +229,7 @@ mod program {
             path: &str,
             write: bool,
             ceiling: u64,
-            task: u64,
+            recipient: ProcId,
         ) -> Result<u64, Errno> {
             // The service's own descriptor lives for the length of this
             // function and no longer: a delegation record carries the path and
@@ -245,7 +245,7 @@ mod program {
                 OpenFlags::READ
             };
             let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
-            let handle = tairix_rt::fd_grant(file.fd(), task, ceiling);
+            let handle = tairix_rt::fd_grant(file.fd(), ceiling, recipient);
             u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
         }
     }

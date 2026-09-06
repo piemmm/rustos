@@ -111,8 +111,8 @@ const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
 /// channel-backed interface and passes to the driver in
 /// [`AttachParams::notify_endpoint`].
 ///
-/// It packs the stack's own kernel task id `pid` (never reused while the
-/// stack lives) and the per-interface slot `index` under a fixed high tag,
+/// It packs the stack's own kernel task id `pid` and the per-interface slot
+/// `index` under a fixed high tag,
 /// mirroring the window client's `event_endpoint_for`: a distinct,
 /// collision-free, **non-reserved** id, so the stack `port_bind`s it
 /// without [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED)
@@ -124,10 +124,11 @@ const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
 ///
 /// `index` is bounded by [`NET_CHANNEL_ENDPOINT_COUNT`] (the most channels
 /// the stack serves at once) and occupies the low byte; `pid` occupies the
-/// next 48 bits, well within a task id's range.
+/// next 40 bits, which is the whole of [`crate::PID_MAX`], so the three
+/// fields tile the word exactly and no pid can reach the tag.
 #[must_use]
 pub const fn notify_endpoint_for(pid: u64, index: u64) -> u64 {
-    NET_NOTIFY_ENDPOINT_TAG | ((pid & 0xFFFF_FFFF_FFFF) << 8) | (index & 0xFF)
+    NET_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | (index & 0xFF)
 }
 
 /// Operation discriminants (the request's fifth byte).
@@ -1114,6 +1115,25 @@ pub fn decode_service_reply(bytes: &[u8]) -> Result<ServiceReport, Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three fields tile the word exactly, so no pid or slot can reach
+    /// another's bits or fold two notify ports onto one id.
+    #[test]
+    fn a_notify_endpoint_packs_pid_and_slot_without_reaching_the_tag() {
+        for pid in [0u64, 1, 4096, crate::PID_MAX] {
+            for index in [0u64, 1, NET_CHANNEL_ENDPOINT_COUNT - 1] {
+                let endpoint = notify_endpoint_for(pid, index);
+                assert_eq!(endpoint & 0xFF, index);
+                assert_eq!((endpoint >> 8) & crate::PID_MAX, pid);
+                assert_eq!(endpoint >> 48, NET_NOTIFY_ENDPOINT_TAG >> 48);
+                assert!(!crate::ipc::is_reserved_endpoint(endpoint));
+            }
+        }
+        assert_ne!(
+            notify_endpoint_for(crate::PID_MAX, 0),
+            notify_endpoint_for(crate::PID_MAX - 1, 0)
+        );
+    }
 
     fn geometry() -> RingGeometry {
         // A GSO-class transmit capacity distinct from the receive MTU,

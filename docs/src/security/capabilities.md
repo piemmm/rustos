@@ -94,10 +94,12 @@ The one **object-grained** delegation beside spawn is the file hand-off
 AW5, `plans/APPDATA.md` §3.8): a holder of `CAP_FS_ACCESS` — the desktop
 session's trusted picker, or the app-data service handing over a blob —
 delegates one of its **own** plain file descriptors, one-shot, to a
-kernel-attested recipient task. The kernel captures the grantor's uid and
-effective set with the path and re-authorises every operation on the
-delegated descriptor under *that* identity, and the recipient-owner-bound
-handle redeems exactly once through the unprivileged `fd_redeem`.
+recipient named by the attested `ProcId` the grantor read from an `Origin`
+— never by a task id, which is redrawn once its task is gone. The kernel
+captures the grantor's uid and effective set with the path and re-authorises
+every operation on the delegated descriptor under *that* identity; it
+records the recipient's instance with the delegation, and the handle redeems
+exactly once through the unprivileged `fd_redeem`, for that instance alone.
 
 The delegation **attenuates and never widens**. It carries the grantor
 descriptor's own read/write access and nothing more, with the open-time flags

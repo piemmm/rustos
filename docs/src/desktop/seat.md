@@ -260,13 +260,17 @@ asynchronous signals.
 - **No wedged consoles.** A vanished owner never strands its console: the
   `exit` path releases any console ownership the exiting task held, and
   the read gate clears a recorded owner the process bookkeeping proves
-  dead (`ProcessWait::is_live`; task ids are never reused, so a proven
-  death is final). The inert bookkeeping default reports every task live,
+  dead (`ProcessWait::is_live`). The inert bookkeeping default reports every
+  task live,
   so a gate that cannot prove death keeps denying — it can heal, never
   widen.
 - **Signal routing rides the same slot.** The cooked-mode `^C`/`^Z`
   delivery to the foreground job (SP9) targets the same recorded owner, so
-  "who gets the interrupt" and "who drains the input" can never diverge.
+  "who gets the interrupt" and "who drains the input" can never diverge. The
+  slot records the owner's process *instance* beside its pid, and the
+  delivery refuses a target whose pid now names a different one — an id whose
+  task is gone may be drawn again, and a mis-delivered `^C` would kill a
+  bystander.
 
 Kernel host tests prove the exclusivity (two tasks cannot both drain, the
 refused reader consumes nothing), the handoff transfer, the bystander

@@ -8703,3 +8703,70 @@ re-rolling a container outside the two container crates. Each increment lands it
 engine, migrates its callers, and deletes the copies it replaces in the same
 change — an increment that leaves both is not done. C0–C3 are prerequisites;
 C4–C9 are mutually independent once C3 lands.
+
+
+## RANDOM-PID — task ids drawn rather than counted (§17.1 contract extension)  **[DONE]**
+
+**Dependencies:** none. Touches `plans/THREADS.md` (the id model),
+`plans/SPAWN.md` (the `^C` delivery slot), and `plans/COLLECTIONS.md` C6
+(whose scope no longer includes the scheduler counters).
+
+**The defect it closes.** Each policy minted task ids from its own monotonic
+`next_id`, so an id disclosed how many tasks the system had admitted and when,
+and two policies in one image would have minted the same ids for unrelated
+tasks — aliasing every process-global keyed by task id (the signal kill gate,
+the wait-set registry, the endpoint registry).
+
+**Shape.** One process-wide generator in `kernel/sched/api` behind a spinlock,
+seeded per boot from the CSPRNG reserve (`boot_id::seed_task_ids`), and one
+id rule (`choose_task_id`) every policy shares: reserved ids are never drawn,
+a candidate the policy already holds is redrawn past under the write lock the
+registration takes, and a bounded run of rejected candidates fails closed. The
+draw spans `tairix_abi::PID_MAX`, the ABI's own pid bound — a pid round-trips
+through a signed syscall argument *and* is packed under a namespace tag to
+derive an IPC endpoint id, so the range is the ABI's to state, not the
+scheduler's to choose.
+
+**§17.1 contract extension.** `SchedulerPolicy` gains
+`spawn_parked_as(requested, …)`: the reserved-identity birth form, so the boot
+path admits PID 1 at `INIT_TASK_ID` rather than relying on a counter starting
+at 1. `SchedError` gains `TaskIdInUse` and `NoTaskIdAvailable`. Two
+conformance verticals cover the new form for all three policies. `kthread`'s
+trailing `parked: bool` became `Admission::{Runnable, Parked, ParkedAs}` so a
+birth form is named at every call site.
+
+**Widened with it.** The pid ABI is `i64` end to end (`AbiType::I64`, the four
+pid-bearing syscall spec rows, the dispatcher, `lib/rt`, `lib/abi-sys`, the
+elevation reply, and the generated C header), because a drawn id does not fit
+`i32`. CFQ's ready set tie-breaks on an enqueue sequence rather than the task
+id, since ordering random ids would pick an arbitrary winner where arrival
+order is the fair one.
+
+**What reuse now means, and what it does not.** A *live* id is never issued
+twice; a dead task's id may be drawn again, as on any system that bounds its
+pid space. Every state keyed by a task id is torn down before the scheduler
+releases the id, and where a stale reference must be told apart from a fresh
+occupant of the same number the process-instance `ProcId` is what
+distinguishes them — the foreground `^C`/`^Z` slot now carries it and refuses a
+stale target.
+
+**An identity may outlive its task, and the draw respects that.** A process
+*is* its leader thread's task, so reaping the leader of a group whose siblings
+still run would return a live process's number to the draw. `kernel/sched/api`
+therefore holds a process-wide reserved-id set beside the generator, and
+`choose_task_id` composes it with the policy's own liveness predicate — so the
+hold is part of the one id rule every policy already calls, and needed no
+addition to the `SchedulerPolicy` contract. `threads::retire` owns both halves
+— it is the per-thread half of every death, so it is the one place the group's
+member count crosses: it takes the hold when a retiring thread is its process's
+leader and siblings remain, and returns the number when the count reaches zero
+(`plans/OPEN-DEFECTS.md` D91).
+
+**No interface now names a process by pid alone across a window where it can
+change hands.** The last one was `fd_grant`, which took its recipient's task
+id; it takes the attested `ProcId` instead, the delegation records that
+instance, and `fd_redeem` admits it alone — so a mint that raced its
+recipient's exit is inert rather than merely unlikely. The pid left the
+request entirely rather than gaining an assertion beside it, and the gate sits
+at redemption, where the redeemer's instance is the dispatcher's own snapshot
+and so needs no cross-lock atomicity argument (`plans/OPEN-DEFECTS.md` D92).

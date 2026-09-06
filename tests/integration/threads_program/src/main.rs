@@ -362,9 +362,7 @@ mod program {
         let group_exit_code = group_exit_code as i32;
 
         for (index, path) in CHILD_PATHS.iter().enumerate() {
-            let Ok(pid) = i32::try_from(tairix_rt::spawn(path)) else {
-                return FAIL_PARENT;
-            };
+            let pid = tairix_rt::spawn(path);
             if pid <= 0 {
                 return FAIL_PARENT;
             }

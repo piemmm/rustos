@@ -958,6 +958,10 @@ delegation a whole descriptor:
 
 - `fd_grant` mints the **grantor descriptor's own** access mode rather than a
   hard-coded read, so a delegation never conveys more than the grantor opened.
+  It names its recipient by the attested `ProcId` the dispatcher read on the
+  request's own ticket (`origin.proc_id()`), never by a task id: an id is
+  redrawn once its task is gone, and the instance is recorded so only the
+  application that asked can redeem.
   A directory and a non-path backing stay refused, and the open-time flags
   (`CREATE`, `TRUNCATE`, `APPEND`, `NO_FOLLOW`) are not carried: the file is
   already open, and an `APPEND` delegation would silently move every write to

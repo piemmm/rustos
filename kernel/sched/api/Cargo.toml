@@ -40,3 +40,10 @@ tairix-kernel-sched-mlfq = { path = "../mlfq", version = "=0.0.0" }
 # is a `SchedApi` crate and so may name
 # `kernel/arch/api` and `lib/*` only.
 tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
+# The pid range a drawn task id must stay inside is an ABI value, not the
+# scheduler's own choice: peers derive tag-packed endpoint ids from a pid.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The process-wide task-id generator draws from the project's one shared
+# non-cryptographic generator and holds it behind the shared spinlock.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }

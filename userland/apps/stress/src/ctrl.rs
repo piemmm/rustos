@@ -38,7 +38,7 @@ const KILL_STATUS: i32 = match Signal::Kill.termination_status() {
 /// One child the controller is supervising.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Child {
-    pid: i32,
+    pid: i64,
     kind: ChildKind,
 }
 
@@ -67,7 +67,7 @@ pub enum Action {
     /// Send `signal` to child `pid`.
     Signal {
         /// The child to signal.
-        pid: i32,
+        pid: i64,
         /// The signal to send (`Terminate` on drain, `Kill` on grace
         /// expiry).
         signal: Signal,
@@ -83,7 +83,7 @@ pub enum Event {
     /// A supervised child was reaped with `code`.
     ChildExited {
         /// The reaped child's PID.
-        pid: i32,
+        pid: i64,
         /// Its wait status (exit code, or the `128+n` signal status).
         code: i32,
     },
@@ -143,7 +143,7 @@ impl Controller {
     }
 
     /// Record a spawned worker child.
-    pub fn add_worker(&mut self, pid: i32, kind: WorkerKind) {
+    pub fn add_worker(&mut self, pid: i64, kind: WorkerKind) {
         self.children.push(Child {
             pid,
             kind: ChildKind::Worker(kind),
@@ -151,7 +151,7 @@ impl Controller {
     }
 
     /// Record the spawned `--monitor` child.
-    pub fn add_monitor(&mut self, pid: i32) {
+    pub fn add_monitor(&mut self, pid: i64) {
         self.children.push(Child {
             pid,
             kind: ChildKind::Monitor,
@@ -210,7 +210,7 @@ impl Controller {
         self.monitor_quit
     }
 
-    fn on_child_exited(&mut self, pid: i32, code: i32) -> Vec<Action> {
+    fn on_child_exited(&mut self, pid: i64, code: i32) -> Vec<Action> {
         let Some(position) = self.children.iter().position(|child| child.pid == pid) else {
             // Not ours (already reaped, or a stray report): nothing to do.
             return Vec::new();

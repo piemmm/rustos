@@ -49,7 +49,7 @@ use crate::kthread::reschedule_current;
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct WaitedChild {
     /// PID of the reported child.
-    pub pid: u32,
+    pub pid: u64,
     /// What happened to it: exited (reaped) or stopped (still tracked).
     pub status: WaitStatus,
 }
@@ -87,7 +87,7 @@ pub trait ProcessWait: Sync {
     /// `parent` (and `parent` has no children, for [`tairix_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
-    fn wait(&self, parent: ProcessId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno>;
+    fn wait(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno>;
 
     /// Non-blocking counterpart to [`Self::wait`]: try to report a child of
     /// `parent` selected by `pid` **without ever parking the caller**.
@@ -107,7 +107,7 @@ pub trait ProcessWait: Sync {
     /// The default fails closed with [`Errno::NotImplemented`] so a producer
     /// that predates the poll path — and the inert [`NullProcessWait`] —
     /// never fabricates a reaped child; [`KernelProcessWait`] overrides it.
-    fn poll(&self, _parent: ProcessId, _pid: i32, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn poll(&self, _parent: ProcessId, _pid: i64, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -155,7 +155,7 @@ pub trait ProcessWait: Sync {
     /// [`Errno::NotFound`] when `pid` does not name a live child of
     /// `sender`. The default fails closed with [`Errno::NotImplemented`] so
     /// the inert [`NullProcessWait`] never authorises anyone.
-    fn authorise_child(&self, _sender: ProcessId, _pid: i32) -> Result<ProcessId, Errno> {
+    fn authorise_child(&self, _sender: ProcessId, _pid: i64) -> Result<ProcessId, Errno> {
         Err(Errno::NotImplemented)
     }
 
@@ -168,7 +168,7 @@ pub trait ProcessWait: Sync {
     /// ready on [`ChildPeek::Reapable`]. The default fails closed with
     /// [`ChildPeek::NoChild`] so the inert [`NullProcessWait`] (and any
     /// producer that predates the wait-set) never fabricates a child.
-    fn child_state(&self, _parent: ProcessId, _pid: i32) -> ChildPeek {
+    fn child_state(&self, _parent: ProcessId, _pid: i64) -> ChildPeek {
         ChildPeek::NoChild
     }
 
@@ -189,8 +189,10 @@ pub trait ProcessWait: Sync {
     /// The console foreground gate uses this to self-heal a stale
     /// controlling-owner slot: a recorded owner this reports dead is
     /// cleared so the console is never wedged behind a process that can no
-    /// longer read it. Task ids are never reused, so a `false` answer is
-    /// final. The default reports **live** — the answer that keeps the
+    /// longer read it. A `false` answer is final for the process it was asked
+    /// about: that row is gone, and a later task drawing the same id is a
+    /// different process the gate has not been asked about. The default
+    /// reports **live** — the answer that keeps the
     /// gate denying — so a producer that predates the query (and the inert
     /// [`NullProcessWait`]) can never *widen* access by mistaking a live
     /// owner for a dead one; [`KernelProcessWait`] overrides it with the
@@ -211,7 +213,7 @@ pub trait ProcessWait: Sync {
 pub struct NullProcessWait;
 
 impl ProcessWait for NullProcessWait {
-    fn wait(&self, _parent: ProcessId, _pid: i32, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn wait(&self, _parent: ProcessId, _pid: i64, _flags: WaitFlags) -> Result<WaitedChild, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -223,15 +225,6 @@ impl ProcessWait for NullProcessWait {
 /// boot path replaces it with [`KernelProcessWait`] through
 /// `KernelSyscallHandlers::with_process_wait`.
 pub static NULL_PROCESS_WAIT: NullProcessWait = NullProcessWait;
-
-/// Narrow a scheduler process id to the `u32` PID the ABI carries.
-///
-/// Scheduler process ids stay well within `u32` for every supported
-/// configuration; a value that would not fit saturates rather than wrapping
-/// (never silently truncate).
-fn narrow_task_id(id: u64) -> u32 {
-    u32::try_from(id).unwrap_or(u32::MAX)
-}
 
 /// One child's entry in the [`ProcessTable`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -375,12 +368,12 @@ impl ProcessTable {
     /// [`Reap::NoChild`]. A negative `pid` other than [`tairix_abi::WAIT_PID_ANY`]
     /// names no child and fails closed with [`Reap::NoChild`].
     #[must_use]
-    pub fn reap(&mut self, parent: ProcessId, pid: i32, report_stopped: bool) -> Reap {
+    pub fn reap(&mut self, parent: ProcessId, pid: i64, report_stopped: bool) -> Reap {
         let (any_match, reapable, stopped) = self.find(parent, pid, report_stopped);
         if let Some((child_id, code)) = reapable {
             self.children.remove(&child_id);
             Reap::Ready(WaitedChild {
-                pid: narrow_task_id(child_id),
+                pid: child_id,
                 status: WaitStatus::Exited(code),
             })
         } else if let Some((child_id, signal)) = stopped {
@@ -389,7 +382,7 @@ impl ProcessTable {
                 entry.stop_pending = None;
             }
             Reap::Ready(WaitedChild {
-                pid: narrow_task_id(child_id),
+                pid: child_id,
                 status: WaitStatus::Stopped(signal),
             })
         } else if any_match {
@@ -407,7 +400,7 @@ impl ProcessTable {
     /// follows. It shares the private `find` scan with [`Self::reap`], so
     /// the two can never disagree on which children match.
     #[must_use]
-    pub fn peek(&self, parent: ProcessId, pid: i32) -> ChildPeek {
+    pub fn peek(&self, parent: ProcessId, pid: i64) -> ChildPeek {
         let (any_match, reapable, _) = self.find(parent, pid, false);
         if reapable.is_some() {
             ChildPeek::Reapable
@@ -432,7 +425,7 @@ impl ProcessTable {
     fn find(
         &self,
         parent: ProcessId,
-        pid: i32,
+        pid: i64,
         report_stopped: bool,
     ) -> (bool, Option<(u64, i32)>, Option<(u64, Signal)>) {
         let target: Option<u64> = if pid == WAIT_PID_ANY {
@@ -481,7 +474,7 @@ impl ProcessTable {
     /// than pretending to reach it. A negative or otherwise non-representable
     /// `pid` names no child.
     #[must_use]
-    pub fn live_child(&self, parent: ProcessId, pid: i32) -> Option<ProcessId> {
+    pub fn live_child(&self, parent: ProcessId, pid: i64) -> Option<ProcessId> {
         let want = u64::try_from(pid).ok()?;
         let entry = self.children.get(&want)?;
         if entry.parent == Some(parent.0) && entry.exit.is_none() {
@@ -520,9 +513,9 @@ impl ProcessTable {
     /// The parentless liveness lookup behind [`ProcessWait::is_live`]: a
     /// tracked entry with no recorded exit is live; a zombie awaiting reap,
     /// a reaped (removed) entry, and a process the table never tracked all
-    /// report dead. Every console foreground owner was authorised as a
-    /// live tracked child when it was granted (process ids are never reused),
-    /// so "untracked" can only mean the owner is gone.
+    /// report dead. Every console foreground owner was authorised as a live
+    /// tracked child when it was granted, and its row outlives its
+    /// scheduler entry, so "untracked" can only mean the owner is gone.
     #[must_use]
     pub fn is_live(&self, process: ProcessId) -> bool {
         self.children
@@ -574,7 +567,7 @@ where
     fn try_report(
         &self,
         parent: ProcessId,
-        pid: i32,
+        pid: i64,
         flags: WaitFlags,
     ) -> Result<WaitedChild, Errno> {
         match self.table.lock().reap(parent, pid, flags.is_stopped()) {
@@ -619,7 +612,7 @@ where
         self.table.lock().record_continue(process);
     }
 
-    fn authorise_child(&self, sender: ProcessId, pid: i32) -> Result<ProcessId, Errno> {
+    fn authorise_child(&self, sender: ProcessId, pid: i64) -> Result<ProcessId, Errno> {
         // The one bookkeeping lookup the signal producer and the
         // `console_foreground` handler share with `wait`, so the
         // parent/child relationship has a single definition. Only a
@@ -630,7 +623,7 @@ where
             .ok_or(Errno::NotFound)
     }
 
-    fn poll(&self, parent: ProcessId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn poll(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno> {
         // A single non-blocking report attempt — the same primitive the
         // blocking `wait` loop uses, so the two can never diverge. A matching
         // child with nothing to report yet is `WouldBlock` (the
@@ -639,7 +632,7 @@ where
         self.try_report(parent, pid, flags)
     }
 
-    fn child_state(&self, parent: ProcessId, pid: i32) -> ChildPeek {
+    fn child_state(&self, parent: ProcessId, pid: i64) -> ChildPeek {
         self.table.lock().peek(parent, pid)
     }
 
@@ -647,7 +640,7 @@ where
         self.table.lock().is_live(process)
     }
 
-    fn wait(&self, parent: ProcessId, pid: i32, flags: WaitFlags) -> Result<WaitedChild, Errno> {
+    fn wait(&self, parent: ProcessId, pid: i64, flags: WaitFlags) -> Result<WaitedChild, Errno> {
         loop {
             // Re-poll under the lock, then release it *before* parking so the
             // child whose exit we are waiting for can take the same lock from

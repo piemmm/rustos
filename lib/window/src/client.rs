@@ -250,15 +250,15 @@ const fn key_modifiers(modifiers: WireModifiers) -> Modifiers {
 pub const EVENT_MAILBOX_CAPACITY: usize = 32;
 
 /// The event-mailbox endpoint id an app binds for its window events: the
-/// app's kernel task id (never reused) under a fixed high tag, so every
-/// app instance binds a distinct, collision-free, non-reserved id — the
-/// one naming rule every window-channel app shares, so two apps can never
-/// disagree about the id space. The mailbox is owner-only to receive and
-/// every message carries its sender's kernel-attested origin, so the id
-/// needs no secrecy.
+/// app's kernel task id under a fixed high tag, so every app instance binds
+/// a distinct, collision-free, non-reserved id — the one naming rule every
+/// window-channel app shares, so two apps can never disagree about the id
+/// space. A pid is bounded to [`tairix_abi::PID_MAX`] precisely so it fits
+/// beneath the tag. The mailbox is owner-only to receive and every message
+/// carries its sender's kernel-attested origin, so the id needs no secrecy.
 #[must_use]
 pub const fn event_endpoint_for(pid: u64) -> u64 {
-    EVENT_ENDPOINT_TAG | pid
+    EVENT_ENDPOINT_TAG | (pid & tairix_abi::PID_MAX)
 }
 
 /// The one call the client issues: send one request frame, receive one

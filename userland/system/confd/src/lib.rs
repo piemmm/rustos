@@ -245,8 +245,8 @@ pub trait Storage {
     /// for a failed listing.
     fn list_dir(&mut self, path: &str) -> Result<Vec<DirEntry>, Errno>;
 
-    /// Open the file at `path` and delegate it to the live task `task` as a
-    /// one-shot grant, returning the handle the task redeems.
+    /// Open the file at `path` and delegate it to the process instance
+    /// `recipient` as a one-shot grant, returning the handle it redeems.
     ///
     /// `write` decides both what the delegation conveys and whether an absent
     /// file is created; `ceiling` is the highest length the holder may write
@@ -260,9 +260,15 @@ pub trait Storage {
     /// # Errors
     ///
     /// [`Errno::NotFound`] when a read-only open names a file that does not
-    /// exist, or when `task` is not live; any other [`Errno`] the open or the
-    /// delegation reports.
-    fn grant(&mut self, path: &str, write: bool, ceiling: u64, task: u64) -> Result<u64, Errno>;
+    /// exist, or when no live process holds `recipient`; any other [`Errno`]
+    /// the open or the delegation reports.
+    fn grant(
+        &mut self,
+        path: &str,
+        write: bool,
+        ceiling: u64,
+        recipient: ProcId,
+    ) -> Result<u64, Errno>;
 }
 
 /// One staged, uncommitted change to a document.
@@ -747,7 +753,7 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
     ) -> Result<usize, Errno> {
         let create = mode.is_write();
         let blobs = self.blobs(fs, origin, identity, create)?;
-        let outcome = blobs.grant(fs, name, mode, origin.pid());
+        let outcome = blobs.grant(fs, name, mode, origin.proc_id());
         let handle = self.resolve(origin, outcome)?;
         encode_grant_reply(handle, out)
     }
@@ -836,7 +842,7 @@ impl<S: Sink, R: Entropy> AppData<S, R> {
         out: &mut [u8],
     ) -> Result<usize, Errno> {
         let temp = self.temps(fs, origin, identity, true)?;
-        let outcome = temp.create(fs, &mut self.entropy, origin.pid());
+        let outcome = temp.create(fs, &mut self.entropy, origin.proc_id());
         let (handle, name) = self.resolve(origin, outcome)?;
         encode_temp_reply(handle, &name, out)
     }

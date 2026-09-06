@@ -204,6 +204,7 @@ fn c_type(ty: AbiType) -> &'static str {
         AbiType::Unit => "void",
         // `Errno` is an `i32` discriminant; both render as `int32_t`.
         AbiType::I32 | AbiType::Errno => "int32_t",
+        AbiType::I64 => "int64_t",
         AbiType::U32 => "uint32_t",
         AbiType::Cap => "uint16_t",
         // Opaque kernel handles and IPC endpoints are 64-bit values.
@@ -3219,7 +3220,7 @@ mod tests {
             "wait nonblock flag bit: {h}"
         );
         assert!(
-            h.contains("uint64_t tairix_sys_wait(int32_t a0, void * a1, uint32_t a2);"),
+            h.contains("uint64_t tairix_sys_wait(int64_t a0, void * a1, uint32_t a2);"),
             "wait prototype carries the flags argument: {h}"
         );
         // The fs_set_mode() permission mask is read from lib/abi, never
@@ -3242,7 +3243,7 @@ mod tests {
             "signal terminate discriminant: {h}"
         );
         assert!(
-            h.contains("int32_t tairix_sys_signal(int32_t a0, uint32_t a1);"),
+            h.contains("int32_t tairix_sys_signal(int64_t a0, uint32_t a1);"),
             "signal prototype carries the pid and signal arguments: {h}"
         );
         // The stop-report flag, the two line-discipline signals, and the
@@ -3280,7 +3281,7 @@ mod tests {
             "wait status stopped kind: {h}"
         );
         assert!(
-            h.contains("int32_t tairix_sys_console_foreground(uint32_t a0, int32_t a1);"),
+            h.contains("int32_t tairix_sys_console_foreground(uint32_t a0, int64_t a1);"),
             "console_foreground prototype carries the fd and pid arguments: {h}"
         );
     }
@@ -3292,7 +3293,7 @@ mod tests {
     fn syscall_header_carries_the_sched_priority_contract() {
         let h = body("tairix_syscall.h");
         assert!(
-            h.contains("int32_t tairix_sys_sched_set_priority(int32_t a0, uint32_t a1);"),
+            h.contains("int32_t tairix_sys_sched_set_priority(int64_t a0, uint32_t a1);"),
             "sched_set_priority prototype carries the pid and level arguments: {h}"
         );
         for (name, level) in [
