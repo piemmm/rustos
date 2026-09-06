@@ -582,6 +582,36 @@ mod program {
                 DegradedField::Mounts => {
                     "notice: the mount table is unavailable; volume capacities are not shown"
                 }
+                DegradedField::MemoryPressureBand => {
+                    "notice: the memory-pressure band is unavailable; the pressure banner is degraded"
+                }
+                DegradedField::ReclaimStats => {
+                    "notice: the reclaim ledger is unavailable; the reclaimable share is not shown"
+                }
+                DegradedField::RamzipStats => {
+                    "notice: compressed-memory statistics are unavailable; the compressed tier is not shown"
+                }
+                DegradedField::CacheLedgers => {
+                    "notice: the bounded-cache ledger is unavailable; the reclaim ledger is not shown"
+                }
+                DegradedField::NetInterfaceCounters => {
+                    "notice: per-interface counters are unavailable; the counters block is not shown"
+                }
+                DegradedField::NetSockets => {
+                    "notice: the socket table is unavailable; the socket census is not shown"
+                }
+                DegradedField::NetResolverServers => {
+                    "notice: the configured resolvers are unavailable; they are not shown"
+                }
+                DegradedField::NetTimeServers => {
+                    "notice: the configured time servers are unavailable; they are not shown"
+                }
+                DegradedField::NetStackDefence => {
+                    "notice: connection-defence counters are unavailable; they are not shown"
+                }
+                DegradedField::HardwareTree => {
+                    "notice: the hardware tree is unavailable; the graphics device is not named"
+                }
                 DegradedField::VolumeHealth => {
                     "notice: volume I/O health is unavailable; a failing disk cannot be reported"
                 }
@@ -827,9 +857,7 @@ mod program {
             | WindowEvent::PickCancelled { .. } => return,
         };
         if let Some(action) = action {
-            if let Some(outcome) = service.panel_mut().act(host, action, authority) {
-                service.apply_grouping(host, outcome, authority);
-            }
+            service.panel_mut().act(host, action, authority);
         }
     }
 

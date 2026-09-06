@@ -1,36 +1,27 @@
 //! Unit tests for the live model builder and action-to-effect mapping.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::switchboard_ipc::{CommandSection, SeatReport};
+use tairix_abi::switchboard_ipc::SeatReport;
 use tairix_abi::sysinfo::{
     CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, ProcessState, Uptime,
 };
-use tairix_abi::{Duration64, ProcId, SchedPriority, Signal, Time64, PROC_ID_LEN};
-use tairix_controls::{ActivityState, PressureKind, MAX_CHART_SAMPLES};
+use tairix_abi::{Duration64, ProcId, Signal, Time64};
 
 use super::{
-    apply_action, build_model, map_section, signal_pid, Effect, GroupingEdit, RollingMeters,
-    SessionReport, TaskMeters, TASK_HISTORY_LEN,
+    apply_action, build_model, signal_pid, Effect, RollingMeters, SessionReport, TaskMeters,
+    TASK_HISTORY_LEN,
 };
-use crate::activities::{Activities, Member};
-use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
-use crate::sample::{MemoryPressureSample, ProcessSummary, Sample};
+use crate::derive::{derive_summary, Hysteresis};
+use crate::sample::{ProcessSummary, Sample};
 use crate::test_host::{
-    process_summary as process, process_summary_with, sample_with, DEFAULT_UID,
-    NO_AUTHORITY as NONE, PROC_CONTROL_AUTHORITY as PROC_CONTROL,
+    process_summary as process, sample_with, DEFAULT_UID, NO_AUTHORITY as NONE,
+    PROC_CONTROL_AUTHORITY as PROC_CONTROL,
 };
-use crate::view::{
-    ActionVerdict, ActivityControl, PressureControl, Reading, RecoveryControl, Section,
-    SwitchboardAction, TaskControl, TileInstrument, Unmeasured,
-};
+use crate::view::{Reading, RecoveryControl, SwitchboardAction, TaskControl, Unmeasured};
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test
 /// data so the expected pressure-card text is computed from the same
-/// literal constants a reader can check by eye.
-const GIB: u64 = 1024 * 1024 * 1024;
-
 /// The meter state the run loop would hold after deriving and recording
 /// exactly `samples`, in order — the same sequence the service performs.
 fn meters_over(samples: &[Sample]) -> RollingMeters {
@@ -52,127 +43,10 @@ fn meters_for(sample: &Sample) -> RollingMeters {
 fn model(
     sample: &Sample,
     session: &SessionReport,
-    meters: &RollingMeters,
+    meters: &mut RollingMeters,
     authority: &dyn tairix_abi::CapabilityQuery,
 ) -> super::PanelModel {
-    build_model(
-        "Switchboard",
-        sample,
-        session,
-        meters,
-        authority,
-        &Activities::new(),
-        None,
-    )
-}
-
-fn member(proc_id: ProcId, pid: u64, name: &str) -> Member {
-    Member {
-        proc_id,
-        pid,
-        name: String::from(name),
-    }
-}
-
-#[test]
-fn map_section_covers_every_wire_section() {
-    assert_eq!(map_section(CommandSection::Tasks), Section::Tasks);
-    assert_eq!(map_section(CommandSection::Jobs), Section::Jobs);
-    assert_eq!(map_section(CommandSection::Pressure), Section::Pressure);
-    assert_eq!(map_section(CommandSection::Activities), Section::Activities);
-    assert_eq!(map_section(CommandSection::Recovery), Section::Recovery);
-    assert_eq!(map_section(CommandSection::System), Section::System);
-}
-
-#[test]
-fn tasks_are_built_in_sampled_order_with_a_switch_action() {
-    let sample = sample_with(alloc::vec![
-        process(10, ProcessState::Running, b"alpha", Some(500)),
-        process(20, ProcessState::Running, b"beta", None),
-    ]);
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    assert_eq!(panel.model.tasks.len(), 2);
-    assert_eq!(panel.model.tasks[0].name, "alpha");
-    assert_eq!(panel.model.tasks[0].cpu_permille, Some(500));
-    // A live task's window may always be asked for; nothing else is, without
-    // the process-control capability this caller does not hold.
-    assert_eq!(
-        panel.model.tasks[0].authority.verdict(TaskControl::Switch),
-        ActionVerdict::Ready
-    );
-    for control in [
-        TaskControl::Pause,
-        TaskControl::Resume,
-        TaskControl::LowerPriority,
-        TaskControl::ForceQuit,
-    ] {
-        assert_eq!(
-            panel.model.tasks[0].authority.verdict(control),
-            ActionVerdict::DeniedByAuthority,
-            "{control:?} needs process control"
-        );
-    }
-    assert_eq!(panel.model.tasks[0].group, None);
-    assert_eq!(panel.task_owner(0), Some(10));
-    assert_eq!(panel.task_owner(1), Some(20));
-    assert_eq!(panel.task_owner(2), None);
-}
-
-#[test]
-fn a_task_grouped_into_an_activity_carries_its_index() {
-    let sample = sample_with(alloc::vec![
-        process(10, ProcessState::Running, b"alpha", None),
-        process(20, ProcessState::Running, b"beta", None),
-    ]);
-    let real = sample.processes[0].proc_id;
-    let mut activities = Activities::new();
-    activities.create(member(real, 10, "alpha")).expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert_eq!(panel.model.tasks[0].group, Some(0));
-    assert_eq!(panel.model.tasks[1].group, None);
-}
-
-#[test]
-fn a_live_process_is_working_and_a_finished_or_stopped_one_is_idle() {
-    let sample = sample_with(alloc::vec![
-        process(1, ProcessState::Runnable, b"runnable", None),
-        process(2, ProcessState::Running, b"running", None),
-        process(3, ProcessState::Blocked, b"blocked", None),
-        process(4, ProcessState::Zombie, b"zombie", None),
-        process(5, ProcessState::Stopped, b"stopped", None),
-    ]);
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let activities: Vec<ActivityState> =
-        panel.model.tasks.iter().map(|task| task.activity).collect();
-    assert_eq!(
-        activities,
-        alloc::vec![
-            ActivityState::Working,
-            ActivityState::Working,
-            ActivityState::Working,
-            ActivityState::Idle,
-            ActivityState::Idle,
-        ]
-    );
+    build_model("Switchboard", sample, session, meters, authority)
 }
 
 #[test]
@@ -186,7 +60,7 @@ fn stopped_processes_become_recovery_rows() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     assert_eq!(panel.model.recovery.len(), 1);
@@ -207,7 +81,7 @@ fn recovery_force_is_allowed_only_with_the_capability() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &PROC_CONTROL,
     );
     assert!(panel.model.recovery[0].can_force);
@@ -225,7 +99,7 @@ fn seat_report_owners_are_joined_against_sampled_names() {
         seat: SeatReport::new(1, &[42]).expect("valid report"),
         frame: None,
     };
-    let panel = model(&sample, &report, &meters_for(&sample), &NONE);
+    let panel = model(&sample, &report, &mut meters_for(&sample), &NONE);
     assert_eq!(panel.model.recovery.len(), 1);
     assert_eq!(panel.model.recovery[0].name, "hungapp");
     assert_eq!(panel.recovery_owner(0), Some(42));
@@ -244,7 +118,7 @@ fn an_unknown_reported_owner_does_not_fabricate_a_row() {
         seat: SeatReport::new(1, &[99]).expect("valid report"),
         frame: None,
     };
-    let panel = model(&sample, &report, &meters_for(&sample), &NONE);
+    let panel = model(&sample, &report, &mut meters_for(&sample), &NONE);
     assert!(panel.model.recovery.is_empty());
 }
 
@@ -260,810 +134,13 @@ fn a_stopped_process_also_named_by_the_seat_report_is_not_duplicated() {
         seat: SeatReport::new(1, &[7]).expect("valid report"),
         frame: None,
     };
-    let panel = model(&sample, &report, &meters_for(&sample), &NONE);
+    let panel = model(&sample, &report, &mut meters_for(&sample), &NONE);
     assert_eq!(panel.model.recovery.len(), 1);
-}
-
-#[test]
-fn an_unsampled_resource_reads_unknown_and_stays_unmeasured() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let cpu = &panel.model.system.headline[0];
-    let memory = &panel.model.system.headline[1];
-    assert_eq!(cpu.name, "CPU");
-    assert_eq!(memory.name, "Memory");
-    // An unsampled reading names why it is missing rather than showing a
-    // zero, which would read as "idle" when the truth is "unknown".
-    assert_eq!(cpu.value, Reading::Absent(Unmeasured::Unavailable));
-    assert_eq!(memory.value, Reading::Absent(Unmeasured::NotPermitted));
-    assert_eq!(memory.instrument, TileInstrument::Track(None));
-    assert_eq!(cpu.instrument, TileInstrument::Trend(alloc::vec![]));
-}
-
-#[test]
-fn a_sampled_resource_carries_its_measured_reading() {
-    let sample = Sample {
-        cpu_busy_permille: Some(624),
-        memory_pressure: Some(MemoryPressureSample {
-            band: 0,
-            used_permille: 310,
-            total_bytes: 0,
-        }),
-        ..Sample::default()
-    };
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let cpu = &panel.model.system.headline[0];
-    let memory = &panel.model.system.headline[1];
-    assert_eq!(cpu.value, Reading::measured("62%"));
-    assert_eq!(cpu.instrument, TileInstrument::Trend(alloc::vec![624]));
-    assert_eq!(memory.value, Reading::measured("31%"));
-    assert_eq!(memory.instrument, TileInstrument::Track(Some(310)));
-}
-
-#[test]
-fn the_cpu_meter_carries_the_pressure_the_derivation_latched() {
-    let sample = Sample {
-        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    assert!(meters.system.cpu_pressured());
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let cpu = &panel.model.system.headline[0];
-    assert_eq!(cpu.value, Reading::measured("90%"));
-    assert!(
-        cpu.pressured,
-        "the header must carry the same latch the tray icon reads"
-    );
-    assert_eq!(
-        cpu.instrument,
-        TileInstrument::Trend(alloc::vec![CPU_PRESSURE_ENTER_PERMILLE])
-    );
-}
-
-#[test]
-fn the_memory_meter_carries_the_band_the_sampler_read() {
-    let sample = Sample {
-        memory_pressure: Some(MemoryPressureSample {
-            band: 2,
-            used_permille: 950,
-            total_bytes: 0,
-        }),
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    assert!(meters.system.memory_pressured());
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let memory = &panel.model.system.headline[1];
-    assert_eq!(memory.value, Reading::measured("95%"));
-    assert!(
-        memory.pressured,
-        "the header must carry the same latch the tray icon reads"
-    );
-    assert_eq!(memory.instrument, TileInstrument::Track(Some(950)));
-}
-
-#[test]
-fn the_cpu_history_records_every_measured_sample_in_order() {
-    let samples: Vec<Sample> = [100u16, 200, 300]
-        .iter()
-        .map(|busy| Sample {
-            cpu_busy_permille: Some(*busy),
-            ..Sample::default()
-        })
-        .collect();
-    let meters = meters_over(&samples);
-    assert_eq!(meters.system.cpu_history(), &[100, 200, 300]);
-}
-
-#[test]
-fn an_unmeasurable_interval_contributes_no_history_point() {
-    let samples = alloc::vec![
-        Sample {
-            cpu_busy_permille: Some(120),
-            ..Sample::default()
-        },
-        Sample::default(),
-        Sample {
-            cpu_busy_permille: Some(340),
-            ..Sample::default()
-        },
-    ];
-    let meters = meters_over(&samples);
-    assert_eq!(meters.system.cpu_history(), &[120, 340]);
-}
-
-#[test]
-fn the_cpu_history_is_bounded_and_drops_the_oldest_reading() {
-    let samples: Vec<Sample> = (0..MAX_CHART_SAMPLES + 3)
-        .map(|index| Sample {
-            cpu_busy_permille: Some(u16::try_from(index).expect("small index")),
-            ..Sample::default()
-        })
-        .collect();
-    let meters = meters_over(&samples);
-    assert_eq!(meters.system.cpu_history().len(), MAX_CHART_SAMPLES);
-    assert_eq!(meters.system.cpu_history().first(), Some(&3));
-    let last = u16::try_from(MAX_CHART_SAMPLES + 2).expect("small index");
-    assert_eq!(meters.system.cpu_history().last(), Some(&last));
-}
-
-#[test]
-fn jobs_services_and_system_actions_stay_honestly_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    assert!(panel.model.jobs.is_empty());
-    // There is no service registry to enumerate, so the screen states the
-    // absence rather than showing an empty list that reads as "none".
-    assert!(panel
-        .model
-        .system
-        .actions
-        .iter()
-        .all(|action| { !action.allowed && action.refusal == Some(Unmeasured::NoInterface) }));
 }
 
 // --- Pressure section --------------------------------------------------
 
-#[test]
-fn no_pressure_cards_when_neither_latch_is_active() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    assert!(panel.model.pressure.is_empty());
-}
-
-#[test]
-fn a_cpu_culprit_card_recommends_lowering_priority_for_its_own_uid() {
-    let sample = sample_with(alloc::vec![process_summary_with(
-        10,
-        ProcessState::Running,
-        b"hog",
-        Some(900),
-        DEFAULT_UID,
-        0,
-        SchedPriority::Normal,
-    )]);
-    let mut s = sample;
-    s.cpu_busy_permille = Some(CPU_PRESSURE_ENTER_PERMILLE);
-    let meters = meters_for(&s);
-    let panel = build_model(
-        "Switchboard",
-        &s,
-        &SessionReport::HEALTHY,
-        &meters,
-        &NONE,
-        &Activities::new(),
-        Some(DEFAULT_UID),
-    );
-    assert_eq!(panel.model.pressure.len(), 1);
-    let cause = &panel.model.pressure[0];
-    assert_eq!(cause.resource, "CPU");
-    assert_eq!(cause.kind, PressureKind::Cpu);
-    assert_eq!(cause.culprit, "hog");
-    assert_eq!(cause.cause, "Using 90% of the CPU over the last sample.");
-    assert_eq!(cause.task_index, Some(0));
-    let lower = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::LowerPriority)
-        .expect("a lower-priority action");
-    assert_eq!(lower.verdict, ActionVerdict::Ready);
-    assert!(lower.recommended);
-    let pause = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::Pause)
-        .expect("a pause action");
-    assert_eq!(pause.verdict, ActionVerdict::Ready);
-    assert!(panel.model.pressure[0]
-        .actions
-        .iter()
-        .any(|action| action.control == PressureControl::ShowTasks));
-    assert_eq!(panel.pressure_target(0), Some(10));
-}
-
-#[test]
-fn a_cpu_culprit_is_denied_without_authority_over_another_uid() {
-    let sample = {
-        let mut s = sample_with(alloc::vec![process_summary_with(
-            10,
-            ProcessState::Running,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        )]);
-        s.cpu_busy_permille = Some(CPU_PRESSURE_ENTER_PERMILLE);
-        s
-    };
-    let meters = meters_for(&sample);
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters,
-        &NONE,
-        &Activities::new(),
-        Some(DEFAULT_UID + 1),
-    );
-    let cause = &panel.model.pressure[0];
-    let lower = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::LowerPriority)
-        .expect("a lower-priority action");
-    assert_eq!(lower.verdict, ActionVerdict::DeniedByAuthority);
-}
-
-#[test]
-fn a_cpu_culprit_is_ready_across_uids_with_the_capability() {
-    let sample = {
-        let mut s = sample_with(alloc::vec![process_summary_with(
-            10,
-            ProcessState::Running,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        )]);
-        s.cpu_busy_permille = Some(CPU_PRESSURE_ENTER_PERMILLE);
-        s
-    };
-    let meters = meters_for(&sample);
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters,
-        &PROC_CONTROL,
-        &Activities::new(),
-        Some(DEFAULT_UID + 1),
-    );
-    let cause = &panel.model.pressure[0];
-    let lower = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::LowerPriority)
-        .expect("a lower-priority action");
-    assert_eq!(lower.verdict, ActionVerdict::Ready);
-}
-
-#[test]
-fn a_cpu_culprit_already_low_disables_lower_priority() {
-    let sample = {
-        let mut s = sample_with(alloc::vec![process_summary_with(
-            10,
-            ProcessState::Running,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            SchedPriority::Low,
-        )]);
-        s.cpu_busy_permille = Some(CPU_PRESSURE_ENTER_PERMILLE);
-        s
-    };
-    let meters = meters_for(&sample);
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters,
-        &NONE,
-        &Activities::new(),
-        Some(DEFAULT_UID),
-    );
-    let cause = &panel.model.pressure[0];
-    let lower = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::LowerPriority)
-        .expect("a lower-priority action");
-    assert_eq!(lower.verdict, ActionVerdict::DisabledByState);
-}
-
-#[test]
-fn a_stopped_cpu_culprit_disables_pause() {
-    let sample = {
-        let mut s = sample_with(alloc::vec![process_summary_with(
-            10,
-            ProcessState::Stopped,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        )]);
-        s.cpu_busy_permille = Some(CPU_PRESSURE_ENTER_PERMILLE);
-        s
-    };
-    let meters = meters_for(&sample);
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters,
-        &NONE,
-        &Activities::new(),
-        Some(DEFAULT_UID),
-    );
-    let cause = &panel.model.pressure[0];
-    let pause = cause
-        .actions
-        .iter()
-        .find(|action| action.control == PressureControl::Pause)
-        .expect("a pause action");
-    assert_eq!(pause.verdict, ActionVerdict::DisabledByState);
-}
-
-#[test]
-fn a_culprit_less_cpu_card_names_the_resource_when_no_rate_is_measured() {
-    let sample = Sample {
-        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
-        processes: alloc::vec![process(10, ProcessState::Running, b"unmeasured", None)],
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let cause = &panel.model.pressure[0];
-    assert_eq!(cause.culprit, "CPU");
-    assert_eq!(
-        cause.cause,
-        "The processor is saturated; per-task rates are not measured yet."
-    );
-    assert_eq!(cause.task_index, None);
-    assert_eq!(cause.actions.len(), 1);
-    assert_eq!(cause.actions[0].control, PressureControl::ShowTasks);
-    assert_eq!(panel.pressure_target(0), None);
-}
-
-#[test]
-fn a_memory_culprit_card_names_bytes_and_the_share_of_memory() {
-    let mem_bytes = 2 * GIB;
-    let total_bytes = 4 * GIB;
-    let sample = Sample {
-        memory_pressure: Some(MemoryPressureSample {
-            band: 2,
-            used_permille: 500,
-            total_bytes,
-        }),
-        processes: alloc::vec![process_summary_with(
-            10,
-            ProcessState::Running,
-            b"leaky",
-            None,
-            DEFAULT_UID,
-            mem_bytes,
-            SchedPriority::Normal,
-        )],
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    assert_eq!(panel.model.pressure.len(), 1);
-    let cause = &panel.model.pressure[0];
-    assert_eq!(cause.resource, "Memory");
-    assert_eq!(cause.culprit, "leaky");
-    assert_eq!(cause.cause, "Using 2.0 GiB of RAM (50% of memory).");
-    assert_eq!(cause.task_index, Some(0));
-    assert_eq!(cause.actions.len(), 1);
-    assert_eq!(cause.actions[0].control, PressureControl::ShowTasks);
-    assert_eq!(cause.actions[0].verdict, ActionVerdict::Ready);
-    assert!(cause.actions[0].recommended);
-    assert_eq!(panel.pressure_target(0), Some(10));
-}
-
-#[test]
-fn a_memory_culprit_card_omits_the_percent_clause_without_a_total() {
-    let sample = Sample {
-        memory_pressure: Some(MemoryPressureSample {
-            band: 2,
-            used_permille: 900,
-            total_bytes: 0,
-        }),
-        processes: alloc::vec![process_summary_with(
-            10,
-            ProcessState::Running,
-            b"leaky",
-            None,
-            DEFAULT_UID,
-            640 * 1024,
-            SchedPriority::Normal,
-        )],
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let cause = &panel.model.pressure[0];
-    assert_eq!(cause.cause, "Using 640.0 KiB of RAM.");
-}
-
-#[test]
-fn a_culprit_less_memory_card_names_the_resource_when_nothing_measures_it() {
-    let sample = Sample {
-        memory_pressure: Some(MemoryPressureSample {
-            band: 2,
-            used_permille: 900,
-            total_bytes: 0,
-        }),
-        processes: alloc::vec![process(10, ProcessState::Running, b"clean", None)],
-        ..Sample::default()
-    };
-    let meters = meters_for(&sample);
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let cause = &panel.model.pressure[0];
-    assert_eq!(cause.culprit, "Memory");
-    assert_eq!(cause.cause, "Memory pressure is high.");
-    assert_eq!(cause.task_index, None);
-    assert_eq!(panel.pressure_target(0), None);
-}
-
 // --- Activities section --------------------------------------------------
-
-#[test]
-fn an_activity_summary_reports_its_id_name_and_member_count() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let real = sample.processes[0].proc_id;
-    let mut activities = Activities::new();
-    let id = activities.create(member(real, 10, "a")).expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert_eq!(panel.model.activities.len(), 1);
-    let summary = &panel.model.activities[0];
-    assert_eq!(summary.id, id);
-    assert_eq!(summary.detail, "1 task");
-    assert!(!summary.paused);
-    assert_eq!(panel.activity_id(0), Some(id));
-    assert_eq!(panel.activity_members(0), &[10]);
-}
-
-#[test]
-fn an_activity_detail_is_plural_for_multiple_members() {
-    let sample = sample_with(alloc::vec![
-        process(10, ProcessState::Running, b"a", None),
-        process(20, ProcessState::Running, b"b", None),
-    ]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-    activities
-        .assign(0, member(sample.processes[1].proc_id, 20, "b"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert_eq!(panel.model.activities[0].detail, "2 tasks");
-    assert_eq!(panel.activity_members(0), &[10, 20]);
-}
-
-#[test]
-fn an_activitys_combined_reading_totals_its_joined_members() {
-    let sample = sample_with(alloc::vec![
-        process_summary_with(
-            10,
-            ProcessState::Running,
-            b"a",
-            Some(120),
-            DEFAULT_UID,
-            2 * GIB,
-            SchedPriority::Normal,
-        ),
-        process_summary_with(
-            20,
-            ProcessState::Running,
-            b"b",
-            Some(80),
-            DEFAULT_UID,
-            GIB,
-            SchedPriority::Normal,
-        ),
-    ]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-    activities
-        .assign(0, member(sample.processes[1].proc_id, 20, "b"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    let summary = &panel.model.activities[0];
-
-    // The group's cost is the sum of what its own members were measured at —
-    // there is no per-group accounting to read instead.
-    assert_eq!(summary.cpu, Reading::measured("20%"), "120‰ + 80‰");
-    assert_eq!(
-        summary.memory,
-        Reading::measured("3.0 GiB"),
-        "2 GiB + 1 GiB"
-    );
-    assert_eq!(
-        summary.network,
-        Reading::Absent(Unmeasured::NoInterface),
-        "no per-task network accounting exists to total"
-    );
-}
-
-#[test]
-fn an_activity_total_is_absent_when_a_member_reading_is() {
-    // The second member's CPU share was never read, so the group's CPU total
-    // is absent rather than understating the group by skipping it.
-    let sample = sample_with(alloc::vec![
-        process(10, ProcessState::Running, b"a", Some(120)),
-        process(20, ProcessState::Running, b"b", None),
-    ]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-    activities
-        .assign(0, member(sample.processes[1].proc_id, 20, "b"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert!(
-        matches!(panel.model.activities[0].cpu, Reading::Absent(_)),
-        "one unread part makes the whole total absent, not a smaller measurement"
-    );
-    assert!(
-        matches!(panel.model.activities[0].memory, Reading::Measured(_)),
-        "memory is read for every process, so its total still stands"
-    );
-}
-
-#[test]
-fn an_activity_with_no_running_member_has_no_total_at_all() {
-    // The group's member has exited, so nothing in the sample supports a
-    // total: reporting nought would claim the group costs nothing.
-    let sample = sample_with(alloc::vec![process(
-        10,
-        ProcessState::Running,
-        b"other",
-        Some(500)
-    )]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(ProcId::from_raw([7u8; PROC_ID_LEN]), 99, "gone"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    let summary = &panel.model.activities[0];
-    assert!(matches!(summary.cpu, Reading::Absent(_)));
-    assert!(matches!(summary.memory, Reading::Absent(_)));
-    assert!(matches!(summary.disk, Reading::Absent(_)));
-    assert!(!summary.members[0].joined, "its member is not running");
-}
-
-#[test]
-fn an_activity_is_working_when_a_member_is_working_and_not_paused() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert_eq!(panel.model.activities[0].activity, ActivityState::Working);
-}
-
-#[test]
-fn a_paused_activity_is_idle_even_with_a_working_member() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-    activities.set_paused(0, true);
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert_eq!(panel.model.activities[0].activity, ActivityState::Idle);
-    assert!(panel.model.activities[0].paused);
-}
-
-#[test]
-fn can_control_is_true_for_a_same_uid_member_without_the_capability() {
-    let sample = sample_with(alloc::vec![process_summary_with(
-        10,
-        ProcessState::Running,
-        b"a",
-        None,
-        DEFAULT_UID,
-        0,
-        SchedPriority::Normal,
-    )]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        Some(DEFAULT_UID),
-    );
-    assert!(panel.model.activities[0].can_control);
-}
-
-#[test]
-fn can_control_is_false_for_a_foreign_uid_member_without_the_capability() {
-    let sample = sample_with(alloc::vec![process_summary_with(
-        10,
-        ProcessState::Running,
-        b"a",
-        None,
-        DEFAULT_UID,
-        0,
-        SchedPriority::Normal,
-    )]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        Some(DEFAULT_UID + 1),
-    );
-    assert!(!panel.model.activities[0].can_control);
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &PROC_CONTROL,
-        &activities,
-        Some(DEFAULT_UID + 1),
-    );
-    assert!(panel.model.activities[0].can_control);
-}
-
-#[test]
-fn an_unjoined_member_falls_back_to_its_stored_name_and_is_idle() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let vanished = ProcId::from_raw([9; 16]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(vanished, 99, "gone"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    let summary = &panel.model.activities[0];
-    assert_eq!(summary.members.len(), 1);
-    assert_eq!(summary.members[0].name, "gone");
-    assert_eq!(summary.members[0].detail, "");
-    assert_eq!(summary.members[0].activity, ActivityState::Idle);
-    // An unjoined member cannot be signalled; it never appears in the
-    // targets an activity action would act on.
-    assert!(panel.activity_members(0).is_empty());
-}
-
-#[test]
-fn can_accept_member_reflects_the_member_bound() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    assert!(panel.model.activities[0].can_accept_member);
-}
-
-#[test]
-fn can_create_activity_reflects_activities_can_create() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    assert!(panel.model.can_create_activity);
-}
 
 // --- apply_action: existing actions -------------------------------------
 
@@ -1078,7 +155,7 @@ fn switch_and_reveal_both_ask_the_session_for_that_owner() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     for control in [TaskControl::Switch, TaskControl::Reveal] {
@@ -1102,7 +179,7 @@ fn each_signalling_command_maps_to_its_own_signal() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &PROC_CONTROL,
     );
     for (control, expected) in [
@@ -1145,7 +222,7 @@ fn resume_only_reaches_a_stopped_task() {
     let panel = model(
         &running,
         &SessionReport::HEALTHY,
-        &meters_for(&running),
+        &mut meters_for(&running),
         &PROC_CONTROL,
     );
     assert!(
@@ -1170,7 +247,7 @@ fn resume_only_reaches_a_stopped_task() {
     let panel = model(
         &stopped,
         &SessionReport::HEALTHY,
-        &meters_for(&stopped),
+        &mut meters_for(&stopped),
         &PROC_CONTROL,
     );
     assert_eq!(
@@ -1202,7 +279,7 @@ fn a_task_command_the_caller_may_not_use_produces_no_effect() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     for control in [TaskControl::Pause, TaskControl::ForceQuit] {
@@ -1224,7 +301,7 @@ fn open_logs_produces_no_effect_because_no_interface_exists() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &PROC_CONTROL,
     );
     assert!(apply_action(
@@ -1244,7 +321,7 @@ fn an_out_of_range_task_index_produces_no_effect() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     let effect = apply_action(
@@ -1269,7 +346,7 @@ fn a_recovery_restart_action_maps_to_restart_owner() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     let effect = apply_action(
@@ -1294,7 +371,7 @@ fn a_recovery_force_action_signals_kill_when_authorised() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &PROC_CONTROL,
     );
     let effect = apply_action(
@@ -1325,7 +402,7 @@ fn a_recovery_force_action_is_never_attempted_without_the_capability() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     let effect = apply_action(
@@ -1345,7 +422,7 @@ fn a_scroll_action_has_no_effect() {
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
-        &meters_for(&sample),
+        &mut meters_for(&sample),
         &NONE,
     );
     let effect = apply_action(&panel, SwitchboardAction::Scrolled { offset: 3 }, &NONE);
@@ -1367,518 +444,6 @@ fn a_task_id_beyond_the_syscall_width_is_refused_never_truncated() {
     let beyond = i64::MAX.cast_unsigned() + 1;
     assert_eq!(signal_pid(beyond), None);
     assert_eq!(signal_pid(u64::MAX), None);
-}
-
-// --- apply_action: pressure ----------------------------------------------
-
-fn cpu_pressure_panel(
-    priority: SchedPriority,
-    state: ProcessState,
-    self_uid: Option<u32>,
-    authority: &dyn tairix_abi::CapabilityQuery,
-) -> super::PanelModel {
-    let sample = Sample {
-        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
-        processes: alloc::vec![process_summary_with(
-            10,
-            state,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            priority,
-        )],
-        ..Sample::default()
-    };
-    build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        authority,
-        &Activities::new(),
-        self_uid,
-    )
-}
-
-#[test]
-fn apply_action_lowers_priority_when_ready() {
-    let panel = cpu_pressure_panel(
-        SchedPriority::Normal,
-        ProcessState::Running,
-        Some(DEFAULT_UID),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::LowerPriority,
-        },
-        &NONE,
-    );
-    assert_eq!(effect, alloc::vec![Effect::LowerPriority { pid: 10 }]);
-}
-
-#[test]
-fn apply_action_refuses_to_lower_an_already_low_priority() {
-    let panel = cpu_pressure_panel(
-        SchedPriority::Low,
-        ProcessState::Running,
-        Some(DEFAULT_UID),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::LowerPriority,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn apply_action_refuses_pause_without_authority() {
-    let panel = cpu_pressure_panel(
-        SchedPriority::Normal,
-        ProcessState::Running,
-        Some(DEFAULT_UID + 1),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::Pause,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn apply_action_pauses_the_culprit_when_ready() {
-    let panel = cpu_pressure_panel(
-        SchedPriority::Normal,
-        ProcessState::Running,
-        Some(DEFAULT_UID),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::Pause,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![Effect::Signal {
-            pid: 10,
-            signal: Signal::Stop
-        }]
-    );
-}
-
-#[test]
-fn apply_action_show_tasks_never_produces_an_effect() {
-    let panel = cpu_pressure_panel(
-        SchedPriority::Normal,
-        ProcessState::Running,
-        Some(DEFAULT_UID),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::ShowTasks,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn apply_action_pressure_index_out_of_range_is_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::Pause,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-// --- apply_action: grouping ------------------------------------------------
-
-#[test]
-fn task_grouped_into_a_new_activity_yields_an_assign_edit() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::TaskGrouped {
-            task: 0,
-            activity: None,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![Effect::Grouping(GroupingEdit::Assign {
-            task: 0,
-            activity: None
-        })]
-    );
-}
-
-#[test]
-fn task_grouped_with_an_out_of_range_task_is_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::TaskGrouped {
-            task: 0,
-            activity: None,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn task_grouped_with_an_out_of_range_activity_is_empty() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::TaskGrouped {
-            task: 0,
-            activity: Some(0),
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn task_ungrouped_yields_an_unassign_edit() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(&panel, SwitchboardAction::TaskUngrouped { task: 0 }, &NONE);
-    assert_eq!(
-        effect,
-        alloc::vec![Effect::Grouping(GroupingEdit::Unassign { task: 0 })]
-    );
-}
-
-#[test]
-fn task_ungrouped_out_of_range_is_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(&panel, SwitchboardAction::TaskUngrouped { task: 0 }, &NONE);
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn activity_renamed_yields_a_rename_edit() {
-    let sample = sample_with(alloc::vec![process(10, ProcessState::Running, b"a", None)]);
-    let mut activities = Activities::new();
-    activities
-        .create(member(sample.processes[0].proc_id, 10, "a"))
-        .expect("room");
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        None,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::ActivityRenamed { index: 0 },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![Effect::Grouping(GroupingEdit::Rename { activity: 0 })]
-    );
-}
-
-#[test]
-fn activity_renamed_out_of_range_is_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::ActivityRenamed { index: 0 },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-fn activity_panel(
-    paused: bool,
-    self_uid: Option<u32>,
-    authority: &dyn tairix_abi::CapabilityQuery,
-) -> (super::PanelModel, ProcId) {
-    let sample = sample_with(alloc::vec![
-        process_summary_with(
-            10,
-            ProcessState::Running,
-            b"a",
-            None,
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        ),
-        process_summary_with(
-            20,
-            ProcessState::Running,
-            b"b",
-            None,
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        ),
-    ]);
-    let real_a = sample.processes[0].proc_id;
-    let real_b = sample.processes[1].proc_id;
-    let mut activities = Activities::new();
-    activities.create(member(real_a, 10, "a")).expect("room");
-    activities.assign(0, member(real_b, 20, "b")).expect("room");
-    activities.set_paused(0, paused);
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        authority,
-        &activities,
-        self_uid,
-    );
-    (panel, real_a)
-}
-
-#[test]
-fn activity_switch_activates_every_joined_member_in_group_order() {
-    let (panel, _) = activity_panel(false, Some(DEFAULT_UID), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Switch,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![Effect::ActivateOwners {
-            owners: alloc::vec![10, 20]
-        }]
-    );
-}
-
-#[test]
-fn activity_pause_signals_and_edits_when_controllable() {
-    let (panel, _) = activity_panel(false, Some(DEFAULT_UID), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Pause,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![
-            Effect::SignalMany {
-                pids: alloc::vec![10, 20],
-                signal: Signal::Stop
-            },
-            Effect::Grouping(GroupingEdit::SetPaused {
-                activity: 0,
-                paused: true
-            }),
-        ]
-    );
-}
-
-#[test]
-fn activity_pause_is_refused_without_control() {
-    let (panel, _) = activity_panel(false, Some(DEFAULT_UID + 1), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Pause,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
-}
-
-#[test]
-fn activity_resume_signals_continue_and_clears_paused() {
-    let (panel, _) = activity_panel(true, Some(DEFAULT_UID), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Resume,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![
-            Effect::SignalMany {
-                pids: alloc::vec![10, 20],
-                signal: Signal::Continue
-            },
-            Effect::Grouping(GroupingEdit::SetPaused {
-                activity: 0,
-                paused: false
-            }),
-        ]
-    );
-}
-
-#[test]
-fn activity_close_terminates_joined_members_and_closes() {
-    let (panel, _) = activity_panel(false, Some(DEFAULT_UID), &NONE);
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Close,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![
-            Effect::SignalMany {
-                pids: alloc::vec![10, 20],
-                signal: Signal::Terminate
-            },
-            Effect::Grouping(GroupingEdit::Close { activity: 0 }),
-        ]
-    );
-}
-
-#[test]
-fn activity_close_skips_a_member_not_joined_to_the_current_sample() {
-    let sample = sample_with(alloc::vec![process_summary_with(
-        10,
-        ProcessState::Running,
-        b"a",
-        None,
-        DEFAULT_UID,
-        0,
-        SchedPriority::Normal,
-    )]);
-    let real_a = sample.processes[0].proc_id;
-    let vanished = ProcId::from_raw([9; 16]);
-    let mut activities = Activities::new();
-    activities.create(member(real_a, 10, "a")).expect("room");
-    activities
-        .assign(0, member(vanished, 99, "gone"))
-        .expect("room");
-    let panel = build_model(
-        "Switchboard",
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-        &activities,
-        Some(DEFAULT_UID),
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Close,
-        },
-        &NONE,
-    );
-    assert_eq!(
-        effect,
-        alloc::vec![
-            Effect::SignalMany {
-                pids: alloc::vec![10],
-                signal: Signal::Terminate
-            },
-            Effect::Grouping(GroupingEdit::Close { activity: 0 }),
-        ]
-    );
-}
-
-#[test]
-fn activity_index_out_of_range_is_empty() {
-    let sample = Sample::default();
-    let panel = model(
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters_for(&sample),
-        &NONE,
-    );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Switch,
-        },
-        &NONE,
-    );
-    assert!(effect.is_empty());
 }
 
 /// One second in nanoseconds — the interval the disk-rate fixtures sample
@@ -2247,111 +812,6 @@ fn a_fault_that_recovers_and_faults_again_is_timed_from_the_new_fault() {
 
 // --- The pressure clock ------------------------------------------------
 
-/// One busy CPU hog, so a band has a culprit to blame.
-fn cpu_hog() -> ProcessSummary {
-    process_summary_with(
-        10,
-        ProcessState::Running,
-        b"hog",
-        Some(900),
-        DEFAULT_UID,
-        0,
-        SchedPriority::Normal,
-    )
-}
-
-/// A sample taken `secs` after boot whose machine-wide CPU busy share is
-/// `busy` — the reading the pressure band is actually latched from.
-fn banded_sample_at(secs: i64, busy: u16) -> Sample {
-    Sample {
-        cpu_busy_permille: Some(busy),
-        ..sample_at(secs, alloc::vec![cpu_hog()])
-    }
-}
-
-#[test]
-fn a_pressure_bands_age_is_measured_from_when_the_band_was_entered() {
-    let mut meters = RollingMeters::new();
-    let mut hysteresis = Hysteresis::new();
-    let mut record = |secs: i64, meters: &mut RollingMeters| {
-        let sample = banded_sample_at(secs, CPU_PRESSURE_ENTER_PERMILLE);
-        let _ = derive_summary(&sample, &mut hysteresis);
-        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
-        sample
-    };
-    record(100, &mut meters);
-    let later = record(160, &mut meters);
-
-    let elapsed = meters
-        .pressure
-        .cpu_elapsed(later.uptime.map(|up| up.since_boot))
-        .expect("a band held across two samples has an age");
-    assert_eq!(
-        elapsed.secs(),
-        60,
-        "the band is aged from the sample that first saw it, not from this one"
-    );
-
-    // The card carries that same measurement rather than deriving a second
-    // opinion of its own.
-    let panel = model(&later, &SessionReport::HEALTHY, &meters, &NONE);
-    let cause = panel
-        .model
-        .pressure
-        .iter()
-        .find(|cause| cause.kind == PressureKind::Cpu)
-        .expect("the CPU band is flagged");
-    assert_eq!(cause.since, Reading::measured("1m"));
-}
-
-#[test]
-fn a_pressure_band_with_no_uptime_reading_has_no_age_rather_than_a_zero() {
-    let mut meters = RollingMeters::new();
-    let mut hysteresis = Hysteresis::new();
-    // No uptime reading at all, so there is no clock to measure the band
-    // against — which the card must state, not paper over with a nought.
-    let sample = Sample {
-        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
-        ..sample_with(alloc::vec![cpu_hog()])
-    };
-    let _ = derive_summary(&sample, &mut hysteresis);
-    meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
-    assert_eq!(meters.pressure.cpu_elapsed(None), None);
-
-    let panel = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
-    let cause = panel
-        .model
-        .pressure
-        .iter()
-        .find(|cause| cause.kind == PressureKind::Cpu)
-        .expect("the CPU band is flagged");
-    assert!(
-        matches!(cause.since, Reading::Absent(_)),
-        "an age nobody could measure is stated as absent, never as 0s"
-    );
-}
-
-#[test]
-fn a_band_that_eases_and_returns_is_timed_from_the_new_band() {
-    let mut meters = RollingMeters::new();
-    let mut hysteresis = Hysteresis::new();
-    for (secs, busy) in [
-        (10, CPU_PRESSURE_ENTER_PERMILLE),
-        (20, 0),
-        (30, CPU_PRESSURE_ENTER_PERMILLE),
-        (50, CPU_PRESSURE_ENTER_PERMILLE),
-    ] {
-        let sample = banded_sample_at(secs, busy);
-        let _ = derive_summary(&sample, &mut hysteresis);
-        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
-    }
-    let elapsed = meters
-        .pressure
-        .cpu_elapsed(Some(Duration64::from_secs(50)))
-        .expect("the second band has its own age");
-    assert_eq!(elapsed.secs(), 20, "the eased band's start is forgotten");
-}
-
 #[test]
 fn the_models_resolved_count_is_the_clocks_count() {
     let mut meters = RollingMeters::new();
@@ -2363,7 +823,7 @@ fn the_models_resolved_count_is_the_clocks_count() {
     );
     let healthy = sample_at(20, Vec::new());
     meters.record(&healthy, hysteresis, &SessionReport::HEALTHY);
-    let built = model(&healthy, &SessionReport::HEALTHY, &meters, &NONE);
+    let built = model(&healthy, &SessionReport::HEALTHY, &mut meters, &NONE);
     assert_eq!(built.model.recovery_resolved, 1);
 }
 
@@ -2401,8 +861,8 @@ fn a_faults_crash_record_is_matched_by_process_identity() {
         crashes: Some(alloc::vec![crash_for(proc_id, 7)]),
         ..Sample::default()
     };
-    let meters = meters_for(&sample);
-    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
+    let mut meters = meters_for(&sample);
+    let built = model(&sample, &SessionReport::HEALTHY, &mut meters, &NONE);
     let crash = built.model.recovery[0]
         .crash
         .as_ref()
@@ -2418,9 +878,6 @@ fn a_faults_crash_record_is_matched_by_process_identity() {
     assert!(crash.location.contains("null page"), "{}", crash.location);
 }
 
-/// An instruction-side kill reads as one: it names no data location and is
-/// never rendered as a read, which is what a bare write bit would have
-/// made of it.
 #[test]
 fn an_instruction_side_crash_names_no_data_location() {
     let process = stopped(7);
@@ -2435,8 +892,8 @@ fn an_instruction_side_crash_names_no_data_location() {
         crashes: Some(alloc::vec![record]),
         ..Sample::default()
     };
-    let meters = meters_for(&sample);
-    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
+    let mut meters = meters_for(&sample);
+    let built = model(&sample, &SessionReport::HEALTHY, &mut meters, &NONE);
     let crash = built.model.recovery[0]
         .crash
         .as_ref()
@@ -2459,8 +916,8 @@ fn a_crash_record_for_another_task_is_never_attributed_to_this_fault() {
         crashes: Some(alloc::vec![crash_for(other, 7)]),
         ..Sample::default()
     };
-    let meters = meters_for(&sample);
-    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
+    let mut meters = meters_for(&sample);
+    let built = model(&sample, &SessionReport::HEALTHY, &mut meters, &NONE);
     assert!(
         built.model.recovery[0].crash.is_none(),
         "matching on the reused pid would attribute a dead task's crash to a live one"
@@ -2470,8 +927,8 @@ fn a_crash_record_for_another_task_is_never_attributed_to_this_fault() {
 #[test]
 fn a_fault_carries_its_own_resource_cost_with_network_unmeasured() {
     let sample = sample_with(alloc::vec![stopped(7)]);
-    let meters = meters_for(&sample);
-    let built = model(&sample, &SessionReport::HEALTHY, &meters, &NONE);
+    let mut meters = meters_for(&sample);
+    let built = model(&sample, &SessionReport::HEALTHY, &mut meters, &NONE);
     let item = &built.model.recovery[0];
     assert_eq!(item.cpu, Reading::measured("1%"));
     assert_eq!(item.memory, Reading::measured("0 B"));

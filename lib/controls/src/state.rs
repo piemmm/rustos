@@ -346,6 +346,10 @@ pub enum PressureKind {
     Power,
     /// Thermal pressure.
     Thermal,
+    /// Graphics / display-path utilisation.
+    Gpu,
+    /// General-purpose accelerator utilisation.
+    Accelerator,
 }
 
 /// Whether a control is under a resource pressure, and which.

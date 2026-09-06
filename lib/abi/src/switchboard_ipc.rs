@@ -645,18 +645,12 @@ pub const fn command_endpoint_for(pid: u64) -> u64 {
 pub enum CommandSection {
     /// The live-tasks section (the resting section of an ordinary open).
     Tasks = 1,
-    /// The background-jobs section.
-    Jobs = 2,
+    /// The resources section: one pane per resource device — the processor,
+    /// memory, each volume, each interface, the display path, and the
+    /// machine's own identity, seats and authority.
+    Resources = 2,
     /// The recovery section (what a long-press on a flagged icon opens).
     Recovery = 3,
-    /// The system section: the machine's own readings, storage, network,
-    /// session, permissions and system actions.
-    System = 4,
-    /// The pressure section ("why is my machine slow": per-resource cause
-    /// cards, `plans/NEW-TASKBAR.md` T12).
-    Pressure = 5,
-    /// The activities section (task grouping, `plans/NEW-TASKBAR.md` T12).
-    Activities = 6,
 }
 
 impl CommandSection {
@@ -675,11 +669,8 @@ impl CommandSection {
     pub const fn from_u8(value: u8) -> Result<Self, Errno> {
         match value {
             1 => Ok(Self::Tasks),
-            2 => Ok(Self::Jobs),
+            2 => Ok(Self::Resources),
             3 => Ok(Self::Recovery),
-            4 => Ok(Self::System),
-            5 => Ok(Self::Pressure),
-            6 => Ok(Self::Activities),
             _ => Err(Errno::OutOfRange),
         }
     }

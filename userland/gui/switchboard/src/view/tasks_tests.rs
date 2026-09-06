@@ -15,8 +15,8 @@ use tairix_controls::{
 };
 
 use super::{
-    TaskAuthority, TaskControl, TaskKind, TaskSummary, COLUMN_WEIGHTS, COL_ACTIVITY, COL_CPU,
-    COL_LAST_ACTIVE, COL_MEMORY, COL_NETWORK,
+    TaskAuthority, TaskControl, TaskOwner, TaskSummary, COLUMN_WEIGHTS, COL_ACTIVITY, COL_CORE,
+    COL_CPU, COL_MEMORY, COL_NETWORK,
 };
 use tairix_controls::testkit::high_contrast;
 
@@ -28,7 +28,7 @@ use crate::view::test_support::{
     task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
 };
 use crate::view::{
-    ActionVerdict, Section, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
+    ActionVerdict, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
     UNMEASURED_READING,
 };
 
@@ -87,7 +87,7 @@ fn a_table_with_rows_selects_the_first_and_offers_its_commands() {
         Some(task_id(0)),
         "a table with something to show always has a subject"
     );
-    assert_eq!(sb.tasks.rail.len(), 8, "so its commands are offered");
+    assert_eq!(sb.tasks.rail.len(), 7, "so its commands are offered");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn choosing_a_row_gives_the_rail_its_whole_command_set() {
     select_task_row(&mut sb, b, Scale::ONE, &theme, 1);
 
     assert_eq!(sb.tasks.selected, Some(task_id(1)));
-    assert_eq!(sb.tasks.rail.len(), 8, "every command keeps its slot");
+    assert_eq!(sb.tasks.rail.len(), 7, "every command keeps its slot");
     let labels: alloc::vec::Vec<&str> = sb
         .tasks
         .rail
@@ -128,7 +128,6 @@ fn choosing_a_row_gives_the_rail_its_whole_command_set() {
             "Resume",
             "Lower priority",
             "Open logs",
-            "Group\u{2026}",
             "Force quit",
         ]
     );
@@ -144,7 +143,7 @@ fn each_rail_command_reports_its_own_control() {
         (2, TaskControl::Pause),
         (3, TaskControl::Resume),
         (4, TaskControl::LowerPriority),
-        (7, TaskControl::ForceQuit),
+        (6, TaskControl::ForceQuit),
     ];
     for (slot, control) in wanted {
         let mut sb = Switchboard::new(&one_task(all_ready()));
@@ -164,14 +163,14 @@ fn a_denied_command_keeps_its_slot_and_fails_closed() {
         switch: ActionVerdict::Ready,
         ..TaskAuthority::default()
     }));
-    let actions = invoke_rail(&mut sb, b, &theme, 0, 7);
+    let actions = invoke_rail(&mut sb, b, &theme, 0, 6);
     assert!(
         actions.is_empty(),
         "a command the caller may not use must not activate"
     );
-    assert_eq!(sb.tasks.rail.len(), 8, "it keeps its slot regardless");
+    assert_eq!(sb.tasks.rail.len(), 7, "it keeps its slot regardless");
     assert_eq!(
-        sb.tasks.rail.items()[7].state().disposition(),
+        sb.tasks.rail.items()[6].state().disposition(),
         ControlDisposition::DeniedByAuthority,
         "and wears the Authority Mark"
     );
@@ -212,8 +211,8 @@ fn force_quit_carries_the_destructive_role() {
     let theme = Theme::dark();
     let mut sb = Switchboard::new(&model());
     select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 0);
-    assert_eq!(sb.tasks.rail.items()[7].role(), ControlRole::Destructive);
-    for slot in 0..7 {
+    assert_eq!(sb.tasks.rail.items()[6].role(), ControlRole::Destructive);
+    for slot in 0..6 {
         assert_eq!(sb.tasks.rail.items()[slot].role(), ControlRole::Neutral);
     }
 }
@@ -241,7 +240,7 @@ fn the_selection_follows_the_task_when_a_re_sort_moves_it() {
         Some(chosen),
         "the selection names the task, never the row it sat in"
     );
-    assert_eq!(sb.tasks.rail.len(), 8, "so its commands are still offered");
+    assert_eq!(sb.tasks.rail.len(), 7, "so its commands are still offered");
 }
 
 #[test]
@@ -259,228 +258,6 @@ fn hiding_the_selected_task_drops_the_selection_and_its_commands() {
     assert!(
         sb.tasks.rail.is_empty(),
         "commands with no visible subject are withdrawn, not left dangling"
-    );
-}
-
-/// Open the Group popup on task row 0 through the rail's Group command.
-fn open_group_popup_on_first_task(sb: &mut Switchboard, b: Rect, theme: &Theme) {
-    let actions = invoke_rail(sb, b, theme, 0, TasksSection::group_slot());
-    assert!(actions.is_empty(), "opening the popup emits nothing");
-    assert!(sb.tasks.popup.is_some(), "the Group popup must open");
-}
-
-/// A window point that hits row `index` of the open Group popup.
-fn popup_row_point(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> (i32, i32) {
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let ctx = sb.section_ctx(&layout, b, Scale::ONE, theme, font());
-    let anchor = sb.tasks.anchor_rect(ctx);
-    let popup = sb.tasks.popup.as_ref().expect("an open Group popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, theme);
-    let x = rect.left() + i32::try_from(rect.width).unwrap_or(0) / 2;
-    for y in rect.top()..rect.bottom() {
-        if popup.menu.row_at(rect, Scale::ONE, theme, Point::new(x, y)) == Some(index) {
-            return (x, y);
-        }
-    }
-    panic!("popup row {index} is not hit-testable");
-}
-
-#[test]
-fn the_group_command_opens_the_popup_on_the_selected_task() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let popup = sb.tasks.popup.as_ref().expect("popup");
-    assert_eq!(popup.task, 0);
-    // One row per activity, then "New activity"; an ungrouped task gets no
-    // "Remove from activity" row.
-    assert_eq!(popup.menu.items().len(), 7);
-    assert_eq!(popup.menu.items()[0].label(), "activity 0");
-    assert_eq!(popup.menu.items()[6].label(), "New activity");
-}
-
-#[test]
-fn group_popup_anchors_below_its_command_inside_the_window() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
-    let anchor = sb.tasks.anchor_rect(ctx);
-    let expected = task_rail_rects(&sb, b, Scale::ONE, &theme)[TasksSection::group_slot()];
-    assert_eq!(anchor, expected, "the anchor is the Group command itself");
-    let popup = sb.tasks.popup.as_ref().expect("popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme);
-    // The Group command sits low in the rail, so the popup opens upward from
-    // it rather than off the bottom of the window — either way it meets its
-    // anchor's edge and stays wholly inside the window.
-    assert!(
-        rect.bottom() == anchor.top() || rect.top() == anchor.bottom(),
-        "the popup meets its anchor's edge"
-    );
-    assert!(rect.left() >= b.left());
-    assert!(rect.right() <= b.right());
-    assert!(rect.top() >= b.top());
-    assert!(rect.bottom() <= b.bottom());
-}
-
-#[test]
-fn group_popup_lists_activities_with_disable_reasons() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut m = model();
-    m.tasks[0].group = Some(0);
-    m.activities[1].can_accept_member = false;
-    m.can_create_activity = false;
-    let mut sb = Switchboard::new(&m);
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let items = sb.tasks.popup.as_ref().expect("popup").menu.items();
-    assert_eq!(items.len(), 8);
-    assert_eq!(
-        items[0].state().disposition(),
-        ControlDisposition::DisabledByState
-    );
-    assert_eq!(items[0].reason(), Some("Current activity"));
-    assert_eq!(
-        items[1].state().disposition(),
-        ControlDisposition::DisabledByState
-    );
-    assert_eq!(items[1].reason(), Some("Activity is full"));
-    assert_eq!(
-        items[2].state().disposition(),
-        ControlDisposition::Interactive
-    );
-    assert_eq!(items[6].label(), "New activity");
-    assert_eq!(
-        items[6].state().disposition(),
-        ControlDisposition::DisabledByState
-    );
-    assert_eq!(items[6].reason(), Some("Activity limit reached"));
-    assert_eq!(items[7].label(), "Remove from activity");
-    assert_eq!(
-        items[7].state().disposition(),
-        ControlDisposition::Interactive
-    );
-}
-
-#[test]
-fn group_popup_groups_to_an_existing_activity() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let (x, y) = popup_row_point(&sb, b, &theme, 2);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert!(actions.contains(&SwitchboardAction::TaskGrouped {
-        task: 0,
-        activity: Some(2)
-    }));
-    assert!(sb.tasks.popup.is_none(), "activation closes the popup");
-}
-
-#[test]
-fn group_popup_new_activity_groups_to_none() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let (x, y) = popup_row_point(&sb, b, &theme, 6);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert!(actions.contains(&SwitchboardAction::TaskGrouped {
-        task: 0,
-        activity: None
-    }));
-    assert!(sb.tasks.popup.is_none());
-}
-
-#[test]
-fn group_popup_removes_a_grouped_task() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut m = model();
-    m.tasks[0].group = Some(0);
-    let mut sb = Switchboard::new(&m);
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let (x, y) = popup_row_point(&sb, b, &theme, 7);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert!(actions.contains(&SwitchboardAction::TaskUngrouped { task: 0 }));
-    assert!(sb.tasks.popup.is_none());
-}
-
-#[test]
-fn group_popup_refuses_a_disabled_row() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut m = model();
-    m.tasks[0].group = Some(0);
-    let mut sb = Switchboard::new(&m);
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    // Row 0 is the task's current activity, disabled with its reason.
-    let (x, y) = popup_row_point(&sb, b, &theme, 0);
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
-        "a disabled popup row must not activate"
-    );
-    assert!(
-        sb.tasks.popup.is_some(),
-        "a refused activation leaves the popup open"
-    );
-}
-
-#[test]
-fn group_popup_escape_dismisses_without_emitting() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
-    assert!(sb.tasks.popup.is_none());
-}
-
-#[test]
-fn group_popup_outside_press_dismisses_without_emitting() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
-    let anchor = sb.tasks.anchor_rect(ctx);
-    let popup = sb.tasks.popup.as_ref().expect("popup");
-    let rect = Switchboard::popup_rect(&popup.menu, anchor, b, Scale::ONE, &theme);
-    // The location band sits above the command the popup anchors on, so a
-    // press there is genuinely outside it.
-    let (x, y) = centre(layout.location);
-    assert!(
-        !rect.contains(Point::new(x, y)),
-        "the probe point must sit outside the popup"
-    );
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty(),
-        "an outside press dismisses without emitting"
-    );
-    assert!(sb.tasks.popup.is_none());
-}
-
-#[test]
-fn group_popup_drops_on_refresh_and_section_change() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = Switchboard::new(&model());
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    sb.set_model(&model());
-    assert!(
-        sb.tasks.popup.is_none(),
-        "a refresh supersedes the menu the popup was built from"
-    );
-
-    open_group_popup_on_first_task(&mut sb, b, &theme);
-    sb.select_section(Section::Jobs);
-    assert!(
-        sb.tasks.popup.is_none(),
-        "a section change invalidates the popup's anchor"
     );
 }
 
@@ -518,29 +295,6 @@ fn the_keyboard_selects_a_row_then_reaches_its_commands() {
 }
 
 #[test]
-fn keyboard_group_flow_reaches_the_popup_and_activates() {
-    let mut sb = Switchboard::new(&model());
-    focus_task_row(&mut sb, 0);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    walk_to_rail_slot(&mut sb, TasksSection::group_slot());
-    assert_eq!(
-        key(&mut sb, Key::Named(NamedKey::Enter)),
-        None,
-        "opening the popup emits nothing"
-    );
-    assert_eq!(sb.tasks.popup.as_ref().map(|p| p.task), Some(0));
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-    assert_eq!(
-        key(&mut sb, Key::Named(NamedKey::Enter)),
-        Some(SwitchboardAction::TaskGrouped {
-            task: 0,
-            activity: Some(0)
-        })
-    );
-    assert!(sb.tasks.popup.is_none());
-}
-
-#[test]
 fn a_rail_command_takes_the_focus_ring_from_the_rows() {
     let mut sb = Switchboard::new(&model());
     focus_task_row(&mut sb, 0);
@@ -560,11 +314,11 @@ fn a_rail_command_takes_the_focus_ring_from_the_rows() {
 }
 
 /// One row a table fixture is to build, spelled in the order the table
-/// shows it: what it is called, what kind of task it is, the condition it
+/// shows it: what it is called, which principal owns it, the condition it
 /// is in, and the two figures the census and sort tests read.
 struct RowSpec {
     name: &'static str,
-    kind: TaskKind,
+    uid: u32,
     recovery: RecoveryState,
     cpu: Option<u16>,
     memory: Option<u64>,
@@ -574,14 +328,14 @@ struct RowSpec {
 /// column of struct literals.
 const fn row(
     name: &'static str,
-    kind: TaskKind,
+    uid: u32,
     recovery: RecoveryState,
     cpu: Option<u16>,
     memory: Option<u64>,
 ) -> RowSpec {
     RowSpec {
         name,
-        kind,
+        uid,
         recovery,
         cpu,
         memory,
@@ -596,7 +350,8 @@ fn table_model(rows: &[RowSpec]) -> SwitchboardModel {
         m.tasks.push(TaskSummary {
             proc_id: task_id(index),
             name: alloc::string::String::from(spec.name),
-            kind: spec.kind,
+            owner: TaskOwner::new(spec.uid),
+            core: Some(0),
             lifecycle: Some(ProcessState::Running),
             cpu_permille: spec.cpu,
             memory_bytes: spec.memory,
@@ -612,41 +367,11 @@ fn table_model(rows: &[RowSpec]) -> SwitchboardModel {
 /// and filter tests both read, so both are asserted against one arrangement.
 fn mixed_model() -> SwitchboardModel {
     table_model(&[
-        row(
-            "alpha",
-            TaskKind::Process,
-            RecoveryState::None,
-            Some(300),
-            Some(2048),
-        ),
-        row(
-            "Beta",
-            TaskKind::Process,
-            RecoveryState::None,
-            Some(100),
-            Some(1024),
-        ),
-        row(
-            "gamma",
-            TaskKind::Process,
-            RecoveryState::Hung,
-            Some(200),
-            None,
-        ),
-        row(
-            "delta",
-            TaskKind::Job,
-            RecoveryState::None,
-            None,
-            Some(4096),
-        ),
-        row(
-            "epsilon",
-            TaskKind::Service,
-            RecoveryState::None,
-            Some(50),
-            Some(512),
-        ),
+        row("alpha", 1000, RecoveryState::None, Some(300), Some(2048)),
+        row("Beta", 1000, RecoveryState::None, Some(100), Some(1024)),
+        row("gamma", 1000, RecoveryState::Hung, Some(200), None),
+        row("delta", 0, RecoveryState::None, None, Some(4096)),
+        row("epsilon", 0, RecoveryState::None, Some(50), Some(512)),
     ])
 }
 
@@ -698,8 +423,8 @@ fn walk_action_to(sb: &mut Switchboard, index: usize) {
 fn expected_census(counts: [usize; 4]) -> alloc::vec::Vec<MetricTile> {
     [
         ("Processes", IconKind::Executable, PressureKind::Cpu),
-        ("Jobs", IconKind::Job, PressureKind::Disk),
-        ("Services", IconKind::ServiceBundle, PressureKind::Network),
+        ("Users", IconKind::User, PressureKind::Network),
+        ("Mine", IconKind::ServiceBundle, PressureKind::Disk),
         ("Alerts", IconKind::Bell, PressureKind::Thermal),
     ]
     .iter()
@@ -717,7 +442,7 @@ fn each_census_tile_counts_what_the_model_carries() {
     let sb = Switchboard::new(&mixed_model());
     assert_eq!(
         sb.tasks.census,
-        expected_census([3, 1, 1, 1]),
+        expected_census([5, 2, 3, 1]),
         "each tile counts rows the model genuinely carries"
     );
 }
@@ -726,14 +451,14 @@ fn each_census_tile_counts_what_the_model_carries() {
 fn a_census_tile_with_nothing_to_count_reads_zero_not_blank() {
     let sb = Switchboard::new(&table_model(&[row(
         "solo",
-        TaskKind::Process,
+        1000,
         RecoveryState::None,
         None,
         None,
     )]));
     assert_eq!(
         sb.tasks.census,
-        expected_census([1, 0, 0, 0]),
+        expected_census([1, 1, 1, 0]),
         "a source with nothing to report counts zero, never nothing"
     );
 }
@@ -744,7 +469,7 @@ fn every_filter_tab_carries_its_own_real_count() {
     let labels: alloc::vec::Vec<&str> = sb.tasks.filters.tabs().iter().map(Tab::label).collect();
     assert_eq!(
         labels,
-        alloc::vec!["All 5", "Processes 3", "Jobs 1", "Services 1", "Faults 1"],
+        alloc::vec!["All 5", "Mine 3", "System 2", "Faults 1"],
         "a tab states the count its rows will deliver"
     );
 }
@@ -757,9 +482,8 @@ fn choosing_a_filter_shows_exactly_the_rows_it_counted() {
             alloc::vec!["alpha", "Beta", "gamma", "delta", "epsilon"],
         ),
         (1, alloc::vec!["alpha", "Beta", "gamma"]),
-        (2, alloc::vec!["delta"]),
-        (3, alloc::vec!["epsilon"]),
-        (4, alloc::vec!["gamma"]),
+        (2, alloc::vec!["delta", "epsilon"]),
+        (3, alloc::vec!["gamma"]),
     ] {
         let mut sb = Switchboard::new(&mixed_model());
         focus_header_stop(&mut sb, 0);
@@ -778,7 +502,7 @@ fn choosing_a_filter_shows_exactly_the_rows_it_counted() {
 fn a_filter_that_admits_nothing_shows_no_rows_and_strands_no_cursor() {
     let mut sb = Switchboard::new(&table_model(&[row(
         "solo",
-        TaskKind::Process,
+        1000,
         RecoveryState::None,
         None,
         None,
@@ -851,8 +575,8 @@ fn each_sortable_column_orders_by_the_value_its_cells_show() {
     );
     assert_eq!(
         sorted_by(&m, 1),
-        alloc::vec!["delta", "alpha", "Beta", "gamma", "epsilon"],
-        "Type sorts by kind, stably within a kind"
+        alloc::vec!["delta", "epsilon", "alpha", "Beta", "gamma"],
+        "Owner sorts by uid, stably within an owner"
     );
     assert_eq!(
         sorted_by(&m, 4),
@@ -910,10 +634,10 @@ fn a_second_press_reverses_the_sort_and_the_unmeasured_rows_stay_last() {
 fn the_sort_is_stable_across_rows_it_cannot_separate() {
     // Four rows the Type sort cannot tell apart, in a deliberate order.
     let m = table_model(&[
-        row("d", TaskKind::Process, RecoveryState::None, None, None),
-        row("c", TaskKind::Process, RecoveryState::None, None, None),
-        row("b", TaskKind::Process, RecoveryState::None, None, None),
-        row("a", TaskKind::Process, RecoveryState::None, None, None),
+        row("d", 1000, RecoveryState::None, None, None),
+        row("c", 1000, RecoveryState::None, None, None),
+        row("b", 1000, RecoveryState::None, None, None),
+        row("a", 1000, RecoveryState::None, None, None),
     ]);
     assert_eq!(
         sorted_by(&m, 1),
@@ -1011,19 +735,28 @@ fn a_tasks_activity_changes_nothing_the_table_draws() {
 }
 
 #[test]
-fn network_and_last_active_render_an_explicit_unmeasured_mark() {
+fn the_network_column_renders_an_explicit_unmeasured_mark() {
     let sb = Switchboard::new(&mixed_model());
     let cells = sb.tasks.entries[0].row.cells();
-    let unmeasured = TableCell::new(UNMEASURED_READING)
-        .with_align(CellAlign::Trailing)
-        .with_state(ControlState::disabled());
-    for column in [COL_NETWORK, COL_LAST_ACTIVE] {
-        assert_eq!(
-            cells[column], unmeasured,
-            "column {column} has no interface to read, so it says so — \
-             and says it disabled, never as a small figure"
-        );
-    }
+    // Per-task network has no interface at all, so the column says so —
+    // disabled, never as a small figure a reader would take for a rate.
+    assert_eq!(
+        cells[COL_NETWORK],
+        TableCell::new(UNMEASURED_READING)
+            .with_align(CellAlign::Trailing)
+            .with_state(ControlState::disabled())
+    );
+}
+
+#[test]
+fn the_core_column_reads_the_cpu_the_scheduler_placed_the_task_on() {
+    let sb = Switchboard::new(&mixed_model());
+    // Core is a real reading off the process record, so it is a figure
+    // rather than the mark the Network column carries.
+    assert_eq!(
+        sb.tasks.entries[0].row.cells()[COL_CORE],
+        TableCell::new("0").with_align(CellAlign::Trailing)
+    );
 }
 
 #[test]
@@ -1064,7 +797,7 @@ fn the_grouping_control_arranges_the_same_rows() {
     assert!(sb.tasks.grouping.is_expanded(), "the choices open");
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert_eq!(sb.tasks.grouping.selected_text(), Some("By type"));
+    assert_eq!(sb.tasks.grouping.selected_text(), Some("By owner"));
     assert_eq!(
         shown(&sb),
         alloc::vec!["alpha", "Beta", "gamma", "delta", "epsilon"],
@@ -1112,8 +845,8 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
     let span = sb.active().focus_span();
     assert_eq!(
         span,
-        3 + 5 + 8 + 2,
-        "three header stops, five rows, eight commands, two footer"
+        3 + 5 + 7 + 2,
+        "three header stops, five rows, seven commands, two footer"
     );
 
     let mut rows = alloc::vec::Vec::new();
@@ -1129,7 +862,7 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
     // scrolling list.
     let mut expected = alloc::vec![None, None, None];
     expected.extend((0..5).map(Some));
-    expected.extend(core::iter::repeat_n(None, 8 + 2));
+    expected.extend(core::iter::repeat_n(None, 7 + 2));
     assert_eq!(rows, expected);
 }
 

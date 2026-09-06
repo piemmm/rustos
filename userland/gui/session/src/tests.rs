@@ -6866,13 +6866,13 @@ fn a_press_while_the_monitor_is_still_starting_opens_on_its_first_publish() {
 #[test]
 fn a_pending_open_refused_by_a_full_mailbox_survives_to_the_next_publish() {
     let mut full = RefusingMailbox::default();
-    let mut pending = Some(CommandSection::Jobs);
+    let mut pending = Some(CommandSection::Resources);
 
     deliver_pending_open(&mut pending, MONITOR_PID, &mut full);
     assert_eq!(full.attempts, 1, "one publish is one attempt");
     assert_eq!(
         pending,
-        Some(CommandSection::Jobs),
+        Some(CommandSection::Resources),
         "a refused delivery keeps the press pending"
     );
 

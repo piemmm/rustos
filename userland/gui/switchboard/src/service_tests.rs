@@ -9,15 +9,14 @@ use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
 
 use super::{CycleOutcome, Service, MAX_CONSECUTIVE_PUBLISH_FAILURES};
-use crate::model::{GroupingEdit, TASK_HISTORY_LEN};
-use crate::panel::PanelOutcome;
+use crate::model::TASK_HISTORY_LEN;
 use crate::publish::KEEPALIVE_NS;
 use crate::sample::{DegradedField, ScopeVerdicts};
 use crate::test_host::{
     process_record, DeadTransport, ProcessListTransport, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
     PROC_CONTROL_AUTHORITY, SYSTEM_POWER_AUTHORITY,
 };
-use crate::view::{Reading, Section};
+use crate::view::Section;
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.
@@ -74,10 +73,13 @@ fn the_first_cycle_publishes_and_notes_each_degraded_measurement_once() {
             DegradedField::Uptime,
             DegradedField::LoadAverage,
             DegradedField::CpuInfo,
+            DegradedField::MemoryPressureBand,
             DegradedField::Identity,
             DegradedField::MemoryTotal,
             DegradedField::ResourceLimits,
             DegradedField::Mounts,
+            DegradedField::NetResolverServers,
+            DegradedField::NetTimeServers,
         ]
     );
     let announced = host.degradations.len();
@@ -141,8 +143,6 @@ fn an_unbound_endpoint_stops_the_service_cleanly() {
     );
 }
 
-/// A refusal is told apart from a session that simply is not there, because
-/// the run loop ends quietly on the second and fails loudly on the first.
 #[test]
 fn a_session_that_refuses_this_instance_stops_the_service_abnormally() {
     let mut host = RecordingHost::new();
@@ -185,16 +185,6 @@ fn repeated_publish_failures_eventually_stop_the_service() {
     );
 }
 
-/// A desktop that has not drained its queue must never cost this service
-/// its life.
-///
-/// The regression, and the whole reason the tray capsule went permanently
-/// dead: a call endpoint at capacity refuses the post outright rather than
-/// blocking, so a session busy enough to leave its queue full for five
-/// sample periods used to exhaust the give-up budget and the monitor exited
-/// — and nothing restarts one. It is back-pressure, not a fault: the
-/// summary is still unacknowledged, so the next sample simply offers it
-/// again, and one attempt per period is not a retry loop.
 #[test]
 fn a_session_that_has_not_drained_its_queue_never_stops_the_service() {
     let mut host = RecordingHost::new();
@@ -228,8 +218,6 @@ fn a_session_that_has_not_drained_its_queue_never_stops_the_service() {
     assert_eq!(host.published.len(), periods as usize + 1);
 }
 
-/// Back-pressure does not launder a genuine fault: a real failure that
-/// follows one still counts.
 #[test]
 fn back_pressure_does_not_clear_the_give_up_budget() {
     let mut host = RecordingHost::new();
@@ -315,40 +303,6 @@ fn open(service: &mut Service, host: &mut RecordingHost, section: CommandSection
 }
 
 #[test]
-fn a_frame_report_reaches_an_open_resources_page_at_once() {
-    let mut host = RecordingHost::new();
-    let mut service = service();
-    let report = frame_report();
-
-    open(&mut service, &mut host, CommandSection::System);
-    service.command(
-        &mut host,
-        SwitchboardCommand::FrameReport { report },
-        &NO_AUTHORITY,
-    );
-
-    assert_eq!(service.panel().session_report().frame, Some(report));
-    let facts = &service.panel().model().model.system.compositor;
-    assert_eq!(facts[0].label, "Last frame");
-    assert_eq!(
-        facts[0].value,
-        Reading::measured("3.2k px of 2.0M px recomposed"),
-        "the report must be rebuilt into the page, not held until the next sample"
-    );
-}
-
-/// A frame report is adopted while the panel is closed, but nothing is
-/// rebuilt for it.
-///
-/// This is the regression for the pointer-over-wallpaper storm's second
-/// half. The session's frame path can produce a report several times a
-/// second, and rebuilding walks every sampled process to allocate a row, a
-/// name, and a CPU history for each — work that with no window open reaches
-/// no screen at all, since `Panel::refresh` renders nothing without a view
-/// and the next `cycle` rebuilds from a fresh sample regardless. Together
-/// with the session's own rate limit this is what takes the monitor from
-/// half a core down to nothing while a user simply moves the pointer.
-#[test]
 fn a_frame_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
     let mut host = RecordingHost::new();
     let mut service = service();
@@ -375,12 +329,6 @@ fn a_frame_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
     assert_eq!(host.presents, 0, "and nothing may be presented");
 }
 
-/// A seat report is on the same terms: adopted always, rebuilt only for a
-/// panel that can show it.
-///
-/// Sampled against a real process list and naming one of its rows, so the
-/// report is one that genuinely *would* change the model — a closed panel
-/// whose model happens to be empty either way would prove nothing.
 #[test]
 fn a_seat_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
     let target_pid = 50;
@@ -417,35 +365,6 @@ fn a_seat_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
     );
 }
 
-/// Opening the panel is what folds in every report that arrived while it
-/// was closed, so a user never sees a page built from a report the service
-/// had already been told about.
-///
-/// This is the whole reason the rebuild can be skipped above: the window is
-/// created from the model, so the model is rebuilt first.
-#[test]
-fn opening_the_panel_shows_the_reports_that_arrived_while_it_was_closed() {
-    let mut host = RecordingHost::new();
-    let mut service = service();
-
-    service.command(
-        &mut host,
-        SwitchboardCommand::FrameReport {
-            report: frame_report(),
-        },
-        &NO_AUTHORITY,
-    );
-    open(&mut service, &mut host, CommandSection::System);
-
-    let facts = &service.panel().model().model.system.compositor;
-    assert_eq!(facts[0].label, "Last frame");
-    assert_eq!(
-        facts[0].value,
-        Reading::measured("3.2k px of 2.0M px recomposed"),
-        "a page opening now must carry the report the service already holds"
-    );
-}
-
 /// Two sampled rows: the service's own, and a target task grouped into an
 /// activity by the tests below.
 fn two_row_records(self_pid: u64, target_pid: u64) -> Vec<ProcessRecord> {
@@ -465,164 +384,6 @@ fn two_row_records(self_pid: u64, target_pid: u64) -> Vec<ProcessRecord> {
             b"task"
         ),
     ]
-}
-
-#[test]
-fn self_uid_derived_from_the_services_own_row_grants_same_uid_control() {
-    let target_pid = 50;
-    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
-    let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Edit(GroupingEdit::Assign {
-            task: 1,
-            activity: None,
-        }),
-        &NO_AUTHORITY,
-    );
-
-    assert_eq!(service.panel().model().model.activities.len(), 1);
-    assert!(
-        service.panel().model().model.activities[0].can_control,
-        "the target shares the service's own derived uid"
-    );
-}
-
-#[test]
-fn a_missing_self_row_denies_control_without_the_capability() {
-    let target_pid = 50;
-    let records = alloc::vec![process_record(
-        target_pid,
-        ProcId::from_raw([2; 16]),
-        DEFAULT_UID,
-        ProcessState::Running,
-        b"task"
-    )];
-    let transport = ProcessListTransport::new(records);
-    let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Edit(GroupingEdit::Assign {
-            task: 0,
-            activity: None,
-        }),
-        &NO_AUTHORITY,
-    );
-    assert!(
-        !service.panel().model().model.activities[0].can_control,
-        "an unknown self uid must never grant the same-uid rule"
-    );
-
-    // The capability alone still grants it, even with no self row. Re-derived
-    // through a cycle, which is what rebuilds the model under an authority in
-    // production; the assigned activity survives it because its member is
-    // still in the sampled process list.
-    service.cycle(
-        &mut host,
-        &transport,
-        crate::SAMPLE_PERIOD_NS,
-        &PROC_CONTROL_AUTHORITY,
-    );
-    assert!(service.panel().model().model.activities[0].can_control);
-}
-
-#[test]
-fn a_grouping_edit_re_presents_the_panel_immediately() {
-    let target_pid = 50;
-    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
-    let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-    service.command(
-        &mut host,
-        SwitchboardCommand::OpenPanel {
-            section: CommandSection::Activities,
-        },
-        &NO_AUTHORITY,
-    );
-    let presents = host.presents;
-
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Edit(GroupingEdit::Assign {
-            task: 1,
-            activity: None,
-        }),
-        &NO_AUTHORITY,
-    );
-    service.panel_mut().flush(&mut host);
-
-    assert_eq!(service.panel().model().model.activities.len(), 1);
-    assert!(
-        host.presents > presents,
-        "the new activity is shown without waiting for the next sample"
-    );
-}
-
-#[test]
-fn activities_survive_a_degraded_process_list_sample() {
-    let target_pid = 50;
-    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
-    let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Edit(GroupingEdit::Assign {
-            task: 1,
-            activity: None,
-        }),
-        &NO_AUTHORITY,
-    );
-    assert_eq!(service.panel().model().model.activities.len(), 1);
-
-    // A later cycle whose process-list query fails must not wipe the
-    // activity: an honestly empty list from a query failure is not "every
-    // process exited".
-    service.cycle(&mut host, &DeadTransport, KEEPALIVE_NS, &NO_AUTHORITY);
-    assert_eq!(
-        service.panel().model().model.activities.len(),
-        1,
-        "a degraded sample must never prune live activities"
-    );
-}
-
-#[test]
-fn a_rename_refusal_is_reported_and_leaves_the_name_unchanged() {
-    let target_pid = 50;
-    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
-    let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
-    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Edit(GroupingEdit::Assign {
-            task: 1,
-            activity: None,
-        }),
-        &NO_AUTHORITY,
-    );
-
-    service.apply_grouping(
-        &mut host,
-        PanelOutcome::Renamed {
-            activity: 0,
-            name: String::from("   "),
-        },
-        &NO_AUTHORITY,
-    );
-
-    assert_eq!(
-        service.panel().model().model.activities[0].name,
-        "Activity 1"
-    );
-    assert_eq!(host.refused_actions(), alloc::vec!["rename that activity"]);
 }
 
 #[test]
@@ -942,11 +703,6 @@ fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
     assert_eq!(t2, crate::SAMPLE_PERIOD_NS / 2);
 }
 
-/// A cycle whose own work costs a whole sample period must still park for a
-/// period afterwards. The deadline is anchored to the clock as it stood
-/// before the work, so without re-anchoring the wait the loop would find
-/// nothing left to wait for, re-enter the full cycle at once, and keep doing
-/// so — the runaway a busy monitor was observed to fall into.
 #[test]
 fn a_cycle_that_costs_a_whole_period_still_parks_for_one() {
     let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);

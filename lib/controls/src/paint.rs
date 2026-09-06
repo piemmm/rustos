@@ -100,6 +100,8 @@ pub(crate) const fn pressure_role(kind: PressureKind) -> SignalRole {
         PressureKind::Network => SignalRole::Network,
         PressureKind::Power => SignalRole::Power,
         PressureKind::Thermal => SignalRole::Thermal,
+        PressureKind::Gpu => SignalRole::Gpu,
+        PressureKind::Accelerator => SignalRole::Accelerator,
     }
 }
 

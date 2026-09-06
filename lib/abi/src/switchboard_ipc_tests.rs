@@ -482,11 +482,8 @@ fn command_endpoint_is_derived_from_the_task_id_and_is_never_reserved() {
 fn command_section_rejects_the_reserved_zero_and_unknown_bytes() {
     for section in [
         CommandSection::Tasks,
-        CommandSection::Jobs,
+        CommandSection::Resources,
         CommandSection::Recovery,
-        CommandSection::System,
-        CommandSection::Pressure,
-        CommandSection::Activities,
     ] {
         assert_eq!(CommandSection::from_u8(section.as_u8()), Ok(section));
     }
@@ -525,11 +522,8 @@ fn seat_report_constructor_refuses_a_contradictory_report() {
 fn round_trips_open_panel_for_every_section() {
     for section in [
         CommandSection::Tasks,
-        CommandSection::Jobs,
+        CommandSection::Resources,
         CommandSection::Recovery,
-        CommandSection::System,
-        CommandSection::Pressure,
-        CommandSection::Activities,
     ] {
         let command = SwitchboardCommand::OpenPanel { section };
         assert_eq!(

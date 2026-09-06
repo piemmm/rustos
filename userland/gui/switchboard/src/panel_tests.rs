@@ -4,24 +4,19 @@
 use tairix_abi::driver::display::DamageRect;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
-use tairix_abi::{Errno, SchedPriority, Signal};
+use tairix_abi::{Errno, Signal};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
 use super::{refusal_notice, Panel, PANEL_TITLE};
-use crate::activities::{Activities, Member};
-use crate::derive::{derive_summary, Hysteresis, CPU_PRESSURE_ENTER_PERMILLE};
 use crate::model::{build_model, PanelModel, RollingMeters, SessionReport};
 use crate::sample::Sample;
 use crate::test_host::{
-    process_summary, process_summary_with, sample_with, RecordingHost, DEFAULT_UID, NO_AUTHORITY,
-    PROC_CONTROL_AUTHORITY,
+    process_summary, sample_with, RecordingHost, NO_AUTHORITY, PROC_CONTROL_AUTHORITY,
 };
-use crate::view::{
-    ActivityControl, PressureControl, RecoveryControl, Section, SwitchboardAction, TaskControl,
-};
+use crate::view::{RecoveryControl, Section, SwitchboardAction, TaskControl};
 use crate::wait::required_members;
 
 /// This service's own scheduler task id in these tests.
@@ -44,10 +39,8 @@ fn stopped_model(pid: u64, can_force: bool) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SessionReport::HEALTHY,
-        &RollingMeters::new(),
+        &mut RollingMeters::new(),
         authority,
-        &Activities::new(),
-        None,
     )
 }
 
@@ -63,10 +56,8 @@ fn task_model(pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SessionReport::HEALTHY,
-        &RollingMeters::new(),
+        &mut RollingMeters::new(),
         &NO_AUTHORITY,
-        &Activities::new(),
-        None,
     )
 }
 
@@ -81,10 +72,8 @@ fn busy_model(first_pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample_with(processes),
         &SessionReport::HEALTHY,
-        &RollingMeters::new(),
+        &mut RollingMeters::new(),
         &NO_AUTHORITY,
-        &Activities::new(),
-        None,
     )
 }
 
@@ -109,10 +98,8 @@ fn frame_model(damaged_px: u64) -> PanelModel {
         PANEL_TITLE,
         &Sample::default(),
         &session,
-        &RollingMeters::new(),
+        &mut RollingMeters::new(),
         &NO_AUTHORITY,
-        &Activities::new(),
-        None,
     )
 }
 
@@ -122,92 +109,8 @@ fn empty_model() -> PanelModel {
         PANEL_TITLE,
         &Sample::default(),
         &SessionReport::HEALTHY,
-        &RollingMeters::new(),
+        &mut RollingMeters::new(),
         &NO_AUTHORITY,
-        &Activities::new(),
-        None,
-    )
-}
-
-/// A model with a single CPU pressure card, culprit `pid`, controllable as
-/// the fixture's own uid with no capability needed.
-fn pressured_model(pid: u64) -> PanelModel {
-    let sample = Sample {
-        cpu_busy_permille: Some(CPU_PRESSURE_ENTER_PERMILLE),
-        processes: alloc::vec![process_summary_with(
-            pid,
-            ProcessState::Running,
-            b"hog",
-            Some(900),
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        )],
-        ..Sample::default()
-    };
-    let mut hysteresis = Hysteresis::new();
-    let _ = derive_summary(&sample, &mut hysteresis);
-    let mut meters = RollingMeters::new();
-    meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
-    build_model(
-        PANEL_TITLE,
-        &sample,
-        &SessionReport::HEALTHY,
-        &meters,
-        &NO_AUTHORITY,
-        &Activities::new(),
-        Some(DEFAULT_UID),
-    )
-}
-
-/// A model with one activity grouping two live, controllable members.
-fn activity_model(first_pid: u64, second_pid: u64) -> PanelModel {
-    let sample = sample_with(alloc::vec![
-        process_summary_with(
-            first_pid,
-            ProcessState::Running,
-            b"a",
-            None,
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        ),
-        process_summary_with(
-            second_pid,
-            ProcessState::Running,
-            b"b",
-            None,
-            DEFAULT_UID,
-            0,
-            SchedPriority::Normal,
-        ),
-    ]);
-    let mut activities = Activities::new();
-    activities
-        .create(Member {
-            proc_id: sample.processes[0].proc_id,
-            pid: first_pid,
-            name: alloc::string::String::from("a"),
-        })
-        .expect("room");
-    activities
-        .assign(
-            0,
-            Member {
-                proc_id: sample.processes[1].proc_id,
-                pid: second_pid,
-                name: alloc::string::String::from("b"),
-            },
-        )
-        .expect("room");
-    build_model(
-        PANEL_TITLE,
-        &sample,
-        &SessionReport::HEALTHY,
-        &RollingMeters::new(),
-        &NO_AUTHORITY,
-        &activities,
-        Some(DEFAULT_UID),
     )
 }
 
@@ -266,28 +169,6 @@ fn a_fresh_panel_is_closed_and_shows_nothing() {
 }
 
 #[test]
-fn opening_shows_the_requested_section_and_arms_the_window_source() {
-    for (command, expected) in [
-        (CommandSection::Tasks, Section::Tasks),
-        (CommandSection::Jobs, Section::Jobs),
-        (CommandSection::Pressure, Section::Pressure),
-        (CommandSection::Activities, Section::Activities),
-        (CommandSection::Recovery, Section::Recovery),
-        (CommandSection::System, Section::System),
-    ] {
-        let mut host = RecordingHost::new();
-        let mut panel = Panel::new(OWN_PID, empty_model());
-        open(&mut panel, &mut host, command);
-        assert!(panel.is_open());
-        assert_eq!(panel.section(), Some(expected));
-        assert_eq!(host.opened, 1);
-        assert_eq!(host.presents, 1);
-        assert_eq!(host.armed(), required_members(true));
-        assert!(host.refusals.is_empty());
-    }
-}
-
-#[test]
 fn a_second_open_raises_the_one_window_rather_than_stacking_another() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
@@ -302,23 +183,6 @@ fn a_second_open_raises_the_one_window_rather_than_stacking_another() {
     );
     assert_eq!(panel.section(), Some(Section::Recovery));
     assert_eq!(host.armed(), required_members(true));
-}
-
-#[test]
-fn a_refused_raise_is_stated_and_the_section_still_changes() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, empty_model());
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    host.request_refusal = Some(Errno::NotFound);
-
-    open(&mut panel, &mut host, CommandSection::Jobs);
-
-    assert_eq!(
-        host.refused_actions(),
-        alloc::vec!["raise the overview window"]
-    );
-    assert_eq!(panel.section(), Some(Section::Jobs));
-    assert!(panel.is_open());
 }
 
 #[test]
@@ -445,36 +309,6 @@ fn a_fresh_frame_reading_draws_nothing_while_tasks_is_on_show() {
         "the session reports a frame per compositor frame, and only the \
          System section draws it"
     );
-}
-
-#[test]
-fn a_fresh_frame_reading_redraws_while_the_system_section_is_on_show() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, frame_model(3_200));
-    open(&mut panel, &mut host, CommandSection::System);
-    let presents = host.presents;
-
-    panel.refresh(frame_model(6_400));
-    panel.flush(&mut host);
-
-    assert_eq!(host.presents, presents + 1);
-}
-
-#[test]
-fn switching_the_section_on_show_redraws() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, frame_model(3_200));
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
-
-    panel
-        .view
-        .as_mut()
-        .expect("the panel is open")
-        .select_section(Section::System);
-    panel.flush(&mut host);
-
-    assert_eq!(host.presents, presents + 1);
 }
 
 #[test]
@@ -669,100 +503,6 @@ fn a_scroll_action_changes_nothing_outside_the_panel() {
     assert!(host.requests.is_empty());
     assert!(host.signals.is_empty());
     assert!(panel.is_open());
-}
-
-#[test]
-fn a_lower_priority_refusal_is_stated_and_the_panel_stays_open() {
-    let mut host = RecordingHost::new();
-    host.lower_refusal = Some(Errno::PermissionDenied);
-    let mut panel = Panel::new(OWN_PID, pressured_model(50));
-    open(&mut panel, &mut host, CommandSection::Pressure);
-
-    panel.act(
-        &mut host,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::LowerPriority,
-        },
-        &NO_AUTHORITY,
-    );
-
-    assert_eq!(host.lowered, alloc::vec![50]);
-    assert_eq!(host.refused_actions(), alloc::vec!["lower priority"]);
-    assert!(panel.is_open());
-}
-
-#[test]
-fn a_lower_priority_action_lowers_the_culprit_when_ready() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, pressured_model(50));
-    open(&mut panel, &mut host, CommandSection::Pressure);
-
-    panel.act(
-        &mut host,
-        SwitchboardAction::Pressure {
-            index: 0,
-            control: PressureControl::LowerPriority,
-        },
-        &NO_AUTHORITY,
-    );
-
-    assert_eq!(host.lowered, alloc::vec![50]);
-    assert!(host.refusals.is_empty());
-}
-
-#[test]
-fn a_signal_many_sweep_continues_past_an_individual_refusal() {
-    let mut host = RecordingHost::new();
-    host.signal_refusal = Some(Errno::PermissionDenied);
-    let mut panel = Panel::new(OWN_PID, activity_model(10, 20));
-    open(&mut panel, &mut host, CommandSection::Activities);
-
-    panel.act(
-        &mut host,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Pause,
-        },
-        &NO_AUTHORITY,
-    );
-
-    // Both members were still signalled even though each one refused: one
-    // member's refusal never aborts the sweep.
-    assert_eq!(
-        host.signals,
-        alloc::vec![(10, Signal::Stop), (20, Signal::Stop)]
-    );
-    assert_eq!(
-        host.refused_actions(),
-        alloc::vec!["pause that activity", "pause that activity"]
-    );
-}
-
-#[test]
-fn an_activate_owners_sweep_raises_windows_back_to_front() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, activity_model(10, 20));
-    open(&mut panel, &mut host, CommandSection::Activities);
-
-    panel.act(
-        &mut host,
-        SwitchboardAction::Activity {
-            index: 0,
-            control: ActivityControl::Switch,
-        },
-        &NO_AUTHORITY,
-    );
-
-    // Raising the last member first, and the first member last, leaves the
-    // group's first member frontmost.
-    assert_eq!(
-        host.requests,
-        alloc::vec![
-            SwitchboardRequest::ActivateOwner { owner: 20 },
-            SwitchboardRequest::ActivateOwner { owner: 10 },
-        ]
-    );
 }
 
 #[test]

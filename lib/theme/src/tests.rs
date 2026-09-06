@@ -61,6 +61,8 @@ fn dark_and_light_palettes_differ_on_every_role() {
         SignalRole::Network,
         SignalRole::Power,
         SignalRole::Thermal,
+        SignalRole::Gpu,
+        SignalRole::Accelerator,
         SignalRole::Recovery,
         SignalRole::Success,
         SignalRole::Warning,
@@ -211,6 +213,8 @@ fn signal_resolves_each_semantic_role_to_its_field() {
     assert_eq!(p.signal(SignalRole::Network), p.network_activity);
     assert_eq!(p.signal(SignalRole::Power), p.power_pressure);
     assert_eq!(p.signal(SignalRole::Thermal), p.thermal_pressure);
+    assert_eq!(p.signal(SignalRole::Gpu), p.gpu_pressure);
+    assert_eq!(p.signal(SignalRole::Accelerator), p.accelerator_pressure);
     assert_eq!(p.signal(SignalRole::Recovery), p.recovery);
     assert_eq!(p.signal(SignalRole::Success), p.success);
     assert_eq!(p.signal(SignalRole::Warning), p.warning);
@@ -860,6 +864,8 @@ fn sample_theme(id: ThemeId) -> Theme {
             network_activity: Rgba::rgb(64, 176, 255),
             power_pressure: Rgba::rgb(139, 212, 80),
             thermal_pressure: Rgba::rgb(255, 122, 60),
+            gpu_pressure: Rgba::rgb(34, 184, 166),
+            accelerator_pressure: Rgba::rgb(217, 79, 140),
             recovery: Rgba::rgb(255, 106, 176),
             success: Rgba::rgb(76, 208, 122),
             warning: Rgba::rgb(245, 197, 66),

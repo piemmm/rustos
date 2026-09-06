@@ -289,7 +289,7 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<(usize, MenuItem)>
 pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
     Some(match ROWS.get(index)?.action {
         SystemAction::About => TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::System,
+            section: CommandSection::Resources,
         },
         SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Tasks,

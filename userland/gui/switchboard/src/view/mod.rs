@@ -1,8 +1,8 @@
 //! The Switchboard window's screen (`plans/NEW-SWITCHBOARD.md`).
 //!
 //! This is the surface behind the always-right-most Switchboard taskbar icon:
-//! the live task, background-job, pressure, activity, recovery, and
-//! system-overview state this service samples, laid out for a reader. It is
+//! the live task, resource-device and recovery state this service samples,
+//! laid out for a reader. It is
 //! assembled **purely from the shared Reactive Alloy controls** (spec §17) —
 //! a [`Breadcrumb`] location band, the collection controls
 //! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card),
@@ -18,11 +18,9 @@
 //! [`SwitchboardAction`], input dispatch, the scroll model, and the list
 //! geometry every section's primary column reuses.
 //! Each section is a struct in its own sibling module — [`mod@tasks`],
-//! [`mod@background`], [`mod@pressure`], [`mod@activities`],
-//! [`mod@recovery`], and [`mod@system`] — owning its own view models,
+//! [`mod@resources`] and [`mod@recovery`] — owning its own view models,
 //! controls and cursor behind one internal section dispatch, and every type
-//! that was public from this screen before the split is re-exported here
-//! unchanged.
+//! a host names is re-exported here.
 //!
 //! # What it composes
 //!
@@ -31,7 +29,7 @@
 //! - Along the top of the client sits the **location band**: a [`Breadcrumb`] reading
 //!   `Switchboard › <section>` with a section-list [`IconButton`] at its
 //!   trailing end. The trail's leading crumb and that command both open the
-//!   one [`Menu`] of the six [`Section`]s — the one being shown marked
+//!   one [`Menu`] of the three [`Section`]s — the one being shown marked
 //!   selected — and choosing a row switches section. The host chooses which
 //!   section the panel opens on — Recovery when the user reached for a
 //!   flagged capsule, Tasks otherwise — with
@@ -47,8 +45,8 @@
 //! # Data in, typed actions out
 //!
 //! The caller builds a [`SwitchboardModel`] of typed view models
-//! ([`TaskSummary`], [`JobSummary`], [`RecoveryItem`], [`SystemReport`],
-//! [`SystemAction`]); Switchboard turns it into controls.
+//! ([`TaskSummary`], [`RecoveryItem`], [`ResourceReport`]); Switchboard
+//! turns it into controls.
 //! It performs no privileged work: every interaction emits a typed
 //! [`SwitchboardAction`] the hosting service authorises and applies (a denied
 //! action renders distinctly and fails closed, never activating).
@@ -82,35 +80,31 @@ use tairix_controls::{
 };
 use tairix_icon::IconKind;
 
-pub mod activities;
-pub mod background;
 pub mod frame;
-pub mod pressure;
+pub mod reading;
 pub mod recovery;
 mod refresh;
-pub mod system;
-pub mod system_data;
+pub mod resources;
 pub mod tasks;
 
-pub use activities::{ActivityControl, ActivityMember, ActivitySummary};
-pub use background::{JobControl, JobSummary};
-pub use pressure::{PressureAction, PressureCause, PressureControl};
-pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, RecoveryItem};
-pub use system_data::{
-    HeadlineTile, HealthSeverity, LimitRow, NetworkInterface, Reading, SessionSeat, StorageVolume,
-    SystemAction, SystemFact, SystemPage, SystemReport, TileInstrument, Unmeasured,
+pub use reading::{
+    absence_statement, reading_text, selection_prompt, HealthSeverity, Reading, ReadingFact,
+    Unmeasured,
 };
-pub use tasks::{TaskAuthority, TaskControl, TaskKind, TaskSummary};
+pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, RecoveryItem};
+pub use resources::{
+    BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceGroup,
+    DeviceId, HeroInstrument, PaneBlock, PaneHero, PressureBanner, ResourceControl, ResourceDevice,
+    ResourceReport, TaskCostColumn,
+};
+pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskSummary};
 
-use activities::ActivitiesSection;
-use background::JobsSection;
 use frame::{
     action_button_width, resolve_band, resolve_section_frame, row_commands_width, BandLayout,
     SectionAnatomy, SectionFrame,
 };
-use pressure::PressureSection;
 use recovery::RecoverySection;
-use system::SystemSection;
+use resources::ResourcesSection;
 use tasks::TasksSection;
 
 #[cfg(test)]
@@ -120,44 +114,30 @@ mod test_support;
 #[path = "mod_tests.rs"]
 mod tests;
 
-/// One of Switchboard's six top-level sections (`plans/NEW-SWITCHBOARD.md`).
+/// One of Switchboard's three top-level sections
+/// (`plans/NEW-SWITCHBOARD.md` S4) — one per question a reader arrives
+/// with: what is running, what is this machine doing, what broke.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Section {
     /// Live application/task list.
     Tasks,
-    /// Background jobs with known or working progress.
-    Jobs,
-    /// Resource-pressure causes and their recommended relief actions.
-    Pressure,
-    /// Grouped tasks that move, pause, and close together.
-    Activities,
+    /// One pane per resource device: what this machine is doing.
+    Resources,
     /// Hung objects and their recovery actions.
     Recovery,
-    /// The machine itself: its readings, its pages, and its own actions.
-    System,
 }
 
 impl Section {
     /// The sections in tab order.
-    pub const ALL: [Section; 6] = [
-        Section::Tasks,
-        Section::Jobs,
-        Section::Pressure,
-        Section::Activities,
-        Section::Recovery,
-        Section::System,
-    ];
+    pub const ALL: [Section; 3] = [Section::Tasks, Section::Resources, Section::Recovery];
 
     /// The section's zero-based tab index.
     #[must_use]
     pub const fn index(self) -> usize {
         match self {
             Section::Tasks => 0,
-            Section::Jobs => 1,
-            Section::Pressure => 2,
-            Section::Activities => 3,
-            Section::Recovery => 4,
-            Section::System => 5,
+            Section::Resources => 1,
+            Section::Recovery => 2,
         }
     }
 
@@ -172,11 +152,8 @@ impl Section {
     pub const fn title(self) -> &'static str {
         match self {
             Section::Tasks => "Tasks",
-            Section::Jobs => "Jobs",
-            Section::Pressure => "Pressure",
-            Section::Activities => "Activities",
+            Section::Resources => "Resources",
             Section::Recovery => "Recovery",
-            Section::System => "System",
         }
     }
 }
@@ -226,8 +203,6 @@ pub struct SwitchboardModel {
     pub title: String,
     /// The live tasks.
     pub tasks: Vec<TaskSummary>,
-    /// The background jobs.
-    pub jobs: Vec<JobSummary>,
     /// The hung/recoverable objects.
     pub recovery: Vec<RecoveryItem>,
     /// How many faults have cleared since the service started watching.
@@ -237,16 +212,9 @@ pub struct SwitchboardModel {
     /// here — never re-derived by the screen, which sees one model at a
     /// time and would count differently depending on what it saw before.
     pub recovery_resolved: usize,
-    /// Everything the System section shows: its header readings, its eight
-    /// pages' bodies, and the machine's own actions.
-    pub system: SystemReport,
-    /// The resource-pressure causes and their recommended relief actions.
-    pub pressure: Vec<PressureCause>,
-    /// The activities: named groups of tasks that move, pause, and close
-    /// together.
-    pub activities: Vec<ActivitySummary>,
-    /// Whether the caller may group a task into a new activity.
-    pub can_create_activity: bool,
+    /// Everything the Resources section shows: one device per pane, in rail
+    /// order.
+    pub resources: ResourceReport,
 }
 
 impl SwitchboardModel {
@@ -256,13 +224,9 @@ impl SwitchboardModel {
         Self {
             title: title.into(),
             tasks: Vec::new(),
-            jobs: Vec::new(),
             recovery: Vec::new(),
             recovery_resolved: 0,
-            system: SystemReport::default(),
-            pressure: Vec::new(),
-            activities: Vec::new(),
-            can_create_activity: true,
+            resources: ResourceReport::default(),
         }
     }
 }
@@ -286,13 +250,6 @@ pub enum SwitchboardAction {
         /// Which task command.
         control: TaskControl,
     },
-    /// A background job's action was invoked.
-    Job {
-        /// The job's index within the model.
-        index: usize,
-        /// Which job action.
-        control: JobControl,
-    },
     /// A recovery action was invoked.
     Recovery {
         /// The object's index within the model.
@@ -300,53 +257,17 @@ pub enum SwitchboardAction {
         /// Which recovery action.
         control: RecoveryControl,
     },
-    /// A service's action was invoked.
-    Service {
-        /// The service's index within the model.
+    /// A command was invoked on the selected resource device.
+    Resource {
+        /// The device's index within the report, in rail order.
         index: usize,
-    },
-    /// A system-level action was invoked.
-    System {
-        /// The action's index within the model.
-        index: usize,
+        /// Which device command.
+        control: ResourceControl,
     },
     /// The active section was scrolled to `offset` (in item units).
     Scrolled {
         /// The new first-visible item index.
         offset: u64,
-    },
-    /// A pressure cause's relief action was invoked.
-    Pressure {
-        /// The cause's index within the model.
-        index: usize,
-        /// Which relief action.
-        control: PressureControl,
-    },
-    /// A task was grouped into an activity, or into a newly created one.
-    TaskGrouped {
-        /// The task's index within the model.
-        task: usize,
-        /// The activity's index within the model, or `None` to create a new
-        /// activity containing just this task.
-        activity: Option<usize>,
-    },
-    /// A task was removed from its activity.
-    TaskUngrouped {
-        /// The task's index within the model.
-        task: usize,
-    },
-    /// An activity's action was invoked.
-    Activity {
-        /// The activity's index within the model.
-        index: usize,
-        /// Which activity action.
-        control: ActivityControl,
-    },
-    /// An activity's inline rename was committed. The new name is read with
-    /// [`Switchboard::submitted_activity_name`].
-    ActivityRenamed {
-        /// The activity's index within the model.
-        index: usize,
     },
 }
 
@@ -476,11 +397,11 @@ impl FocusRegion {
 enum SectionOutcome {
     /// Report this action to the host.
     Action(SwitchboardAction),
-    /// Show [`Section::Tasks`] with the task at this index focused; `None`
-    /// focuses the first task.
-    ShowTask {
-        /// The task to focus, clamped into the Tasks list by the screen.
-        task: Option<usize>,
+    /// Show [`Section::Tasks`] ordered by what a device costs, so a busy
+    /// device is traced to the tasks sitting on it.
+    ShowTasksBy {
+        /// Which cost to order the table by.
+        column: resources::TaskCostColumn,
     },
 }
 
@@ -500,9 +421,6 @@ struct SectionCtx<'a> {
     bounds: Rect,
     /// The index of the primary column's first visible item.
     start: usize,
-    /// The last pointer position, for the hit tests a control cannot resolve
-    /// from the event alone.
-    pointer: Point,
     /// The active UI scale.
     scale: Scale,
     /// The active theme.
@@ -608,6 +526,17 @@ trait SectionView {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome>;
+
+    /// Re-lay-out anything whose shape depends on the width it will be
+    /// drawn at, before the scroll model is ranged over it.
+    ///
+    /// Nothing by default. A section whose content re-wraps with its own
+    /// width — the Resources pane's per-core grid — recompiles here, once
+    /// per resize rather than per paint, so the scroll range always
+    /// describes the layout that is actually on screen.
+    fn relayout(&mut self, frame: &SectionFrame, scale: Scale, theme: &Theme) {
+        let _ = (frame, scale, theme);
+    }
 
     /// Paint the section into its own regions.
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>);
@@ -802,18 +731,15 @@ pub struct Switchboard {
     /// The open section list, or `None` while it is closed.
     section_menu: Option<Menu>,
     scroll: ScrollBar,
-    /// The six sections, each owning its own view models, controls, cursor and
-    /// overlays. The screen reaches the one on show through
+    /// The three sections, each owning its own view models, controls, cursor
+    /// and overlays. The screen reaches the one on show through
     /// [`active`](Self::active)/[`active_mut`](Self::active_mut), never by
     /// naming a section's own state here.
     tasks: TasksSection,
-    jobs: JobsSection,
-    pressure: PressureSection,
-    activities: ActivitiesSection,
+    resources: ResourcesSection,
     recovery: RecoverySection,
-    system: SystemSection,
     section: Section,
-    offsets: [u64; 6],
+    offsets: [u64; Section::ALL.len()],
     focus: FocusRegion,
     /// The last pointer position, kept so a press can be resolved against the
     /// coordinate the pointer actually reached — hit-testing input, never a
@@ -829,11 +755,8 @@ impl PartialEq for Switchboard {
             section_menu,
             scroll,
             tasks,
-            jobs,
-            pressure,
-            activities,
+            resources,
             recovery,
-            system,
             section,
             offsets,
             focus,
@@ -849,11 +772,8 @@ impl PartialEq for Switchboard {
             && *pointer == other.pointer
             && match section {
                 Section::Tasks => *tasks == other.tasks,
-                Section::Jobs => *jobs == other.jobs,
-                Section::Pressure => *pressure == other.pressure,
-                Section::Activities => *activities == other.activities,
+                Section::Resources => *resources == other.resources,
                 Section::Recovery => *recovery == other.recovery,
-                Section::System => *system == other.system,
             }
     }
 }
@@ -878,13 +798,10 @@ impl Switchboard {
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
             ),
             tasks: TasksSection::new(),
-            jobs: JobsSection::new(),
-            pressure: PressureSection::new(),
-            activities: ActivitiesSection::new(),
+            resources: ResourcesSection::new(),
             recovery: RecoverySection::new(),
-            system: SystemSection::new(),
             section: Section::Tasks,
-            offsets: [0; 6],
+            offsets: [0; Section::ALL.len()],
             focus: FocusRegion::Content,
             pointer: RenderInvariant::new(Point::ORIGIN),
         };
@@ -1004,17 +921,6 @@ impl Switchboard {
     #[must_use]
     pub fn scroll_offset(&self) -> u64 {
         self.offsets[self.section.index()]
-    }
-
-    /// The name committed by the most recent inline activity rename.
-    ///
-    /// `Some` from the [`SwitchboardAction::ActivityRenamed`] emission until
-    /// the next [`set_model`](Switchboard::set_model), mirroring how a host
-    /// reads a committed [`TextField::text`](tairix_controls::TextField::text)
-    /// before refreshing its model.
-    #[must_use]
-    pub fn submitted_activity_name(&self) -> Option<&str> {
-        self.activities.submitted_name()
     }
 
     /// Show `section`, as if it had been chosen from the section list, and
@@ -1234,11 +1140,8 @@ impl Switchboard {
     fn active(&self) -> &dyn SectionView {
         match self.section {
             Section::Tasks => &self.tasks,
-            Section::Jobs => &self.jobs,
-            Section::Pressure => &self.pressure,
-            Section::Activities => &self.activities,
+            Section::Resources => &self.resources,
             Section::Recovery => &self.recovery,
-            Section::System => &self.system,
         }
     }
 
@@ -1254,11 +1157,8 @@ impl Switchboard {
     fn section_mut(&mut self, section: Section) -> &mut dyn SectionView {
         match section {
             Section::Tasks => &mut self.tasks,
-            Section::Jobs => &mut self.jobs,
-            Section::Pressure => &mut self.pressure,
-            Section::Activities => &mut self.activities,
+            Section::Resources => &mut self.resources,
             Section::Recovery => &mut self.recovery,
-            Section::System => &mut self.system,
         }
     }
 
@@ -1276,7 +1176,6 @@ impl Switchboard {
             frame: resolve_section_frame(layout.content, self.active().anatomy(), scale, theme),
             bounds,
             start: usize::try_from(self.offsets[self.section.index()]).unwrap_or(0),
-            pointer: *self.pointer,
             scale,
             theme,
             font,
@@ -1285,8 +1184,13 @@ impl Switchboard {
 
     /// The scrollable list metrics for the active section.
     fn list_info(&self, layout: &SbLayout, scale: Scale, theme: &Theme) -> ListInfo {
-        let frame = resolve_section_frame(layout.content, self.active().anatomy(), scale, theme);
+        let frame = self.section_frame(layout, scale, theme);
         self.active().list_info(&frame, scale, theme)
+    }
+
+    /// The active section's resolved regions for this layout.
+    fn section_frame(&self, layout: &SbLayout, scale: Scale, theme: &Theme) -> SectionFrame {
+        resolve_section_frame(layout.content, self.active().anatomy(), scale, theme)
     }
 
     /// The anchored action column of the active section: the strip the rows'
@@ -1365,6 +1269,8 @@ impl Switchboard {
     /// than leaving it out of bounds.
     fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) {
         let layout = self.compute_layout(bounds, scale, theme);
+        let frame = self.section_frame(&layout, scale, theme);
+        self.active_mut().relayout(&frame, scale, theme);
         let info = self.list_info(&layout, scale, theme);
         self.set_scroll_range(info.count, u64::from(info.visible()));
     }
@@ -1534,27 +1440,28 @@ impl Switchboard {
     ) -> Option<SwitchboardAction> {
         match outcome {
             SectionOutcome::Action(action) => Some(action),
-            SectionOutcome::ShowTask { task } => self.show_task(task, ctx, damage),
+            SectionOutcome::ShowTasksBy { column } => {
+                let action = self.show_tasks(ctx, damage);
+                self.tasks.sort_by_cost(column, ctx, damage);
+                action
+            }
         }
     }
 
-    /// Show [`Section::Tasks`] with `task` focused (clamped into the list;
-    /// `None` focuses the first task) and report the transition.
+    /// Show [`Section::Tasks`] with its first row focused, and report the
+    /// transition.
     ///
-    /// This runs the one section transition and the one focus arithmetic every
-    /// other route runs, so the Pressure section's "Show tasks" relief cannot
-    /// leave the trail, the content and the offsets disagreeing.
-    fn show_task(
+    /// This runs the one section transition and the one focus arithmetic
+    /// every other route runs, so a resource pane's "sort tasks by" command
+    /// cannot leave the trail, the content and the offsets disagreeing.
+    fn show_tasks(
         &mut self,
-        task: Option<usize>,
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         let mut sweep = FocusSweep::reporting(ctx, damage);
         let action = self.select_section_index(Section::Tasks.index(), &mut sweep);
-        let last = self.tasks.item_count().saturating_sub(1);
-        let row = task.unwrap_or(0).min(last);
-        let focus = self.tasks.focus_index_for_row(row);
+        let focus = self.tasks.focus_index_for_row(0);
         self.tasks.set_content_focus(focus);
         self.tasks.set_row_action(0, &mut sweep);
         self.ensure_focus_visible(&mut sweep);

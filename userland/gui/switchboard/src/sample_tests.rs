@@ -6,17 +6,20 @@ use core::cell::RefCell;
 
 use tairix_abi::blkio::BlkHealthCounters;
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{
-    NetIfKind, NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord,
-    IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    NetAddrFamily, NetCounters, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSockProto, NetSockState,
+    NetSocketRecord, NetStackDefenceCounters, IF_NAME_LEN, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::rlimit::{LimitKind, ResourceLimit};
 use tairix_abi::sysinfo::{
-    CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeListRequest, CpuTimeRecord,
-    CrashFaultBucket, CrashFaultClass, CrashRecord, KernelMemoryStats, LoadAverage,
-    MemoryPressureStats, MemoryTotal, MountAvailability, MountListRequest, MountRecord,
-    MountVolumeState, ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord,
+    CacheLedgerRecord, CacheOwnerKind, CpuCoreClass, CpuInfoRecord, CpuLoadRecord,
+    CpuTimeListRequest, CpuTimeRecord, CrashFaultBucket, CrashFaultClass, CrashRecord,
+    KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal,
+    MountAvailability, MountListRequest, MountRecord, MountVolumeState, ProcessListRequest,
+    ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ResourceLimitRecord, SeatRecord,
+    SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime, VolumeIoHealthRecord,
     CPU_INFO_FLAG_FREQ_MEASURED, MACHINE_ID_LEN, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, Time64};
@@ -88,6 +91,24 @@ impl Fixture {
             alloc::vec![KernelMemoryStats::default().to_le_bytes().to_vec()],
         );
         records.insert(SysinfoQueryId::RESOURCE_LIMITS, alloc::vec![limit_report()]);
+        records.insert(
+            SysinfoQueryId::MEMORY_PRESSURE_BAND,
+            alloc::vec![MemoryPressureBand::default().to_le_bytes().to_vec()],
+        );
+        records.insert(
+            SysinfoQueryId::RAMZIP_STATS,
+            alloc::vec![RamzipStats::default().to_le_bytes().to_vec()],
+        );
+        records.insert(
+            SysinfoQueryId::NET_STACK_DEFENCE,
+            alloc::vec![NetStackDefenceCounters::default().to_le_bytes().to_vec()],
+        );
+        // The hardware tree is the one reading whose reply carries a header
+        // ahead of its records, so an empty snapshot is that header alone.
+        records.insert(
+            SysinfoQueryId::HARDWARE_TREE,
+            alloc::vec![HwTreeHeader::new(1, 0).to_le_bytes().to_vec()],
+        );
         for paged in [
             SysinfoQueryId::CPU_INFO,
             SysinfoQueryId::CPU_LOAD,
@@ -96,6 +117,12 @@ impl Fixture {
             SysinfoQueryId::NET_INTERFACE_FACTS,
             SysinfoQueryId::NET_INTERFACE_STATE,
             SysinfoQueryId::NET_INTERFACE_RATES,
+            SysinfoQueryId::NET_INTERFACE_COUNTERS,
+            SysinfoQueryId::NET_SOCKETS,
+            SysinfoQueryId::NET_RESOLVER_SERVERS,
+            SysinfoQueryId::NET_TIME_SERVERS,
+            SysinfoQueryId::RECLAIM_STATS,
+            SysinfoQueryId::CACHE_LEDGERS,
             SysinfoQueryId::SEAT_LIST,
             SysinfoQueryId::CRASH_RECORD,
         ] {
@@ -407,6 +434,81 @@ fn net_rates(name: &[u8], rx_bps: u64) -> NetInterfaceRatesRecord {
         tx_pps: 0,
         tx_bps: 0,
     }
+}
+
+/// One CPU's execution-time record.
+fn cpu_time(cpu: u32, busy_ns: u64, idle_ns: u64) -> CpuTimeRecord {
+    CpuTimeRecord {
+        cpu,
+        reserved: 0,
+        busy_ns,
+        idle_ns,
+    }
+}
+
+/// One interface's cumulative counters, distinguishable by `rx_bytes`.
+fn net_counters(name: &[u8], rx_bytes: u64) -> NetInterfaceCountersRecord {
+    NetInterfaceCountersRecord {
+        name: if_name(name),
+        counters: NetCounters {
+            rx_bytes,
+            ..NetCounters::default()
+        },
+    }
+}
+
+/// One socket record in `state`; the census reads nothing else off it.
+fn socket(state: NetSockState) -> NetSocketRecord {
+    NetSocketRecord {
+        proto: NetSockProto::Tcp,
+        state,
+        family: NetAddrFamily::V4,
+        local_addr: [0; 16],
+        local_port: 80,
+        peer_addr: [0; 16],
+        peer_port: 0,
+        owner: 0,
+        recv_q: 0,
+        send_q: 0,
+    }
+}
+
+/// One configured server at IPv4 `octets`.
+fn server(octets: [u8; 4]) -> NetServerAddr {
+    let mut addr = [0u8; 16];
+    addr[..4].copy_from_slice(&octets);
+    NetServerAddr {
+        family: NetAddrFamily::V4,
+        addr,
+    }
+}
+
+/// One reclaim-ledger row for reclaim class `class`, holding
+/// `payload_bytes`.
+fn reclaim_class(class: u8, payload_bytes: u64) -> ReclaimClassRecord {
+    ReclaimClassRecord {
+        class,
+        payload_bytes,
+        ..ReclaimClassRecord::default()
+    }
+}
+
+/// One bounded-cache ledger row named `label`, holding `payload_bytes`.
+fn cache_ledger(label: &[u8], payload_bytes: u64) -> CacheLedgerRecord {
+    let mut record = CacheLedgerRecord::new(label, CacheOwnerKind::KernelSubsystem, 0, 0)
+        .expect("a valid ledger row");
+    record.payload_bytes = payload_bytes;
+    record
+}
+
+/// A whole hardware-tree snapshot reply: its header, then `nodes`.
+fn hw_snapshot(nodes: &[HwNode]) -> Vec<u8> {
+    let count = u64::try_from(nodes.len()).expect("a plausible node count");
+    let mut out = HwTreeHeader::new(1, count).to_le_bytes().to_vec();
+    for node in nodes {
+        out.extend_from_slice(&node.to_le_bytes());
+    }
+    out
 }
 
 /// One user-fault crash record for a process called `name`.
@@ -805,6 +907,12 @@ fn the_fixed_size_readings_are_present_and_decoded() {
     assert_eq!(sample.load_average, Some(LoadAverage::default()));
     assert_eq!(sample.memory_total, Some(MemoryTotal::default()));
     assert_eq!(sample.kernel_memory, Some(KernelMemoryStats::default()));
+    assert_eq!(sample.pressure_band, Some(MemoryPressureBand::default()));
+    assert_eq!(sample.ramzip, Some(RamzipStats::default()));
+    assert_eq!(
+        sample.stack_defence,
+        Some(NetStackDefenceCounters::default())
+    );
 
     // The limit report is decoded positionally: one record per kind, in
     // discriminant order.
@@ -885,6 +993,135 @@ fn the_paged_readings_are_present_and_decoded() {
     let crashes = sample.crashes.expect("crash records read");
     assert_eq!(crashes[0].name_bytes(), b"wild");
     assert!(sample.degradations.is_empty());
+}
+
+#[test]
+fn the_resource_pane_readings_are_present_and_decoded() {
+    let fixture = Fixture::new();
+    fixture.serve(
+        SysinfoQueryId::NET_INTERFACE_COUNTERS,
+        blobs(&[net_counters(b"eth0", 4_096)], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    fixture.serve(
+        SysinfoQueryId::NET_SOCKETS,
+        blobs(
+            &[
+                socket(NetSockState::Established),
+                socket(NetSockState::Established),
+                socket(NetSockState::Listen),
+                socket(NetSockState::Closed),
+            ],
+            |r| r.to_le_bytes().to_vec(),
+        ),
+    );
+    fixture.serve(
+        SysinfoQueryId::NET_RESOLVER_SERVERS,
+        blobs(&[server([1, 1, 1, 1])], |r| r.to_le_bytes().to_vec()),
+    );
+    fixture.serve(
+        SysinfoQueryId::NET_TIME_SERVERS,
+        blobs(&[server([2, 2, 2, 2]), server([3, 3, 3, 3])], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    fixture.serve(
+        SysinfoQueryId::RECLAIM_STATS,
+        blobs(&[reclaim_class(0, 2_048)], |r| r.to_le_bytes().to_vec()),
+    );
+    fixture.serve(
+        SysinfoQueryId::CACHE_LEDGERS,
+        blobs(&[cache_ledger(b"glyph atlas", 1_024)], |r| {
+            r.to_le_bytes().to_vec()
+        }),
+    );
+    fixture.serve(
+        SysinfoQueryId::HARDWARE_TREE,
+        alloc::vec![hw_snapshot(&[HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )])],
+    );
+
+    let mut sampler = Sampler::new(granted());
+    let sample = sampler.sample(&fixture, 0);
+
+    assert_eq!(
+        sample.net_counters.expect("counters read")[0]
+            .counters
+            .rx_bytes,
+        4_096
+    );
+    // The socket table is folded into the two counts the pane states as it
+    // is walked, so a closed socket is counted in neither.
+    assert_eq!(
+        sample.sockets,
+        Some(super::SocketCensus {
+            established: 2,
+            listening: 1,
+        })
+    );
+    assert_eq!(sample.resolver_servers.expect("resolvers read").len(), 1);
+    assert_eq!(sample.time_servers.expect("time servers read").len(), 2);
+    assert_eq!(
+        sample.reclaim.expect("reclaim ledger read")[0].payload_bytes,
+        2_048
+    );
+    let ledgers = sample.cache_ledgers.expect("cache ledgers read");
+    assert_eq!(ledgers[0].label_bytes(), b"glyph atlas");
+    let nodes = sample.hardware.expect("hardware tree read");
+    assert_eq!(nodes[0].class(), Some(HwDeviceClass::Display));
+    assert!(sample.degradations.is_empty());
+}
+
+#[test]
+fn a_core_first_seen_this_sample_reports_no_busy_share() {
+    let fixture = Fixture::new();
+    fixture.set_cpu(alloc::vec![cpu_time(0, 750, 250)]);
+    let mut sampler = Sampler::new(granted());
+
+    // A cumulative total is not a share: the first sighting has nothing to
+    // delta against, so it contributes no reading rather than the whole of
+    // boot dressed as this interval.
+    let first = sampler.sample(&fixture, 0);
+    assert_eq!(first.core_busy.len(), 1);
+    assert_eq!(first.core_busy[0].cpu, 0);
+    assert_eq!(first.core_busy[0].permille, None);
+
+    fixture.set_cpu(alloc::vec![cpu_time(0, 1_500, 500)]);
+    let second = sampler.sample(&fixture, NS);
+    assert_eq!(second.core_busy[0].permille, Some(750));
+}
+
+#[test]
+fn a_cores_share_follows_its_own_cpu_index_not_its_position() {
+    let fixture = Fixture::new();
+    fixture.set_cpu(alloc::vec![
+        cpu_time(0, 1_000, 1_000),
+        cpu_time(1, 1_000, 1_000)
+    ]);
+    let mut sampler = Sampler::new(granted());
+    let _ = sampler.sample(&fixture, 0);
+
+    // The service reports its CPUs in the other order, and only CPU 1 moved.
+    // Keying on the index the record names is what stops one core's delta
+    // being attributed to the other.
+    fixture.set_cpu(alloc::vec![
+        cpu_time(1, 1_750, 1_250),
+        cpu_time(0, 1_000, 1_000)
+    ]);
+    let second = sampler.sample(&fixture, NS);
+    let share = |cpu: u32| {
+        second
+            .core_busy
+            .iter()
+            .find(|core| core.cpu == cpu)
+            .and_then(|core| core.permille)
+    };
+    assert_eq!(share(1), Some(750));
+    assert_eq!(share(0), None, "an interval with no work measured no share");
 }
 
 #[test]

@@ -16,9 +16,6 @@
 //! arming the one multiplexed wait, translating window events, and
 //! painting.
 
-use alloc::collections::BTreeSet;
-use alloc::string::String;
-
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
 use tairix_geometry::Region;
@@ -26,10 +23,9 @@ use tairix_log::EventId;
 use tairix_procinfo::Transport;
 use tairix_window::Repaint;
 
-use crate::activities::{Activities, Member};
 use crate::derive::{derive_summary, Hysteresis};
-use crate::model::{build_model, derive_self_uid, GroupingEdit, RollingMeters, SessionReport};
-use crate::panel::{Panel, PanelOutcome, PANEL_TITLE};
+use crate::model::{build_model, RollingMeters, SessionReport};
+use crate::panel::{Panel, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
 use crate::view::Switchboard;
@@ -222,47 +218,40 @@ pub enum CycleOutcome {
 pub const SESSION_REFUSED: EventId = EventId(21_000);
 
 /// The Switchboard service: the sampler, the derived tray summary's
-/// hysteresis, the publish gate, the rolling meter readings, the
-/// activity-grouping state, and the optional overview panel.
+/// hysteresis, the publish gate, the rolling meter readings, and the
+/// optional overview panel.
 pub struct Service {
-    self_pid: u64,
     sampler: Sampler,
     hysteresis: Hysteresis,
     publisher: Publisher,
     meters: RollingMeters,
     last_sample: Sample,
-    activities: Activities,
     panel: Panel,
     next_sample_ns: u64,
 }
 
 impl Service {
     /// A fresh service owned by the process `self_pid`, sampling within
-    /// `scopes`, with no activities grouped and a closed panel whose model
-    /// already reflects what `authority` allows.
+    /// `scopes`, with a closed panel whose model already reflects what
+    /// `authority` allows.
     #[must_use]
     pub fn new(self_pid: u64, scopes: ScopeVerdicts, authority: &dyn CapabilityQuery) -> Self {
         let last_sample = Sample::default();
-        let meters = RollingMeters::new();
-        let activities = Activities::new();
+        let mut meters = RollingMeters::new();
         let model = build_model(
             PANEL_TITLE,
             &last_sample,
             &SessionReport::HEALTHY,
-            &meters,
+            &mut meters,
             authority,
-            &activities,
-            derive_self_uid(&last_sample, self_pid),
         );
         Self {
-            self_pid,
             panel: Panel::new(self_pid, model),
             sampler: Sampler::new(scopes),
             hysteresis: Hysteresis::new(),
             publisher: Publisher::new(),
             meters,
             last_sample,
-            activities,
             next_sample_ns: 0,
         }
     }
@@ -317,19 +306,6 @@ impl Service {
         self.meters
             .record(&sample, self.hysteresis, self.panel.session_report());
         // A process list that degraded to its honest empty form this cycle
-        // is a query failure, not "every process exited" — pruning against
-        // it would wipe every activity on a transient `sysinfo` hiccup, so
-        // the grouping state is only ever pruned against a sample whose
-        // process list actually succeeded.
-        if !sample.degradations.contains(&DegradedField::ProcessList) {
-            let live: BTreeSet<_> = sample
-                .processes
-                .iter()
-                .map(|process| process.proc_id)
-                .collect();
-            self.activities.retain_live(&live);
-            self.activities.refresh_names(&sample.processes);
-        }
         self.last_sample = sample;
         self.rebuild(authority);
 
@@ -440,126 +416,19 @@ impl Service {
         }
     }
 
-    /// Apply a grouping-related outcome the panel reported from a window
-    /// action, then rebuild the panel's model so the change is on the
-    /// composition the next flush compares against what is on screen.
+    /// Rebuild the live model only when the panel is actually showing.
     ///
-    /// The edit is applied and presented once in this same wake, before the
-    /// service parks again — so the popup or rename the user just committed
-    /// is visible now, not at the next sample.
+    /// A rebuild is not a cheap thing to do per report — [`build_model`]
+    /// walks every sampled process and allocates a row, a name and a history
+    /// for each — and with the panel closed it buys nothing: the model it
+    /// stores is read only on paths that require an open window, and
+    /// [`Service::cycle`] rebuilds it from a fresh sample within one sample
+    /// period regardless.
     ///
-    /// Every edit resolves the index it carries through the *current*
-    /// [`crate::model::PanelModel`] to a stable activity id before touching
-    /// [`Activities`], so a stale index from an action queued before a
-    /// refresh can never edit the wrong group; an id that has since vanished
-    /// (its activity closed or dissolved meanwhile) is a silent no-op, not a
-    /// guess. A validation refusal (an invalid rename) is stated and the
-    /// grouping state is left unchanged.
-    pub fn apply_grouping(
-        &mut self,
-        host: &mut dyn ServiceHost,
-        outcome: PanelOutcome,
-        authority: &dyn CapabilityQuery,
-    ) {
-        match outcome {
-            PanelOutcome::Edit(GroupingEdit::Assign { task, activity }) => {
-                let Some((proc_id, pid, name)) = self.panel.model().task_ident(task) else {
-                    return;
-                };
-                let member = Member {
-                    proc_id,
-                    pid,
-                    name: String::from(name),
-                };
-                match activity {
-                    Some(activity_index) => {
-                        let Some(activity_id) = self.panel.model().activity_id(activity_index)
-                        else {
-                            return;
-                        };
-                        let Some(current_index) = self.group_index_of_id(activity_id) else {
-                            return;
-                        };
-                        if let Err(refusal) = self.activities.assign(current_index, member) {
-                            host.report_refusal("group that task", refusal);
-                        }
-                    }
-                    None => {
-                        if let Err(refusal) = self.activities.create(member) {
-                            host.report_refusal("group that task", refusal);
-                        }
-                    }
-                }
-            }
-            PanelOutcome::Edit(GroupingEdit::Unassign { task }) => {
-                let Some((proc_id, _, _)) = self.panel.model().task_ident(task) else {
-                    return;
-                };
-                let _ = self.activities.unassign(proc_id);
-            }
-            PanelOutcome::Edit(GroupingEdit::SetPaused { activity, paused }) => {
-                let Some(activity_id) = self.panel.model().activity_id(activity) else {
-                    return;
-                };
-                if let Some(current_index) = self.group_index_of_id(activity_id) {
-                    let _ = self.activities.set_paused(current_index, paused);
-                }
-            }
-            PanelOutcome::Edit(GroupingEdit::Close { activity }) => {
-                let Some(activity_id) = self.panel.model().activity_id(activity) else {
-                    return;
-                };
-                if let Some(current_index) = self.group_index_of_id(activity_id) {
-                    let _ = self.activities.close(current_index);
-                }
-            }
-            PanelOutcome::Edit(GroupingEdit::Rename { activity }) => {
-                // The widget never reports `ActivityRenamed` without a
-                // committed name in hand, so `Renamed` is the only shape a
-                // rename outcome takes; this arm exists only so the match
-                // stays exhaustive against `GroupingEdit`'s other variants.
-                let _ = activity;
-            }
-            PanelOutcome::Renamed { activity, name } => {
-                let Some(activity_id) = self.panel.model().activity_id(activity) else {
-                    return;
-                };
-                if let Some(current_index) = self.group_index_of_id(activity_id) {
-                    if let Err(refusal) = self.activities.rename(current_index, &name) {
-                        host.report_refusal("rename that activity", refusal);
-                    }
-                }
-            }
-        }
-
-        self.rebuild(authority);
-    }
-
-    /// The current index of the activity `id` still names, or `None` when
-    /// it has since closed or dissolved (fail closed — never guess at a
-    /// position).
-    fn group_index_of_id(&self, id: u64) -> Option<usize> {
-        self.activities.iter().position(|group| group.id == id)
-    }
-
-    /// Rebuild the model only when a window is open to show it.
-    ///
-    /// The session's reports arrive whether or not anybody is looking: it
-    /// sends what its last frame cost from its own frame path, and that path
-    /// runs for every pointer motion across bare wallpaper. A rebuild is not
-    /// a cheap thing to do per report — [`build_model`] walks every sampled
-    /// process and allocates a row, a name, and a history for each — and with
-    /// the panel closed it buys nothing at all: [`Panel::refresh`] renders
-    /// nothing without a view, the model it stores is read only on paths that
-    /// require an open window, and [`Service::cycle`] rebuilds it from a
-    /// fresh sample within [`SAMPLE_PERIOD_NS`](crate::SAMPLE_PERIOD_NS)
-    /// regardless.
-    ///
-    /// So the report itself is always adopted — that is a field write — and
-    /// only the rebuild waits. Nothing is lost by waiting: the panel cannot
-    /// open without going through [`Service::command`]'s `OpenPanel` arm,
-    /// which rebuilds first, so the first frame a user sees already carries
-    /// every report that arrived while they were not looking.
+    /// Nothing is lost by waiting: the panel cannot open without going
+    /// through [`Service::command`]'s `OpenPanel` arm, which rebuilds first,
+    /// so the first frame a user sees already carries every report that
+    /// arrived while they were not looking.
     fn rebuild_if_shown(&mut self, authority: &dyn CapabilityQuery) {
         if self.panel.is_open() {
             self.rebuild(authority);
@@ -569,15 +438,13 @@ impl Service {
     /// Rebuild the live model from the sample and meter state in hand and
     /// hand it to the panel, which re-renders only if it actually changed.
     fn rebuild(&mut self, authority: &dyn CapabilityQuery) {
-        let self_uid = derive_self_uid(&self.last_sample, self.self_pid);
+        let session = *self.panel.session_report();
         let model = build_model(
             PANEL_TITLE,
             &self.last_sample,
-            self.panel.session_report(),
-            &self.meters,
+            &session,
+            &mut self.meters,
             authority,
-            &self.activities,
-            self_uid,
         );
         self.panel.refresh(model);
     }

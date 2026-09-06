@@ -74,6 +74,7 @@ pub(crate) fn process_summary_with(
         name: name.to_vec(),
         state,
         uid,
+        cpu: 0,
         mem_bytes,
         priority,
         cpu_permille,

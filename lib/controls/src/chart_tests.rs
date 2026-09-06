@@ -222,6 +222,8 @@ fn each_pressure_kind_traces_in_its_own_rail_colour() {
         (PressureKind::Network, p.network_activity),
         (PressureKind::Power, p.power_pressure),
         (PressureKind::Thermal, p.thermal_pressure),
+        (PressureKind::Gpu, p.gpu_pressure),
+        (PressureKind::Accelerator, p.accelerator_pressure),
     ];
     for (kind, expected) in cases {
         let surface = chart_surface(&Chart::new(kind).with_samples([600; 6]), &theme);

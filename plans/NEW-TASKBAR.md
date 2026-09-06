@@ -1367,7 +1367,7 @@ no authority: each row reports a typed outcome and the session resolves it.
 
 | Row | Resolved by | Backing |
 |---|---|---|
-| About This System | session → Switchboard `System` | the System screen (identity, uptime, load, memory) |
+| About This System | session → Switchboard `Resources` | the Resources section, whose `Machine` rail group carries identity, uptime, seats and the session's authority |
 | System Monitor | session → Switchboard `Tasks` | the T11 open panel |
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |

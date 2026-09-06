@@ -27,30 +27,9 @@ use tairix_input::{InputEvent, Key};
 use tairix_theme::Theme;
 use tairix_window::Repaint;
 
-use crate::model::{
-    apply_action, map_section, signal_pid, Effect, GroupingEdit, PanelModel, SessionReport,
-};
+use crate::model::{apply_action, map_section, signal_pid, Effect, PanelModel, SessionReport};
 use crate::service::{RenderInputs, ServiceHost};
 use crate::view::{Section, Switchboard, SwitchboardAction};
-
-/// What the panel reports upward after applying an action whose effect
-/// touches the service's own grouping state, since the panel itself stays
-/// stateless about it (only [`crate::service::Service`] owns
-/// [`crate::activities::Activities`]).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PanelOutcome {
-    /// Apply this edit to the service's grouping state.
-    Edit(GroupingEdit),
-    /// An activity's inline rename was committed to this name, read from
-    /// the widget at the moment the action was reported (the widget's own
-    /// buffer is transient, so the caller must capture it now).
-    Renamed {
-        /// The activity's index within the model.
-        activity: usize,
-        /// The committed name.
-        name: String,
-    },
-}
 
 /// Exactly what [`Panel::flush`] last presented: the composition value plus
 /// the [`RenderInputs`] snapshot of everything else that changes the
@@ -243,21 +222,16 @@ impl Panel {
         self.repaint_whole();
     }
 
-    /// Apply every effect `action` implies under `authority`, in order, and
-    /// report any grouping-state edit upward for the caller to apply to the
-    /// service's own [`crate::activities::Activities`] — the panel stays
-    /// stateless about grouping.
+    /// Apply every effect `action` implies under `authority`, in order.
     ///
-    /// A refusal on one entry of a multi-effect action (a signal sweep, an
-    /// activation sweep) is stated and the rest still run: one member
-    /// refusing must never abort the others.
+    /// A refusal on one entry is stated and the rest still run: one refusal
+    /// must never abort the others.
     pub fn act(
         &mut self,
         host: &mut dyn ServiceHost,
         action: SwitchboardAction,
         authority: &dyn CapabilityQuery,
-    ) -> Option<PanelOutcome> {
-        let mut outcome = None;
+    ) {
         for effect in apply_action(&self.model, action, authority) {
             match effect {
                 Effect::ActivateOwner { owner } => {
@@ -278,38 +252,8 @@ impl Panel {
                     Self::signal_one(host, pid, signal, "force that task to quit");
                 }
                 Effect::LowerPriority { pid } => Self::lower_priority(host, pid),
-                Effect::SignalMany { pids, signal } => {
-                    let action = sweep_action(signal);
-                    for pid in pids {
-                        Self::signal_one(host, pid, signal, action);
-                    }
-                }
-                Effect::ActivateOwners { owners } => {
-                    // Raising back-to-front leaves the first member
-                    // frontmost, since each raise brings its owner above
-                    // whatever is already on top.
-                    for &owner in owners.iter().rev() {
-                        Self::attempt(
-                            host,
-                            "switch to that activity's window",
-                            SwitchboardRequest::ActivateOwner { owner },
-                        );
-                    }
-                }
-                Effect::Grouping(GroupingEdit::Rename { activity }) => {
-                    let name = self
-                        .view
-                        .as_ref()
-                        .and_then(Switchboard::submitted_activity_name)
-                        .map(String::from);
-                    if let Some(name) = name {
-                        outcome = Some(PanelOutcome::Renamed { activity, name });
-                    }
-                }
-                Effect::Grouping(edit) => outcome = Some(PanelOutcome::Edit(edit)),
             }
         }
-        outcome
     }
 
     /// Send one owner-directed request, stating a refusal rather than
@@ -443,18 +387,6 @@ impl Panel {
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);
         }
-    }
-}
-
-/// The plain-words action name for a refusal notice on one member of a
-/// [`Effect::SignalMany`] sweep, named from the signal it carries so the
-/// stated reason matches the activity action that issued it.
-fn sweep_action(signal: Signal) -> &'static str {
-    match signal {
-        Signal::Stop => "pause that activity",
-        Signal::Continue => "resume that activity",
-        Signal::Terminate => "close that activity",
-        Signal::Interrupt | Signal::Kill => "signal that activity's task",
     }
 }
 

@@ -5945,57 +5945,25 @@ catch a record lying about the cause.
 
 ## D89 — sixteen QEMU verticals link an arch port with no allocator — FIXED
 
-`cargo xtask ci` cannot pass at `ff79c0b25`: the `test --qemu` stage fails its
-very first build with `no global memory allocator found but one is required`.
 Sixteen verticals link an architecture port (`tairix-arch-x86_64` /
-`-aarch64` / `-riscv64`) *without* linking `tairix-kernel`, and the ports now
-reach an allocating path — `lib/abi`, `lib/rng` and `lib/log` all name `alloc`
-— so each freestanding binary needs a `#[global_allocator]` it does not
-declare. Reproduced on all three Tier-1 targets, and against a clean `HEAD`
-with every unrelated change stashed, so it is neither environmental nor a
-stale artefact.
+`-aarch64` / `-riscv64`) *without* linking `tairix-kernel`, and declare no
+`#[global_allocator]`. They stopped building — `no global memory allocator
+found but one is required` — the moment a port reached an allocating path,
+which took the whole `test --qemu` stage down with them on every Tier-1
+target.
 
-The sixteen: `memory_isolation`, `cross_cpu_tlb_shootdown_qemu_x86_64`,
-`accessed_bit_qemu_x86_64`, `abi_sys_syscall_qemu_{aarch64,riscv64}`,
-`cross_cpu_tlb_shootdown_qemu_{aarch64,riscv64}`, `fiq_selfsample_qemu_aarch64`,
-`ipi_smp_qemu_{aarch64,riscv64}`, `memory_isolation_qemu_{aarch64,riscv64}`,
-`timer_preempt_qemu_{aarch64,riscv64}`, `uaccess_fault_qemu_{aarch64,riscv64}`,
-`uart_console_qemu_aarch64`.
+The path was `lib/log`'s boot ring, which was heap-backed. It now builds on
+`lib/inline`'s allocation-free `RingBuf`, so no port pulls an allocator in and
+a freestanding binary that links one needs no heap of its own. `lib/log` names
+`alloc` only inside its own test module.
 
-**The fix is a decision, not a transcription.** Roughly fourteen verticals
-*already* carry their own copy of the static heap plus `#[global_allocator]`
-(`accessed_bit_qemu_riscv64`, `enter_user_qemu_x86_64`, …), so adding sixteen
-more copies of the same block is the duplication the charter forbids: the one
-definition belongs in a shared integration-test crate every vertical depends
-on, with the existing copies collapsed into it. Two things that decision has
-to settle:
+That is the right shape rather than sixteen new `#[global_allocator]` blocks:
+a vertical links a port precisely to prove an Arch HAL property *without* the
+kernel, and roughly fourteen verticals already carry their own copy of that
+block, so transcribing sixteen more would have been the duplication the
+charter forbids.
 
-- **Where the heap sits.** `accessed_bit_qemu_riscv64` places its arena in the
-  linker's NOLOAD `.heap` section so the boot trampoline neither zeroes it nor
-  counts it as usable memory; the x86_64 verticals use plain `.bss`. A shared
-  crate has to express that per-port difference, and `cfg(target_arch …)` is
-  not permitted in `tests/`.
-- **Whether the ports should demand it at all.** These verticals link a port
-  deliberately *without* the kernel, to prove an Arch HAL property in
-  isolation. If that is to stay possible without every such test carrying a
-  heap, the allocating path belongs behind something the port does not pull in
-  unconditionally.
-
-**Closed by `plans/COLLECTIONS.md` C3, which removed the requirement at its
-root rather than satisfying it sixteen times.** Splitting the container tier
-into `lib/inline` (which links no allocator) and `lib/collections` let
-`lib/log` — the crate that had pulled `alloc` into every log-bearing port —
-depend on the allocation-free half, so these binaries have no `alloc` in
-their graph at all and need no `#[global_allocator]` to declare. The shared
-integration-test crate this section proposed is therefore not needed, and the
-question of where a shared test heap should sit does not arise.
-
-Verified while landing C5: `cargo xtask ci` builds and runs all 162 enrolled
-QEMU verticals — every one named above among them — and the log carries no
-occurrence of `no global memory allocator`.
-
----
-
+Verified by building all sixteen on all three Tier-1 targets.
 ## D90 — the host test suite passed only in the harness's alphabetical order (DONE)
 
 A test suite is a set, not a sequence, and this one had become a sequence:

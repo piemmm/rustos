@@ -7376,7 +7376,7 @@ fn a_secondary_press_elsewhere_on_the_bar_asks_for_no_system_menu() {
 fn every_row_maps_to_exactly_its_expected_response() {
     let expected = alloc::vec![
         Some(TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::System,
+            section: CommandSection::Resources,
         }),
         Some(TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Tasks,

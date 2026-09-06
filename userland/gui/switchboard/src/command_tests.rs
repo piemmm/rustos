@@ -21,23 +21,6 @@ fn origin_bytes(proc_id: ProcId) -> [u8; ORIGIN_WIRE_LEN] {
 }
 
 #[test]
-fn a_command_from_the_session_decodes() {
-    let session = ProcId::from_raw([9; PROC_ID_LEN]);
-    let sender = origin_bytes(session);
-    let frame = SwitchboardCommand::OpenPanel {
-        section: CommandSection::System,
-    }
-    .to_le_bytes();
-    let command = authenticate_command(&frame, &sender, session).expect("authenticated");
-    assert_eq!(
-        command,
-        SwitchboardCommand::OpenPanel {
-            section: CommandSection::System
-        }
-    );
-}
-
-#[test]
 fn a_command_from_a_non_session_origin_is_dropped() {
     let session = ProcId::from_raw([9; PROC_ID_LEN]);
     let stranger = ProcId::from_raw([2; PROC_ID_LEN]);

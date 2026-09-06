@@ -6,9 +6,8 @@
 //! [`Tabs`] over its own row and the [`SearchField`] over the next), the
 //! sortable [`TableHeader`] and its [`TableRow`]s, the selected task's
 //! command [`ActionRail`], the footer band (the shown/total count, the
-//! auto-refresh [`Toggle`] and the grouping [`ComboBox`]), the grouping
-//! [`Menu`] the Group command opens, and the section's layout, painting and
-//! input.
+//! auto-refresh [`Toggle`] and the grouping [`ComboBox`]), and the section's
+//! layout, painting and input.
 //!
 //! # The commands act on the selection, not on a row
 //!
@@ -37,68 +36,70 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::damage;
 use tairix_controls::{
     ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
-    ControlRole, ControlState, HeaderAction, HeaderColumn, Menu, MenuAction, MenuItem,
-    MetricLayout, MetricTile, Panel, PressureKind, PressureState, RailAction, RecoveryState,
-    RowAction, SearchField, SelectionState, SelectorAction, SortOrder, StatusPill, Tab, TableCell,
-    TableHeader, TableRow, Tabs, TabsAction, Toggle,
+    ControlRole, ControlState, HeaderAction, HeaderColumn, MetricLayout, MetricTile, Panel,
+    PressureKind, PressureState, RailAction, RecoveryState, RowAction, SearchField, SelectionState,
+    SelectorAction, SortOrder, StatusPill, Tab, TableCell, TableHeader, TableRow, Tabs, TabsAction,
+    Toggle,
 };
 
 use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::{carry_hover, restate_rail};
+use super::resources::TaskCostColumn;
 use super::{
     resolve_selection, ActionVerdict, FocusSweep, ListInfo, SectionCtx, SectionOutcome,
     SectionView, Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 use crate::format::{format_bytes, format_rate, percent};
 
-/// What kind of thing a task row *is*, as the row's Type column.
+/// Which principal owns a task, as the row's Owner column.
 ///
-/// Each variant names a source the service genuinely reads, so the column
-/// states a fact rather than a classification nobody measured. The System
-/// Information API's process list reports processes and says nothing about
-/// which of them a user would call an application, so there is deliberately
-/// no `App` variant: guessing one would be a fabricated reading.
+/// Carried as the uid the process record reports plus the one classification
+/// the surface makes of it, so the column states a reading and the owner
+/// filters partition the rows by that same reading rather than by a guess.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub enum TaskKind {
-    /// A row from the process list — every row the service can build today.
-    #[default]
-    Process,
-    /// A row from a background-job registry. No such registry exists yet,
-    /// so nothing produces this variant; it is the Jobs filter's honest
-    /// zero rather than a promise.
-    Job,
-    /// A row from the service manager's own registry, on the same footing
-    /// as [`Self::Job`].
-    Service,
+pub struct TaskOwner {
+    /// The owning uid, exactly as the process record reports it.
+    pub uid: u32,
+    /// Whether that uid is the system principal.
+    pub is_system: bool,
 }
 
-impl TaskKind {
-    /// The Type column's text for this kind.
+impl TaskOwner {
+    /// The uid the system principal runs as.
+    ///
+    /// `uid = 0` is merely the system user in this system — its powers come
+    /// from capabilities, never from the number — so this is a *display*
+    /// classification for the Owner column and its two filters, never an
+    /// authority decision.
+    pub const SYSTEM_UID: u32 = 0;
+
+    /// The owner of a task running as `uid`.
     #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Process => "Process",
-            Self::Job => "Job",
-            Self::Service => "Service",
+    pub const fn new(uid: u32) -> Self {
+        Self {
+            uid,
+            is_system: uid == Self::SYSTEM_UID,
         }
     }
 
-    /// The glyph the Task column draws beside the name, naming what the row
-    /// is rather than decorating it.
+    /// The Owner column's text.
+    ///
+    /// No interface maps a uid to a user name from this service, so a
+    /// non-system owner reads as its number rather than a name this service
+    /// would have to invent.
     #[must_use]
-    pub const fn icon(self) -> IconKind {
-        match self {
-            Self::Process => IconKind::Executable,
-            Self::Job => IconKind::Job,
-            Self::Service => IconKind::ServiceBundle,
+    pub fn label(self) -> String {
+        if self.is_system {
+            return String::from("system");
         }
+        alloc::format!("uid {}", self.uid)
     }
 }
 
@@ -205,8 +206,11 @@ pub struct TaskSummary {
     pub proc_id: ProcId,
     /// The task's display name.
     pub name: String,
-    /// What this row is, for the Type column.
-    pub kind: TaskKind,
+    /// Which principal owns the task, for the Owner column.
+    pub owner: TaskOwner,
+    /// The CPU the scheduler last dispatched the task on, for the Core
+    /// column. `None` for a task that is not currently on one.
+    pub core: Option<u8>,
     /// The task's lifecycle state, for the State column. `None` for a row
     /// whose source reports no lifecycle.
     pub lifecycle: Option<ProcessState>,
@@ -230,9 +234,6 @@ pub struct TaskSummary {
     pub recovery: RecoveryState,
     /// What the caller may do to this task, one verdict per rail command.
     pub authority: TaskAuthority,
-    /// The activity this task is grouped into, as an index into
-    /// [`SwitchboardModel::activities`](super::SwitchboardModel::activities); `None` when it is ungrouped.
-    pub group: Option<usize>,
 }
 
 impl Default for TaskSummary {
@@ -242,7 +243,8 @@ impl Default for TaskSummary {
         Self {
             proc_id: ProcId::KERNEL,
             name: String::new(),
-            kind: TaskKind::default(),
+            owner: TaskOwner::default(),
+            core: None,
             lifecycle: None,
             cpu_permille: None,
             memory_bytes: None,
@@ -252,7 +254,6 @@ impl Default for TaskSummary {
             activity: ActivityState::Idle,
             recovery: RecoveryState::None,
             authority: TaskAuthority::default(),
-            group: None,
         }
     }
 }
@@ -294,7 +295,7 @@ struct ColumnSpec {
     sortable: bool,
 }
 
-/// The Tasks table's columns, in draw order (`plans/switchboard1.png`).
+/// The Tasks table's columns, in draw order (`plans/switchboard/01-tasks.png`).
 ///
 /// Every column is a *reading* about the task; what may be done to it is the
 /// trailing rail's business, not a column's. The Activity column carries a
@@ -308,7 +309,7 @@ const COLUMNS: [ColumnSpec; 9] = [
         sortable: true,
     },
     ColumnSpec {
-        title: "Type",
+        title: "Owner",
         weight: 10,
         align: CellAlign::Leading,
         sortable: true,
@@ -350,17 +351,17 @@ const COLUMNS: [ColumnSpec; 9] = [
         sortable: false,
     },
     ColumnSpec {
-        title: "Last active",
-        weight: 12,
+        title: "Core",
+        weight: 8,
         align: CellAlign::Trailing,
-        sortable: false,
+        sortable: true,
     },
 ];
 
 /// The Task column: the row's icon and name.
 const COL_TASK: usize = 0;
-/// The Type column.
-const COL_TYPE: usize = 1;
+/// The Owner column: which principal the task runs as.
+const COL_OWNER: usize = 1;
 /// The State column.
 const COL_STATE: usize = 2;
 /// The Activity column, whose rect the CPU sparkline is drawn into.
@@ -374,9 +375,8 @@ const COL_DISK: usize = 6;
 /// The Network column, which has no interface to read and is always
 /// unmeasured.
 const COL_NETWORK: usize = 7;
-/// The Last-active column, which has no interface to read and is always
-/// unmeasured.
-const COL_LAST_ACTIVE: usize = 8;
+/// The Core column: the CPU the scheduler last dispatched the task on.
+const COL_CORE: usize = 8;
 
 /// The column weights alone, in draw order — the one geometry every column
 /// query is resolved through, so the heading, the cells and the sparkline can
@@ -411,12 +411,10 @@ pub(super) enum TaskFilter {
     /// Every row.
     #[default]
     All,
-    /// Rows the process list produced.
-    Processes,
-    /// Rows a background-job registry produced.
-    Jobs,
-    /// Rows the service registry produced.
-    Services,
+    /// Rows owned by the reader's own principal.
+    Mine,
+    /// Rows owned by the system principal.
+    System,
     /// Rows in a condition the Recovery list would name — stopped, or
     /// reported unresponsive.
     Faults,
@@ -424,21 +422,18 @@ pub(super) enum TaskFilter {
 
 impl TaskFilter {
     /// The filters the strip offers, in tab order.
-    const ALL: [Self; 5] = [
-        Self::All,
-        Self::Processes,
-        Self::Jobs,
-        Self::Services,
-        Self::Faults,
-    ];
+    ///
+    /// `Jobs` and `Services` are deliberately absent: with no job registry
+    /// and no service manager, every row is a process, and a tab that can
+    /// only ever read `(0)` is chrome. They return with their registries.
+    const ALL: [Self; 4] = [Self::All, Self::Mine, Self::System, Self::Faults];
 
     /// This filter's tab label, without its count.
     const fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Processes => "Processes",
-            Self::Jobs => "Jobs",
-            Self::Services => "Services",
+            Self::Mine => "Mine",
+            Self::System => "System",
             Self::Faults => "Faults",
         }
     }
@@ -449,9 +444,10 @@ impl TaskFilter {
     fn admits(self, task: &TaskSummary) -> bool {
         match self {
             Self::All => true,
-            Self::Processes => task.kind == TaskKind::Process,
-            Self::Jobs => task.kind == TaskKind::Job,
-            Self::Services => task.kind == TaskKind::Service,
+            // Ownership comes off the process record, so the two owner
+            // filters partition the rows by a reading rather than a guess.
+            Self::Mine => !task.owner.is_system,
+            Self::System => task.owner.is_system,
             Self::Faults => task.is_faulted(),
         }
     }
@@ -467,21 +463,21 @@ pub(super) enum TaskGrouping {
     /// No grouping: the sort alone decides the order.
     #[default]
     Ungrouped,
-    /// Rows of the same [`TaskKind`] together.
-    ByType,
+    /// Rows owned by the same principal together.
+    ByOwner,
     /// Working rows before idle ones.
     ByActivity,
 }
 
 impl TaskGrouping {
     /// The groupings the footer offers, in choice order.
-    const ALL: [Self; 3] = [Self::Ungrouped, Self::ByType, Self::ByActivity];
+    const ALL: [Self; 3] = [Self::Ungrouped, Self::ByOwner, Self::ByActivity];
 
     /// This grouping's choice label.
     const fn label(self) -> &'static str {
         match self {
             Self::Ungrouped => "Ungrouped",
-            Self::ByType => "By type",
+            Self::ByOwner => "By owner",
             Self::ByActivity => "By activity",
         }
     }
@@ -492,11 +488,7 @@ impl TaskGrouping {
     fn key(self, task: &TaskSummary) -> u8 {
         match self {
             Self::Ungrouped => 0,
-            Self::ByType => match task.kind {
-                TaskKind::Process => 0,
-                TaskKind::Job => 1,
-                TaskKind::Service => 2,
-            },
+            Self::ByOwner => u8::from(task.owner.is_system),
             Self::ByActivity => match task.activity {
                 ActivityState::Working => 0,
                 _ => 1,
@@ -556,33 +548,27 @@ const RAIL_TITLE: &str = "ACTIONS";
 
 /// One command the rail offers for the selected task.
 ///
-/// Most are a [`TaskControl`] the service carries out; `Group` is this
-/// section's own popup, which reports its choice as a grouping edit rather
-/// than as a task control, so it is named here rather than forced into the
-/// control vocabulary.
+/// Every one is a [`TaskControl`] the service carries out; the rail offers
+/// nothing the system cannot perform.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum TaskCommand {
     /// Invoke a control on the selected task.
     Control(TaskControl),
-    /// Open the Group popup for the selected task.
-    Group,
 }
 
 /// One census tile: what it counts, what it says, and the glyph and identity
 /// tint it wears.
 struct CensusSpec {
     label: &'static str,
-    /// The filter whose admitted tasks this tile counts — the same predicate
-    /// the matching tab counts through, so a tile and its tab can never
-    /// state different numbers for the same tasks.
-    filter: TaskFilter,
+    /// What this tile counts.
+    count: Census,
     icon: IconKind,
     /// What tints the tile's glyph. An identity colour per kind of thing
     /// counted, not a claim that a resource is under strain.
     tint: PressureKind,
 }
 
-/// The census tiles, in reading order (`plans/switchboard1.png`).
+/// The census tiles, in reading order (`plans/switchboard/01-tasks.png`).
 ///
 /// The one declaration: the tiles are built from it and the room the location
 /// band is asked for is measured from it, so the band can never seat a
@@ -590,29 +576,43 @@ struct CensusSpec {
 const CENSUS: [CensusSpec; 4] = [
     CensusSpec {
         label: "Processes",
-        filter: TaskFilter::Processes,
+        count: Census::Rows(TaskFilter::All),
         icon: IconKind::Executable,
         tint: PressureKind::Cpu,
     },
     CensusSpec {
-        label: "Jobs",
-        filter: TaskFilter::Jobs,
-        icon: IconKind::Job,
-        tint: PressureKind::Disk,
-    },
-    CensusSpec {
-        label: "Services",
-        filter: TaskFilter::Services,
-        icon: IconKind::ServiceBundle,
+        label: "Users",
+        count: Census::Owners,
+        icon: IconKind::User,
         tint: PressureKind::Network,
     },
     CensusSpec {
+        label: "Mine",
+        count: Census::Rows(TaskFilter::Mine),
+        icon: IconKind::ServiceBundle,
+        tint: PressureKind::Disk,
+    },
+    CensusSpec {
         label: "Alerts",
-        filter: TaskFilter::Faults,
+        count: Census::Rows(TaskFilter::Faults),
         icon: IconKind::Bell,
         tint: PressureKind::Thermal,
     },
 ];
+
+/// What one census tile counts.
+///
+/// Every tile counts adopted rows through a *reading*: either the same
+/// predicate the matching filter tab counts through — so a tile and its tab
+/// can never state different numbers — or the distinct owners those rows
+/// name.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Census {
+    /// The rows one filter admits.
+    Rows(TaskFilter),
+    /// The distinct principals owning at least one row.
+    Owners,
+}
 
 /// One rail command's presentation: what it does, what it says, the glyph
 /// that says it without words, and the weight the plate carries.
@@ -624,14 +624,14 @@ struct CommandSpec {
 }
 
 /// The rail's commands, in the order they are offered
-/// (`plans/switchboard1.png`).
+/// (`plans/switchboard/01-tasks.png`).
 ///
 /// Reading order is the order a reader reaches for them: go to the task,
 /// then find it, then throttle it, then group it, and only last end it.
 /// Force quit is [`ControlRole::Destructive`] so its plate wears the danger
 /// rim, and it sits at the foot of the list where a mis-aimed press is
 /// least likely to land on it.
-const RAIL_COMMANDS: [CommandSpec; 8] = [
+const RAIL_COMMANDS: [CommandSpec; 7] = [
     CommandSpec {
         command: TaskCommand::Control(TaskControl::Switch),
         label: "Switch to",
@@ -669,12 +669,6 @@ const RAIL_COMMANDS: [CommandSpec; 8] = [
         role: ControlRole::Neutral,
     },
     CommandSpec {
-        command: TaskCommand::Group,
-        label: "Group\u{2026}",
-        icon: IconKind::Library,
-        role: ControlRole::Neutral,
-    },
-    CommandSpec {
         command: TaskCommand::Control(TaskControl::ForceQuit),
         label: "Force quit",
         icon: IconKind::Quit,
@@ -691,41 +685,6 @@ pub(super) struct TaskEntry {
     pub(super) row: TableRow,
     /// The task's own CPU history, as the Activity column's sparkline.
     pub(super) spark: Chart,
-    /// The activity this task is grouped into, as of the last
-    /// [`adopt`](SectionView::adopt), mirroring [`TaskSummary::group`] so the
-    /// Group popup can be built without the model.
-    pub(super) group: Option<usize>,
-}
-
-/// One activity a task's Group popup may move it into: as much of the
-/// activity as the popup's row needs, and no more.
-///
-/// The popup is this section's own control and has to be buildable from the
-/// keyboard, with only a key in hand — so the choices it offers are derived
-/// here from the same sample the rows are, rather than reached for across the
-/// composition in the Activities section's own state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct GroupTarget {
-    /// The activity's display name, which labels its popup row.
-    pub(super) name: String,
-    /// Whether the activity can still take another member; a full one is
-    /// offered disabled with its reason rather than hidden.
-    pub(super) can_accept_member: bool,
-}
-
-/// The Group popup [`Menu`], anchored on a Tasks row's `Group` button.
-///
-/// It names the task by its index in the *model* rather than by a captured
-/// screen rectangle or a shown-row position: the anchor rectangle is
-/// re-derived from the current arrangement and layout every time the popup
-/// is rendered or hit-tested, so it survives a resize, a scroll, and a
-/// re-filter or re-sort that moves the row — and it needs no
-/// bounds/scale/theme to open from the keyboard, which
-/// [`Switchboard::on_key`] cannot supply.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct GroupPopup {
-    pub(super) task: usize,
-    pub(super) menu: Menu,
 }
 
 /// Where the footer's controls sit: the shown/total count and the
@@ -777,12 +736,6 @@ pub(super) struct TasksSection {
     pub(super) grouping: ComboBox,
     /// The footer's auto-refresh toggle.
     pub(super) auto_refresh: Toggle,
-    /// The activities the Group popup offers, in model order.
-    pub(super) group_targets: Vec<GroupTarget>,
-    /// Whether the caller may group a task into a *new* activity.
-    pub(super) can_create_activity: bool,
-    /// The open Group popup, or `None` while it is closed.
-    pub(super) popup: Option<GroupPopup>,
     /// Where the content cursor is among this section's focusable things:
     /// the header's stops, one per shown row, the rail's commands, then the
     /// footer's stops.
@@ -792,8 +745,8 @@ pub(super) struct TasksSection {
 }
 
 impl TasksSection {
-    /// An empty Tasks section: no tasks, no selection, no popup, cursor on
-    /// the filters.
+    /// An empty Tasks section: no tasks, no selection, cursor on the
+    /// filters.
     pub(super) fn new() -> Self {
         let mut section = Self {
             tasks: Vec::new(),
@@ -827,9 +780,6 @@ impl TasksSection {
             )
             .with_selected(0),
             auto_refresh: Toggle::new("Auto-refresh", true),
-            group_targets: Vec::new(),
-            can_create_activity: true,
-            popup: None,
             focus: 0,
             action: 0,
         };
@@ -1093,8 +1043,10 @@ impl TasksSection {
             state = state.with_selection(SelectionState::Selected);
         }
         let mut cells = Vec::with_capacity(COLUMNS.len());
-        cells.push(TaskEntry::cell(COL_TASK, &task.name).with_icon(task.kind.icon()));
-        cells.push(TaskEntry::cell(COL_TYPE, task.kind.label()));
+        // Every row the process list produces is a process, so the glyph
+        // names that rather than a classification nothing measures.
+        cells.push(TaskEntry::cell(COL_TASK, &task.name).with_icon(IconKind::Executable));
+        cells.push(TaskEntry::cell(COL_OWNER, &task.owner.label()));
         cells.push(TaskEntry::cell(COL_STATE, task.state_text()));
         // The Activity column's reading is the sparkline drawn over it, so
         // its cell carries no text of its own to draw underneath.
@@ -1113,12 +1065,16 @@ impl TasksSection {
         // last-active time, so both are unmeasured for every row rather
         // than a zero or a plausible-looking number.
         cells.push(TaskEntry::reading(COL_NETWORK, None));
-        cells.push(TaskEntry::reading(COL_LAST_ACTIVE, None));
+        // A task the scheduler has not placed reads unmeasured rather than
+        // naming a core it is not on.
+        cells.push(TaskEntry::reading(
+            COL_CORE,
+            task.core.map(|core| alloc::format!("{core}")),
+        ));
 
         TaskEntry {
             row: TableRow::new(cells).with_state(state),
             spark: Chart::new(PressureKind::Cpu).with_samples(task.cpu_history.iter().copied()),
-            group: task.group,
         }
     }
 
@@ -1146,7 +1102,7 @@ impl TasksSection {
             .map(|spec| {
                 MetricTile::new(
                     spec.label,
-                    count_text(self.count_of(spec.filter)),
+                    count_text(self.census_of(spec.count)),
                     spec.tint,
                 )
                 .with_layout(MetricLayout::Stacked)
@@ -1159,6 +1115,22 @@ impl TasksSection {
     /// the count its rows deliver, from the one predicate.
     fn count_of(&self, filter: TaskFilter) -> usize {
         self.tasks.iter().filter(|task| filter.admits(task)).count()
+    }
+
+    /// What one census tile counts, over the adopted rows.
+    fn census_of(&self, census: Census) -> usize {
+        match census {
+            Census::Rows(filter) => self.count_of(filter),
+            Census::Owners => {
+                let mut seen: Vec<u32> = Vec::new();
+                for task in &self.tasks {
+                    if !seen.contains(&task.owner.uid) {
+                        seen.push(task.owner.uid);
+                    }
+                }
+                seen.len()
+            }
+        }
     }
 
     /// Re-label every filter tab with its own live count, in place.
@@ -1313,14 +1285,6 @@ impl TasksSection {
             .collect()
     }
 
-    /// Which rail slot holds the `Group…` command.
-    pub(super) fn group_slot() -> usize {
-        RAIL_COMMANDS
-            .iter()
-            .position(|spec| spec.command == TaskCommand::Group)
-            .unwrap_or(0)
-    }
-
     /// The pinned column-heading rectangle at the top of the primary
     /// region, above the rows that scroll beneath it.
     fn header_rect(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Rect {
@@ -1385,88 +1349,6 @@ impl TasksSection {
         Rect::new(left, top, w, h)
     }
 
-    /// The Group popup's anchor rectangle: the rail's own `Group` command,
-    /// re-derived from the current layout every time, so it can never go
-    /// stale across a resize or a scroll.
-    ///
-    /// The rail is anchored beside the table rather than scrolling with it,
-    /// so the anchor no longer depends on where — or whether — the subject's
-    /// row is on screen. A frame too narrow to seat the rail has no command
-    /// to anchor on; the primary column's own rectangle is used instead so
-    /// the popup still lands inside the window (fail closed, never a panic).
-    fn anchor_rect(&self, ctx: SectionCtx<'_>) -> Rect {
-        let anchored = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
-            .and_then(|content| {
-                self.rail
-                    .item_rect(content, Self::group_slot(), ctx.scale, ctx.theme)
-            });
-        anchored.unwrap_or(ctx.frame.primary)
-    }
-
-    /// Open the Group popup for the given task.
-    ///
-    /// The item list is built once from the current group targets (spec T12):
-    /// each activity, disabled with a reason when it is the task's current
-    /// activity or is full; then `"New activity"`, disabled when the caller
-    /// may not create one; then, only when the task is already grouped,
-    /// `"Remove from activity"`.
-    fn open_popup(&mut self, task: usize) {
-        let Some(current) = self.tasks.get(task).map(|task| task.group) else {
-            return;
-        };
-        let mut items: Vec<MenuItem> = self
-            .group_targets
-            .iter()
-            .enumerate()
-            .map(|(i, target)| {
-                let mut item = MenuItem::new(target.name.clone());
-                if current == Some(i) {
-                    item = item
-                        .with_state(ControlState::disabled())
-                        .with_reason("Current activity");
-                } else if !target.can_accept_member {
-                    item = item
-                        .with_state(ControlState::disabled())
-                        .with_reason("Activity is full");
-                }
-                item
-            })
-            .collect();
-        let mut new_activity = MenuItem::new("New activity");
-        if !self.can_create_activity {
-            new_activity = new_activity
-                .with_state(ControlState::disabled())
-                .with_reason("Activity limit reached");
-        }
-        items.push(new_activity);
-        if current.is_some() {
-            items.push(MenuItem::new("Remove from activity"));
-        }
-        self.popup = Some(GroupPopup {
-            task,
-            menu: Menu::new(items),
-        });
-    }
-
-    /// Map an activated Group popup row to its [`SwitchboardAction`] and
-    /// close the popup.
-    fn resolve_activation(&mut self, index: usize) -> Option<SectionOutcome> {
-        let popup = self.popup.take()?;
-        let task = popup.task;
-        let action = match index.cmp(&self.group_targets.len()) {
-            Ordering::Less => SwitchboardAction::TaskGrouped {
-                task,
-                activity: Some(index),
-            },
-            Ordering::Equal => SwitchboardAction::TaskGrouped {
-                task,
-                activity: None,
-            },
-            Ordering::Greater => SwitchboardAction::TaskUngrouped { task },
-        };
-        Some(SectionOutcome::Action(action))
-    }
-
     /// Which shown row the content cursor is on, or `None` when it is on
     /// the header or the footer.
     fn focused_row(&self) -> Option<usize> {
@@ -1514,18 +1396,30 @@ impl TasksSection {
     /// then, so this can only be reached with a subject in hand.
     fn invoke_rail(&mut self, slot: usize) -> Option<SectionOutcome> {
         let task = self.selected_index()?;
-        match RAIL_COMMANDS.get(slot)?.command {
-            TaskCommand::Control(control) => {
-                Some(SectionOutcome::Action(SwitchboardAction::Task {
-                    index: task,
-                    control,
-                }))
-            }
-            TaskCommand::Group => {
-                self.open_popup(task);
-                None
-            }
-        }
+        let TaskCommand::Control(control) = RAIL_COMMANDS.get(slot)?.command;
+        Some(SectionOutcome::Action(SwitchboardAction::Task {
+            index: task,
+            control,
+        }))
+    }
+
+    /// Order the table by what a resource device costs, descending, as a
+    /// resource pane's "sort tasks by" command asks.
+    ///
+    /// The sort is committed through the same path a column heading's own
+    /// request takes, so what is drawn and what is ordered stay one fact.
+    pub(super) fn sort_by_cost(
+        &mut self,
+        column: TaskCostColumn,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) {
+        let index = match column {
+            TaskCostColumn::Cpu => COL_CPU,
+            TaskCostColumn::Memory => COL_MEMORY,
+            TaskCostColumn::Disk => COL_DISK,
+        };
+        self.apply_sort(index, SortOrder::Descending, ctx, damage);
     }
 
     /// Apply a sort request from the column headings and re-arrange,
@@ -1746,12 +1640,8 @@ fn command_button(spec: &CommandSpec, authority: TaskAuthority) -> Button {
         },
         spec.role,
     );
-    button.set_state(match spec.command {
-        TaskCommand::Control(control) => authority.verdict(control).to_state(),
-        // Grouping is this section's own arrangement of tasks it can already
-        // see, so it needs no authority over the task itself.
-        TaskCommand::Group => ActionVerdict::Ready.to_state(),
-    });
+    let TaskCommand::Control(control) = spec.command;
+    button.set_state(authority.verdict(control).to_state());
     button
 }
 
@@ -1781,7 +1671,7 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 fn compare_column(left: &TaskSummary, right: &TaskSummary, column: usize) -> Ordering {
     match column {
         COL_TASK => left.name.cmp(&right.name),
-        COL_TYPE => left.kind.label().cmp(right.kind.label()),
+        COL_OWNER => left.owner.uid.cmp(&right.owner.uid),
         COL_STATE => left.state_text().cmp(right.state_text()),
         COL_CPU => compare_reading(left.cpu_permille, right.cpu_permille),
         COL_MEMORY => compare_reading(left.memory_bytes, right.memory_bytes),
@@ -1829,19 +1719,6 @@ impl SectionView for TasksSection {
             return;
         }
         self.tasks.clone_from(&model.tasks);
-        self.group_targets = model
-            .activities
-            .iter()
-            .map(|activity| GroupTarget {
-                name: activity.name.clone(),
-                can_accept_member: activity.can_accept_member,
-            })
-            .collect();
-        self.can_create_activity = model.can_create_activity;
-        // The popup's rows are the group targets this sample has just
-        // replaced, so a refresh drops it rather than re-validating a menu
-        // built from the superseded list.
-        self.popup = None;
         self.relabel_filters();
         self.census = self.build_census();
         self.arrange();
@@ -2131,11 +2008,11 @@ impl SectionView for TasksSection {
     }
 
     fn holds_keyboard(&self) -> bool {
-        self.popup.is_some() || self.grouping.is_expanded()
+        self.grouping.is_expanded()
     }
 
     fn holds_pointer(&self) -> bool {
-        self.popup.is_some() || self.grouping.is_expanded()
+        self.grouping.is_expanded()
     }
 
     fn render_overlay(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
@@ -2147,16 +2024,8 @@ impl SectionView for TasksSection {
                 ctx.theme,
             );
         }
-        let Some(popup) = &self.popup else {
-            return;
-        };
-        let anchor = self.anchor_rect(ctx);
-        let rect = Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
-        popup.menu.render(surface, rect, ctx.scale, ctx.theme);
     }
 
-    /// A primary press outside the popup's bounds dismisses it without
-    /// emitting; otherwise the event feeds the popup itself.
     fn overlay_on_pointer(
         &mut self,
         event: &InputEvent,
@@ -2173,43 +2042,10 @@ impl SectionView for TasksSection {
                 self.grouping.set_selected(index);
                 self.arrange();
             }
-            return None;
         }
-        let popup = self.popup.as_ref()?;
-        let anchor = self.anchor_rect(ctx);
-        let popup_rect =
-            Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
-
-        if let InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        } = event
-        {
-            if popup
-                .menu
-                .row_at(popup_rect, ctx.scale, ctx.theme, ctx.pointer)
-                .is_none()
-            {
-                self.popup = None;
-                return None;
-            }
-        }
-
-        let popup = self.popup.as_mut()?;
-        match popup
-            .menu
-            .on_pointer(event, popup_rect, ctx.scale, ctx.theme, damage)
-        {
-            Some(MenuAction::Activated { index }) => self.resolve_activation(index),
-            Some(MenuAction::Dismissed) => {
-                self.popup = None;
-                None
-            }
-            Some(MenuAction::OpenSubmenu { .. }) | None => None,
-        }
+        None
     }
 
-    /// Arrows move the popup's focus, Enter or Space activates the focused
-    /// row, and Escape dismisses without emitting.
     fn overlay_on_key(
         &mut self,
         key: Key,
@@ -2228,24 +2064,8 @@ impl SectionView for TasksSection {
                 self.grouping.set_selected(index);
                 self.arrange();
             }
-            return None;
         }
-        let anchor = self.anchor_rect(ctx);
-        let popup = self.popup.as_mut()?;
-        let rect = Switchboard::popup_rect(&popup.menu, anchor, ctx.bounds, ctx.scale, ctx.theme);
-        let action = popup.menu.on_key(key, rect, ctx.scale, ctx.theme, damage);
-        match action {
-            Some(MenuAction::Activated { index }) => self.resolve_activation(index),
-            Some(MenuAction::Dismissed) => {
-                self.popup = None;
-                None
-            }
-            Some(MenuAction::OpenSubmenu { .. }) | None => None,
-        }
-    }
-
-    fn dismiss_overlay(&mut self) {
-        self.popup = None;
+        None
     }
 }
 

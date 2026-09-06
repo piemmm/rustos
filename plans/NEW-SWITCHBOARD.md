@@ -21,12 +21,12 @@ lie about.
 
 | # | Task | Depends on | Spec | Status |
 |---|---|---|---|---|
-| **A1** | `Section` and wire `CommandSection` carry exactly `Tasks`, `Resources`, `Recovery`; discriminants renumbered with no reserved gap; `map_section` and its exhaustive table shrink | — | S4 | planned |
-| **F1** | Resources' `SectionAnatomy`: the device rail as `sidebar`, the pane as `primary`, and the shed route replacing the rail with a band `ComboBox` | A1 | S3 | planned |
+| **A1** | `Section` and wire `CommandSection` carry exactly `Tasks`, `Resources`, `Recovery`; discriminants renumbered with no reserved gap; `map_section` and its exhaustive table shrink | — | S4 | done |
+| **F1** | Resources' `SectionAnatomy`: the device rail as `sidebar`, the pane as `primary`, and the shed route replacing the rail with a band `ComboBox` | A1 | S3 | done |
 | **C1** | `chart::Chart` gains an optional opposing series, mirrored below a drawn midline and tinted by its own `PressureKind` | — | S7 | done |
 | **C2** | `metric::CompositionBar` — named proportional segments of a measured whole, with its key; segments that do not sum to the whole are a construction error | — | S7 | done |
 | **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | done |
-| **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | planned |
+| **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | done |
 | **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | planned |
 | **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | planned |
 | **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | planned |
@@ -34,21 +34,21 @@ lie about.
 | **Q4** | `ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`: `busy_ns`/`idle_ns`, device memory, `in_flight` | D1 | S8 | planned |
 | **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | done |
 | **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | planned |
-| **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | planned |
-| **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | planned |
-| **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | planned |
-| **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | planned |
-| **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | planned |
-| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | planned |
+| **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | done |
+| **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | done |
+| **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
+| **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
+| **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | done |
+| **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4 | V1, P1, D1, Q4 | S4 | planned |
-| **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | planned |
-| **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the four census tiles | A1 | S4 | planned |
-| **V10** | Top-consumers block on the CPU, Memory and volume panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | planned |
-| **X1** | Delete `view/{background,pressure,activities}.rs` and their tests; `PressureClock` and the cause model move to V3's banner, the group model to V9's grouping | V3, V9 | S10 | planned |
-| **X2** | Delete `view/{system,system_data}.rs`, the `PageLine` vocabulary and `SystemReport`'s `cores`/`memory`/`compositor` fact vectors | V2, V3, V4, V5, V6, V8 | S10 | planned |
-| **X3** | Re-point `view/tasks.rs`'s three board citations at `plans/switchboard/01-tasks.png` | V9 | S10 | planned |
-| **X4** | Rewrite `docs/src/desktop/switchboard.md` — it describes the section set | V1–V10 | S10 | planned |
-| **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | planned |
+| **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
+| **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
+| **V10** | Top-consumers block on the CPU, Memory and volume panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | done |
+| **X1** | Delete `view/{background,pressure,activities}.rs` and their tests; `PressureClock` and the cause model move to V3's banner, the group model to V9's grouping | V3, V9 | S10 | done |
+| **X2** | Delete `view/{system,system_data}.rs`, the `PageLine` vocabulary and `SystemReport`'s `cores`/`memory`/`compositor` fact vectors | V2, V3, V4, V5, V6, V8 | S10 | done |
+| **X3** | Re-point `view/tasks.rs`'s three board citations at `plans/switchboard/01-tasks.png` | V9 | S10 | done |
+| **X4** | Rewrite `docs/src/desktop/switchboard.md` — it describes the section set | V1–V10 | S10 | done |
+| **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | done |
 | **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | done |
 | **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | planned |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |

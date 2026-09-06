@@ -23,8 +23,8 @@ use tairix_controls::{
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_WIDTH};
+use super::reading::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::refresh::{resettle_cards, restate_rail};
-use super::system_data::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::{
     action_state, resolve_selection, select_pressed_card, FocusSweep, ListInfo, SectionCtx,
     SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,

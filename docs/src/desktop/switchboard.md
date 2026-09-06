@@ -62,7 +62,7 @@ The window manager decorates the window server-side (the frame, title bar,
 window commands, and resize grabber — see `plans/COMPOSITOR-WORK.md`);
 Switchboard draws only its client content, beginning with a **location band**
 at the top: a `Breadcrumb` reading `Switchboard › <section>` and, at
-its trailing end, an `IconButton` that opens a `Menu` of the six sections with
+its trailing end, an `IconButton` that opens a `Menu` of the three sections with
 the one on show marked selected. The trail's leading crumb opens the same
 list, so the section is reachable by pointer or keyboard — with the band
 focused, Space or Enter opens the list, Up/Down walk it, Enter shows the
@@ -101,14 +101,14 @@ marks the whole window, and so does a round that moved something and reported
 nothing, so an under-report can only ever cost pixels rather than leave a stale
 frame. What it carries:
 
+**Three sections, one per question a reader arrives with:** what is running,
+what is this machine doing, what broke.
+
 | Section | Source |
 |---|---|
 | Tasks | the sampled process list, as a filterable, searchable, sortable table with the selected task's commands beside it — see below |
-| Pressure | "why is my machine slow": one cause card per resource the **tray's own latches** flag (CPU ≥ 90 % with < 80 % release; memory band ≥ mild), naming the measured culprit — the busiest sampled task for CPU, the largest mapped address space for memory — with a plain-language cause line and recommended actions, each rendered `Ready`, `DisabledByState` (a culprit already at `Low` priority or already stopped) or `DeniedByAuthority` per the same rule the kernel enforces. No latch, no card; no per-task rate yet, a culprit-less card with the one action that is still honest (`Show tasks`) |
-| Activities | the service's own **session-lifetime task groupings**: named sets of live processes (keyed by the never-reused `proc_id`), each rendered with its member rows joined against the current sample. Created from the Tasks section's `Group…` command; renamed inline; paused/resumed/closed as a set |
+| Resources | one pane per resource *device* the sample names: the processor, the machine's memory, each mounted volume, each managed interface, the display path, and the machine's own identity, seats and authority — see below |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
-| System | the machine's own readings, over eight sidebar pages beneath four header tiles — see below |
-| Jobs | always empty — the list states the absence rather than reading as "nothing is running"; see below |
 
 A resource the service could not measure this cycle reads `unknown` with an
 unmeasured meter, never a fabricated `0%`.
@@ -131,18 +131,18 @@ window's own minimum client width is the widest such floor — not the width at
 which every optional column happens to fit, because shedding one is a correct
 outcome and clipping a command is not.
 
-A section whose primary column is a list of `Card`s — Pressure, Recovery, and
-Background — is a master/detail screen, and **pressing a card selects it**: a
-completed click anywhere on a card's own body, clear of any footer button it
-carries, makes that card's subject the selected one, so its detail pane, impact
-column, and action rail all describe the card the reader just pressed. Where a
-card carries footer commands (only Pressure does), a click on one of those
-buttons selects the card *and* resolves that command, so a command can never
-act on a subject other than the card that offered it. A card that is not
-actionable — disabled, or denied by authority — selects nothing. One walk over
-the visible cards serves all three sections, so no section can drift into a
-different idea of what a press means, and the keyboard cursor selects the card
-it lands on for the same reason.
+A section whose primary column is a list of `Card`s — Recovery — is a
+master/detail screen, and **pressing a card selects it**: a completed click
+anywhere on a card's own body, clear of any footer button it carries, makes
+that card's subject the selected one, so its detail pane, impact column and
+action rail all describe the card the reader just pressed. Where a card
+carries footer commands, a click on one selects the card *and* resolves that
+command, so a command can never act on a subject other than the card that
+offered it. A card that is not actionable — disabled, or denied by authority —
+selects nothing. The walk over the visible cards is shared rather than written
+per section, so a second card-based section cannot drift into a different idea
+of what a press means, and the keyboard cursor selects the card it lands on for
+the same reason.
 
 ### The Tasks table
 
@@ -231,101 +231,85 @@ socket accounting, and the process record carries no creation timestamp — so
 both render the explicit unmeasured mark. An absent reading is never a `0`,
 never a dash that reads like one, and never a plausible number.
 
-### The System screen
+### The Resources section
 
-System is the machine reading about itself. A vertical `Tabs` **sidebar**
-selects one of eight pages — Overview, Resources, Storage, Network, Session,
-Permissions, Services, Power. It selects the page, not the section; the
-window's location band remains the one section switcher.
+Resources is **one pane per resource device**, instrument-led. A vertical
+`Tabs` **sidebar** — the device rail — lists what discovery actually found,
+grouped: `Resources` (the processor, the machine's memory), `Storage` (one
+entry per mounted volume), `Network` (one per managed interface), `Graphics`
+(the display path), then `Machine` (identity and uptime, sessions and seats,
+permissions and limits). Each entry carries its name, its current reading and
+its own bounded trace, so the rail is a live summary of the whole machine and
+the pane is the detail of one part of it. The `Machine` entries carry no
+trace: they are facts rather than rates, and the absent instrument is what
+says so.
 
-The **header** carries four `MetricTile`s. CPU and Network plot a trend,
-because a rate has no fixed ceiling to fill a bar against; Memory and Disk
-fill a track, because each is a fraction of a measured whole. The Disk tile
-sums the capacity of every mounted volume and the Network tile sums every
-interface's rates, so each states the machine's figure rather than one
-arbitrary member's.
+**The rail's length is discovered, never declared.** Twelve cores, four
+volumes and three interfaces is the design case; a hundred-core machine with a
+dozen volumes gets a scrolling rail, not a truncated one, and no entry count
+is a compile-time constant. A machine with nothing mounted has no `Storage`
+group at all rather than an empty slot — but a rail group missing because the
+*inventory* was refused is a different statement, and the report carries which.
 
-Each **page** states what it can measure:
+Cores are deliberately **not** rail entries: the CPU pane shows every core at
+once, so a per-core rail would state the same readings twice and push the
+devices off screen.
 
-| Page | What it reads |
-|---|---|
-| Overview | hostname, OS version, machine id, uptime, boot time, CPU model and core count, load average and installed RAM; then the Active Services statement and the authority summary |
-| Resources | the per-core load, the memory and kernel-heap detail, and what the desktop's last composited frame cost |
-| Storage | every mount — source, mount point, filesystem, medium, availability, used-of-total from the volume's own block counts, and its measured health |
-| Network | per interface — its facts, its link state and addresses, and its rx/tx rates |
-| Session | the seats and the logged-in census the load reading carries |
-| Permissions | what the service can attest about the caller's authority, with each resource limit's soft and hard bound and its live usage |
-| Services, Power | no interface exists, so each states plainly what is missing and why |
+Each pane is a **hero** — the device's headline reading, its context lines and
+its instrument — over **blocks** of the detail behind it. The instrument
+belongs to the reading, not the renderer: a rate trends, because its shape
+over time *is* the reading and it has no fixed ceiling to fill a bar against;
+a fraction of a measured whole tracks. A fact pane has neither, and that is
+what says its readings are facts.
 
-Every page compiles down to one ordered vocabulary of lines — a heading, a
-fact, or an absence — so the screen has a single layout, a single scroll
-range and a single paint loop rather than eight of each.
+A block holds whatever its reading *is* — a composition, a grid of per-core
+cells each with its own trace, the tasks costing the device most, a status
+pill the health buckets resolve to, or genuine facts. Rendering a resource as
+key/value text is the defect this section exists to fix.
 
-The **rail** is `SYSTEM ACTIONS`, seated in a `Panel` because the rail control
-carries no caption of its own. It is a rail rather than a per-row column
-because this screen commands one subject: the machine.
+**A resource under pressure wears a banner on its own pane**, above the hero:
+the band, how long it has stood there, and the relief the model recommends. A
+cause and its resource were never two places. A band's age has no interface
+behind it — nothing timestamps a band change — so the service clocks it off
+the monotonic uptime reading and reads unmeasured where there is none, never a
+fabricated zero.
 
-**Nothing here is ever fabricated, and an absence says which kind it is.** A
-reading the caller may not have reads *not permitted*; one the service asked
-for and did not get reads *unavailable*. They are different statements to a
-reader and are never conflated. A missing measurement is never a `0`, never an
-empty bar, and never an empty list — an empty list reads as "none", which is a
-claim, so a reading with no interface behind it states its absence in words.
-An unmeasured trend plots no trace at all rather than a line along the floor,
-and an unmeasured track stays unfilled rather than sitting at nought.
+**The CPU, Memory and volume panes each carry the five tasks costing that
+resource most**, from the per-task readings the process record already
+provides, so a pane and the Tasks table can never disagree. **Summing them is
+not the device's total** and the block says so: filesystem, RAID and swap
+traffic belongs to no process. The interface pane has no such block — per-task
+network has no interface at all — and states that in words rather than showing
+an empty list, because an empty list reads as *none*.
 
-A refused action names its own kind of refusal. An action refused for want of
-a capability wears the Authority Mark, because acquiring that authority would
-make it available; an action with no endpoint behind it at all is plainly
-disabled, because no grant would change anything.
+**The Graphics pane is named for the display path, not for a GPU.** A
+framebuffer-only or headless machine has no GPU and would read an empty *GPU*
+pane — but it still composites, and that work is what a reader needs. So the
+pane leads with the compositor's measured frame cost and treats the device as
+one of its facts. The reading that earns the block is damaged pixels against
+blended pixels against screen pixels; every figure is a count of work, and no
+duration rides this path, because a duration is neither reproducible nor
+assertable. A frame that recomposed nothing reads *idle* rather than a row of
+zeros pretending a frame was drawn, and a frame nobody has reported yet reads
+unavailable — only the session that owns the compositor can count one.
 
-The content cursor's stops are the eight pages and then the rail's buttons, so
-Up/Down walks the sidebar exactly as a reader expects of a vertical list and
-Enter or Space commits. The `Tabs` control's own vertical navigation is
-deliberately not given the same keys, which would give them two meanings.
+**A device's commands are labelled, not glyphed**, and almost none has an
+endpoint. Of the commands the panes offer, only "sort tasks by *resource*" is
+one this service can carry out: it is a view transition onto the Tasks table,
+ordered by that device's own cost, so a busy device is traced to the tasks
+sitting on it. Every other command is drawn *plainly disabled* for want of an
+endpoint rather than marked for authority — acquiring a capability would not
+make an absent endpoint appear.
 
-#### The Desktop block
+**Selecting a device performs no I/O.** The rail's selection changes which
+pane is drawn from state the sampler has already delivered: it issues no
+query, opens no store and waits on nothing, and a pane with no sample yet
+reads unavailable rather than blocking for one.
 
-The Resources page's third block is the one reading this service does not
-sample. The session owns the compositor, so it sends what its last frame cost
-over the command channel above — only when the counts changed, never more than
-four times a second, and never when the only served content was this service's
-own paint (a monitor must not measure itself) — and this service validates and
-renders it:
-
-| Row | What it reads |
-|---|---|
-| Last frame | the pixels the frame recomposed, of the whole screen |
-| Blended | the layer contributions blended to resolve them, and how many times over the damage that is |
-| Opaque copies | damaged pixels resolved by copying an opaque run instead |
-| Rectangles | how many rectangles the frame recomposed |
-| Present calls | how many calls into the display driver published it |
-| Window furniture | furniture lookups served from the retained cache, and how many had to be rendered |
-
-Each counter's own meaning is in [what one frame
-cost](./wm.md#what-one-frame-cost-framestats). *Blended* exceeding *Last
-frame* many times over is not an error — it is the reading: a frame that
-blends four million pixels to change three thousand is paying for depth
-nobody can see, and one that recomposes the whole screen to move a cursor is
-damaging too much.
-
-The block is refreshed as each report lands, but only while the window is
-open: a report that arrives with the panel closed is adopted and nothing is
-rebuilt for it, because rebuilding walks every sampled process to allocate a
-row, a name and a history for each, and no window means no reader. Opening the
-panel rebuilds first, so the first frame a user sees already carries every
-report that arrived while they were not looking — and the session's own rate
-limit ([the command
-channel](./session.md#the-command-mailbox-the-session-sends-on)) is what
-stops a pointer crossing the wallpaper producing those reports at frame rate
-in the first place.
-
-A report whose counts no compositor pass could have produced is refused where
-it is decoded, so the block never renders a sender's arithmetic. An idle frame
-reads *idle, nothing recomposed* rather than a row of zeros pretending a frame
-was drawn, and a frame nobody has reported yet reads unavailable. Every figure
-is a count of work; no duration rides this path, because a duration is neither
-reproducible nor assertable.
+**When the window is too narrow to seat the rail, its *route* moves into the
+band** as a `ComboBox` naming the current device, whose list is the same
+device set the rail held. Losing the rail must not lose a pane, so what
+replaces it is a control rather than an omission.
 
 ### The Recovery screen
 
@@ -386,139 +370,35 @@ rail always describe the card the reader is on. A rail stop hands the key to
 the button, so a refused command refuses the keyboard exactly as it refuses
 the pointer.
 
-### The Pressure screen
-
-Pressure carries the same master/detail anatomy as Recovery: the **primary**
-column is one `Card` per flagged cause — the culprit, a plain-language cause
-line, and that cause's relief commands in the card's own footer — and the
-**detail** pane describes whichever cause is selected. There is no action rail:
-a cause's relief belongs to the card that offers it, where the resource being
-relieved is unambiguous.
-
-Selection is remembered by the *resource* the cause is about, not by its row
-number: the list is rebuilt every sample, so a number would re-point at a
-different resource the moment one above it eased. A cause that is still flagged
-keeps the selection however far it has moved; a resource that eases loses it.
-That is the one shared selection rule every section with a selection reads.
-
-The detail pane names the culprit and the resource, then states four facts:
-
-| Fact | What it reads |
-|---|---|
-| Resource | the pressured resource the cause names |
-| Pressure | how much of it is in use — the machine-wide CPU busy share, or the memory band's own measured share |
-| In band | how long the resource has stood in that band, measured by this service (below) |
-| Relief | the cause's own recommended command, and — where this session cannot take it — why not |
-
-A **band's age** is tracked by the service exactly as a fault's age is: nothing
-in the System Information API timestamps a band change, so the service keeps
-when it first saw each resource pressured and clocks it off the monotonic
-uptime reading. With no uptime reading there is no clock and the age reads
-unmeasured rather than as a fabricated zero; a band that eases forgets its
-start, so a resource that comes back under pressure is timed from its *new*
-band.
-
-The Relief fact names a refused command rather than hiding it: a reader is told
-what would relieve the pressure and that this session may not do it (`not
-permitted` for want of the capability, `not available in this state` when the
-culprit is already stopped or already at `Low`). The command itself still fails
-closed at its own button, to the keyboard exactly as to the pointer. A cause
-whose model recommends nothing says so instead of volunteering another of its
-commands.
-
-### The Activities screen
-
-Activities is a flattened list: one header row per group, its member rows
-indented beneath it, and the group's four commands — Switch, Pause-or-Resume,
-Rename, Close — inline on the header row itself, where the group that owns them
-is unambiguous. The **detail** pane describes the selected group.
-
-Selection is remembered by the group's own stable id, and pressing any part of
-a header — its name or any of its four commands — selects that group, so the
-pane describes the group the reader just acted on. A refresh that reorders the
-groups keeps the reader on the same one; a group that closes loses the
-selection. An in-flight rename is re-located the same way, by id and never by
-row.
-
-The pane states the group's own name and member count, then its four **combined
-readings**, then one line per member:
-
-| Reading | Where it comes from |
-|---|---|
-| CPU | the sum of its joined members' own measured shares |
-| Memory | the sum of its joined members' own resident sizes |
-| Disk | the sum of its joined members' own measured I/O rates |
-| Network | always unmeasured: there is no per-task network accounting to total |
-
-There is no per-group accounting anywhere to read, so a total is a sum of the
-members' *own* measurements or it is absent. One unread part makes the whole
-total absent — a total that quietly skipped an unmeasured member would
-understate the group while reading as a measurement — and a group with no
-member joined to this sample has no total at all rather than a nought that
-would claim the group costs nothing. Each member line reads that member's own
-figure, states plainly that it is not running when it has exited, and wears the
-unmeasured mark when it is running but its figure was not read.
-
-### The Background screen
-
-Background carries the same master/detail anatomy: a `Card` per job, a detail
-pane (the job's name and how far through it is, a throughput `Chart`, two
-columns of `FactList`, and a `Timeline`), a `JOB ACTIONS` rail with Pause and
-Cancel for the selected job, and a footer holding an Auto-throttle `Toggle`.
-
-Nothing in this system keeps a registry of background jobs — no service
-publishes one and the System Information API has no query for one — so the
-list is empty on every real machine and says so in two statements: the shared
-absence line ("no interface"), and a sentence naming what is missing, because
-a reader who sees only an empty list concludes nothing is running, which is a
-different and unverified claim. The anatomy around it is the shape a registry
-would fill, not a promise that one exists, and no job is invented to populate
-it.
-
-The Auto-throttle switch is off and *plainly disabled* rather than wearing the
-Authority Mark: the caller's authority is not what is missing, so the control
-must not imply that a grant would change anything.
-
-### Activities are live groupings, not saved workspaces
-
-An activity is a **grouping of live processes for the current session**,
-held by this service in memory: members are ephemeral processes, so a
-persisted grouping would outlive the only things it names. Members that
-exit are pruned (and an emptied group dissolved) — but **only on a sample
-whose process list actually succeeded**, so a degraded sample can never
-wipe the user's groupings. Set actions (pause/resume/close/switch) act
-only on members **joined to the current sample** by `proc_id`: a stored
-numeric pid whose process has exited may have been reused by an unrelated
-process, so acting on unjoined members is refused by construction rather
-than risked. Names are bounded (48 characters), trimmed, unique per
-instance, and validated on rename — a refused rename is stated on `stderr`
-and changes nothing. The bounds (12 activities × 32 members) are
-hand-curation scale; the panel renders the honest reason ("Activity limit
-reached", "Activity is full") on the controls they disable.
-
 ### What is deliberately empty, and why
 
-- **Jobs** — there is no background-job registry anywhere in the OS to
-  enumerate, so the Background screen's list states that absence while its
-  anatomy stands ready for one.
+- **Background jobs** — there is no job registry anywhere in the OS to
+  enumerate, so no section shows one. It returns as a `Jobs` tab and a
+  `Type` column on Tasks the day a registry lands, not as a section.
 - **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
-  no service-enumeration query, so the System screen's Services page and its
-  Overview's Active Services block both state that absence rather than
-  showing an empty list that would read as "no services are running".
+  no service-enumeration query, so nothing claims to list them.
+- **A volume's rate, utilisation, queue depth and await** — no per-volume
+  I/O statistics query exists yet, so the volume pane's service-and-queue
+  block marks every row rather than deriving a figure. Its health block is a
+  real measurement today.
+- **A graphics device's engine utilisation and video memory** — the hardware
+  tree names the device, but no query publishes its per-engine busy time or
+  its memory, so those facts are marked. The pane leads with the compositor's
+  measured frame cost precisely so a machine with no GPU still reads usefully.
+- **Per-task network bytes** — no per-process socket accounting exists
+  anywhere in the system; attribution belongs to the network service, which
+  owns the sockets. The interface pane states that in words.
+- **Temperature, AC and battery** — no sensor or power-supply interface
+  exists, and no driver to serve one.
 - **In-panel system actions** — the machine's power transitions are not
   rows *in this window*: they live in the taskbar's quick-actions menu,
   where the user confirms them, and reach this service as the `Power`
   command below. Session lock is the desktop session's own surface (it
   keeps the session running behind it), never this service's.
-- **Disk and network pressure cards and resource rows** — the API exposes
-  no whole-machine disk-throughput query (the per-process byte counters the
-  Tasks table's Disk column derives from measure one task, not the device),
-  and while a per-interface network-rates query exists
-  (`NET_INTERFACE_RATES`), no tray latch is derived from it, so a card would
-  be a guess rather than a measured cause.
-- **App "sleep" and disk "throttle"** (sketched on the concept boards) —
-  no such kernel interfaces exist; the pressure cards offer only actions
-  that genuinely work today: pause (`Stop`), lower priority, show tasks.
+- **An accelerator pane** — there is no accelerator device class for
+  discovery to report, so the rail grows no `Accelerators` group and the pane
+  does not exist. It arrives with the driver class, not as a greyed-out
+  teaser.
 
 Offering a control that would fail at the point of use is worse than an
 honest absence, so these stay empty.
@@ -532,13 +412,8 @@ honest absence, so these stay empty.
 | Task *Lower priority* | `sched_set_priority(pid, Low)` on the selected task |
 | Task *Force quit* | `signal(pid, Kill)` on the selected task — requires `CAP_PROC_CONTROL` |
 | Task *Open logs* | nothing: no journal-read query exists, which is why the command is disabled |
-| Task *Group…* menu | file the task into an activity / a new activity / out of its activity (service-local state; no syscall) |
-| Pressure *Pause* | `signal(pid, Stop)` on the measured culprit |
-| Pressure *Lower priority* | `sched_set_priority(pid, Low)` on the culprit — lowering follows the kernel's own-child / same-principal / `CAP_PROC_CONTROL` target rule, and the card renders the action spent once the record already reads `Low` |
-| Pressure *Show tasks* | resolved inside the widget: jumps to the Tasks section focused on the culprit row |
-| Activity *Switch* | one `ActivateOwner` per joined member, raised in reverse order so the first member lands frontmost |
-| Activity *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` swept over the joined members — one refusal is reported and the sweep continues |
-| Activity *Close* | `signal(pid, Terminate)` swept over the joined members (the graceful ask — force-kill stays Recovery's job), then the grouping dissolves |
+| Resource *Sort tasks by …* | resolved inside the widget: shows the Tasks table ordered by what that device costs, so a busy device is traced to the tasks on it |
+| Every other resource command | nothing: no endpoint exists to drive a reclaim, a scrub, a trim, an unmount, a lease renewal or a clipboard, which is why each is drawn plainly disabled |
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — requires `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |

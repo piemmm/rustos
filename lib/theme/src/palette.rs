@@ -98,6 +98,10 @@ pub struct Palette {
     pub power_pressure: Rgba,
     /// Thermal pressure.
     pub thermal_pressure: Rgba,
+    /// Graphics / display-path utilisation.
+    pub gpu_pressure: Rgba,
+    /// General-purpose accelerator utilisation.
+    pub accelerator_pressure: Rgba,
     /// Hung, not-responding, repair, restart, or force-action state.
     pub recovery: Rgba,
     /// Completed, verified, recovered.
@@ -174,6 +178,8 @@ impl Palette {
             SignalRole::Network => self.network_activity,
             SignalRole::Power => self.power_pressure,
             SignalRole::Thermal => self.thermal_pressure,
+            SignalRole::Gpu => self.gpu_pressure,
+            SignalRole::Accelerator => self.accelerator_pressure,
             SignalRole::Recovery => self.recovery,
             SignalRole::Success => self.success,
             SignalRole::Warning => self.warning,
@@ -203,6 +209,10 @@ pub enum SignalRole {
     Power,
     /// Thermal pressure.
     Thermal,
+    /// Graphics / display-path utilisation.
+    Gpu,
+    /// General-purpose accelerator utilisation.
+    Accelerator,
     /// Recovery / repair / restart.
     Recovery,
     /// Completed / verified.

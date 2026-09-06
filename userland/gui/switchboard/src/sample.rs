@@ -45,20 +45,25 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use tairix_abi::hwtree::HwNode;
 use tairix_abi::net_ipc::{
-    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetInterfaceStateRecord,
+    NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
+    NetInterfaceStateRecord, NetServerAddr, NetSockState, NetStackDefenceCounters,
 };
 use tairix_abi::sysinfo::{
-    CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest, CrashRecord,
-    CrashRecordRequest, KernelMemoryStats, LoadAverage, MemoryTotal, MountListRequest, MountRecord,
-    NetInterfaceListRequest, NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord,
-    ProcessState, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId, SystemIdentity,
-    Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest, RESOURCE_LIMITS_REPORT_LEN,
+    CacheLedgerRecord, CpuInfoListRequest, CpuInfoRecord, CpuLoadRecord, CpuLoadRequest,
+    CpuTimeRecord, CrashRecord, CrashRecordRequest, KernelMemoryStats, LoadAverage,
+    MemoryPressureBand, MemoryTotal, MountListRequest, MountRecord, NetInterfaceListRequest,
+    NetInterfaceRatesRequest, ProcessListRequest, ProcessRecord, ProcessState, RamzipStats,
+    ReclaimClassRecord, ResourceLimitRecord, SeatListRequest, SeatRecord, SysinfoQueryId,
+    SystemIdentity, Uptime, VolumeIoHealthRecord, VolumeIoHealthRequest,
+    RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
 use tairix_procinfo::{
-    call, for_each_process, memory_pressure, walk_pages, CallError, CpuTotals, ListError,
-    Transport, WalkStep,
+    call, fetch_tree, for_each_cpu_time, for_each_net_socket, for_each_process, memory_pressure,
+    memory_pressure_band, net_stack_defence, ramzip_stats, walk_pages, CallError, CpuTotals,
+    ListError, Transport, WalkStep,
 };
 
 use crate::schedule::{Cadence, SAMPLE_PERIOD_NS};
@@ -104,6 +109,9 @@ pub struct ProcessSummary {
     /// own uid so a control renders denied exactly where the kernel's
     /// same-principal rule would refuse it.
     pub uid: u32,
+    /// The CPU the scheduler last dispatched this task on, so a busy core in
+    /// the CPU pane can be traced to the task sitting on it.
+    pub cpu: u8,
     /// Bytes of memory currently mapped in the process's address space
     /// ([`ProcessRecord::mem_bytes`]) — what names the memory-pressure
     /// culprit.
@@ -196,6 +204,26 @@ pub enum DegradedField {
     ResourceLimits,
     /// The crash-record list could not be read.
     CrashRecords,
+    /// The ungated memory-pressure band could not be read.
+    MemoryPressureBand,
+    /// The reclaimable-memory ledger could not be read.
+    ReclaimStats,
+    /// The compressed-memory tier's statistics could not be read.
+    RamzipStats,
+    /// The bounded-cache ledger could not be read.
+    CacheLedgers,
+    /// Per-interface cumulative counters could not be read.
+    NetInterfaceCounters,
+    /// The socket table could not be read.
+    NetSockets,
+    /// The configured resolver servers could not be read.
+    NetResolverServers,
+    /// The configured time servers could not be read.
+    NetTimeServers,
+    /// The network stack's connection-defence counters could not be read.
+    NetStackDefence,
+    /// The hardware tree could not be read.
+    HardwareTree,
 }
 
 /// Why a reading is absent from a [`Sample`].
@@ -258,6 +286,36 @@ const VOLUME_RECORD_CAP: usize = 256;
 /// claiming so is not describing hardware.
 const NET_INTERFACE_CAP: usize = 64;
 
+/// Reclaim-ledger rows the sampler retains, across the kernel's own reclaim
+/// classes and every process-reported bounded cache.
+///
+/// A bounded cache is a declared thing, not an unbounded list: the reclaim
+/// model itself caps what one process may report, so a few hundred rows
+/// covers every cache a busy desktop declares while bounding what a service
+/// claiming more can make one sample allocate.
+const CACHE_ROW_CAP: usize = 256;
+
+/// Socket records the sampler walks.
+///
+/// The interface pane states *how many* sockets are established and
+/// listening, never which, so this bounds the walk that counts them: a
+/// machine serving more connections than this reports the count it read,
+/// which is exactly what the sampler saw.
+const SOCKET_RECORD_CAP: usize = 4096;
+
+/// Configured resolver or time servers the sampler retains.
+///
+/// A stub resolver and an NTP client each consult a handful; a list longer
+/// than this is not a configuration a reader is looking at.
+const SERVER_RECORD_CAP: usize = 16;
+
+/// Hardware-tree nodes the sampler retains.
+///
+/// One node per detected bus or device function, so a densely populated
+/// server with several root complexes and their whole PCIe fan-out stays
+/// well inside this while a service claiming more cannot page without limit.
+const HW_NODE_CAP: usize = 1024;
+
 /// Seat records the sampler retains.
 ///
 /// A seat is a physical workstation position at the machine (its
@@ -301,12 +359,41 @@ fn page_for(record_len: usize) -> u16 {
         .clamp(1, PAGE_RECORDS_MAX)
 }
 
+/// One core's busy share over the sample interval.
+///
+/// `None` for a core first seen this sample: a cumulative total is not a
+/// share, and reporting one would plot the whole of boot as this interval's
+/// reading.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CoreBusy {
+    /// The CPU index this share belongs to.
+    pub cpu: u32,
+    /// Its busy share, in permille.
+    pub permille: Option<u16>,
+}
+
+/// How many sockets the stack holds, by the two states a reader asks about.
+///
+/// The interface pane states counts, never a socket list, so the walk that
+/// reads the table folds it into these two totals rather than retaining
+/// thousands of records nothing would draw.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct SocketCensus {
+    /// Sockets with an established connection.
+    pub established: u64,
+    /// Sockets accepting connections.
+    pub listening: u64,
+}
+
 /// One sample of the live system, gathered by [`Sampler::sample`].
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct Sample {
     /// Count of processes observed in the [`ProcessState::Stopped`] state
     /// (recovery candidates).
     pub stopped_count: u16,
+    /// Each core's own busy share over the sample interval, in CPU-index
+    /// order. Empty when the per-CPU accounting could not be read.
+    pub core_busy: Vec<CoreBusy>,
     /// Overall CPU busy fraction, in permille. `None` when the aggregate
     /// CPU-time query failed or reported no CPUs.
     pub cpu_busy_permille: Option<u16>,
@@ -392,6 +479,35 @@ pub struct Sample {
     /// ([`Cadence::Inventory`] — a limit changes on an administrative
     /// act).
     pub resource_limits: Option<Vec<ResourceLimitRecord>>,
+    /// The ungated memory-pressure band ([`Cadence::EverySample`]), which a
+    /// session without the kernel-statistics scope can still read — so the
+    /// pressure banner works on an unprivileged ceiling.
+    pub pressure_band: Option<MemoryPressureBand>,
+    /// The kernel's reclaimable-memory ledger, one row per reclaim class
+    /// ([`Cadence::Memory`], kernel-statistics scope).
+    pub reclaim: Option<Vec<ReclaimClassRecord>>,
+    /// The compressed-memory tier's statistics ([`Cadence::Memory`],
+    /// kernel-statistics scope).
+    pub ramzip: Option<RamzipStats>,
+    /// Every declared bounded cache and what it currently holds
+    /// ([`Cadence::Memory`], kernel-statistics scope).
+    pub cache_ledgers: Option<Vec<CacheLedgerRecord>>,
+    /// Per-interface cumulative counters ([`Cadence::EverySample`], global
+    /// scope).
+    pub net_counters: Option<Vec<NetInterfaceCountersRecord>>,
+    /// How many sockets are established and listening
+    /// ([`Cadence::EverySample`], global scope).
+    pub sockets: Option<SocketCensus>,
+    /// The configured resolver servers ([`Cadence::Inventory`]).
+    pub resolver_servers: Option<Vec<NetServerAddr>>,
+    /// The configured time servers ([`Cadence::Inventory`]).
+    pub time_servers: Option<Vec<NetServerAddr>>,
+    /// The stack's connection-defence counters ([`Cadence::EverySample`],
+    /// global scope).
+    pub stack_defence: Option<NetStackDefenceCounters>,
+    /// The discovered hardware tree ([`Cadence::Inventory`], hardware
+    /// scope), which names the graphics device the display path runs on.
+    pub hardware: Option<Vec<HwNode>>,
     /// Recent user-fault crash records ([`Cadence::Inventory`],
     /// kernel-statistics scope). `Some(empty)` is the healthy system that
     /// has crashed nothing — which is why this is not a bare [`Vec`].
@@ -483,17 +599,27 @@ impl ScopeVerdicts {
             | DegradedField::LoadAverage
             | DegradedField::CpuInfo
             | DegradedField::MemoryTotal
+            | DegradedField::MemoryPressureBand
             | DegradedField::Mounts
+            | DegradedField::NetResolverServers
+            | DegradedField::NetTimeServers
             | DegradedField::ResourceLimits => true,
             DegradedField::MemoryPressure
             | DegradedField::CpuLoad
             | DegradedField::KernelMemory
+            | DegradedField::ReclaimStats
+            | DegradedField::RamzipStats
+            | DegradedField::CacheLedgers
             | DegradedField::VolumeHealth
             | DegradedField::CrashRecords => self.memory_pressure,
-            DegradedField::NetInterfaceState | DegradedField::NetInterfaceRates => {
-                self.global_process_scope
-            }
-            DegradedField::NetInterfaceFacts | DegradedField::Seats => self.hardware_scope,
+            DegradedField::NetInterfaceState
+            | DegradedField::NetInterfaceRates
+            | DegradedField::NetInterfaceCounters
+            | DegradedField::NetSockets
+            | DegradedField::NetStackDefence => self.global_process_scope,
+            DegradedField::NetInterfaceFacts
+            | DegradedField::HardwareTree
+            | DegradedField::Seats => self.hardware_scope,
         }
     }
 }
@@ -620,6 +746,7 @@ struct PagedRead {
 pub struct Sampler {
     scopes: ScopeVerdicts,
     prev_proc_times: BTreeMap<ProcId, u64>,
+    prev_core_times: BTreeMap<u32, CpuTotals>,
     prev_sample_ns: Option<u64>,
     prev_totals: Option<CpuTotals>,
     last_memory: Option<MemoryPressureSample>,
@@ -637,6 +764,12 @@ pub struct Sampler {
     seats: Option<Vec<SeatRecord>>,
     resource_limits: Option<Vec<ResourceLimitRecord>>,
     crashes: Option<Vec<CrashRecord>>,
+    reclaim: Option<Vec<ReclaimClassRecord>>,
+    ramzip: Option<RamzipStats>,
+    cache_ledgers: Option<Vec<CacheLedgerRecord>>,
+    resolver_servers: Option<Vec<NetServerAddr>>,
+    time_servers: Option<Vec<NetServerAddr>>,
+    hardware: Option<Vec<HwNode>>,
 }
 
 impl Sampler {
@@ -647,6 +780,7 @@ impl Sampler {
         Self {
             scopes,
             prev_proc_times: BTreeMap::new(),
+            prev_core_times: BTreeMap::new(),
             prev_sample_ns: None,
             prev_totals: None,
             last_memory: None,
@@ -661,6 +795,12 @@ impl Sampler {
             seats: None,
             resource_limits: None,
             crashes: None,
+            reclaim: None,
+            ramzip: None,
+            cache_ledgers: None,
+            resolver_servers: None,
+            time_servers: None,
+            hardware: None,
         }
     }
 
@@ -681,14 +821,18 @@ impl Sampler {
 
         let (stopped_count, top_task, processes) =
             self.sample_processes(transport, elapsed_ns, &mut degradations);
-        let cpu_busy_permille = self.sample_cpu_totals(transport, &mut degradations);
+        let (cpu_busy_permille, core_busy) = self.sample_cpu_totals(transport, &mut degradations);
         self.sample_memory_pressure(transport, &mut degradations);
         let uptime = self.read_uptime(transport, &mut degradations);
         let load_average = self.read_load_average(transport, &mut degradations);
         let cpu_info = self.read_cpu_info(transport, &mut degradations);
         let cpu_load = self.read_cpu_load(transport, &mut degradations);
+        let pressure_band = self.read_pressure_band(transport, &mut degradations);
         let net_state = self.read_net_state(transport, &mut degradations);
         let net_rates = self.read_net_rates(transport, &mut degradations);
+        let net_counters = self.read_net_counters(transport, &mut degradations);
+        let sockets = self.read_sockets(transport, &mut degradations);
+        let stack_defence = self.read_stack_defence(transport, &mut degradations);
         self.refresh_cached(transport, &mut degradations);
 
         self.prev_sample_ns = Some(now_ns);
@@ -697,6 +841,7 @@ impl Sampler {
         Sample {
             stopped_count,
             cpu_busy_permille,
+            core_busy,
             top_task,
             memory_pressure: self.last_memory,
             processes,
@@ -716,6 +861,16 @@ impl Sampler {
             seats: self.seats.clone(),
             resource_limits: self.resource_limits.clone(),
             crashes: self.crashes.clone(),
+            pressure_band,
+            reclaim: self.reclaim.clone(),
+            ramzip: self.ramzip,
+            cache_ledgers: self.cache_ledgers.clone(),
+            net_counters,
+            sockets,
+            resolver_servers: self.resolver_servers.clone(),
+            time_servers: self.time_servers.clone(),
+            stack_defence,
+            hardware: self.hardware.clone(),
             scopes: self.scopes,
             elapsed_ns,
         }
@@ -798,6 +953,7 @@ impl Sampler {
                 name: record.name_bytes().to_vec(),
                 state: record.state,
                 uid: record.uid,
+                cpu: record.cpu,
                 mem_bytes: record.mem_bytes,
                 priority: record.priority,
                 cpu_permille: elapsed_ns.and_then(|interval| permille_of(delta, interval)),
@@ -816,22 +972,63 @@ impl Sampler {
         &mut self,
         transport: &dyn Transport,
         degradations: &mut Vec<DegradedField>,
-    ) -> Option<u16> {
-        match CpuTotals::fetch_all(transport) {
-            Ok(Some(totals)) => {
-                self.note_success(DegradedField::CpuTime);
-                let prev = self.prev_totals.unwrap_or_default();
-                self.prev_totals = Some(totals);
-                CpuTotals::busy_permille(prev, totals)
-            }
-            // No CPUs reported: an honest empty, never a failure to warn
-            // about.
-            Ok(None) => None,
-            Err(_) => {
-                self.note_failure(DegradedField::CpuTime, degradations);
-                None
-            }
+    ) -> (Option<u16>, Vec<CoreBusy>) {
+        let mut totals = CpuTotals::default();
+        let mut cores: Vec<CpuTimeRecord> = Vec::new();
+        let outcome = for_each_cpu_time(transport, |record| {
+            totals.busy_ns = totals.busy_ns.saturating_add(record.busy_ns);
+            totals.idle_ns = totals.idle_ns.saturating_add(record.idle_ns);
+            cores.push(*record);
+            Ok(if cores.len() >= CPU_RECORD_CAP {
+                WalkStep::Stop
+            } else {
+                WalkStep::Continue
+            })
+        });
+        if outcome.is_err() {
+            self.note_failure(DegradedField::CpuTime, degradations);
+            // Prior-sample state is left untouched: a transient failure must
+            // not erase totals a later sample could still delta against.
+            return (None, Vec::new());
         }
+        self.note_success(DegradedField::CpuTime);
+        // No CPUs reported is an honest empty, not a failure to warn about,
+        // and there is nothing to delta.
+        if cores.is_empty() {
+            return (None, Vec::new());
+        }
+        let per_core = self.core_busy(&cores);
+        let prev = self.prev_totals.unwrap_or_default();
+        self.prev_totals = Some(totals);
+        (CpuTotals::busy_permille(prev, totals), per_core)
+    }
+
+    /// Each core's busy share over the interval, from the delta against its
+    /// own previous reading.
+    ///
+    /// Keyed on the CPU index the record names rather than its position, so
+    /// a service that reports its CPUs in a different order between samples
+    /// cannot attribute one core's delta to another.
+    fn core_busy(&mut self, cores: &[CpuTimeRecord]) -> Vec<CoreBusy> {
+        let mut shares = Vec::with_capacity(cores.len());
+        let mut current = BTreeMap::new();
+        for record in cores {
+            let now = CpuTotals {
+                busy_ns: record.busy_ns,
+                idle_ns: record.idle_ns,
+            };
+            let permille = self
+                .prev_core_times
+                .get(&record.cpu)
+                .and_then(|prev| CpuTotals::busy_permille(*prev, now));
+            current.insert(record.cpu, now);
+            shares.push(CoreBusy {
+                cpu: record.cpu,
+                permille,
+            });
+        }
+        self.prev_core_times = current;
+        shares
     }
 
     /// On the memory-pressure query's own slower cadence (and only when the
@@ -886,6 +1083,17 @@ impl Sampler {
     /// news again rather than a repeat.
     fn note_success(&mut self, field: DegradedField) {
         self.warned.remove(&field);
+    }
+
+    /// Record `field`'s outcome — the pair of the two above, for a reading
+    /// fetched through a `lib/procinfo` helper rather than through this
+    /// module's own scalar and paged readers.
+    fn note(&mut self, field: DegradedField, read: bool, degradations: &mut Vec<DegradedField>) {
+        if read {
+            self.note_success(field);
+        } else {
+            self.note_failure(field, degradations);
+        }
     }
 
     /// Issue a fixed-size reading and decode it, blaming `field` if either
@@ -1018,6 +1226,101 @@ impl Sampler {
             degradations,
             page_payload,
             CpuInfoRecord::from_bytes,
+        )
+    }
+
+    /// The ungated memory-pressure band.
+    ///
+    /// Read separately from the audited pressure query because it needs no
+    /// capability: a session without the kernel-statistics scope still gets
+    /// the band the banner is about.
+    fn read_pressure_band(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<MemoryPressureBand> {
+        if !self.due(DegradedField::MemoryPressureBand, false) {
+            return None;
+        }
+        let read = memory_pressure_band(transport).ok();
+        self.note(
+            DegradedField::MemoryPressureBand,
+            read.is_some(),
+            degradations,
+        );
+        read
+    }
+
+    /// The stack's connection-defence counters.
+    fn read_stack_defence(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<NetStackDefenceCounters> {
+        if !self.due(DegradedField::NetStackDefence, false) {
+            return None;
+        }
+        let read = net_stack_defence(transport).ok();
+        self.note(DegradedField::NetStackDefence, read.is_some(), degradations);
+        read
+    }
+
+    /// How many sockets are established and listening.
+    ///
+    /// The table is folded into two counts as it is walked: the pane states
+    /// how many, never which, so retaining the records would hold thousands
+    /// nothing draws.
+    fn read_sockets(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<SocketCensus> {
+        if !self.due(DegradedField::NetSockets, false) {
+            return None;
+        }
+        let mut census = SocketCensus::default();
+        let mut seen = 0usize;
+        let outcome = for_each_net_socket(transport, |record| {
+            match record.state {
+                NetSockState::Established => {
+                    census.established = census.established.saturating_add(1);
+                }
+                NetSockState::Listen => {
+                    census.listening = census.listening.saturating_add(1);
+                }
+                _ => {}
+            }
+            seen = seen.saturating_add(1);
+            Ok(if seen >= SOCKET_RECORD_CAP {
+                WalkStep::Stop
+            } else {
+                WalkStep::Continue
+            })
+        });
+        self.note(DegradedField::NetSockets, outcome.is_ok(), degradations);
+        outcome.is_ok().then_some(census)
+    }
+
+    /// Per-interface cumulative counters.
+    fn read_net_counters(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<Vec<NetInterfaceCountersRecord>> {
+        if !self.due(DegradedField::NetInterfaceCounters, false) {
+            return None;
+        }
+        self.read_paged(
+            transport,
+            PagedRead {
+                query: SysinfoQueryId::NET_INTERFACE_COUNTERS,
+                field: DegradedField::NetInterfaceCounters,
+                record_len: NetInterfaceCountersRecord::WIRE_LEN,
+                cap: NET_INTERFACE_CAP,
+            },
+            degradations,
+            page_payload,
+            NetInterfaceCountersRecord::from_bytes,
         )
     }
 
@@ -1272,6 +1575,119 @@ impl Sampler {
                 self.crashes = Some(records);
             }
         }
+        self.refresh_memory_detail(transport, degradations);
+        self.refresh_net_config(transport, degradations);
+        if self.due(DegradedField::HardwareTree, self.hardware.is_some()) {
+            let read = fetch_tree(transport).ok();
+            self.note(DegradedField::HardwareTree, read.is_some(), degradations);
+            if let Some(mut nodes) = read {
+                nodes.truncate(HW_NODE_CAP);
+                self.hardware = Some(nodes);
+            }
+        }
+    }
+
+    /// Refresh the memory readings behind the composition bar and the
+    /// reclaim ledger, on the audited memory cadence their capability sets.
+    fn refresh_memory_detail(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) {
+        if self.due(DegradedField::RamzipStats, self.ramzip.is_some()) {
+            let read = ramzip_stats(transport).ok();
+            self.note(DegradedField::RamzipStats, read.is_some(), degradations);
+            if let Some(stats) = read {
+                self.ramzip = Some(stats);
+            }
+        }
+        if self.due(DegradedField::ReclaimStats, self.reclaim.is_some()) {
+            if let Some(records) = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::RECLAIM_STATS,
+                    field: DegradedField::ReclaimStats,
+                    record_len: ReclaimClassRecord::WIRE_LEN,
+                    cap: CACHE_ROW_CAP,
+                },
+                degradations,
+                page_payload,
+                ReclaimClassRecord::from_bytes,
+            ) {
+                self.reclaim = Some(records);
+            }
+        }
+        if self.due(DegradedField::CacheLedgers, self.cache_ledgers.is_some()) {
+            if let Some(records) = self.read_paged(
+                transport,
+                PagedRead {
+                    query: SysinfoQueryId::CACHE_LEDGERS,
+                    field: DegradedField::CacheLedgers,
+                    record_len: CacheLedgerRecord::WIRE_LEN,
+                    cap: CACHE_ROW_CAP,
+                },
+                degradations,
+                page_payload,
+                CacheLedgerRecord::from_bytes,
+            ) {
+                self.cache_ledgers = Some(records);
+            }
+        }
+    }
+
+    /// Refresh the configured resolver and time servers, which change on an
+    /// administrative action rather than moment to moment.
+    fn refresh_net_config(
+        &mut self,
+        transport: &dyn Transport,
+        degradations: &mut Vec<DegradedField>,
+    ) {
+        if self.due(
+            DegradedField::NetResolverServers,
+            self.resolver_servers.is_some(),
+        ) {
+            if let Some(servers) = self.read_servers(
+                transport,
+                SysinfoQueryId::NET_RESOLVER_SERVERS,
+                DegradedField::NetResolverServers,
+                degradations,
+            ) {
+                self.resolver_servers = Some(servers);
+            }
+        }
+        if self.due(DegradedField::NetTimeServers, self.time_servers.is_some()) {
+            if let Some(servers) = self.read_servers(
+                transport,
+                SysinfoQueryId::NET_TIME_SERVERS,
+                DegradedField::NetTimeServers,
+                degradations,
+            ) {
+                self.time_servers = Some(servers);
+            }
+        }
+    }
+
+    /// A configured-server list, whichever of the two `query` names: both
+    /// page the same [`NetServerAddr`] record, so they share one read.
+    fn read_servers(
+        &mut self,
+        transport: &dyn Transport,
+        query: SysinfoQueryId,
+        field: DegradedField,
+        degradations: &mut Vec<DegradedField>,
+    ) -> Option<Vec<NetServerAddr>> {
+        self.read_paged(
+            transport,
+            PagedRead {
+                query,
+                field,
+                record_len: NetServerAddr::WIRE_LEN,
+                cap: SERVER_RECORD_CAP,
+            },
+            degradations,
+            page_payload,
+            NetServerAddr::from_bytes,
+        )
     }
 }
 
@@ -1286,14 +1702,25 @@ const fn cadence_of(field: DegradedField) -> Cadence {
         | DegradedField::LoadAverage
         | DegradedField::CpuInfo
         | DegradedField::CpuLoad
+        | DegradedField::MemoryPressureBand
         | DegradedField::NetInterfaceState
-        | DegradedField::NetInterfaceRates => Cadence::EverySample,
-        DegradedField::MemoryPressure | DegradedField::KernelMemory => Cadence::Memory,
+        | DegradedField::NetInterfaceRates
+        | DegradedField::NetInterfaceCounters
+        | DegradedField::NetSockets
+        | DegradedField::NetStackDefence => Cadence::EverySample,
+        DegradedField::MemoryPressure
+        | DegradedField::KernelMemory
+        | DegradedField::ReclaimStats
+        | DegradedField::RamzipStats
+        | DegradedField::CacheLedgers => Cadence::Memory,
         DegradedField::Mounts
         | DegradedField::VolumeHealth
         | DegradedField::Seats
         | DegradedField::ResourceLimits
-        | DegradedField::CrashRecords => Cadence::Inventory,
+        | DegradedField::CrashRecords
+        | DegradedField::NetResolverServers
+        | DegradedField::NetTimeServers
+        | DegradedField::HardwareTree => Cadence::Inventory,
         DegradedField::Identity | DegradedField::MemoryTotal | DegradedField::NetInterfaceFacts => {
             Cadence::Static
         }

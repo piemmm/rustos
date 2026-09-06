@@ -39,14 +39,11 @@
 //! * [`command`] — [`command::authenticate_command`], which drops any
 //!   command not attested to the desktop session's identity before it is
 //!   ever decoded, let alone applied.
-//! * [`activities`] — [`activities::Activities`], the service-held,
-//!   session-lifetime state that groups live processes into named
-//!   activities the Activities section renders and acts on.
 //! * [`model`] — [`model::build_model`], the pure function that turns a
-//!   [`sample::Sample`], the rolling [`model::LiveMeters`] state, the
-//!   session's [`tairix_abi::switchboard_ipc::SeatReport`], and the
-//!   service's [`activities::Activities`] into the live overview panel's
-//!   [`view::SwitchboardModel`], and [`model::apply_action`],
+//!   [`sample::Sample`], the rolling [`model::LiveMeters`] and
+//!   [`model::DeviceMeters`] state and the session's
+//!   [`tairix_abi::switchboard_ipc::SeatReport`] into the live overview
+//!   panel's [`view::SwitchboardModel`], and [`model::apply_action`],
 //!   which maps the panel's reported [`view::SwitchboardAction`]
 //!   back onto the outbound [`model::Effect`]s it implies.
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
@@ -115,37 +112,34 @@
 
 extern crate alloc;
 
-pub mod activities;
 pub mod command;
 pub mod derive;
 pub mod format;
 pub mod model;
 pub mod panel;
 pub mod publish;
+pub mod resource_report;
 pub mod sample;
 pub mod schedule;
 pub mod service;
-pub mod system_report;
 pub mod view;
 pub mod wait;
 
 #[cfg(test)]
 mod test_host;
 
-pub use activities::{
-    Activities, ActivityView, Member, ACTIVITY_NAME_MAX, MAX_ACTIVITIES, MAX_ACTIVITY_MEMBERS,
-};
 pub use command::{authenticate_command, is_from_session};
 pub use derive::{derive_summary, memory_pressured, Hysteresis};
 pub use model::{
-    apply_action, build_model, derive_self_uid, map_section, signal_pid, Effect, GroupingEdit,
-    LiveMeters, PanelModel, SessionReport,
+    apply_action, build_model, map_section, signal_pid, DeviceMeters, Effect, LiveMeters,
+    PanelModel, SessionReport,
 };
 pub use panel::{
-    refusal_notice, Panel, PanelOutcome, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT,
-    WIN_SIZING, WIN_WIDTH,
+    refusal_notice, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE, WIN_HEIGHT, WIN_SIZING,
+    WIN_WIDTH,
 };
 pub use publish::Publisher;
+pub use resource_report::build_resource_report;
 pub use sample::{
     probe_scopes, Absence, DegradedField, MemoryPressureSample, ProcessSummary, Sample, Sampler,
     ScopeVerdicts, TopTask,
@@ -156,10 +150,9 @@ pub use service::{
     SESSION_REFUSED,
 };
 pub use view::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, HeadlineTile, HealthSeverity,
-    JobControl, JobSummary, LimitRow, NetworkInterface, PressureAction, PressureCause,
-    PressureControl, Reading, RecoveryControl, RecoveryItem, Section, SessionSeat, StorageVolume,
-    Switchboard, SwitchboardAction, SwitchboardModel, SystemAction, SystemFact, SystemPage,
-    SystemReport, TaskSummary, TileInstrument, Unmeasured,
+    ActionVerdict, BlockBody, DeviceAction, DeviceGroup, DeviceId, HealthSeverity, PaneBlock,
+    PaneHero, PressureBanner, Reading, ReadingFact, RecoveryControl, RecoveryItem, ResourceControl,
+    ResourceDevice, ResourceReport, Section, Switchboard, SwitchboardAction, SwitchboardModel,
+    TaskSummary, Unmeasured,
 };
 pub use wait::{required_members, WaitToken};

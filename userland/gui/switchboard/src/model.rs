@@ -1,38 +1,31 @@
 //! Build the live [`SwitchboardModel`] the panel renders from a [`Sample`],
-//! the session's [`SessionReport`], and the service's own [`Activities`]
-//! grouping state, and map each interactive [`SwitchboardAction`] the
-//! composed control reports back onto the outbound [`Effect`]s it implies.
+//! the monitor's rolling meter state and the session's [`SessionReport`],
+//! and map each interactive [`SwitchboardAction`] the composed control
+//! reports back onto the outbound [`Effect`]s it implies.
 //!
-//! This module performs none of these effects itself and never fabricates
-//! a row it cannot back with a real reading: `jobs`, `services`, and
-//! `system_actions` are left empty because the OS exposes no background-job
-//! registry, no service-enumeration query in the System Information API,
-//! and no power/lock interface this service may drive (see the crate
-//! docs). [`crate::panel`] applies the effects through its host seam; this
-//! module decides *what* to do, never *how*.
+//! This module performs none of these effects itself and never fabricates a
+//! row it cannot back with a real reading. [`crate::panel`] applies the
+//! effects through its host seam; this module decides *what* to do, never
+//! *how*.
 
 use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
 use tairix_abi::sysinfo::{CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState};
-use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
-use tairix_controls::{
-    ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, MAX_CHART_SAMPLES,
-};
+use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, Signal};
+use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
 
-use crate::activities::Activities;
 use crate::derive::{memory_pressured, Hysteresis};
 use crate::format::{format_bytes, format_duration, format_rate, percent};
+use crate::resource_report::{build_resource_report, reading};
 use crate::sample::{DegradedField, ProcessSummary, Sample};
-use crate::system_report::{build_system_report, reading, HeadlinePressure};
+use crate::view::resources::DeviceId;
 use crate::view::{
-    ActionVerdict, ActivityControl, ActivityMember, ActivitySummary, CrashSnapshot, FaultImpact,
-    FaultMark, PressureAction, PressureCause, PressureControl, Reading, RecoveryControl,
-    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl,
-    TaskKind, TaskSummary, Unmeasured,
+    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem,
+    Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskOwner,
+    TaskSummary, Unmeasured,
 };
 
 /// Convert a wire [`CommandSection`] into the shared control's own
@@ -43,11 +36,8 @@ use crate::view::{
 pub const fn map_section(command: CommandSection) -> Section {
     match command {
         CommandSection::Tasks => Section::Tasks,
-        CommandSection::Jobs => Section::Jobs,
-        CommandSection::Pressure => Section::Pressure,
-        CommandSection::Activities => Section::Activities,
+        CommandSection::Resources => Section::Resources,
         CommandSection::Recovery => Section::Recovery,
-        CommandSection::System => Section::System,
     }
 }
 
@@ -70,16 +60,6 @@ pub fn signal_pid(owner: u64) -> Option<i64> {
 pub(crate) fn display_name(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec())
         .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
-}
-
-/// Whether a row owned by `uid` is controllable under `self_uid`/`authority`:
-/// the row is the caller's own (the same-uid rule kill(2) itself uses) or
-/// the caller holds the administrative capability. An unknown `self_uid`
-/// (the service could not find its own row in the sample) is never
-/// controllable through the same-uid rule — only the capability can still
-/// grant it — so a lookup failure narrows authority rather than widening it.
-fn controllable(uid: u32, self_uid: Option<u32>, authority: &dyn CapabilityQuery) -> bool {
-    self_uid == Some(uid) || authority.holds(CapabilityId::PROC_CONTROL)
 }
 
 /// The rolling instrument state the panel's resource rows need that no single
@@ -155,6 +135,161 @@ impl LiveMeters {
     pub const fn memory_pressured(&self) -> bool {
         self.memory_pressured
     }
+}
+
+/// The per-core and per-device rolling state the Resources rail and its
+/// panes need that no single [`Sample`] carries: each core's own bounded
+/// busy history, and each device's previous cumulative counters with the
+/// rates they produce.
+///
+/// Keyed on the subject's own identity — a CPU index, a volume id, an
+/// interface name — rather than a rail position, so a device that appears
+/// or goes away between samples can never inherit another's trace. Every
+/// entry is rebuilt from the sample rather than mutated in place, so a
+/// volume unmounted or an interface removed leaks neither history nor
+/// counters.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeviceMeters {
+    cores: BTreeMap<u32, Vec<u16>>,
+    devices: BTreeMap<DeviceId, DeviceTrack>,
+}
+
+/// What one device's tracking holds between samples: the cumulative
+/// counters the next sample deltas against, and the rates those produced.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct DeviceTrack {
+    /// The device's cumulative primary-direction counter as of the last
+    /// sample (bytes received, bytes read).
+    primary: u64,
+    /// Its cumulative opposing-direction counter (bytes sent, written).
+    opposing: u64,
+    /// The primary direction's recent rates, oldest first.
+    primary_history: Vec<u16>,
+    /// The opposing direction's recent rates, oldest first.
+    opposing_history: Vec<u16>,
+    /// The primary direction's latest rate, in bytes per second.
+    primary_rate: Option<u64>,
+    /// The opposing direction's latest rate, in bytes per second.
+    opposing_rate: Option<u64>,
+}
+
+/// The rate a device's trace is plotted against, in bytes per second.
+///
+/// A rate has no ceiling of its own to fill a bar against, so a trace needs
+/// a reference to be drawn in permille at all. One shared reference across
+/// every device is what makes two rail traces comparable by eye, which is
+/// the whole point of a rail of them; a device faster than this plots at the
+/// top of its box rather than past it.
+const TRACE_FULL_SCALE_BYTES: u64 = 1_000_000_000;
+
+impl DeviceMeters {
+    /// Nothing measured yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cores: BTreeMap::new(),
+            devices: BTreeMap::new(),
+        }
+    }
+
+    /// Fold `sample`'s per-core shares in, dropping any core it does not
+    /// name.
+    pub fn record_cores(&mut self, sample: &Sample) {
+        let mut next = BTreeMap::new();
+        for core in &sample.core_busy {
+            let mut history = self.cores.remove(&core.cpu).unwrap_or_default();
+            // An interval the service could not measure contributes no
+            // point rather than a zero one, which would plot as a genuine
+            // idle moment.
+            if let Some(permille) = core.permille {
+                push_bounded(&mut history, permille);
+            }
+            next.insert(core.cpu, history);
+        }
+        self.cores = next;
+    }
+
+    /// One core's recorded busy shares, oldest first.
+    #[must_use]
+    pub fn core_history(&self, cpu: u32) -> &[u16] {
+        self.cores.get(&cpu).map_or(&[], Vec::as_slice)
+    }
+
+    /// Fold one device's cumulative counters in.
+    ///
+    /// A device first seen this sample, and an interval the service could
+    /// not measure, each yield no rate: a cumulative total is not a rate.
+    pub fn record_device(
+        &mut self,
+        id: DeviceId,
+        primary: u64,
+        opposing: u64,
+        elapsed_ns: Option<u64>,
+    ) {
+        let previous = self.devices.remove(&id);
+        let mut track = previous.clone().unwrap_or_default();
+        track.primary_rate = previous
+            .as_ref()
+            .and_then(|prev| rate_per_sec(primary, prev.primary, elapsed_ns));
+        track.opposing_rate = previous
+            .as_ref()
+            .and_then(|prev| rate_per_sec(opposing, prev.opposing, elapsed_ns));
+        track.primary = primary;
+        track.opposing = opposing;
+        if let Some(rate) = track.primary_rate {
+            push_bounded(&mut track.primary_history, trace_permille(rate));
+        }
+        if let Some(rate) = track.opposing_rate {
+            push_bounded(&mut track.opposing_history, trace_permille(rate));
+        }
+        self.devices.insert(id, track);
+    }
+
+    /// Drop every device the caller did not record this sample, so an
+    /// unmounted volume or a removed interface leaves nothing behind.
+    pub fn retain_recorded(&mut self, recorded: &[DeviceId]) {
+        self.devices.retain(|id, _| recorded.contains(id));
+    }
+
+    /// One device's latest primary and opposing rates, in bytes per second.
+    #[must_use]
+    pub fn device_rates(&self, id: DeviceId) -> (Option<u64>, Option<u64>) {
+        self.devices.get(&id).map_or((None, None), |track| {
+            (track.primary_rate, track.opposing_rate)
+        })
+    }
+
+    /// One device's recorded primary-direction rates, oldest first.
+    #[must_use]
+    pub fn primary_history(&self, id: DeviceId) -> &[u16] {
+        self.devices
+            .get(&id)
+            .map_or(&[], |track| track.primary_history.as_slice())
+    }
+
+    /// One device's recorded opposing-direction rates, oldest first.
+    #[must_use]
+    pub fn opposing_history(&self, id: DeviceId) -> &[u16] {
+        self.devices
+            .get(&id)
+            .map_or(&[], |track| track.opposing_history.as_slice())
+    }
+}
+
+/// A byte rate as the permille of [`TRACE_FULL_SCALE_BYTES`] its trace plots
+/// at, clamped at full rather than wrapping past the box.
+fn trace_permille(bytes_per_sec: u64) -> u16 {
+    let permille = bytes_per_sec.saturating_mul(1_000) / TRACE_FULL_SCALE_BYTES;
+    u16::try_from(permille.min(1_000)).unwrap_or(1_000)
+}
+
+/// Append `value` to a bounded history, dropping the oldest point once the
+/// chart's own window is full.
+fn push_bounded(history: &mut Vec<u16>, value: u16) {
+    if history.len() >= MAX_CHART_SAMPLES {
+        history.remove(0);
+    }
+    history.push(value);
 }
 
 /// The number of CPU readings kept per task for its row's sparkline.
@@ -487,9 +622,12 @@ pub struct RollingMeters {
     /// When each standing fault was first observed, so its age is measured
     /// rather than guessed.
     pub faults: FaultClock,
-    /// When each pressured resource entered its current band, so the
-    /// Pressure section's "how long" is measured rather than guessed.
+    /// When each pressured resource entered its current band, so a resource
+    /// pane's "how long" is measured rather than guessed.
     pub pressure: PressureClock,
+    /// The per-core and per-device readings the Resources rail and its panes
+    /// trace, keyed on each subject's own identity.
+    pub devices: DeviceMeters,
 }
 
 impl RollingMeters {
@@ -501,6 +639,7 @@ impl RollingMeters {
             tasks: TaskMeters::new(),
             faults: FaultClock::new(),
             pressure: PressureClock::new(),
+            devices: DeviceMeters::new(),
         }
     }
 
@@ -514,6 +653,7 @@ impl RollingMeters {
     pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis, session: &SessionReport) {
         self.system.record(sample, hysteresis);
         self.tasks.record(sample);
+        self.devices.record_cores(sample);
         self.faults.record(sample, &session.seat);
         let now = sample.uptime.map(|uptime| uptime.since_boot);
         self.pressure.record(
@@ -567,19 +707,8 @@ pub struct PanelModel {
     task_owners: Vec<u64>,
     /// `recovery_owners[i]` is the pid backing `model.recovery[i]`.
     recovery_owners: Vec<u64>,
-    /// `pressure_targets[i]` is the culprit pid backing `model.pressure[i]`,
-    /// or `None` when that cause named no culprit.
-    pressure_targets: Vec<Option<u64>>,
     /// `task_idents[i]` is the identity backing `model.tasks[i]`.
     task_idents: Vec<TaskIdent>,
-    /// `activity_ids[i]` is the stable activity id backing
-    /// `model.activities[i]`.
-    activity_ids: Vec<u64>,
-    /// `activity_members[i]` is the scheduler task ids of `model.activities[i]`'s
-    /// members that are joined to the current sample, in group order — the
-    /// signal-sweep and activate targets a rendered [`ActivityMember`] (name/
-    /// detail/activity only) cannot carry.
-    activity_members: Vec<Vec<u64>>,
 }
 
 impl PanelModel {
@@ -597,13 +726,6 @@ impl PanelModel {
         self.recovery_owners.get(index).copied()
     }
 
-    /// The culprit pid backing `model.pressure[index]`, or `None` when the
-    /// cause named no culprit, or the index is out of range (fail closed).
-    #[must_use]
-    pub fn pressure_target(&self, index: usize) -> Option<u64> {
-        self.pressure_targets.get(index).copied().flatten()
-    }
-
     /// The `(proc_id, pid, name)` backing `model.tasks[index]`, or `None`
     /// for an out-of-range index (fail closed).
     #[must_use]
@@ -612,49 +734,15 @@ impl PanelModel {
             .get(index)
             .map(|ident| (ident.proc_id, ident.pid, ident.name.as_str()))
     }
-
-    /// The stable activity id backing `model.activities[index]`, or `None`
-    /// for an out-of-range index (fail closed).
-    #[must_use]
-    pub fn activity_id(&self, index: usize) -> Option<u64> {
-        self.activity_ids.get(index).copied()
-    }
-
-    /// The joined member pids of `model.activities[index]`, in group order,
-    /// or an empty slice for an out-of-range index (fail closed).
-    #[must_use]
-    pub fn activity_members(&self, index: usize) -> &[u64] {
-        self.activity_members
-            .get(index)
-            .map_or(&[][..], Vec::as_slice)
-    }
-}
-
-/// The service's own uid, found by its own pid's row in `sample`.
-///
-/// `None` when the row is not present this sample — a fresh service before
-/// its first process-list read, or one whose process-list query itself
-/// degraded this cycle. An unknown uid narrows authority rather than
-/// widening it: `controllable` never grants the same-uid rule on a `None`,
-/// only the administrative capability can still act.
-#[must_use]
-pub fn derive_self_uid(sample: &Sample, self_pid: u64) -> Option<u32> {
-    sample
-        .processes
-        .iter()
-        .find(|process| process.pid == self_pid)
-        .map(|process| process.uid)
 }
 
 /// Build the live [`PanelModel`] from this sample, the monitor's
-/// [`RollingMeters`], what the session has reported ([`SessionReport`]), and
-/// the service's own [`Activities`] grouping state.
+/// [`RollingMeters`] and what the session has reported ([`SessionReport`]).
 ///
-/// `self_uid` is the service's own uid, derived by the caller from its own
-/// pid's row in `sample` (an unknown uid narrows authority rather than
-/// widening it — see `controllable`). `meters` must already have this
-/// sample folded in, so the rows carry this cycle's rates and histories
-/// rather than the previous cycle's. `authority` is queried once per
+/// `meters` must already have this sample folded in, so the rows carry this
+/// cycle's rates and histories rather than the previous cycle's; the
+/// Resources report folds each device's own counters in as it builds them,
+/// which is why the meters are taken mutably. `authority` is queried once per
 /// action kind that needs it, so the rendered [`SwitchboardModel`] and the
 /// effect [`apply_action`] later produces from the same authority can never
 /// disagree about whether an action is available.
@@ -663,51 +751,27 @@ pub fn build_model(
     title: &str,
     sample: &Sample,
     session: &SessionReport,
-    meters: &RollingMeters,
+    meters: &mut RollingMeters,
     authority: &dyn CapabilityQuery,
-    activities: &Activities,
-    self_uid: Option<u32>,
 ) -> PanelModel {
     let mut model = SwitchboardModel::new(title);
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
-    let (tasks, task_owners, task_idents) = build_tasks(
-        &sample.processes,
-        &session.seat,
-        &meters.tasks,
-        activities,
-        can_force,
-    );
+    let (tasks, task_owners, task_idents) =
+        build_tasks(&sample.processes, &session.seat, &meters.tasks, can_force);
     let (recovery, recovery_owners) = build_recovery(sample, &session.seat, meters, can_force);
-    let (pressure, pressure_targets) = build_pressure(sample, meters, self_uid, authority);
-    let (activity_summaries, activity_ids, activity_members) =
-        build_activities(activities, sample, &meters.tasks, self_uid, authority);
+    let resources = build_resource_report(sample, meters, session, authority);
 
     model.tasks = tasks;
-    model.system = build_system_report(
-        sample,
-        meters.system.cpu_history(),
-        HeadlinePressure {
-            cpu: meters.system.cpu_pressured(),
-            memory: meters.system.memory_pressured(),
-        },
-        session.frame,
-        authority,
-    );
     model.recovery = recovery;
     model.recovery_resolved = meters.faults.resolved();
-    model.pressure = pressure;
-    model.activities = activity_summaries;
-    model.can_create_activity = activities.can_create();
+    model.resources = resources;
 
     PanelModel {
         model,
         task_owners,
         recovery_owners,
-        pressure_targets,
         task_idents,
-        activity_ids,
-        activity_members,
     }
 }
 
@@ -718,11 +782,14 @@ pub fn build_model(
 /// process's CPU time, not which resource that process is straining, so
 /// naming one would be a guess dressed as a measurement.
 ///
-/// Every row's kind is [`TaskKind::Process`], because that is what the
-/// process list reports. Nothing here reads a background-job registry or a
-/// service registry — neither exists — so no row claims to be a job or a
-/// service, and the counts for those two are honest zeroes rather than a
-/// classification of processes nobody measured.
+/// Every row is a process, because that is what the process list reports:
+/// nothing here reads a background-job registry or a service registry —
+/// neither exists — so no row claims to be either, and the surface offers no
+/// filter or tile that could only ever count nought.
+///
+/// Owner and Core come straight off the process record, so a busy core in
+/// the CPU pane can be traced to the task sitting on it and per-principal
+/// accounting is visible on a machine with many users.
 ///
 /// The disk rate and the sparkline history come from `meters`, which the
 /// caller has already folded this sample into.
@@ -730,7 +797,6 @@ fn build_tasks(
     processes: &[ProcessSummary],
     seat_report: &SeatReport,
     meters: &TaskMeters,
-    activities: &Activities,
     can_force: bool,
 ) -> (Vec<TaskSummary>, Vec<u64>, Vec<TaskIdent>) {
     let mut tasks = Vec::with_capacity(processes.len());
@@ -741,7 +807,8 @@ fn build_tasks(
         tasks.push(TaskSummary {
             proc_id: process.proc_id,
             name: name.clone(),
-            kind: TaskKind::Process,
+            owner: TaskOwner::new(process.uid),
+            core: Some(process.cpu),
             lifecycle: Some(process.state),
             cpu_permille: process.cpu_permille,
             memory_bytes: Some(process.mem_bytes),
@@ -751,7 +818,6 @@ fn build_tasks(
             activity: process_activity(process.state),
             recovery: process_recovery(process, seat_report),
             authority: task_authority(process.state, can_force),
-            group: activities.group_index_of(process.proc_id),
         });
         owners.push(process.pid);
         idents.push(TaskIdent {
@@ -943,21 +1009,6 @@ fn cpu_reading(permille: Option<u16>, sample: &Sample) -> Reading {
     reading(sample, DegradedField::CpuTime, permille, percent)
 }
 
-/// How much of the machine's memory is in use, or why that cannot be said.
-///
-/// The share comes from the one memory-pressure reading the sampler takes,
-/// so an absent reading is explained by that field's own verdict rather
-/// than by this deriving a second opinion — and never by a plausible
-/// percentage of a total nobody read.
-fn memory_share_reading(sample: &Sample) -> Reading {
-    reading(
-        sample,
-        DegradedField::MemoryPressure,
-        sample.memory_pressure.map(|memory| memory.used_permille),
-        percent,
-    )
-}
-
 /// A faulted task's own storage throughput, or why there is none.
 ///
 /// Absent for exactly the reason a rate is absent anywhere else: no
@@ -970,15 +1021,6 @@ fn disk_reading(bytes_per_sec: Option<u64>, sample: &Sample) -> Reading {
         bytes_per_sec,
         format_rate,
     )
-}
-
-/// A resident-memory total, or why there is none.
-///
-/// The process list is what carries a footprint, so an absent total is
-/// explained by that field's own verdict — a group whose members this
-/// sample never saw has no total, rather than a nought none of them holds.
-fn memory_bytes_reading(bytes: Option<u64>, sample: &Sample) -> Reading {
-    reading(sample, DegradedField::ProcessList, bytes, format_bytes)
 }
 
 /// The marks a fault's timeline carries.
@@ -1087,381 +1129,6 @@ fn crash_location(bucket: CrashFaultBucket, offset: u64) -> String {
     }
 }
 
-/// The "Show tasks" relief action every pressure cause offers: it always
-/// works (a section switch needs no authority), so it is always
-/// [`ActionVerdict::Ready`].
-fn show_tasks_action(recommended: bool) -> PressureAction {
-    PressureAction {
-        label: String::from("Show tasks"),
-        control: PressureControl::ShowTasks,
-        verdict: ActionVerdict::Ready,
-        recommended,
-    }
-}
-
-/// The Pressure section's cards, built from the same latches the tray
-/// icon's rail uses ([`LiveMeters::cpu_pressured`] /
-/// [`LiveMeters::memory_pressured`]) — measured pressure, never guessed —
-/// alongside the culprit pid each card's relief actions target.
-///
-/// How long each cause has stood comes from `meters`' [`PressureClock`],
-/// the only honest source: the System Information API reports that a
-/// resource *is* pressured, never when it became so, so an age this
-/// service did not itself observe reads as unmeasured.
-fn build_pressure(
-    sample: &Sample,
-    meters: &RollingMeters,
-    self_uid: Option<u32>,
-    authority: &dyn CapabilityQuery,
-) -> (Vec<PressureCause>, Vec<Option<u64>>) {
-    let mut causes = Vec::new();
-    let mut targets = Vec::new();
-    let now = sample.uptime.map(|uptime| uptime.since_boot);
-    if meters.system.cpu_pressured() {
-        let since = elapsed_reading(meters.pressure.cpu_elapsed(now), sample);
-        let (cause, target) = cpu_pressure_cause(sample, self_uid, authority, since);
-        causes.push(cause);
-        targets.push(target);
-    }
-    if meters.system.memory_pressured() {
-        let since = elapsed_reading(meters.pressure.memory_elapsed(now), sample);
-        let (cause, target) = memory_pressure_cause(sample, since);
-        causes.push(cause);
-        targets.push(target);
-    }
-    (causes, targets)
-}
-
-/// The CPU pressure card: culprit is the sampled row with the highest
-/// measured CPU share, or a culprit-less card naming the resource itself
-/// when no per-process rate has been measured yet.
-fn cpu_pressure_cause(
-    sample: &Sample,
-    self_uid: Option<u32>,
-    authority: &dyn CapabilityQuery,
-    since: Reading,
-) -> (PressureCause, Option<u64>) {
-    let amount = cpu_reading(sample.cpu_busy_permille, sample);
-    let culprit = sample
-        .processes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, process)| {
-            process
-                .cpu_permille
-                .map(|permille| (index, process, permille))
-        })
-        .max_by_key(|(_, _, permille)| *permille);
-
-    let Some((index, process, permille)) = culprit else {
-        return (
-            PressureCause {
-                resource: String::from("CPU"),
-                kind: PressureKind::Cpu,
-                culprit: String::from("CPU"),
-                cause: String::from(
-                    "The processor is saturated; per-task rates are not measured yet.",
-                ),
-                activity: ActivityState::Idle,
-                task_index: None,
-                amount,
-                since,
-                actions: alloc::vec![show_tasks_action(false)],
-            },
-            None,
-        );
-    };
-
-    let can_control = controllable(process.uid, self_uid, authority);
-    let lower_verdict = if process.priority == SchedPriority::Low {
-        ActionVerdict::DisabledByState
-    } else if can_control {
-        ActionVerdict::Ready
-    } else {
-        ActionVerdict::DeniedByAuthority
-    };
-    let pause_verdict = if process.state == ProcessState::Stopped {
-        ActionVerdict::DisabledByState
-    } else if can_control {
-        ActionVerdict::Ready
-    } else {
-        ActionVerdict::DeniedByAuthority
-    };
-
-    let cause = PressureCause {
-        resource: String::from("CPU"),
-        kind: PressureKind::Cpu,
-        culprit: display_name(&process.name),
-        cause: format!("Using {}% of the CPU over the last sample.", permille / 10),
-        activity: ActivityState::Progress(ProgressValue::new(permille)),
-        task_index: Some(index),
-        amount,
-        since,
-        actions: alloc::vec![
-            PressureAction {
-                label: String::from("Lower priority"),
-                control: PressureControl::LowerPriority,
-                verdict: lower_verdict,
-                recommended: true,
-            },
-            PressureAction {
-                label: String::from("Pause"),
-                control: PressureControl::Pause,
-                verdict: pause_verdict,
-                recommended: false,
-            },
-            show_tasks_action(false),
-        ],
-    };
-    (cause, Some(process.pid))
-}
-
-/// The memory pressure card: culprit is the sampled row holding the most
-/// memory, or a culprit-less card naming the resource itself when no row
-/// carries a measured footprint.
-///
-/// Pausing a process does not free the memory it already holds, so the
-/// only relief this card ever offers is Show tasks; force-quitting a
-/// culprit stays the Recovery section's job.
-fn memory_pressure_cause(sample: &Sample, since: Reading) -> (PressureCause, Option<u64>) {
-    let amount = memory_share_reading(sample);
-    let culprit = sample
-        .processes
-        .iter()
-        .enumerate()
-        .filter(|(_, process)| process.mem_bytes > 0)
-        .max_by_key(|(_, process)| process.mem_bytes);
-
-    let Some((index, process)) = culprit else {
-        return (
-            PressureCause {
-                resource: String::from("Memory"),
-                kind: PressureKind::Memory,
-                culprit: String::from("Memory"),
-                cause: String::from("Memory pressure is high."),
-                activity: ActivityState::Idle,
-                task_index: None,
-                amount,
-                since,
-                actions: alloc::vec![show_tasks_action(false)],
-            },
-            None,
-        );
-    };
-
-    let total_bytes = sample
-        .memory_pressure
-        .map_or(0, |memory| memory.total_bytes);
-    let used_permille = sample
-        .memory_pressure
-        .map_or(0, |memory| memory.used_permille);
-    let share_clause = if total_bytes > 0 {
-        let share = (u128::from(process.mem_bytes) * 1000 / u128::from(total_bytes)).min(1000);
-        let share = u16::try_from(share).unwrap_or(1000);
-        format!(" ({}% of memory)", share / 10)
-    } else {
-        String::new()
-    };
-    let cause_text = format!(
-        "Using {} of RAM{}.",
-        format_bytes(process.mem_bytes),
-        share_clause
-    );
-
-    let cause = PressureCause {
-        resource: String::from("Memory"),
-        kind: PressureKind::Memory,
-        culprit: display_name(&process.name),
-        cause: cause_text,
-        activity: ActivityState::Progress(ProgressValue::new(used_permille)),
-        task_index: Some(index),
-        amount,
-        since,
-        actions: alloc::vec![show_tasks_action(true)],
-    };
-    (cause, Some(process.pid))
-}
-
-/// The total of one measured reading across every joined member of an
-/// activity, or `None` when the group has no joined member at all or any
-/// joined member's own reading is unmeasured.
-///
-/// One missing part makes the whole absent: a total that quietly skipped an
-/// unmeasured member would understate the group while reading as a
-/// measurement. The sum saturates rather than wrapping, so an implausible
-/// set of readings overstates at the ceiling instead of folding back to a
-/// small, believable figure.
-fn member_total(
-    joined: &[&ProcessSummary],
-    read: impl Fn(&ProcessSummary) -> Option<u64>,
-) -> Option<u64> {
-    if joined.is_empty() {
-        return None;
-    }
-    joined.iter().try_fold(0u64, |total, member| {
-        read(member).map(|value| total.saturating_add(value))
-    })
-}
-
-/// One activity's combined CPU share across its joined members, or why
-/// there is none.
-///
-/// A group spanning several cores legitimately totals past 100%, so the
-/// share is not clamped; it saturates at the widest figure the share type
-/// carries, which a group bounded by
-/// [`MAX_ACTIVITY_MEMBERS`](crate::activities::MAX_ACTIVITY_MEMBERS) cannot
-/// reach.
-fn activity_cpu_reading(joined: &[&ProcessSummary], sample: &Sample) -> Reading {
-    let total = member_total(joined, |process| process.cpu_permille.map(u64::from))
-        .map(|total| u16::try_from(total).unwrap_or(u16::MAX));
-    cpu_reading(total, sample)
-}
-
-/// The Activities section's summaries, one per tracked group in group
-/// order, alongside each group's stable id and its joined members' pids
-/// (in group order) for the actions a rendered [`ActivityMember`] cannot
-/// resolve on its own.
-///
-/// Each summary also carries what the group costs the machine, totalled
-/// from its joined members' own measured readings rather than from any
-/// per-group accounting: there is none, and inventing one would be a figure
-/// nobody measured. Network is always unmeasured because no per-process
-/// network accounting exists to total.
-fn build_activities(
-    activities: &Activities,
-    sample: &Sample,
-    meters: &TaskMeters,
-    self_uid: Option<u32>,
-    authority: &dyn CapabilityQuery,
-) -> (Vec<ActivitySummary>, Vec<u64>, Vec<Vec<u64>>) {
-    let mut summaries = Vec::with_capacity(activities.len());
-    let mut ids = Vec::with_capacity(activities.len());
-    let mut member_pids = Vec::with_capacity(activities.len());
-    let processes = &sample.processes;
-
-    for group in activities.iter() {
-        let mut members = Vec::with_capacity(group.members.len());
-        let mut joined_pids = Vec::new();
-        let mut joined = Vec::new();
-        let mut any_working = false;
-        let mut all_joined_controllable = true;
-
-        for member in group.members {
-            let Some(process) = processes
-                .iter()
-                .find(|process| process.proc_id == member.proc_id)
-            else {
-                members.push(ActivityMember {
-                    name: member.name.clone(),
-                    detail: String::new(),
-                    activity: ActivityState::Idle,
-                    joined: false,
-                });
-                continue;
-            };
-            joined.push(process);
-            joined_pids.push(process.pid);
-            let activity = process_activity(process.state);
-            if activity == ActivityState::Working {
-                any_working = true;
-            }
-            if !controllable(process.uid, self_uid, authority) {
-                all_joined_controllable = false;
-            }
-            let detail = process.cpu_permille.map_or_else(String::new, percent);
-            members.push(ActivityMember {
-                name: display_name(&process.name),
-                detail,
-                activity,
-                joined: true,
-            });
-        }
-        let joined_count = joined.len();
-
-        let can_control = if joined_count == 0 {
-            authority.holds(CapabilityId::PROC_CONTROL)
-        } else {
-            all_joined_controllable
-        };
-        let activity = if !group.paused && any_working {
-            ActivityState::Working
-        } else {
-            ActivityState::Idle
-        };
-        let count = group.members.len();
-        let detail = if count == 1 {
-            String::from("1 task")
-        } else {
-            format!("{count} tasks")
-        };
-
-        summaries.push(ActivitySummary {
-            id: group.id,
-            name: String::from(group.name),
-            detail,
-            activity,
-            paused: group.paused,
-            can_control,
-            can_accept_member: count < crate::activities::MAX_ACTIVITY_MEMBERS,
-            cpu: activity_cpu_reading(&joined, sample),
-            memory: memory_bytes_reading(
-                member_total(&joined, |process| Some(process.mem_bytes)),
-                sample,
-            ),
-            disk: disk_reading(
-                member_total(&joined, |process| meters.disk_rate(process.proc_id)),
-                sample,
-            ),
-            network: Reading::Absent(Unmeasured::NoInterface),
-            members,
-        });
-        ids.push(group.id);
-        member_pids.push(joined_pids);
-    }
-
-    (summaries, ids, member_pids)
-}
-
-/// A grouping-state edit produced by a task or activity action, applied by
-/// [`crate::service::Service`] to its own [`Activities`] — the panel and
-/// its [`Effect`]s stay stateless about grouping, and the current
-/// [`PanelModel`] is what resolves every index they carry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GroupingEdit {
-    /// Assign `task` to `activity`, or to a freshly created activity when
-    /// `activity` is `None`.
-    Assign {
-        /// The task's index within the model.
-        task: usize,
-        /// The activity's index within the model, or `None` to create one.
-        activity: Option<usize>,
-    },
-    /// Remove `task` from its activity.
-    Unassign {
-        /// The task's index within the model.
-        task: usize,
-    },
-    /// Commit the pending rename, read from the widget with
-    /// [`Switchboard::submitted_activity_name`](crate::view::Switchboard::submitted_activity_name).
-    Rename {
-        /// The activity's index within the model.
-        activity: usize,
-    },
-    /// Set an activity's paused flag.
-    SetPaused {
-        /// The activity's index within the model.
-        activity: usize,
-        /// The new paused state.
-        paused: bool,
-    },
-    /// Close an activity (its members are handled by a separate signal
-    /// sweep alongside this edit).
-    Close {
-        /// The activity's index within the model.
-        activity: usize,
-    },
-}
-
 /// The outbound effect an interactive [`SwitchboardAction`] implies.
 /// [`crate::panel`] applies every entry of the [`Vec`] [`apply_action`]
 /// returns, in order; an empty vector means nothing to do beyond letting
@@ -1490,21 +1157,6 @@ pub enum Effect {
         /// The scheduler task id to lower.
         pid: u64,
     },
-    /// Deliver one signal to each of several processes, continuing past an
-    /// individual refusal rather than aborting the sweep.
-    SignalMany {
-        /// The scheduler task ids to signal.
-        pids: Vec<u64>,
-        /// The signal to deliver to each.
-        signal: Signal,
-    },
-    /// Ask the session to raise each owner's window in turn.
-    ActivateOwners {
-        /// The owners' scheduler task ids, in group order.
-        owners: Vec<u64>,
-    },
-    /// Apply a grouping-state edit to the service's own [`Activities`].
-    Grouping(GroupingEdit),
 }
 
 /// Map an interactive [`SwitchboardAction`] the composed control reported
@@ -1540,41 +1192,13 @@ pub fn apply_action(
                 }
             }
         }
-        SwitchboardAction::Pressure { index, control } => apply_pressure(panel, index, control),
-        SwitchboardAction::TaskGrouped { task, activity } => {
-            if panel.task_ident(task).is_none() {
-                return Vec::new();
-            }
-            if let Some(activity_index) = activity {
-                if panel.activity_id(activity_index).is_none() {
-                    return Vec::new();
-                }
-            }
-            alloc::vec![Effect::Grouping(GroupingEdit::Assign { task, activity })]
-        }
-        SwitchboardAction::TaskUngrouped { task } => {
-            if panel.task_ident(task).is_none() {
-                return Vec::new();
-            }
-            alloc::vec![Effect::Grouping(GroupingEdit::Unassign { task })]
-        }
-        SwitchboardAction::Activity { index, control } => apply_activity(panel, index, control),
-        SwitchboardAction::ActivityRenamed { index } => {
-            if panel.activity_id(index).is_none() {
-                return Vec::new();
-            }
-            alloc::vec![Effect::Grouping(GroupingEdit::Rename { activity: index })]
-        }
-        // No background-job registry exists, so a job action can never
-        // resolve to a real target; no service-enumeration query or
-        // power/lock interface exists either, so service and system-action
-        // rows are never populated and their actions never fire in
-        // practice. A section change and a scroll need only the re-render
-        // the caller already performs.
-        SwitchboardAction::SectionChanged { .. }
-        | SwitchboardAction::Job { .. }
-        | SwitchboardAction::Service { .. }
-        | SwitchboardAction::System { .. }
+        // Every resource command the rail draws as available is a view
+        // transition the composed control resolves itself; the rest have no
+        // endpoint behind them and are drawn disabled, so a scripted or
+        // otherwise unexpected report of one yields no effect rather than
+        // acting on something this service never renders as available.
+        SwitchboardAction::Resource { .. }
+        | SwitchboardAction::SectionChanged { .. }
         | SwitchboardAction::Scrolled { .. } => Vec::new(),
     }
 }
@@ -1620,100 +1244,6 @@ fn apply_task(panel: &PanelModel, index: usize, control: TaskControl) -> Vec<Eff
             signal: Signal::Kill,
         }],
         TaskControl::OpenLogs => Vec::new(),
-    }
-}
-
-/// A pressure cause's relief action, re-checked against the verdict
-/// [`build_model`] already computed for it rather than re-deriving
-/// authority from scratch — the model's verdict *is* the server-side
-/// check, computed once under the real authority so it can never disagree
-/// with what is rendered.
-///
-/// [`PressureControl::ShowTasks`] never reaches here: the composed control
-/// resolves it internally into a section change, so seeing it here (a
-/// scripted or otherwise unexpected report) yields no effect rather than
-/// acting on an action this service never renders as its own.
-fn apply_pressure(panel: &PanelModel, index: usize, control: PressureControl) -> Vec<Effect> {
-    let Some(cause) = panel.model.pressure.get(index) else {
-        return Vec::new();
-    };
-    let Some(pid) = panel.pressure_target(index) else {
-        return Vec::new();
-    };
-    let Some(action) = cause
-        .actions
-        .iter()
-        .find(|action| action.control == control)
-    else {
-        return Vec::new();
-    };
-    if action.verdict != ActionVerdict::Ready {
-        return Vec::new();
-    }
-    match control {
-        PressureControl::Pause => alloc::vec![Effect::Signal {
-            pid,
-            signal: Signal::Stop,
-        }],
-        PressureControl::LowerPriority => alloc::vec![Effect::LowerPriority { pid }],
-        PressureControl::ShowTasks => Vec::new(),
-    }
-}
-
-/// An activity's action, re-checked against the `can_control` verdict
-/// [`build_model`] already computed for it. A stored pid whose process
-/// exited may have been reused by an unrelated process, so a sweep or an
-/// activation only ever names members still joined to the *current*
-/// sample — acting on an unjoined pid would risk the pid-reuse hazard.
-fn apply_activity(panel: &PanelModel, index: usize, control: ActivityControl) -> Vec<Effect> {
-    let Some(summary) = panel.model.activities.get(index) else {
-        return Vec::new();
-    };
-    let pids = panel.activity_members(index).to_vec();
-    match control {
-        ActivityControl::Switch => alloc::vec![Effect::ActivateOwners { owners: pids }],
-        ActivityControl::Pause => {
-            if !summary.can_control {
-                return Vec::new();
-            }
-            alloc::vec![
-                Effect::SignalMany {
-                    pids,
-                    signal: Signal::Stop,
-                },
-                Effect::Grouping(GroupingEdit::SetPaused {
-                    activity: index,
-                    paused: true,
-                }),
-            ]
-        }
-        ActivityControl::Resume => {
-            if !summary.can_control {
-                return Vec::new();
-            }
-            alloc::vec![
-                Effect::SignalMany {
-                    pids,
-                    signal: Signal::Continue,
-                },
-                Effect::Grouping(GroupingEdit::SetPaused {
-                    activity: index,
-                    paused: false,
-                }),
-            ]
-        }
-        ActivityControl::Close => {
-            if !summary.can_control {
-                return Vec::new();
-            }
-            alloc::vec![
-                Effect::SignalMany {
-                    pids,
-                    signal: Signal::Terminate,
-                },
-                Effect::Grouping(GroupingEdit::Close { activity: index }),
-            ]
-        }
     }
 }
 
