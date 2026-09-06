@@ -663,6 +663,10 @@ const AUTOLOAD_FILES_ACTIVATED_MARKER: &str =
 /// reconstructed bar the script clicks against matches the guest's.
 const FILES_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::FILES_BAR_APP_NAME;
 
+/// Bare name of the application the autoload script launches from the program
+/// library, from that vertical's own contract.
+const TERMINAL_BAR_APP_NAME: &str = tairix_test_autoload_input_qemu_aarch64::TERMINAL_BAR_APP_NAME;
+
 /// Guest marker gating the terminal stage's library-popup clicks: the
 /// handshake click's `Pressed` reached the still-focused files window — a
 /// wake boundary strictly past the verified second dump.
@@ -796,6 +800,18 @@ const AUTOLOAD_DESKTOP_REVEALED_MARKER: &str = tairix_desktop_session::DESKTOP_R
 /// desktop's own surfaces are session-painted compositor windows and never
 /// call the window channel.
 const APPBAR_WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
+
+/// Serial marker the picker-delegation vertical gates its pick-click on: the
+/// session's own announcement that a frame carrying the trusted picker — with
+/// its listing landed — reached the display. Imported from the session crate's
+/// own definition, so the emitter and this consumer can never drift.
+///
+/// It is the only honest gate. The picker is a window the session owns, so the
+/// window channel says nothing about its pixels; the requesting application
+/// learns only that its `PickFile` was *accepted*; and the listing is read on
+/// a worker, so acceptance is not yet a row to click. A click gated on
+/// anything earlier races the frame the rows are in.
+const FILEPICK_PICKER_MARKER: &str = tairix_desktop_session::PICKER_SHOWN_MESSAGE;
 
 /// Serial marker the elevated Date & Time vertical waits for before typing
 /// credentials into the session's credential prompt — the prompt's own
@@ -6821,6 +6837,127 @@ static TESTS: &[QemuTest] = &[
         bounded_pointer_script: false,
         serial: &[],
     },
+    // `plans/CAPABILITY_USE.md` CU6 / `plans/APPWIN.md` AW5: the
+    // **picker-delegation** vertical — the only test that drives a
+    // capability-bearing descriptor hand-off between two principals on a
+    // running machine.
+    //
+    // It boots the same graphical world as its icon-bar sibling, types the
+    // unlock passphrase, logs in and starts `desktop`. The pointer script then
+    // launches the **viewer** from the program library. The viewer holds no
+    // filesystem capability of its own and is handed no document, so it asks
+    // the session's trusted picker, which opens at the account's home under
+    // the *session's* authority. One click on the planted document's row
+    // concludes the pick, so the session mints a one-shot delegation for that
+    // file and the viewer redeems it.
+    //
+    // The guest's PASS is those two dispatched syscalls, each attributed by
+    // the kernel to the principal that made it and required in that order — a
+    // claim about a hand-off *between* processes, which is the whole point and
+    // is not something a host test can make.
+    //
+    // Its own vertical rather than a stage bolted onto the icon-bar or
+    // autoload script: the autoload vertical is the D15 freeze case, and
+    // landing a security path's only guest coverage on a known-intermittent
+    // host would make that coverage intermittent by construction.
+    //
+    // No screendump: the claim is which principal called which syscall, which
+    // is a record and not a picture, and its siblings already assert the
+    // desktop's pixels.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-filepick-qemu-aarch64",
+        binary: "tairix-test-filepick-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until both autoloaded
+            // input drivers have armed their interrupts so no keystroke
+            // hits a dead device.
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            // The fixture account's login, then `desktop` at the text
+            // shell's prompt — the same bundle a graphical login spawns.
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[],
+        pointer_script: Some(filepick_pointer_script),
+        bounded_pointer_script: false,
+        serial: &[],
+    },
+    // `plans/NEW-FILEMANAGER.md` FM9: the **filesystem-mutation** vertical —
+    // the only test in which a user's own gesture reaches a write syscall and
+    // the kernel's mutation audit trail records it. Before it, no run in the
+    // tree produced a single mutation record, so the whole path from gesture to
+    // trail was unexercised on a running kernel.
+    //
+    // It boots the same graphical world as its siblings, types the unlock
+    // passphrase, logs in and starts `desktop`. The pointer script then
+    // right-clicks bare wallpaper — the session opens the backdrop's own menu
+    // there — and clicks its New Folder row, so the session creates a
+    // directory in the account's desktop folder under the logged-in account's
+    // own identity.
+    //
+    // The guest's PASS is that mutation record, attributed by the path it
+    // carries rather than by a count: the file manager creates its Trash
+    // directory when a window opens, so a count could latch on an unrelated
+    // write. Its refusing counterpart is a different event id and can never
+    // latch, so a gesture the kernel refuses fails the run.
+    //
+    // Its own vertical rather than a stage on the autoload script, for the
+    // reason its picker sibling above is: that vertical is the D15 freeze case.
+    //
+    // No screendump: the claim is what the kernel recorded, which is a record
+    // and not a picture, and its siblings already assert the desktop's pixels.
+    //
+    // Single CPU and the same 300-second *inactivity* budget as its siblings:
+    // the longest the guest may fall silent, never a runtime deadline, so
+    // co-scheduling cannot turn a slow guest into a timeout.
+    QemuTest {
+        package: "tairix-test-fsmutate-qemu-aarch64",
+        binary: "tairix-test-fsmutate-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            // The encrypted-root passphrase, held until both autoloaded
+            // input drivers have armed their interrupts so no keystroke
+            // hits a dead device.
+            (
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            // The fixture account's login, then `desktop` at the text
+            // shell's prompt — the same bundle a graphical login spawns.
+            (AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[],
+        pointer_script: Some(fsmutate_pointer_script),
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     // `plans/NEW-MENUS.md` D17: the desktop **menu chain** vertical — the
     // first thing on the system ever to put a menu plate on a screen. A
     // dedicated sibling of the icon-bar vertical above rather than a further
@@ -9756,38 +9893,13 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 /// The final click is what completes the run: it launches the second sample,
 /// whose record is the gate's verdict.
 fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
-    use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_desktop_session::DesktopShell;
     use tairix_geometry::Point;
-    use tairix_log::DiscardSink;
     use tairix_qemu::MouseButton;
-    use tairix_reclaim::ReportedPressure;
-    use tairix_taskbar::{AppSlot, LibraryRow, TaskbarConfig};
+    use tairix_taskbar::AppSlot;
     use tairix_test_desktop_hover_qemu_aarch64::{SAMPLE_APP_NAME, SWEEP_MOVES};
 
-    // The shell exists only to reproduce the guest's layout arithmetic. It
-    // rasterises nothing and owns no display, so it is wired truthfully rather
-    // than plausibly: no display backing, and a gauge that has never been told
-    // a band (which answers critical, so nothing is admitted).
-    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
-    static DISCARD_SINK: DiscardSink = DiscardSink;
-
-    let (width, height) = ramfb_screen();
     let scale = RECONSTRUCTION_SCALE;
-    let mut shell = DesktopShell::new(
-        TaskbarConfig::bottom_bar(width, height),
-        SEAT_PRIMARY,
-        0,
-        &NO_PRESSURE_FEED,
-        &DISCARD_SINK,
-    );
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(reconstructed_library(&[
-            super::image_apps::FRAMESTATS_FIXTURE_CRATE,
-        ])?);
+    let mut shell = reconstructed_shell(&[super::image_apps::FRAMESTATS_FIXTURE_CRATE])?;
     // The file manager is autostarted at bring-up, so the bar already carries
     // its slot by the time the script runs. The sweep's endpoints sit at the
     // bar's two ends and so do not move with the strip, but the strip is
@@ -9810,37 +9922,12 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
     // bar, so one pass between them crosses everything drawn in between.
     let sweep_start = Point::new(library_button.x, sweep_end.y);
 
-    // The popup's row for the fixture bundle, keyed by the bundle it launches
-    // — the same on-disk identity the guest attributes the samples to — never
-    // a display-name literal.
-    let bundle = format!(
-        "{}/{SAMPLE_APP_NAME}{}",
-        tairix_abi::SYSTEM_COMMAND_STORE,
-        tairix_abi::BUNDLE_SUFFIX
-    );
-    let library = taskbar.library();
-    let row = library
-        .rows()
-        .iter()
-        .position(|row| match row {
-            LibraryRow::Entry { id, .. } => library
-                .catalog()
-                .entry(id)
-                .is_some_and(|entry| entry.bundle().as_str() == bundle),
-            LibraryRow::Folder { .. } => false,
-        })
-        .ok_or_else(|| format!("hover script: {bundle} is not listed in the program library"))?;
-    let sample_row = rect_centre(
-        taskbar
-            .library_layout(scale)
-            .rows
-            .iter()
-            .find(|(shown, _)| *shown == row)
-            .map(|(_, rect)| *rect)
-            .ok_or_else(|| {
-                "hover script: the fixture's row is not visible in the popup".to_string()
-            })?,
-        "framestats library entry",
+    // The popup's row for the fixture bundle.
+    let sample_row = library_row_centre(
+        taskbar,
+        scale,
+        &bundle_path(tairix_abi::SYSTEM_COMMAND_STORE, SAMPLE_APP_NAME),
+        "hover script",
     )?;
 
     let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
@@ -9867,37 +9954,92 @@ const fn ramfb_screen() -> (u32, u32) {
     )
 }
 
-/// Open the program library, right-click the slot the session gives its process on
-/// the bar, choose the *New window* row of the menu the application declared,
-/// then primary-click that same slot to take its declared default action.
+/// A host copy of the desktop's model, with the program library seeded from
+/// the same discovered catalog the guest session merges from its planted
+/// store, plus any test-only `fixtures` that vertical's disk plants.
 ///
-/// Every rectangle is reconstructed by driving the **production** taskbar
-/// model — the same layout, hit-testing, and menu-building code the guest
-/// runs — so the script clicks where the guest actually draws rather than at
-/// coordinates copied from a screenshot. The declared menu itself comes from
-/// the terminal's own `appbar` module, so the row this clicks is named once
-/// rather than restated by position.
+/// The shell exists only to reproduce the guest's layout arithmetic and its
+/// input routing, so a script clicks exactly where the guest draws. It never
+/// rasterises anything and owns no display, so it is wired truthfully rather
+/// than plausibly: no display backing (a zero-sized backing budgets nothing)
+/// and a gauge that has never been told a band (which answers critical, so
+/// nothing is admitted).
+fn reconstructed_shell(fixtures: &[&str]) -> Result<tairix_desktop_session::DesktopShell, String> {
+    use tairix_abi::seat::SEAT_PRIMARY;
+    use tairix_desktop_session::DesktopShell;
+    use tairix_log::DiscardSink;
+    use tairix_taskbar::TaskbarConfig;
+
+    static NO_PRESSURE_FEED: tairix_reclaim::ReportedPressure =
+        tairix_reclaim::ReportedPressure::unknown();
+    static DISCARD_SINK: DiscardSink = DiscardSink;
+
+    let (width, height) = ramfb_screen();
+    let mut shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(width, height),
+        SEAT_PRIMARY,
+        0,
+        &NO_PRESSURE_FEED,
+        &DISCARD_SINK,
+    );
+    shell
+        .session_mut()
+        .taskbar_mut()
+        .library_mut()
+        .set_catalog(reconstructed_library(fixtures)?);
+    Ok(shell)
+}
+
+/// The on-disk bundle path a program store's entry for the application named
+/// `app` has: `<store>/<app>.app`, composed from the shared `lib/abi`
+/// spellings.
 ///
-/// Every gate is **causal** rather than timed, and each is the strongest fact
-/// the emitting side can honestly state:
+/// A library row is keyed by this rather than by a display name, because it is
+/// the identity a guest PASS witness attributes a launch to.
+fn bundle_path(store: &str, app: &str) -> String {
+    format!("{store}/{app}{}", tairix_abi::BUNDLE_SUFFIX)
+}
+
+/// Centre of the open program-library popup's row that launches `bundle`.
 ///
-/// - The desktop's own reveal witness opens the script, so nothing is
-///   injected before there is a bar to hit.
-/// - The two slot gestures wait on the session's per-window
-///   [`APPBAR_WINDOW_SHOWN_MARKER`]: the *first* occurrence for the
-///   right-click, the *second* for the final primary click. That witness
-///   follows a frame the session actually put on screen, so by then the
-///   application has declared its bar (it declares before it opens a window),
-///   the session has grouped that window under its attested owner, and the
-///   strip has been re-resolved and drawn. A create reply would say only that
-///   the window exists.
-/// - The menu row's click follows its right-click immediately — that press is
-///   what opens the menu, so the row is on screen by construction.
-///
-/// The final primary click is also what keeps the guest alive long enough to
-/// be photographed: it opens the third window, which is the create that
-/// completes the guest's PASS, and the runner sends no pointer step until
-/// every dump already asked for has been read back and parsed.
+/// Resolved through the popup's own rows and its own layout, so the point is
+/// where the guest actually draws that row rather than a coordinate copied
+/// from a screenshot; `what` names the caller in the two refusals. The one
+/// definition every script that launches from the library reads, so a change
+/// to the popup's layout or ordering cannot leave one script clicking a row
+/// that has moved.
+fn library_row_centre(
+    taskbar: &tairix_taskbar::Taskbar,
+    scale: tairix_geometry::Scale,
+    bundle: &str,
+    what: &str,
+) -> Result<tairix_geometry::Point, String> {
+    use tairix_taskbar::LibraryRow;
+
+    let library = taskbar.library();
+    let row = library
+        .rows()
+        .iter()
+        .position(|row| match row {
+            LibraryRow::Entry { id, .. } => library
+                .catalog()
+                .entry(id)
+                .is_some_and(|entry| entry.bundle().as_str() == bundle),
+            LibraryRow::Folder { .. } => false,
+        })
+        .ok_or_else(|| format!("{what}: {bundle} is not listed in the program library"))?;
+    rect_centre(
+        taskbar
+            .library_layout(scale)
+            .rows
+            .iter()
+            .find(|(shown, _)| *shown == row)
+            .map(|(_, rect)| *rect)
+            .ok_or_else(|| format!("{what}: {bundle}'s row is not visible in the popup"))?,
+        "library entry",
+    )
+}
+
 /// A host copy of the desktop model advanced to "the terminal has been
 /// launched from the program library", with the screen points that gesture
 /// used and the slot the session gives it.
@@ -9967,41 +10109,13 @@ fn bar_press(
 
 /// Reconstruct the launch of the terminal from the program library.
 fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
-    use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_desktop_session::{DesktopShell, FILES_LABEL};
+    use tairix_desktop_session::FILES_LABEL;
     use tairix_input::PointerButton;
-    use tairix_log::DiscardSink;
-    use tairix_taskbar::{AppSlot, LibraryRow, TaskbarConfig, TaskbarInput};
+    use tairix_taskbar::{AppSlot, TaskbarInput};
     use tairix_test_appbar_qemu_aarch64::BAR_APP_NAME;
 
-    // The shell exists only to reproduce the guest's layout arithmetic and
-    // its input routing, so the script clicks exactly where the guest draws.
-    // It never rasterises anything and owns no display, so it is wired
-    // truthfully rather than plausibly: no display backing (a zero-sized
-    // backing budgets nothing) and a gauge that has never been told a band
-    // (which answers critical, so nothing is admitted).
-    static NO_PRESSURE_FEED: tairix_reclaim::ReportedPressure =
-        tairix_reclaim::ReportedPressure::unknown();
-    static DISCARD_SINK: DiscardSink = DiscardSink;
-
-    let (width, height) = ramfb_screen();
     let scale = RECONSTRUCTION_SCALE;
-    let mut shell = DesktopShell::new(
-        TaskbarConfig::bottom_bar(width, height),
-        SEAT_PRIMARY,
-        0,
-        &NO_PRESSURE_FEED,
-        &DISCARD_SINK,
-    );
-    // The popup lists the same catalog the guest session merges from the
-    // planted machine store, so the reconstructed rows sit exactly where the
-    // guest draws them.
-    shell
-        .session_mut()
-        .taskbar_mut()
-        .library_mut()
-        .set_catalog(reconstructed_library(&[])?);
-
+    let mut shell = reconstructed_shell(&[])?;
     let bar = shell.session().taskbar().layout(scale);
     let library_button = rect_centre(bar.library, "Library button")?;
 
@@ -10015,38 +10129,12 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         PointerButton::Primary,
     );
 
-    // The popup's row for the application whose bar this drives — keyed by
-    // the bundle it launches (the same on-disk identity the guest PASS
-    // witness attributes by), never a display-name literal.
-    let bundle = format!(
-        "{}/{BAR_APP_NAME}{}",
-        tairix_abi::SYSTEM_APPLICATION_STORE,
-        tairix_abi::BUNDLE_SUFFIX
-    );
-    let taskbar = shell.session().taskbar();
-    let library = taskbar.library();
-    let row = library
-        .rows()
-        .iter()
-        .position(|row| match row {
-            LibraryRow::Entry { id, .. } => library
-                .catalog()
-                .entry(id)
-                .is_some_and(|entry| entry.bundle().as_str() == bundle),
-            LibraryRow::Folder { .. } => false,
-        })
-        .ok_or_else(|| format!("icon-bar script: {bundle} is not listed in the program library"))?;
-    let entry_row = rect_centre(
-        taskbar
-            .library_layout(scale)
-            .rows
-            .iter()
-            .find(|(shown, _)| *shown == row)
-            .map(|(_, rect)| *rect)
-            .ok_or_else(|| {
-                "icon-bar script: the terminal's row is not visible in the popup".to_string()
-            })?,
-        "terminal library entry",
+    // The popup's row for the application whose bar this drives.
+    let entry_row = library_row_centre(
+        shell.session().taskbar(),
+        scale,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, BAR_APP_NAME),
+        "icon-bar script",
     )?;
 
     // Launching from a row closes the popup and puts the application on the
@@ -10077,6 +10165,199 @@ fn reconstruct_bar_launch() -> Result<BarLaunch, String> {
         entry_row,
         slot,
     })
+}
+
+/// The home listing the shared users-root fixture plants, for reconstructing
+/// the picker's row geometry.
+///
+/// It answers for the account's home and refuses everywhere else: the picker
+/// opens at the home and this reconstruction needs that one listing, so a
+/// request for anything else is a mistake rather than a directory to invent.
+struct PlantedHome {
+    /// Root-first components of the home the picker opens at.
+    home: Vec<String>,
+    /// Name of the planted document, decoded once by the caller.
+    doc: String,
+}
+
+impl tairix_browse::DirectorySource for PlantedHome {
+    fn list(&mut self, components: &[String]) -> Result<tairix_browse::Listing, tairix_abi::Errno> {
+        use tairix_browse::{Entry, Listing};
+
+        if components != self.home.as_slice() {
+            return Err(tairix_abi::Errno::NotFound);
+        }
+        // Derived from the same two definitions the fixture plants from — the
+        // fixed home subdirectory set and the planted document's name — so
+        // neither side carries a copy of the listing.
+        let mut entries: Vec<Entry> = tairix_users::HOME_SUBDIRS
+            .iter()
+            .map(|name| Entry::directory(*name))
+            .collect();
+        entries.push(Entry::file(&self.doc));
+        Ok(Listing::Ready(entries))
+    }
+}
+
+/// Root-first components of the account the fixture plants, parsed with the
+/// same shared spelling the session parses `HOME` with.
+fn planted_home_components() -> Result<Vec<String>, String> {
+    let home = tairix_users::default_home(tairix_test_arxfs_image::USERS_FIXTURE_USERNAME);
+    tairix_browse::vfs::components_from_absolute_path(&home)
+        .map_err(|e| format!("pick script: {home} is not a spellable path: {e:?}"))
+}
+
+/// Screen point of the picker's row for the document the fixture plants in the
+/// account's home.
+///
+/// Reconstructed by driving the **production** browser and renderer — the same
+/// engine the picker composes its surface and inverts its clicks with — over
+/// that listing, at the picker's own viewport and chrome band. So the script
+/// clicks the row the guest actually draws rather than a coordinate read off a
+/// screenshot, and a change to the picker's layout moves both together.
+///
+/// The picker is undecorated session chrome at a fixed origin, so the
+/// window-local rectangle is offset by that origin alone — no client inset,
+/// unlike a served application window.
+fn reconstruct_pick_click(
+    shell: &tairix_desktop_session::DesktopShell,
+) -> Result<tairix_geometry::Point, String> {
+    use tairix_browse::{Browser, WIN_HEIGHT, WIN_WIDTH};
+    use tairix_desktop_session::{PICKER_ORIGIN, PICKER_TOOLBAR};
+    use tairix_geometry::{Point, Rect};
+
+    let home = planted_home_components()?;
+    let doc = core::str::from_utf8(tairix_test_arxfs_image::HOME_DOC_NAME)
+        .map_err(|e| format!("pick script: the planted document's name is not UTF-8: {e}"))?;
+    let source = PlantedHome {
+        home: home.clone(),
+        doc: doc.to_string(),
+    };
+    let browser = Browser::open_at(source, home)
+        .map_err(|e| format!("pick script: the planted home does not open: {e:?}"))?;
+    let index = browser
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == doc)
+        .ok_or_else(|| format!("pick script: {doc} is not listed in the planted home"))?;
+
+    let scale = RECONSTRUCTION_SCALE;
+    let viewport = Rect::new(
+        0,
+        0,
+        scale.scale_length(WIN_WIDTH),
+        scale.scale_length(WIN_HEIGHT),
+    );
+    let local = rect_centre(
+        tairix_browse::render::entry_rect(
+            &browser,
+            scale,
+            shell.session().active_theme(),
+            viewport,
+            PICKER_TOOLBAR,
+            index,
+        )
+        .ok_or_else(|| format!("pick script: {doc}'s row is not drawn in the picker"))?,
+        "picker document row",
+    )?;
+    Ok(Point::new(
+        PICKER_ORIGIN.x.saturating_add(local.x),
+        PICKER_ORIGIN.y.saturating_add(local.y),
+    ))
+}
+
+/// Create a folder on the desktop through the backdrop's own menu.
+///
+/// Two gestures, each gated on a fact the emitting side can honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so the right-press
+///   lands on a backdrop that is drawn.
+/// - The menu row waits on the session's own [`MENU_SHOWN_MARKER`] — a frame
+///   carrying the open chain reached the display. An accepted open says only
+///   that the session took the request; the plate is refused at draw time if
+///   it cannot be given a surface, so a click gated on anything earlier races
+///   the frame the row is in.
+///
+/// The plate's geometry is reconstructed by driving the **production** pinboard
+/// model and menu chain, so the row this clicks is the row the guest draws.
+fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_desktop_session::pinboard;
+    use tairix_desktop_session::windows::window_menu_placement;
+    use tairix_geometry::{Point, Rect};
+    use tairix_qemu::MouseButton;
+
+    let (width, height) = ramfb_screen();
+    // A backdrop point clear of the icon bar along the bottom edge and of the
+    // desktop's own icon grid in the leading corner, so the press lands on
+    // bare wallpaper: the menu the session opens there is the backdrop's, with
+    // no icon under the pointer and so no `Open` row (which is what fixes the
+    // row order the reconstruction below reads).
+    #[allow(clippy::cast_possible_wrap)] // Screen extents are far below i32::MAX.
+    let backdrop = Point::new(width as i32 * 2 / 3, height as i32 / 3);
+
+    // The plate the session opens for a press on bare backdrop, and its New
+    // Folder row. The model is the production one: no icon under the pointer,
+    // and the settings a session with nothing stored runs with.
+    let model = pinboard::model(false, &tairix_wallpaper::PinboardSettings::default());
+    let (_, row) = chain_plate_and_row(
+        model,
+        window_menu_placement(Rect::new(backdrop.x, backdrop.y, 0, 0)),
+        pinboard::PinboardCommand::NewFolder.label(),
+        "desktop mutation script",
+    )?;
+    let new_folder = rect_centre(row, "New Folder row")?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Secondary, backdrop);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, new_folder);
+    Ok(pen.steps())
+}
+
+/// Launch the viewer from the program library and choose the planted document
+/// in the trusted picker it opens.
+///
+/// Three clicks, each gated on a fact the emitting side can honestly state:
+///
+/// - The desktop's own reveal witness opens the script, so nothing is injected
+///   before there is a bar to hit.
+/// - The library button and the viewer's row follow it immediately: the press
+///   is what opens the popup, so the row is on screen by construction.
+/// - The document's row waits on the session's own [`FILEPICK_PICKER_MARKER`]
+///   — a frame carrying the picker *with its listing landed* reached the
+///   display. Nothing earlier is honest: the viewer learns only that its
+///   request was accepted, and the listing arrives on a worker, so an accepted
+///   pick is not yet a row to click.
+///
+/// The viewer holds no filesystem capability of its own and is handed no
+/// document, so it asks for a pick on launch; the click on a regular-file row
+/// is what makes the session mint the delegation the guest is waiting for.
+fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_qemu::MouseButton;
+    use tairix_test_filepick_qemu_aarch64::PICK_APP_NAME;
+
+    let shell = reconstructed_shell(&[])?;
+    let bar = shell.session().taskbar().layout(RECONSTRUCTION_SCALE);
+    let library_button = rect_centre(bar.library, "Library button")?;
+    let entry_row = library_row_centre(
+        shell.session().taskbar(),
+        RECONSTRUCTION_SCALE,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, PICK_APP_NAME),
+        "pick script",
+    )?;
+    let document_row = reconstruct_pick_click(&shell)?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.click(revealed, 1, MouseButton::Primary, entry_row);
+    pen.click(
+        FILEPICK_PICKER_MARKER,
+        1,
+        MouseButton::Primary,
+        document_row,
+    );
+    Ok(pen.steps())
 }
 
 /// Open the program library, right-click the slot the session gives its
@@ -10609,7 +10890,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     use tairix_log::DiscardSink;
     use tairix_qemu::{MouseButton, PointerAction, PointerStep};
     use tairix_reclaim::ReportedPressure;
-    use tairix_taskbar::{LibraryRow, TaskbarConfig};
+    use tairix_taskbar::TaskbarConfig;
 
     // The shell below exists only to reproduce the guest's layout
     // arithmetic, so the script clicks exactly where the guest draws. It
@@ -10663,36 +10944,15 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         "Files slot",
     )?;
     let library_button = rect_centre(bar.library, "Library button")?;
-    // The popup's terminal entry — keyed by the bundle it launches (the
-    // same on-disk identity the guest PASS witnesses attribute by), never
-    // a display-name literal — in the deterministic freshly-opened state
+    // The popup's terminal entry, in the deterministic freshly-opened state
     // the guest presents after the Library click (search cleared, every
     // folder expanded, scroll at the top).
-    let library = taskbar.library();
-    let terminal_bundle = format!("{}/terminal.app", tairix_abi::SYSTEM_APPLICATION_STORE);
-    let terminal_index = library
-        .rows()
-        .iter()
-        .position(|row| match row {
-            LibraryRow::Entry { id, .. } => library
-                .catalog()
-                .entry(id)
-                .is_some_and(|entry| entry.bundle().as_str() == terminal_bundle),
-            LibraryRow::Folder { .. } => false,
-        })
-        .ok_or_else(|| {
-            format!("desktop pointer script: no library entry launches {terminal_bundle}")
-        })?;
-    let terminal_entry = taskbar
-        .library_layout(Scale::ONE)
-        .rows
-        .iter()
-        .find(|&&(index, _)| index == terminal_index)
-        .map(|&(_, rect)| rect)
-        .ok_or_else(|| {
-            "desktop pointer script: the terminal entry is not visible in the popup".to_string()
-        })?;
-    let terminal_entry = rect_centre(terminal_entry, "terminal library entry")?;
+    let terminal_entry = library_row_centre(
+        taskbar,
+        Scale::ONE,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, TERMINAL_BAR_APP_NAME),
+        "desktop pointer script",
+    )?;
     // Each served window's own client viewport: the session cascades the
     // windows in open order through the one shared placement rule and
     // decorates them, each sized by its app's own constants — the same

@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 19 open, 78 closed, 97 total.
+table normalises all three to **closed**. 20 open, 79 closed, 99 total.
 
-### Open (19)
+### Open (20)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -44,10 +44,11 @@ table normalises all three to **closed**. 19 open, 78 closed, 97 total.
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D94 | the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan + a doc claimed it did | claim corrected; neither the witnesses *nor* the click-through exist — no vertical mentions a viewer or picker, so this is a whole new graphical-session vertical |
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
+| D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
+| D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 
-### Closed (78)
+### Closed (79)
 
 | ID | Subject |
 |---|---|
@@ -129,6 +130,7 @@ table normalises all three to **closed**. 19 open, 78 closed, 97 total.
 | D91 | a leader thread that exits first stranded its process id, which the draw could then reissue |
 | D92 | `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number |
 | D93 | riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor be acknowledged |
+| D94 | the `fd_grant`/`fd_redeem` picker delegation had no guest vertical (a plan + a doc claimed it did) |
 
 ## Scope
 
@@ -5466,63 +5468,95 @@ wakeup.
 callbacks (`the_wiring_step_installs_the_preempt_tick_and_ipi_callbacks`);
 it fails with the IPI install removed.
 
-## D94 — the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan and a doc both claimed it did (OPEN)
+## D94 — the `fd_grant`/`fd_redeem` picker delegation had no guest vertical, and a plan and a doc both claimed it did (FIXED)
 
 **Mechanism.** `plans/NEW-FILEMANAGER.md` FM9-b recorded that the aarch64
 `autoload_input` vertical "latches two new guest PASS witnesses —
 `SyscallInvoked sc=fd_grant` then `sc=fd_redeem`", and
-`docs/src/desktop/apps.md` stated the picker hand-off was "proven end to end"
-with the run's PASS keyed on those records. Neither is true: **`sc=fd_grant`
-appears in no `.rs` file in the tree**, and `qemu_tests.rs` contains no
-`fd_grant`, `fd_redeem`, or file-picker witness at all (its only `picker`
-mention is the taskbar's unrelated hover-window picker). Both claims are
-corrected in the change that found this; what is missing is the vertical.
+`docs/src/desktop/apps.md` stated the hand-off was "proven end to end". Neither
+was true: `sc=fd_grant` appeared in no `.rs` file, and `qemu_tests.rs` carried
+no `fd_grant`, `fd_redeem`, viewer or file-picker witness at all. The claim
+asserted guest coverage of a *security* path — a capability-bearing descriptor
+delegation between two principals — so a reviewer reading either document would
+conclude the click-through was verified against a running kernel when only host
+unit tests and the model covered it.
 
-**Why it matters more than an ordinary stale doc.** The claim asserted guest
-coverage of a *security* path — a capability-bearing descriptor delegation
-between two principals — so a reviewer reading either document would conclude
-the click-through was verified against a running kernel when only the host
-unit tests and the model cover it. That is the shape of gap that lets a real
-regression through, and it is why the correction is not merely cosmetic.
+**Two of the entry's own sizing facts were also wrong**, and correcting them
+made the work smaller than recorded:
 
-**What does hold today.** The kernel path is host-tested (mint, the D92
-instance gate, one-shot redemption, the grantor-identity re-check, the
-extent ceiling), the picker's browse model is host-tested, the fixture plants
-a readable document in `/Users/root`, and the picker opens at the session's
-home. Every guest-side consumer compiles and links for all three Tier-1
-targets. What is absent is a run that drives launcher → Viewer → picker →
-document-row click and asserts the two audit records.
+- "No vertical's image fixtures carry the Viewer bundle" was false. The Viewer
+  is a complete bundle (`AppInfo.toml`, `Run`, `Help/`, its icon) and the image
+  build *discovers* it from the userland walk, so every fixture image already
+  plants it; its manifest declares `kind = "application"` and
+  `library = "Accessories"`, so it is already a row in the program-library
+  popup. No new `FsDisk` variant and no fixture change were needed.
+- "The user-authority session cannot `log_emit`" was false. The session already
+  emits `DESKTOP_REVEALED`, `WINDOW_SHOWN`, `MENU_SHOWN` and `CONTENT_RELEASED`
+  through `tairix_rt::LogSink`, and those records reach the serial transcript —
+  the icon-bar vertical gates on `WINDOW_SHOWN` by its message text. Measured on
+  a real run: `id=20003` and `id=20006` both appear.
 
-**What the vertical needs.** The witness pair, plus the pick-click gate that
-must precede it — a test-kernel picker-open marker (the session's first
-post-rename `comm=desktop sc=fs_open`, the picker's `open_at` home read),
-because no `MessageDelivered` fires for the session-internal picker and the
-user-authority session cannot `log_emit`.
+**The recorded gate was unsound, so the fix does not use it.** FM9-b proposed a
+test-kernel marker derived from "the session's *first* `comm=desktop sc=fs_open`
+after the FM9-a rename". Measured against a transcript, the session emits **43**
+`comm=desktop sc=fs_open` records per run and **10** of them land *after* a
+library launch, so "the first one after the launch" is not the picker's. The
+picker's listing is also read on a worker (`Listing::Pending`), so no single
+`fs_open` marks "ready to click" at all. Gating on a count of them is the
+cumulative-event anti-pattern D19/D20 names.
 
-**Shape: a new dedicated vertical, not an extension of `autoload_input`**
-(User-decided). Extending the aarch64 `autoload_input` vertical is the
-cheaper path and is what `plans/NEW-FILEMANAGER.md` FM9-b describes, but that
-vertical is the D15 freeze case — reproducibly 4/4 under a 300 s *and* an
-1800 s budget, perturbable by a few added `lib/net` bytes. Landing a security
-path's only guest coverage on a known-intermittent host would make that
-coverage intermittent by construction, which the no-flaky-tests rule forbids
-outright. A minimal dedicated vertical drives launcher → Viewer → picker →
-document-row click and asserts the two audit records without inheriting D15.
+**Fix.** The session announces the fact itself, exactly as it already does for
+the sibling surface no channel reports:
 
-**Size, measured — larger than "add two witnesses".** FM9-b's remaining
-claim that the aarch64 `autoload_input` vertical already "launches the Viewer
-from the desktop's launcher, lets the auto-opened picker read the home,
-clicks the document row" is **also** untrue, and is corrected with this
-entry. Neither `tools/xtask/src/commands/qemu_tests.rs` nor the vertical's
-own crate mentions a viewer or a picker at all, no vertical's image fixtures
-carry the Viewer bundle, and nothing plants the document the picker is
-supposed to open. So the click-through itself does not exist either: this is
-a whole graphical-session vertical (boot to session, seat input, WM,
-taskbar + library popup, the Viewer bundle in the image, a planted document,
-layout-reconstructed pointer clicks, the picker-open gate) and the two
-witnesses on top, not a witness patch. Comparable existing verticals are
-450–850 lines of crate plus their harness script. Budget it as its own piece
-of work.
+- `tairix_desktop_session::PICKER_SHOWN` (id `20_008`, "file picker on screen"),
+  emitted one-shot per pick from `present()` beside `WINDOW_SHOWN` and
+  `MENU_SHOWN` — and only once `Browser::is_listing()` is false, so a picker
+  showing its "listing…" cue with no row in it is not announced as usable. The
+  picker is constructed before the first present so one announcement path serves
+  every present.
+- `PICKER_TOOLBAR` is public, for the same reason `PICKER_ORIGIN` already was: a
+  host observer reconstructs a row's rectangle through the shared renderer and
+  must lay out over the band the picker actually draws.
+
+**The vertical: `tests/integration/filepick_qemu_aarch64` (new).** Its own
+dedicated vertical rather than a stage on `autoload_input`, which is the D15
+freeze case — landing a security path's only guest coverage on a
+known-intermittent host would make it intermittent by construction. It boots the
+production aarch64 pipeline against the shared autoload root, launches the
+Viewer from the program library, waits for `PICKER_SHOWN`, and clicks the
+planted document's row. The row's screen point is reconstructed by driving the
+production `Browser` and `render::entry_rect` over the home listing, with both
+sides deriving that listing from the same two definitions the fixture plants
+from (`tairix_users::HOME_SUBDIRS` and `HOME_DOC_NAME`), so neither carries a
+copy of it; the picker is undecorated session chrome, so the offset is
+`PICKER_ORIGIN` alone with no client inset.
+
+The guest PASS is a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed
+by `sc=fd_redeem` from `comm=viewer`, in that order. Attributing each half to
+the principal the kernel says made the call is what makes the run a statement
+about a hand-off *between* processes; requiring the order rules out a redemption
+that could not have come from this pick.
+
+**Evidence.** The run's transcript carries `viewer.app` loaded, then
+`id=20008 file picker on screen`, then `comm=desktop … sc=fd_grant`, then
+`comm=viewer … sc=fd_redeem`, and the two `proc` ids differ with the viewer's
+`pproc` naming the session — so the delegation crossed a real process boundary.
+Falsified by removing the pick-click: the run then fails at its ceiling with the
+Viewer launched and the picker on screen but **zero** grant or redeem records,
+so the witness is caused by the gesture and not by the launch. Four consecutive
+runs pass in 16.88–17.09 s.
+
+The `PICKER_SHOWN` guard is host-tested three ways (announced once, only after
+the listing lands, silent with no pick showing, announced afresh for a later
+pick); removing the pending guard makes the "waits for its listing" test fail on
+exactly the wrong behaviour.
+
+**Landed alongside, from the same investigation.** The library-row lookup was
+copy-pasted in **four** scripts (the icon-bar, hover, autoload and new
+picker paths), one of them with its own `"terminal.app"` literal bypassing
+`BUNDLE_SUFFIX`. All four now share `library_row_centre` + `bundle_path`, and
+the headless-shell construction they each repeated is `reconstructed_shell`.
+The three pre-existing verticals pass unchanged after the fold.
 
 ## D95 — an unbounded transmit parked the netstack link peer inside its send path, so its completion gate never tripped and the run blamed the guest (FIXED)
 
@@ -6030,3 +6064,69 @@ timing. An order-dependent suite now fails the change that introduces it
   path, and the three sibling `ipc_call` tests use it too — a `thread::spawn`
   + `join` there left the server spinning on a core for the rest of the run
   whenever the client failed.
+
+## D98 — the harness cannot order typed keys after a pointer click, so a rename click-through cannot be gated (OPEN)
+
+Found while closing D94, in the attempt to give the FM9-a mutation
+click-through its guest coverage. The **create** half landed as the
+`fsmutate-qemu-aarch64` vertical (`plans/NEW-FILEMANAGER.md` FM9); the
+**rename** half is blocked here.
+
+**Mechanism.** The QEMU runner advances two independent cursors: a
+`pointer_script` of `PointerStep`s and a `typed_keys` list, each step gated on
+its own serial marker and occurrence count. Nothing orders one against the
+other. A rename click-through needs typing that happens *strictly after* the
+click which opens the inline editor, and the only markers available to the
+typed-key cursor are ones that fire at or before that click — so the typing
+could be injected while the menu is still open, where the characters reach the
+focused window as shortcuts instead. Gating it on the same marker as the click
+is a race by construction, which the no-flaky-tests rule forbids outright.
+
+**Why the obvious repairs do not work.**
+
+- **`PointerAction` cannot carry a key.** Its variants are `Move`, `Press`,
+  `Release`, `Click`, so a key cannot simply be scripted as one more ordered
+  pointer step.
+- **The typed-key model cannot express the keys anyway.** `qkeycode_for` maps
+  *characters*, covering printable ASCII plus `ret`/`tab`/`spc` and the
+  `\u{3}` ETX byte as `ctrl-c`. It has no spelling for `F9` or a ctrl-shift
+  chord, and the existing `ctrl-c` only works because ETX is a real character.
+  Encoding `F9` as some sentinel character would be exactly the hack the
+  charter forbids.
+- **The app announces nothing to gate on.** The inline rename editor opening
+  produces no audit record and no session announcement; the app's menu-choice
+  delivery and its repaint are both counted events on shared channels.
+
+**The fix, when it is done.** Give the runner **one ordered script** whose
+steps are either a pointer action or a typed key, so a key can be sequenced
+after a click the way two clicks already are, and widen the key vocabulary from
+characters to a typed-key vocabulary (characters plus named keys and chords) so
+`F9` and `Ctrl+Shift+N` are expressible. That is a refactor of shared test
+infrastructure touching every enrolment's `typed_keys`, which is why it is its
+own piece of work rather than a step inside a vertical.
+
+**What it unblocks.** FM9-a's rename half; FM9-a's *toolbar* gesture (a files
+window opens with `Chrome::HIDDEN`, so the New Folder tool is only reachable
+after `Ctrl+F9` reveals the band, or via `Ctrl+Shift+N`); FM9-c's delete
+click-through; and any later click-through needing a function key. The
+regression test requirement rides with it: each unblocked click-through lands
+with its own guest witness.
+
+## D99 — `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests (OPEN)
+
+Found while closing D94. `manager_tool_rect` is a public `lib/browse` entry
+point — the forward mirror of `manager_tool_at`, added for the FM9-a New Folder
+click-through — and every one of its callers is a test in its own crate. A
+public item with no present-day consumer is speculative surface.
+
+**Why it is not simply deleted.** It is the surface FM9-a's toolbar gesture
+needs, and that gesture is blocked on D98 rather than abandoned: a files window
+opens with its toolbar band hidden, so nothing can click a tool until the
+harness can express the key that reveals it. Deleting it now and re-deriving it
+when D98 lands would be churn; keeping it silently is the defect. It is
+recorded here so the choice is explicit and bounded.
+
+**Resolution.** Whichever comes first: D98 lands and FM9-a's toolbar
+click-through gives it its caller, or FM9-a's toolbar gesture is abandoned and
+the helper goes with it (`§2.14` — the change that makes code obsolete deletes
+it).

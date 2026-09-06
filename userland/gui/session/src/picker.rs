@@ -52,9 +52,14 @@ const PICKER_TITLE_SEPARATOR: &str = ": ";
 /// hit-tests that invert it cannot disagree about whether there is one.
 const PICKER_CHROME: ManagerChrome<'static> = ManagerChrome::none();
 
-/// The band [`PICKER_CHROME`] shows, for the layout questions that take it
+/// The band the picker's chrome shows, for the layout questions that take it
 /// alone.
-pub(crate) const PICKER_TOOLBAR: ToolbarBand = PICKER_CHROME.toolbar;
+///
+/// Public for the same reason [`PICKER_ORIGIN`] is: a host-side observer
+/// reconstructs a picker row's rectangle through the shared renderer, and it
+/// must lay out over the band the picker actually draws rather than a guess at
+/// it.
+pub const PICKER_TOOLBAR: ToolbarBand = PICKER_CHROME.toolbar;
 
 /// Bytes a location has left once the fixed prefix is spelled. Derived here
 /// once, so the prefix and the room it leaves can never drift apart.
@@ -66,6 +71,27 @@ const PICKER_LOCATION_BUDGET: usize =
 /// observer (the AW5 QEMU vertical's click script) drives the picker
 /// where the session actually places it — never a re-derived guess.
 pub const PICKER_ORIGIN: Point = Point::new(120, 90);
+
+/// One-shot: a frame carrying the picker, with its listing landed, reached
+/// the display.
+///
+/// The sibling of [`MENU_SHOWN`](crate::MENU_SHOWN) for the picker, and
+/// necessary for the same reason: the picker is a session-owned compositor
+/// window, so the window channel says nothing about its pixels, and the
+/// requesting app learns only that its `PickFile` was *accepted*. Acceptance
+/// is not readiness either — the listing is read on a worker, so a picker can
+/// be on screen showing its "listing…" cue with no row to choose yet. So "the
+/// picker is up and there is something to choose" is announced here or
+/// nowhere, which is what lets a user diagnosing a picker that never appeared,
+/// or a QEMU vertical deciding when a row is worth clicking, wait on a fact
+/// rather than on a delay. Id `20_008` is the next free slot in the
+/// desktop-session event range.
+pub const PICKER_SHOWN: tairix_log::EventId = tairix_log::EventId(20_008);
+
+/// The exact message [`PICKER_SHOWN`] is emitted with. A log consumer keys on
+/// this rendered text, so it is defined once beside the id and imported by
+/// both sides.
+pub const PICKER_SHOWN_MESSAGE: &str = "file picker on screen";
 
 /// How the user concluded a pick.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +148,8 @@ struct ActivePick<S: DirectorySource> {
     for_window: u64,
     wm: WindowId,
     browser: Browser<S>,
+    /// Whether [`PICKER_SHOWN`] has been announced for this pick.
+    shown: bool,
 }
 
 /// The session's picker engine over an injected directory-source factory
@@ -300,6 +328,25 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         })
     }
 
+    /// Announce [`PICKER_SHOWN`] for a pick whose picker a presented frame has
+    /// now carried with its listing landed.
+    ///
+    /// Called after a successful present, like its window and menu siblings.
+    /// One-shot per pick: a repaint, a navigation, or any later frame
+    /// announces nothing more. A pick still waiting on its listing announces
+    /// nothing *yet* — the rows a user picks from are not on screen until it
+    /// lands — so the announcement can never run ahead of the pixels.
+    pub fn report_newly_shown(&mut self, report: impl FnOnce()) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active.shown || active.browser.is_listing() {
+            return;
+        }
+        active.shown = true;
+        report();
+    }
+
     /// Run one navigation step against the active browser, repaint on a
     /// change, retitle the window when the step moved to another directory,
     /// and conclude when the step chose a file.
@@ -403,6 +450,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             for_window,
             wm,
             browser,
+            shown: false,
         });
         Ok(())
     }

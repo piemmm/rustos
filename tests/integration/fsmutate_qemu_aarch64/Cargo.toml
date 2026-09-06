@@ -1,0 +1,50 @@
+[package]
+name = "tairix-test-fsmutate-qemu-aarch64"
+description = "plans/NEW-FILEMANAGER.md FM9 QEMU integration test: boot the graphical desktop on the aarch64 virt board and drive a user's own pointer gestures into filesystem mutations, holding the run to the kernel's own mutation audit records"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared mutation contract (src/lib.rs): the operations the
+# gestures must produce and how each is attributed — read by both the
+# freestanding PASS gate and the host runner's pointer script, so the gesture
+# the host injects and the witness the guest latches can never drift apart.
+# `no_std` consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
+
+# Host-only: the shared browser engine, so a test can pin this crate's copy of
+# the new-folder name to the creator's own definition. It is deliberately not a
+# real dependency — the engine links the userland runtime, whose allocator and
+# panic handler cannot coexist with a kernel binary — so the constant is
+# mirrored and the test is what stops the two drifting.
+[dev-dependencies]
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+
+[[bin]]
+name = "tairix-test-fsmutate-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop and mutate the filesystem
+# by pointer" integration test. It runs the entire production boot pipeline
+# through `tairix-kernel`'s library half (`boot_aarch64::boot`) and only swaps
+# the audit sink for the PASS witnesses. Keeping the QEMU-exit shortcut in a
+# dedicated bin (not a Cargo feature on a production crate) prevents feature
+# unification from leaking it into any production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The kernel's filesystem-mutation audit vocabulary: the `FsNodeMutated`
+# event id whose `op` and `path` fields attribute a mutation.
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

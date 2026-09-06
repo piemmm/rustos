@@ -3768,6 +3768,106 @@ fn picker_abort_is_scoped_to_the_requesting_window() {
     assert_eq!(picker.wm_id(), None);
 }
 
+/// A source that answers the first request for a directory with `Pending` and
+/// every later one from the tree, standing in for the session's real listing
+/// worker: the picker opens showing its cue and the rows arrive on a `resume`.
+struct DeferredSource {
+    tree: TreeSource,
+    deferred: alloc::collections::BTreeSet<String>,
+}
+
+impl DeferredSource {
+    fn fixture() -> Self {
+        Self {
+            tree: TreeSource::fixture(),
+            deferred: alloc::collections::BTreeSet::new(),
+        }
+    }
+}
+
+impl DirectorySource for DeferredSource {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        let key = components.join("/");
+        if self.deferred.insert(key) {
+            return Ok(Listing::Pending);
+        }
+        self.tree.list(components)
+    }
+}
+
+/// The picker announcement waits for the rows, not merely for the window, and
+/// is made once.
+///
+/// A pick whose listing is still in flight has a window on screen and nothing
+/// in it to choose, so announcing there would hand a waiter a picker it cannot
+/// use. The announcement therefore holds until the listing lands, and then
+/// fires exactly once however many frames follow.
+#[test]
+fn the_picker_witness_waits_for_its_listing_and_is_announced_once() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(DeferredSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    assert!(
+        picker.wm_id().is_some(),
+        "the picker window is up while its listing is in flight"
+    );
+
+    let mut announcements = 0;
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(
+        announcements, 0,
+        "a picker with no rows yet is not announced as usable"
+    );
+
+    // The listing lands and the view commits.
+    assert!(picker.resume(&mut shell, &mut comp).is_none());
+
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 1, "announced on the frame that carries rows");
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 1, "and never again for the same pick");
+}
+
+/// With no pick showing there is nothing to announce, so every present is
+/// silent — the announcement can never describe a picker that is not there.
+#[test]
+fn the_picker_witness_is_silent_with_no_pick_showing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+
+    let mut announcements = 0;
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 0, "no pick, no announcement");
+
+    // A concluded pick leaves the slot idle again, and a later present over
+    // that idle slot is silent too.
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 1, "the showing pick is announced");
+    picker.abort_for(7, &mut shell, &mut comp);
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 1, "the taken-down pick announces nothing");
+}
+
+/// The one-shot is per *pick*, not per session: the next pick is a new picker
+/// the user has not seen yet, so it is announced in its own right. A waiter
+/// that gated on the first announcement alone would otherwise act on a stale
+/// one.
+#[test]
+fn the_picker_witness_is_announced_again_for_a_later_pick() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+
+    let mut announcements = 0;
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker.report_newly_shown(|| announcements += 1);
+    picker.abort_for(7, &mut shell, &mut comp);
+
+    picker.begin(9, &mut shell, &mut comp).expect("accepted");
+    picker.report_newly_shown(|| announcements += 1);
+    assert_eq!(announcements, 2, "a second pick is announced too");
+}
+
 /// A fake app-data service standing in for the library-admin command's
 /// published scope, holding `overlay` when the account has one.
 ///
@@ -10251,6 +10351,10 @@ fn reduced_motion_announces_the_desktop_visible_on_its_first_frame() {
 #[test]
 fn the_reveal_witness_id_is_inside_the_sessions_reserved_range() {
     assert!((DESKTOP_SESSION_RANGE_START..DESKTOP_SESSION_RANGE_END).contains(&DESKTOP_REVEALED.0));
+    assert!(
+        (DESKTOP_SESSION_RANGE_START..DESKTOP_SESSION_RANGE_END).contains(&crate::PICKER_SHOWN.0),
+        "the picker witness is in the same reserved block"
+    );
 }
 
 /// Logging out and stepping aside hand the seat on cleared, so the desktop

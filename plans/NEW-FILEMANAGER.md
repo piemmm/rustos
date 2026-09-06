@@ -216,41 +216,59 @@ the signed `AppInfo` MIME associations that resolve the viewer), and
 for a regular file; the app's own scrolled `OpenWithChooser` list offers the
 full `applications_for` result and launches the picked bundle through the same
 `DOCUMENT_ROLE_ARG`+`STDIN` hand-off, where the default open picks the first).
-**FM6b is complete. FM9-pre (the `FsNodeMutated`/
+**FM6b is complete. FM9-pre is landed** (the `FsNodeMutated`/
 `FsMutationDenied` filesystem-mutation audit events every write syscall emits,
-the robust serial witnesses the vertical keys on and a §5.4/§19.4 requirement
-in their own right), FM9-a and FM9-c are landed; FM9-b's picker-at-home and
-planted document landed but its guest witnesses did not (D94).** FM9-a appends the New-Folder +
-inline-rename click-through to the aarch64 `autoload_input` QEMU vertical after
-the AW4 terminal round trip: it descends into `/Users/root` by
-layout-reconstructed pointer clicks (`render::selection_rect` for rows, the new
-forward `render::manager_tool_rect` over the new `Toolbar::tool_rect` for the
-New Folder tool, offset by the WM's `WindowFrame::insets` client inset) and
-seat-keyboard `Enter`s, creates+names a folder, and the guest PASS latches two
-new `FsNodeMutated` `op=mkdir`→`op=rename` witnesses (post-terminal-round-trip,
-fail-closed) plus a "named folder" screendump. **FM9-b's app-side half is landed; its guest coverage is not.**
+a §5.4/§19.4 requirement in their own right and the robust serial witnesses a
+mutation vertical keys on). **FM9-b is now complete, app side and guest side.
+FM9-a and FM9-c are app-side only: their product halves are landed, and their
+guest click-throughs are partly delivered and partly blocked, as below.**
+
+**FM9-a — what is true.** The *product* half is landed: `render::selection_rect`
+for rows, the forward `render::manager_tool_rect` over `Toolbar::tool_rect` for
+the New Folder tool, and the inline-rename commit. The *guest* half is
+`tests/integration/fsmutate_qemu_aarch64`, a
+dedicated vertical that reaches the **create** through the *desktop backdrop's*
+own New Folder row and latches `FsNodeMutated` `op=mkdir` attributed by the
+created path — the first mutation record any guest run in the tree has ever
+produced. Two parts remain blocked on `plans/OPEN-DEFECTS.md` D98 (the harness
+cannot order a typed key after a pointer click): the **rename** commit, which
+needs typing sequenced after the click that opens the editor, and the
+**toolbar** gesture itself, because a files window opens with
+`Chrome::HIDDEN` and the New Folder tool is reachable only after `Ctrl+F9`
+reveals the band (or via `Ctrl+Shift+N`) — neither key being expressible by a
+harness that injects characters. `manager_tool_rect` therefore has no caller
+yet, tracked as D99.
 Landed: the trusted picker opens at the user's home (`Browser::open_at` over
 the session's `HOME`, falling back to `/`), and the CU6 one-shot delegation
 that hands the picked file to the viewer is host-tested end to end (mint, the
 D92 instance gate, one-shot redemption, the grantor-identity re-check, the
-extent ceiling). **No guest run exists.** `sc=fd_grant` appears in no `.rs`
-file in the tree; no vertical asserts the delegation records; and — contrary
-to what this section previously claimed — no vertical drives the click-through
-either: neither `qemu_tests.rs` nor any vertical crate mentions a viewer or a
-file picker, no image fixture carries the Viewer bundle, and nothing plants
-the document the picker would open. What remains is therefore the whole
-click-through plus the witness pair (`SyscallInvoked sc=fd_grant` then
-`sc=fd_redeem`, after the FM9-a rename so no earlier delegation can satisfy
-them) and the pick-click gate that must precede it: a test-kernel picker-open
-marker (the session's first post-rename `comm=desktop sc=fs_open`, the
-picker's `open_at` home read), so the click lands only once the picker is
-composited — no `MessageDelivered` fires for the session-internal picker and
-the user-authority session cannot `log_emit`, so the test sink is what can
-turn that unique read into a deterministic gate. Tracked as
-`plans/OPEN-DEFECTS.md` D94, whose User-decided shape is a **new dedicated
-vertical**: extending the aarch64 `autoload_input` vertical would inherit its
-open intermittency (D15). **FM9-c (delete with confirm) is now
-fully landed.** A clickable **Delete** joins the context menu (its
+extent ceiling). **The guest run now exists**:
+`tests/integration/filepick_qemu_aarch64`, a dedicated vertical rather than a
+stage on the aarch64 `autoload_input` vertical, which would have inherited its
+open intermittency (D15). It launches the Viewer from the program-library row,
+waits for the picker to be on screen, and clicks the planted document's row;
+its guest PASS is `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
+`sc=fd_redeem` from `comm=viewer`, attributing each half to the principal the
+kernel says made the call so the run states a hand-off *between* processes.
+
+Two of this section's earlier premises were wrong and are corrected here. The
+Viewer bundle **is** already on every fixture image — the image build discovers
+it from the userland walk, and its manifest's `library = "Accessories"` already
+makes it a popup row — so no fixture change was needed. And the session **can**
+emit a record: `DESKTOP_REVEALED`, `WINDOW_SHOWN` and `MENU_SHOWN` already
+reach the serial transcript through `tairix_rt::LogSink`.
+
+The pick-click gate is therefore not the test-kernel `fs_open` marker this
+section proposed, which measurement showed unsound: the session emits 43
+`comm=desktop sc=fs_open` records per run, 10 of them *after* a library launch,
+and the picker's listing is read on a worker (`Listing::Pending`) so no single
+read means "ready to click". Instead the session announces the fact itself —
+`PICKER_SHOWN`, one-shot per pick and only once `Browser::is_listing()` is
+false — the sibling of `MENU_SHOWN` for the other surface no channel reports.
+Closed as `plans/OPEN-DEFECTS.md` D94. **FM9-c (delete with confirm) is landed as
+product; its guest click-through is not** — no vertical drives a delete or a
+context menu, and it is blocked with FM9-a's remaining halves on
+`plans/OPEN-DEFECTS.md` D98. A clickable **Delete** joins the context menu (its
 `begin_delete` action already existed, so this is not speculative surface,
 §2.4), routed through `dispatch_context_command` to the same confirm-and-remove
 verb the `Delete` key opens. Delivering the right-click needed a real compositor
@@ -1453,64 +1471,62 @@ the click-through that keys on them is written.
   fully-gated landing appended **after** the AW4 terminal round trip (so the
   existing delivery counts 2/4/7/16 do not shift; each new stage adds its own
   kernel-attested PASS witness rather than re-deriving the terminal gates):
-  - **FM9-a — New Folder + inline-rename `[x]` (done).** The aarch64
-    `autoload_input` vertical, after the AW4 terminal round trip, drives the
-    served files window to create and name a folder in `/Users/root` by
-    coordinate-computed pointer clicks (the seat-keyboard injection
-    `tairix_qemu::qkeycode_for` covers only printable ASCII + `ret`/`tab`/
-    `spc`, no arrows). Every click point is reconstructed from the browser's
-    own layout code — `render::selection_rect` for rows, the new forward
-    `render::manager_tool_rect` (over the new `Toolbar::tool_rect`) for the
-    New Folder tool — over a `Browser::open_root` on a fake `DirectorySource`,
-    so it obeys the same default sort (directories first, name ascending:
-    `Apps`, `Storage`, `System`, `Users`) and resolves each row by name; the
-    points are offset by the WM's client inset (`WindowFrame::insets`) so a
-    click lands on the client, not the server-side title bar/border. The
-    first click hits the `Users` row at a left-biased column clear of the
-    (raised, large) terminal window — raising+focusing files — then a seat
-    `Enter` descends; a `root`-row click + `Enter` descends into
-    `/Users/root`; the New Folder tool click makes `New Folder` (`fs_mkdir`)
-    and opens the inline rename; a typed suffix + `Enter` commits a distinct
-    name (`fs_rename`). Sequencing is the window-event (`MessageDelivered`)
-    delivery counter (a focus-changing click = 3, a same-window press = 1, a
-    typed key = 2 edges), so pointer and seat-keyboard cursors interleave
-    deterministically; the contract counts live in the vertical's `src/lib.rs`
-    (`FM9_*`). Two new guest PASS witnesses latch from the FM9-pre
-    `FsNodeMutated` (id 4100) `op=mkdir` then `op=rename` serial lines,
-    counted only after the terminal round trip so no boot/login mutation can
-    satisfy them (fail closed — `FsMutationDenied` is id 4101 and never
-    latches), plus a "named folder" screendump asserting the files window is
-    composited at its slot.
-  - **FM9-b — open a file into the viewer via CU6 delegation `[x]` (done).**
+  - **FM9-a — New Folder + inline-rename: product `[x]` (done); the create's
+    guest click-through `[x]` (done, by a different route); the rename commit
+    and the toolbar gesture `[ ]` (blocked, D98).** The product half is
+    landed — `render::selection_rect` for rows, the forward
+    `render::manager_tool_rect` over `Toolbar::tool_rect` for the New Folder
+    tool, and the inline-rename commit — and is host-tested.
+    The create's guest coverage is
+    `tests/integration/fsmutate_qemu_aarch64`, which reaches it by pointer
+    alone: it right-clicks bare wallpaper, so
+    the session opens the *backdrop's* own menu, and clicks its New Folder row
+    (`PinboardCommand::NewFolder`), whose handler runs `fs_mkdir` in the
+    account's desktop folder. The guest PASS is one `FsNodeMutated` record with
+    `op=mkdir` whose `path` ends in the creator's own `NEW_FOLDER_BASE`,
+    attributed by path rather than by a count because the file manager
+    legitimately creates its Trash directory when a window opens. It is the
+    first mutation record any guest run in this tree has produced; the whole
+    gesture→syscall→audit-trail path was previously unexercised on a running
+    kernel. Falsified by dropping the row click: the menu still opens and no
+    mutation is recorded, so the run fails.
+    The **rename** commit and the **toolbar** gesture stay blocked on
+    `plans/OPEN-DEFECTS.md` D98: the rename needs typing sequenced after the
+    click that opens the editor, which the harness's independent typed-key
+    cursor cannot express, and the toolbar tool is not even drawn until
+    `Ctrl+F9` reveals the band (`Chrome::HIDDEN` is what a window opens with) —
+    a key the character-based injection has no spelling for.
+  - **FM9-b — open a file into the viewer via CU6 delegation `[x]` (done,
+    product and guest).**
     The trusted picker now opens at the user's home (`Browser::open_at` over
     the session's `HOME`, parsed with the shared
     `vfs::components_from_absolute_path`, falling back to `/`), and the shared
     users-root fixture plants a readable document (`HOME_DOC_NAME`) in
-    `/Users/root`. After FM9-a, the vertical launches the **Viewer** from the
-    desktop's launcher (session-internal taskbar clicks, gated on the
-    FM9-a folder-dump delivery count and held behind that dump); the Viewer,
-    handed no document, asks the picker, which opens the home. A single
-    pointer click on the document row (reconstructed through the same
-    `render::selection_rect`, at `PICKER_ORIGIN` with **no** frame inset —
-    the picker is undecorated session chrome) concludes the pick, so the
-    session `fd_grant`s the chosen file to the Viewer and the Viewer
-    `fd_redeem`s it. Two new guest PASS witnesses latch from `SyscallInvoked`
-    `sc=fd_grant` then `sc=fd_redeem` (after the FM9-a rename, so no earlier
-    delegation can satisfy them; the picker is the only `fd_grant` caller and
-    the Viewer the only `fd_redeem` caller in the image). **Sequencing the
-    pick was the hard part** and is solved without any production change: the
-    session-internal picker delivers no `MessageDelivered`, maps no `shm`
-    frame, and — being user-authority — cannot `log_emit`, so there is no
-    kernel-audited event at picker-open. But the picker's `open_at` home
-    listing is the session's *first* directory read after the FM9-a rename, a
-    `SyscallInvoked` `comm=desktop sc=fs_open`; the test kernel's audit sink
-    turns that unique event into the deterministic `FM9B_PICKER_OPEN_MARKER`
-    serial line, and the runner gates the pick-click on it (the `fs_open`
-    happens synchronously inside the `PickFile` serve, so the click lands in a
-    later wake with the picker composited). Non-flaky across repeated runs.
+    `/Users/root`. The guest half is
+    `tests/integration/filepick_qemu_aarch64` — its own vertical, not a stage
+    on `autoload_input`, which is the D15 freeze case. It clicks the
+    program-library button and the Viewer's row; the Viewer, handed no
+    document, asks the picker, which opens the home. A single pointer click on
+    the document row (reconstructed through the production `Browser` and
+    `render::entry_rect`, at `PICKER_ORIGIN` with **no** frame inset — the
+    picker is undecorated session chrome) concludes the pick, so the session
+    `fd_grant`s the chosen file to the Viewer and the Viewer `fd_redeem`s it.
+    The guest PASS is `sc=fd_grant` from `comm=desktop` then `sc=fd_redeem`
+    from `comm=viewer`, in that order: attributing each half to the principal
+    the kernel says made the call is what makes the run a claim about a
+    hand-off *between* processes, and the order rules out a redemption that
+    could not have come from this pick.
+    **Sequencing the pick is the hard part, and the gate must be the session's
+    own announcement.** `PICKER_SHOWN` fires one-shot per pick and only once
+    `Browser::is_listing()` is false — the sibling of `MENU_SHOWN` for the
+    other surface no channel reports. Nothing derived from the session's
+    `fs_open` records can stand in: it emits 43 of them per run, 10 after a
+    library launch, and the listing is read on a worker, so no single read
+    means "there is a row to click".
   - **FM9-c — delete with confirm — product `[x]` (done, host-tested);
     right-click delivery in QEMU `[x]` (done, proven); the full delete
-    click-through in `autoload_input` `[x]` (done).** A
+    click-through `[ ]` (blocked, D98: no vertical drives a delete or a
+    context menu).** A
     clickable **Delete** joins the context menu (`ContextCommand::Delete`,
     enabled on any selection), routed through the app's
     `dispatch_context_command` to the *same* `begin_delete` the `Delete` key

@@ -3353,6 +3353,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-filepick-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-syscall",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-fiq-selfsample-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -3469,6 +3481,19 @@ dependencies = [
  "tairix-drv-fs-ext4",
  "tairix-drv-fs-fat32",
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-test-fsmutate-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-browse",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
 ]
 
 [[package]]
@@ -5895,6 +5920,7 @@ dependencies = [
  "tairix-test-desktop-pressure-qemu-aarch64",
  "tairix-test-encrypted-root-image",
  "tairix-test-fat32-image",
+ "tairix-test-filepick-qemu-aarch64",
  "tairix-test-framestats",
  "tairix-test-memsoak",
  "tairix-test-menu-qemu-aarch64",

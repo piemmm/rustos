@@ -258,7 +258,8 @@ pub use library::{catalogued, load_library, load_programs, LoadedLibrary, Loaded
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use pace::FramePacer;
 pub use picker::{
-    ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_TITLE,
+    ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_SHOWN,
+    PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR,
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;

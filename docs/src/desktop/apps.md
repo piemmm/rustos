@@ -1076,13 +1076,28 @@ the session delegates the chosen file to the Viewer through the CU6 one-shot
 `fd_grant` / `fd_redeem` — the Viewer then reads exactly that one file with no
 filesystem capability of its own.
 
-**Coverage: host-proven, no guest vertical at all.** The kernel delegation
-path (mint, the instance gate, one-shot redemption, the grantor-identity
-re-check) and the picker's own model are unit-tested on the host. **No
-enrolled QEMU vertical drives any of the flow above** — none launches the
-Viewer, opens the picker, plants a document, or asserts the
-`fd_grant`/`fd_redeem` audit records — so the click-through is not proven end
-to end (`plans/OPEN-DEFECTS.md` D94).
+**Coverage: host-proven and guest-proven.** The kernel delegation path (mint,
+the instance gate, one-shot redemption, the grantor-identity re-check) and the
+picker's own model are unit-tested on the host, and the
+`filepick-qemu-aarch64` vertical drives the whole click-through on a running
+kernel: it launches the Viewer from the program library, waits for the
+session's own `PICKER_SHOWN` record, clicks the planted document's row, and
+passes only on a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
+`sc=fd_redeem` from `comm=viewer`.
+
+Attributing each half to the principal the kernel says made the call is what
+makes the run a statement about a hand-off *between* two processes rather than
+about one process touching its own descriptor, and requiring that order rules
+out a redemption that could not have come from this pick. Removing the
+pick-click makes the run fail with the Viewer launched and the picker on screen
+but no delegation at all, so the witness is caused by the gesture rather than by
+the launch.
+
+The pick-click waits on `PICKER_SHOWN` because nothing earlier is honest: the
+picker is a window the session owns, so the window channel says nothing about
+its pixels; the requesting application learns only that its `PickFile` was
+*accepted*; and the listing is read on a worker, so acceptance is not yet a row
+to click.
 
 ### Multi-selection and the clipboard model
 

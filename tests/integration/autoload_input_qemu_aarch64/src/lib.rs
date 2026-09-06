@@ -82,6 +82,15 @@
 /// from drifting.
 pub const FILES_BAR_APP_NAME: &str = "files";
 
+/// Bare name of the application this vertical's script launches from the
+/// program library — the bundle is `<system application store>/<name>.app`,
+/// composed from the shared `lib/abi` spellings rather than written out.
+///
+/// Named here for the same reason as the slot above: the host script resolves
+/// the popup row to click from it, so one definition keeps the row it clicks
+/// and the bundle the guest witnesses name in step.
+pub const TERMINAL_BAR_APP_NAME: &str = "terminal";
+
 /// Guest marker: the files window received the `Focus` + `Pressed` pair of
 /// the first in-window click — it exists, is active, and the compositor has
 /// the frame the second screendump reads.

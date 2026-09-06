@@ -1184,6 +1184,29 @@ QEMU vertical gates both its screendumps and its bar gestures on it: a create
 reply would say only that the window exists, which is too early to photograph
 and too early to click.
 
+### And the trusted picker's own witness
+
+`PICKER_SHOWN` ("file picker on screen") is the same announcement for the one
+surface the session puts up on an *application's* behalf. It is needed for the
+same reason `MENU_SHOWN` is, and for one more of its own.
+
+The picker is a window the session owns, so the window channel says nothing
+about its pixels, and the application that asked learns only that its
+`PickFile` was *accepted*. But acceptance is not readiness here: the picker
+lists its directory through the session's deferred listing desk, so it can be on
+screen showing its "listing…" cue with no row to choose yet. So the
+announcement waits for both — a frame carried the picker *and* its listing has
+landed — and until then says nothing.
+
+One announcement per pick, not per session: the next pick is a picker the user
+has not seen, so it is announced in its own right. A waiter that keyed on the
+first announcement alone would otherwise act on a stale one.
+
+Two readers depend on it, as with its siblings. A user diagnosing a pick that
+never appeared can tell "never drawn" from "never asked". And the
+picker-delegation QEMU vertical gates its pick-click on it: any earlier gate
+races the frame the rows are in.
+
 ### And its own release witness
 
 `CONTENT_RELEASED` ("window content released under memory pressure") is the

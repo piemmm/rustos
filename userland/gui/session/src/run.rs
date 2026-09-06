@@ -133,9 +133,9 @@ mod program {
         WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
-        MIN_FRAME_PUBLISH_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL, WALLPAPER_RUN_PATH, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE,
+        MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
+        SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
+        WALLPAPER_RUN_PATH, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE,
     };
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
@@ -844,15 +844,16 @@ mod program {
     /// reveal witness is announced, so the record can only follow pixels
     /// this session actually put on the screen. Each served window whose
     /// first painted frame this one carried is announced there too, and the
-    /// menu chain this one first carried, for the same reason: until the frame
-    /// lands, nobody has seen either.
-    fn present(
+    /// menu chain and the trusted picker this one first carried, for the same
+    /// reason: until the frame lands, nobody has seen any of them.
+    fn present<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
         fade: &mut ScreenFade,
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
+        picker: &mut SessionPicker<S, F>,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
@@ -890,6 +891,17 @@ mod program {
                                 key: "owner",
                                 value: LogFieldValue::Str(owner),
                             }],
+                        },
+                    );
+                });
+                picker.report_newly_shown(|| {
+                    log(
+                        &LOG_SINK,
+                        &LogEvent {
+                            level: LogLevel::Info,
+                            id: PICKER_SHOWN,
+                            message: PICKER_SHOWN_MESSAGE,
+                            fields: &[],
                         },
                     );
                 });
@@ -1778,6 +1790,29 @@ mod program {
         // fallback colour in its place — and, once that backdrop lands, for it to
         // finish dissolving in over that colour.
         fade.set_awaiting_backdrop(!backdrop_ready || !shell.backdrop_settled());
+        // The trusted file picker (AW5/CU6): the one shared browser engine
+        // over the session's own capability-checked listing call. Every
+        // pick starts from a fresh listing under the session's authority;
+        // the app never lists anything itself. The picker opens at the
+        // logged-in user's home (`HOME`, exported by login) so the user
+        // lands among their own files rather than at the storage-forest
+        // root; an unset or malformed `HOME` parses to no components (the
+        // root), and a home that cannot be listed when a pick begins falls
+        // back to the root there (fail closed, never a guessed path).
+        //
+        // Built before the first present because every present announces the
+        // picker it has newly carried, and one announcement path serves them
+        // all.
+        let picker_start = tairix_rt::env_var(b"HOME")
+            .and_then(|home| core::str::from_utf8(home).ok())
+            .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
+            .unwrap_or_default();
+        let picker_listings = alloc::sync::Arc::clone(&listings);
+        let mut picker = SessionPicker::new(move || AsyncDirectorySource {
+            listings: alloc::sync::Arc::clone(&picker_listings),
+            client: ListingClient::Picker,
+        })
+        .starting_at(picker_start);
         if let Err(code) = present(
             &mut shell,
             &mut compositor,
@@ -1785,6 +1820,7 @@ mod program {
             &mut fade,
             &mut windows,
             &mut menu,
+            &mut picker,
         ) {
             return code;
         }
@@ -2041,25 +2077,6 @@ mod program {
         // park below to the moment it comes due and nothing else; a desktop
         // with nothing held arms nothing.
         let mut pacer = FramePacer::new();
-        // The trusted file picker (AW5/CU6): the one shared browser engine
-        // over the session's own capability-checked listing call. Every
-        // pick starts from a fresh listing under the session's authority;
-        // the app never lists anything itself. The picker opens at the
-        // logged-in user's home (`HOME`, exported by login) so the user
-        // lands among their own files rather than at the storage-forest
-        // root; an unset or malformed `HOME` parses to no components (the
-        // root), and a home that cannot be listed when a pick begins falls
-        // back to the root there (fail closed, never a guessed path).
-        let picker_start = tairix_rt::env_var(b"HOME")
-            .and_then(|home| core::str::from_utf8(home).ok())
-            .and_then(|home| tairix_browse::vfs::components_from_absolute_path(home).ok())
-            .unwrap_or_default();
-        let picker_listings = alloc::sync::Arc::clone(&listings);
-        let mut picker = SessionPicker::new(move || AsyncDirectorySource {
-            listings: alloc::sync::Arc::clone(&picker_listings),
-            client: ListingClient::Picker,
-        })
-        .starting_at(picker_start);
         // The trusted confirmation prompt for a power transition. It is the
         // session's own window, so the question the user answers is asked by
         // the desktop itself rather than by the bar, which holds no
@@ -2215,6 +2232,7 @@ mod program {
                         &mut fade,
                         &mut windows,
                         &mut menu,
+                        &mut picker,
                     ) {
                         return code;
                     }
@@ -3065,6 +3083,7 @@ mod program {
                     &mut fade,
                     &mut windows,
                     &mut menu,
+                    &mut picker,
                 ) {
                     return code;
                 }

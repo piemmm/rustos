@@ -311,6 +311,10 @@ tairix-test-autoload-input-qemu-aarch64 = { path = "../../tests/integration/auto
 # bar is driven and the two window markers the guest emits), defined once in
 # that test crate's lib target beside the guest PASS gate.
 tairix-test-appbar-qemu-aarch64 = { path = "../../tests/integration/appbar_qemu_aarch64", version = "=0.0.0" }
+# The picker-delegation vertical's shared contract: the application the
+# library row launches, read by the pointer script so the row it clicks and
+# the process the guest attributes the redemption to are one definition.
+tairix-test-filepick-qemu-aarch64 = { path = "../../tests/integration/filepick_qemu_aarch64", version = "=0.0.0" }
 # The desktop-menu vertical's shared interaction contract (the application
 # whose window menu is opened), defined once beside that guest's PASS gate.
 tairix-test-menu-qemu-aarch64 = { path = "../../tests/integration/menu_qemu_aarch64", version = "=0.0.0" }

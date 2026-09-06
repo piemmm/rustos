@@ -91,7 +91,12 @@ impl PinboardCommand {
     /// The arrangement rows are worded as the *directions on screen* a user
     /// sees, not as the settings vocabulary's leading/trailing edges, because
     /// a menu is read by someone looking at their icons.
-    const fn label(self) -> &'static str {
+    ///
+    /// Public because a host-side observer resolves a drawn row by the text it
+    /// shows, so the label it looks for is this one definition rather than a
+    /// copy of the wording.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
             Self::NewFolder => "New Folder",

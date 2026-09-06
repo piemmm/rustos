@@ -1,0 +1,44 @@
+[package]
+name = "tairix-test-filepick-qemu-aarch64"
+description = "plans/CAPABILITY_USE.md CU6 QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch the viewer from the program library, let the session's trusted picker open at the user's home, click the planted document's row, and hold the run to the one-shot descriptor delegation crossing from the session to the viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The vertical's shared delegation contract (src/lib.rs): the application the
+# library row launches and the two attested syscall names the delegation is
+# recognised by — read by both the freestanding PASS gate and the host
+# runner's pointer script, so the gesture the host injects and the witness the
+# guest latches can never drift apart. `no_std` consts only, host-buildable.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "tairix-test-filepick-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 desktop, launch the viewer, and
+# watch the picker delegate one descriptor into it" integration test. It runs
+# the entire production boot pipeline through `tairix-kernel`'s library half
+# (`boot_aarch64::boot`) — bootstrap-floor virtio-MMIO discovery, the unlock
+# kthread, driver autoload, the display service, and the desktop session — and
+# only swaps the audit sink for the PASS witnesses. Keeping the QEMU-exit
+# shortcut in a dedicated bin (not a Cargo feature on a production crate)
+# prevents feature unification from leaking it into any production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+# The syscall audit vocabulary: the `SyscallInvoked` event id whose `sc` and
+# `comm` fields attribute a dispatched syscall to the process that made it.
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
