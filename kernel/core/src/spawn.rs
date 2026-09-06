@@ -933,6 +933,14 @@ pub struct BuiltImage {
     /// The user-stack span the seam's layout placed in `frozen`; the fault
     /// path backs growth pages inside it.
     pub stack_span: StackSpan,
+    /// The image's relocated load base
+    /// ([`image_load_base`](tairix_kernel_mem::image_load_base)).
+    ///
+    /// Recorded per process at admission so a diagnostic can express a code
+    /// address as an offset into the program's own binary — the whole reason
+    /// a stall report or a crash record is an offline `addr2line` input
+    /// rather than a disclosure of the load address.
+    pub load_base: u64,
     /// The child process's live, mutable address space (`plans/PI.md`
     /// 5d-0-ii (b′)) built from the *same* arch space `frozen` was frozen
     /// from, so the child's `mem_map` / `mmio_map` mutate its own space.

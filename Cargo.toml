@@ -383,6 +383,8 @@ members = [
     "tests/integration/heap_qemu_aarch64",
     "tests/integration/memsoak_program",
     "tests/integration/memsoak_qemu_aarch64",
+    "tests/integration/stalltrace_program",
+    "tests/integration/stalltrace_qemu_aarch64",
     "tests/integration/framestats_program",
     "tests/integration/desktop_hover_qemu_aarch64",
     "tests/integration/pipeline_qemu_aarch64",

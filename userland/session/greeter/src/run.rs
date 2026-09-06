@@ -46,6 +46,8 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
     use tairix_abi::driver::display::{Display, DisplayMode};
     use tairix_abi::fs::OpenFlags;
@@ -631,6 +633,12 @@ mod program {
                 ServeEnd::Failed(_) => 1,
             };
         }
+
+        // From here this task drives a user-facing loop, so declare the
+        // frame it owes. A debug image then reports any span that overruns,
+        // naming the call that spent it; a shippable one arms nothing and
+        // answers zero, which is why the result is not examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         if tairix_rt::display_acquire(SEAT_PRIMARY) < 1 {
             return fail(
                 EXIT_NO_SEAT,

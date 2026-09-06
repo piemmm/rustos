@@ -252,3 +252,12 @@ process's lazily created, memberless sleep wait-set (`waitset_wait` with the
 remaining window as its deadline) so the kernel's one-shot timer wakes it,
 and degrades to a cooperative yield wait only if the kernel refuses a
 wait-set. `park_forever` is its unbounded counterpart.
+
+`latency_watch` is the one diagnostic wrapper: an interactive surface calls
+it once with `tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS` before its event
+loop, and the kernel then reports any span that overruns, naming the syscall
+that spent the budget and the user stack that led there
+(`docs/src/architecture/latency-diagnostics.md`). It returns the budget
+actually armed, which is `0` on an image that compiles the diagnostics out —
+an answer rather than a failure, so a surface neither branches on the image
+it runs in nor reports anything to the user.

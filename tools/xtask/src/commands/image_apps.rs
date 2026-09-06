@@ -277,6 +277,30 @@ pub fn memsoak_store_files(
     )
 }
 
+/// The composed store files the stall-trace vertical's disk plants: the
+/// shared [`app_store_files`] set plus the test-only `stalltrace` fixture
+/// bundle (`plans/FIX-STALLTRACE.md`), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn stalltrace_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/stalltrace_program",
+        "stalltrace",
+        &FILES,
+    )
+}
+
 /// The composed store files the desktop-hover vertical's disk plants: the
 /// shared [`app_store_files`] set plus the test-only `framestats` frame-sample
 /// fixture bundle (`plans/FIX-DESKTOP-SPEEDUP.md` A.4), memoised per arch.

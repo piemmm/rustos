@@ -71,6 +71,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn latency_watch(&self, _c: &CallerContext<'_>, _budget_ns: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn exit(&self, _c: &CallerContext<'_>, _code: i32) -> SyscallResult {
         self.bump();
         Ok(0)

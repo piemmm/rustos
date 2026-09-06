@@ -220,6 +220,12 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // across the ports; a malformed span refuses the spawn closed).
         let stack_span = spawn_layout::stack_span(&layout)
             .ok_or_else(|| refuse_build(ctx, "stack_span_malformed"))?;
+        // The image's relocated load base, so a later diagnostic can express
+        // a code address as an offset into the program's own binary rather
+        // than disclosing where it was placed. Derived from the same image
+        // and bias the layout above was.
+        let load_base = tairix_kernel_mem::image_load_base(&image, CHILD_USER_BIAS)
+            .ok_or_else(|| refuse_build(ctx, "load_base_unfit"))?;
 
         let request = SpawnRequest {
             image: &image,
@@ -352,6 +358,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             frozen,
             physmap,
             stack_span,
+            load_base,
             live,
             pre_resume,
             entry: UserThreadEntry {

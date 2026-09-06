@@ -47,6 +47,7 @@
 //! | 4133 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
 //! | 4140 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
 //! | 4141 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
+//! | 4150 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -613,6 +614,23 @@ pub enum AuditEvent {
     /// operations into it, serves no further writes — so the volume is now
     /// read-only and behind. It carries no secret or capability token.
     VolumeWritebackFailed,
+    /// An interactive surface overran the frame budget it declared
+    /// (`plans/FIX-STALLTRACE.md`).
+    ///
+    /// Emitted by the syscall dispatcher of a `watchdog-diagnostics` build
+    /// through the diagnostic (log/UART) stream, never the persistent
+    /// hash-chained audit trail — like the lockup detail, an
+    /// address-bearing developer aid is kept off the tamper-evident log.
+    /// The fields say what spent the budget: `budget_ms`/`elapsed_ms`, how
+    /// much of it went to blocking calls (`blocked_ms`, `calls`) versus
+    /// user-mode work, the syscall that carried the span over
+    /// (`blocked_in`), and a `pc` plus `bt` chain of the stalling code.
+    /// Every code address is expressed relative to the program's own load
+    /// base and is omitted when that base is unknown, so the record is an
+    /// offline `addr2line` input and never an ASLR oracle. It carries no
+    /// secret and no capability token. A shippable image compiles the whole
+    /// facility out; the id is reserved so the catalogue stays stable.
+    TaskLatencyOverrun,
 }
 
 impl AuditEvent {
@@ -681,6 +699,7 @@ impl AuditEvent {
             Self::HwNodeRemoved => 4140,
             Self::HwNodeRemoveRefused => 4141,
             Self::VolumeWritebackFailed => 4134,
+            Self::TaskLatencyOverrun => 4150,
         })
     }
 
@@ -751,6 +770,7 @@ impl AuditEvent {
             Self::HwNodeRemoved => "hardware-tree node removed",
             Self::HwNodeRemoveRefused => "hardware-tree node removal refused (busy)",
             Self::VolumeWritebackFailed => "volume write-back publish failed",
+            Self::TaskLatencyOverrun => "interactive surface overran its frame budget",
         }
     }
 }
@@ -772,70 +792,89 @@ pub(crate) fn emit(sink: &dyn Sink, level: Level, event: AuditEvent, fields: &[F
 mod tests {
     use super::AuditEvent;
 
+    /// Every event in the catalogue, in id order.
+    ///
+    /// One list, shared by both cases below: a variant reachable by only
+    /// one of them is a variant whose id is checked for range but not for
+    /// collision, which is how four of them came to be uncovered. Adding a
+    /// variant means adding it here — the `id` and `message` matches are
+    /// exhaustive, so the compiler already names the other two sites.
+    const ALL: &[AuditEvent] = &[
+        AuditEvent::BootStarted,
+        AuditEvent::PhaseStarted,
+        AuditEvent::PhaseReady,
+        AuditEvent::PhaseFailed,
+        AuditEvent::BootCompleted,
+        AuditEvent::RamSelfTest,
+        AuditEvent::Panic,
+        AuditEvent::KernelFault,
+        AuditEvent::SyscallFeatureUnavailable,
+        AuditEvent::SyscallNoCallerContext,
+        AuditEvent::ProcessSpawned,
+        AuditEvent::ProcessSpawnDenied,
+        AuditEvent::ProcessSpawnFailed,
+        AuditEvent::DriverUnloaded,
+        AuditEvent::TaskFaultKilled,
+        AuditEvent::TaskExitedNonzero,
+        AuditEvent::ProcessSignalCrossPrincipal,
+        AuditEvent::ProcessPriorityChange,
+        AuditEvent::UsersDbLoaded,
+        AuditEvent::UsersDbRejected,
+        AuditEvent::DriverStoreScanned,
+        AuditEvent::GroupsDbLoaded,
+        AuditEvent::GroupsDbRejected,
+        AuditEvent::UserAdminApplied,
+        AuditEvent::UserAdminRejected,
+        AuditEvent::InputDelivered,
+        AuditEvent::SeatSwitched,
+        AuditEvent::SeatLeaseRevoked,
+        AuditEvent::SeatCreated,
+        AuditEvent::SeatDestroyed,
+        AuditEvent::SeatLeaseReclaimed,
+        AuditEvent::EntropyReserveSeeded,
+        AuditEvent::EntropyReserveUnseeded,
+        AuditEvent::BootIdMinted,
+        AuditEvent::BootIdUnavailable,
+        AuditEvent::HashKeyPublished,
+        AuditEvent::HashKeyUnavailable,
+        AuditEvent::SecondaryCpuStarted,
+        AuditEvent::SecondaryCpuStartFailed,
+        AuditEvent::SecondaryCpuOnline,
+        AuditEvent::CpuStallDetected,
+        AuditEvent::CpuStallCleared,
+        AuditEvent::CpuHardLockupDetected,
+        AuditEvent::CpuHardLockupCleared,
+        AuditEvent::CpuLockupRecovery,
+        AuditEvent::CpuLockupDiagnostic,
+        AuditEvent::CpuWatchdogSelfSample,
+        AuditEvent::IrqLineQuarantined,
+        AuditEvent::FsNodeMutated,
+        AuditEvent::FsMutationDenied,
+        AuditEvent::SystemConfigApplied,
+        AuditEvent::SystemConfigRejected,
+        AuditEvent::CpuOpsRoutineSelected,
+        AuditEvent::CryptoSelfTestFailed,
+        AuditEvent::VolumeDegraded,
+        AuditEvent::VolumeRecovering,
+        AuditEvent::VolumeRecovered,
+        AuditEvent::SystemPower,
+        AuditEvent::VolumeWritebackFailed,
+        AuditEvent::HwNodeRemoved,
+        AuditEvent::HwNodeRemoveRefused,
+        AuditEvent::TaskLatencyOverrun,
+    ];
+
+    #[test]
+    fn every_event_is_listed_for_both_checks() {
+        // A guard on the list itself: the count is the one thing neither
+        // exhaustive match can enforce, so it is asserted rather than
+        // assumed.
+        assert_eq!(ALL.len(), 62, "a new event belongs in `ALL`");
+    }
+
     #[test]
     fn event_ids_are_in_kernel_core_range() {
-        for ev in [
-            AuditEvent::BootStarted,
-            AuditEvent::PhaseStarted,
-            AuditEvent::PhaseReady,
-            AuditEvent::PhaseFailed,
-            AuditEvent::BootCompleted,
-            AuditEvent::RamSelfTest,
-            AuditEvent::Panic,
-            AuditEvent::KernelFault,
-            AuditEvent::SyscallFeatureUnavailable,
-            AuditEvent::SyscallNoCallerContext,
-            AuditEvent::ProcessSpawned,
-            AuditEvent::ProcessSpawnDenied,
-            AuditEvent::ProcessSpawnFailed,
-            AuditEvent::DriverUnloaded,
-            AuditEvent::TaskFaultKilled,
-            AuditEvent::TaskExitedNonzero,
-            AuditEvent::ProcessSignalCrossPrincipal,
-            AuditEvent::ProcessPriorityChange,
-            AuditEvent::UsersDbLoaded,
-            AuditEvent::UsersDbRejected,
-            AuditEvent::GroupsDbLoaded,
-            AuditEvent::GroupsDbRejected,
-            AuditEvent::DriverStoreScanned,
-            AuditEvent::UserAdminApplied,
-            AuditEvent::UserAdminRejected,
-            AuditEvent::InputDelivered,
-            AuditEvent::SeatSwitched,
-            AuditEvent::SeatLeaseRevoked,
-            AuditEvent::SeatCreated,
-            AuditEvent::SeatDestroyed,
-            AuditEvent::SeatLeaseReclaimed,
-            AuditEvent::EntropyReserveSeeded,
-            AuditEvent::EntropyReserveUnseeded,
-            AuditEvent::BootIdMinted,
-            AuditEvent::BootIdUnavailable,
-            AuditEvent::HashKeyPublished,
-            AuditEvent::HashKeyUnavailable,
-            AuditEvent::SecondaryCpuStarted,
-            AuditEvent::SecondaryCpuStartFailed,
-            AuditEvent::SecondaryCpuOnline,
-            AuditEvent::CpuStallDetected,
-            AuditEvent::CpuStallCleared,
-            AuditEvent::CpuHardLockupDetected,
-            AuditEvent::CpuHardLockupCleared,
-            AuditEvent::CpuLockupRecovery,
-            AuditEvent::CpuLockupDiagnostic,
-            AuditEvent::CpuWatchdogSelfSample,
-            AuditEvent::IrqLineQuarantined,
-            AuditEvent::FsNodeMutated,
-            AuditEvent::FsMutationDenied,
-            AuditEvent::SystemConfigApplied,
-            AuditEvent::SystemConfigRejected,
-            AuditEvent::CpuOpsRoutineSelected,
-            AuditEvent::CryptoSelfTestFailed,
-            AuditEvent::VolumeDegraded,
-            AuditEvent::VolumeRecovering,
-            AuditEvent::VolumeRecovered,
-            AuditEvent::SystemPower,
-            AuditEvent::HwNodeRemoved,
-            AuditEvent::HwNodeRemoveRefused,
-        ] {
+        for ev in ALL {
             let id = ev.id().0;
             assert!(
                 (4_000..5_000).contains(&id),
@@ -846,66 +885,7 @@ mod tests {
 
     #[test]
     fn event_ids_are_unique() {
-        let ids = [
-            AuditEvent::BootStarted.id().0,
-            AuditEvent::PhaseStarted.id().0,
-            AuditEvent::PhaseReady.id().0,
-            AuditEvent::PhaseFailed.id().0,
-            AuditEvent::BootCompleted.id().0,
-            AuditEvent::RamSelfTest.id().0,
-            AuditEvent::Panic.id().0,
-            AuditEvent::KernelFault.id().0,
-            AuditEvent::SyscallFeatureUnavailable.id().0,
-            AuditEvent::SyscallNoCallerContext.id().0,
-            AuditEvent::ProcessSpawned.id().0,
-            AuditEvent::ProcessSpawnDenied.id().0,
-            AuditEvent::ProcessSpawnFailed.id().0,
-            AuditEvent::DriverUnloaded.id().0,
-            AuditEvent::TaskFaultKilled.id().0,
-            AuditEvent::TaskExitedNonzero.id().0,
-            AuditEvent::ProcessSignalCrossPrincipal.id().0,
-            AuditEvent::ProcessPriorityChange.id().0,
-            AuditEvent::UsersDbLoaded.id().0,
-            AuditEvent::UsersDbRejected.id().0,
-            AuditEvent::GroupsDbLoaded.id().0,
-            AuditEvent::GroupsDbRejected.id().0,
-            AuditEvent::DriverStoreScanned.id().0,
-            AuditEvent::UserAdminApplied.id().0,
-            AuditEvent::UserAdminRejected.id().0,
-            AuditEvent::InputDelivered.id().0,
-            AuditEvent::SeatSwitched.id().0,
-            AuditEvent::SeatLeaseRevoked.id().0,
-            AuditEvent::SeatCreated.id().0,
-            AuditEvent::SeatDestroyed.id().0,
-            AuditEvent::SeatLeaseReclaimed.id().0,
-            AuditEvent::EntropyReserveSeeded.id().0,
-            AuditEvent::EntropyReserveUnseeded.id().0,
-            AuditEvent::BootIdMinted.id().0,
-            AuditEvent::BootIdUnavailable.id().0,
-            AuditEvent::SecondaryCpuStarted.id().0,
-            AuditEvent::SecondaryCpuStartFailed.id().0,
-            AuditEvent::SecondaryCpuOnline.id().0,
-            AuditEvent::CpuStallDetected.id().0,
-            AuditEvent::CpuStallCleared.id().0,
-            AuditEvent::CpuHardLockupDetected.id().0,
-            AuditEvent::CpuHardLockupCleared.id().0,
-            AuditEvent::CpuLockupRecovery.id().0,
-            AuditEvent::CpuLockupDiagnostic.id().0,
-            AuditEvent::CpuWatchdogSelfSample.id().0,
-            AuditEvent::IrqLineQuarantined.id().0,
-            AuditEvent::FsNodeMutated.id().0,
-            AuditEvent::FsMutationDenied.id().0,
-            AuditEvent::SystemConfigApplied.id().0,
-            AuditEvent::SystemConfigRejected.id().0,
-            AuditEvent::CpuOpsRoutineSelected.id().0,
-            AuditEvent::CryptoSelfTestFailed.id().0,
-            AuditEvent::VolumeDegraded.id().0,
-            AuditEvent::VolumeRecovering.id().0,
-            AuditEvent::VolumeRecovered.id().0,
-            AuditEvent::SystemPower.id().0,
-            AuditEvent::HwNodeRemoved.id().0,
-            AuditEvent::HwNodeRemoveRefused.id().0,
-        ];
+        let ids: alloc::vec::Vec<u32> = ALL.iter().map(|ev| ev.id().0).collect();
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 assert_ne!(ids[i], ids[j], "duplicate event id");

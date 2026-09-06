@@ -109,6 +109,10 @@ use tairix_arch_api::InFlightInterrupt;
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
 use tairix_util::fmt::format_hex_u64;
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_util::fmt::{
+    format_hex_offset, format_hex_offset_list, HEX_OFFSET_LEN, HEX_OFFSET_STRIDE,
+};
 
 use crate::audit::{emit, AuditEvent};
 use crate::cpu_state::{self, CpuState};
@@ -462,7 +466,7 @@ pub fn install_lock_diagnostics(current_cpu: fn() -> Option<CpuId>) {
 /// the per-CPU slot can never name different cores.
 #[cfg(feature = "watchdog-diagnostics")]
 fn lock_diag_current_cpu_id() -> Option<u32> {
-    lock_diag_current_cpu().map(|cpu| cpu as u32)
+    lock_diag_current_cpu()
 }
 
 /// Resolve the running CPU's dense id through the installed resolver, or
@@ -1881,22 +1885,6 @@ fn in_flight_field(in_flight: InFlightInterrupt) -> Option<tairix_log::FieldValu
     }
 }
 
-/// Render `offset` into `buf` as the image-relative marker `+0x`-prefixed
-/// 16-nibble lowercase hex. The leading `+` makes unmistakable that the
-/// value is an offset from the kernel image base, never an absolute
-/// runtime address, so a reader can never confuse the two.
-#[cfg(feature = "watchdog-diagnostics")]
-fn hex_off(offset: u64, buf: &mut [u8; 19]) -> &str {
-    buf[0] = b'+';
-    buf[1] = b'0';
-    buf[2] = b'x';
-    let mut hex = [0u8; 16];
-    let rendered = format_hex_u64(offset, &mut hex);
-    let bytes = rendered.as_bytes();
-    buf[3..3 + bytes.len()].copy_from_slice(bytes);
-    core::str::from_utf8(&buf[..3 + bytes.len()]).unwrap_or("+0x")
-}
-
 /// Render the debug-only lockup **detail** through `sink`: the
 /// address-bearing developer aids the always-on summary deliberately
 /// omits. Every kernel address is rendered image-base-relative (`+0x…`)
@@ -1904,6 +1892,10 @@ fn hex_off(offset: u64, buf: &mut [u8; 19]) -> &str {
 /// omitted entirely when the base is unregistered (fail closed, never a
 /// raw disclosure). Split out so host tests drive it against a recording
 /// sink without the install seam.
+// One linear record builder: the field array is written by index and its
+// rendered text buffers must outlive the emit, so splitting it would only
+// scatter those borrows across helpers that all have to hand them back.
+#[allow(clippy::too_many_lines)]
 #[cfg(feature = "watchdog-diagnostics")]
 fn report_detail_to(
     sink: &dyn Sink,
@@ -1912,8 +1904,8 @@ fn report_detail_to(
     observer: Option<CpuId>,
     diag: &Diag,
 ) {
-    let mut pc_buf = [0u8; 19];
-    let mut live_pc_buf = [0u8; 19];
+    let mut pc_buf = [0u8; HEX_OFFSET_LEN];
+    let mut live_pc_buf = [0u8; HEX_OFFSET_LEN];
     let mut live_ctx_buf = [0u8; 18];
     let mut aux_buf = [0u8; 18];
     let mut kdetail_buf = [0u8; 18];
@@ -1939,7 +1931,7 @@ fn report_detail_to(
     if let Some(off) = image_relative(diag.pc) {
         fields[n] = tairix_log::Field {
             key: "pc",
-            value: tairix_log::FieldValue::Str(hex_off(off, &mut pc_buf)),
+            value: tairix_log::FieldValue::Str(format_hex_offset(off, &mut pc_buf)),
         };
         n += 1;
     }
@@ -1954,7 +1946,7 @@ fn report_detail_to(
         if let Some(off) = image_relative(live) {
             fields[n] = tairix_log::Field {
                 key: "live_pc",
-                value: tairix_log::FieldValue::Str(hex_off(off, &mut live_pc_buf)),
+                value: tairix_log::FieldValue::Str(format_hex_offset(off, &mut live_pc_buf)),
             };
             n += 1;
         }
@@ -2063,10 +2055,10 @@ fn report_detail_to(
 }
 
 /// Bytes needed to render the deepest backtrace as `+0x<16>,+0x<16>,…`:
-/// each of [`cpu_state::WD_BT_MAX`] frames is `+0x` + 16 nibbles (19) plus a
-/// separating comma (20), and the trailing comma is simply not written.
+/// each of [`cpu_state::WD_BT_MAX`] frames is one rendered offset plus a
+/// separating comma, and the trailing comma is simply not written.
 #[cfg(feature = "watchdog-diagnostics")]
-const BT_RENDER_BYTES: usize = cpu_state::WD_BT_MAX * 20;
+const BT_RENDER_BYTES: usize = cpu_state::WD_BT_MAX * HEX_OFFSET_STRIDE;
 
 /// Slots for the lockup-detail record's fields. Every field is written by
 /// index, so this must stay at or above the number a single report can emit
@@ -2094,27 +2086,21 @@ fn push_backtrace_field<'a>(
     if diag.bt_len == 0 {
         return n;
     }
-    let mut used = 0;
-    let mut rendered_any = false;
+    // Only frames the image base can place are rendered, so a walk taken
+    // before the base was registered adds nothing rather than disclosing a
+    // raw address.
+    let mut offsets = [0u64; cpu_state::WD_BT_MAX];
+    let mut count = 0;
     for &pc in diag.bt.iter().take(diag.bt_len) {
-        let Some(off) = image_relative(pc) else {
-            continue;
-        };
-        if rendered_any {
-            buf[used] = b',';
-            used += 1;
+        if let Some(off) = image_relative(pc) {
+            offsets[count] = off;
+            count += 1;
         }
-        let mut one = [0u8; 19];
-        let text = hex_off(off, &mut one);
-        let bytes = text.as_bytes();
-        buf[used..used + bytes.len()].copy_from_slice(bytes);
-        used += bytes.len();
-        rendered_any = true;
     }
-    if !rendered_any {
+    let text = format_hex_offset_list(&offsets[..count], buf);
+    if text.is_empty() {
         return n;
     }
-    let text = core::str::from_utf8(&buf[..used]).unwrap_or("");
     let mut n = n;
     fields[n] = tairix_log::Field {
         key: "k_bt",

@@ -133,6 +133,60 @@ pub fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
     core::str::from_utf8(&buf[..]).unwrap_or("?")
 }
 
+/// Bytes [`format_hex_offset`] writes: `+0x` plus 16 nibbles.
+pub const HEX_OFFSET_LEN: usize = 19;
+
+/// Render `offset` into `buf` as `+0x` followed by fixed-width 16-nibble
+/// lowercase hex, and return the populated sub-slice.
+///
+/// The leading `+` is what stops a reader mistaking a diagnostic's code
+/// address for an absolute runtime one: every address on a kernel or user
+/// post-mortem record is expressed relative to a load base, so the marker
+/// is the difference between an offline `addr2line` input and a disclosed
+/// load address.
+#[must_use]
+pub fn format_hex_offset(offset: u64, buf: &mut [u8; HEX_OFFSET_LEN]) -> &str {
+    buf[0] = b'+';
+    buf[1] = b'0';
+    buf[2] = b'x';
+    let mut hex = [0u8; 16];
+    let rendered = format_hex_u64(offset, &mut hex);
+    buf[3..].copy_from_slice(rendered.as_bytes());
+    core::str::from_utf8(&buf[..]).unwrap_or("+0x")
+}
+
+/// Bytes [`format_hex_offset_list`] needs per rendered offset: one offset
+/// plus its separating comma. The trailing comma is never written, so a
+/// buffer of `n * HEX_OFFSET_STRIDE` always holds `n` offsets.
+pub const HEX_OFFSET_STRIDE: usize = HEX_OFFSET_LEN + 1;
+
+/// Render `offsets` into `buf` as a comma-separated list of
+/// [`format_hex_offset`] values, and return the populated sub-slice.
+///
+/// The one spelling of a rendered backtrace, so a kernel post-mortem and a
+/// user-space stall report cannot disagree about how a frame chain reads.
+/// Renders as many whole offsets as `buf` holds and stops, so a caller with
+/// a fixed field buffer gets a prefix rather than nothing.
+#[must_use]
+pub fn format_hex_offset_list<'b>(offsets: &[u64], buf: &'b mut [u8]) -> &'b str {
+    let mut used = 0;
+    for &offset in offsets {
+        let separator = usize::from(used > 0);
+        if used + separator + HEX_OFFSET_LEN > buf.len() {
+            break;
+        }
+        if separator == 1 {
+            buf[used] = b',';
+            used += 1;
+        }
+        let mut one = [0u8; HEX_OFFSET_LEN];
+        let text = format_hex_offset(offset, &mut one);
+        buf[used..used + HEX_OFFSET_LEN].copy_from_slice(text.as_bytes());
+        used += HEX_OFFSET_LEN;
+    }
+    core::str::from_utf8(&buf[..used]).unwrap_or("")
+}
+
 /// Render `bytes` into `buf` as lowercase hex, two characters per byte, and
 /// return the populated sub-slice.
 ///
@@ -168,7 +222,10 @@ const fn hex_nibble(nibble: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_hex_bytes, format_hex_u64, format_i32, format_u64, format_usize};
+    use super::{
+        format_hex_bytes, format_hex_offset, format_hex_offset_list, format_hex_u64, format_i32,
+        format_u64, format_usize, HEX_OFFSET_LEN, HEX_OFFSET_STRIDE,
+    };
 
     #[test]
     fn format_i32_zero() {
@@ -299,5 +356,50 @@ mod tests {
     fn format_hex_bytes_into_an_unusable_buffer_is_empty() {
         let mut buf = [0u8; 1];
         assert_eq!(format_hex_bytes(&[0xaa], &mut buf), "");
+    }
+
+    #[test]
+    fn format_hex_offset_marks_the_value_as_relative() {
+        let mut buf = [0u8; HEX_OFFSET_LEN];
+        assert_eq!(
+            format_hex_offset(0x1234_5678, &mut buf),
+            "+0x0000000012345678"
+        );
+    }
+
+    #[test]
+    fn format_hex_offset_renders_the_extremes_full_width() {
+        let mut buf = [0u8; HEX_OFFSET_LEN];
+        assert_eq!(format_hex_offset(0, &mut buf), "+0x0000000000000000");
+        assert_eq!(format_hex_offset(u64::MAX, &mut buf), "+0xffffffffffffffff");
+    }
+
+    #[test]
+    fn an_offset_list_joins_with_commas_and_no_trailing_one() {
+        let mut buf = [0u8; 3 * HEX_OFFSET_STRIDE];
+        assert_eq!(
+            format_hex_offset_list(&[1, 2], &mut buf),
+            "+0x0000000000000001,+0x0000000000000002"
+        );
+    }
+
+    #[test]
+    fn an_empty_offset_list_renders_nothing() {
+        let mut buf = [0u8; HEX_OFFSET_STRIDE];
+        assert_eq!(format_hex_offset_list(&[], &mut buf), "");
+    }
+
+    #[test]
+    fn an_offset_list_renders_a_prefix_rather_than_overrunning_its_buffer() {
+        // Room for two offsets and one separator exactly; the third is
+        // dropped rather than truncated mid-value.
+        let mut buf = [0u8; 2 * HEX_OFFSET_LEN + 1];
+        assert_eq!(
+            format_hex_offset_list(&[1, 2, 3], &mut buf),
+            "+0x0000000000000001,+0x0000000000000002"
+        );
+        // A buffer too small for even one offset renders nothing.
+        let mut tiny = [0u8; HEX_OFFSET_LEN - 1];
+        assert_eq!(format_hex_offset_list(&[1], &mut tiny), "");
     }
 }

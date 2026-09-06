@@ -13,6 +13,12 @@ updates state on input and paints once from that state, scoped to what changed.
 This plan is that rule's staged enforcement across the desktop; it is no longer
 where the rule is derived.
 
+The rule now has a runtime witness as well as a reviewer: a surface declares
+the frame it owes and the kernel reports any span that overruns, naming the
+blocking call and the user stack that led there (`plans/FIX-STALLTRACE.md`).
+A freeze found by reading code, as every site in §1.1 was, is now one a debug
+image reports.
+
 ---
 
 ## 1. The defect

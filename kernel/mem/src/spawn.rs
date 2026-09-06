@@ -144,6 +144,28 @@ pub fn derive_user_layout(
     })
 }
 
+/// The image's relocated load base: the lowest address any of its segments
+/// is mapped at, once relocated by `bias`.
+///
+/// A diagnostic expresses a code address as an offset from this, so a
+/// post-mortem or stall report is an offline `addr2line` input rather than a
+/// disclosure of where the loader placed the program.
+///
+/// [`None`] when a segment's relocation overflows — the same refusal
+/// [`build_process_image`] takes — so a caller fails the build rather than
+/// recording a base it could not compute. A parsed [`LoadImage`] always
+/// carries at least one segment (the decoder refuses an image with none), so
+/// there is no "no segments" answer to give.
+#[must_use]
+pub fn image_load_base(image: &LoadImage, bias: u64) -> Option<u64> {
+    let mut lowest = None;
+    for segment in image.segments() {
+        let seg_base = segment.relocated_vaddr(bias).ok()?;
+        lowest = Some(lowest.map_or(seg_base, |base: u64| base.min(seg_base)));
+    }
+    lowest
+}
+
 /// The register state a freshly built process image is entered with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessImage {
@@ -1055,5 +1077,51 @@ mod tests {
             LAYOUT_CEILING
         )
         .is_none());
+    }
+
+    /// The load base is the lowest relocated segment address — not the
+    /// entry point, and not the bias — so a diagnostic's offsets are into
+    /// the program's own binary.
+    #[test]
+    fn image_load_base_is_the_lowest_relocated_segment() {
+        let specs = [
+            SegSpec {
+                vaddr: 0x1000,
+                file_size: 4,
+                mem_size: 0x1000,
+                perm: RxePermission::ReadExecute,
+                content: vec![5, 6, 7, 8],
+            },
+            SegSpec {
+                vaddr: 0x3000,
+                file_size: 4,
+                mem_size: 0x1000,
+                perm: RxePermission::ReadWrite,
+                content: vec![1, 2, 3, 4],
+            },
+        ];
+        let (bytes, _) = image_bytes(0x1000, &specs);
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
+        let bias = 0x4000_0000;
+        // The lowest segment sits a page above the bias, so a base that
+        // merely echoed the bias would not pass.
+        assert_eq!(super::image_load_base(&image, bias), Some(bias + 0x1000));
+        assert_eq!(super::image_load_base(&image, 0), Some(0x1000));
+    }
+
+    /// A relocation that overflows yields no base, so the build refuses
+    /// rather than recording one it could not compute.
+    #[test]
+    fn image_load_base_refuses_an_overflowing_relocation() {
+        let specs = [SegSpec {
+            vaddr: 0x1000,
+            file_size: 4,
+            mem_size: 0x1000,
+            perm: RxePermission::ReadExecute,
+            content: vec![5, 6, 7, 8],
+        }];
+        let (bytes, _) = image_bytes(0x1000, &specs);
+        let image = LoadImage::parse(&bytes, &TAG).expect("valid image");
+        assert_eq!(super::image_load_base(&image, u64::MAX), None);
     }
 }

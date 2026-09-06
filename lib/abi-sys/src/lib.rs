@@ -100,6 +100,9 @@ const NUM_THREAD_EXIT: u64 = SyscallNumber::THREAD_EXIT.as_u16() as u64;
 const NUM_FUTEX_WAIT: u64 = SyscallNumber::FUTEX_WAIT.as_u16() as u64;
 const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
 
+/// `latency_watch` syscall number (as above).
+const NUM_LATENCY_WATCH: u64 = SyscallNumber::LATENCY_WATCH.as_u16() as u64;
+
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -1171,6 +1174,27 @@ pub extern "C" fn sys_signal_intake(op: u32) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel validates the op and acts only on the caller's own intake.
     unsafe { raw_syscall(NUM_SIGNAL_INTAKE, [u64::from(op), 0, 0, 0, 0, 0]) }
+}
+
+/// `latency_watch`: declare the calling thread's interactive frame budget in
+/// nanoseconds (`SyscallNumber::LATENCY_WATCH`, `plans/FIX-STALLTRACE.md`).
+/// `TAIRIX_LATENCY_BUDGET_DISARM` disarms it.
+///
+/// Returns the budget actually armed: the value clamped up to
+/// `TAIRIX_LATENCY_MIN_BUDGET_NS`, or `0` on an image that compiles the
+/// latency diagnostics out. Zero is an answer rather than a failure, so a
+/// caller reads it back instead of branching on the image it runs on.
+///
+/// Requires no capability: a thread describes only its own responsiveness
+/// obligation, granting nothing and reaching no other thread. A debug image
+/// then reports any span that overruns, naming the syscall that spent the
+/// budget and the load-relative user backtrace of the stalling code.
+#[must_use]
+#[export_name = "tairix_sys_latency_watch"]
+pub extern "C" fn sys_latency_watch(budget_ns: u64) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel clamps the budget and records it against the calling thread.
+    unsafe { raw_syscall(NUM_LATENCY_WATCH, [budget_ns, 0, 0, 0, 0, 0]) }
 }
 
 /// `sched_set_realtime`: set the calling task's scheduling class — enter
@@ -3140,6 +3164,7 @@ mod tests {
         (NUM_THREAD_EXIT, "thread_exit", 0),
         (NUM_FUTEX_WAIT, "futex_wait", 3),
         (NUM_FUTEX_WAKE, "futex_wake", 2),
+        (NUM_LATENCY_WATCH, "latency_watch", 1),
     ];
 
     #[test]
@@ -3845,6 +3870,32 @@ mod tests {
         assert_eq!(args[0], ptr as u64);
         assert_eq!(args[1], u64::from(u32::MAX));
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn latency_watch_marshals_the_budget_and_returns_what_was_armed() {
+        let (number, args) = capture(tairix_abi::latency::MIN_FRAME_BUDGET_NS, || {
+            assert_eq!(
+                sys_latency_watch(tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS),
+                tairix_abi::latency::MIN_FRAME_BUDGET_NS,
+                "the stub returns the kernel's answer verbatim, clamp and all"
+            );
+        });
+        assert_eq!(number, NUM_LATENCY_WATCH);
+        assert_eq!(args[0], tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS);
+        assert_eq!(&args[1..], &[0, 0, 0, 0, 0]);
+    }
+
+    /// Zero is the disarm on the way in and "no facility" on the way out;
+    /// the stub passes both through rather than translating either into an
+    /// error the C caller would have to handle.
+    #[test]
+    fn latency_watch_passes_zero_through_in_both_directions() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_latency_watch(tairix_abi::latency::BUDGET_DISARM), 0);
+        });
+        assert_eq!(number, NUM_LATENCY_WATCH);
+        assert_eq!(args[0], 0);
     }
 
     #[test]

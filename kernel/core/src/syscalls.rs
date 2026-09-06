@@ -73,6 +73,8 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
+#[cfg(feature = "watchdog-diagnostics")]
+use crate::latency::Overrun;
 use crate::sched::{
     level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
 };
@@ -85,6 +87,8 @@ use tairix_abi::sysinfo::{
     UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
     CRASH_MAX_FRAMES,
 };
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
@@ -2201,6 +2205,166 @@ where
         self.land_thread_down(process, thread, Some(FAULT_EXIT_CODE));
     }
 
+    /// Render one interactive-surface frame-budget overrun through the
+    /// **diagnostic** sink, walking the stalling thread's user stack.
+    ///
+    /// The frame the bookkeeping hands over was captured at a kernel entry
+    /// the thread is still inside, so its user stack has not moved since and
+    /// the chain read from it is exactly the stall's. Every read goes through
+    /// the fallible, `copy_in`-backed reader, so a corrupt or unmapped frame
+    /// pointer ends the walk cleanly rather than faulting the kernel.
+    ///
+    /// Code addresses are expressed relative to the program's own PIE load
+    /// base and are **omitted entirely** when that base is unknown, so the
+    /// record is an offline `addr2line` input and never discloses a load
+    /// address. It goes to the diagnostic stream rather than the
+    /// hash-chained audit trail, like the lockup detail, so no address lands
+    /// on the tamper-evident log.
+    /// Walk the stalling thread's user stack into `frames`, returning the
+    /// load-relative pc and the number of frames written.
+    ///
+    /// Both are `None`/zero when the frame is absent, the PIE load base is
+    /// unknown, or the port did not save a frame pointer: a code address is
+    /// omitted rather than emitted absolute (fail closed, no load-base
+    /// disclosure).
+    #[cfg(feature = "watchdog-diagnostics")]
+    fn walk_stall_frames(
+        &self,
+        process: ProcessId,
+        thread: SecTaskId,
+        over: &Overrun,
+        frames: &mut [u64; tairix_abi::latency::MAX_STALL_FRAMES],
+    ) -> (Option<u64>, usize) {
+        let aspaces = self.aspaces.read();
+        let (Some(regs), Some(base)) = (over.frame, aspaces.load_base(process)) else {
+            return (None, 0);
+        };
+        let rel = |addr: u64| addr.saturating_sub(base);
+        let mut count = 0usize;
+        if regs.fp_valid {
+            if let (Some((space, physmap)), Some(span)) =
+                (aspaces.resolve(process), aspaces.stack_span(thread))
+            {
+                let reader = crate::crash::UserStackReader::new(space, physmap);
+                let bounds = StackBounds::new(span.committed_base(), span.top());
+                walk(&reader, regs.fp, regs.layout, bounds, |ret_addr| {
+                    if count < frames.len() {
+                        frames[count] = rel(ret_addr);
+                        count += 1;
+                    }
+                });
+            }
+        }
+        (Some(rel(regs.pc)), count)
+    }
+
+    #[cfg(feature = "watchdog-diagnostics")]
+    fn report_latency_overrun(&self, process: ProcessId, thread: SecTaskId, over: &Overrun) {
+        use tairix_abi::latency::MAX_STALL_FRAMES;
+        use tairix_util::fmt::{
+            format_hex_offset, format_hex_offset_list, HEX_OFFSET_LEN, HEX_OFFSET_STRIDE,
+        };
+
+        let mut frames = [0u64; MAX_STALL_FRAMES];
+        let (pc_relative, frame_count) = self.walk_stall_frames(process, thread, over, &mut frames);
+
+        let caps_guard = self.caps.read();
+        let record = caps_guard.caps_of_process(process);
+        let name = record.map_or("", TaskCapabilities::name);
+
+        let mut pc_buf = [0u8; HEX_OFFSET_LEN];
+        let mut bt_buf = [0u8; MAX_STALL_FRAMES * HEX_OFFSET_STRIDE];
+        let bt = format_hex_offset_list(&frames[..frame_count], &mut bt_buf);
+
+        let mut fields = [
+            Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(thread.0),
+            },
+            Field {
+                key: "name",
+                value: tairix_log::FieldValue::Str(name),
+            },
+            Field {
+                key: "budget_ms",
+                value: tairix_log::FieldValue::UnsignedInt(over.budget_ns / NANOS_PER_MILLI),
+            },
+            Field {
+                key: "elapsed_ms",
+                value: tairix_log::FieldValue::UnsignedInt(over.elapsed_ns / NANOS_PER_MILLI),
+            },
+            Field {
+                key: "blocked_ms",
+                value: tairix_log::FieldValue::UnsignedInt(over.blocked_ns / NANOS_PER_MILLI),
+            },
+            Field {
+                key: "calls",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(over.calls)),
+            },
+            Field {
+                key: "sampled",
+                value: tairix_log::FieldValue::Str(over.sample.as_str()),
+            },
+            // The three below are present only when the overrun has them,
+            // so a record never implies a blocking call or an address it
+            // could not name.
+            Field {
+                key: "blocked_in",
+                value: tairix_log::FieldValue::Str(""),
+            },
+            Field {
+                key: "blocked_in_ms",
+                value: tairix_log::FieldValue::UnsignedInt(0),
+            },
+            Field {
+                key: "pc",
+                value: tairix_log::FieldValue::Str(""),
+            },
+            Field {
+                key: "bt",
+                value: tairix_log::FieldValue::Str(""),
+            },
+        ];
+        let mut n = 7;
+        if let Some(number) = over.blocked_in {
+            fields[n] = Field {
+                key: "blocked_in",
+                value: tairix_log::FieldValue::Str(
+                    SyscallNumber::from_register(number)
+                        .ok()
+                        .and_then(tairix_abi::syscalls::spec_for)
+                        .map_or("unknown", |spec| spec.name),
+                ),
+            };
+            n += 1;
+            fields[n] = Field {
+                key: "blocked_in_ms",
+                value: tairix_log::FieldValue::UnsignedInt(over.blocked_in_ns / NANOS_PER_MILLI),
+            };
+            n += 1;
+        }
+        if let Some(pc) = pc_relative {
+            fields[n] = Field {
+                key: "pc",
+                value: tairix_log::FieldValue::Str(format_hex_offset(pc, &mut pc_buf)),
+            };
+            n += 1;
+        }
+        if !bt.is_empty() {
+            fields[n] = Field {
+                key: "bt",
+                value: tairix_log::FieldValue::Str(bt),
+            };
+            n += 1;
+        }
+        crate::audit::emit(
+            self.log_sink,
+            tairix_log::Level::Warn,
+            AuditEvent::TaskLatencyOverrun,
+            &fields[..n],
+        );
+    }
+
     /// Retire `thread` from its thread group and, when it was the group's last
     /// thread still executing, record `status` for the parent's `wait` and
     /// reclaim the process.
@@ -2222,6 +2386,11 @@ where
         thread: SecTaskId,
         status: Option<i32>,
     ) -> bool {
+        // The frame-budget watch is per-thread, so it goes with the thread —
+        // before the group-still-alive return, or a dying thread of a live
+        // process would leave its accounting for whoever draws its id next.
+        #[cfg(feature = "watchdog-diagnostics")]
+        crate::latency::forget(SchedulerArch::current_cpu(self.arch), thread.0);
         if crate::threads::retire(self.caps, self.aspaces, thread) != 0 {
             return false;
         }
@@ -6428,6 +6597,30 @@ where
         Ok(0)
     }
 
+    /// Declare the calling thread's interactive frame budget.
+    ///
+    /// Present in both feature states, because the answer differs but the
+    /// handler must not: a shippable image arms nothing and says so with
+    /// zero, which the caller reads back rather than handling an error it
+    /// could do nothing about. Leaving it to the trait default instead would
+    /// make an unwired kernel answer the same way as a deliberately inert
+    /// one.
+    fn latency_watch(&self, caller: &CallerContext<'_>, budget_ns: u64) -> SyscallResult {
+        #[cfg(feature = "watchdog-diagnostics")]
+        {
+            Ok(crate::latency::arm(
+                SchedulerArch::current_cpu(self.arch),
+                caller.task_id.0,
+                budget_ns,
+            ))
+        }
+        #[cfg(not(feature = "watchdog-diagnostics"))]
+        {
+            let _ = (caller, budget_ns);
+            Ok(0)
+        }
+    }
+
     fn dma_alloc(
         &self,
         caller: &CallerContext<'_>,
@@ -9240,6 +9433,19 @@ where
             }
         }
 
+        // A surface's frame obligation runs from one event wait to the
+        // next, so this wait is where a watched thread stops owing one — and
+        // the wait's own cost is never charged to it. A *memberless* wait
+        // with a finite timeout is not an event wait at all but a sleep, and
+        // a sleep on the frame path is one of the stalls the watch exists to
+        // catch, so it deliberately leaves the span open.
+        #[cfg(feature = "watchdog-diagnostics")]
+        let event_wait = !members.is_empty() || timeout_ns == crate::waitq::NO_DEADLINE;
+        #[cfg(feature = "watchdog-diagnostics")]
+        if event_wait {
+            crate::latency::close_span(cpu, sched_task);
+        }
+
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
         // post-write IRQ-edge consume.
         let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
@@ -9359,6 +9565,14 @@ where
         // on *any* timed wait-queue needs (or clear it) so a finished wait
         // leaves no stale arming and drops no other queue's pending wake.
         self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
+
+        // The wait has returned, so the surface owes an answer from here —
+        // whichever way this call ends, since a refused wait still hands the
+        // thread back to user code.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if event_wait {
+            crate::latency::open_span(cpu, sched_task, self.arch.monotonic_ns(cpu));
+        }
 
         let (kind, id, token) = outcome?;
 
@@ -11077,6 +11291,11 @@ fn build_from_bytes(
         // A freshly admitted process is its own thread-group leader, so its
         // leader thread owns the spawn layout's stack span.
         aspaces.set_stack_span(sec_id, sec_id.leader_task(), image.stack_span);
+        // The image's load base, so a later diagnostic — a stall report, a
+        // crash record — expresses this program's code addresses as offsets
+        // into its own binary. Without it every such address is omitted
+        // rather than emitted absolute, which is fail-closed but useless.
+        aspaces.set_load_base(sec_id, image.load_base);
     }
     Ok(ReadyToEnter {
         pre_resume: image.pre_resume,
@@ -12060,6 +12279,19 @@ where
         // returns above sit before this point, so the window never leaks.
         crate::procsignal::syscall_enter(sched_task_id);
 
+        // Frame-budget boundary (entry): record which call this watched
+        // thread is entering, together with the user frame the port
+        // published, and report a span that went over budget while the
+        // thread was running user code — the frame just taken names that
+        // code, and its stack cannot move while the thread is in here.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if let Some(over) = crate::latency::on_syscall_entry(cpu, sched_task_id, raw_number, || {
+            self.arch.monotonic_ns(cpu)
+        }) {
+            self.handlers
+                .report_latency_overrun(caller_process, task_id, &over);
+        }
+
         // Steps 2–5: hand off to the dispatcher, which performs the
         // capability check, argument validation, handler dispatch,
         // and audit emission.
@@ -12083,6 +12315,18 @@ where
         // `reschedule_current` call: the kernel is non-preemptible, and
         // nothing below parks.
         let completion_cpu = SchedulerArch::current_cpu(self.arch);
+
+        // Frame-budget boundary (exit): the call has returned, so its cost
+        // is known. A span that crosses its budget *here* was carried over
+        // by this very call, and the frame taken at its entry names the
+        // blocking call site.
+        #[cfg(feature = "watchdog-diagnostics")]
+        if let Some(over) = crate::latency::on_syscall_exit(completion_cpu, sched_task_id, || {
+            self.arch.monotonic_ns(completion_cpu)
+        }) {
+            self.handlers
+                .report_latency_overrun(caller_process, task_id, &over);
+        }
 
         // The kill boundary: a termination deferred while this task was
         // inside the handler lands now, after the unwind released
@@ -16243,6 +16487,9 @@ mod tests {
                 frozen,
                 physmap,
                 stack_span,
+                // The fixture maps one page at a fixed address, so that page
+                // is the whole image and its base.
+                load_base: 0x1000,
                 live: None,
                 pre_resume: crate::test_arch::inert_process_resume(),
                 entry: crate::spawn::UserThreadEntry {
@@ -22870,6 +23117,116 @@ mod tests {
             .with_filesystem(fs)
             .with_file_map(fm);
         (fs, fm, aspaces, h, ctx, sink)
+    }
+
+    /// The overrun record's fields, and the deliberate omission of a code
+    /// address the load base cannot place.
+    ///
+    /// It goes to the **diagnostic** sink, not the audit sink, so no code
+    /// address lands on the tamper-evident log; the fixture wires the same
+    /// recorder to both and the assertions key on the id.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[test]
+    fn a_latency_overrun_reports_where_the_budget_went() {
+        use crate::latency::{EntryFrame, Overrun};
+        use tairix_abi::latency::{StallSample, DEFAULT_FRAME_BUDGET_NS};
+        use tairix_arch_api::backtrace::FrameLayout;
+
+        let (_fs, _fm, aspaces, h, _ctx, sink) = file_map_fixture(Vec::new());
+        let h = h.with_log_sink(sink);
+        let over = Overrun {
+            budget_ns: DEFAULT_FRAME_BUDGET_NS,
+            elapsed_ns: 312_000_000,
+            blocked_ns: 304_000_000,
+            calls: 41,
+            blocked_in: Some(u64::from(SyscallNumber::IPC_CALL.as_u16())),
+            blocked_in_ns: 297_000_000,
+            frame: None,
+            sample: StallSample::None,
+        };
+
+        // 1. No frame: the timings and the culprit call still name what
+        //    spent the budget, and no address is implied.
+        sink.clear();
+        h.report_latency_overrun(ProcessId(2), SecTaskId(2), &over);
+        let rec = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::TaskLatencyOverrun.id())
+            .expect("the overrun is reported");
+        assert_eq!(rec.level, tairix_log::Level::Warn);
+        let field = |key: &str| {
+            rec.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(field("task"), Some(String::from("2")));
+        assert_eq!(field("budget_ms"), Some(String::from("250")));
+        assert_eq!(field("elapsed_ms"), Some(String::from("312")));
+        assert_eq!(field("blocked_ms"), Some(String::from("304")));
+        assert_eq!(field("calls"), Some(String::from("41")));
+        assert_eq!(field("sampled"), Some(String::from("none")));
+        assert_eq!(field("blocked_in"), Some(String::from("ipc_call")));
+        assert_eq!(field("blocked_in_ms"), Some(String::from("297")));
+        assert!(field("pc").is_none(), "no frame implies no address");
+        assert!(field("bt").is_none());
+
+        // 2. A frame whose load base was never recorded: the address is
+        //    omitted rather than emitted absolute, so the record can never
+        //    disclose a load address.
+        let framed = Overrun {
+            frame: Some(EntryFrame {
+                pc: 0x4000_4a1c,
+                fp: 0,
+                fp_valid: false,
+                layout: FrameLayout {
+                    saved_fp_offset: 0,
+                    return_addr_offset: 8,
+                },
+            }),
+            sample: StallSample::Blocking,
+            ..over
+        };
+        sink.clear();
+        h.report_latency_overrun(ProcessId(2), SecTaskId(2), &framed);
+        let rec = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::TaskLatencyOverrun.id())
+            .expect("reported");
+        assert!(
+            !rec.fields.iter().any(|(k, _)| k == "pc"),
+            "an unplaceable address is omitted, never emitted absolute"
+        );
+        assert_eq!(
+            rec.fields
+                .iter()
+                .find(|(k, _)| k == "sampled")
+                .map(|(_, v)| v.as_str()),
+            Some("blocking")
+        );
+
+        // 3. With the load base recorded the pc renders load-relative, with
+        //    the marker that distinguishes it from an absolute address.
+        aspaces.write().set_load_base(ProcessId(2), 0x4000_0000);
+        sink.clear();
+        h.report_latency_overrun(ProcessId(2), SecTaskId(2), &framed);
+        let rec = sink
+            .snapshot()
+            .into_iter()
+            .find(|e| e.id == AuditEvent::TaskLatencyOverrun.id())
+            .expect("reported");
+        assert_eq!(
+            rec.fields
+                .iter()
+                .find(|(k, _)| k == "pc")
+                .map(|(_, v)| v.as_str()),
+            Some("+0x0000000000004a1c")
+        );
+        // The port reported no usable frame pointer, so no chain is walked
+        // and none is claimed.
+        assert!(!rec.fields.iter().any(|(k, _)| k == "bt"));
     }
 
     /// `file_map` validates the request shape, resolves the caller's own

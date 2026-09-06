@@ -4976,6 +4976,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-stalltrace"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-test-stalltrace-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-stalltrace",
+]
+
+[[package]]
 name = "tairix-test-stress-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5927,6 +5948,7 @@ dependencies = [
  "tairix-test-netstack-wire",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
+ "tairix-test-stalltrace",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",
  "tairix-theme",

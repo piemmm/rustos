@@ -705,7 +705,28 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
     number: u64,
     args_ptr: *const [u64; SYSCALL_MAX_ARGS],
+    user_frame_ptr: u64,
+    user_pc: u64,
 ) -> u64 {
+    // Report the entering ring-3 pc and frame pointer, so a diagnostic can
+    // attribute a user call stack to this call. Unlike the interrupt stubs
+    // the `syscall` entry saves no GPR block, so the stub hands both values
+    // over in argument registers — `rbp` is untouched by the stub and
+    // `rip` is the `syscall` instruction's own `rcx`, which is already the
+    // fourth System V argument register. System V makes `rbp` callee-saved,
+    // so a Rust prologue here would have overwritten it: the value has to
+    // arrive as an argument rather than be read out of the register.
+    // The observer is consulted first: resolving this CPU's dense id costs
+    // a LAPIC id read, which must not be added to every syscall on an image
+    // whose kernel installed no observer.
+    if let Some(observe) = tairix_arch_api::userentry::user_entry_observer() {
+        observe(
+            crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id()),
+            user_pc,
+            user_frame_ptr,
+            true,
+        );
+    }
     let raw = SYSCALL_DISPATCH_CALLBACK.load(Ordering::Acquire);
     if raw == 0 {
         // Fail-closed: a syscall reached the trampoline before the
@@ -751,7 +772,9 @@ pub fn syscall_entry_addr() -> u64 {
 /// 4. Build the [`SYSCALL_MAX_ARGS`]-wide argument array on the
 ///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
-///    `%rsi = &args[0]`. Call [`tairix_arch_x86_64_syscall_dispatch`].
+///    `%rsi = &args[0]`, `%rdx = user %rbp`, `%rcx = user RIP` (already
+///    there). Call [`tairix_arch_x86_64_syscall_dispatch`]. No extra push,
+///    so the frame size and its alignment padding are unchanged.
 /// 6. The return value is in `%rax` already — leave it.
 /// 7. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
 ///    (restoring the caller's argument registers — the user-side trap
@@ -790,9 +813,18 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "pushq %rdx",
         "pushq %rsi",
         "pushq %rdi",
-        // 5. Call Rust trampoline: rdi=number (was rax), rsi=&args[0].
+        // 5. Call Rust trampoline: rdi=number (was rax), rsi=&args[0],
+        //    rdx=user rbp, rcx=user RIP. `rdx` held a syscall argument,
+        //    which step 4 has already stored into the array, so it is free;
+        //    `rbp` is untouched by this stub and still holds the user's, and
+        //    `rcx` is the `syscall` instruction's saved user RIP and already
+        //    sits in the fourth System V argument register. Passing both in
+        //    registers costs no push, so the frame size — and the "rsp ≡ 0
+        //    (mod 16) at `call`" rule the user-rsp slot pads for — is
+        //    unchanged.
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
+        "movq %rbp, %rdx",
         // 6. Run the syscall body with device interrupts deliverable. The
         //    CPU cleared IF via IA32_FMASK on entry; we are now in a
         //    well-defined kernel context (swapgs done, pivoted onto this

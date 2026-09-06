@@ -1,0 +1,43 @@
+[package]
+name = "tairix-test-stalltrace-qemu-aarch64"
+description = "plans/FIX-STALLTRACE.md QEMU vertical: boot the production aarch64 tairix-kernel pipeline (boot_aarch64::boot) with the debug image's watchdog-diagnostics on and the encrypted-root disk carrying the standard signed store bundles plus the test-only stalltrace fixture bundle, unlock the root, authenticate root/root at the console login, and run `stalltrace` from the scripted shell. The fixture declares a frame budget and provokes exactly one overrun; PASS once the kernel's TaskLatencyOverrun record has arrived naming the blocking call with a live user backtrace, and the shell's scripted exit follows it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-stalltrace-qemu-aarch64"
+path = "src/main.rs"
+
+# Freestanding "boot the production aarch64 pipeline and prove a provoked
+# frame-budget overrun is reported with a live user backtrace" integration
+# test. It reuses the entire production boot pipeline through
+# `tairix-kernel`'s library half and only swaps the diagnostic sink for the
+# gate (no duplication) — and it enables `watchdog-diagnostics`, because the
+# facility under test exists in no other configuration. Keeping the
+# QEMU-exit shortcut in a dedicated bin (not a Cargo feature on a production
+# crate) prevents feature unification from leaking it into any production
+# build (fail closed).
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0", features = [
+    "watchdog-diagnostics",
+] }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The shared failure-code minter, so each refused-record case exits with its
+# own distinguishable code rather than an indistinguishable timeout.
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+# The fixture's vocabulary library — the marker lines this vertical's script
+# keys on. `default-features = false`: the fixture's `program` feature (its
+# own `Run` binary's userland runtime) must never link into this kernel bin.
+tairix-test-stalltrace = { path = "../stalltrace_program", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

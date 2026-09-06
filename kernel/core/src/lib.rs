@@ -101,6 +101,10 @@ pub mod kheap;
 pub mod kstack;
 pub mod kthread;
 pub mod kthread_irq;
+/// The task-latency watchdog is a debug-image developer aid: a shippable
+/// image carries none of its state and answers every arming call with zero.
+#[cfg(feature = "watchdog-diagnostics")]
+pub mod latency;
 pub mod launch_cache;
 pub mod live_producer;
 pub mod loadavg;

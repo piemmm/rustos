@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 20 open, 79 closed, 99 total.
+table normalises all three to **closed**. 20 open, 82 closed, 102 total.
 
 ### Open (20)
 
@@ -48,7 +48,7 @@ table normalises all three to **closed**. 20 open, 79 closed, 99 total.
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 
-### Closed (79)
+### Closed (82)
 
 | ID | Subject |
 |---|---|
@@ -131,6 +131,9 @@ table normalises all three to **closed**. 20 open, 79 closed, 99 total.
 | D92 | `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number |
 | D93 | riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor be acknowledged |
 | D94 | the `fd_grant`/`fd_redeem` picker delegation had no guest vertical (a plan + a doc claimed it did) |
+| D100 | the PIE load base was never recorded, so every user code address in a diagnostic was unplaceable |
+| D101 | the debug image's kernel diagnostics were never linted by any clippy pass |
+| D102 | a new syscall's handler default answered a value instead of refusing, and its C-ABI stub was missing |
 
 ## Scope
 
@@ -6098,3 +6101,133 @@ recorded here so the choice is explicit and bounded.
 click-through gives it its caller, or FM9-a's toolbar gesture is abandoned and
 the helper goes with it (`§2.14` — the change that makes code obsolete deletes
 it).
+
+## D100 — the PIE load base was never recorded, so every user code address in a diagnostic was unplaceable (FIXED)
+
+**Mechanism.** `AddressSpaceRegistry::set_load_base` / `load_base` existed and
+were reached only from tests: no production path recorded a process's
+relocated load base. Both consumers degraded silently, because each expresses
+a code address as an offset into the program's own binary and **omits** the
+field when the base is unknown rather than emitting it absolute — the
+`plans/FIX-WILD.md` crash record's `pc`, registers and backtrace, and the
+`plans/FIX-STALLTRACE.md` stall report's `pc` and `bt`. Fail-closed, so
+nothing leaked and nothing crashed; the two diagnostics were simply blind,
+and a reader had no way to tell "no address to report" from "the address was
+withheld".
+
+**Evidence.** The stall-trace vertical's first run. Its transcript carried a
+complete overrun record with everything except the two fields the facility
+exists for, which is what named the gap:
+
+```
+id=4150 ... name=stalltrace budget_ms=250 elapsed_ms=501 blocked_ms=500
+  calls=4 sampled=blocking blocked_in=waitset_wait blocked_in_ms=500
+```
+
+**Fix.** `tairix_kernel_mem::image_load_base` is the one definition of "the
+lowest relocated segment address". The three arch image builders compute it
+from the same image and bias their layout was derived with and carry it in
+`BuiltImage`; `build_child_image` records it per process beside the stack
+span. It answers `None` — and so fails the build through the same
+`refuse_build` path the layout derivations use — when a segment's relocation
+overflows, rather than recording a base it could not compute.
+
+**Regression tests.** `image_load_base_is_the_lowest_relocated_segment` (the
+base is the lowest segment, not the entry point and not the bias, biased and
+unbiased) and `image_load_base_refuses_an_overflowing_relocation`, both in
+`kernel/mem`; plus `tests/integration/stalltrace_qemu_aarch64`, which fails
+the run with its own code when a report's `pc` is absent or not
+load-relative, so the guest cannot regress to the blind state without saying
+so.
+
+**What is not claimed.** PID 1's load base is still unrecorded: `init` is
+entered by the boot path before any ordinary admission, and its own producers
+(`kernel/tairix-kernel/src/*/init_spawn.rs`) do not go through
+`build_child_image`. `init` arms no frame budget, so the stall report is
+unaffected; a *crash* record for PID 1 keeps omitting its addresses. That
+remainder belongs to `plans/FIX-WILD.md`'s own plumbing rather than being
+smuggled in here.
+
+## D101 — the debug image's kernel diagnostics were never linted by any clippy pass (FIXED)
+
+**Mechanism.** `cargo xtask ci`'s clippy stages — the host pass and every
+per-target product pass — all ran with default features, and the whole
+debug-image diagnostics body is behind the `watchdog-diagnostics` feature. So
+the lockup detail, the kernel-activity breadcrumb, the per-CPU lock-site
+stack, and (as it was being written) the task-latency watchdog were code no
+gate ever compiled under `-D warnings`. A lint regression reachable only in
+the non-shippable `debug` image could not fail CI, which is the one image a
+developer actually runs.
+
+**Evidence.** Running the same clippy by hand with the feature on surfaced
+two pre-existing findings immediately, in code untouched by the change that
+found them.
+
+**Fix.** `tools/xtask`'s target-clippy stage now lints the kernel stratum
+twice per Tier-1 target: once as the shippable `installer` image builds it,
+once with the debug image's feature on. The feature name is read from the
+same place the image build spells it, so the pass and the image cannot
+diverge. The two findings it surfaced are fixed rather than allowed
+unexplained — `report_detail_to`'s length, with the justification that it is
+the linear record builder its siblings are, and
+`lock_diagnostics_current_cpu`'s `Option`, which its installed seam's type
+dictates.
+
+**What is not claimed.** This closes the *kernel* stratum only. The enrolled
+QEMU guests under `tests/integration/` remain unlinted, which is the separate
+known gap staged in `plans/CODEVERIFY.md`.
+
+## D102 — a new syscall's `SyscallHandlers` default answered a value instead of refusing, so an unwired kernel was indistinguishable from an inert one (FIXED)
+
+**Mechanism.** `latency_watch` returns a *value* rather than a status: zero
+means "this image armed no budget", which a caller reads back instead of
+handling an error it could do nothing about. Its `SyscallHandlers` default
+was written to answer that zero directly — so a kernel that never wired the
+handler would have reported "armed nothing" exactly as a shippable image
+whose facility is compiled out does, and the two states could not be told
+apart. Every other handler in the trait defaults to
+`Err(Errno::NotImplemented)` precisely so an unwired subsystem is detected;
+this one defaulted fail-**open**.
+
+It was also the C-ABI surface's gap in the same change: `lib/abi-sys` must
+export one `tairix_sys_*` stub per `abi-v1` syscall, and the new syscall had
+none — 119 stubs against 120 table entries — so a third-party program could
+not call it at all.
+
+**Evidence.** Two independent gate stages, on the same change:
+
+```
+tests::registry_covers_exactly_the_frozen_table
+  every abi-v1 syscall must have exactly one tairix_sys_* stub
+  left: 119   right: 120
+
+dispatch_capability_gate_tracks_oracle
+  minimal failing input: [Call { cap_mask: 0, selector: 119 }]
+  left: 0   right: 1        (handler reached: no; oracle: yes)
+```
+
+The proptest model is what named the fail-open default: its oracle expects an
+uncapped syscall to *reach a handler*, and the silently-succeeding default
+satisfied the return value while reaching nothing.
+
+**Fix.** The default refuses with `Err(Errno::NotImplemented)` like every
+sibling, and `kernel/core`'s override — present in **both** feature states,
+with only the answer differing — is what returns zero on an image that
+compiles the facility out. The `lib/abi-sys` stub
+(`tairix_sys_latency_watch`) and its registry row were added; the generated
+C header already carried the prototype, since that is emitted from the
+table.
+
+**Regression tests.**
+`an_unwired_handler_refuses_rather_than_answering_a_value` in
+`kernel/syscall` drives a double implementing only the trait's *required*
+methods, so every defaulted handler is exercised as an unwired build behaves;
+`latency_watch_marshals_the_budget_and_returns_what_was_armed` and
+`latency_watch_passes_zero_through_in_both_directions` in `lib/abi-sys`; plus
+the existing registry-coverage and capability-gate model, which are what
+caught it.
+
+**What this says about the change that caused it.** Both halves were found by
+the whole-project gate rather than by the per-crate runs used while building,
+which is the reason the charter makes the whole-project run the only thing
+that counts as done.

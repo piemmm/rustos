@@ -1470,6 +1470,7 @@ You are not exempt from any rule above. In addition:
     | Default desktop apps going live: app windows, live app data channels, the file picker | `plans/APPWIN.md` |
     | The graphical file manager (`files.app`): clickable icons, open/launch, rename, move/copy/delete, properties | `plans/NEW-FILEMANAGER.md` |
     | Desktop responsiveness: non-blocking app launch (no UI freeze while an app loads), asynchronous process launch | `plans/FIX-DESKTOP.md` |
+    | Diagnosing a desktop pause: the per-thread frame budget, the overrun report, the user-stack backtrace of the stalling call | `plans/FIX-STALLTRACE.md` |
     | The desktop pinboard: the wallpaper (default set, fit modes, sandboxed decode, the per-user settings the session publishes), the `Desktop` folder's icon arrangement and sort order, the backdrop context menu, and the wallpaper chooser app | `plans/PINBOARD.md` |
     | The taskbar / icon bar: the program-library launcher + folder catalog, the file-manager icon, the per-application slot strip with its app-declared menu and hover window picker, the notification area, and the always-rightmost Switchboard system-overview icon | `plans/NEW-TASKBAR.md` |
     | The Switchboard window: its sections, chrome, the controls it composes, and which readings are real measurements versus awaiting an interface | `plans/NEW-SWITCHBOARD.md` |

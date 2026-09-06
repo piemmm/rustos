@@ -2130,6 +2130,24 @@ order (one fully-gated increment each):
                    wire their own cadence + `WatchdogArch`. Design:
                    `docs/src/architecture/scheduler.md` +
                    `docs/src/architecture/kernel.md` audit catalogue.
+                 - **Task-latency watchdog — stack-traced interactive stalls
+                   (host-proven + aarch64 QEMU vertical). Design:
+                   `plans/FIX-STALLTRACE.md`,
+                   `docs/src/architecture/latency-diagnostics.md`.** A thread
+                   declares the frame it owes the user (`latency_watch`,
+                   syscall 119, no capability); the kernel measures each span
+                   from the return of an event wait to the next one and
+                   reports an overrun naming the syscall that spent the budget
+                   and the load-relative user backtrace of the stalling code
+                   (`TASK_LATENCY_OVERRUN`, 4150, on the diagnostic stream so
+                   no address reaches the audit trail). Detection is at the two
+                   syscall boundaries only — the frame is captured while the
+                   thread is inside the kernel, where its user stack is
+                   frozen — so there is no sampling of another thread and no
+                   timer sweep; a thread that never returns is a wedge the
+                   CPU-lockup and liveness watchdogs already own. Every
+                   interactive surface arms it; non-interactive services
+                   deliberately do not. Debug images only.
                  - **Runaway-interrupt quarantine — the storm root-cause fix
                    (host-proven).** The `usb_mouse`/`xhci` "100% CPU" +
                    hard-lockup symptom is a bound line (a wedged/never-quiesced

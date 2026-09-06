@@ -35,6 +35,14 @@
 //! The image pipeline builds the kernel and the programs in separate cargo
 //! invocations for exactly that reason; the lint passes mirror it.
 //!
+//! ## The debug-image pass
+//!
+//! The kernel stratum is linted twice per target: once as the shippable
+//! `installer` image builds it, and once with the debug image's
+//! `watchdog-diagnostics` feature on. Those bodies exist in no other
+//! configuration, so the second pass is the only thing that lints the debug
+//! image at all.
+//!
 //! ## The `wasm32` pass
 //!
 //! The browser target builds only one piece of product code — its own Arch HAL
@@ -74,6 +82,20 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             let packages = selection(&crates, arch, stratum);
             lint(ctx, arch.target_triple(), stratum.label(), &packages, args)?;
         }
+        // The kernel again with the debug-image diagnostics on. Those bodies
+        // — the lockup detail, the kernel-activity breadcrumb, the
+        // task-latency watchdog — exist in no other configuration, so
+        // without this pass the whole debug image is code nothing ever
+        // lints. The `installer` image is the pass above.
+        let kernel = selection(&crates, arch, Stratum::Kernel);
+        lint_with_features(
+            ctx,
+            arch.target_triple(),
+            "kernel+diagnostics",
+            &kernel,
+            KERNEL_DIAGNOSTICS_FEATURE,
+            args,
+        )?;
     }
     let (wasm_target, wasm_verticals) = wasm_tests::packages();
     lint(ctx, wasm_target, "arch", &wasm_arch(&crates), args)?;
@@ -90,6 +112,10 @@ fn wasm_arch(crates: &[Crate]) -> Vec<&str> {
         .collect()
 }
 
+/// The feature that turns the debug image's kernel diagnostics on, as
+/// `tools/xtask`'s image build spells it (`kernel_diag_feature_args`).
+const KERNEL_DIAGNOSTICS_FEATURE: &str = "watchdog-diagnostics";
+
 /// Run one `-D warnings` clippy pass over `packages` built for `target`.
 fn lint(
     ctx: &Context,
@@ -98,8 +124,23 @@ fn lint(
     packages: &[&str],
     args: &[OsString],
 ) -> Result<(), String> {
+    lint_with_features(ctx, target, what, packages, "", args)
+}
+
+/// [`lint`], with `features` (empty for none) enabled on the selection.
+fn lint_with_features(
+    ctx: &Context,
+    target: &str,
+    what: &str,
+    packages: &[&str],
+    features: &str,
+    args: &[OsString],
+) -> Result<(), String> {
     let mut cmd = ctx.cargo();
     cmd.args(["clippy", "--locked", "--target", target]);
+    if !features.is_empty() {
+        cmd.args(["--features", features]);
+    }
     // Report every finding in one pass rather than stopping at the first crate
     // that trips: a lint gate a developer has to re-run per error wastes a
     // cross-compile each time.

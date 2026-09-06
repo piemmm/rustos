@@ -2407,6 +2407,7 @@ fn generate_syscall() -> String {
     emit_signal_contract(&mut out);
     emit_power_contract(&mut out);
     emit_waitset_contract(&mut out);
+    emit_latency_contract(&mut out);
 
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
     for spec in SYSCALLS {
@@ -2417,6 +2418,37 @@ fn generate_syscall() -> String {
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
     out.push_str("#endif /* TAIRIX_SYSCALL_H */\n");
     out
+}
+
+/// Emit the `latency_watch()` contract into `tairix_syscall.h`: the default
+/// frame budget a surface declares and the bounds the kernel holds a budget
+/// and its reports to, every value read from `lib/abi` and never re-typed.
+fn emit_latency_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::latency;
+    out.push_str(
+        "/* latency_watch() — declare the calling thread's interactive frame budget in\n\
+         * nanoseconds. Returns the budget actually armed: the value clamped up to\n\
+         * TAIRIX_LATENCY_MIN_BUDGET_NS, or 0 on an image that compiles the diagnostics\n\
+         * out. Zero is an answer, not a failure. TAIRIX_LATENCY_BUDGET_DISARM disarms\n\
+         * the watch. Requires no capability. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LATENCY_DEFAULT_BUDGET_NS {}ull",
+        latency::DEFAULT_FRAME_BUDGET_NS
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LATENCY_MIN_BUDGET_NS {}ull",
+        latency::MIN_FRAME_BUDGET_NS
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LATENCY_BUDGET_DISARM {}ull",
+        latency::BUDGET_DISARM
+    );
+    out.push('\n');
 }
 
 /// Emit the signal-call contract items into `tairix_syscall.h`: the

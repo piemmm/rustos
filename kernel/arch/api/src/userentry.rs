@@ -22,6 +22,16 @@
 //! * [`EnterUser`] — the per-port handle the kernel reaches through. Its
 //!   single method consumes a [`UserEntry`] and diverges into user mode.
 //!
+//! # The inbound counterpart
+//!
+//! [`note_user_entry`] is the same boundary in the other direction: the
+//! port reports the register state a user thread is *entering the kernel*
+//! with, which only the port can read (the values live in whatever frame
+//! its trap entry saved). It exists so a diagnostic can attribute a user
+//! call stack to the thread that made the call; the observer is installed
+//! by the kernel, and a port whose kernel installed none pays a single
+//! relaxed load.
+//!
 //! # Why no host conformance vertical
 //!
 //! Unlike the side-channel and memory-tagging surfaces, "enter user
@@ -127,6 +137,61 @@ pub trait EnterUser: Send + Sync {
     unsafe fn enter_user(&self, regs: UserEntry) -> !;
 }
 
+/// The signature of the user-entry observer: the entering CPU's
+/// [`CpuId`](crate::CpuId), the interrupted user program counter and
+/// frame-pointer register, and whether that frame-pointer register is one
+/// the port actually saved.
+///
+/// Three scalars rather than a
+/// [`UserRegisterFrame`](crate::backtrace::UserRegisterFrame): this fires
+/// on every user->kernel entry, so it carries only what a frame-pointer
+/// walk needs — the chain's root and the pc that names its top. The walk's
+/// bounds come from the thread's own stack span, so the stack pointer is
+/// not among them, and a consumer that needs the whole register file has
+/// the fault path's frame instead.
+pub type UserEntryObserverFn = extern "C" fn(crate::CpuId, u64, u64, bool);
+
+/// The installed observer as a raw function pointer (`0` = none).
+static USER_ENTRY_OBSERVER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Install the user-entry observer every port reports through.
+///
+/// Storing a `fn` (not a closure) keeps it safe to call from trap
+/// context: there is no captured environment to drop mid-flight.
+pub fn set_user_entry_observer(cb: UserEntryObserverFn) {
+    USER_ENTRY_OBSERVER.store(cb as usize, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The installed observer, if any.
+///
+/// A port checks this *before* reading its saved frame, so an image whose
+/// kernel installed no observer pays one relaxed load per entry and never
+/// touches the frame.
+#[must_use]
+pub fn user_entry_observer() -> Option<UserEntryObserverFn> {
+    let raw = USER_ENTRY_OBSERVER.load(core::sync::atomic::Ordering::Relaxed);
+    if raw == 0 {
+        None
+    } else {
+        // SAFETY: every store into `USER_ENTRY_OBSERVER` round-trips a valid
+        // `UserEntryObserverFn` through `set_user_entry_observer`.
+        Some(unsafe { core::mem::transmute::<usize, UserEntryObserverFn>(raw) })
+    }
+}
+
+/// Report the register state `cpu` is entering the kernel from user mode
+/// with, to the installed observer.
+///
+/// `fp_valid` is the port's honest statement about its own trap frame: a
+/// port that does not save the frame-pointer register passes `false` so no
+/// consumer walks a chain from a register it never held.
+pub fn note_user_entry(cpu: crate::CpuId, pc: u64, fp: u64, fp_valid: bool) {
+    if let Some(observe) = user_entry_observer() {
+        observe(cpu, pc, fp, fp_valid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +257,27 @@ mod tests {
         let port = NeverEnter;
         let _: &dyn EnterUser = &port;
         assert_send_sync(&port);
+    }
+
+    /// The observed entry, so the installed-observer round trip is
+    /// checkable without a trap.
+    static OBSERVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+    extern "C" fn record(_cpu: crate::CpuId, pc: u64, _fp: u64, _fp_valid: bool) {
+        OBSERVED.store(pc, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn an_entry_reaches_the_installed_observer_and_is_a_no_op_without_one() {
+        // Before any install the report must be inert rather than a null
+        // call: a port reports on every entry, including on an image whose
+        // kernel wants no observer.
+        note_user_entry(0, 0x1111, 0, false);
+        assert_eq!(OBSERVED.load(core::sync::atomic::Ordering::Relaxed), 0);
+
+        set_user_entry_observer(record);
+        assert!(user_entry_observer().is_some());
+        note_user_entry(0, 0xfeed, 0x2100, true);
+        assert_eq!(OBSERVED.load(core::sync::atomic::Ordering::Relaxed), 0xfeed);
     }
 }

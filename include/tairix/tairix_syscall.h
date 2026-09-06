@@ -142,6 +142,7 @@ extern "C" {
 #define TAIRIX_SYS_FS_REALPATH 116u
 #define TAIRIX_SYS_PORT_READ 117u
 #define TAIRIX_SYS_PORT_WRITE 118u
+#define TAIRIX_SYS_LATENCY_WATCH 119u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -310,6 +311,15 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_WAIT_SOURCE_MEMORY_PRESSURE 9u
 #define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
 
+/* latency_watch() — declare the calling thread's interactive frame budget in
+* nanoseconds. Returns the budget actually armed: the value clamped up to
+* TAIRIX_LATENCY_MIN_BUDGET_NS, or 0 on an image that compiles the diagnostics
+* out. Zero is an answer, not a failure. TAIRIX_LATENCY_BUDGET_DISARM disarms
+* the watch. Requires no capability. */
+#define TAIRIX_LATENCY_DEFAULT_BUDGET_NS 250000000ull
+#define TAIRIX_LATENCY_MIN_BUDGET_NS 1000000ull
+#define TAIRIX_LATENCY_BUDGET_DISARM 0ull
+
 /* Syscall entry points, implemented by the user-space stub library. */
 void tairix_sys_yield(void);
 void tairix_sys_exit(int32_t a0);
@@ -430,6 +440,7 @@ int32_t tairix_sys_fs_link(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uin
 uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3, uint32_t a4);
 uint64_t tairix_sys_port_read(uint64_t a0, uintptr_t a1, uint32_t a2);
 uint64_t tairix_sys_port_write(uint64_t a0, uintptr_t a1, uint32_t a2, uintptr_t a3);
+uint64_t tairix_sys_latency_watch(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

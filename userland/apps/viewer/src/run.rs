@@ -51,6 +51,8 @@ mod program {
 
     use alloc::vec::Vec;
 
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
     use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WINDOW_ENDPOINT};
@@ -910,6 +912,11 @@ mod program {
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
     fn main() -> i32 {
+        // From here this task drives a user-facing loop, so declare the
+        // frame it owes. A debug image then reports any span that overruns,
+        // naming the call that spent it; a shippable one arms nothing and
+        // answers zero, which is why the result is not examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         let mut client = WindowClient::new(RtWindowTransport);
 
         // --- The desktop this window will be shown on, established before

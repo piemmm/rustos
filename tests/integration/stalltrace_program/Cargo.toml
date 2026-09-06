@@ -1,0 +1,41 @@
+[package]
+name = "tairix-test-stalltrace"
+description = "plans/FIX-STALLTRACE.md fixture: the `stalltrace` command app the aarch64 stall-trace QEMU vertical plants on its disk and runs from the scripted root shell. It declares a frame budget, opens a span through a real event wait on a self-fed pipe, then deliberately stalls past the budget inside one syscall so the kernel's overrun report has a blocking call to name and a live user stack to walk. Never planted on a production image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring the other fixture bundles
+# (`tairix-test-memsoak`). `cargo build -p tairix-test-stalltrace` builds the
+# fixture program with it; `tools/xtask` depends on the *library* half alone
+# for the marker definitions, so the script build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt"]
+
+# The package is both the `tairix-test-stalltrace` vocabulary library (the
+# command word and marker lines the vertical's serial script keys on) and the
+# `Run` entry-point binary of the `stalltrace` fixture bundle. The binary is a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-test-stalltrace-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frame-budget constants and the wait-set vocabulary the fixture speaks;
+# it invents no parallel constants and links no kernel crate.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime (`_start`,
+# panic handler, allocator, and the syscall wrappers this fixture drives).
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }

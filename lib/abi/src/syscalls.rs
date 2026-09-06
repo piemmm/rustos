@@ -2964,6 +2964,32 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::MMIO_MAP),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::LATENCY_WATCH,
+        name: "latency_watch",
+        arg_count: 1,
+        args: [
+            // The frame budget in nanoseconds; `0` disarms. Any value is
+            // representable — the kernel clamps rather than refusing — so
+            // the whole register is a plain `U64`.
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The budget actually armed, so a caller reads back the clamp and
+        // learns from `0` that the image compiles the diagnostics out.
+        ret: AbiType::U64,
+        // A thread describes only its own responsiveness obligation: no
+        // authority is granted, no other thread is reachable, and no
+        // scheduling decision changes.
+        required_capability: None,
+        // Not a security decision, and a surface arms it once per session:
+        // the overrun report is the record worth keeping, not the arming.
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

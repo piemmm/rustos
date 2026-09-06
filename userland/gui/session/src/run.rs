@@ -83,6 +83,7 @@ mod program {
     use tairix_abi::driver::display::DisplayMode;
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest};
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
     use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -6174,6 +6175,13 @@ mod program {
                 return 2;
             }
         }
+
+        // From here this task is the desktop's compositor loop, so declare
+        // the frame it owes the user. A debug image then reports any span
+        // that overruns, naming the call that spent it; a shippable one
+        // arms nothing and answers zero, which is why the result is not
+        // examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
 
         // Acquire the boot seat's exclusive, revocable lease. The kernel
         // binds this task as the owner; a seat already held refuses with a

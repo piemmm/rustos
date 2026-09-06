@@ -827,6 +827,15 @@ pub fn boot(
     let _ = crate::riscv64::panic_ctx::install_kernel_fault_handler();
 
     syscall_entry::set_dispatch_callback(production_dispatch);
+
+    // Arm the task-latency watchdog beside the dispatcher it observes: an
+    // interactive surface that declares a frame budget then gets an overrun
+    // report naming the blocking call and the user code that stalled. The
+    // layout is this port's own frame-pointer convention, the same constant
+    // its fault-path backtrace uses. Debug image only; a shippable image
+    // installs no observer and the entry hook costs one relaxed load.
+    #[cfg(feature = "watchdog-diagnostics")]
+    tairix_kernel_core::latency::install(tairix_arch_riscv64::backtrace::Backtracer::LAYOUT);
     // Demand-paged file mappings resolve their U-mode data page faults
     // through the same resident hook; install the resolver beside the
     // dispatch callback so both are in place before user space exists.

@@ -37,6 +37,8 @@
 mod program {
     extern crate alloc;
 
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::time::WallTimeState;
@@ -329,6 +331,11 @@ mod program {
     /// set up and routes its return value through the `exit` syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would separate the frame-region grant from the create it must precede.
     fn main() -> i32 {
+        // From here this task drives a user-facing loop, so declare the
+        // frame it owes. A debug image then reports any span that overruns,
+        // naming the call that spent it; a shippable one arms nothing and
+        // answers zero, which is why the result is not examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         // --- What the clock says now. An unset clock leaves the fields empty
         // and says so; a refused read says that instead, so the two are never
         // confused for one another.

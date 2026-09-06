@@ -1169,6 +1169,25 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Declare the calling thread's interactive frame budget
+    /// (`plans/FIX-STALLTRACE.md`).
+    ///
+    /// `budget_ns` is clamped by [`tairix_abi::latency::clamp_budget_ns`];
+    /// [`tairix_abi::latency::BUDGET_DISARM`] disarms the watch. Returns the
+    /// budget actually armed, which is zero on an image that compiles the
+    /// latency diagnostics out — an answer the caller reads back, never an
+    /// error it has to handle.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`], like every other handler here: answering
+    /// zero by default would make a build that never wired the handler
+    /// indistinguishable from one whose facility is compiled out. The real
+    /// handler is installed in `kernel/core`, in both feature states, and it
+    /// is the one that answers zero.
+    fn latency_watch(&self, _caller: &CallerContext<'_>, _budget_ns: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Allocate a DMA-coherent buffer for the calling driver, bounded by a
     /// granted device DMA constraint (`plans/PI.md`
     /// P10 chunk 5d-0).
@@ -3212,6 +3231,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .port_write(caller, args.0[0], args.0[1], width, args.0[3])
             }
+            // The budget is clamped by the handler rather than validated
+            // here: every 64-bit value names an armable budget or the
+            // disarm, so there is nothing to refuse.
+            SyscallNumber::LATENCY_WATCH => self.handlers.latency_watch(caller, args.0[0]),
             SyscallNumber::DMA_ALLOC => {
                 // `validate_arg` accepts args[0] as an opaque `Handle` u64
                 // (resolved against the calling task + grant table in the
@@ -4059,6 +4082,10 @@ mod tests {
         fn yield_now(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("yield");
             Ok(0)
+        }
+        fn latency_watch(&self, _c: &CallerContext<'_>, budget_ns: u64) -> SyscallResult {
+            self.record("latency_watch");
+            Ok(budget_ns)
         }
         fn exit(&self, _c: &CallerContext<'_>, code: i32) -> SyscallResult {
             self.record("exit");
@@ -5217,6 +5244,143 @@ mod tests {
             // result.
             Ok(handle)
         }
+    }
+
+    /// A double that wires nothing: it implements only the trait's
+    /// *required* methods, each refusing, so every **defaulted** handler is
+    /// exercised exactly as a build that never installed one behaves.
+    struct Unwired;
+
+    // Every method here is required by the trait (it has no default);
+    // each refuses, which is what an unwired build does.
+    impl SyscallHandlers for Unwired {
+        fn yield_now(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn exit(&self, _c: &CallerContext<'_>, _code: i32) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn ipc_send(&self, _c: &CallerContext<'_>, _e: u64, _p: u64, _l: usize) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn ipc_recv(
+            &self,
+            _c: &CallerContext<'_>,
+            _e: u64,
+            _p: u64,
+            _l: usize,
+            _s: u64,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn cap_query(&self, _c: &CallerContext<'_>, _cap: CapabilityId) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn cap_delegate(&self, _c: &CallerContext<'_>, _t: u64, _s: u64) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn cap_revoke(&self, _c: &CallerContext<'_>, _t: u64, _cap: CapabilityId) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn clock_get(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn irq_bind(&self, _c: &CallerContext<'_>, _line: u32) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn irq_wait(&self, _c: &CallerContext<'_>, _h: IrqHandle, _t: u64) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn random_get(
+            &self,
+            _c: &CallerContext<'_>,
+            _b: u64,
+            _l: usize,
+            _f: RandomFlags,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn stream_write(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _b: u64,
+            _l: usize,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn stream_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _b: u64,
+            _l: usize,
+            _t: u64,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn spawn(
+            &self,
+            _c: &CallerContext<'_>,
+            _p: u64,
+            _pl: usize,
+            _a: u64,
+            _al: usize,
+            _s: u64,
+            _sl: usize,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn mem_map(
+            &self,
+            _c: &CallerContext<'_>,
+            _l: usize,
+            _f: MapFlags,
+            _h: u64,
+        ) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn mem_unmap(&self, _c: &CallerContext<'_>, _b: u64, _l: usize) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn wait(&self, _c: &CallerContext<'_>, _pid: i64, _s: u64, _f: WaitFlags) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+        fn boot_session_get(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            Err(Errno::NotImplemented)
+        }
+    }
+
+    /// An unwired handler refuses rather than answering a value.
+    ///
+    /// `latency_watch` returns a *value* — zero means "this image armed
+    /// nothing" — so a default that answered zero would make a kernel that
+    /// never wired the handler indistinguishable from one whose facility is
+    /// deliberately compiled out. It therefore refuses like every sibling,
+    /// and `kernel/core` is what answers zero.
+    #[test]
+    fn an_unwired_handler_refuses_rather_than_answering_a_value() {
+        let sink = RecordingSink::new();
+        let dispatcher = Dispatcher::new(&Unwired, &sink);
+        let caps = TaskCapabilities::derive(
+            ProcessId(1),
+            UserId(0),
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            &sink,
+        );
+        let ctx = CallerContext {
+            task_id: TaskId(1),
+            caps: &caps,
+        };
+        assert_eq!(
+            dispatcher.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::LATENCY_WATCH.as_u16()),
+                RawArgs([tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS, 0, 0, 0, 0, 0]),
+            ),
+            Err(Errno::NotImplemented)
+        );
     }
 
     #[test]

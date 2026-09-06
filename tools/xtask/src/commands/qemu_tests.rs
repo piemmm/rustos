@@ -357,6 +357,13 @@ enum FsDisk {
     /// fixture crate lives outside the userland discovery walk, so only
     /// this disk ever carries it; no production image ships it.
     MemsoakRootDisk,
+    /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
+    /// volume** additionally carries the test-only `stalltrace` fixture
+    /// bundle ([`super::image_apps::stalltrace_store_files`]) — the
+    /// stall-trace vertical's backing (`plans/FIX-STALLTRACE.md`). The
+    /// fixture crate lives outside the userland discovery walk, so only this
+    /// disk ever carries it; no production image ships it.
+    StalltraceRootDisk,
     /// The [`Self::AutoloadRootDisk`] layout — the same graphical world, with
     /// the signed input and display driver bundles and the text-login
     /// document — whose store additionally carries the test-only `framestats`
@@ -908,6 +915,18 @@ const VALUE_PIPE_WRITE_REFUSED_MARKER: &str = "not supported by the backing";
 /// `tairix_test_memsoak::PASS_MARKER` by a unit test below, so the script
 /// and the program cannot drift.
 const MEMSOAK_PASS_PREFIX: &str = "MEMSOAK PASS baseline=";
+
+/// Serial marker the stall-trace vertical waits for before typing the shell
+/// `exit` that completes its PASS chain: the `stalltrace` fixture's line
+/// stating it provoked its overrun. Read from the fixture's own definition,
+/// so the script and the program cannot drift.
+const STALLTRACE_PROVOKED_MARKER: &str = tairix_test_stalltrace::PROVOKED_MARKER;
+
+/// The bare command word the stall-trace vertical types at the shell, with
+/// its newline. Pinned to the fixture's own `COMMAND` by a unit test below,
+/// so the bundle it installs under and the word the script types cannot
+/// drift.
+const STALLTRACE_COMMAND_LINE: &str = "stalltrace\n";
 
 /// Serial marker the stream-socket vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the `tcpecho` client's success
@@ -5209,6 +5228,58 @@ static TESTS: &[QemuTest] = &[
             (MEMSOAK_PASS_PREFIX, Duration::ZERO, "exit\n"),
         ],
     },
+    // `plans/FIX-STALLTRACE.md`: the stall-trace vertical.
+    // `tairix-test-stalltrace-qemu-aarch64` boots the *production* aarch64
+    // pipeline — with the debug image's `watchdog-diagnostics` on, the only
+    // configuration in which the task-latency watchdog exists — using the
+    // encrypted-root disk that carries the standard signed store bundles
+    // **plus** the test-only `stalltrace` fixture bundle
+    // (`FsDisk::StalltraceRootDisk`), unlocks the root, authenticates
+    // `root`/`root` at the console login, and types the bare word
+    // `stalltrace` at the shell. The fixture declares the default frame
+    // budget, opens a span through a real event wait on a pipe it feeds
+    // itself, and then parks well past the budget inside one syscall, so the
+    // kernel must report at that syscall's exit. The guest's *diagnostic*
+    // sink is the gate (the overrun record is an address-bearing developer
+    // aid and never reaches the audit trail), and it judges the record's
+    // fields through the host-tested `assess`: a named blocking call, a
+    // stall at least the budget, `sampled=blocking`, and a load-relative
+    // `pc` plus `bt`. A record that arrives *wrong* fails the run at once
+    // with which expectation it missed; an accepted one arms the PASS, which
+    // fires on the next audited `exit` — the shell's, typed only after the
+    // `STALLTRACE PROVOKED` marker appeared — so the report provably reached
+    // the transcript before the run ended (the arm-then-exit discipline).
+    // This is what proves the aarch64 trampoline publishes a usable frame
+    // and that the `copy_in`-backed walk reads a real chain off a stalling
+    // user stack; the state machine itself is host-tested. A 300-second
+    // budget covers boot + bounded PBKDF2 + the deliberate stall on QEMU
+    // TCG, matching the other full-boot dialogue verticals; single CPU like
+    // the rest of them.
+    QemuTest {
+        package: "tairix-test-stalltrace-qemu-aarch64",
+        binary: "tairix-test-stalltrace-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        fs_disk: FsDisk::StalltraceRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[
+            ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+            ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+            ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+            ("root@tairix ~% ", Duration::ZERO, STALLTRACE_COMMAND_LINE),
+            (STALLTRACE_PROVOKED_MARKER, Duration::ZERO, "exit\n"),
+        ],
+    },
     // `plans/NETWORK.md` N5c: the stream-socket (TCP) vertical.
     // `tairix-test-netstack-stream-qemu-aarch64` boots the *production*
     // aarch64 pipeline with the encrypted-root disk that carries the standard
@@ -8298,6 +8369,7 @@ pub(crate) struct StoreSet {
     /// The memsoak-augmented application set the memory-stability vertical
     /// plants.
     apps_with_memsoak: &'static [AppStoreFile],
+    apps_with_stalltrace: &'static [AppStoreFile],
     /// The application/service bundles the desktop-hover vertical plants: the
     /// shared set plus the test-only `framestats` fixture bundle, which the
     /// seeded program-library catalog is derived from and so lists.
@@ -8372,6 +8444,12 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         FsDisk::MemsoakRootDisk => super::image_apps::memsoak_store_files(ctx, arch, profile)?,
         _ => EMPTY,
     };
+    let apps_with_stalltrace = match t.fs_disk {
+        FsDisk::StalltraceRootDisk => {
+            super::image_apps::stalltrace_store_files(ctx, arch, profile)?
+        }
+        _ => EMPTY,
+    };
     let apps_with_framestats = match t.fs_disk {
         FsDisk::HoverRootDisk => super::image_apps::framestats_store_files(ctx, arch, profile)?,
         _ => EMPTY,
@@ -8436,6 +8514,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     Ok(StoreSet {
         apps,
         apps_with_memsoak,
+        apps_with_stalltrace,
         apps_with_framestats,
         autoload_drivers,
         apps_with_tcpecho,
@@ -11177,6 +11256,7 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
     let StoreSet {
         apps,
         apps_with_memsoak,
+        apps_with_stalltrace,
         ..
     } = stores;
     Ok(match t.fs_disk {
@@ -11216,6 +11296,18 @@ fn fs_disk_image(t: &QemuTest, stores: StoreSet) -> Result<Option<FsImage>, Stri
             let total_sectors = image_total_sectors(&bytes);
             Some(FsImage {
                 extension: "memsoak-root.img",
+                bytes,
+                total_sectors,
+            })
+        }
+        // The stall-trace vertical likewise uses the plain encrypted-root
+        // author: it needs no driver store, only the standard store plus its
+        // one test-only fixture bundle.
+        FsDisk::StalltraceRootDisk => {
+            let bytes = encrypted_root_disk_bytes(t, apps_with_stalltrace)?;
+            let total_sectors = image_total_sectors(&bytes);
+            Some(FsImage {
+                extension: "stalltrace-root.img",
                 bytes,
                 total_sectors,
             })
@@ -11820,11 +11912,12 @@ mod tests {
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fold_peer_verdict, login_type_plant, persist_serial,
         qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
-        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
-        TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
+        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -12068,6 +12161,31 @@ mod tests {
             pass.starts_with(MEMSOAK_PASS_PREFIX),
             "fixture PASS line {pass:?} must start with the script marker {MEMSOAK_PASS_PREFIX:?}"
         );
+    }
+
+    /// The stall-trace vertical's serial script types the fixture's own
+    /// command word and waits for the fixture's own marker, so a rename of
+    /// either cannot leave the script silently waiting for a line the
+    /// program no longer prints.
+    #[test]
+    fn stalltrace_script_matches_the_fixture_vocabulary() {
+        assert_eq!(
+            STALLTRACE_COMMAND_LINE.trim_end_matches('\n'),
+            tairix_test_stalltrace::COMMAND
+        );
+        assert!(
+            STALLTRACE_COMMAND_LINE.ends_with('\n'),
+            "the shell needs the return"
+        );
+        assert_eq!(
+            STALLTRACE_PROVOKED_MARKER,
+            tairix_test_stalltrace::PROVOKED_MARKER
+        );
+        // The inert marker must not be a prefix of the provoked one, or an
+        // image with the diagnostics compiled out would satisfy the script
+        // and the run would pass having proven nothing.
+        assert!(!tairix_test_stalltrace::PROVOKED_MARKER
+            .starts_with(tairix_test_stalltrace::INERT_MARKER));
     }
 
     /// The value-pipe vertical's machine-id marker is exactly what the

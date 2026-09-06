@@ -670,6 +670,25 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
             // frame the trampoline built; reading it for the duration of
             // this call is sound.
             let saved = unsafe { &*frame.cast::<[u64; crate::syscall_entry::SAVED_GPRS]>() };
+            // Report the entering EL0 pc and frame pointer, so a diagnostic
+            // can attribute a user call stack to this call. The trampoline
+            // has already saved `ELR_EL1` and `x29`, so this is two reads of
+            // a frame that is live for the whole handler; the observer is
+            // consulted first, so an image that installed none pays one
+            // relaxed load. AArch64 always saves the fp, hence `true`.
+            if tairix_arch_api::userentry::user_entry_observer().is_some() {
+                // SAFETY: `frame` addresses the live saved frame the
+                // trampoline built for this lower-EL entry, which saves the
+                // full GP set plus `ELR`/`SPSR`/`SP_EL0`; both indices read
+                // here lie within it.
+                let (pc, fp) = unsafe { (*frame.add(ELR_FRAME_INDEX), *frame.add(FP_FRAME_INDEX)) };
+                tairix_arch_api::userentry::note_user_entry(
+                    crate::smp::current_cpu_index(),
+                    pc,
+                    fp,
+                    true,
+                );
+            }
             let mut syscall_frame = crate::syscall_entry::syscall_frame_from_saved(saved);
             // Run the syscall body with device IRQs deliverable. The PE
             // masked `DAIF.I` on exception entry; the trampoline has now

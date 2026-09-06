@@ -2375,6 +2375,26 @@ impl SyscallNumber {
     /// issues few of them.
     pub const PORT_WRITE: Self = Self(118);
 
+    /// Declare the calling thread's interactive frame budget, in
+    /// nanoseconds (`plans/FIX-STALLTRACE.md`).
+    ///
+    /// The single argument is `budget_ns: u64`, clamped by
+    /// [`crate::latency::clamp_budget_ns`];
+    /// [`crate::latency::BUDGET_DISARM`] disarms the watch. The kernel then
+    /// opens a span each time this thread returns from an event wait and
+    /// closes it at the next one, and reports an overrun with the blocking
+    /// syscall, the time lost, and a load-relative user backtrace.
+    ///
+    /// It grants nothing, changes no scheduling decision, and reaches no
+    /// other thread, so it requires no capability — a thread describes only
+    /// its own responsiveness obligation.
+    ///
+    /// Returns the budget actually armed, which is `0` on an image that
+    /// compiles the diagnostics out. That is an answer rather than an
+    /// error: a surface reads back what it got and carries on, never
+    /// branching on the image it runs in.
+    pub const LATENCY_WATCH: Self = Self(119);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

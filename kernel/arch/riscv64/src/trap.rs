@@ -612,6 +612,23 @@ unsafe fn trap_body(
 
     if (scause & SCAUSE_INTERRUPT_BIT) == 0 {
         if crate::syscall_entry::is_ecall_from_user(scause) {
+            // Report the entering U-mode pc and frame pointer, so a
+            // diagnostic can attribute a user call stack to this call. The
+            // vector has already saved `sepc` and `s0`, so this is two reads
+            // of a frame that is live for the whole handler; the observer is
+            // consulted first, so an image that installed none pays one
+            // relaxed load. The vector persists `s0` (the fp), hence `true`.
+            if tairix_arch_api::userentry::user_entry_observer().is_some() {
+                // SAFETY: `frame` is the live saved-register frame the asm
+                // vector passed, valid for the duration of this read.
+                let f = unsafe { &*frame };
+                tairix_arch_api::userentry::note_user_entry(
+                    crate::smp::current_hartid(),
+                    f.sepc,
+                    f.s0,
+                    true,
+                );
+            }
             // Run the syscall body with S-mode interrupts deliverable. The
             // hart cleared `sstatus.SIE` on trap entry; the asm vector has
             // now saved the caller-saved registers and the frame-resident

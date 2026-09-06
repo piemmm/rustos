@@ -74,6 +74,8 @@ mod program {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
+
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::window_ipc::{
         AppMenuItemId, MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
@@ -1096,6 +1098,11 @@ mod program {
     /// syscall.
     #[allow(clippy::too_many_lines)] // One linear bring-up plus one event loop; splitting would obscure the teardown ordering.
     fn main() -> i32 {
+        // From here this task drives a user-facing loop, so declare the
+        // frame it owes. A debug image then reports any span that overruns,
+        // naming the call that spent it; a shippable one arms nothing and
+        // answers zero, which is why the result is not examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         // --- The user's own profile, before anything is sized or painted, so
         // the first frame is what they chose rather than a default corrected
         // once they have seen it. It is the user's, so every window shares

@@ -1131,6 +1131,9 @@ pub fn init_secondary_preemption(cpu: tairix_arch_api::CpuId) {
 /// that has not yet published its dense id reads the boot default `0`, and
 /// the observer's per-CPU-slot lookup fails closed on any out-of-range id.
 /// Present only in a debug-diagnostics freestanding build.
+// The `Option` is the installed seam's type (`fn() -> Option<CpuId>`), which
+// exists for a port that cannot answer; this port always can.
+#[allow(clippy::unnecessary_wraps)]
 #[cfg(all(feature = "watchdog-diagnostics", freestanding, kernel_isa = "aarch64"))]
 fn lock_diagnostics_current_cpu() -> Option<tairix_arch_api::CpuId> {
     Some(tairix_arch_aarch64::smp::current_cpu_index())

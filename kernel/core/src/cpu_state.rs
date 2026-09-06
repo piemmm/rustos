@@ -286,6 +286,40 @@ pub(crate) struct CpuState {
     /// to be live rather than a stale leftover.
     #[cfg(feature = "watchdog-diagnostics")]
     pub(crate) lock_owner: [AtomicU32; LOCK_STACK_MAX],
+    /// The user program counter and frame-pointer register this CPU is
+    /// currently entering the kernel from, published by the port's syscall
+    /// entry — the only place the saved user frame is in hand — and read by
+    /// [`crate::latency`] to attribute a frame to the entering thread.
+    ///
+    /// Per-CPU rather than per-thread because the publish and the read are
+    /// the two ends of one kernel entry on one CPU: an interrupt taken
+    /// between them issues no syscall, and the kernel does not preempt
+    /// itself. The latency watch copies the frame into the thread's own
+    /// record before that thread can park.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) ue_pc: AtomicU64,
+    /// User frame-pointer register published alongside [`Self::ue_pc`].
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) ue_fp: AtomicU64,
+    /// Whether [`Self::ue_fp`] is a usable frame pointer — the port's own
+    /// verdict, so a port that does not save the register never has a
+    /// fabricated chain walked from it.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) ue_fp_valid: AtomicBool,
+    /// Whether any frame has been published on this CPU, so a port that
+    /// publishes none is not read as one reporting a zeroed frame.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) ue_present: AtomicBool,
+    /// The frame-budget watch of the thread currently running here, replaced
+    /// at every user switch-in.
+    ///
+    /// A syscall boundary reaches its own thread's watch through this slot
+    /// rather than the authoritative map, so it touches only lines this CPU
+    /// owns. Consulting the map per syscall would put a compare-exchange on
+    /// one globally shared word in front of every syscall on every CPU as
+    /// soon as any surface armed a budget.
+    #[cfg(feature = "watchdog-diagnostics")]
+    pub(crate) latency_watch: SpinLock<Option<crate::latency::Published>>,
 }
 
 impl CpuState {
@@ -326,6 +360,16 @@ impl CpuState {
             lock_acquiring: AtomicU32::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: [const { AtomicU32::new(0) }; LOCK_STACK_MAX],
+            #[cfg(feature = "watchdog-diagnostics")]
+            ue_pc: AtomicU64::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            ue_fp: AtomicU64::new(0),
+            #[cfg(feature = "watchdog-diagnostics")]
+            ue_fp_valid: AtomicBool::new(false),
+            #[cfg(feature = "watchdog-diagnostics")]
+            ue_present: AtomicBool::new(false),
+            #[cfg(feature = "watchdog-diagnostics")]
+            latency_watch: SpinLock::new(None),
         }
     }
 }

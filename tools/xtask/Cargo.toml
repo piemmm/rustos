@@ -128,6 +128,7 @@ tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # `default-features = false`: the fixture's `program` feature (its `Run`
 # binary's userland runtime) is for its freestanding cross-compile only.
 tairix-test-memsoak = { path = "../../tests/integration/memsoak_program", version = "=0.0.0", default-features = false }
+tairix-test-stalltrace = { path = "../../tests/integration/stalltrace_program", version = "=0.0.0", default-features = false }
 # The stream-socket vertical's fixture constant: the `TCPECHO PASS` marker its
 # serial script waits for is pinned against the fixture's own `PASS_MARKER` by
 # a unit test, so the script and the program cannot drift. `default-features =

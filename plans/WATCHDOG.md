@@ -16,6 +16,12 @@ takes interrupts is not a CPU lockup and is the service watchdog's to catch; a
 core that has stopped executing is this watchdog's. Where a wedged *kernel*
 task also hard-locks a CPU, this watchdog is the last line.
 
+A third detector sits beside both: the task-latency watchdog
+(`plans/FIX-STALLTRACE.md`) watches an *interactive thread* against a frame
+budget it declared, and reports the call that spent it. A stalled core is
+this plan's; a service that stops answering is the service manager's; a
+desktop that paused and then recovered is that one's.
+
 ## Model (done)
 
 Two per-CPU heartbeats plus an activity class, all in

@@ -115,7 +115,8 @@ pub use seal::{EntropySource, NonceSequence, SealError, SealKey};
 pub use sensitive::SensitiveBuffer;
 pub use slab::{Slab, SlabError, SlabHandle, SoftwareTagCheck};
 pub use spawn::{
-    build_process_image, derive_user_layout, ProcessImage, SpawnError, UserLayout, UserStack,
+    build_process_image, derive_user_layout, image_load_base, ProcessImage, SpawnError, UserLayout,
+    UserStack,
 };
 pub use swap::{EncryptedSwap, SwapBackend, SwapError, SwapPage, SWAP_RECORD_LEN};
 pub use uaccess::{copy_in, copy_out, UaccessError};

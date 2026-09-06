@@ -246,6 +246,9 @@ const NUM_CLOCK_GET: u64 = SyscallNumber::CLOCK_GET.as_u16() as u64;
 /// `boot_session_get` syscall number (as above).
 const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
+/// `latency_watch` syscall number (as above).
+const NUM_LATENCY_WATCH: u64 = SyscallNumber::LATENCY_WATCH.as_u16() as u64;
+
 /// `self_origin` syscall number (as above).
 const NUM_SELF_ORIGIN: u64 = SyscallNumber::SELF_ORIGIN.as_u16() as u64;
 
@@ -1055,6 +1058,34 @@ pub fn clock_get() -> u64 {
     // takes no arguments and no memory operand, so all six argument registers
     // are zero; its result is the `U64` nanosecond reading.
     unsafe { raw_syscall(NUM_CLOCK_GET, [0, 0, 0, 0, 0, 0]) }
+}
+
+/// Declare this thread's interactive frame budget, in nanoseconds
+/// (`SyscallNumber::LATENCY_WATCH`).
+///
+/// An interactive surface calls this once, before its event loop, with
+/// [`DEFAULT_FRAME_BUDGET_NS`](tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS).
+/// The kernel then measures each span from the return of an event wait to
+/// the next one, and reports an overrun naming the syscall that spent the
+/// budget and the user code that stalled — a diagnosis the loop cannot make
+/// for itself, because by the time it observes the cost the stack that
+/// caused it has unwound.
+///
+/// Returns the budget actually armed: the value clamped up to the kernel's
+/// armable floor, or `0` on an image that compiles the diagnostics out.
+/// Zero is an answer, not a failure — the facility is a developer aid, so a
+/// surface neither branches on the image it runs in nor reports anything to
+/// the user. It requires no capability: a thread describes only its own
+/// responsiveness obligation, and the call reaches no other thread.
+///
+/// [`tairix_abi::latency::BUDGET_DISARM`] disarms the watch.
+#[must_use]
+pub fn latency_watch(budget_ns: u64) -> u64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `latency_watch` takes one
+    // by-value budget and no memory operand, so the remaining argument
+    // registers are zero; its result is the armed budget.
+    unsafe { raw_syscall(NUM_LATENCY_WATCH, [budget_ns, 0, 0, 0, 0, 0]) }
 }
 
 /// Read the operator's one-boot login choice

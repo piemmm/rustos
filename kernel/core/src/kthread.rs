@@ -1120,7 +1120,16 @@ where
             crate::watchdog::KernelBreadcrumb::TaskBody,
             step.task_id,
         );
+        // The frame-budget watch of the task about to run here, so its
+        // syscall boundaries reach it through this CPU's own slot instead of
+        // the authoritative map. Published per switch rather than per
+        // syscall, and cleared on the way out so a later boundary cannot
+        // reach a task that is no longer running here.
+        #[cfg(feature = "watchdog-diagnostics")]
+        crate::latency::publish(step.cpu, step.task_id);
         let action = dispatch_step(&mut control, step.cpu);
+        #[cfg(feature = "watchdog-diagnostics")]
+        crate::latency::unpublish(step.cpu);
         // The task body returned; the CFQ post-run accounting tail
         // (`Scheduler::dispatch` after the body call) runs next, with device
         // interrupts still masked from the suspending task's exception entry

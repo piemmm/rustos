@@ -65,6 +65,7 @@
 mod program {
     use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
+    use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::reply::decode_status_reply;
     use tairix_abi::switchboard_ipc::{
         command_endpoint_for, decode_publish_reply, SwitchboardCommand, SwitchboardRequest,
@@ -1040,6 +1041,11 @@ mod program {
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
+        // From here this task drives a user-facing loop, so declare the
+        // frame it owes. A debug image then reports any span that overruns,
+        // naming the call that spent it; a shippable one arms nothing and
+        // answers zero, which is why the result is not examined.
+        let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         if tairix_rt::signal_intake(SignalIntakeOp::Enable) != 0 {
             return fail(EXIT_NO_WAIT_SOURCE, "cannot enable signal observation");
         }

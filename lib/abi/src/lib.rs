@@ -36,6 +36,7 @@ pub mod hwtree;
 pub mod i2c_ipc;
 pub mod input;
 pub mod ipc;
+pub mod latency;
 pub(crate) mod le;
 pub mod log;
 pub mod log_ingress;
