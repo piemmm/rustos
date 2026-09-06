@@ -1,6 +1,6 @@
 [package]
 name = "tairix-rng"
-description = "TAIRiX random number generation: a NIST SP 800-90A HMAC-SHA256 CSPRNG, a pluggable entropy/hardware-RNG seam, and a fast non-cryptographic generator."
+description = "TAIRiX random number generation, split on unpredictability rather than speed: a NIST SP 800-90A HMAC-SHA256 CSPRNG for long-lived key material, a fast unpredictable ChaCha12 fast-key-erasure generator for everything else that must not be guessable, a fast predictable xoshiro256++ generator for decorrelation and fixtures, and a pluggable entropy/hardware-RNG seam."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

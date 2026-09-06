@@ -3,8 +3,8 @@
 //! This crate exists for one purpose: to keep cryptography out of the rest
 //! of the codebase. Per no hand-rolled primitives are allowed;
 //! everything here is a thin wrapper over a vetted upstream implementation
-//! ([`sha2`], [`ed25519_dalek`], and [`chacha20poly1305`]) selected so that
-//! the audit footprint never exceeds a handful of crates.
+//! ([`sha2`], [`ed25519_dalek`], [`chacha20poly1305`], and [`chacha20`])
+//! selected so that the audit footprint never exceeds a handful of crates.
 //!
 //! The wrappers intentionally expose a *narrower* API than the upstream
 //! crates: callers receive fixed-size byte arrays, not opaque types whose
@@ -22,6 +22,7 @@ pub mod hash;
 pub mod kdf;
 pub mod mac;
 pub mod sign;
+pub mod stream;
 
 pub use aead::{
     open, seal, AeadError, AeadKey, AeadNonce, AeadTag, AEAD_KEY_LEN, AEAD_NONCE_LEN, AEAD_TAG_LEN,
@@ -37,3 +38,7 @@ pub use mac::{
     hmac_sha256, hmac_sha256_parts, hmac_sha256_verify, MacKey, MacTag, MAC_KEY_LEN, MAC_TAG_LEN,
 };
 pub use sign::{Ed25519PublicKey, Ed25519Signature, SignatureError};
+pub use stream::{
+    chacha12_keystream, StreamKey, StreamNonce, CHACHA12_MAX_KEYSTREAM_BYTES, STREAM_KEY_LEN,
+    STREAM_NONCE_LEN,
+};

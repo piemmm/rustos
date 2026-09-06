@@ -256,13 +256,14 @@ fn the_reciprocal_answers_exactly_what_the_divide_would() {
 /// A deterministic generator for the differential sweeps, so a failure is
 /// reproducible from the seed alone.
 ///
-/// It is `lib/rng`'s own non-cryptographic generator rather than a private one
-/// written here, so the workspace keeps a single fast generator.
-struct TestRng(tairix_rng::FastRng);
+/// It is `lib/rng`'s own predictable generator rather than a private one
+/// written here, so the workspace keeps one of these. Predictability is what
+/// a fixture wants; nothing here is a security surface.
+struct TestRng(tairix_rng::NonCryptoRng);
 
 impl TestRng {
     fn new(seed: u64) -> Self {
-        Self(tairix_rng::FastRng::seed_from_u64(seed))
+        Self(tairix_rng::NonCryptoRng::seed_from_u64(seed))
     }
 
     fn next_u32(&mut self) -> u32 {

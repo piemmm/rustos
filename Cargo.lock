@@ -883,6 +883,7 @@ dependencies = [
 name = "tairix-crypto"
 version = "0.0.0"
 dependencies = [
+ "chacha20",
  "chacha20poly1305",
  "ed25519-dalek",
  "hmac",
@@ -2008,7 +2009,6 @@ dependencies = [
  "tairix-arch-api",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-cfq",
- "tairix-rng",
  "tairix-sync",
 ]
 
@@ -2019,7 +2019,6 @@ dependencies = [
  "tairix-arch-api",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-eevdf",
- "tairix-rng",
  "tairix-sync",
 ]
 
@@ -2031,7 +2030,6 @@ dependencies = [
  "tairix-arch-api",
  "tairix-kernel-sched-api",
  "tairix-kernel-sched-mlfq",
- "tairix-rng",
  "tairix-sync",
 ]
 
@@ -2353,6 +2351,7 @@ dependencies = [
  "tairix-resolver",
  "tairix-rng",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4346,6 +4345,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-rng-soak"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-rng",
+]
+
+[[package]]
 name = "tairix-test-root-unlock-admission-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5892,6 +5899,7 @@ dependencies = [
  "tairix-test-memsoak",
  "tairix-test-menu-qemu-aarch64",
  "tairix-test-netstack-wire",
+ "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",
  "tairix-test-tcpecho",
  "tairix-test-tcpserve",

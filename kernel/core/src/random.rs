@@ -52,17 +52,19 @@ use zeroize::Zeroize;
 pub trait RandomReserve {
     /// Fill `out` with cryptographically secure random bytes.
     ///
-    /// When `non_blocking` is set, a required reseed that has no fresh
-    /// entropy fails closed (the fallible [`OutputReserve::fill`]); otherwise
-    /// the call waits through the reseed (the blocking
-    /// [`OutputReserve::fill_blocking`]). Generation from a *seeded* reserve
-    /// never blocks for entropy.
+    /// A seeded reserve serves from its `ChaCha12` stage, so generation itself
+    /// never waits on the entropy source and never fails. `non_blocking`
+    /// chooses only what the reserve does when its periodic
+    /// fold-fresh-entropy-into-the-key step has come due and the source is
+    /// momentarily dry: the fallible [`OutputReserve::fill`] defers the fold
+    /// to the next request and serves now, while
+    /// [`OutputReserve::fill_blocking`] waits for the entropy first. Either
+    /// way the bytes served are cipher output under a DRBG-derived key.
     ///
     /// # Errors
     ///
-    /// * [`ReserveError::NotReady`] before the reserve is seeded.
-    /// * [`ReserveError::Entropy`] when a required reseed has no entropy. On
-    ///   error `out` is left zeroed rather than partially filled.
+    /// [`ReserveError::NotReady`] before the reserve is seeded; `out` is left
+    /// untouched.
     fn draw(&mut self, out: &mut [u8], non_blocking: bool) -> Result<(), ReserveError>;
 }
 

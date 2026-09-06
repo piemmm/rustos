@@ -52,6 +52,7 @@ mod program {
     };
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_util::secret::Wiped;
 
     /// The client's async delivery-port endpoint id: an app-local,
     /// unrestricted well-known value (not a reserved kernel id), so binding
@@ -150,21 +151,22 @@ mod program {
         }
     }
 
-    /// Seed the payload generator from the kernel CSPRNG.
+    /// Key the payload generator from the kernel CSPRNG.
     ///
-    /// The blocking draw (no [`RandomFlags::NON_BLOCKING`]) waits only for the
-    /// kernel RNG to initialise and never blocks thereafter. A source that
-    /// cannot supply the seed is reported, never worked around with a
-    /// predictable stream — a compressible payload would silently invalidate
-    /// the measurement the tool exists to make.
+    /// A kernel RNG that cannot supply the key is reported, never worked
+    /// around with a predictable stream — a compressible payload would
+    /// silently invalidate the measurement the tool exists to make.
     fn seed_generator() -> Result<FastRng, PingError> {
-        let mut seed = [0u8; 32];
-        let drawn = tairix_rt::random_get(&mut seed, RandomFlags::empty())
+        // The generator keeps its own copy and wipes that on drop; this is
+        // the marshalling buffer, and `Wiped` erases it on every exit from
+        // the scope including the early returns below.
+        let mut key = Wiped::<{ tairix_rng::STREAM_KEY_LEN }>::new();
+        let drawn = tairix_rt::random_get(&mut key[..], RandomFlags::empty())
             .map_err(|raw| PingError::Socket(Errno::from_syscall(raw)))?;
-        if drawn != seed.len() {
+        if drawn != key.len() {
             return Err(PingError::Socket(Errno::EntropyNotReady));
         }
-        Ok(FastRng::from_seed_bytes(&seed))
+        Ok(FastRng::from_key(&key))
     }
 
     impl PingIo for RtPingIo {

@@ -1,0 +1,25 @@
+[package]
+name = "tairix-test-rng-soak"
+description = "Statistical soak for the kernel random subsystem. Drives `lib/rng`'s two unpredictable generators (the buffered ChaCha12 FastRng and the HMAC-SHA256 CsRng) through a first-party NIST SP 800-22-style battery — monobit, block frequency, runs, longest run of ones, binary matrix rank, approximate entropy, cumulative sums (forward and backward), and Maurer's universal statistical test — and reaches a verdict by SP 800-22's two-level rule (pass proportion within a six-sigma band, plus p-value uniformity) over every sequence a run accumulates. Every statistic is held against a known-bad generator it must reject (a narrow LFSR for linear dependence over GF(2), a bare counter for everything else), so no test in the battery can be vacuous. Host test scaffolding; never linked into TAIRiX."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The generators under test, reached through their real public API — the
+# battery adds no parallel implementation of either.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# Shared per-run seed resolution, start-of-test seed logging, budget
+# deadline, and the names of the environment variables the orchestrator
+# exports, so this soak reads exactly what `cargo xtask rngsoak` writes
+# through the one seam every fuzz/proptest/soak harness uses.
+tairix-fuzzseed = { path = "../../fuzzseed", version = "=0.0.0" }

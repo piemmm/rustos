@@ -414,6 +414,7 @@ members = [
     "tests/integration/devmgr_hwtree_qemu_aarch64",
     "tests/integration/posix_fs_suite",
     "tests/integration/fs_soak",
+    "tests/integration/rng_soak",
     "tests/integration/virtio_blk_pci_x86_64",
     "tests/integration/fat32_virtio_blk_pci_x86_64",
     "tests/integration/arxfs_virtio_blk_pci_x86_64",
@@ -560,6 +561,14 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.tairix-display]
+opt-level = 3
+
+# The statistical RNG battery is the same case one layer out: a per-PR pass
+# runs nine SP 800-22 tests over tens of megabytes of generator output, which
+# is millions of bit reads, GF(2) eliminations and table updates and nothing a
+# developer steps through. At the dev profile's `opt-level = 1` it is the
+# difference between a gate step of a couple of seconds and one of a dozen.
+[profile.dev.package.tairix-test-rng-soak]
 opt-level = 3
 
 # `panic = "abort"` collides with the test harness on host targets. Cargo

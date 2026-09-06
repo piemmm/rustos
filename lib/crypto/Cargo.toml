@@ -30,6 +30,14 @@ hmac = { version = "=0.12.1", default-features = false }
 # only the in-place detached `AeadInPlace` trait, so nonces and keys are
 # supplied by the caller and never sourced inside this crate.
 chacha20poly1305 = { version = "=0.10.1", default-features = false }
+# RustCrypto's audited ChaCha stream cipher, already in the tree beneath
+# `chacha20poly1305` above and already source-pinned, so naming it directly
+# adds no crate to the audit surface. It backs `stream`'s ChaCha12 keystream,
+# which the kernel random subsystem's fast generator expands its output from.
+# `default-features = false` keeps this `no_std`; `zeroize` wires the cipher's
+# own key/state to a volatile wipe on drop, the same wipe the AEAD above
+# already relies on.
+chacha20 = { version = "=0.9.1", default-features = false, features = ["zeroize"] }
 # The `zeroize` feature wires `ed25519-dalek`'s own internal key material
 # into `zeroize::Zeroize` on drop. `lib/crypto` itself never names the
 # `zeroize` crate (we expose verification only, no private-key handling),

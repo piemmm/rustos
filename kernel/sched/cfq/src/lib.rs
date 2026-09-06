@@ -41,9 +41,9 @@
 //! * **Per-CPU run queues, work-stealing across cores.** Each CPU owns one
 //!   `vruntime`-ordered [`Scheduler`]-internal run queue with its own
 //!   monotonic `min_vruntime` floor; idle CPUs steal the smallest-vruntime
-//!   task from a victim chosen by the project's shared non-cryptographic
-//!   `FastRng` (`lib/rng`; no second PRNG) and rebase its `vruntime` onto
-//!   the stealing CPU's front (a task carries no lag across CPUs).
+//!   task from a victim chosen by the shared per-CPU `StealScan`
+//!   (`kernel/sched/api`) and rebase its `vruntime` onto the stealing CPU's
+//!   front (a task carries no lag across CPUs).
 //! * **IPI-based preemption.** [`Scheduler::spawn`] and
 //!   [`Scheduler::unpark`] notify the home CPU via
 //!   [`SchedulerArch::send_ipi`]; the arch port decides whether that is an

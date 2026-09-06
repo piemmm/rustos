@@ -1,47 +1,53 @@
 //! TAIRiX random number generation.
 //!
 //! This crate is the one place the rest of TAIRiX gets randomness from. It
-//! provides three layers, separated by purpose:
+//! provides three generators, named for the property that decides which one a
+//! call site may use:
 //!
-//! * [`CsRng`] — the **cryptographically secure** generator. A NIST SP
-//!   800-90Ar1 HMAC-SHA256 DRBG ([`drbg::HmacDrbg`]) that reseeds from a
-//!   pluggable [`EntropySource`] for forward secrecy. This is what `ARXFS`
-//!   keys, the encrypted-swap key, nonces, and the
-//!   KASLR/ASLR seed must use. Its draws are fallible and fail closed — they never block, spin, or panic.
-//! * [`FastRng`] — a **fast, non-cryptographic** generator (xoshiro256++) for
-//!   bulk randomness with no security requirement (scheduler decisions,
-//!   collection seeds, backoff jitter). Never use it for keys or nonces.
-//! * [`hardware::PlatformFast`] — a fast generator that prefers a motherboard
-//!   **hardware RNG** ([`hardware::HardwareRng`]) when one is present and
-//!   falls back to [`FastRng`] when it is not (or transiently fails).
+//! * [`CsRng`] — **cryptographically secure**, for long-lived key material. A
+//!   NIST SP 800-90Ar1 HMAC-SHA256 DRBG ([`drbg::HmacDrbg`]) reseeded from a
+//!   pluggable [`EntropySource`], so a state compromise cannot predict output
+//!   indefinitely. `ARXFS` volume keys, the encrypted-swap key, and the
+//!   KASLR/ASLR seed come from here. Its draws are fallible and fail closed —
+//!   they never block, spin, or panic.
+//! * [`FastRng`] — **fast and unpredictable**, for everything that should not
+//!   be guessable but is not long-lived key material: task ids, a network
+//!   payload, the kernel's userland-facing output reserve. Buffered `ChaCha12`
+//!   with fast key erasure over `lib/crypto`, roughly forty times cheaper than
+//!   the DRBG per byte and backtracking-resistant.
+//! * [`NonCryptoRng`] — **fast and predictable** (xoshiro256++). Statistically
+//!   excellent and trivially invertible, so it is for decorrelation and
+//!   reproducible fixtures only: spreading per-CPU work-stealing scans, seeded
+//!   test streams. Never a key, a nonce, or an identifier an adversary
+//!   benefits from enumerating.
 //!
 //! # The cryptographic core is composed, not hand-rolled
 //!
-//! Per no cryptographic primitive is hand-rolled here.
-//! The DRBG is the standard HMAC-DRBG construction layered over `lib/crypto`'s
-//! audited HMAC-SHA256, exactly as `lib/crypto`'s `kdf` layers HKDF-Expand
-//! over the same PRF. The only first-party algorithm is the *non-cryptographic*
-//! xoshiro256++, which is an ordinary PRNG, not a security primitive.
+//! No cryptographic primitive is written here. The DRBG is the standard
+//! HMAC-DRBG construction over `lib/crypto`'s audited HMAC-SHA256, exactly as
+//! `lib/crypto`'s `kdf` layers HKDF-Expand over the same PRF, and [`FastRng`]
+//! is Bernstein's fast-key-erasure construction over `lib/crypto`'s audited
+//! `ChaCha12`. The only first-party algorithm is xoshiro256++, which is an
+//! ordinary PRNG rather than a security primitive.
 //!
-//! # Hardware RNG: extra entropy *and* a fast source
+//! # Hardware RNG: entropy input, never output
 //!
 //! A platform hardware source ([`hardware::HardwareRng`], supplied by
-//! `kernel/arch/<target>` or a `drivers/*` crate — it is never probed here,
-//! keeping the crate architecture-neutral) is used two ways:
-//!
-//! 1. As an *additional* entropy input: wrap it in
-//!    [`hardware::HardwareEntropy`] and XOR-mix it with the other platform
-//!    sources via [`CombinedSource`] before it ever feeds [`CsRng`]. It is one
-//!    independent input among several, never the sole trusted source.
-//! 2. As a fast source: [`hardware::PlatformFast`] draws from it directly,
-//!    falling back to the software [`FastRng`] when absent or failing.
+//! `kernel/arch/<target>` or a `drivers/*` crate — never probed here, so the
+//! crate stays architecture-neutral) is an *additional entropy input* and
+//! nothing else: wrap it in [`hardware::HardwareEntropy`] and XOR-mix it with
+//! the other platform sources through [`CombinedSource`] before it feeds
+//! [`CsRng`]. It is one independent input among several, never the sole
+//! trusted source, and its bytes never reach a caller unconditioned. A caller
+//! wanting speed takes [`FastRng`], which is both conditioned and cheaper than
+//! a hardware instruction.
 //!
 //! # Worked wiring
 //!
 //! ```
 //! use tairix_rng::{CombinedSource, CsRng, EntropyError, EntropySource, JitterSource};
-//! use tairix_rng::hardware::{HardwareEntropy, HardwareRng, PlatformFast};
-//! use tairix_rng::RandU64;
+//! use tairix_rng::hardware::{HardwareEntropy, HardwareRng};
+//! use tairix_rng::{FastRng, RandU64};
 //!
 //! # struct Rdrand;
 //! # impl HardwareRng for Rdrand {
@@ -50,8 +56,8 @@
 //! #         Ok(())
 //! #     }
 //! # }
-//! # fn wire(hw: Option<Rdrand>) -> Result<(), EntropyError> {
-//! // Mix a hardware source (if present) with timing jitter into one pool…
+//! # fn wire() -> Result<(), EntropyError> {
+//! // Mix a hardware source with timing jitter into one pool…
 //! let rdrand = Rdrand;
 //! // `JitterSource` samples a high-resolution counter; supply the platform's
 //! // (here a stand-in monotonic counter with varying deltas).
@@ -65,13 +71,13 @@
 //! let mut sources: [&mut dyn EntropySource; 2] = [&mut hw_entropy, &mut jitter];
 //! let pool = CombinedSource::new(&mut sources);
 //!
-//! // …and seed the cryptographic generator from the combined pool.
+//! // …seed the cryptographic generator from the combined pool…
 //! let mut csrng = CsRng::new(pool)?;
-//! let mut key = [0u8; 32];
-//! csrng.try_fill_bytes(&mut key)?;
+//! let mut volume_key = [0u8; 32];
+//! csrng.try_fill_bytes(&mut volume_key)?;
 //!
-//! // A fast, hardware-preferring generator, seeded unpredictably.
-//! let mut fast = PlatformFast::new(hw, csrng.try_next_u64()?);
+//! // …and key the fast generator from it for bulk unpredictable bytes.
+//! let mut fast: FastRng = csrng.fork_fast()?;
 //! let _coin = fast.next_u64() & 1;
 //! # Ok(())
 //! # }
@@ -89,6 +95,7 @@ pub mod fast;
 pub mod hardware;
 pub mod interrupt;
 pub mod jitter;
+pub mod noncrypto;
 pub mod rand;
 pub mod reserve;
 
@@ -96,9 +103,14 @@ pub use bootseed::{BootSeedSource, MAX_BOOT_SEED_LEN};
 pub use csprng::{CsRng, DEFAULT_RESEED_INTERVAL};
 pub use drbg::{DrbgError, HmacDrbg, DRBG_OUTLEN, RESEED_INTERVAL};
 pub use entropy::{CombinedSource, EntropyError, EntropySource, MixedPair};
-pub use fast::FastRng;
-pub use hardware::{HardwareEntropy, HardwareRng, PlatformFast};
+pub use fast::{FastRng, FAST_BUFFER_BYTES, FAST_REFILL_BYTES, PERTURB_INTERVAL_BYTES};
+pub use hardware::{HardwareEntropy, HardwareRng};
 pub use interrupt::{InterruptEntropyPool, InterruptPoolSource};
 pub use jitter::{JitterSource, TimeSource};
+pub use noncrypto::NonCryptoRng;
 pub use rand::RandU64;
+// The 256-bit key `FastRng` takes, re-exported from `lib/crypto` so a
+// consumer of this crate names one crate rather than two. Not a second
+// definition: the type is the cipher's own.
 pub use reserve::{OutputReserve, ReserveError, DEFAULT_RESERVE_BYTES};
+pub use tairix_crypto::{StreamKey, STREAM_KEY_LEN};

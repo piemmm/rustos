@@ -13,7 +13,7 @@ no allocation, and exposes a deliberately narrow public surface.
 | [`tairix-hash`](hash.md) | Keyed SipHash-1-3, the XXH64 fast mixer, and the per-boot / per-process key. | experimental |
 | [`tairix-inline`](inline.md) | Allocation-free containers: bounded vector and string, rings, the intrusive list, the fixed bitset. Links no allocator. | experimental |
 | [`tairix-log`](log.md) | Structured, level-filtered, alloc-free logging.                  | stable    |
-| [`tairix-rng`](rng.md) | CSPRNG (HMAC-DRBG) + entropy/hardware-RNG seam + fast PRNG.       | experimental |
+| [`tairix-rng`](rng.md) | CSPRNG (HMAC-DRBG), a fast unpredictable ChaCha12 generator, a predictable one, + the entropy/hardware-RNG seam. | experimental |
 | [`tairix-util`](util.md) | Reserved destination for ≥ 2-use helpers — empty in Stage 1.   | experimental |
 
 These crates are the foundation Stage 2 (the kernel core) builds on. They

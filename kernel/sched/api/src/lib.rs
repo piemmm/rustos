@@ -9,7 +9,9 @@
 //!   [`TaskAction`], [`TaskContext`], [`TaskId`], [`SchedError`],
 //!   [`StepOutcome`], [`SchedulerConfig`]);
 //! * the re-exported scheduler-facing Arch HAL surface ([`CpuId`],
-//!   [`SchedulerArch`]) and the host [`TestArch`] double; and
+//!   [`SchedulerArch`]) and the host [`TestArch`] double;
+//! * [`StealScan`], the per-CPU work-stealing scan start every per-CPU-queue
+//!   policy shares; and
 //! * the shared `conformance` suite (feature `conformance`) every
 //!   concrete scheduler must pass.
 //!
@@ -28,6 +30,7 @@ pub mod conformance;
 pub mod error;
 pub mod outcome;
 pub mod policy;
+pub mod steal;
 pub mod task;
 
 #[cfg(any(test, feature = "test-arch"))]
@@ -37,6 +40,7 @@ pub use config::SchedulerConfig;
 pub use error::{SchedError, SchedResult};
 pub use outcome::{ExitDisposition, StepOutcome};
 pub use policy::SchedulerPolicy;
+pub use steal::StealScan;
 pub use task::{
     choose_task_id, release_task_id, reserve_task_id, seed_task_ids, task_id_reserved, Priority,
     SchedClass, TaskAction, TaskContext, TaskId, TaskState, INIT_TASK_ID, MAX_TASK_ID, NO_TASK,

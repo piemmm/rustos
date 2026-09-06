@@ -38,11 +38,11 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = [
     "test-util",
 ] }
-# The workspace's own fast non-cryptographic generator, for the differential
-# sweeps that prove the sliding-window blur and its reciprocal multiply agree
-# with a naive reference over random content. A private generator written in the
-# test file would be a second one to reason about; a seeded run is reproducible
-# from its seed alone. Test-only, so nothing reaches a shipped image.
+# The workspace's own predictable generator, for the differential sweeps that
+# prove the sliding-window blur and its reciprocal multiply agree with a naive
+# reference over random content. A private generator written in the test file
+# would be a second one to reason about; a seeded run is reproducible from its
+# seed alone. Test-only, so nothing reaches a shipped image.
 tairix-rng = { path = "../rng", version = "=0.0.0" }
 
 [lints]

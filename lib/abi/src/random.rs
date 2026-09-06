@@ -13,13 +13,20 @@
 //! [`RandomFlags`]. The kernel fills the buffer with cryptographically
 //! secure random bytes and returns the count written.
 //!
-//! * Before the kernel RNG is initialised, a request **blocks** until it is
-//!   seeded — unless the caller set [`RandomFlags::NON_BLOCKING`], in which
-//!   case it fails closed with [`crate::Errno::EntropyNotReady`] rather than
-//!   returning weak randomness.
+//! * Before the kernel RNG is initialised, **every** request fails closed
+//!   with [`crate::Errno::EntropyNotReady`] rather than returning weak
+//!   randomness. It is not made to wait: the only way the RNG is still
+//!   unseeded once userland exists is that the platform's entropy sources
+//!   are all dead, and a wait on a dead source never ends. A caller that
+//!   wants to retry decides that for itself, and one that set
+//!   [`RandomFlags::NON_BLOCKING`] has said it will not.
 //! * After initialisation a request never blocks waiting for fresh external
-//!   entropy; if the output reserve is empty the kernel generates more bytes
-//!   synchronously from the CSPRNG.
+//!   entropy: the reserve serves from a cipher keyed by the CSPRNG, so an
+//!   exhausted buffer is regenerated on the spot.
+//!   [`RandomFlags::NON_BLOCKING`] then chooses only whether the reserve's
+//!   periodic fold of fresh entropy into that key waits for a momentarily
+//!   dry source or is deferred to a later request; the bytes served are the
+//!   same either way.
 //!
 //! The numeric flag bits and the per-call length cap are part of the frozen
 //! random ABI: new behaviour is added by allocating an unused bit, never by

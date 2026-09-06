@@ -91,9 +91,10 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `lib/log`: structured, level-filtered, no-alloc-on-hot-path logging with
   stable event IDs.
 - `lib/rng`: random number generation — a NIST SP 800-90A HMAC-SHA256
-  CSPRNG composed over `lib/crypto`'s audited HMAC, a pluggable
+  CSPRNG composed over `lib/crypto`'s audited HMAC, a fast *unpredictable*
+  ChaCha12 fast-key-erasure generator over the same crate, a pluggable
   entropy / hardware-RNG seam (the §19.2 platform RNG), and a fast
-  non-cryptographic xoshiro256++ generator.
+  *predictable* xoshiro256++ generator for decorrelation and fixtures.
 - `lib/util`: only items used by ≥ 2 crates.
 
 **Tests**
@@ -117,9 +118,13 @@ Do **not** begin a stage before all its listed dependencies are complete.
 - `lib/caps` enforces subset-only delegation (exhaustive property test).
 - `lib/crypto` exposes audited SHA-256 + Ed25519 verification only; upstream
   crates pinned exactly with `zeroize` enabled.
-- `lib/rng` (experimental): `CsRng` HMAC-SHA256 DRBG over `lib/crypto`'s HMAC
-  (NIST CAVP-validated) with a pluggable `EntropySource`, a `HardwareRng`
-  seam, and `FastRng` (xoshiro256++) — the §19.2 platform-RNG seam.
+- `lib/rng` (experimental): three generators split on unpredictability, not
+  speed — `CsRng` HMAC-SHA256 DRBG over `lib/crypto`'s HMAC (NIST
+  CAVP-validated) for long-lived key material, `FastRng` (buffered ChaCha12,
+  fast key erasure) for everything else that must not be guessable, and
+  `NonCryptoRng` (xoshiro256++) for decorrelation and fixtures — plus a
+  pluggable `EntropySource` and the `HardwareRng` seam (entropy input only),
+  the §19.2 platform-RNG seam.
 - `lib/util` holds only items with ≥ 2 independent callers (§2.3):
   `fmt` (audit-field formatters; `kernel/sec` + `kernel/ipc`, promoted in
   Stage 2.5), `size` (the GNU `--block-size` grammar, ceiling block

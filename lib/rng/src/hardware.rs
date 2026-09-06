@@ -1,30 +1,24 @@
-//! The motherboard hardware-RNG seam and a hardware-first fast generator.
+//! The motherboard hardware-RNG seam.
 //!
 //! Many platforms expose a hardware random source: an on-die DRBG/entropy
 //! instruction (x86 `RDRAND`/`RDSEED`, ARMv8.5 `RNDR`/`RNDRRS`, RISC-V
 //! `Zkr`), a TPM, or a virtio-rng device. [`HardwareRng`] is the seam through
 //! which such a source is offered to `lib/rng`. The *concrete* driver is
 //! architecture- or device-specific and therefore lives in
-//! `kernel/arch/<target>` or a `drivers/*` crate (: no
-//! target-conditional code in `lib/*`); this crate only consumes the trait,
-//! so it stays architecture-neutral and host-testable.
+//! `kernel/arch/<target>` or a `drivers/*` crate (no target-conditional code
+//! in a shared crate); this crate only consumes the trait, so it stays
+//! architecture-neutral and host-testable.
 //!
-//! A hardware source plays two roles, exactly as the issue asks:
-//!
-//! * **Extra entropy.** Wrapped in [`HardwareEntropy`] it becomes an ordinary
-//!   [`EntropySource`], so it can be XOR-mixed by
-//!   [`crate::CombinedSource`] *alongside* the other platform sources and
-//!   feed [`crate::CsRng`]. It is never trusted as the *sole* source — a
-//!   vendor RNG could be weak or backdoored — only as one independent input.
-//! * **A fast source.** [`PlatformFast`] uses the hardware source directly
-//!   for fast, non-cryptographic `u64`s when present, and falls back to the
-//!   software [`FastRng`] when it is absent or momentarily fails. There is no
-//!   busy-retry-until-it-works loop: one failed draw
-//!   simply falls through to the software generator.
+//! **A hardware source is entropy *input*, never final output.** Wrapped in
+//! [`HardwareEntropy`] it becomes an ordinary [`EntropySource`], so
+//! [`crate::CombinedSource`] can XOR-mix it *alongside* the other platform
+//! sources before it feeds [`crate::CsRng`]. It is never trusted as the sole
+//! source — a vendor RNG could be weak or backdoored — and its bytes never
+//! reach a caller unconditioned. A generator wanting speed takes
+//! [`crate::FastRng`], whose output is conditioned by a cipher and costs less
+//! than a hardware instruction anyway.
 
 use crate::entropy::{EntropyError, EntropySource};
-use crate::fast::FastRng;
-use crate::rand::RandU64;
 
 /// A platform hardware random source.
 ///
@@ -66,74 +60,9 @@ impl<H: HardwareRng> EntropySource for HardwareEntropy<'_, H> {
     }
 }
 
-/// A fast `u64` generator that prefers a hardware source and falls back to
-/// software.
-///
-/// Construct with [`PlatformFast::new`], passing the platform's hardware
-/// source if one was detected. This is the issue's "hardware RNG as a fast
-/// source, with fallback to a faster version of our own RNG if no hardware
-/// present": when hardware is present it is used directly (and any transient
-/// failure still falls through to the software generator, so [`RandU64`] is
-/// infallible); when it is absent, the software [`FastRng`] is used outright.
-///
-/// As with [`FastRng`], this is **not** cryptographically secure and must not
-/// produce keys or nonces; those go through [`crate::CsRng`].
-pub enum PlatformFast<H: HardwareRng> {
-    /// Hardware present: draw from it, with a software generator on standby.
-    Hardware {
-        /// The platform hardware source.
-        hardware: H,
-        /// Software generator used when a hardware draw fails.
-        fallback: FastRng,
-    },
-    /// No hardware: the software generator is the fast source.
-    Software(FastRng),
-}
-
-impl<H: HardwareRng> PlatformFast<H> {
-    /// Build a fast generator, preferring `hardware` when `Some`.
-    ///
-    /// `fallback_seed` seeds the software [`FastRng`] used either as the sole
-    /// generator (no hardware) or as the standby for transient hardware
-    /// failures. Seed it from [`crate::CsRng::try_next_u64`] for an
-    /// unpredictable fallback.
-    #[must_use]
-    pub fn new(hardware: Option<H>, fallback_seed: u64) -> Self {
-        match hardware {
-            Some(hardware) => Self::Hardware {
-                hardware,
-                fallback: FastRng::seed_from_u64(fallback_seed),
-            },
-            None => Self::Software(FastRng::seed_from_u64(fallback_seed)),
-        }
-    }
-
-    /// `true` if this generator is backed by a hardware source.
-    #[must_use]
-    pub fn is_hardware_backed(&self) -> bool {
-        matches!(self, Self::Hardware { .. })
-    }
-}
-
-impl<H: HardwareRng> RandU64 for PlatformFast<H> {
-    fn next_u64(&mut self) -> u64 {
-        match self {
-            Self::Hardware { hardware, fallback } => {
-                let mut bytes = [0u8; 8];
-                if hardware.try_fill(&mut bytes).is_ok() {
-                    u64::from_le_bytes(bytes)
-                } else {
-                    fallback.next_u64()
-                }
-            }
-            Self::Software(fallback) => fallback.next_u64(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{EntropyError, HardwareEntropy, HardwareRng};
     use crate::csprng::CsRng;
 
     /// A mock hardware RNG yielding a fixed byte, optionally failing.
@@ -177,39 +106,5 @@ mod tests {
             CsRng::new(HardwareEntropy::new(&hw)).err(),
             Some(EntropyError::Unavailable)
         );
-    }
-
-    #[test]
-    fn platform_fast_uses_hardware_when_present() {
-        let hw = MockHw {
-            byte: 0xCD,
-            fails: false,
-        };
-        let mut fast = PlatformFast::new(Some(hw), 0);
-        assert!(fast.is_hardware_backed());
-        // Every byte is 0xCD => the u64 is all 0xCD.
-        assert_eq!(fast.next_u64(), 0xCDCD_CDCD_CDCD_CDCD);
-    }
-
-    #[test]
-    fn platform_fast_falls_back_to_software_when_no_hardware() {
-        let mut fast = PlatformFast::<MockHw>::new(None, 0xABCD_EF01);
-        assert!(!fast.is_hardware_backed());
-        // Matches a bare FastRng with the same seed.
-        let mut reference = FastRng::seed_from_u64(0xABCD_EF01);
-        assert_eq!(fast.next_u64(), reference.next_u64());
-    }
-
-    #[test]
-    fn platform_fast_falls_back_on_transient_hardware_failure() {
-        let hw = MockHw {
-            byte: 0,
-            fails: true,
-        };
-        let mut fast = PlatformFast::new(Some(hw), 0x1234);
-        // Hardware fails => the value must come from the software fallback,
-        // matching a FastRng seeded identically.
-        let mut reference = FastRng::seed_from_u64(0x1234);
-        assert_eq!(fast.next_u64(), reference.next_u64());
     }
 }

@@ -1,39 +1,62 @@
 //! The kernel random output reserve ([`OutputReserve`]).
 //!
-//! the charter requires the kernel to keep a *bounded random output
-//! reserve*: a buffer of CSPRNG **output** (not raw entropy) that satisfies
-//! random requests without running the DRBG on every call, refilled on
-//! demand. This type is that reserve, kept architecture-neutral and
-//! allocator-free in `lib/rng` so the kernel can place one per CPU
-//! ("preferably per-CPU to avoid lock contention") in
-//! kernel-only, non-swappable memory.
+//! The kernel keeps a *bounded random output reserve*: a buffer of CSPRNG
+//! **output** — not raw entropy — that satisfies random requests without
+//! running a DRBG on every call, refilled on demand. This type is that
+//! reserve, kept architecture-neutral and allocator-free so the kernel can
+//! place one per CPU in kernel-only, non-swappable memory.
 //!
-//! # Contract (mirrors)
+//! # The chain
 //!
-//! * **Uninitialised before seeding.** A reserve constructed with
-//!   [`OutputReserve::new`] holds no generator. [`OutputReserve::fill`]
-//!   returns [`ReserveError::NotReady`] until [`OutputReserve::seed`]
-//!   succeeds. The kernel maps that to a block (normal request) or to
-//!   `EntropyNotReady` (non-blocking request).
-//! * **No weak fallback once ready.** After seeding, if the buffered bytes
-//!   are exhausted the reserve generates more **synchronously** from the
-//!   CSPRNG rather than failing or returning low-quality bytes.
+//! ```text
+//! entropy pool → CsRng (HMAC-DRBG) → FastRng<N> (ChaCha12) → userland
+//! ```
+//!
+//! [`crate::CsRng`] is the reserve's *authority*: it keys the fast generator
+//! at seed time and re-keys it at every boundary. [`crate::FastRng`] is what
+//! every served byte comes from, so a userland request costs a cipher block
+//! rather than a DRBG generate. The reserve keeps no byte buffer of its own —
+//! `FastRng` already is a buffered generator that wipes each byte as it is
+//! consumed, and a second such buffer beside it would be one more
+//! zeroisation path to keep correct.
+//!
+//! # Contract
+//!
+//! * **Uninitialised before seeding.** A reserve from [`OutputReserve::new`]
+//!   holds no generator, and every draw returns [`ReserveError::NotReady`]
+//!   until [`OutputReserve::seed`] succeeds. The kernel maps that to a block
+//!   (normal request) or to `EntropyNotReady` (non-blocking request).
+//! * **No weak fallback, and no blocking, once ready.** Serving needs no
+//!   fresh entropy at all: an exhausted buffer is regenerated from the
+//!   cipher, so a seeded reserve neither returns short, nor waits on the
+//!   entropy source, nor substitutes low-quality bytes.
 //! * **Zeroised on consumption and reuse.** Bytes handed to a caller are
-//!   wiped from the buffer immediately, and the whole buffer is wiped before
-//!   it is refilled — a paged-out or cloned copy can never replay them.
-//! * **Discarded across boundaries.** [`OutputReserve::discard`] wipes the
-//!   buffered output for the suspend/hibernate/clone/crash-dump/reseed
-//!   boundaries enumerates; the generator state is wiped too when the
-//!   reserve is dropped (`zeroize`, via [`crate::CsRng`]).
+//!   wiped immediately, and a refill destroys the key that produced the
+//!   previous buffer, so a paged-out or cloned copy can replay nothing.
+//! * **Discarded across boundaries.** [`OutputReserve::discard`] drops
+//!   buffered output *and* rotates the key behind it for the
+//!   suspend/hibernate/clone/crash-dump/reseed boundaries; both generators'
+//!   working state is wiped on drop.
+//! * **Periodically prediction-resistant.** Every
+//!   [`crate::PERTURB_INTERVAL_BYTES`] of output the reserve reseeds the DRBG
+//!   from the entropy pool and folds a fresh 32 bytes into the cipher key, so
+//!   fresh entropy enters the chain on a bounded output cadence rather than
+//!   only when the DRBG's own draw counter happens to run out.
 
 use zeroize::Zeroize;
 
+use tairix_crypto::STREAM_KEY_LEN;
+
 use crate::csprng::CsRng;
 use crate::entropy::{EntropyError, EntropySource};
+use crate::fast::FastRng;
+use crate::rand::RandU64;
 
-/// Whether a reserve operation reseeds fallibly or blocks through a shortage.
+/// Whether a reserve operation draws entropy fallibly or blocks through a
+/// shortage.
 ///
-/// Lets the fallible and blocking entry points share one fill/reseed body by abstracting only the choice of `CsRng` method.
+/// Lets the fallible and blocking entry points share one perturbation and
+/// reseed body, abstracting only the choice of [`CsRng`] method.
 #[derive(Clone, Copy)]
 enum ReseedMode {
     Fallible,
@@ -41,7 +64,7 @@ enum ReseedMode {
 }
 
 impl ReseedMode {
-    /// Generate `out` from `rng`, reseeding (per this mode) if one is due.
+    /// Generate `out` from `rng`.
     fn generate<E: EntropySource>(
         self,
         rng: &mut CsRng<E>,
@@ -53,7 +76,7 @@ impl ReseedMode {
         }
     }
 
-    /// Reseed `rng` (per this mode).
+    /// Reseed `rng` from its entropy source.
     fn reseed<E: EntropySource>(self, rng: &mut CsRng<E>) -> Result<(), EntropyError> {
         match self {
             ReseedMode::Fallible => rng.reseed(),
@@ -62,7 +85,7 @@ impl ReseedMode {
     }
 }
 
-/// Default reserve size, in bytes (the charter permits 2 KiB).
+/// Default reserve size, in bytes.
 ///
 /// Matches `tairix_abi::RANDOM_RESERVE_DEFAULT_BYTES`; the two are kept equal
 /// but the crates do not depend on one another, so each states it
@@ -77,205 +100,209 @@ pub enum ReserveError {
     /// initialised. The caller decides whether to block (normal request) or
     /// fail closed with `EntropyNotReady` (non-blocking request).
     NotReady,
-    /// The underlying CSPRNG could not produce bytes (a required reseed had
-    /// no entropy). Fail closed; never substitute weak randomness.
+    /// A boundary that genuinely needs fresh entropy could not draw it: the
+    /// initial seed, or an explicit [`OutputReserve::reseed`]. Fail closed;
+    /// never substitute weak randomness. Serving bytes never reports this,
+    /// because serving needs no entropy.
     Entropy(EntropyError),
+}
+
+/// The seeded half of a reserve: the DRBG authority and the generator every
+/// served byte comes from.
+struct Ready<E: EntropySource, const N: usize> {
+    cs: CsRng<E>,
+    fast: FastRng<N>,
 }
 
 /// A bounded reserve of CSPRNG output, refilled on demand.
 ///
-/// `N` is the buffer size in bytes; use [`DEFAULT_RESERVE_BYTES`] unless a
-/// caller has a measured reason to differ. The generator `E` is the
-/// [`EntropySource`] the inner [`CsRng`] reseeds from.
+/// `N` is the issue-buffer size in bytes; use [`DEFAULT_RESERVE_BYTES`]
+/// unless a caller has a measured reason to differ. `E` is the
+/// [`EntropySource`] the inner [`CsRng`] seeds and reseeds from.
 pub struct OutputReserve<E: EntropySource, const N: usize = DEFAULT_RESERVE_BYTES> {
-    rng: Option<CsRng<E>>,
-    buf: [u8; N],
-    /// Index of the next unconsumed byte in `buf[..filled]`.
-    pos: usize,
-    /// Number of valid (unconsumed-or-future) bytes; `buf[pos..filled]` is
-    /// live output, `buf[..pos]` and `buf[filled..]` are wiped.
-    filled: usize,
+    ready: Option<Ready<E, N>>,
 }
 
 impl<E: EntropySource, const N: usize> OutputReserve<E, N> {
     /// Create an unseeded reserve.
     ///
-    /// [`OutputReserve::fill`] returns [`ReserveError::NotReady`] until
+    /// Every draw returns [`ReserveError::NotReady`] until
     /// [`OutputReserve::seed`] succeeds; this models the pre-initialisation
-    /// window in.
+    /// window the kernel boots through.
     #[must_use]
     pub const fn new() -> Self {
         const {
             assert!(N > 0, "OutputReserve capacity must be non-zero");
         }
-        Self {
-            rng: None,
-            buf: [0u8; N],
-            pos: 0,
-            filled: 0,
-        }
+        Self { ready: None }
     }
 
     /// Seed the reserve, making it ready to serve requests.
     ///
-    /// Instantiates the inner [`CsRng`] from `entropy`. Re-seeding an
-    /// already-ready reserve replaces the generator and discards any buffered
-    /// output (it belonged to the old generator).
+    /// Instantiates the [`CsRng`] from `entropy` and keys the fast generator
+    /// from its first output. Seeding an already-ready reserve replaces both,
+    /// discarding output that belonged to the old pair.
     ///
     /// # Errors
     ///
     /// Returns [`ReserveError::Entropy`] if the source cannot supply the
-    /// initial seed; the reserve stays unseeded.
+    /// initial seed. The reserve is left exactly as it was — unseeded, or
+    /// still serving from its previous generators — rather than half-built.
     pub fn seed(&mut self, entropy: E) -> Result<(), ReserveError> {
-        let rng = CsRng::new(entropy).map_err(ReserveError::Entropy)?;
-        self.discard();
-        self.rng = Some(rng);
+        let mut cs = CsRng::new(entropy).map_err(ReserveError::Entropy)?;
+        let fast = cs.fork_fast().map_err(ReserveError::Entropy)?;
+        self.ready = Some(Ready { cs, fast });
         Ok(())
     }
 
     /// Whether the reserve has been seeded.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
-        self.rng.is_some()
+        self.ready.is_some()
     }
 
     /// Fill `out` with cryptographically secure random bytes.
     ///
-    /// Serves from the buffer where possible, wiping each consumed byte and
-    /// regenerating the whole buffer (after wiping it) when it is exhausted.
-    /// A request larger than the buffer is generated directly from the
-    /// CSPRNG, so the reserve never returns short or blocks for entropy once
-    /// ready.
+    /// Serves from the fast generator, which refills itself from the cipher
+    /// and wipes each byte as it hands it over. A request of any length is
+    /// served in one call; nothing here waits on the entropy source.
     ///
-    /// This is the **fallible** fill: a required reseed that cannot draw fresh
-    /// entropy fails closed with [`ReserveError::Entropy`] (carrying
-    /// [`EntropyError::Reseeding`]). Use [`OutputReserve::fill_blocking`] to
-    /// wait through the reseed instead.
+    /// This is the **fallible** fill only in that the periodic perturbation
+    /// it carries out does not wait: when fresh entropy is momentarily
+    /// unavailable the perturbation is simply deferred to the next request
+    /// and the bytes served are unaffected — they are cipher output under a
+    /// DRBG-derived key either way. Use [`OutputReserve::fill_blocking`] to
+    /// wait for the perturbation's entropy instead.
     ///
     /// # Errors
     ///
-    /// * [`ReserveError::NotReady`] if the reserve has not been seeded.
-    /// * [`ReserveError::Entropy`] if a required reseed has no entropy. On
-    ///   error `out` is left zeroed rather than partially filled.
+    /// [`ReserveError::NotReady`] if the reserve has not been seeded; `out`
+    /// is left untouched.
     pub fn fill(&mut self, out: &mut [u8]) -> Result<(), ReserveError> {
-        self.fill_with(out, ReseedMode::Fallible)
+        self.serve(out, ReseedMode::Fallible)
     }
 
-    /// Fill `out` with cryptographically secure random bytes, **blocking**
-    /// through a reseed if one is required and its entropy is momentarily
-    /// unavailable.
+    /// Fill `out` with cryptographically secure random bytes, **waiting** for
+    /// the entropy a due perturbation needs.
     ///
-    /// Identical to [`OutputReserve::fill`] except that a required reseed
-    /// waits for entropy (via [`crate::CsRng::fill_bytes_blocking`]) instead
-    /// of failing closed. Generation itself never needs fresh entropy, so the
-    /// common buffered/refill path does not block.
+    /// Identical to [`OutputReserve::fill`] except that a perturbation which
+    /// has come due waits for its entropy rather than deferring. Generation
+    /// itself never blocks either way.
     ///
     /// # Errors
     ///
-    /// * [`ReserveError::NotReady`] if the reserve has not been seeded.
-    /// * [`ReserveError::Entropy`] if a required reseed's source is genuinely
-    ///   dead. On error `out` is left zeroed rather than partially filled.
+    /// [`ReserveError::NotReady`] if the reserve has not been seeded; `out`
+    /// is left untouched.
     pub fn fill_blocking(&mut self, out: &mut [u8]) -> Result<(), ReserveError> {
-        self.fill_with(out, ReseedMode::Blocking)
+        self.serve(out, ReseedMode::Blocking)
     }
 
-    /// Shared fill body for the fallible and blocking paths; `mode` chooses
-    /// only how a required reseed draws its entropy.
-    fn fill_with(&mut self, out: &mut [u8], mode: ReseedMode) -> Result<(), ReserveError> {
-        let Some(rng) = self.rng.as_mut() else {
+    /// Shared serve body; `mode` chooses only how a due perturbation draws.
+    fn serve(&mut self, out: &mut [u8], mode: ReseedMode) -> Result<(), ReserveError> {
+        let Some(ready) = self.ready.as_mut() else {
             return Err(ReserveError::NotReady);
         };
-
-        // A request larger than one buffer's worth is generated directly:
-        // buffering it would gain nothing and the reserve must not return
-        // short (generate synchronously when the reserve cannot serve).
-        if out.len() > N {
-            if let Err(e) = mode.generate(rng, out) {
-                out.zeroize();
-                return Err(ReserveError::Entropy(e));
-            }
-            return Ok(());
-        }
-
-        let mut written = 0;
-        while written < out.len() {
-            if self.pos == self.filled {
-                // Wipe stale output before regenerating so a refill never
-                // leaves a previous generator's bytes readable in the buffer.
-                self.buf.zeroize();
-                if let Err(e) = mode.generate(rng, &mut self.buf) {
-                    self.pos = 0;
-                    self.filled = 0;
-                    out[..written].zeroize();
-                    return Err(ReserveError::Entropy(e));
-                }
-                self.pos = 0;
-                self.filled = N;
-            }
-            let take = core::cmp::min(out.len() - written, self.filled - self.pos);
-            out[written..written + take].copy_from_slice(&self.buf[self.pos..self.pos + take]);
-            // Zeroise consumed bytes immediately (zeroed on consumption).
-            self.buf[self.pos..self.pos + take].zeroize();
-            self.pos += take;
-            written += take;
-        }
+        perturb_if_due(ready, mode);
+        ready.fast.fill_bytes(out);
         Ok(())
     }
 
-    /// Reseed the inner CSPRNG and discard any buffered output.
+    /// Reseed the DRBG and re-key the fast generator from it, discarding
+    /// buffered output.
     ///
-    /// lists the reseed boundary among the points where the
-    /// reserve's buffered bytes must be discarded. This is the **fallible**
-    /// reseed; use [`OutputReserve::reseed_blocking`] to wait for entropy.
+    /// This is the explicit reseed boundary, distinct from the automatic
+    /// perturbation [`OutputReserve::fill`] carries out. **Fallible**: use
+    /// [`OutputReserve::reseed_blocking`] to wait for entropy.
     ///
     /// # Errors
     ///
     /// * [`ReserveError::NotReady`] if the reserve has not been seeded.
     /// * [`ReserveError::Entropy`] (carrying [`EntropyError::Reseeding`]) if
-    ///   the reseed has no entropy right now; the existing generator is left
-    ///   intact and the caller may retry.
+    ///   there is no entropy right now; the generators are left usable and
+    ///   the caller may retry.
     pub fn reseed(&mut self) -> Result<(), ReserveError> {
         self.reseed_with(ReseedMode::Fallible)
     }
 
-    /// Reseed the inner CSPRNG, **blocking** through a momentary entropy
-    /// shortage, and discard any buffered output.
+    /// Reseed the DRBG and re-key the fast generator, **blocking** through a
+    /// momentary entropy shortage.
     ///
     /// # Errors
     ///
     /// * [`ReserveError::NotReady`] if the reserve has not been seeded.
-    /// * [`ReserveError::Entropy`] only if the reseed's source is genuinely
-    ///   dead; the existing generator is left intact.
+    /// * [`ReserveError::Entropy`] only if the source is genuinely dead; the
+    ///   generators are left usable.
     pub fn reseed_blocking(&mut self) -> Result<(), ReserveError> {
         self.reseed_with(ReseedMode::Blocking)
     }
 
     /// Shared reseed body for the fallible and blocking paths.
     fn reseed_with(&mut self, mode: ReseedMode) -> Result<(), ReserveError> {
-        let Some(rng) = self.rng.as_mut() else {
+        let Some(ready) = self.ready.as_mut() else {
             return Err(ReserveError::NotReady);
         };
-        mode.reseed(rng).map_err(ReserveError::Entropy)?;
-        self.discard();
+        mode.reseed(&mut ready.cs).map_err(ReserveError::Entropy)?;
+        let mut key = [0u8; STREAM_KEY_LEN];
+        let drawn = mode.generate(&mut ready.cs, &mut key);
+        // Either way the boundary destroys buffered output and the key behind
+        // it; only a successful draw also installs a DRBG-derived one.
+        match drawn {
+            Ok(()) => ready.fast = FastRng::from_key(&key),
+            Err(e) => {
+                ready.fast.discard();
+                key.zeroize();
+                return Err(ReserveError::Entropy(e));
+            }
+        }
+        key.zeroize();
         Ok(())
     }
 
-    /// Discard (zeroise) the buffered output without touching the generator.
+    /// Discard buffered output **and** the key that produced it, without
+    /// touching the DRBG.
     ///
-    /// Called at the suspend/hibernate/fork-clone/crash-dump boundaries of
-    /// so already-generated bytes cannot be replayed from a
-    /// snapshot or inherited by a cloned task.
+    /// Called at the suspend/hibernate/fork-clone/crash-dump boundaries, so
+    /// already-generated bytes cannot be replayed from a snapshot and a
+    /// cloned task cannot continue its parent's stream. A no-op on an
+    /// unseeded reserve, which has nothing to discard.
     pub fn discard(&mut self) {
-        self.buf.zeroize();
-        self.pos = 0;
-        self.filled = 0;
+        if let Some(ready) = self.ready.as_mut() {
+            ready.fast.discard();
+        }
     }
 
-    /// Number of buffered, not-yet-consumed bytes. For introspection/tests.
+    /// Buffered, not-yet-consumed bytes. For introspection and tests.
     #[must_use]
     pub const fn buffered(&self) -> usize {
-        self.filled - self.pos
+        match &self.ready {
+            Some(ready) => ready.fast.buffered(),
+            None => 0,
+        }
     }
+}
+
+/// Fold fresh entropy into the fast generator's key when its output cadence
+/// says it is due.
+///
+/// The reseed comes first and is the point of the exercise: perturbing with
+/// output of a DRBG state that was compromised at the same moment buys
+/// nothing, so prediction resistance needs entropy that has actually entered
+/// the chain since. A shortage defers the perturbation to the next request
+/// instead of denying it or failing the caller's draw — the bytes served are
+/// cipher output under a DRBG-derived key regardless, and refusing randomness
+/// to userland would buy no security.
+fn perturb_if_due<E: EntropySource, const N: usize>(ready: &mut Ready<E, N>, mode: ReseedMode) {
+    if !ready.fast.perturb_due() {
+        return;
+    }
+    if mode.reseed(&mut ready.cs).is_err() {
+        return;
+    }
+    let mut fresh = [0u8; STREAM_KEY_LEN];
+    if mode.generate(&mut ready.cs, &mut fresh).is_ok() {
+        ready.fast.perturb(&fresh);
+    }
+    fresh.zeroize();
 }
 
 impl<E: EntropySource, const N: usize> Default for OutputReserve<E, N> {
@@ -299,11 +326,12 @@ impl<E: EntropySource, const N: usize> core::fmt::Debug for OutputReserve<E, N> 
 mod tests {
     use super::{OutputReserve, ReserveError, DEFAULT_RESERVE_BYTES};
     use crate::entropy::{EntropyError, EntropySource};
+    use crate::fast::PERTURB_INTERVAL_BYTES;
 
-    /// Deterministic stand-in for an entropy source (see `csprng` tests): a
-    /// counter expanded so each fill is distinct. Not entropy — it makes the
-    /// reserve's behaviour reproducible. An optional budget drives the
-    /// reseed-failure path.
+    /// Deterministic stand-in for an entropy source (see the `csprng` tests):
+    /// a counter expanded so each fill is distinct. Not entropy — it makes
+    /// the reserve's behaviour reproducible. An optional budget drives the
+    /// shortage paths.
     struct CountingSource {
         counter: u64,
         budget: Option<u32>,
@@ -349,6 +377,22 @@ mod tests {
         r
     }
 
+    /// Draw `bytes` from `reserve` in `chunk`-sized requests, returning the
+    /// tail of the stream so two reserves' late output can be compared.
+    fn drain<const N: usize>(
+        reserve: &mut OutputReserve<CountingSource, N>,
+        bytes: u64,
+        tail: &mut [u8],
+    ) {
+        let mut chunk = [0u8; 4096];
+        let mut served = 0u64;
+        while served < bytes {
+            reserve.fill(&mut chunk).expect("a seeded reserve serves");
+            served += u64::try_from(chunk.len()).expect("a chunk length fits a u64");
+        }
+        reserve.fill(tail).expect("a seeded reserve serves");
+    }
+
     #[test]
     fn default_capacity_is_two_kib() {
         assert_eq!(DEFAULT_RESERVE_BYTES, 2048);
@@ -360,8 +404,10 @@ mod tests {
         assert!(!r.is_ready());
         let mut out = [0u8; 8];
         assert_eq!(r.fill(&mut out), Err(ReserveError::NotReady));
+        assert_eq!(r.fill_blocking(&mut out), Err(ReserveError::NotReady));
         // Output untouched on the early-boot failure.
         assert_eq!(out, [0u8; 8]);
+        assert_eq!(r.buffered(), 0);
     }
 
     #[test]
@@ -382,6 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn the_reserve_serves_from_the_fast_generator_the_drbg_keyed() {
+        // Pins the chain: the bytes userland gets are cipher output under a
+        // key the DRBG produced, not DRBG output directly.
+        use crate::csprng::CsRng;
+        use crate::fast::FastRng;
+        use crate::rand::RandU64;
+        let mut reference: FastRng<64> = CsRng::new(CountingSource::new(3))
+            .expect("seed")
+            .fork_fast()
+            .expect("fork");
+        let mut expected = [0u8; 100];
+        reference.fill_bytes(&mut expected);
+
+        let mut r = ready_reserve::<64>(3);
+        let mut served = [0u8; 100];
+        r.fill(&mut served).expect("serve");
+        assert_eq!(served, expected);
+    }
+
+    #[test]
+    fn a_request_larger_than_the_buffer_is_served_in_one_call() {
+        let mut r = ready_reserve::<16>(99);
+        let mut out = [0u8; 100];
+        r.fill(&mut out).expect("served across refills");
+        assert_ne!(out, [0u8; 100]);
+        // No 16-byte window repeats: the refills continued the stream.
+        for (i, a) in out.chunks(16).enumerate() {
+            for b in out.chunks(16).skip(i + 1) {
+                assert_ne!(a, b, "a refill repeated its predecessor's output");
+            }
+        }
+    }
+
+    #[test]
     fn reserve_refills_across_multiple_requests() {
         // Buffer of 32; draw 200 bytes total, forcing several refills.
         let mut r = ready_reserve::<32>(0xABCD);
@@ -399,20 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn large_request_is_served_directly_past_the_buffer() {
-        // Request larger than the buffer must succeed in one call.
-        let mut r = ready_reserve::<16>(99);
-        let mut out = [0u8; 100];
-        r.fill(&mut out).expect("direct generation");
-        assert_ne!(out, [0u8; 100]);
-        // The small buffer was untouched (direct path), so nothing buffered.
-        assert_eq!(r.buffered(), 0);
-    }
-
-    #[test]
-    fn consumed_buffer_bytes_are_zeroised() {
-        // One refill of a 32-byte buffer, consume 8; the consumed prefix must
-        // be wiped while the remaining bytes stay live.
+    fn consumed_bytes_leave_only_the_unserved_remainder_buffered() {
         let mut r = ready_reserve::<32>(5);
         let mut out = [0u8; 8];
         r.fill(&mut out).expect("serve");
@@ -430,36 +497,45 @@ mod tests {
     }
 
     #[test]
-    fn discard_wipes_buffered_output() {
+    fn discard_wipes_buffered_output_and_rotates_the_key() {
         let mut r = ready_reserve::<64>(42);
         let mut out = [0u8; 8];
         r.fill(&mut out).unwrap();
         assert!(r.buffered() > 0);
         r.discard();
         assert_eq!(r.buffered(), 0, "suspend/clone boundary wipes the reserve");
-        // Still ready after a discard — only the buffer was dropped.
+        // Still ready after a discard — only the fast generator moved on.
         assert!(r.is_ready());
         r.fill(&mut out).expect("serves again after discard");
     }
 
+    /// A discard on an unseeded reserve must not panic or make it look ready.
     #[test]
-    fn fork_clone_separation_no_shared_buffered_bytes() {
-        // Model a fork: the parent draws (buffering the remainder), then the
-        // child reserve is discarded so it cannot replay the parent's
-        // buffered output. After discard the child must regenerate.
+    fn discard_on_an_unseeded_reserve_is_a_no_op() {
+        let mut r = OutputReserve::<CountingSource, 64>::new();
+        r.discard();
+        assert!(!r.is_ready());
+    }
+
+    #[test]
+    fn a_cloned_reserve_cannot_continue_its_parents_stream() {
+        // Model a fork: parent and child start identical, the child's
+        // reserve is discarded, and from then on their streams differ.
         let mut parent = ready_reserve::<64>(7);
-        let mut p = [0u8; 8];
+        let mut child = ready_reserve::<64>(7);
+        let (mut p, mut c) = ([0u8; 8], [0u8; 8]);
         parent.fill(&mut p).unwrap();
-        let buffered_before = parent.buffered();
-        assert!(buffered_before > 0);
-        parent.discard();
-        assert_eq!(parent.buffered(), 0);
+        child.fill(&mut c).unwrap();
+        assert_eq!(p, c, "the fork starts from one state");
+        child.discard();
+        let (mut pa, mut ca) = ([0u8; 128], [0u8; 128]);
+        parent.fill(&mut pa).unwrap();
+        child.fill(&mut ca).unwrap();
+        assert_ne!(pa, ca, "a discarded child must not replay the parent");
     }
 
     #[test]
     fn reseed_succeeds_and_discards_buffer() {
-        // Budget: 1 (seed) + 1 (reseed) successful fills, then plenty more so
-        // post-reseed generation works.
         let mut r = OutputReserve::<CountingSource, 64>::new();
         r.seed(CountingSource::new(3)).unwrap();
         let mut out = [0u8; 8];
@@ -474,29 +550,72 @@ mod tests {
     fn reseed_before_seed_is_not_ready() {
         let mut r = OutputReserve::<CountingSource, 64>::new();
         assert_eq!(r.reseed(), Err(ReserveError::NotReady));
+        assert_eq!(r.reseed_blocking(), Err(ReserveError::NotReady));
     }
 
     #[test]
     fn reseed_failure_is_surfaced_not_hidden() {
         // Budget 1: only the instantiation seed succeeds. A subsequent
         // explicit reseed has no entropy left, and that must surface rather
-        // than be hidden or replaced with weak randomness (fail closed).
+        // than be hidden or replaced with weak randomness.
         let mut r = OutputReserve::<CountingSource, 16>::new();
         r.seed(CountingSource::with_budget(9, 1)).unwrap();
-        // Serving still works (generation does not draw fresh entropy)…
+        // Serving still works — generation needs no fresh entropy at all…
         let mut out = [0u8; 8];
         r.fill(&mut out).expect("generation needs no fresh entropy");
-        // …but the reseed boundary needs entropy and surfaces the typed,
-        // transient `Reseeding` (the generator is intact).
+        // …but the reseed boundary does, and surfaces the typed, transient
+        // `Reseeding` with the generators left intact.
         assert_eq!(
             r.reseed(),
             Err(ReserveError::Entropy(EntropyError::Reseeding))
         );
+        r.fill(&mut out)
+            .expect("still serves after a failed reseed");
+    }
+
+    /// The perturbation must actually happen: once the cadence elapses, the
+    /// reserve's stream must diverge from an unperturbed generator's.
+    #[test]
+    fn the_reserve_perturbs_its_generator_on_the_output_cadence() {
+        let mut perturbing = ready_reserve::<2048>(11);
+        // Budget 1 covers instantiation only, so this reserve's perturbation
+        // reseed finds nothing and it keeps its original key.
+        let mut starved = OutputReserve::<CountingSource, 2048>::new();
+        starved.seed(CountingSource::with_budget(11, 1)).unwrap();
+
+        // Before the cadence elapses both are the same generator.
+        let (mut early_a, mut early_b) = ([0u8; 64], [0u8; 64]);
+        perturbing.fill(&mut early_a).unwrap();
+        starved.fill(&mut early_b).unwrap();
+        assert_eq!(early_a, early_b, "no perturbation is due yet");
+
+        let (mut late_a, mut late_b) = ([0u8; 64], [0u8; 64]);
+        drain(&mut perturbing, PERTURB_INTERVAL_BYTES, &mut late_a);
+        drain(&mut starved, PERTURB_INTERVAL_BYTES, &mut late_b);
+        assert_ne!(
+            late_a, late_b,
+            "the reserve did not fold fresh entropy in on its cadence"
+        );
+    }
+
+    /// A perturbation with no entropy available must defer, never deny the
+    /// caller's bytes.
+    #[test]
+    fn a_perturbation_shortage_never_denies_a_draw() {
+        let mut starved = OutputReserve::<CountingSource, 2048>::new();
+        starved.seed(CountingSource::with_budget(5, 1)).unwrap();
+        let mut tail = [0u8; 64];
+        drain(&mut starved, PERTURB_INTERVAL_BYTES, &mut tail);
+        assert_ne!(tail, [0u8; 64], "output must keep flowing");
+        // And it keeps serving past the missed perturbation.
+        starved
+            .fill_blocking(&mut tail)
+            .expect("a blocking fill serves too");
     }
 
     /// A source whose non-blocking `fill` is exhausted after `budget` draws
-    /// but whose blocking `fill_blocking` always delivers — a stand-in for a
-    /// parking platform source, exercising the reserve's blocking path.
+    /// but whose `fill_blocking` always delivers — a stand-in for a parking
+    /// platform source, exercising the reserve's blocking paths.
     struct ParkingSource {
         counter: u64,
         budget: u32,
@@ -553,26 +672,13 @@ mod tests {
     }
 
     #[test]
-    fn fill_blocking_waits_through_a_required_reseed() {
-        // A tiny reseed interval forces a reseed mid-stream; the fallible fill
-        // would fail closed once the budget is spent, but the blocking fill
-        // waits for entropy and keeps serving.
-        let mut r = OutputReserve::<ParkingSource, 8>::new();
-        r.seed(ParkingSource::new(3, 1)).unwrap();
-        let mut out = [0u8; 4];
-        // First fill refills the buffer from the seeded generator; no reseed
-        // is due yet, so it serves from buffered output.
-        r.fill_blocking(&mut out).expect("first blocking fill");
-        assert_ne!(out, [0u8; 4]);
-    }
-
-    #[test]
     fn debug_does_not_leak_state() {
         extern crate alloc;
         use alloc::format;
         let r = ready_reserve::<64>(5);
-        let s = format!("{r:?}");
-        assert!(s.contains("OutputReserve"));
-        assert!(s.contains("ready"));
+        assert_eq!(
+            format!("{r:?}"),
+            "OutputReserve { ready: true, capacity: 64, buffered: 0, .. }"
+        );
     }
 }

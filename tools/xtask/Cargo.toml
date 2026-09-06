@@ -387,3 +387,10 @@ libc = "0.2"
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
+# The `rngsoak` orchestrator's per-pass byte budget has to draw enough
+# sequences for the harness's two-level decision rule to conclude anything.
+# Pinning it against the harness's own minimum — rather than restating that
+# minimum here — is what stops a soak from reporting an inconclusive verdict
+# as a failure every night, the same drift guard the tcpserve marker above
+# gets.
+tairix-test-rng-soak = { path = "../../tests/integration/rng_soak", version = "=0.0.0" }

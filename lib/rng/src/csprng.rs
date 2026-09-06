@@ -287,26 +287,25 @@ impl<E: EntropySource> CsRng<E> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    /// Spawn a [`FastRng`] seeded from this CSPRNG.
+    /// Key a [`FastRng`] from this CSPRNG.
     ///
-    /// The returned fast generator is unpredictable at birth (its 256-bit
-    /// state came from secure output) but cheap to run thereafter. Use it for
-    /// bulk *non-security* randomness that still benefits from an
-    /// unpredictable starting point; never for keys or nonces (those stay on
-    /// [`CsRng`]).
+    /// The returned generator is unpredictable at birth — its 256-bit key
+    /// came from DRBG output — and thereafter costs a fraction of a DRBG
+    /// draw. This is the whole random chain in one call: entropy pool →
+    /// HMAC-DRBG → `ChaCha12`. Long-lived key material still comes straight
+    /// from this generator, because a forked one is only *periodically*
+    /// prediction-resistant, and only if its owner perturbs it
+    /// ([`FastRng::perturb`]).
     ///
     /// # Errors
     ///
     /// As [`CsRng::try_fill_bytes`].
-    pub fn fork_fast(&mut self) -> Result<FastRng, EntropyError> {
-        let mut state = [0u8; 32];
-        self.try_fill_bytes(&mut state)?;
-        let mut words = [0u64; 4];
-        for (word, chunk) in words.iter_mut().zip(state.as_chunks::<8>().0) {
-            *word = u64::from_le_bytes(*chunk);
-        }
-        state.zeroize();
-        Ok(FastRng::from_state(words))
+    pub fn fork_fast<const N: usize>(&mut self) -> Result<FastRng<N>, EntropyError> {
+        let mut key = [0u8; tairix_crypto::STREAM_KEY_LEN];
+        self.try_fill_bytes(&mut key)?;
+        let forked = FastRng::from_key(&key);
+        key.zeroize();
+        Ok(forked)
     }
 
     /// Number of draws since the last (re)seed; for introspection and tests.
@@ -524,9 +523,27 @@ mod tests {
     fn fork_fast_is_unpredictable_and_each_fork_differs() {
         use crate::rand::RandU64;
         let mut rng = CsRng::new(CountingSource::new(42)).unwrap();
-        let mut f1 = rng.fork_fast().unwrap();
-        let mut f2 = rng.fork_fast().unwrap();
+        let mut f1: FastRng = rng.fork_fast().unwrap();
+        let mut f2: FastRng = rng.fork_fast().unwrap();
         assert_ne!(f1.next_u64(), f2.next_u64(), "two forks must differ");
+    }
+
+    /// A fork must key the generator from DRBG output, not from something
+    /// derivable at the call site.
+    #[test]
+    fn fork_fast_takes_its_key_from_the_drbg_stream() {
+        use crate::rand::RandU64;
+        let mut expected_key = [0u8; tairix_crypto::STREAM_KEY_LEN];
+        CsRng::new(CountingSource::new(9))
+            .unwrap()
+            .try_fill_bytes(&mut expected_key)
+            .unwrap();
+        let mut reference: FastRng = FastRng::from_key(&expected_key);
+        let mut forked: FastRng = CsRng::new(CountingSource::new(9))
+            .unwrap()
+            .fork_fast()
+            .unwrap();
+        assert_eq!(forked.next_u64(), reference.next_u64());
     }
 
     #[test]

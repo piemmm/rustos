@@ -12,6 +12,7 @@ audit footprint never exceeds a handful of crates.
 | SHA-256   | `sha256(&[u8]) -> [u8; 32]`   | `sha2 = 0.10.9`      |
 | Ed25519 verification | `Ed25519PublicKey::verify` | `ed25519-dalek = 2.1.1` |
 | ChaCha20-Poly1305 AEAD | `aead::seal` / `aead::open` | `chacha20poly1305 = 0.10.1` |
+| ChaCha12 keystream | `stream::chacha12_keystream` | `chacha20 = 0.9.1` |
 | PBKDF2-HMAC-SHA256 | `pbkdf2_sha256` / `pbkdf2_sha256_verify` | `hmac = 0.12.1` + `sha2` |
 
 Signing is **not** exposed. Signing keys live behind the local capability
@@ -38,6 +39,27 @@ caller. The one consumer today is the kernel's encrypted-swap layer
 key with a monotonic counter. On any authentication failure `open`
 returns the single opaque `AeadError::Authentication`, leaking nothing
 about why a forgery was rejected (`AGENTS.md` §5.4).
+
+## Stream keystream (§22)
+
+`stream::chacha12_keystream` wraps ChaCha12 — the twelve-round reduced
+variant of ChaCha20 (RFC 8439) — as a *keystream* rather than a cipher:
+callers hand in a key, a nonce, and two destinations, and receive
+`32 + N` contiguous keystream bytes with the first 32 in the smaller one.
+Nothing here chooses a key or a nonce; as with the AEAD above that
+discipline belongs to the caller, which is the only party that knows
+whether its key is fresh per run.
+
+The split destination is not a convenience: its consumer is `lib/rng`'s
+fast-key-erasure generator, which replaces its key from the head of its own
+keystream, and a single destination would force it to hold a scratch copy of
+the whole run — a copy of unissued random output it would then have to wipe.
+`N` is a const parameter, so the run is checked against the cipher's
+per-nonce capacity at compile time and the wrapper needs no fallible path.
+
+`chacha20` adds no crate to the audit surface: it is already in the tree
+beneath `chacha20poly1305`, already source-pinned, and its `zeroize` feature
+was already enabled — naming it directly only makes the dependency explicit.
 
 ## Password derivation (§5.1)
 
@@ -133,6 +155,11 @@ as a dedicated step.
   signature and tampered message rejections.
 * ChaCha20-Poly1305: the RFC 8439 §2.8.2 worked example, plus round-trip
   and tampered-ciphertext / tag / nonce / associated-data rejections.
+* ChaCha12 keystream: the first 96 bytes under RFC 8439's test-vector key
+  and nonce, computed independently from the round function reduced to
+  twelve rounds rather than restated from the dependency — so the test pins
+  both the round count and the split point. Plus destination-overwrite (not
+  XOR-into) behaviour, run extension, and key/nonce sensitivity.
 * `ct_eq`: a per-position single-byte-flip sweep, a content-independent
   traversal-count check, and a fixed-seed randomised differential against
   the reference `==`.

@@ -36,6 +36,7 @@ mod pie_build;
 mod proptest;
 mod prune;
 mod qemu_tests;
+mod rngsoak;
 mod sbom;
 mod seed;
 mod spec_review;
@@ -66,6 +67,7 @@ pub enum Command {
     Fuzz,
     Proptest,
     FsSoak,
+    RngSoak,
     Miri,
     ModelCheck,
     SpecReview,
@@ -100,6 +102,7 @@ impl Command {
         Command::Fuzz,
         Command::Proptest,
         Command::FsSoak,
+        Command::RngSoak,
         Command::Miri,
         Command::ModelCheck,
         Command::SpecReview,
@@ -133,6 +136,7 @@ impl Command {
             "fuzz" => Command::Fuzz,
             "proptest" => Command::Proptest,
             "fssoak" => Command::FsSoak,
+            "rngsoak" => Command::RngSoak,
             "miri" => Command::Miri,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
@@ -168,6 +172,7 @@ impl Command {
             Command::Fuzz => "fuzz",
             Command::Proptest => "proptest",
             Command::FsSoak => "fssoak",
+            Command::RngSoak => "rngsoak",
             Command::Miri => "miri",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
@@ -221,6 +226,9 @@ impl Command {
             Command::FsSoak => {
                 "Soak arxfs/ext4/fat32 on a ≥1 GiB RAM volume for a wall-clock budget."
             }
+            Command::RngSoak => {
+                "Soak the random generators through the statistical battery for a budget."
+            }
             Command::Miri => {
                 "Interpret the crates with a hand-written unsafe core under the UB oracle."
             }
@@ -267,6 +275,7 @@ impl Command {
             Command::Fuzz => run_fuzz(ctx, args),
             Command::Proptest => run_proptest(ctx, args),
             Command::FsSoak => run_fssoak(ctx, args),
+            Command::RngSoak => run_rngsoak(ctx, args),
             Command::Miri => miri::run(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
@@ -1049,6 +1058,18 @@ fn run_fssoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let opts = fssoak::parse(args)?;
     eprintln!("xtask: [fssoak] {}", ctx.workspace_root.display());
     fssoak::run(ctx, &opts)
+}
+
+fn run_rngsoak(ctx: &Context, args: &[OsString]) -> Result<(), String> {
+    // Drive the statistical battery over each unpredictable generator for a
+    // wall-clock budget. `--quick` runs each ≥ 5 s; `--soak` runs each ≥ 24 h
+    // for the nightly job. The target set and the budget live in
+    // `commands/rngsoak.rs`; the parallel per-generator fan-out is
+    // `tools/ci/soak.sh`'s job, not `ci`'s — `ci` gets its coverage from the
+    // harness's own fixed-seed smoke pass in the host test phase.
+    let opts = rngsoak::parse(args)?;
+    eprintln!("xtask: [rngsoak] {}", ctx.workspace_root.display());
+    rngsoak::run(ctx, &opts)
 }
 
 fn run_model_check(args: &[OsString]) -> Result<(), String> {

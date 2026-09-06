@@ -20,7 +20,8 @@
 #
 # Scheduling priority: the test matrix is the ONLY job with a hard, no-retry
 # wall-clock deadline per job (its QEMU verticals fail closed on timeout); the
-# fuzz/proptest/fssoak soaks are throughput jobs with no per-pass deadline —
+# fuzz/proptest/fssoak/rngsoak soaks are throughput jobs with no per-pass
+# deadline —
 # they merely run more passes the more CPU they get. Every job fans out to all
 # cores, so launching them all together oversubscribes the host many-fold; the
 # QEMU guests then starve for TCG cycles and time out (only the deadline-bound
@@ -42,16 +43,17 @@
 # be a real bug the load merely exposed.
 #
 # Usage:
-#   tools/ci/soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] \
+#   tools/ci/soak.sh [fuzz|proptest|fssoak|rngsoak|test|both|all] [--sequential] \
 #                    [--secs N] [--dry-run]
 #
 #   (no kind)      same as `both`: the fuzz and proptest soaks
 #   fuzz           run only the fuzz harnesses
 #   proptest       run only the proptest models
 #   fssoak         run only the docs/src/filesystem/soak.md filesystem soak
+#   rngsoak        run only the statistical random-generator soak
 #   test           run only the repeated-test soak
 #   both           run the fuzz and proptest soaks
-#   all            run fuzz, proptest, the filesystem soak, and the test soak
+#   all            run fuzz, proptest, both soaks, and the test soak
 #   --sequential   run jobs one at a time (default is parallel)
 #   --secs N       override the per-job budget (for smoke runs; CI uses 24 h)
 #   --dry-run      print the planned jobs and exit without running anything
@@ -70,7 +72,7 @@ secs=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        fuzz | proptest | fssoak | test) kind="$1" ;;
+        fuzz | proptest | fssoak | rngsoak | test) kind="$1" ;;
         both | all) kind="$1" ;;
         --sequential) sequential=1 ;;
         --dry-run) dry_run=1 ;;
@@ -81,7 +83,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             echo "soak: unexpected argument '$1'" >&2
-            echo "usage: soak.sh [fuzz|proptest|fssoak|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
+            echo "usage: soak.sh [fuzz|proptest|fssoak|rngsoak|test|both|all] [--sequential] [--secs N] [--dry-run]" >&2
             exit 2
             ;;
     esac
@@ -149,8 +151,8 @@ launch_raw() {
     fi
 }
 
-# launch <label> <xtask-subcommand> <target>: a fuzz/proptest/fssoak soak job
-# for one registry target, sharing the per-job budget. These are the
+# launch <label> <xtask-subcommand> <target>: a fuzz/proptest/fssoak/rngsoak
+# soak job for one registry target, sharing the per-job budget. These are the
 # deadline-free throughput soaks, so they run at the lowered
 # `$throughput_nice` priority.
 launch() {
@@ -178,6 +180,16 @@ if [ "$kind" = "all" ] || [ "$kind" = "fssoak" ]; then
     while IFS= read -r f; do
         [ -n "$f" ] && launch "fssoak-$f" fssoak "$f"
     done < <(enumerate fssoak)
+fi
+# The statistical random-generator soak: one job per registered generator,
+# each drawing sequences from it and accumulating them into one SP 800-22
+# two-level verdict for the per-job budget. The registry (`cargo xtask
+# rngsoak --list`) is the single source of truth, so this never hard-codes
+# the generator list.
+if [ "$kind" = "all" ] || [ "$kind" = "rngsoak" ]; then
+    while IFS= read -r g; do
+        [ -n "$g" ] && launch "rngsoak-$g" rngsoak "$g"
+    done < <(enumerate rngsoak)
 fi
 # The repeated-test soak: one job that repeats the whole test matrix
 # (host + the bare-metal QEMU verticals) for the per-job budget. `cargo xtask

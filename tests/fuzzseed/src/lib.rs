@@ -1,6 +1,6 @@
 //! Shared per-run PRNG seeding, logging, and budget seam for the test
 //! harnesses that draw pseudo-random inputs: the fuzz harnesses, the
-//! stateful proptest models, and the filesystem soak.
+//! stateful proptest models, and the filesystem and statistical-RNG soaks.
 //!
 //! ## Why this exists
 //!
@@ -71,6 +71,21 @@ pub const FSSOAK_BUDGET_ENV: &str = "TAIRIX_FSSOAK_BUDGET_SECS";
 /// RAM device size (bytes) the `cargo xtask fssoak` orchestrator exports for a
 /// soak; unset selects the harness's own smaller smoke device.
 pub const FSSOAK_BYTES_ENV: &str = "TAIRIX_FSSOAK_BYTES";
+
+/// Seed environment variable the statistical RNG soak reads. Unlike the other
+/// harnesses an *unset* value does not draw fresh entropy for a plain `cargo
+/// test`: a statistical verdict is probabilistic, so the per-PR pass runs
+/// from a fixed seed and only a budgeted soak explores new streams. Pinning
+/// this replays a logged failure either way.
+pub const RNGSOAK_SEED_ENV: &str = "TAIRIX_RNGSOAK_SEED";
+
+/// Wall-clock budget (seconds) the `cargo xtask rngsoak` orchestrator exports
+/// for a soak; unset or zero selects the single smoke pass.
+pub const RNGSOAK_BUDGET_ENV: &str = "TAIRIX_RNGSOAK_BUDGET_SECS";
+
+/// Bytes per generator the `cargo xtask rngsoak` orchestrator exports for one
+/// pass; unset selects the harness's own smoke count.
+pub const RNGSOAK_BYTES_ENV: &str = "TAIRIX_RNGSOAK_BYTES";
 
 /// `SplitMix64` finaliser: spreads the bits of `x` so even sequential inputs
 /// (a counter, a job index) map to well-separated outputs.

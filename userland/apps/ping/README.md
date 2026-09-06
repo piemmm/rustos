@@ -25,10 +25,11 @@ opts into a deterministic repeating pattern where one is wanted (a
 pattern-sensitive fault, a codec under test); `-p random` names the
 default explicitly.
 
-The bytes come from `lib/rng`'s fast xoshiro256++ generator seeded once
-from the kernel CSPRNG. Bulk uncompressible data is not a security
-surface, so drawing every payload from the CSPRNG would spend the reserve
-for nothing; a private generator is forbidden, so `lib/rng` owns both.
+The bytes come from `lib/rng`'s fast ChaCha12 generator, keyed once from
+the kernel CSPRNG. A draw happens per echo, so the cheaper predictable
+generator would buy nothing measurable; drawing every payload from the
+CSPRNG would spend the reserve for nothing. A private generator is
+forbidden, so `lib/rng` owns all three.
 
 ## Name resolution
 

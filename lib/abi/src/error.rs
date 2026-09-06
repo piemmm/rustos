@@ -82,12 +82,12 @@ pub enum Errno {
     NoSpace = 15,
     /// The kernel cryptographic RNG has not yet been initialised.
     ///
-    /// Emitted only by the random API and only when the
-    /// caller explicitly requested non-blocking behaviour
-    /// ([`crate::random::RandomFlags::NON_BLOCKING`]). Before the kernel RNG
-    /// is seeded a blocking request waits; a non-blocking request fails
-    /// closed with this errno rather than returning weak randomness. After
-    /// initialisation the random API never returns it.
+    /// Emitted only by the random API, and only before the kernel RNG is
+    /// seeded — at which point it is returned whether or not the caller set
+    /// [`crate::random::RandomFlags::NON_BLOCKING`], because the sources a
+    /// wait would wait on are dead. Failing closed here is what keeps a
+    /// caller from being handed weak randomness. After initialisation the
+    /// random API never returns it.
     EntropyNotReady = 16,
     /// An object cannot be created because one with the same identity
     /// already exists.

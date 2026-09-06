@@ -5188,9 +5188,12 @@ where
             return Ok(0);
         }
 
-        // A non-blocking caller must never wait for the RNG to be seeded; it fails closed with `EntropyNotReady`
-        // instead. The flag has no effect once the reserve is seeded —
-        // generation never waits for fresh entropy.
+        // A non-blocking caller must never wait for the RNG to be seeded; it
+        // fails closed with `EntropyNotReady` instead. Once the reserve is
+        // seeded the flag only chooses whether a due
+        // fold-fresh-entropy-into-the-key step waits for its entropy or is
+        // deferred; the bytes served are the same either way and generation
+        // itself never waits.
         let non_blocking = flags.is_non_blocking();
 
         // Resolve the caller's address space once and stream the bytes

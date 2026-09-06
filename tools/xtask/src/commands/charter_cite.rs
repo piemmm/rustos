@@ -178,6 +178,12 @@ const SOURCES: &[&str] = &[
     "ISO",
     "ITU",
     "IANA",
+    // NIST Special Publications: the randomness, entropy-source, and
+    // statistical-test-suite standards the crypto and RNG crates cite by
+    // section. `SP 800-22 §2.5` collides with a charter label, so without
+    // this the citation reads as one.
+    "SP 800",
+    "FIPS",
     // Bus, controller, and device specifications.
     "virtio",
     "xHCI",
@@ -884,6 +890,22 @@ mod tests {
             reasons("// authentication must fail (§ relocation defence)"),
             vec!["section sign naming no section"]
         );
+    }
+
+    /// A numbered external standard whose own subsection happens to spell a
+    /// charter label must read as the standard's, not the charter's.
+    #[test]
+    fn an_external_standard_whose_section_collides_with_a_charter_label_is_accepted() {
+        for body in [
+            "/// full rank, rank one short, or less (SP 800-22 §2.5).",
+            "//! The HMAC-DRBG Update function (SP 800-90Ar1 §2.2).",
+            "/// The digest length FIPS 180-4 §2.9 fixes.",
+            "/// The connection states RFC 9293 §2.11 lists.",
+        ] {
+            assert!(reasons(body).is_empty(), "wrongly refused: {body}");
+        }
+        // And a bare one still fails, so the addition did not open a hole.
+        assert!(!reasons("/// The rank classes (§2.5).").is_empty());
     }
 
     #[test]

@@ -246,9 +246,10 @@ payload doubles as a per-packet integrity check.
 
 `-p <hex>` opts into a fixed repeating pattern (iputils' spelling) where a
 deterministic payload is wanted; `-p random` names the default explicitly.
-The bytes come from `lib/rng`'s fast xoshiro256++ generator seeded once from
-the kernel CSPRNG — bulk uncompressible data is not a security surface, so
-drawing every payload from the CSPRNG would spend the reserve for nothing.
+The bytes come from `lib/rng`'s fast ChaCha12 generator, keyed once from the
+kernel CSPRNG — a draw happens per echo, so the cheaper predictable generator
+would buy nothing measurable, while drawing every payload from the CSPRNG
+would spend the reserve for nothing.
 
 ### Deliberate divergences
 

@@ -43,7 +43,12 @@ tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 # The pid range a drawn task id must stay inside is an ABI value, not the
 # scheduler's own choice: peers derive tag-packed endpoint ids from a pid.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The process-wide task-id generator draws from the project's one shared
-# non-cryptographic generator and holds it behind the shared spinlock.
+# Two consumers, on opposite sides of the split this crate's `lib/rng`
+# dependency exists to respect: the process-wide task-id generator takes the
+# *unpredictable* one (the endpoint registry is an existence oracle, so a
+# predictable id stream would enumerate every task on the machine), and the
+# shared work-stealing scan start takes the *predictable* one (a scan
+# rotation only wants decorrelation, on a hot path). Both are held behind the
+# shared spinlock.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }

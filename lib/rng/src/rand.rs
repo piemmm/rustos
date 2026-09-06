@@ -1,10 +1,10 @@
 //! The common interface for an infallible `u64` generator.
 //!
 //! [`RandU64`] is implemented by the *infallible* generators in this crate —
-//! the fast non-cryptographic [`crate::FastRng`] and the
-//! hardware-with-fallback [`crate::hardware::PlatformFast`] — and provides the
-//! shared, generator-independent sampling logic (byte filling and unbiased
-//! bounded integers) once, so no consumer re-derives it.
+//! the unpredictable [`crate::FastRng`] and the predictable
+//! [`crate::NonCryptoRng`] — and provides the shared,
+//! generator-independent sampling logic (byte filling and unbiased bounded
+//! integers) once, so no consumer re-derives it.
 //!
 //! The cryptographic [`crate::CsRng`] deliberately does **not** implement this
 //! trait: its draws can fail (a reseed may need entropy that is momentarily

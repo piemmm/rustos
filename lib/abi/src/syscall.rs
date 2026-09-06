@@ -102,10 +102,9 @@ impl SyscallNumber {
     /// bytes written. The kernel draws from its CSPRNG-backed output
     /// reserve; the call is unprivileged (drawing
     /// randomness needs no capability), but a `len` above
-    /// [`crate::RANDOM_REQUEST_MAX_BYTES`] is refused. With
-    /// [`crate::RandomFlags::NON_BLOCKING`] set and the kernel RNG not
-    /// yet seeded it returns [`crate::Errno::EntropyNotReady`] rather
-    /// than blocking.
+    /// [`crate::RANDOM_REQUEST_MAX_BYTES`] is refused. Before the kernel
+    /// RNG is seeded it returns [`crate::Errno::EntropyNotReady`] rather
+    /// than waiting on entropy sources that are, by then, dead.
     pub const RANDOM_GET: Self = Self(10);
     /// Write a byte buffer to one of the calling process's inherited
     /// standard streams.

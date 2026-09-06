@@ -72,21 +72,24 @@ pub fn publish_hash_key(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) -> b
     tairix_hash::is_published()
 }
 
-/// Seed the scheduler's process-wide task-id generator from the same
-/// reserve, so the ids a boot hands out differ from the last boot's as well
-/// as from each other.
+/// Key the scheduler's process-wide task-id generator from the same reserve,
+/// so the ids a boot hands out differ from the last boot's as well as from
+/// each other.
 ///
-/// Unseeded, the generator still runs from its compiled-in seed and still
-/// hands out non-sequential ids; only cross-boot distinctness is lost. That
-/// is why this neither fails closed nor is audited, unlike the hash key: a
-/// task id is a name, never an authority — reaching a task is gated by
-/// capability — so a predictable one grants nothing.
+/// The key is taken at the generator's full width, because a narrower draw
+/// stretched to fill it would cap the effective entropy at the draw's width
+/// however wide the generator's state is.
+///
+/// Unkeyed, the generator still runs from its compiled-in seed and still
+/// hands out unpredictable, non-sequential ids within the boot; only
+/// cross-boot distinctness is lost. That is why this neither fails closed nor
+/// is audited, unlike the hash key.
 pub fn seed_task_ids(rng: &RwLock<Box<dyn RandomReserve + Send + Sync>>) {
-    let mut bytes = [0u8; 8];
-    if rng.write().draw(&mut bytes, true).is_ok() {
-        tairix_kernel_sched_api::seed_task_ids(u64::from_le_bytes(bytes));
+    let mut key = [0u8; tairix_rng::STREAM_KEY_LEN];
+    if rng.write().draw(&mut key, true).is_ok() {
+        tairix_kernel_sched_api::seed_task_ids(&key);
     }
-    wipe(&mut bytes);
+    wipe(&mut key);
 }
 
 /// Draw a per-boot hash key from the reserve, or `None` when the reserve

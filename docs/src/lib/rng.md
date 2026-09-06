@@ -1,15 +1,30 @@
 # `tairix-rng`
 
-The single place TAIRiX gets randomness. It separates three generators
-by purpose so the wrong one is hard to reach for by accident:
+The single place TAIRiX gets randomness. It separates three generators by the
+**property** that decides which one a call site may use — not by how fast they
+are — so the wrong one is hard to reach for by accident:
 
-| Type                     | Kind                        | Use it for |
-|--------------------------|-----------------------------|------------|
-| `CsRng`                  | Cryptographically secure    | Keys, nonces, the swap key (§4), the KASLR/ASLR seed (§19.2), capability material |
-| `FastRng`                | Fast, **non**-cryptographic | Scheduler decisions, collection seeds, backoff jitter, fuzzing |
-| `hardware::PlatformFast` | Fast, hardware-preferring   | The same fast uses, when a motherboard hardware RNG is present |
+| Type           | Property                   | Use it for |
+|----------------|----------------------------|------------|
+| `CsRng`        | Cryptographically secure   | Long-lived key material: `ARXFS` volume keys, the swap key (§4), the KASLR/ASLR seed (§19.2), capability material |
+| `FastRng`      | Fast **and unpredictable** | Anything that must not be guessable but is not long-lived key material: task ids, network payloads, the kernel output reserve |
+| `NonCryptoRng` | Fast and **predictable**   | Decorrelation and reproducible fixtures: per-CPU work-stealing scan starts, seeded test streams |
+
+The axis is unpredictability, not statistical quality, because the two are
+unrelated. `NonCryptoRng` (xoshiro256++) passes the full BigCrush/PractRand
+batteries and is still trivially invertible: four consecutive outputs carry
+its whole 256-bit state, and recovering it is arithmetic rather than
+cryptanalysis. A type named only for its speed would say nothing about which
+property it has, which is how bulk randomness ends up drawn from an
+invertible generator.
 
 ## The cryptographic core is composed, not hand-rolled
+
+Both unpredictable generators are standard constructions over `lib/crypto`'s
+audited primitives — HMAC-DRBG over `hmac_sha256`, fast key erasure over
+`chacha12_keystream`. No cryptographic primitive is written in this crate; the
+only first-party algorithm is xoshiro256++, which is an ordinary PRNG rather
+than a security primitive (§2.12).
 
 `CsRng` is a NIST SP 800-90Ar1 **HMAC-SHA256 DRBG** (`drbg::HmacDrbg`):
 Instantiate, Reseed, Generate, and the internal Update, built entirely
@@ -68,12 +83,12 @@ source alone; XOR is entropy-preserving for independent inputs.
 A motherboard hardware RNG (`hardware::HardwareRng`) plays both roles the
 issue calls for:
 
-1. **Extra entropy.** `HardwareEntropy` adapts it to `EntropySource`, so
-   it is one input among several feeding `CsRng`, never the sole one.
-2. **A fast source.** `hardware::PlatformFast` draws fast `u64`s from the
-   hardware directly when present, and falls back to the software
-   `FastRng` when it is absent or momentarily fails — there is no
-   busy-retry-until-it-works loop (§2.1).
+A hardware source is **entropy input and nothing else**: `HardwareEntropy`
+adapts it to `EntropySource`, so it is one input among several feeding
+`CsRng`, never the sole one, and its bytes never reach a caller
+unconditioned (§22 — "hardware RNG output is input material only"). A caller
+wanting speed takes `FastRng`, whose output is conditioned by a cipher and
+costs *less* per byte than a hardware RNG instruction.
 
 ## Kernel output reserve and the random syscall (§22)
 
@@ -84,28 +99,53 @@ syscall. The contract lives in `lib/abi`
 2 KiB, `RANDOM_REQUEST_MAX_BYTES`) and the syscall is
 `SyscallNumber::RANDOM_GET` (`abi-v1`, appended to the table). Drawing
 randomness needs no capability; an over-large request is refused with
-`LengthOutOfRange`, and a non-blocking request issued before the RNG is
-seeded fails closed with `Errno::EntropyNotReady` rather than returning
-weak bytes.
+`LengthOutOfRange`, and a request issued before the RNG is seeded fails
+closed with `Errno::EntropyNotReady` rather than returning weak bytes or
+waiting on entropy sources that are, by then, dead.
 
 `OutputReserve<E, const N>` is the bounded reserve of CSPRNG **output**
 (not raw entropy) the kernel keeps — preferably one per CPU in
-kernel-only, non-swappable memory — so it serves requests without
-running the DRBG on every call:
+kernel-only, non-swappable memory. It is the whole chain in one type:
+
+```text
+entropy pool → CsRng (HMAC-DRBG) → FastRng<2048> (ChaCha12) → userland
+```
+
+Exactly Linux's shape, with an extra NIST-approved stage in front. `CsRng` is
+the *authority*: it keys the fast generator at seed time and re-keys it at
+every boundary. `FastRng` is what every served byte comes from, so a userland
+request costs a cipher block rather than a DRBG generate. The reserve keeps
+**no byte buffer of its own** — `FastRng` already is a buffered generator that
+wipes each byte as it is consumed, and a second such buffer beside it would be
+one more zeroisation path to keep correct (§2.2).
 
 * **Unseeded before the RNG initialises.** `fill` returns
-  `ReserveError::NotReady` until `seed` succeeds; the kernel maps that to
-  a block (normal request) or to `EntropyNotReady` (non-blocking).
-* **No weak fallback once ready.** If the buffer is exhausted, the
-  reserve regenerates synchronously from `CsRng`; a request larger than
-  the buffer is generated directly. It never returns short or blocks for
-  fresh entropy after initialisation.
-* **Zeroised on consumption and reuse.** Consumed bytes are wiped
-  immediately and the whole buffer is wiped before each refill, so a
-  paged-out or cloned copy cannot replay them.
-* **Discarded across boundaries.** `discard` wipes buffered output for
-  the suspend/hibernate/fork-clone/crash-dump/reseed boundaries §22
-  enumerates; the generator state is wiped on drop via `zeroize`.
+  `ReserveError::NotReady` until `seed` succeeds, which the kernel maps to
+  `EntropyNotReady`.
+* **No weak fallback, and no blocking, once ready.** Serving needs no fresh
+  entropy at all, so an exhausted buffer is regenerated from the cipher on the
+  spot. A request of any length is served in one call, and a seeded reserve
+  neither returns short nor waits on the entropy source (§22).
+* **Zeroised on consumption and reuse.** Consumed bytes are wiped immediately,
+  and a refill destroys the key that produced the previous buffer, so a
+  paged-out or cloned copy can replay nothing.
+* **Discarded across boundaries.** `discard` drops buffered output *and*
+  rotates the key behind it for the
+  suspend/hibernate/fork-clone/crash-dump/reseed boundaries §22 enumerates —
+  rotating unconditionally is what keeps a suspend image or a cloned task from
+  continuing its original's stream. Both generators' state is wiped on drop
+  via `zeroize`.
+* **Periodically prediction-resistant.** Every `PERTURB_INTERVAL_BYTES` of
+  output the reserve reseeds the DRBG from the entropy pool and folds a fresh
+  32 bytes into the cipher key. The reseed comes first and is the point:
+  perturbing with output of a DRBG state compromised at the same moment buys
+  nothing. It also keeps fresh entropy entering the chain on a bounded
+  *output* cadence — without it, putting a cipher in front would have dropped
+  the DRBG's reseed rate from once per ~128 MiB of userland randomness to once
+  per ~64 TiB, because the reserve draws from the DRBG so rarely. A momentary
+  shortage defers the fold to the next request rather than denying the
+  caller's bytes, which are cipher output under a DRBG-derived key either way;
+  `RandomFlags::NON_BLOCKING` chooses only between deferring and waiting.
 
 The reserve does not hand bytes to userland by itself: the production
 `kernel/core` `random_get` handler (increment D.4 of `PLAN.md` Stage 7's
@@ -257,14 +297,114 @@ mixed as a third never-sole source.
 architecture, and the counter read + the one-place feed live behind the Arch
 HAL and the `IrqTable` in `kernel/core`.
 
-## Fast, non-cryptographic generator
+## `FastRng`: buffered ChaCha12 with fast key erasure
 
-`FastRng` is xoshiro256++ (Blackman & Vigna), seeded via SplitMix64. It is
-an ordinary PRNG, not a security primitive (§2.12), so rolling it
-ourselves is allowed and adds no dependency. Its state is recoverable from
-output, so it must never produce keys or nonces. `RandU64` carries the
-shared, generator-independent sampling logic — byte filling and Lemire's
-unbiased bounded integers — once, so no consumer re-derives it (§2.2).
+`FastRng` is Bernstein's fast-key-erasure construction over `lib/crypto`'s
+audited ChaCha12 — the same shape as OpenBSD's `arc4random` and Linux's
+`get_random_u64`. One refill runs the cipher once under the current key and a
+fixed nonce, producing `FAST_REFILL_BYTES` (256, exactly four cipher blocks,
+so none is generated and thrown away) of keystream:
+
+1. the first 32 bytes **become the key**;
+2. the remaining 224 fill the issue buffer.
+
+**The key that produced a buffer is destroyed before a byte of that buffer is
+issued**, and each byte is wiped from the buffer as it is consumed. A constant
+zero nonce is correct and deliberate: the key is fresh on every refill, so a
+`(key, nonce)` pair can never recur, and a counter would be extra state buying
+nothing.
+
+What that gives, and what it does not:
+
+* **Indistinguishable from uniform** at 256-bit security.
+* **Backtracking-resistant.** The key behind already-issued bytes exists
+  nowhere, so a full memory capture reveals nothing about past output.
+* **Deterministic from its key**, so reproducible fixtures keep working, and
+  `seed_from_u64` is `const` so a consumer can hold one in a `static` (the
+  scheduler's process-wide task-id generator does).
+* **Not prediction-resistant on its own.** Recovery from a state compromise
+  needs fresh entropy, which no generator can conjure, so it is the owner's
+  job: `perturb_due` reports the cadence (`PERTURB_INTERVAL_BYTES` of output,
+  counted in bytes so it does not shift with the buffer size) and `perturb`
+  XOR-folds 32 fresh bytes into the key. XOR is the point — a dead, stuck, or
+  hostile source contributes zeros or garbage and can never *lower* the key's
+  quality.
+
+Cost, stated honestly. `.cargo/config.toml` pins `chacha20_force_soft` on
+`x86_64-unknown-none`, because that target is soft-float and SSE-disabled and
+lowering the AVX2/SSE2 intrinsics there crashes codegen; the other bare-metal
+targets are scalar by default. **So in-kernel and in userland this is the
+scalar backend on every Tier-1 target.**
+
+| | cycles per `u64`, amortised |
+|---|---|
+| `NonCryptoRng` (xoshiro256++) | ~4 |
+| `FastRng` (ChaCha12, scalar) | ~40 |
+| `CsRng` (HMAC-DRBG) | ~1500–2000 |
+
+Ten times the cost of xoshiro, forty times cheaper than the DRBG. That is why
+the scheduler's steal-scan rotation keeps xoshiro — a hot path whose only
+output is where a round-robin scan begins — and everything that should be
+unpredictable takes `FastRng`.
+
+## `NonCryptoRng`: predictable on purpose
+
+`NonCryptoRng` is xoshiro256++ (Blackman & Vigna), seeded via SplitMix64. It
+is an ordinary PRNG, not a security primitive (§2.12), so rolling it ourselves
+is allowed and adds no dependency. It is named for its predictability rather
+than its speed so that it reads as obviously wrong beside a key or a nonce
+with no prior knowledge of xoshiro required.
+
+Its one production consumer is `kernel/sched/api`'s `StealScan`, which gives
+each CPU an independent stream deciding where that CPU begins its
+work-stealing scan. That is decorrelation — stopping every idle CPU from
+probing CPU 0 first and convoying on one queue lock — not unpredictability:
+the scan visits every CPU anyway, and an observer who can predict which is
+probed first learns nothing they could act on. Streams are seeded with the
+bare CPU index, because SplitMix64 avalanches; there is deliberately no seed
+field on `SchedulerConfig`, since a seed with no real supplier would be
+speculative surface (§2.4).
+
+`RandU64` carries the shared, generator-independent sampling logic — byte
+filling and Lemire's unbiased bounded integers (`next_below`) — once, so no
+consumer re-derives it (§2.2).
+
+## The statistical soak
+
+No statistical test can distinguish a good PRNG from true randomness, so the
+load-bearing tests of these constructions are the *structural* ones listed
+below. The outer check that the bytes actually coming out look like nothing at
+all is `tests/integration/rng_soak`: a first-party NIST SP 800-22-style
+battery — monobit, block frequency, runs, longest run of ones, binary matrix
+rank, approximate entropy, cumulative sums (forward and backward), and
+Maurer's universal statistical test — over `FastRng` and `CsRng`.
+
+* **Every test carries a negative control it must reject**, because a
+  statistical test that rejects nothing is not a weak test, it is not a test.
+  A bare counter covers the bias, correlation, and compressibility tests; a
+  31-bit LFSR covers the binary matrix rank test, whose whole purpose is
+  detecting linear dependence over GF(2). The LFSR's register is deliberately
+  narrower than the test's 32-bit matrix span — a wider one would hide the
+  linearity and make the control vacuous — and it *passes* the bias and
+  correlation tests, which is what makes it a control for the rank test
+  specifically rather than a generally bad generator.
+* `NonCryptoRng` is excluded by design: it is predictable on purpose and
+  passes this battery comfortably, which is precisely why a battery is the
+  wrong instrument for judging it.
+* The verdict is SP 800-22's two-level rule — pass proportion inside a band,
+  plus p-value uniformity by chi-square over ten bins — reached **once**, over
+  every sequence a run accumulated. The band is six sigma rather than the
+  suggested three, and the uniformity floor `1e-6`, so the whole battery's
+  false-alarm probability is around `1e-4`: a gate must never be flaky, and a
+  soak whose verdict was noise would be worse than none. Detection power is
+  unaffected, because a structural defect does not sit marginally outside the
+  band — it pins p-values at zero.
+* A plain `cargo test` runs one fixed-seed pass per generator (so the PR gate
+  is deterministic); `cargo xtask rngsoak` exports a wall-clock budget and the
+  harness keeps drawing, accumulating into one verdict. The band narrows as
+  the sequence count grows, so a longer soak is strictly more sensitive rather
+  than merely longer. `tools/ci/soak.sh rngsoak` fans the registry out one job
+  per generator.
 
 ## Test vectors
 
@@ -302,13 +442,27 @@ unbiased bounded integers — once, so no consumer re-derives it (§2.2).
   surfacing transient `Reseeding`; a blocking draw and `reseed_blocking`
   waiting through a reseed shortage; and the no-reseed fast path producing
   identical output for both styles without blocking.
-* Hardware paths: hardware-backed entropy seeding, hardware-preferring
-  fast draws, and the software fallback on absence or transient failure.
+* Hardware paths: hardware-backed entropy seeding and failure propagation.
+* `chacha12_keystream`: the first 96 keystream bytes under RFC 8439's
+  test-vector key and nonce, computed independently from the round function
+  reduced to twelve rounds, so both the round count and the 32/N split point
+  are pinned rather than restated from the dependency.
+* `FastRng` structure — the load-bearing set, because no statistical test can
+  tell a good PRNG from true randomness: the first issued bytes equal the
+  cipher's keystream past the derived key (pinning the split, the key
+  derivation, the nonce, and the byte order at once); a state driven past a
+  buffer cannot reproduce it; consumed bytes are wiped and live ones are not;
+  perturbation diverges two identical generators, discards their buffers, and
+  with an all-zero fold cannot change the key or stall the stream; a discard
+  rotates the key even with nothing buffered, so a clone cannot continue its
+  parent's stream; construction is `const`; `Debug` prints only sizes.
 * Statistical balance: deterministic mean and per-bit-position checks
-  over 1 MiB of `FastRng` and `CsRng` output (fixed seed — never flaky).
+  over 1 MiB of `NonCryptoRng` and `CsRng` output (fixed seed — never flaky).
 * Output reserve (§22): unseeded fail-closed, seed-failure handling,
-  post-seed non-blocking generation, multi-request refill, large-request
-  direct generation, zeroise-on-consume, `discard` (suspend/clone) and
-  `reseed` boundary wipes, reseed-failure surfacing as transient
-  `Reseeding`, and the blocking `fill_blocking`/`reseed_blocking` waiting
-  through a reseed shortage.
+  the served bytes matching a `FastRng` the DRBG keyed, multi-request refill,
+  a request larger than the buffer served across refills without repeating,
+  the perturbation actually firing on its output cadence (a starved reserve's
+  stream diverges from a fed one's), a perturbation shortage never denying a
+  draw, `discard` (suspend/clone) rotating the key so a clone cannot replay
+  the parent, and `reseed` surfacing a transient `Reseeding` while
+  `reseed_blocking` waits through it.

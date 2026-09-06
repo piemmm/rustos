@@ -24,7 +24,7 @@
 
 use alloc::collections::BTreeSet;
 
-use tairix_rng::{FastRng, RandU64};
+use tairix_rng::{FastRng, RandU64, StreamKey};
 use tairix_sync::SpinLock;
 
 use crate::arch::CpuId;
@@ -87,22 +87,28 @@ const TASK_ID_BOOT_SEED: u64 = 0x5441_534B_5F49_4400;
 /// System-wide rather than per-policy so no two schedulers can mint the same
 /// id: a process-global keyed by task id (the signal kill gate, a wait queue,
 /// the endpoint registry) cannot tell two schedulers' tasks apart, so a
-/// second instance drawing from its own counter would alias them. The
-/// non-cryptographic generator is deliberate — what is wanted here is that
-/// ids carry no sequence, not that an adversary cannot predict the next one,
-/// because reaching a task is authorised by capability and never by naming
-/// its id.
+/// second instance drawing from its own counter would alias them.
+///
+/// The generator is the *unpredictable* one, and that matters even though an
+/// id is not an authority. Reaching a task is gated by capability and never
+/// by naming its id, so guessing one grants nothing — but the endpoint
+/// registry answers whether an id is live, and that is an existence oracle. A
+/// predictable generator turns a handful of observed ids into the whole
+/// stream, and thus into every live and future task and endpoint id on the
+/// machine, across every tenant sharing it. Admitting a task costs thousands
+/// of cycles, so a cipher-backed draw is free by comparison.
 static TASK_IDS: SpinLock<FastRng> = SpinLock::new(FastRng::seed_from_u64(TASK_ID_BOOT_SEED));
 
 /// Re-seed the process-wide generator from the platform's randomness, so ids
 /// differ across boots as well as across tasks.
 ///
 /// The boot path calls this once, as soon as the kernel's random reserve can
-/// serve a draw. A later call simply re-seeds: the generator holds no
-/// published state and its output is not an authority, so re-seeding costs
-/// nothing and is never a security event.
-pub fn seed_task_ids(seed: u64) {
-    *TASK_IDS.lock() = FastRng::seed_from_u64(seed);
+/// serve a draw. The key is taken at full width rather than stretched from a
+/// `u64`, so the generator's entropy is the platform's and not 64 bits of it.
+/// A later call simply re-keys: the generator holds no published state, so
+/// re-keying costs nothing and is never a security event.
+pub fn seed_task_ids(key: &StreamKey) {
+    *TASK_IDS.lock() = FastRng::from_key(key);
 }
 
 /// Choose the id a policy registers a new task under: the caller's reserved
@@ -215,7 +221,10 @@ fn choose_reserved(
 /// [`SchedError::NoTaskIdAvailable`] when every one of [`DRAW_ATTEMPTS`]
 /// candidates was rejected — fail closed rather than register a task at an id
 /// already in use.
-fn draw_id(rng: &mut FastRng, is_live: impl Fn(TaskId) -> bool) -> SchedResult<TaskId> {
+fn draw_id<const N: usize>(
+    rng: &mut FastRng<N>,
+    is_live: impl Fn(TaskId) -> bool,
+) -> SchedResult<TaskId> {
     for _ in 0..DRAW_ATTEMPTS {
         let candidate = rng.next_u64() & MAX_TASK_ID;
         if candidate >= FIRST_DRAWN_TASK_ID && !is_live(candidate) {
@@ -233,12 +242,18 @@ mod id_tests {
     };
     use crate::error::SchedError;
     use alloc::collections::BTreeSet;
-    use tairix_rng::{FastRng, RandU64};
+    use tairix_rng::{FastRng, RandU64, StreamKey};
 
     /// A generator of this test's own, so what it draws never depends on what
     /// another test drew from the process-wide one.
     fn rng(seed: u64) -> FastRng {
         FastRng::seed_from_u64(seed)
+    }
+
+    /// A full-width key, so the re-key path is exercised with the shape the
+    /// boot path hands in.
+    fn key(fill: u8) -> StreamKey {
+        [fill; tairix_rng::STREAM_KEY_LEN]
     }
 
     #[test]
@@ -324,7 +339,7 @@ mod id_tests {
     #[test]
     fn the_shared_generator_serves_usable_ids_across_a_re_seed() {
         assert!(choose_task_id(None, |_| false).expect("a draw succeeds") >= FIRST_DRAWN_TASK_ID);
-        seed_task_ids(0x5555_6666_7777_8888);
+        seed_task_ids(&key(0x5a));
         assert!(
             choose_task_id(None, |_| false).expect("a draw succeeds after re-seeding")
                 >= FIRST_DRAWN_TASK_ID
