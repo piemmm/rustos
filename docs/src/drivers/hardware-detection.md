@@ -213,6 +213,19 @@ re-evaluating a settled tree emits no record and the diagnostic log is never
 re-flooded with identical lines (`AGENTS.md` §20 / §2.16). An unbound node is
 thus *logged*, not re-logged.
 
+That late-bound catalogue arrival is the loop's own guarantee, not a
+consequence of a tree change. The kernel serves the store endpoint only once
+the boot floor has the system volume up, and **nothing bumps the hardware-tree
+generation when it does**, so a fetch issued before then (logged `13005`
+`DRIVER_STORE_UNAVAILABLE`) has no wake source behind it. While the fetch is
+outstanding the loop therefore waits under a bounded deadline
+(`tairix_devmgr::service`'s `CATALOGUE_RETRY_NS`) and retries; once the
+catalogue is in hand the wait is indefinite again, so the steady state takes
+no wakes. Waiting indefinitely for a bump that never comes is what parked the
+device manager for the rest of the boot on a platform whose tree is
+enumerated once and never changes — a device tree with no hotplug — and
+autoloaded nothing (`plans/OPEN-DEFECTS.md` D76).
+
 The routine `NODE_UNBOUND` decision is additionally logged at **`Debug`**
 (unlike the `Info` `NODE_BOUND` / `Warn` tie / load-failure decisions), so on
 a default-`Info` boot the unbound nodes are dropped in O(1) by the level

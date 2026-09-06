@@ -106,12 +106,13 @@ mod program {
             tairix_rt::hw_tree_read(buf).map_err(Errno::from_syscall)
         }
 
-        fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno> {
-            // Block until the tree's generation advances past the one last
-            // observed; `u64::MAX` is the effectively unbounded wait a
-            // device manager holds for the life of the system. A negative
-            // return is a `-errno` the loop fails closed on.
-            let waited = tairix_rt::hw_tree_wait(last_generation, u64::MAX);
+        fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
+            // Park until the tree's generation advances past the one last
+            // observed, or `timeout_ns` elapses; the caller picks the
+            // deadline (unbounded once nothing is outstanding). A negative
+            // return is a `-errno` the loop fails closed on, `TimedOut`
+            // included — the loop reads that as "re-react".
+            let waited = tairix_rt::hw_tree_wait(last_generation, timeout_ns);
             if waited < 0 {
                 return Err(Errno::from_syscall(waited));
             }

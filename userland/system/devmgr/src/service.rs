@@ -12,8 +12,11 @@
 //! `hw_tree_read` / `hw_tree_wait` / `ipc_call` syscalls it binds in
 //! production.
 //!
-//! The loop never busy-spins: [`HwTreeService::wait_for_change`]
-//! blocks until the store's generation advances. A failure in a tree-seam
+//! The loop never busy-spins: [`HwTreeService::wait_for_change`] parks until
+//! the store's generation advances, indefinitely once nothing is
+//! outstanding. The one exception is an unfetched catalogue, whose milestone
+//! has no generation bump behind it and so waits under a bounded retry
+//! deadline (`CATALOGUE_RETRY_NS`). A failure in a tree-seam
 //! operation ends the loop fail-closed with the reported [`Errno`]; a catalogue that cannot be fetched is fail-soft —
 //! the service loads nothing but keeps observing.
 
@@ -47,9 +50,11 @@ pub trait HwTreeService {
     fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Block until the store's generation advances past `last_generation`
-    /// (reactive re-match and hotplug). Returns once
-    /// the tree has changed, or fails closed with the reported [`Errno`].
-    fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno>;
+    /// (reactive re-match and hotplug), or until `timeout_ns` elapses;
+    /// `u64::MAX` waits indefinitely. Returns once the tree has changed,
+    /// [`Errno::TimedOut`] if the deadline elapsed with it unchanged, or
+    /// fails closed with the reported [`Errno`].
+    fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno>;
 
     /// Report the decoded snapshot header (its generation and node count)
     /// after a read.
@@ -58,6 +63,25 @@ pub trait HwTreeService {
     /// Report one decoded node of the snapshot, in wire order.
     fn on_node(&mut self, node: &HwNode);
 }
+
+/// Deadline [`run`] waits under while the driver-store catalogue is still
+/// outstanding.
+///
+/// The catalogue is a one-time read of the read-only `/System` store, which
+/// becomes reachable when the boot floor has the system volume up. No
+/// hardware-tree generation bump accompanies that, so waiting indefinitely
+/// for one parks the service for the rest of the boot on a platform whose
+/// tree never changes again (a device tree enumerated once at boot, no
+/// hotplug) and nothing is ever autoloaded. The bounded deadline makes the
+/// retry this loop's own guarantee instead of a hope that some unrelated
+/// node mutation happens to arrive.
+///
+/// It applies only while the fetch is outstanding: the steady-state wait is
+/// indefinite, so this is a bounded wait for a milestone that has no wake
+/// source, not a poll. The value trades autoload latency after the store
+/// appears against wakes while it has not — the whole desktop and network
+/// bring-up queues behind this fetch, so it is short.
+const CATALOGUE_RETRY_NS: u64 = 250_000_000;
 
 /// Initial size of the growable hardware-tree snapshot buffer.
 ///
@@ -112,12 +136,15 @@ fn read_tree_growing<T: HwTreeService>(tree: &mut T, buf: &mut Vec<u8>) -> Resul
 /// match-and-load each node through `store`, returning the generation the
 /// snapshot was taken at.
 ///
-/// The catalogue is retried while `catalogue` is [`None`]: the kernel store
-/// service binds its endpoint *after* the boot tree settles, so a fetch
-/// issued before the bind fails (the endpoint is unbound) — the kernel then
-/// bumps the tree generation when it binds, waking this loop to retry. Until the catalogue is obtained, matching runs
-/// against an empty candidate set, so every node is observed and left
-/// unbound, then loaded on the re-evaluation once the store is reachable.
+/// The catalogue is retried while `catalogue` is [`None`]: the kernel serves
+/// the store endpoint only once the boot floor has the system volume up, so a
+/// fetch issued before then fails with the endpoint unbound. Nothing bumps
+/// the hardware-tree generation when that endpoint appears, so the retry is
+/// driven by [`run`]'s own bounded deadline
+/// ([`CATALOGUE_RETRY_NS`]) rather than by a tree change. Until the
+/// catalogue is obtained, matching runs against an empty candidate set, so
+/// every node is observed and left unbound, then loaded on the
+/// re-evaluation once the store is reachable.
 ///
 /// # Errors
 ///
@@ -301,7 +328,22 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         if budget.is_some_and(|max| reactions >= max) {
             return Ok(());
         }
-        tree.wait_for_change(last_generation)?;
+        // Indefinite only when nothing is outstanding. An unfetched
+        // catalogue has no generation bump behind it, so it waits under a
+        // deadline and retries; everything else the reaction defers is
+        // woken by the node mutation it is waiting on, and would poll for
+        // the life of a machine whose NIC or network stack never appears.
+        let timeout_ns = if catalogue.is_none() {
+            CATALOGUE_RETRY_NS
+        } else {
+            u64::MAX
+        };
+        match tree.wait_for_change(last_generation, timeout_ns) {
+            // Changed, or the deadline elapsed with the catalogue still
+            // outstanding: either way re-react so the fetch is retried.
+            Ok(()) | Err(Errno::TimedOut) => {}
+            Err(err) => return Err(err),
+        }
         last_generation = react_once(
             tree,
             store,
@@ -357,6 +399,9 @@ mod tests {
         snapshots: Vec<Vec<u8>>,
         next: usize,
         waited_on: Vec<u64>,
+        /// The deadline each wait was asked to hold for, so a test can
+        /// assert the loop never parks indefinitely on an outstanding fetch.
+        waited_under: Vec<u64>,
         reported_nodes: Vec<u32>,
         wait_error: Option<Errno>,
     }
@@ -367,6 +412,7 @@ mod tests {
                 snapshots,
                 next: 0,
                 waited_on: Vec::new(),
+                waited_under: Vec::new(),
                 reported_nodes: Vec::new(),
                 wait_error: None,
             }
@@ -384,11 +430,12 @@ mod tests {
             Ok(snapshot.len())
         }
 
-        fn wait_for_change(&mut self, last_generation: u64) -> Result<(), Errno> {
+        fn wait_for_change(&mut self, last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
             if let Some(err) = self.wait_error {
                 return Err(err);
             }
             self.waited_on.push(last_generation);
+            self.waited_under.push(timeout_ns);
             Ok(())
         }
 
@@ -1014,7 +1061,11 @@ mod tests {
             Ok(self.snapshot.len())
         }
 
-        fn wait_for_change(&mut self, _last_generation: u64) -> Result<(), Errno> {
+        fn wait_for_change(
+            &mut self,
+            _last_generation: u64,
+            _timeout_ns: u64,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -1033,7 +1084,11 @@ mod tests {
             Err(self.0)
         }
 
-        fn wait_for_change(&mut self, _last_generation: u64) -> Result<(), Errno> {
+        fn wait_for_change(
+            &mut self,
+            _last_generation: u64,
+            _timeout_ns: u64,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 
@@ -1120,6 +1175,181 @@ mod tests {
         assert!(
             tree.reads > 1,
             "the snapshot should not have fit the initial buffer"
+        );
+    }
+
+    /// A hardware tree enumerated once at boot that never changes again —
+    /// what QEMU `virt` and a fixed board present, having no hotplug.
+    ///
+    /// Unlike [`ScriptedTree`] this models the kernel's parking semantics
+    /// instead of handing out a scripted sequence of changes: a wait under a
+    /// finite deadline elapses with [`Errno::TimedOut`], and an *unbounded*
+    /// wait on a generation that can never advance is a park for the rest of
+    /// the boot, reported as [`Errno::WouldBlock`] so a host test observes
+    /// the hang a guest would suffer instead of being handed a reaction the
+    /// kernel would never deliver.
+    struct StaticTree {
+        snapshot: Vec<u8>,
+    }
+
+    impl StaticTree {
+        fn new(snapshot: Vec<u8>) -> Self {
+            Self { snapshot }
+        }
+    }
+
+    impl HwTreeService for StaticTree {
+        fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            if buf.len() < self.snapshot.len() {
+                return Err(Errno::BufferTooSmall);
+            }
+            buf[..self.snapshot.len()].copy_from_slice(&self.snapshot);
+            Ok(self.snapshot.len())
+        }
+
+        fn wait_for_change(&mut self, _last_generation: u64, timeout_ns: u64) -> Result<(), Errno> {
+            if timeout_ns == u64::MAX {
+                return Err(Errno::WouldBlock);
+            }
+            Err(Errno::TimedOut)
+        }
+
+        fn on_header(&mut self, _header: &HwTreeHeader) {}
+
+        fn on_node(&mut self, _node: &HwNode) {}
+    }
+
+    /// A store whose endpoint is unbound for its first `refusals` catalogue
+    /// fetches — the system volume not yet up — and which serves a real
+    /// catalogue and load replies after that.
+    struct DeferredCatalogue {
+        refusals: u32,
+        catalogue: Vec<(u32, Vec<DriverBindKey>)>,
+        loads: RefCell<Vec<(u32, u32)>>,
+    }
+
+    impl DriverStoreCall for DeferredCatalogue {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            match StoreRequest::decode(request)? {
+                StoreRequest::Catalogue if self.refusals > 0 => {
+                    self.refusals -= 1;
+                    // An unbound endpoint refuses the call itself; there is
+                    // no in-band reply to frame.
+                    Err(Errno::NotFound)
+                }
+                StoreRequest::Catalogue => {
+                    let entries: Vec<(u32, &[DriverBindKey])> = self
+                        .catalogue
+                        .iter()
+                        .map(|(id, keys)| (*id, keys.as_slice()))
+                        .collect();
+                    encode_catalogue_reply(reply, &entries)
+                }
+                StoreRequest::Load { bundle_id, node_id } => {
+                    self.loads.borrow_mut().push((bundle_id, node_id));
+                    let seq = self.loads.borrow().len() as u64;
+                    encode_load_reply(reply, 0x1000 + seq)
+                }
+                StoreRequest::Unload { .. } => Err(Errno::NotFound),
+                StoreRequest::ReadConfig { .. } => {
+                    tairix_abi::driver_store::encode_error_reply(reply, Errno::NotFound)
+                }
+            }
+        }
+    }
+
+    /// The catalogue fetch is retried on the loop's own deadline, so a tree
+    /// that never changes still autoloads once the store appears.
+    ///
+    /// The store endpoint binds after the boot floor has the system volume
+    /// up, and nothing bumps the hardware-tree generation when it does. A
+    /// device tree with no hotplug therefore never advances its generation
+    /// again, so an indefinite wait here parked the device manager for the
+    /// life of the boot with no catalogue and autoloaded nothing.
+    #[test]
+    fn a_deferred_catalogue_is_retried_on_a_tree_that_never_changes() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let mut tree = StaticTree::new(encode(
+            1,
+            &[
+                HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+                input_node(2, kbd),
+            ],
+        ));
+        let mut store = DeferredCatalogue {
+            refusals: 1,
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("the loop retries the fetch rather than parking for ever");
+
+        assert_eq!(
+            store.loads.borrow().as_slice(),
+            &[(7, 2)],
+            "the node matched on the retry once the store answered"
+        );
+        assert!(
+            sink.ids().contains(&events::DRIVER_STORE_UNAVAILABLE.0),
+            "the first fetch was refused: {:?}",
+            sink.ids()
+        );
+        assert!(
+            sink.ids().contains(&events::NODE_BOUND.0),
+            "{:?}",
+            sink.ids()
+        );
+    }
+
+    /// The deadline is bounded only while the fetch is outstanding: once the
+    /// catalogue is in hand the loop parks indefinitely, so the steady state
+    /// takes no wakes.
+    #[test]
+    fn the_wait_is_bounded_only_while_the_catalogue_is_outstanding() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let node = input_node(2, kbd);
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let mut tree = ScriptedTree::new(vec![
+            encode(1, &[root, node]),
+            encode(2, &[root, node]),
+            encode(3, &[root, node]),
+        ]);
+        let mut store = DeferredCatalogue {
+            refusals: 1,
+            catalogue: vec![(7, vec![bind(5, kbd)])],
+            loads: RefCell::new(Vec::new()),
+        };
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("both cycles run");
+
+        assert_eq!(
+            tree.waited_under.as_slice(),
+            &[CATALOGUE_RETRY_NS, u64::MAX],
+            "bounded while the fetch was outstanding, indefinite afterwards"
         );
     }
 }
