@@ -753,23 +753,82 @@ pub struct Spec {
     /// never printed the marker. `None` (the default) leaves the per-arch
     /// [`Arch::outcome_from_status`] convention untouched.
     pub reset_success_marker: Option<String>,
-    /// When `Some`, a **harness-driven** success signal: the run completes
-    /// as `Outcome::Pass` the moment this flag reads `true`, at which point
-    /// the runner kills QEMU. It exists for two-process verticals whose
-    /// success is proven by an out-of-guest observer (the harness-side
-    /// `netpeer` link peer) rather than by the guest itself: the guest must
-    /// *not* self-terminate on an intermediate witness, because the observer's
-    /// confirming event is the **last** link in the causal chain (e.g. the
-    /// peer receiving the guest's echo reply) and a guest self-exit races —
-    /// and loses to — that reply leaving the machine. With this gate the guest
-    /// stays alive and serving until the observer has its proof, so teardown
-    /// can never precede it. A guest that instead reaches its own debug-exit
-    /// (or falls silent for the inactivity budget) still ends the run through
-    /// the normal paths, so a genuine failure remains fail-loud; the
-    /// [`Spec::timeout`] additionally bounds the wait so a gate that never
-    /// trips cannot hang the run. `None` (the default) leaves the run driven
-    /// solely by the guest.
-    pub completion_gate: Option<Arc<AtomicBool>>,
+    /// When `Some`, the **harness-driven** completion signal: the run ends the
+    /// moment the out-of-guest observer (the harness-side `netpeer` link peer)
+    /// reaches a verdict, passing on [`Observation::Confirmed`] and failing
+    /// with the observer's own reason on [`Observation::Abandoned`].
+    ///
+    /// It exists for two-process verticals whose success is proven outside the
+    /// guest: the guest must *not* self-terminate on an intermediate witness,
+    /// because the observer's confirming event is the **last** link in the
+    /// causal chain (e.g. the peer receiving the guest's echo reply) and a
+    /// guest self-exit races — and loses to — that reply leaving the machine.
+    /// With this gate the guest stays alive and serving until the observer has
+    /// its proof, so teardown can never precede it.
+    ///
+    /// Such a guest never falls silent, so the inactivity heartbeat cannot
+    /// fire and the absolute [`Spec::runtime_ceiling`] would otherwise be the
+    /// only backstop — which reports an observer that stopped watching as a
+    /// guest that never finished, and takes the whole ceiling to do it.
+    /// Carrying the abandonment reason is what keeps that diagnosis on the
+    /// side the fault is actually on. `None` (the default) leaves the run
+    /// driven solely by the guest.
+    pub completion_gate: Option<Arc<ObserverGate>>,
+}
+
+/// What the out-of-guest observer has concluded about a gated run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Observation {
+    /// Still watching: no verdict yet, so the run continues.
+    #[default]
+    Watching,
+    /// The confirming, last-in-chain event occurred. The run is a pass.
+    Confirmed,
+    /// The observer stopped watching without confirming, for this reason.
+    /// No later confirmation is possible, so the run ends here rather than
+    /// waiting out a ceiling that would then misreport it as a guest fault.
+    Abandoned(String),
+}
+
+/// The observer's verdict, shared between the observer thread and the runner.
+///
+/// Poisoning is recovered rather than propagated: a panicking observer must
+/// still be able to end its run, and the state behind the lock is a plain
+/// enum that no partial write can corrupt.
+#[derive(Debug, Default)]
+pub struct ObserverGate {
+    state: Mutex<Observation>,
+}
+
+impl ObserverGate {
+    /// Record that the confirming event occurred.
+    pub fn confirm(&self) {
+        *self.locked() = Observation::Confirmed;
+    }
+
+    /// Record that the observer stopped watching without confirming.
+    ///
+    /// A confirmation already reached is never overwritten: the two race
+    /// whenever an observer meets its verdict and *then* fails to shut down
+    /// cleanly, and the confirmation is the load-bearing one.
+    pub fn abandon(&self, reason: impl Into<String>) {
+        let mut state = self.locked();
+        if *state == Observation::Watching {
+            *state = Observation::Abandoned(reason.into());
+        }
+    }
+
+    /// The current verdict.
+    #[must_use]
+    pub fn observation(&self) -> Observation {
+        self.locked().clone()
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, Observation> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// How a QEMU session presents itself to a human.
@@ -911,15 +970,11 @@ impl Spec {
         self
     }
 
-    /// Complete the run as `Outcome::Pass` as soon as `gate` reads `true`,
-    /// killing QEMU at that instant. See [`Spec::completion_gate`]: this is
-    /// the harness-driven success signal for a two-process vertical whose
-    /// proof is held by the out-of-guest `netpeer` observer, so the guest
-    /// stays alive and serving until the observer's confirming (last-in-chain)
-    /// event has occurred rather than self-terminating on an earlier witness
-    /// and racing it.
+    /// End the run as soon as `gate` reaches a verdict, killing QEMU at that
+    /// instant: a pass on a confirmation, a failure carrying the observer's
+    /// reason on an abandonment. See [`Spec::completion_gate`].
     #[must_use]
-    pub fn with_completion_gate(mut self, gate: Arc<AtomicBool>) -> Self {
+    pub fn with_completion_gate(mut self, gate: Arc<ObserverGate>) -> Self {
         self.completion_gate = Some(gate);
         self
     }
@@ -1564,6 +1619,20 @@ struct WaitLoop<'a> {
     run_start: Instant,
 }
 
+/// How a gated run should end given its observer's current verdict, or `None`
+/// while the observer is still watching.
+///
+/// Split out of the poll loop so the mapping is assertable without a guest:
+/// the loop's own coverage costs a QEMU boot, and the branch that matters most
+/// here is the one that only fires when something has already gone wrong.
+fn gate_decision(spec: &Spec) -> Option<DoneReason> {
+    match spec.completion_gate.as_ref()?.observation() {
+        Observation::Watching => None,
+        Observation::Confirmed => Some(DoneReason::CompletedByGate),
+        Observation::Abandoned(reason) => Some(DoneReason::ObserverAbandoned(reason)),
+    }
+}
+
 /// Poll a running QEMU guest to completion and report why it finished.
 ///
 /// Split out of [`supervise`] so the spawn/validate path and the wait loop
@@ -1593,16 +1662,13 @@ fn run_wait_loop(cx: WaitLoop<'_>) -> io::Result<DoneReason> {
     let tick = Duration::from_millis(25);
     let mut serial_closed = false;
     loop {
-        // Harness-driven success: the out-of-guest observer (the `netpeer` link
-        // peer) has confirmed the round-trip. End the run as `Pass` at once,
-        // before waiting on the guest — in this mode the guest never
-        // self-exits, so the gate is the sole success path.
-        if let Some(gate) = &spec.completion_gate {
-            if gate.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(DoneReason::CompletedByGate);
-            }
+        // The out-of-guest observer has reached a verdict. Act on it before
+        // waiting on the guest: in this mode the guest never self-exits, so
+        // the gate is the only signal that can end the run on time.
+        if let Some(done) = gate_decision(spec) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(done);
         }
         if let Some(status) = child.try_wait()? {
             return Ok(exit_reason(spec, serial_script.step, &*injections, status));
@@ -1768,7 +1834,9 @@ fn outcome_from_done(done: DoneReason, spec: &Spec, mut serial: String) -> Outco
             serial,
             cpu_state,
         },
-        DoneReason::InjectionFailed(reason) | DoneReason::DrainFailed(reason) => {
+        DoneReason::InjectionFailed(reason)
+        | DoneReason::DrainFailed(reason)
+        | DoneReason::ObserverAbandoned(reason) => {
             // The failure message rides the serial log so the report
             // explains *why* the run was cut short, exactly as a guest
             // diagnostic would.
@@ -1917,6 +1985,11 @@ enum DoneReason {
     /// (the `netpeer` link peer) confirmed success, so the child was
     /// killed and the run scored `Pass`.
     CompletedByGate,
+    /// The [`Spec::completion_gate`]'s observer stopped watching without
+    /// confirming; the child was killed. The message is the observer's own
+    /// reason, which is the diagnosis — a run left to expire on its ceiling
+    /// instead would report the guest as the thing that never finished.
+    ObserverAbandoned(String),
     /// A requested key/serial injection could not be delivered; the
     /// child was killed. The message explains which injection and why.
     InjectionFailed(String),
@@ -3080,20 +3153,21 @@ mod tests {
     }
 
     #[test]
-    fn completion_gate_builder_records_the_flag() {
+    fn completion_gate_builder_records_the_shared_gate() {
         // By default there is no gate: the run is driven solely by the guest.
         let plain = Spec::for_riscv64_kernel("/tmp/k");
         assert!(plain.completion_gate.is_none());
-        // `with_completion_gate` records the shared flag the harness observer
-        // trips; the same `Arc` is what the runner reads each poll tick.
-        let gate = Arc::new(AtomicBool::new(false));
+        // `with_completion_gate` records the shared gate the harness observer
+        // writes; the same `Arc` is what the runner reads each poll tick.
+        let gate = Arc::new(ObserverGate::default());
         let spec = Spec::for_riscv64_kernel("/tmp/k").with_completion_gate(Arc::clone(&gate));
-        let recorded = spec.completion_gate.expect("gate recorded");
-        assert!(!recorded.load(Ordering::Acquire));
-        gate.store(true, Ordering::Release);
-        assert!(
-            recorded.load(Ordering::Acquire),
-            "the recorded gate is the same flag the harness trips"
+        let recorded = spec.completion_gate.clone().expect("gate recorded");
+        assert_eq!(recorded.observation(), Observation::Watching);
+        gate.confirm();
+        assert_eq!(
+            recorded.observation(),
+            Observation::Confirmed,
+            "the recorded gate is the same one the harness writes"
         );
     }
 
@@ -3102,12 +3176,72 @@ mod tests {
         // The out-of-guest observer's confirmation is success on its own: the
         // guest never wrote a debug-exit code (it did not self-exit), so the
         // outcome must be Pass without consulting the per-arch status rule.
-        let spec = Spec::for_riscv64_kernel("/tmp/k")
-            .with_completion_gate(Arc::new(AtomicBool::new(true)));
+        let gate = Arc::new(ObserverGate::default());
+        gate.confirm();
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_completion_gate(gate);
         assert!(matches!(
             outcome_from_done(DoneReason::CompletedByGate, &spec, "campaign log".into()),
             Outcome::Pass { .. }
         ));
+    }
+
+    #[test]
+    fn a_gate_still_watching_lets_the_run_continue() {
+        let spec = Spec::for_riscv64_kernel("/tmp/k")
+            .with_completion_gate(Arc::new(ObserverGate::default()));
+        assert!(
+            gate_decision(&spec).is_none(),
+            "an observer with no verdict yet must not end the run"
+        );
+        // An ungated run never consults an observer at all.
+        assert!(gate_decision(&Spec::for_riscv64_kernel("/tmp/k")).is_none());
+    }
+
+    #[test]
+    fn an_abandoned_gate_ends_the_run_with_the_observers_reason() {
+        // The regression this pins: an observer that stops watching can never
+        // confirm, so a runner that only looked for a confirmation would wait
+        // out the whole absolute ceiling and then blame the guest for not
+        // finishing. The reason must reach the report from the side the fault
+        // is on.
+        let gate = Arc::new(ObserverGate::default());
+        gate.abandon("netstack peer: inbound v6 echo campaign incomplete");
+        let spec = Spec::for_riscv64_kernel("/tmp/k").with_completion_gate(Arc::clone(&gate));
+        let Some(DoneReason::ObserverAbandoned(reason)) = gate_decision(&spec) else {
+            panic!("an abandoned gate must end the run at once");
+        };
+        assert_eq!(reason, "netstack peer: inbound v6 echo campaign incomplete");
+        // And it fails the run, carrying the reason where a reader will find
+        // it — the same channel a drain or injection failure uses.
+        let outcome = outcome_from_done(
+            DoneReason::ObserverAbandoned(reason),
+            &spec,
+            "guest log".into(),
+        );
+        let Outcome::Fail { serial, .. } = outcome else {
+            panic!("an abandoned observer must fail the run");
+        };
+        assert!(serial.contains("guest log"), "the transcript is kept");
+        assert!(
+            serial.contains("inbound v6 echo campaign incomplete"),
+            "the observer's reason rides the report: {serial}"
+        );
+    }
+
+    #[test]
+    fn a_confirmation_is_never_overwritten_by_a_later_abandonment() {
+        // An observer that meets its verdict and *then* fails to shut down
+        // cleanly has still proved the round trip; the confirmation wins.
+        let gate = ObserverGate::default();
+        gate.confirm();
+        gate.abandon("shutdown went wrong");
+        assert_eq!(gate.observation(), Observation::Confirmed);
+        // The first abandonment reason is the diagnosis, so a later one does
+        // not displace it either.
+        let other = ObserverGate::default();
+        other.abandon("first");
+        other.abandon("second");
+        assert_eq!(other.observation(), Observation::Abandoned("first".into()));
     }
 
     #[test]

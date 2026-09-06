@@ -45,6 +45,7 @@ use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::listen::ListenConfig;
 use tairix_net::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
 use tairix_net::udp::{self, PROTOCOL_UDP};
+use tairix_qemu::ObserverGate;
 use tairix_test_netstack_wire as wire;
 
 /// A fixed key for the stack's neighbour-cache index, so a run's table layout
@@ -68,6 +69,18 @@ impl TempAddrSource for FixedTempSource {
 /// this also paces the peer's timer advancement.
 const RECV_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// Longest a transmit may stall before the frame is dropped.
+///
+/// A counterpart that has stopped draining saturates the wire's socket within
+/// ~90 frames, and an unbounded send then parks the peer *inside* its
+/// transmit path — so it never reaches the receive path its whole verdict
+/// depends on, and the run expires on its ceiling instead. A real NIC drops
+/// from a full transmit ring and the engine's retransmission recovers the
+/// loss, which is what this makes true. One receive slice is the bound: a
+/// frame the wire will not take within the interval the loop services it in
+/// is a dropped frame.
+const SEND_TIMEOUT: Duration = RECV_TIMEOUT;
+
 /// Interval between campaign-ping retransmissions. The guest may still
 /// be booting or mid-DAD when the campaign starts, so unanswered pings
 /// are the expected early state, never an error.
@@ -84,14 +97,15 @@ const IPV4_IDENT_SEED: u16 = 0x7EE7;
 /// A running host-side peer thread bound to one vertical's wire.
 pub struct NetPeer {
     stop: Arc<AtomicBool>,
-    /// Tripped by the peer thread the instant its campaign verdict is first
-    /// met (e.g. the guest's echo reply arrived). It is the harness-driven
-    /// completion signal: for a vertical whose success is proven by this
-    /// out-of-guest observer, the guest is built *not* to self-exit and the
-    /// QEMU runner ends the run when this flag reads `true`, so teardown can
-    /// never precede the observer's confirming (last-in-chain) event and race
-    /// it. `stop_and_join` still returns the authoritative verdict.
-    succeeded: Arc<AtomicBool>,
+    /// The harness-driven completion signal, written by the peer thread and
+    /// polled by the QEMU runner. Confirmed the instant the campaign verdict
+    /// is first met (e.g. the guest's echo reply arrived) — for a vertical
+    /// whose success is proven by this out-of-guest observer the guest is
+    /// built *not* to self-exit, so teardown can never precede the
+    /// observer's confirming (last-in-chain) event and race it — and
+    /// abandoned, with its reason, if the thread ends without confirming.
+    /// `stop_and_join` still returns the authoritative verdict.
+    gate: Arc<ObserverGate>,
     handle: JoinHandle<Result<(), String>>,
 }
 
@@ -293,18 +307,9 @@ impl NetPeer {
     ) -> Result<Self, String> {
         let primary = bind_wire(primary_qemu_sock, primary_peer_sock)?;
         let backup = bind_wire(backup_qemu_sock, backup_peer_sock)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let succeeded = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let thread_succeeded = Arc::clone(&succeeded);
-        let handle = std::thread::spawn(move || {
-            run_bond_peer(&primary, &backup, &thread_stop, &thread_succeeded)
-        });
-        Ok(Self {
-            stop,
-            succeeded,
-            handle,
-        })
+        Ok(Self::launch(move |stop, gate| {
+            run_bond_peer(&primary, &backup, stop, gate)
+        }))
     }
 
     /// Shared socket bring-up + thread spawn for both peer roles: remove any
@@ -314,37 +319,46 @@ impl NetPeer {
     fn spawn_with(
         qemu_sock: &Path,
         peer_sock: &Path,
-        body: fn(&UnixDatagram, &PathBuf, &AtomicBool, &AtomicBool) -> Result<(), String>,
+        body: fn(&UnixDatagram, &PathBuf, &AtomicBool, &ObserverGate) -> Result<(), String>,
     ) -> Result<Self, String> {
         let wire = bind_wire(qemu_sock, peer_sock)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let succeeded = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let thread_succeeded = Arc::clone(&succeeded);
-        let handle = std::thread::spawn(move || {
-            body(
-                &wire.socket,
-                &wire.qemu_sock,
-                &thread_stop,
-                &thread_succeeded,
-            )
-        });
-        Ok(Self {
-            stop,
-            succeeded,
-            handle,
-        })
+        Ok(Self::launch(move |stop, gate| {
+            body(&wire.socket, &wire.qemu_sock, stop, gate)
+        }))
     }
 
-    /// The harness-driven completion gate: a clone of the flag the peer
-    /// thread trips the instant its campaign verdict is first met. The QEMU
-    /// runner is handed this flag ([`tairix_qemu::Spec::with_completion_gate`])
-    /// so it can end the run as soon as the observer confirms success, for a
-    /// vertical whose guest is built not to self-exit. Cloning shares the same
-    /// underlying flag with the running thread.
+    /// Run `body` as the observer thread, publishing its verdict through a
+    /// fresh gate. The one place a peer thread is launched, so no role can be
+    /// left with its abandonment unreported.
+    fn launch(
+        body: impl FnOnce(&AtomicBool, &ObserverGate) -> Result<(), String> + Send + 'static,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(ObserverGate::default());
+        let thread_stop = Arc::clone(&stop);
+        let thread_gate = Arc::clone(&gate);
+        let handle = std::thread::spawn(move || {
+            let verdict = body(&thread_stop, &thread_gate);
+            // An observer that has stopped watching can never confirm, so the
+            // runner must hear why now rather than infer a guest fault when
+            // the ceiling expires.
+            if let Err(reason) = &verdict {
+                thread_gate.abandon(reason.clone());
+            }
+            verdict
+        });
+        Self { stop, gate, handle }
+    }
+
+    /// The harness-driven completion gate, shared with the running peer
+    /// thread. The QEMU runner is handed it
+    /// ([`tairix_qemu::Spec::with_completion_gate`]) so it can end the run as
+    /// soon as this observer reaches a verdict — a pass on the confirming
+    /// event, a failure carrying the peer's own reason if it stops watching
+    /// without one — for a vertical whose guest is built not to self-exit.
     #[must_use]
-    pub fn success_gate(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.succeeded)
+    pub fn observer_gate(&self) -> Arc<ObserverGate> {
+        Arc::clone(&self.gate)
     }
 
     /// Signal the peer to stop and collect its verdict: `Ok` only if the
@@ -366,9 +380,10 @@ struct Wire {
     qemu_sock: PathBuf,
 }
 
-/// Remove any stale socket files, bind the peer end of one wire, and set its
-/// read timeout — the one binding path every peer role shares (the single
-/// wire of the ICMP/TCP peers and each of the bond peer's two).
+/// Remove any stale socket files, bind the peer end of one wire, and bound
+/// both directions of its blocking — the one binding path every peer role
+/// shares (the single wire of the ICMP/TCP peers and each of the bond peer's
+/// two), so no role can be left with an unbounded transmit.
 fn bind_wire(qemu_sock: &Path, peer_sock: &Path) -> Result<Wire, String> {
     for path in [qemu_sock, peer_sock] {
         match std::fs::remove_file(path) {
@@ -387,10 +402,81 @@ fn bind_wire(qemu_sock: &Path, peer_sock: &Path) -> Result<Wire, String> {
     socket
         .set_read_timeout(Some(RECV_TIMEOUT))
         .map_err(|e| format!("netstack peer: set read timeout: {e}"))?;
+    socket
+        .set_write_timeout(Some(SEND_TIMEOUT))
+        .map_err(|e| format!("netstack peer: set write timeout: {e}"))?;
     Ok(Wire {
         socket,
         qemu_sock: qemu_sock.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::{bind_wire, SEND_TIMEOUT};
+    use std::os::unix::net::UnixDatagram;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    use tairix_qemu::ReservedSocket;
+
+    /// Longest the timed hand-over may take before the observer is declared
+    /// parked. Orders of magnitude above the one receive slice a bounded
+    /// transmit costs, so no amount of host load reaches it — an unbounded
+    /// transmit, which never returns at all, is the only way past it.
+    const PARKED: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_saturated_wire_drops_the_frame_instead_of_parking_the_observer() {
+        let qemu = ReservedSocket::reserve("net0q").expect("reserve the qemu end");
+        let peer = ReservedSocket::reserve("net0p").expect("reserve the peer end");
+        let wire = bind_wire(qemu.path(), peer.path()).expect("bind the wire");
+        assert_eq!(
+            wire.socket
+                .write_timeout()
+                .expect("read the wire's transmit bound"),
+            Some(SEND_TIMEOUT),
+            "every role's wire is bound in both directions"
+        );
+
+        // `bind_wire` clears the counterpart's path, so the counterpart is
+        // bound after it. It never reads, which is what a QEMU descheduled
+        // under load looks like from this side.
+        let counterpart = UnixDatagram::bind(qemu.path()).expect("bind the counterpart");
+
+        // The whole sequence runs on a worker: without a transmit bound it
+        // never returns, and a hung test diagnoses nothing.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let frame = [0u8; 1514];
+            let mut accepted = 0u32;
+            while wire.socket.send_to(&frame, &wire.qemu_sock).is_ok() {
+                accepted += 1;
+                if accepted == u32::MAX {
+                    break;
+                }
+            }
+            let start = Instant::now();
+            let refused = wire.socket.send_to(&frame, &wire.qemu_sock).is_err();
+            let _ = tx.send((accepted, refused, start.elapsed()));
+        });
+
+        let (accepted, refused, waited) = rx.recv_timeout(PARKED).expect(
+            "a transmit onto a saturated wire must be refused, not park the observer: a \
+             parked observer never reaches the receive path its verdict depends on, so the \
+             run expires on its ceiling and reports the guest as the fault",
+        );
+        assert!(
+            accepted > 0 && accepted < u32::MAX,
+            "the counterpart's queue must saturate at a finite depth, not stay open \
+             forever (accepted {accepted})"
+        );
+        assert!(refused, "a saturated wire refuses the frame");
+        assert!(
+            waited < PARKED,
+            "the refusal took {waited:?}, which is not a bounded transmit"
+        );
+        drop(counterpart);
+    }
 }
 
 /// The peer's event loop for the **bond-failover** vertical
@@ -415,7 +501,7 @@ fn run_bond_peer(
     primary: &Wire,
     backup: &Wire,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -530,7 +616,7 @@ fn run_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let guest_v6 = wire::link_local(eui64_interface_id(wire::GUEST_MAC));
     run_v6_campaign(socket, qemu_sock, stop, succeeded, None, guest_v6)
@@ -548,7 +634,7 @@ fn run_static_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     run_v6_campaign(
         socket,
@@ -570,7 +656,7 @@ fn run_v6_campaign(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
     peer_static: Option<(core::net::Ipv6Addr, u8)>,
     guest_v6: core::net::Ipv6Addr,
 ) -> Result<(), String> {
@@ -652,7 +738,7 @@ fn run_v6_campaign(
         // teardown cannot precede (and lose the race to) the reply leaving the
         // machine. Idempotent: `reply_v6` only ever goes false -> true.
         if reply_v6 {
-            succeeded.store(true, Ordering::Release);
+            succeeded.confirm();
         }
     }
 
@@ -686,7 +772,7 @@ fn run_dhcp_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -779,7 +865,7 @@ fn run_dhcp_peer(
         // teardown cannot precede (and lose the race to) the reply leaving the
         // machine. Idempotent: `reply` only ever goes false -> true.
         if reply {
-            succeeded.store(true, Ordering::Release);
+            succeeded.confirm();
         }
     }
 
@@ -810,7 +896,7 @@ fn run_dhcp_time_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -891,7 +977,7 @@ fn run_dhcp_time_peer(
         // exact applied instant) is what proves the rest. Neither side passes
         // alone.
         if acked && served > 0 {
-            succeeded.store(true, Ordering::Release);
+            succeeded.confirm();
         }
     }
 
@@ -1305,7 +1391,7 @@ fn run_dhcp6_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -1413,7 +1499,7 @@ fn run_dhcp6_peer(
         // teardown cannot precede (and lose the race to) the reply leaving the
         // machine. Idempotent: `reply` only ever goes false -> true.
         if reply {
-            succeeded.store(true, Ordering::Release);
+            succeeded.confirm();
         }
     }
 
@@ -1930,7 +2016,7 @@ fn run_ping_responder(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let facts = DeviceFacts {
         mac: MacAddress(wire::PEER_MAC),
@@ -2050,8 +2136,10 @@ fn note_reply(out: &StackOutput, expect: IpAddr, seen: &mut bool) {
 
 /// Transmit engine output onto the wire, one frame per datagram. Send
 /// errors are tolerated: before QEMU binds its end there is no receiver
-/// (the engine's retransmission machinery recovers the loss), and after
-/// the guest exits the wire is torn down under us.
+/// (the engine's retransmission machinery recovers the loss), after the
+/// guest exits the wire is torn down under us, and a counterpart that has
+/// stopped draining refuses the frame once [`SEND_TIMEOUT`] elapses rather
+/// than parking this thread.
 fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[TxFrame]) {
     for frame in frames {
         // The host peer speaks the raw wire; a live device would consume
@@ -2268,7 +2356,7 @@ fn run_ntp_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -2293,7 +2381,7 @@ fn run_ntp_peer(
                 if let Some(request) = parse_ntp_frame(&buf[..len]) {
                     answer_ntp_spoof_first(socket, qemu_sock, &request);
                     served = served.saturating_add(1);
-                    succeeded.store(true, Ordering::Release);
+                    succeeded.confirm();
                 } else {
                     let mut out = StackOutput::default();
                     stack.on_frame(&buf[..len], now(start), &mut out);
@@ -2390,7 +2478,7 @@ fn run_tcp_echo_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -2513,7 +2601,7 @@ fn run_telnet_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    succeeded: &AtomicBool,
+    succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -2586,7 +2674,7 @@ fn run_telnet_peer(
             }
         }
         if server.satisfied() {
-            succeeded.store(true, Ordering::Release);
+            succeeded.confirm();
         }
         drive_tcp_egress(
             &mut tcb,
@@ -3158,7 +3246,7 @@ fn run_tcp_echo_ecn_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -3321,7 +3409,7 @@ fn run_tcp_flood_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
@@ -3626,7 +3714,7 @@ fn run_tcp_connect_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
-    _succeeded: &AtomicBool,
+    _succeeded: &ObserverGate,
 ) -> Result<(), String> {
     let start = Instant::now();
     let now = |t0: Instant| {
