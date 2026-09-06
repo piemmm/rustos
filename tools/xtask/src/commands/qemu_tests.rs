@@ -11315,7 +11315,7 @@ fn attach_net_peer(
                     | NetPeerMode::V4DhcpEcho
                     | NetPeerMode::V6Dhcp6Echo
             ) {
-                spec = spec.with_completion_gate(started.success_gate());
+                spec = spec.with_completion_gate(started.observer_gate());
             }
             peer = Some(started);
             spec = spec.with_virtio_net_dgram_mac(
@@ -11435,23 +11435,18 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // like one that completed. Keeping the transcript is what lets a reader
     // check a suspicious pass instead of having to re-derive it.
     persist_serial(t.package, &serial_log, outcome.serial())?;
-    match outcome {
+    let run_result = match outcome {
         Outcome::Pass { .. } => {
             // The guest passed, but the run is not verified until its dumps
-            // and its link peer agree.
+            // agree too.
+            let mut verified = Ok(());
             for (path, assert) in &screendump_paths {
                 if let Err(e) = assert(t, path) {
-                    return Err(format!("{e} (full serial: {})", serial_log.display()));
+                    verified = Err(format!("{e} (full serial: {})", serial_log.display()));
+                    break;
                 }
             }
-            if let Some(Err(e)) = peer_verdict {
-                return Err(format!(
-                    "test --qemu ({}): {e} (full serial: {})",
-                    t.package,
-                    serial_log.display()
-                ));
-            }
-            Ok(())
+            verified
         }
         Outcome::Fail { status, serial } => {
             Err(format!(
@@ -11491,6 +11486,34 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
                 serial_log.display()
             ))
         }
+    };
+    fold_peer_verdict(t.package, &serial_log, run_result, peer_verdict)
+}
+
+/// Combine a run's own result with its link peer's verdict.
+///
+/// The peer's verdict diagnoses a *failed* run as much as a passed one, so it
+/// is folded in either way. Consulting it only on a pass is what let a stalled
+/// out-of-guest observer be reported as a guest that never finished: the
+/// observer's reason was collected and then dropped, leaving the ceiling as
+/// the whole story.
+fn fold_peer_verdict(
+    package: &str,
+    serial_log: &Path,
+    run: Result<(), String>,
+    peer: Option<Result<(), String>>,
+) -> Result<(), String> {
+    let Some(Err(peer_reason)) = peer else {
+        return run;
+    };
+    match run {
+        Ok(()) => Err(format!(
+            "test --qemu ({package}): {peer_reason} (full serial: {})",
+            serial_log.display()
+        )),
+        Err(run_reason) => Err(format!(
+            "{run_reason}\n--- link peer verdict ---\n{peer_reason}\n--- end ---"
+        )),
     }
 }
 
@@ -11535,14 +11558,15 @@ fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String
 mod tests {
     use super::{
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
+        desktop_hover_pointer_script, fold_peer_verdict, login_type_plant, persist_serial,
+        qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
         SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX,
         TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
         VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
         VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
+    use std::path::Path;
     use std::time::Duration;
 
     /// Every desktop click a pointer script drives is **one** step.
@@ -12453,6 +12477,62 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_failed_run_reports_its_link_peers_verdict_too() {
+        // The regression this pins: the peer's verdict used to be consulted
+        // only when the run passed, so a stalled out-of-guest observer was
+        // collected and then dropped — leaving a report that blamed the guest
+        // for a ceiling the observer caused. A failed run must name both.
+        let log = Path::new("/tmp/tairix-fold.serial.log");
+        let run = Err("test --qemu (pkg) UNFINISHED at the 300s runtime ceiling".to_string());
+        let peer = Some(Err(
+            "netstack peer: inbound v6 echo campaign incomplete".to_string()
+        ));
+        let folded = fold_peer_verdict("pkg", log, run, peer).expect_err("the run failed");
+        assert!(
+            folded.contains("UNFINISHED at the 300s runtime ceiling"),
+            "the run's own reason survives: {folded}"
+        );
+        assert!(
+            folded.contains("inbound v6 echo campaign incomplete"),
+            "and the observer's reason is reported beside it: {folded}"
+        );
+    }
+
+    #[test]
+    fn a_passing_run_still_fails_when_its_link_peer_disagrees() {
+        let log = Path::new("/tmp/tairix-fold.serial.log");
+        let folded = fold_peer_verdict(
+            "pkg",
+            log,
+            Ok(()),
+            Some(Err("netstack peer: socket receive: broken pipe".to_string())),
+        )
+        .expect_err("a guest pass is not a verified run");
+        assert!(folded.contains("socket receive: broken pipe"), "{folded}");
+        assert!(
+            folded.contains("pkg"),
+            "the package names the failure: {folded}"
+        );
+    }
+
+    #[test]
+    fn a_verdict_that_agrees_or_is_absent_changes_nothing() {
+        let log = Path::new("/tmp/tairix-fold.serial.log");
+        // An agreeing peer, and a vertical with no peer at all, both leave the
+        // run's own result exactly as it was — pass or fail.
+        assert!(fold_peer_verdict("pkg", log, Ok(()), Some(Ok(()))).is_ok());
+        assert!(fold_peer_verdict("pkg", log, Ok(()), None).is_ok());
+        for peer in [Some(Ok(())), None] {
+            let folded = fold_peer_verdict("pkg", log, Err("guest exploded".to_string()), peer)
+                .expect_err("the run failed on its own");
+            assert_eq!(
+                folded, "guest exploded",
+                "an agreeing peer adds nothing to the report"
+            );
         }
     }
 }

@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 20 open, 77 closed, 97 total.
+table normalises all three to **closed**. 19 open, 78 closed, 97 total.
 
-### Open (20)
+### Open (19)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -45,10 +45,9 @@ table normalises all three to **closed**. 20 open, 77 closed, 97 total.
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
 | D94 | the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan + a doc claimed it did | claim corrected; neither the witnesses *nor* the click-through exist — no vertical mentions a viewer or picker, so this is a whole new graphical-session vertical |
-| D95 | a netstack vertical blows its ceiling after the guest has provably finished | split from D76; the host-side peer observer's confirmation never lands — a `tools/qemu`/`netpeer` defect, not a guest one |
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
 
-### Closed (77)
+### Closed (78)
 
 | ID | Subject |
 |---|---|
@@ -126,6 +125,7 @@ table normalises all three to **closed**. 20 open, 77 closed, 97 total.
 | D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate could not build on any Tier-1 target |
 | D90 | the host test suite passed only in the harness's alphabetical order |
 | D96 | three ports each hand-wrote the per-tick body, so wasm32 drove no timed-wake sweep |
+| D95 | an unbounded transmit parked the netstack link peer, so its gate never tripped and the run blamed the guest |
 | D91 | a leader thread that exits first stranded its process id, which the draw could then reissue |
 | D92 | `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number |
 | D93 | riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor be acknowledged |
@@ -5524,28 +5524,79 @@ witnesses on top, not a witness patch. Comparable existing verticals are
 450–850 lines of crate plus their harness script. Budget it as its own piece
 of work.
 
-## D95 — a netstack QEMU vertical can blow its ceiling after the guest has provably finished, because the host-side peer observer's confirmation never lands (OPEN)
+## D95 — an unbounded transmit parked the netstack link peer inside its send path, so its completion gate never tripped and the run blamed the guest (FIXED)
 
 Split out of D76, whose root cause (the device manager parking with no
 catalogue) is fixed and does **not** explain this half. Here the guest
 *succeeded*: the transcripts carry the driver loaded (`id=7001`), its channel
-published (`id=4180`), the interface bound (`id=16009`/`id=13010`) and five
-inbound echo requests served with replies queued (`id=16012`). The run still
-died on its absolute ceiling, because what the harness waits for is the
-host-side peer observer's confirmation and that never arrived.
+published (`id=4180`), the interface bound (`id=16009`/`id=13010`) and inbound
+echo requests served with replies queued (`id=16012`). The run still died on
+its absolute ceiling, because what the harness waits for is the host-side peer
+observer's confirmation and that never arrived.
 
-So the unmet completion signal is on the **harness** side, in
-`tools/qemu` / `netpeer`, not in the guest. It is fixable without touching a
-job budget and without raising a ceiling — raising it is the mitigation D22
-records as exactly what let its own defect hide.
+**Mechanism, measured.** `bind_wire` set only a *read* timeout on each peer
+wire's datagram socket, so its transmit was unbounded. A Unix-datagram
+counterpart that stops draining saturates after **93 × 1514-byte frames**
+(measured on this host), and the next `send_to` on a socket with no write
+timeout then **blocks indefinitely** (measured: still blocked at 5 s, versus
+~50 ms once bounded). A QEMU descheduled on a loaded host is exactly such a
+counterpart. The peer thread therefore parked *inside* `send_frames`, and from
+there it could never reach `socket.recv` — so it never saw the guest's echo
+reply, never confirmed, and the gate it owns stayed at `Watching` for the whole
+remaining ceiling. The transcript signature is diagnostic: a handful of
+`id=16012` records and then silence, because the peer had stopped campaigning
+as well as stopped listening.
 
-Read the sub-mechanism off each run's transcript rather than off a vertical's
-name: the same vertical has been recorded failing this way in one run and the
-D76 autoload way in another, so a row is not a diagnosis.
+That is why the guest looked guilty. The guest for a gated vertical is built
+not to self-exit, so it never falls silent and the inactivity heartbeat can
+never fire; the absolute ceiling was the only backstop, and it reports "the
+guest was still alive and never completed".
 
-**Done when:** the peer observer's confirmation path survives a starved host,
-with a regression test that demonstrates it (§7) rather than a green re-run
-on an idle machine — "machine load" is never an accepted diagnosis.
+**Second defect, the one that hid the first.** The peer's verdict was folded
+into the result **only on `Outcome::Pass`**. On a `Timeout` or a
+`RuntimeCeilingExceeded` it was collected — so the thread was never left
+unjoined — and then dropped, so the report named the ceiling and never
+mentioned that the observer had stopped watching. A dead or parked observer was
+indistinguishable from a slow guest, which is what sent the investigation to
+the guest side for two ledger entries.
+
+**Fix, both halves, with no ceiling touched.**
+
+- `bind_wire` now bounds the transmit as well as the receive (`SEND_TIMEOUT`,
+  one receive slice), so a saturated wire *drops* the frame the way a real NIC
+  drops from a full transmit ring — which is what that path's own docs already
+  claimed happened. It is the one binding path every peer role shares, so no
+  role can be left with an unbounded transmit.
+- The completion gate can now represent failure. `tairix_qemu::ObserverGate`
+  carries an `Observation` of `Watching` / `Confirmed` / `Abandoned(reason)`
+  instead of a bare `AtomicBool`; `NetPeer::launch` — now the single place a
+  peer thread is started, so the bond role cannot diverge from the rest —
+  records an `Err` verdict as `Abandoned`, and the runner ends the run at once
+  with `DoneReason::ObserverAbandoned`, carrying the observer's own reason on
+  the same channel a drain or injection failure uses. A confirmation already
+  reached is never overwritten by a later abandonment.
+- `fold_peer_verdict` folds the peer's verdict into **every** outcome, so a
+  failed run names both its own reason and the observer's.
+
+**Regression tests, each demonstrated failing first.**
+`a_saturated_wire_drops_the_frame_instead_of_parking_the_observer` saturates a
+real counterpart and times the next hand-over on a worker thread: it fails at
+its 30 s bound with the transmit bound removed and passes in 0.10 s with it, so
+the failure is a failure rather than a hung test.
+`a_failed_run_reports_its_link_peers_verdict_too` fails with the old
+consult-only-on-pass semantics restored, reporting exactly the misleading
+ceiling-only message that hid this defect. `gate_decision` is split out of the
+poll loop so the abandonment branch — the one that only fires when something
+has already gone wrong — is assertable without a QEMU boot.
+
+**Not claimed.** The starved-host failure is not reproduced end to end here:
+doing that means running the netstack verticals under deliberate host
+oversubscription, and the mechanism above is established by direct measurement
+of the socket behaviour plus the transcript signature rather than by a
+reproduction. What is now true is that the parking path no longer exists, and
+that an observer which stops watching for *any* reason ends its run
+immediately with its own reason instead of expiring on a ceiling that blames
+the guest.
 
 ## D96 — three ports each hand-wrote the per-tick body, so wasm32 drove no timed-wake sweep at all (FIXED)
 
