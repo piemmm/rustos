@@ -16,9 +16,9 @@
 # Instead the boot hart publishes the pool it sized for the machine's
 # discovered hart count through `smp::SecondaryStackPool::register`, which
 # writes the pool base and the per-hart slice's log2 size into the
-# `SECONDARY_STACK_BASE` / `SECONDARY_STACK_SHIFT_BITS` globals below
-# before it issues any `hart_start`. This stub reads those globals to
-# locate its slice; the `register` call's `fence` (and the SBI
+# `tairix_arch_riscv64_secondary_stack_base` / `SECONDARY_STACK_SHIFT_BITS`
+# globals below before it issues any `hart_start`. This stub reads those
+# globals to locate its slice; the `register` call's `fence` (and the SBI
 # `hart_start` firmware barrier) order the publish ahead of this hart's
 # first read.
 #
@@ -29,7 +29,7 @@
 #      `a0 < SECONDARY_STACK_COUNT` (the registered pool's hart count), so
 #      the per-hart stack slice this stub selects
 #      (`base + (hartid + 1) << shift`) lies inside the registered pool.
-#   3. `SECONDARY_STACK_BASE`/`_SHIFT_BITS` were published (base
+#   3. the stack-pool base/`_SHIFT_BITS` globals were published (base
 #      non-zero) by the boot hart's `register` before any `hart_start`;
 #      a `hart_start` is refused unless a pool is registered, so this
 #      stub never reads a null base.
@@ -50,7 +50,7 @@ _start_secondary:
     # from the top of its slice, so hart h uses the top of slot index h.
     # The slice size is a power of two, so the multiply is a left shift
     # (avoiding the `M` multiply extension in this freestanding stub).
-    la      t0, SECONDARY_STACK_BASE
+    la      t0, tairix_arch_riscv64_secondary_stack_base
     ld      t1, 0(t0)                       # pool base
     la      t0, SECONDARY_STACK_SHIFT_BITS
     ld      t2, 0(t0)                       # per-hart slice log2 size

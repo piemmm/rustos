@@ -43,7 +43,8 @@
 //! closed.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // Bare-metal-only imports — host builds carry neither
 // `init_local_preempt` nor the timer dispatcher (the static callback
@@ -72,7 +73,6 @@ pub const TIMER_VECTOR: u8 = 0x20;
 /// swap it in/out with `Relaxed` atomics — the callback table is set
 /// up *before* any timer fires and never mutated again in normal
 /// operation.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// The preemption callback the timer ISR forwards each tick **taken from
@@ -99,7 +99,6 @@ static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// only while ring 3 runs (which `crate::userentry` enters with `IF` set);
 /// the explicit ring gate is defence-in-depth so a future in-kernel `sti`
 /// can never accidentally preempt the kernel.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 
 /// LAPIC EOI register MMIO offset (Intel SDM Vol 3A §11.4.1 Table 11-1).
@@ -206,34 +205,21 @@ static PREEMPT_WAKEUP_ABS_TSC: AtomicU64 = AtomicU64::new(NO_DEADLINE);
 /// could be `Drop`-ped while the ISR is mid-flight.
 pub fn set_timer_callback(cb: extern "C" fn(u32)) {
     // `fn` pointers are `usize`-sized, so `as usize` is lossless.
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     TIMER_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
-    // On host builds the static is omitted — callers gated this themselves.
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    let _ = cb;
 }
 
-/// Read the currently-installed timer callback, if any. Test-only.
-///
-/// Host builds always return `None` because the callback storage is
-/// gated to the freestanding target.
+/// Read the currently-installed timer callback, if any.
+/// Test/diagnostic observer.
 #[must_use]
 pub fn timer_callback() -> Option<extern "C" fn(u32)> {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    {
-        let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
-        if raw == 0 {
-            None
-        } else {
-            // SAFETY: every store into `TIMER_CALLBACK_FN` originates
-            // from `set_timer_callback`, which always rounds-trips a
-            // valid `extern "C" fn(u32)` pointer.
-            Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
-        }
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    {
+    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
+    if raw == 0 {
         None
+    } else {
+        // SAFETY: every store into `TIMER_CALLBACK_FN` originates from
+        // `set_timer_callback`, which always round-trips a valid
+        // `extern "C" fn(u32)` pointer.
+        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
     }
 }
 
@@ -245,35 +231,23 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
 /// back to the scheduler via `reschedule_current`) before arming the
 /// timer. Storing a `fn` (not a closure) keeps it safe to invoke from
 /// interrupt context: there is no captured environment that could be
-/// `Drop`-ped while the ISR is mid-flight. Mirrors
-/// [`set_timer_callback`]'s host-inert gating.
+/// `Drop`-ped while the ISR is mid-flight.
 pub fn set_preempt_callback(cb: extern "C" fn(u32)) {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Release);
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    let _ = cb;
 }
 
 /// Read the currently-installed ring-3-preemption callback, if any.
-/// Test-only; always `None` on the host (the storage is gated to the
-/// freestanding target, like [`timer_callback`]).
+/// Test/diagnostic observer.
 #[must_use]
 pub fn preempt_callback() -> Option<extern "C" fn(u32)> {
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    {
-        let raw = PREEMPT_CALLBACK_FN.load(Ordering::Acquire);
-        if raw == 0 {
-            None
-        } else {
-            // SAFETY: every store into `PREEMPT_CALLBACK_FN` originates
-            // from `set_preempt_callback`, which always round-trips a
-            // valid `extern "C" fn(u32)` pointer.
-            Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
-        }
-    }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    {
+    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Acquire);
+    if raw == 0 {
         None
+    } else {
+        // SAFETY: every store into `PREEMPT_CALLBACK_FN` originates from
+        // `set_preempt_callback`, which always round-trips a valid
+        // `extern "C" fn(u32)` pointer.
+        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
     }
 }
 
@@ -498,8 +472,8 @@ pub fn current_cpu_id_from_lapic() -> u32 {
 /// shared by the LAPIC-timer ISR (a quantum expiry or a reschedule IPI)
 /// and the external-IRQ ISR (a device interrupt that woke a
 /// higher-priority task), so the logic lives in exactly one place. The
-/// installed callback (`production_preempt_dispatch`) self-gates on the
-/// per-CPU need-resched latch, so an interrupt that woke nothing returns
+/// installed callback (`tairix_kernel_core::on_user_preempt_point`) self-gates
+/// on the per-CPU need-resched latch, so an interrupt that woke nothing returns
 /// straight to ring 3 with no context switch. A tick taken in ring 0 never
 /// preempts — the kernel is non-preemptible — and its reschedule is
 /// latched and honoured at the interrupted syscall's completion; an absent
@@ -831,14 +805,15 @@ mod tests {
         assert_eq!(LAPIC_BASE_PHYS, 0xFEE0_0000);
     }
 
+    /// The callback slots are live on the host exactly as the aarch64 and
+    /// riscv64 ports' are, so the kernel binary's wiring step can pin what
+    /// it installed under `cargo test`.
     #[test]
-    fn timer_callback_round_trip_on_host_is_none() {
-        // The freestanding-target storage is `cfg`-gated out on the
-        // host. `set_timer_callback` is callable on the host (it's a
-        // no-op stub); the getter must consistently report "none".
+    fn the_timer_callback_round_trips() {
         extern "C" fn cb(_cpu: u32) {}
         set_timer_callback(cb);
-        assert!(timer_callback().is_none());
+        let got = timer_callback().expect("the installed timer callback reads back");
+        assert!(core::ptr::fn_addr_eq(got, cb as extern "C" fn(u32)));
     }
 
     #[test]
@@ -851,15 +826,11 @@ mod tests {
     }
 
     #[test]
-    fn preempt_callback_on_host_is_none() {
-        // The ring-3-preemption callback storage is `cfg`-gated out on the
-        // host, exactly like `TIMER_CALLBACK_FN`. `set_preempt_callback` is
-        // a no-op stub on the host; the getter must consistently report
-        // "none" so a regression that quietly enables host-side storage is
-        // caught.
+    fn the_preempt_callback_round_trips() {
         extern "C" fn cb(_cpu: u32) {}
         set_preempt_callback(cb);
-        assert!(preempt_callback().is_none());
+        let got = preempt_callback().expect("the installed preempt callback reads back");
+        assert!(core::ptr::fn_addr_eq(got, cb as extern "C" fn(u32)));
     }
 
     #[test]

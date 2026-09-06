@@ -378,6 +378,13 @@ tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 # build needs it too, so it is also a dev-dependency (the same crate the
 # freestanding riscv64 image links).
 tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
+# The other two ports' trap-callback wiring modules
+# (`src/{aarch64,x86_64}_preempt_wiring.rs`) carry the same host regression
+# test as riscv64's, so their arch crates are dev-dependencies too. Naming
+# them here rather than relying on the CI host's own triple keeps the tests
+# running whichever machine the host stage runs on.
+tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
+tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0" }
 # The transform-cache host tests capture the reclaim audit records
 # (`plans/SMARTRAM.md` SMART9) through `kernel/core`'s `TestSink`,
 # exposed by its host-only `test-arch` feature. Feature unification

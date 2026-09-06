@@ -132,6 +132,7 @@ pub mod spawn_services;
 pub mod syscalls;
 pub mod syscfg;
 pub mod threads;
+pub mod traps;
 pub mod useradmin;
 pub mod users;
 pub mod waitq;
@@ -279,6 +280,7 @@ pub use supervisor_system::{
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
 pub use syscfg::load_and_apply_system_config;
+pub use traps::{on_reschedule_ipi, on_timer_tick, on_user_preempt_point};
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
     UsersAdminAlreadyInstalled, NULL_USERS_ADMIN,

@@ -529,13 +529,21 @@ the two via the host-tested `tairix_arch_api::wakeup::earliest` helper, or
 disarms when neither is pending. The conversion from monotonic-ns deadline
 to counter ticks, and (on x86_64) the rebase of the chosen TSC duration
 onto the LAPIC count, use the same calibrated frequency `monotonic_ns`
-reads the other way (`AGENTS.md` §2.4). Each port's per-tick timer
-callback latches the fired tick as the CPU's **pending preemption**
-(`kernel/core::note_preempt_tick`, below) and runs the blocking-wait
-**timed-wake sweep** (`kernel/core::timed_wake_sweep`), so every tick —
-including one taken on an otherwise-idle CPU armed solely for a wakeup —
-releases any elapsed waiter
-and re-arms the one-shot to the next deadline. `set_wakeup` defaults to a
+reads the other way (`AGENTS.md` §2.4). The per-tick timer callback is
+**one shared definition** every port installs
+(`kernel/core::traps::on_timer_tick`), not a body each port writes: it
+latches the fired tick as the CPU's **pending preemption**
+(`kernel/core::note_preempt_tick`, below), runs the blocking-wait
+**timed-wake sweep** (`kernel/core::timed_wake_sweep`) — so every tick,
+including one taken on an otherwise-idle CPU armed solely for a wakeup,
+releases any elapsed waiter and re-arms the one-shot to the next deadline
+— and samples the stall watchdog (`watchdog::check_stall`, below). Sharing
+it is what stops a port omitting a duty: three hand-written copies is how
+wasm32 came to drive no deadline sweep at all
+(`plans/OPEN-DEFECTS.md` D96). Each port's return-to-user preempt point
+and reschedule IPI install the sibling `on_user_preempt_point` /
+`on_reschedule_ipi` for the same reason, and each port's wiring module
+carries a host test pinning what it installed. `set_wakeup` defaults to a
 no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.

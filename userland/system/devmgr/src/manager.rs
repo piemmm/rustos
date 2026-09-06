@@ -126,10 +126,9 @@ impl<'m> DeviceManager<'m> {
             match resolve(node.match_keys(), candidates) {
                 MatchResolution::Unmatched => {
                     // Routine, high-volume case: most nodes on a real device
-                    // tree have no driver, so this is logged at `Debug` (not
-                    // `Info`) to keep the slow diagnostic UART from drowning in
-                    // one line per unbound node — still logged with its stable
-                    // id when diagnostics are enabled. Kept identical to the user-space sibling
+                    // tree have no driver, so this is `Debug`, not `Info` — one
+                    // line per unbound node would drown the slow diagnostic
+                    // UART. Kept identical to the user-space sibling
                     // (`crate::autoload::match_and_load`).
                     self.audit_node(events::NODE_UNBOUND, Level::Debug, node.id(), &[]);
                     report.unbound += 1;

@@ -125,71 +125,6 @@ pub extern "C" fn production_external_irq_dispatch(vector: u8) {
     tairix_kernel_core::note_preempt_tick(tairix_arch_x86_64::preempt::current_cpu_id_from_lapic());
 }
 
-/// The ring-3-preemption callback the ISR path invokes on return-to-ring-3
-/// for **any** interrupt (installed via
-/// [`tairix_arch_x86_64::preempt::set_preempt_callback`] in
-/// [`KernelArch::install_irq_dispatch`]), from both the LAPIC-timer ISR (a
-/// quantum expiry or a reschedule IPI — `send_ipi` targets `TIMER_VECTOR`)
-/// and the external-IRQ ISR (a device interrupt that woke a task).
-///
-/// It reschedules **only** when this CPU owes one — i.e. the per-CPU
-/// need-resched latch ([`tairix_kernel_core::take_preempt_pending`]) is
-/// set (by [`production_tick_dispatch`] on a tick/IPI, or by
-/// [`production_external_irq_dispatch`] on a device wake); an interrupt
-/// that woke nothing leaves it clear, so the common case returns straight
-/// to ring 3 with **no** gratuitous context switch. Consuming the latch
-/// here also means a ring-0 tick — which never reaches this ring-3-only
-/// path — keeps its latch until the interrupted syscall's completion
-/// honours it.
-///
-/// When a reschedule is owed it suspends the user task currently running
-/// on `cpu` back to the scheduler with
-/// [`tairix_kernel_core::RescheduleAction::Yield`] — the *involuntary*
-/// analogue of a `yield` syscall: the task is re-enqueued at its priority
-/// and the scheduler picks the next runnable task, giving EEVDF-ordered
-/// time-slicing and running `drain_pending_wakes` so work a device IRQ
-/// just woke actually gets dispatched. This is the x86_64 sibling of the
-/// aarch64/riscv64 `production_preempt_dispatch` (one shape over the Arch
-/// HAL): the latch-consult, reschedule, and preemption count all live in
-/// the shared [`tairix_kernel_core::preempt_current`], which returns
-/// `false` when nothing is owed or no resumable user kthread is published
-/// on `cpu` (unreachable from ring 3 with none switched in, but the
-/// fail-closed return means a stray invocation is a harmless no-op rather
-/// than an unsound switch). The call only ever runs after the ISR has
-/// written the LAPIC EOI, so the in-service bit is already released across
-/// the context switch, and the ISR brackets it with the `swapgs` pair
-/// that balances the kthread cooperative park.
-extern "C" fn production_preempt_dispatch(cpu: CpuId) {
-    let _ = tairix_kernel_core::preempt_current(cpu);
-}
-
-/// The per-tick callback the LAPIC-timer ISR invokes on **every** tick
-/// (ring 3 *or* idle ring 0), installed via
-/// [`tairix_arch_x86_64::preempt::set_timer_callback`].
-///
-/// It latches the fired tick as this CPU's pending preemption
-/// ([`tairix_kernel_core::note_preempt_tick`]) and runs the blocking-wait
-/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
-/// elapsed is unparked and the one-shot is re-armed to the next pending
-/// deadline ([`tairix_kernel_core::timed_wake_sweep`]), so a finite
-/// `hw_tree_wait` timeout fires even when the CPU is otherwise idle
-/// (every task parked) and takes no preemption tick. Both halves are pure
-/// accounting (they never context-switch), so they are safe on a tick
-/// taken in ring 0; the *immediate* preemption of a ring-3 task is the
-/// separate [`production_preempt_dispatch`] ring-3-only callback, while a
-/// tick taken in ring 0 is honoured through the latch at the interrupted
-/// syscall's completion — the running task's quantum is never silently
-/// lost to a tick the non-preemptible kernel could not act on.
-extern "C" fn production_tick_dispatch(cpu: CpuId) {
-    tairix_kernel_core::note_preempt_tick(cpu);
-    tairix_kernel_core::timed_wake_sweep();
-    // Sample the stall watchdog: a tick still fires on a CPU whose task is
-    // looping without returning to the scheduler (interrupts stay
-    // deliverable in ring 0), so this is where a soft lockup on `cpu`
-    // becomes observable and is reported.
-    tairix_kernel_core::check_stall(cpu);
-}
-
 /// Read the [`IrqTable`] published into `IRQ_TABLE_SLOT` by
 /// [`KernelArch::install_irq_dispatch`].
 ///
@@ -527,33 +462,11 @@ impl KernelArch for BinArch {
             // Second publish — same fail-closed posture.
             arch_halt();
         }
-        // Arm ring-3 preemption now that the scheduler is up (P-1c,
-        // `plans/PI.md` D2b-2b-A): install the ring-3-preemption callback
-        // the LAPIC-timer ISR forwards each user-mode tick to. The timer
-        // was programmed **one-shot and left disarmed** during boot
-        // (`preempt::init_local_preempt`, the production boot's step 8);
-        // TAIRiX is tickless, so the scheduler arms
-        // the one-shot to one quantum (via `X86_64Arch::set_preemption`)
-        // only when it dispatches onto a contended CPU and disarms
-        // otherwise. The kernel runs with `RFLAGS.IF == 0` (it issues no
-        // `sti`), so no tick is *taken* until `init` drops to ring 3 with
-        // `IF` set (`userentry`), by which point a user kthread is
-        // published — so installing the callback here, in the kernel-core
-        // `Irq` phase before `BootCompleted`, is race-free and additive: it cannot preempt the cooperative kernel,
-        // only a runaway user task. No scheduler-tick callback is installed
-        // — EEVDF is tickless, so the timer is armed solely to preempt; the timed-wake sweep a deadline-bearing
-        // blocking wait needs (P-2) installs its tick consumer then, not
-        // ahead of it. `set_preempt_callback` is an idempotent
-        // pointer store (not a one-shot slot), so no fail-closed re-call
-        // guard is needed here.
-        tairix_arch_x86_64::preempt::set_preempt_callback(production_preempt_dispatch);
-
-        // Install the per-tick timed-wake sweep callback (Design D P-2), so
-        // every tick — including one taken on an idle ring-0 CPU armed
-        // solely for a blocking-wait deadline — releases any elapsed waiter
-        // and re-arms the one-shot to the next deadline. `set_timer_callback` is an idempotent pointer store, so
-        // no fail-closed re-call guard is needed.
-        tairix_arch_x86_64::preempt::set_timer_callback(production_tick_dispatch);
+        // Install the shared trap callbacks now the scheduler is up. The
+        // kernel runs with `RFLAGS.IF == 0`, so no tick is *taken* until
+        // `init` drops to ring 3 — installing here cannot preempt the
+        // cooperative kernel, only a runaway user task.
+        crate::x86_64_preempt_wiring::install_callbacks();
     }
 
     fn wait_for_interrupt(&self) {

@@ -19,6 +19,14 @@
 //! `kernel/sched::Scheduler::on_timer_tick`; this module only wires the
 //! wasm32 frame loop into that architecture-neutral surface (no interface creep).
 //!
+//! The frame loop is this port's *tick source* and nothing more: the
+//! per-tick body — latching the pending preemption, requesting the
+//! blocking-wait deadline sweep, sampling the stall watchdog — is the one
+//! shared `kernel/core` callback every port installs, never restated
+//! here. A port that writes its own body can silently omit a duty, which
+//! is how this port came to drive no deadline sweep at all
+//! (`plans/OPEN-DEFECTS.md` D96).
+//!
 //! # Inter-context interrupts
 //!
 //! A directed reschedule to another worker arrives over a

@@ -41,8 +41,9 @@ pub const DRIVER_STORE_UNAVAILABLE: EventId = EventId(13_005);
 /// at `Debug` (verbose boot/hotplug diagnostics, filtered out by default).
 pub const TREE_OBSERVED: EventId = EventId(13_006);
 /// One node of the observed hardware tree: its id, parent, class, and match-
-/// key count. Emitted at `Debug` (one record per node, filtered out by
-/// default — lower the level to trace what reached the device manager).
+/// key count. Emitted at `Debug`, so one record per node is filtered out on a
+/// default-`Info` boot and only a build running this service below `Info`
+/// observes it.
 pub const NODE_OBSERVED: EventId = EventId(13_007);
 /// A bound driver was unloaded because its hardware-tree node vanished
 /// (hot-removal). The mirror of [`NODE_BOUND`]: the device

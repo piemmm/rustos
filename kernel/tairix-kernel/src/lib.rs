@@ -465,12 +465,18 @@ pub mod riscv64;
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 
-// Hoisted out of the freestanding-only `riscv64` port module for the same
-// reason as `riscv64_plic_irq`: the production preemption/IPI callback
-// wiring carries a host regression test, and a missing install is a silent
-// lost wakeup rather than a build failure.
+// Each port's trap-callback wiring, hoisted out of its freestanding-only
+// port module for the same reason as `riscv64_plic_irq`: it carries a host
+// regression test. What the test pins is that all three ports install the
+// *shared* `tairix_kernel_core::traps` callbacks, because a missing install
+// is a silent lost wakeup and a port-local tick body is free to omit one of
+// the tick's duties — the wasm32 deadline sweep went missing exactly so.
+#[cfg(any(kernel_isa = "aarch64", test))]
+pub mod aarch64_preempt_wiring;
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_preempt_wiring;
+#[cfg(any(kernel_isa = "x86_64", test))]
+pub mod x86_64_preempt_wiring;
 
 // The data every port's PID 1 spawn seam and runtime spawn producer share
 // by definition — the user-space layout constants (stack/MMIO-window offsets

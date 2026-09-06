@@ -1077,8 +1077,7 @@ mod tests {
     #[test]
     fn dispatch_callback_on_host_is_none() {
         // The freestanding-target storage is `cfg`-gated out on the
-        // host. `set_dispatch_callback` is callable on the host (it's
-        // a no-op stub mirroring `preempt::set_timer_callback`); the
+        // host, so `set_dispatch_callback` is a no-op stub there; the
         // getter must consistently report "none" so a future regression
         // that quietly enables host-side storage is caught.
         set_dispatch_callback(host_dispatch_noop);

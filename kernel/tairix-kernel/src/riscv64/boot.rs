@@ -509,16 +509,16 @@ static PREEMPT_STORAGE: tairix_arch_riscv64::preempt::PreemptStorage<1> =
 /// `init` drops to U-mode. The kernel runs with `sstatus.SIE == 0`, so no
 /// tick is *taken* until a U-mode task runs (the privilege rule U < S),
 /// so this is **additive and non-regressing**: a tick taken in U-mode
-/// drives [`crate::riscv64_preempt_wiring::preempt_dispatch`] immediately, and a one-shot
+/// drives [`tairix_kernel_core::on_user_preempt_point`] immediately, and a one-shot
 /// that fires in S-mode disarms without context-switching (the kernel is
-/// non-preemptible) but is latched by [`crate::riscv64_preempt_wiring::tick_dispatch`] and
+/// non-preemptible) but is latched by [`tairix_kernel_core::on_timer_tick`] and
 /// honoured when the interrupted syscall completes — an expired quantum
 /// is never silently lost.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// ([`crate::riscv64_preempt_wiring::tick_dispatch`]) latches the pending preemption and runs
+/// ([`tairix_kernel_core::on_timer_tick`]) latches the pending preemption and runs
 /// the blocking-wait timed-wake sweep (Design D P-2): it releases any
 /// elapsed `hw_tree_wait`-style waiter and re-arms the one-shot to the
 /// next deadline, so the SBI timer is armed only for a real pending

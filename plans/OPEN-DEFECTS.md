@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 20 open, 76 closed, 96 total.
+table normalises all three to **closed**. 20 open, 77 closed, 97 total.
 
 ### Open (20)
 
@@ -44,11 +44,11 @@ table normalises all three to **closed**. 20 open, 76 closed, 96 total.
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
-| D94 | the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan + a doc claimed it did | claim corrected; the witness pair was never enrolled — `sc=fd_grant` is in no `.rs` file |
+| D94 | the `fd_grant`/`fd_redeem` picker delegation has no guest vertical, and a plan + a doc claimed it did | claim corrected; neither the witnesses *nor* the click-through exist — no vertical mentions a viewer or picker, so this is a whole new graphical-session vertical |
 | D95 | a netstack vertical blows its ceiling after the guest has provably finished | split from D76; the host-side peer observer's confirmation never lands — a `tools/qemu`/`netpeer` defect, not a guest one |
-| D96 | wasm32 drives no timed-wake sweep, so a finite-timeout wait never fires its deadline | three ports drive it; wasm32 has no timer IRQ, so the sweep must hang off its `requestAnimationFrame` tick |
+| D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
 
-### Closed (76)
+### Closed (77)
 
 | ID | Subject |
 |---|---|
@@ -125,6 +125,7 @@ table normalises all three to **closed**. 20 open, 76 closed, 96 total.
 | D88 | an EL0 fixture's `rxe` was not rebuilt when a *dependency* of its program changed |
 | D89 | sixteen QEMU verticals link an arch port with no `#[global_allocator]`, so the gate could not build on any Tier-1 target |
 | D90 | the host test suite passed only in the harness's alphabetical order |
+| D96 | three ports each hand-wrote the per-tick body, so wasm32 drove no timed-wake sweep |
 | D91 | a leader thread that exits first stranded its process id, which the draw could then reissue |
 | D92 | `fd_grant` named its recipient by pid alone, so a delegation could land on a later holder of that number |
 | D93 | riscv64 production never enabled its reschedule-IPI source, so a delivered IPI could neither wake the idle park nor be acknowledged |
@@ -5508,6 +5509,21 @@ coverage intermittent by construction, which the no-flaky-tests rule forbids
 outright. A minimal dedicated vertical drives launcher → Viewer → picker →
 document-row click and asserts the two audit records without inheriting D15.
 
+**Size, measured — larger than "add two witnesses".** FM9-b's remaining
+claim that the aarch64 `autoload_input` vertical already "launches the Viewer
+from the desktop's launcher, lets the auto-opened picker read the home,
+clicks the document row" is **also** untrue, and is corrected with this
+entry. Neither `tools/xtask/src/commands/qemu_tests.rs` nor the vertical's
+own crate mentions a viewer or a picker at all, no vertical's image fixtures
+carry the Viewer bundle, and nothing plants the document the picker is
+supposed to open. So the click-through itself does not exist either: this is
+a whole graphical-session vertical (boot to session, seat input, WM,
+taskbar + library popup, the Viewer bundle in the image, a planted document,
+layout-reconstructed pointer clicks, the picker-open gate) and the two
+witnesses on top, not a witness patch. Comparable existing verticals are
+450–850 lines of crate plus their harness script. Budget it as its own piece
+of work.
+
 ## D95 — a netstack QEMU vertical can blow its ceiling after the guest has provably finished, because the host-side peer observer's confirmation never lands (OPEN)
 
 Split out of D76, whose root cause (the device manager parking with no
@@ -5531,31 +5547,94 @@ D76 autoload way in another, so a row is not a diagnosis.
 with a regression test that demonstrates it (§7) rather than a green re-run
 on an idle machine — "machine load" is never an accepted diagnosis.
 
-## D96 — wasm32 drives no timed-wake sweep, so every finite-timeout blocking wait never fires its deadline on that port (OPEN)
+## D96 — three ports each hand-wrote the per-tick body, so wasm32 drove no timed-wake sweep at all (FIXED)
 
-Noticed while fixing D76, which relies on this mechanism. A blocking wait
-that carries a finite deadline (`hw_tree_wait`, and the console/IPC waits
-that take the same path) is woken by `tairix_kernel_core::timed_wake_sweep`,
-which each port must drive from its timer tick. Three ports do —
-`riscv64_preempt_wiring::tick_dispatch`, `x86_64/arch_wrapper.rs`, and
-`aarch64/gic_irq.rs`. **wasm32 drives it nowhere.**
+**Mechanism.** A blocking wait carrying a finite deadline (`hw_tree_wait`,
+and the console/IPC waits on the same path) is released by
+`tairix_kernel_core::timed_wake_sweep`, which the port must run from its
+timer tick. Nothing shared expressed that: each port wrote its own
+`extern "C" fn(CpuId)` tick body and installed it, and all three
+bare-metal bodies were the same three calls — `note_preempt_tick`,
+`timed_wake_sweep`, `check_stall`. A fourth port inherited none of it, so
+wasm32 drove no sweep, and the omission was invisible because there was no
+single definition to be missing from. The identical `preempt_current`
+wrapper was triplicated the same way and the IPI latch duplicated twice
+more; two QEMU test kernels carried verbatim copies of both.
 
-On that port a task that parks with a deadline is therefore woken only by an
-explicit wake, and a timeout that has genuinely elapsed is never delivered —
-the wait behaves as if it had been unbounded. The D76 fix's bounded catalogue
-retry consequently has no effect on wasm32: the device manager would still
-park for the rest of the boot there.
+**Fix.** `kernel/core/src/traps.rs` is now the one definition of all three:
+`on_user_preempt_point`, `on_timer_tick`, `on_reschedule_ipi`. Every port
+installs *those* — there is no per-port tick body left in which a duty can
+be omitted, so a new port gets the sweep by construction. The eight
+duplicated definitions are deleted.
 
-wasm32 has no timer interrupt (its timer→scheduler path is the
-`requestAnimationFrame` cooperative tick, `kernel/arch/wasm32/src/lib.rs`),
-so the sweep has to hang off that tick rather than off an IRQ — which is why
-this is port work rather than a line in the D76 change, and why it is raised
-here instead of being left silent.
+Each port's install is a wiring module gated `#[cfg(any(kernel_isa = …,
+test))]` — `{aarch64,riscv64,x86_64}_preempt_wiring` — carrying a host test
+that pins the *shared* callback in each slot by function-pointer identity.
+A port that reverts to its own body fails that test. This is the pattern
+`riscv64_preempt_wiring` already used for the lost reschedule IPI (D93),
+extended to the other two ports.
 
-**Done when:** the wasm32 port drives `timed_wake_sweep` from its tick, a
-finite-timeout wait demonstrably fires its deadline there, and the Arch-HAL
-conformance vertical covers the timed wake so a port cannot ship without it.
+Two blockers were fixed on the way, both real defects in their own right:
 
+- `kernel/arch/{aarch64,riscv64}` both exported an unmangled
+  `SECONDARY_STACK_BASE` to their secondary-boot trampolines, so any build
+  linking both harts' ports failed to link. Both are now port-qualified via
+  `#[export_name]`, matching the `tairix_arch_<arch>_*` convention the same
+  files already use for their exported *functions*.
+- x86_64's tick/preempt callback slots were `cfg`-gated to `target_os =
+  "none"`, so on the host they silently stored nothing and read back `None`
+  — the sibling ports' slots are host-live. The gating is removed (eight
+  `cfg` forks deleted) and the two tests that asserted the host inertness
+  are now round-trip tests. `timer_hal`'s host cell stays: it isolates the
+  conformance vertical from the `preempt` slot, exactly as aarch64's does.
+
+**What is not claimed.** No wasm32 image runs `kernel/core` at all — the
+port has no production kernel binary and its two browser verticals drive
+`kernel/sched` directly — so no finite-timeout wait exists there to fire
+yet, and none is demonstrated. What is now true is that the port has
+nothing left to get wrong: its frame loop already dispatches through
+`Timer::dispatch_tick` (host-tested by
+`preempt_tests::animation_frame_drives_the_tick_callback_and_counts`), and
+the body it will dispatch is the shared one. A wasm32 `kernel/core` boot is
+port bring-up tracked in `plans/WIRING.md`, not a missing sweep.
+
+## D97 — a userland service's log threshold cannot be lowered on a shipped system, and four documents said it could (OPEN)
+
+**Mechanism.** `lib/log`'s level filter is process-local and defaults to
+`Info`. The kernel's comes from `BootInfo::log_level`, which each port's
+boot entry passes as a compile-time constant (production: `Level::Info`).
+Nothing plumbs a level to a *userland* service: every `set_max_level` call
+under `userland/` is inside `#[cfg(test)]`, and `lib/sysconfig` carries only
+`net.*` keys. A service therefore drops its own `Debug` records in O(1)
+*before* the `log_emit` syscall, so raising the kernel's level cannot reveal
+them either.
+
+**Consequence.** The device manager's routine diagnostics — `13002`
+`NODE_UNBOUND`, `13006` `TREE_OBSERVED`, `13007` `NODE_OBSERVED` — are
+unreachable on any shipped boot. They are deliberately `Debug` (one `Info`
+line per unbound node once delayed a Pi's passphrase prompt by tens of
+seconds by starving the keyboard pump), which is right; what is missing is
+the other half of that trade, a way to ask for them when diagnosing a
+machine that bound nothing. §18.4 requires an unbound node to be logged, and
+it is — into a filter that no operator can open.
+
+**Corrected in the change that found this** (the same shape as D94's false
+coverage claim, so not cosmetic): `docs/src/drivers/hardware-detection.md`,
+`userland/system/devmgr/README.md`, `devmgr/src/events.rs` and
+`devmgr/src/autoload.rs` each told the reader to "lower the level"/"lower the
+threshold"/"when diagnostics are enabled", inviting an operator to use a
+mechanism that does not exist. They now state what is actually available.
+
+**Not fixed here, and why.** The mechanism is a design with a security
+dimension, not a line: who may raise a service's verbosity, whether it is a
+boot-config key or a runtime request, and how it stays clear of the
+hash-chained audit log (§19.4) that must *not* be filterable. Escalated
+rather than guessed.
+
+**Done when:** a shipped system can raise a named service's log threshold
+under an explicit authority, the setting is observable, and the device
+manager's unbound/observed records are demonstrably reachable on a real boot
+without a rebuild.
 
 ## D85 — an unexpected interrupt at an uninstalled x86_64 vector parks with no record, and a spurious LAPIC interrupt is treated as fatal (OPEN)
 

@@ -228,25 +228,28 @@ forward `render::manager_tool_rect` over the new `Toolbar::tool_rect` for the
 New Folder tool, offset by the WM's `WindowFrame::insets` client inset) and
 seat-keyboard `Enter`s, creates+names a folder, and the guest PASS latches two
 new `FsNodeMutated` `op=mkdir`→`op=rename` witnesses (post-terminal-round-trip,
-fail-closed) plus a "named folder" screendump. **FM9-b is now landed too**
-(open a file into the viewer via the CU6 one-shot delegation): the trusted
-picker now opens at the user's home (`Browser::open_at` over the session's
-`HOME`, falling back to `/`), the fixture plants a readable document in
-`/Users/root`, and the aarch64 `autoload_input` vertical launches the Viewer
-from the desktop's launcher (today the program-library popup,
-`plans/NEW-TASKBAR.md`), lets the auto-opened picker read the home, clicks the
-document row. **The guest witnesses were never enrolled, so this half is
-*not* landed** — `sc=fd_grant` appears in no `.rs` file in the tree, and no
-vertical asserts the delegation records. What remains is the witness pair
-(`SyscallInvoked sc=fd_grant` then `sc=fd_redeem`, after the FM9-a rename so
-no earlier delegation can satisfy them) and the pick-click gate that must
-precede it: a test-kernel picker-open marker (the session's first post-rename
-`comm=desktop sc=fs_open`, the picker's `open_at` home read), so the click
-lands only once the picker is composited — no `MessageDelivered` fires for the
-session-internal picker and the user-authority session cannot `log_emit`, so
-the test sink is what can turn that unique read into a deterministic gate.
-Tracked as `plans/OPEN-DEFECTS.md` D94; note it would extend the aarch64
-`autoload_input` vertical, which carries its own open intermittency (D15). **FM9-c (delete with confirm) is now
+fail-closed) plus a "named folder" screendump. **FM9-b's app-side half is landed; its guest coverage is not.**
+Landed: the trusted picker opens at the user's home (`Browser::open_at` over
+the session's `HOME`, falling back to `/`), and the CU6 one-shot delegation
+that hands the picked file to the viewer is host-tested end to end (mint, the
+D92 instance gate, one-shot redemption, the grantor-identity re-check, the
+extent ceiling). **No guest run exists.** `sc=fd_grant` appears in no `.rs`
+file in the tree; no vertical asserts the delegation records; and — contrary
+to what this section previously claimed — no vertical drives the click-through
+either: neither `qemu_tests.rs` nor any vertical crate mentions a viewer or a
+file picker, no image fixture carries the Viewer bundle, and nothing plants
+the document the picker would open. What remains is therefore the whole
+click-through plus the witness pair (`SyscallInvoked sc=fd_grant` then
+`sc=fd_redeem`, after the FM9-a rename so no earlier delegation can satisfy
+them) and the pick-click gate that must precede it: a test-kernel picker-open
+marker (the session's first post-rename `comm=desktop sc=fs_open`, the
+picker's `open_at` home read), so the click lands only once the picker is
+composited — no `MessageDelivered` fires for the session-internal picker and
+the user-authority session cannot `log_emit`, so the test sink is what can
+turn that unique read into a deterministic gate. Tracked as
+`plans/OPEN-DEFECTS.md` D94, whose User-decided shape is a **new dedicated
+vertical**: extending the aarch64 `autoload_input` vertical would inherit its
+open intermittency (D15). **FM9-c (delete with confirm) is now
 fully landed.** A clickable **Delete** joins the context menu (its
 `begin_delete` action already existed, so this is not speculative surface,
 §2.4), routed through `dispatch_context_command` to the same confirm-and-remove

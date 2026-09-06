@@ -2978,8 +2978,8 @@ static TESTS: &[QemuTest] = &[
     // hardware-isolated EL0 address space from the same `tairix-test-el0-spinner`
     // fixture, and wires the **production** preemption surface: the latch-gated
     // EL0-preemption callback (reschedules only when `take_preempt_pending` is
-    // set — the `production_preempt_dispatch` shape) and the reschedule-IPI
-    // callback that latches need-resched (`production_ipi_dispatch` shape). The
+    // set — the `on_user_preempt_point` shape) and the shared production
+    // reschedule-IPI callback (`on_reschedule_ipi`). The
     // spinner is the SOLE runnable task, so the tickless scheduler never arms the
     // preemption timer; just before entering EL0 its kthread sends itself a
     // reschedule SGI (a non-timer IRQ), which is taken on the first EL0

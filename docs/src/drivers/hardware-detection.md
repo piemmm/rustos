@@ -234,8 +234,11 @@ all — even on the first pass. On a real Raspberry Pi the firmware device tree
 has ~120 nodes, almost all driverless; emitting one `Info` line each over the
 flow-blocked debug UART (~116 ms/line) once delayed the `ARXFS
 passphrase:` prompt by tens of seconds by starving the keyboard report pump. The unbound
-fact is still logged with its stable id when diagnostics are enabled (lower
-the threshold), satisfying §18.4 without the boot-time flood (§20 / §2.16).
+fact still *has* a stable id and is emitted whenever the device manager runs
+below `Info`, satisfying §18.4 without the boot-time flood (§20 / §2.16) — but
+a shipped system offers no way to put it there: a service's threshold is
+process-local and only its own host tests lower it (`plans/OPEN-DEFECTS.md`
+D97).
 
 ## Match-key emission
 

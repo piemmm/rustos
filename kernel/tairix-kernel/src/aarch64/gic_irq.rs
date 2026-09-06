@@ -859,87 +859,6 @@ fn leak_per_cpu_slots<T: Default>(count: usize) -> &'static [T] {
     alloc::boxed::Box::leak(slots.into_boxed_slice())
 }
 
-/// The EL0-preemption callback the arch IRQ path invokes on
-/// return-to-EL0 for **any** interrupt (installed via
-/// [`tairix_arch_aarch64::preempt::set_preempt_callback`]).
-///
-/// It reschedules **only** when this CPU owes one — i.e. the per-CPU
-/// need-resched latch ([`tairix_kernel_core::take_preempt_pending`]) is
-/// set. A timer quantum expiry, a cross-CPU reschedule IPI, and a device
-/// IRQ that woke a higher-priority task all latch it (respectively
-/// [`production_tick_dispatch`], [`production_ipi_dispatch`], and
-/// [`production_device_irq_dispatch`]); an interrupt that woke nothing
-/// leaves it clear, so the common case (e.g. a UART-TX drain IRQ taken
-/// while EL0 runs) returns straight to user mode with **no** gratuitous
-/// context switch. Consuming the latch here also means an EL1 tick — which
-/// never reaches this EL0-only path — keeps its latch until the
-/// interrupted syscall's completion honours it.
-///
-/// When a reschedule is owed it suspends the user task currently running
-/// on `cpu` back to the scheduler with
-/// [`tairix_kernel_core::RescheduleAction::Yield`] — the *involuntary*
-/// analogue of a `yield` syscall: the task is re-enqueued at its priority
-/// and the scheduler picks the next runnable task, giving EEVDF-ordered
-/// time-slicing and, crucially, running `drain_pending_wakes` so work a
-/// device IRQ just woke actually gets dispatched.
-/// [`tairix_kernel_core::reschedule_current`] returns `false` when no
-/// resumable user kthread is published on `cpu` (it cannot be reached from
-/// EL0 with none switched in, but the fail-closed return means a stray
-/// invocation is a harmless no-op rather than an unsound switch). The call
-/// only ever runs after the GIC end-of-interrupt handshake (see
-/// [`tairix_arch_aarch64::exceptions::handle_irq`]), so the interrupt line
-/// is already deactivated across the context switch.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-extern "C" fn production_preempt_dispatch(cpu: tairix_arch_api::CpuId) {
-    let _ = tairix_kernel_core::preempt_current(cpu);
-}
-
-/// The IPI callback the SGI IRQ path invokes on every delivered
-/// inter-processor interrupt (installed via
-/// [`tairix_arch_aarch64::preempt::set_ipi_callback`]).
-///
-/// The scheduler sends an IPI when it places new or newly-woken work on
-/// another CPU. Delivery alone already does the load-bearing part — it
-/// pulls an idle core out of the dispatch loop's `wfi` park, whose next
-/// `step` finds the queued task. The callback's own body handles the
-/// busy-target case: latching the pending reschedule
-/// ([`tairix_kernel_core::note_preempt_tick`]) makes an EL0 task on the
-/// targeted CPU yield at its next syscall boundary, so cross-CPU
-/// placement is honoured promptly on a busy core too (pure accounting,
-/// safe from interrupt context; never a context switch).
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-extern "C" fn production_ipi_dispatch(cpu: tairix_arch_api::CpuId) {
-    tairix_kernel_core::note_preempt_tick(cpu);
-}
-
-/// The per-tick callback the timer IRQ path invokes on **every** tick
-/// (EL0 *or* idle EL1), installed via
-/// [`tairix_arch_aarch64::preempt::set_timer_callback`].
-///
-/// It latches the fired tick as this CPU's pending preemption
-/// ([`tairix_kernel_core::note_preempt_tick`]) and runs the blocking-wait
-/// timed-wake sweep (Design D P-2): any waiter whose finite deadline has
-/// elapsed is unparked and the one-shot is re-armed to the next pending
-/// deadline ([`tairix_kernel_core::timed_wake_sweep`]). This is what makes
-/// a finite `hw_tree_wait` timeout fire even when the CPU is otherwise
-/// idle (every task parked) and takes no preemption tick. Both halves are
-/// pure accounting — they never context-switch — so they are safe on a
-/// tick taken in EL1; the *immediate* preemption of an EL0 task is the
-/// separate [`production_preempt_dispatch`] EL0-only callback, while a
-/// tick taken in EL1 is honoured through the latch at the interrupted
-/// syscall's completion — the running task's quantum is never silently
-/// lost to a tick the non-preemptible kernel could not act on.
-#[cfg(all(freestanding, kernel_isa = "aarch64"))]
-extern "C" fn production_tick_dispatch(cpu: tairix_arch_api::CpuId) {
-    tairix_kernel_core::note_preempt_tick(cpu);
-    tairix_kernel_core::timed_wake_sweep();
-    // Sample the stall watchdog: a tick still fires on a CPU whose task is
-    // looping without returning to the scheduler (interrupts stay
-    // deliverable in-kernel), so this is where a soft lockup on `cpu`
-    // becomes observable and is reported.
-    tairix_kernel_core::check_stall(cpu);
-}
-
 /// The cadence callback the lockup-watchdog's virtual-timer IRQ path
 /// invokes on every ~1 Hz sample (installed via
 /// [`tairix_arch_aarch64::watchdog::set_watchdog_callback`]).
@@ -1014,18 +933,18 @@ extern "C" fn production_watchdog_dispatch(cpu: tairix_arch_api::CpuId, frame: *
 /// (`crate::aarch64::userentry`'s preemptible `SPSR`) or the root-unlock
 /// kthread unmasks at EL1 — the armed timer simply leaves PPI 30 pending
 /// until then, so this is **additive and non-regressing**: a tick taken
-/// in EL0 drives `production_preempt_dispatch` immediately, and a
-/// one-shot tick taken in EL1 disarms without context-switching (the
+/// in EL0 drives [`tairix_kernel_core::on_user_preempt_point`] immediately,
+/// and a one-shot tick taken in EL1 disarms without context-switching (the
 /// kernel is non-preemptible) but is latched by
-/// `production_tick_dispatch` and honoured when the interrupted
+/// [`tairix_kernel_core::on_timer_tick`] and honoured when the interrupted
 /// syscall completes — an expired quantum is never silently lost. The
 /// scheduler re-arms the next one-shot on its following dispatch.
 ///
 /// No *scheduler-fairness* tick callback is installed: EEVDF is tickless
 /// (fairness is advanced inside `Scheduler::step`, not by a periodic
 /// count). The per-tick callback that *is* installed
-/// (`production_tick_dispatch`) latches the pending preemption and runs
-/// the blocking-wait timed-wake sweep (Design D P-2): it releases any
+/// ([`tairix_kernel_core::on_timer_tick`]) latches the pending preemption
+/// and runs the blocking-wait timed-wake sweep (Design D P-2): it releases any
 /// elapsed `hw_tree_wait`-style waiter and re-arms the one-shot to the
 /// next deadline, so the timer is armed only for a real pending event —
 /// a preemption quantum and/or the nearest wakeup — never a fixed
@@ -1068,19 +987,11 @@ pub fn arm_preemption(cpu_count: u32) {
         #[cfg(feature = "watchdog-diagnostics")]
         let _ = tairix_arch_api::watchdog::in_flight::register_slots(leak_per_cpu_slots(count));
 
-        // Install the EL0-preemption callback *before* arming the timer, so
-        // the first tick taken from EL0 already has a handler.
-        preempt::set_preempt_callback(production_preempt_dispatch);
-
-        // Install the per-tick timed-wake sweep callback (Design D P-2), so
-        // every tick — including one taken on an idle EL1 CPU armed solely
-        // for a blocking-wait deadline — releases any elapsed waiter and
-        // re-arms the one-shot to the next deadline.
-        preempt::set_timer_callback(production_tick_dispatch);
-
-        // Install the IPI callback before any core — this one included —
-        // can receive the scheduler's placement SGI.
-        preempt::set_ipi_callback(production_ipi_dispatch);
+        // Install the shared trap callbacks before arming the timer and
+        // before any core — this one included — can receive the
+        // scheduler's placement SGI, so a delivered trap always has a
+        // handler.
+        crate::aarch64_preempt_wiring::install_callbacks();
 
         // Install the lockup-watchdog cadence callback before arming its
         // virtual-timer, so the first sample already feeds the detector.

@@ -57,7 +57,12 @@ pub const SECONDARY_STACK_BYTES: usize = 1 << SECONDARY_STACK_SHIFT;
 /// [`SecondaryStackPool`] is registered). Read by the paging-off
 /// secondary stub by symbol; written once by
 /// [`SecondaryStackPool::register`].
-#[no_mangle]
+///
+/// The exported name is port-qualified like this crate's other exported
+/// symbols: the aarch64 port publishes the same pool base to its own
+/// trampoline, so an unmangled `SECONDARY_STACK_BASE` collides in any
+/// build that links both ports.
+#[export_name = "tairix_arch_riscv64_secondary_stack_base"]
 #[used]
 static SECONDARY_STACK_BASE: AtomicU64 = AtomicU64::new(0);
 

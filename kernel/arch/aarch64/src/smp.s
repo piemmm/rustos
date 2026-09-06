@@ -15,10 +15,11 @@
 // core publishes the pool it sized for the
 // machine's discovered core count through `smp::SecondaryStackPool::
 // register`, which writes the pool base and per-core stride into the
-// `SECONDARY_STACK_BASE` / `SECONDARY_STACK_STRIDE` globals below before
-// it issues any `CPU_ON`. This stub reads those globals to locate its
-// slice; the `register` call's `dsb sy` (and the PSCI `CPU_ON` firmware
-// barrier) order the publish ahead of this core's first read.
+// `tairix_arch_aarch64_secondary_stack_base` / `SECONDARY_STACK_STRIDE`
+// globals below before it issues any `CPU_ON`. This stub reads those
+// globals to locate its slice; the `register` call's `dsb sy` (and the
+// PSCI `CPU_ON` firmware barrier) order the publish ahead of this core's
+// first read.
 //
 // SAFETY-INVARIANTs:
 //   1. Entered at EL1 with the MMU off, exactly once per secondary core,
@@ -30,7 +31,7 @@
 //      guarantees `x0 < SECONDARY_STACK_COUNT` (the registered pool's
 //      core count), so the per-core stack slice this stub selects
 //      (`base + (cpuid + 1) * stride`) lies inside the registered pool.
-//   3. `SECONDARY_STACK_BASE`/`_STRIDE` were published (non-zero) by the
+//   3. the stack-pool base/`_STRIDE` globals were published (non-zero) by the
 //      boot core's `register` before any `CPU_ON`; a `CPU_ON` is refused
 //      unless a pool is registered, so this stub never reads a null base.
 //   4. `tairix_arch_aarch64_secondary_main` is `-> !` and never returns;
@@ -60,8 +61,8 @@ _start_secondary_aarch64:
     // runtime-published pool start and per-core slice size. Each core
     // owns a `stride`-byte slice; the stack grows down from the top of
     // its slice, so core `c` uses the top of slot index `c`.
-    adrp    x0, SECONDARY_STACK_BASE
-    add     x0, x0, :lo12:SECONDARY_STACK_BASE
+    adrp    x0, tairix_arch_aarch64_secondary_stack_base
+    add     x0, x0, :lo12:tairix_arch_aarch64_secondary_stack_base
     ldr     x0, [x0]                        // pool base
     adrp    x1, SECONDARY_STACK_STRIDE
     add     x1, x1, :lo12:SECONDARY_STACK_STRIDE

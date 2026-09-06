@@ -621,16 +621,6 @@ fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid
     qemu_exit::exit_failure(FAIL_DEADLOCK)
 }
 
-#[cfg(migration_smp)]
-extern "C" fn migration_ipi(cpu: CpuId) {
-    tairix_kernel_core::note_preempt_tick(cpu);
-}
-
-#[cfg(migration_smp)]
-extern "C" fn migration_preempt(cpu: CpuId) {
-    let _ = tairix_kernel_core::preempt_current(cpu);
-}
-
 /// Secondary-core entry for the four-vCPU migration package.
 #[cfg(migration_smp)]
 extern "C" fn migration_secondary(cpu: CpuId) -> ! {
@@ -723,8 +713,8 @@ fn start_migration_secondaries(sys: &Subsystems) {
     if STACKS.register().is_err() || smp::set_secondary_entry(migration_secondary).is_err() {
         qemu_exit::exit_failure(FAIL_SECONDARY);
     }
-    preempt::set_ipi_callback(migration_ipi);
-    preempt::set_preempt_callback(migration_preempt);
+    preempt::set_ipi_callback(tairix_kernel_core::on_reschedule_ipi);
+    preempt::set_preempt_callback(tairix_kernel_core::on_user_preempt_point);
     // SAFETY: boot CPU vectors/GIC are live and callbacks are installed.
     unsafe {
         preempt::enable_ipi();

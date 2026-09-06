@@ -152,13 +152,11 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
                 // have no driver, so emitting one record per unbound node at
                 // `Info` floods the slow diagnostic UART and starves boot (a
                 // progress-spam / defect — it once delayed the Pi's
-                // `Root passphrase:` prompt by tens of seconds). It is logged
-                // at `Debug` instead — still logged with its stable id when
-                // diagnostics are enabled, but dropped in
-                // O(1) by the default `Info` filter before any `log_emit`
-                // syscall. A *binding* (`NODE_BOUND`), a packaging tie, or a
-                // load refusal stays visible — those are the actionable
-                // outcomes. Mirrors `events::NODE_OBSERVED`.
+                // `Root passphrase:` prompt by tens of seconds). It is `Debug`
+                // instead, so the default `Info` filter drops it in O(1)
+                // before any `log_emit` syscall. A *binding* (`NODE_BOUND`), a
+                // packaging tie, or a load refusal stays visible — those are
+                // the actionable outcomes. Mirrors `events::NODE_OBSERVED`.
                 if changed(&mut state.reported, id, NodeReport::Unbound) {
                     audit_node(sink, events::NODE_UNBOUND, Level::Debug, id, &[]);
                 }

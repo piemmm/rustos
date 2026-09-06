@@ -28,7 +28,7 @@ use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_core::{
-    note_preempt_tick, preempt_current, preemption_count, reschedule_current, spawn_image,
+    on_reschedule_ipi, preempt_current, preemption_count, reschedule_current, spawn_image,
     spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
@@ -169,18 +169,11 @@ impl CapabilityQuery for SpawnAuthority {
     }
 }
 
-/// The IPI callback the SGI IRQ path invokes on the delivered reschedule SGI
-/// — the production `production_ipi_dispatch` shape verbatim: it latches this
-/// CPU's need-resched flag (pure accounting; never a context switch), so the
-/// return-to-EL0 preempt point then reschedules.
-extern "C" fn ipi_dispatch(cpu: CpuId) {
-    note_preempt_tick(cpu);
-}
-
 /// The EL0-preemption callback the IRQ path invokes on return-to-EL0 for any
 /// interrupt — this drives the **real** production
 /// [`tairix_kernel_core::preempt_current`] (the exact function the
-/// `production_preempt_dispatch` bins call), which reschedules only when this
+/// production ports install as `on_user_preempt_point`), which reschedules only
+/// when this
 /// CPU owes one and, crucially, increments the kernel's per-CPU preemption
 /// count on a real suspension. The local mirror records each true return so
 /// the test asserts the kernel counter tracks it (the always-zero-counter
@@ -310,7 +303,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_PREEMPT_STORAGE);
     }
     preempt::set_preempt_callback(preempt_dispatch);
-    preempt::set_ipi_callback(ipi_dispatch);
+    preempt::set_ipi_callback(on_reschedule_ipi);
     let interval = preempt::interval_for_hz(counter_hz, PREEMPT_TICK_HZ);
     // SAFETY: the boot CPU (id 0); the callbacks are installed (above), the
     // per-CPU storage is registered (above), the EL1 vector table is installed

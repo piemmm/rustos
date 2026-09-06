@@ -17,9 +17,9 @@
 //! audited `tairix_kernel_core::spawn_image` caller. It then wires the
 //! **production** preemption surface: the per-CPU `PreemptStorage`, the
 //! latch-gated EL0-preemption callback (reschedules only when
-//! `take_preempt_pending` is set — the production `production_preempt_dispatch`
-//! shape), and the reschedule-IPI callback that latches need-resched
-//! (`note_preempt_tick` — the production `production_ipi_dispatch` shape). It
+//! `take_preempt_pending` is set — the production `on_user_preempt_point`
+//! shape), and the shared production reschedule-IPI callback
+//! (`tairix_kernel_core::on_reschedule_ipi`). It
 //! spawns the spinner as the **sole** runnable task, so the scheduler keeps
 //! the generic timer disarmed: the timer never fires.
 //!
