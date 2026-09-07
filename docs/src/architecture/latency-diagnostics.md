@@ -126,6 +126,7 @@ trail, so no code address lands on the tamper-evident log:
 [42.117] [WARN] id=4150 interactive surface overran its frame budget task=7
   name=desktop budget_ms=250 elapsed_ms=312 blocked_ms=304 calls=41
   sampled=blocking blocked_in=ipc_call blocked_in_ms=297
+  top_calls=ipc_call=22,stream_read=11
   pc=+0x0000000000004a1c bt=+0x0000000000001220,+0x00000000000008f0
 ```
 
@@ -140,6 +141,7 @@ trail, so no code address lands on the tamper-evident log:
 | `sampled` | What `pc`/`bt` name: `blocking` (the call that spent the budget), `running` (the user code that did), or `none` (the port publishes no frame). |
 | `blocked_in` | The syscall that carried the span over, by name. Absent when the budget went to user-mode work. |
 | `blocked_in_ms` | How long that call had been running when it crossed the budget. |
+| `top_calls` | The syscalls the span made most often, `name=count`, most first. Absent when it made none. Each count is a **lower bound**, not an exact frequency — the sketch behind it holds two counters, not a table — while `calls` is the exact total. |
 | `pc` | The stalling program counter. |
 | `bt` | The user frame-pointer chain above it, newest first. |
 
@@ -147,6 +149,15 @@ Reading the example: 41 syscalls, 304 of 312 ms spent blocked, and the call
 that crossed the line was a 297 ms `ipc_call` — a single slow round trip, not
 death by a thousand cuts. Had `blocked_ms` been near zero with `calls=0`, the
 same span would have been unbounded work on the loop instead.
+
+`top_calls` is what to read when `calls` is in the thousands. `blocked_in` then
+names whichever call happened to be in flight at the boundary — an arbitrary
+member of the storm — and a `running` sample names only the code that issued the
+latest one. The sketch is Misra–Gries at two counters, so any syscall making up
+more than a third of the span is guaranteed to be named, and there are two
+counters because the storms worth naming come in pairs: an allocation high-water
+oscillating across a page boundary is a `mem_map` and a `mem_unmap` at roughly
+equal counts, which a single majority counter would miss entirely.
 
 ### Addresses are load-relative, or absent
 

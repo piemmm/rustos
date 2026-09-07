@@ -88,12 +88,25 @@ next allocation's first fit at the top — which is why they are worth keeping.
 
 The retention is not a constant of the heap's own: it is
 `tairix_reclaim::shrink_target` for `ReclaimClass::RuntimeCache` over a
-`CacheBudget::from_backing(arena_bytes)`, floored at one page (the granule the
-syscall is charged at, so a sub-page budget would be no cache at all). It
-therefore scales with the process's own arena rather than a hand-picked ceiling
-(`AGENTS.md` §24.1/§24.2), is bounded by that budget's documented fraction, and
-reaches zero from moderate pressure onward, shrinking with every other cache in
-the process (`AGENTS.md` §26.3).
+`CacheBudget::from_backing(arena_bytes)`. It therefore scales with the process's
+own arena rather than a hand-picked ceiling (`AGENTS.md` §24.1/§24.2) and is
+bounded by that budget's documented fraction.
+
+Two things then decide the figure, and they answer different questions. The
+budget declares one page as a **working-set floor**, which is what says free top
+pages are working set rather than speculation: mild and moderate pressure still
+permit them, while severe and critical do not, because the reserved floor stays
+zero (`AGENTS.md` §26.3). The result is then **floored at the page granule** —
+the unit the syscall is charged at — because the per-band fraction is under a
+page for any modest arena, and a sub-page retention is not a smaller cache but
+no cache at all.
+
+Conflating those two questions is what made this churn: left to the bare
+fraction, moderate pressure retained nothing, so an allocation high-water merely
+oscillating across one page boundary paid an unmap and a map every iteration —
+two page-table walks, two kernel zeroing passes and a TLB shootdown to every
+other CPU, machine-wide, to hand back one page, and worst exactly when the
+machine was busiest.
 
 Because `pressure::gauge()` answers `Critical` until told otherwise, a process
 that never wires the pressure protocol (below) retains **nothing** and gives

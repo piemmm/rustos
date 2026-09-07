@@ -47,7 +47,7 @@
 //! | 4133 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
 //! | 4140 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
 //! | 4141 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
-//! | 4150 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
+//! | 4150 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -624,7 +624,10 @@ pub enum AuditEvent {
     /// The fields say what spent the budget: `budget_ms`/`elapsed_ms`, how
     /// much of it went to blocking calls (`blocked_ms`, `calls`) versus
     /// user-mode work, the syscall that carried the span over
-    /// (`blocked_in`), and a `pc` plus `bt` chain of the stalling code.
+    /// (`blocked_in`), the syscalls it made most often (`top_calls`), and a
+    /// `pc` plus `bt` chain of the stalling code. `top_calls` is what names a
+    /// span spent in a storm of short calls, where the call in flight at the
+    /// boundary is an arbitrary member of it.
     /// Every code address is expressed relative to the program's own load
     /// base and is omitted when that base is unknown, so the record is an
     /// offline `addr2line` input and never an ASLR oracle. It carries no

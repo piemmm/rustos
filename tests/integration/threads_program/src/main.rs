@@ -444,10 +444,10 @@ mod program {
         let pieces = pool.width() * 3;
 
         // Dispatched before anything else, so the workers have had as little
-        // chance to reach their loop as the runtime allows. A pool that let a
-        // dispatch begin before its workers were up would wait here for an
-        // acknowledgement none of them could give, and this role would hang
-        // instead of failing — which is exactly how that defect showed itself.
+        // chance to reach their loop as the runtime allows. A worker that has
+        // not arrived finds its join refused and helps with nothing, so what
+        // this proves is that the pass still completes on the dispatching
+        // thread and the dispatch does not wait for help that never comes.
         let mut first = alloc::vec![0u64; 64];
         stamp(&mut first, &pool, pieces);
         if first.iter().any(|slot| *slot == 0) {

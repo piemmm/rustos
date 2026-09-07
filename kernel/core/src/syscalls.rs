@@ -700,6 +700,58 @@ impl<'a> PathAuthority<'a> {
     }
 }
 
+/// The `abi-v1` name of syscall `number`, or `"unknown"` for a number this
+/// kernel has no spec for.
+#[cfg(feature = "watchdog-diagnostics")]
+fn syscall_label(number: u64) -> &'static str {
+    SyscallNumber::from_register(number)
+        .ok()
+        .and_then(tairix_abi::syscalls::spec_for)
+        .map_or("unknown", |spec| spec.name)
+}
+
+/// Longest `top_calls` field: two `name=count` pairs and the comma between
+/// them, sized from the ABI's own name bound and a `u32`'s widest decimal.
+#[cfg(feature = "watchdog-diagnostics")]
+const TOP_CALLS_LEN: usize = 2 * (tairix_abi::syscalls::SYSCALL_NAME_MAX + 1 + 10) + 1;
+
+/// Spell the frequent-call sketch's answer as `name=count[,name=count]`.
+///
+/// Empty when the sketch named nothing, so a span that made no syscall at all
+/// carries no field rather than an empty one. Each count is the sketch's lower
+/// bound, not an exact frequency.
+#[cfg(feature = "watchdog-diagnostics")]
+fn format_top_calls(ranked: [Option<(u64, u32)>; 2], buf: &mut [u8; TOP_CALLS_LEN]) -> &str {
+    /// Append what fits, so the field truncates rather than the write failing.
+    fn push(bytes: &[u8], buf: &mut [u8; TOP_CALLS_LEN], used: &mut usize) {
+        let take = bytes.len().min(buf.len().saturating_sub(*used));
+        if let (Some(dst), Some(src)) = (buf.get_mut(*used..*used + take), bytes.get(..take)) {
+            dst.copy_from_slice(src);
+            *used += take;
+        }
+    }
+
+    let mut used = 0usize;
+    for (number, count) in ranked.into_iter().flatten() {
+        if used > 0 {
+            push(b",", buf, &mut used);
+        }
+        push(syscall_label(number).as_bytes(), buf, &mut used);
+        push(b"=", buf, &mut used);
+        let mut digits = [0u8; 12];
+        push(
+            tairix_util::fmt::format_usize(
+                usize::try_from(count).unwrap_or(usize::MAX),
+                &mut digits,
+            )
+            .as_bytes(),
+            buf,
+            &mut used,
+        );
+    }
+    core::str::from_utf8(buf.get(..used).unwrap_or(&[])).unwrap_or("")
+}
+
 impl<'a, A> KernelSyscallHandlers<'a, A>
 where
     A: KernelArch + 'static,
@@ -1410,6 +1462,7 @@ where
     pub fn with_caller_aspace<R>(
         &self,
         caller: &CallerContext<'_>,
+
         f: impl FnOnce(&dyn UserAddressSpace, &dyn PhysMap) -> R,
     ) -> Option<R> {
         let registry = self.aspaces.read();
@@ -2261,6 +2314,7 @@ where
     #[cfg(feature = "watchdog-diagnostics")]
     fn report_latency_overrun(&self, process: ProcessId, thread: SecTaskId, over: &Overrun) {
         use tairix_abi::latency::MAX_STALL_FRAMES;
+        use tairix_log::FieldValue;
         use tairix_util::fmt::{
             format_hex_offset, format_hex_offset_list, HEX_OFFSET_LEN, HEX_OFFSET_STRIDE,
         };
@@ -2275,6 +2329,8 @@ where
         let mut pc_buf = [0u8; HEX_OFFSET_LEN];
         let mut bt_buf = [0u8; MAX_STALL_FRAMES * HEX_OFFSET_STRIDE];
         let bt = format_hex_offset_list(&frames[..frame_count], &mut bt_buf);
+        let mut top_buf = [0u8; TOP_CALLS_LEN];
+        let top_calls = format_top_calls(over.frequent.ranked(), &mut top_buf);
 
         let mut fields = [
             Field {
@@ -2305,9 +2361,8 @@ where
                 key: "sampled",
                 value: tairix_log::FieldValue::Str(over.sample.as_str()),
             },
-            // The three below are present only when the overrun has them,
-            // so a record never implies a blocking call or an address it
-            // could not name.
+            // The tail below is overwritten from `optional`, whose absent
+            // entries are simply not appended.
             Field {
                 key: "blocked_in",
                 value: tairix_log::FieldValue::Str(""),
@@ -2315,6 +2370,10 @@ where
             Field {
                 key: "blocked_in_ms",
                 value: tairix_log::FieldValue::UnsignedInt(0),
+            },
+            Field {
+                key: "top_calls",
+                value: tairix_log::FieldValue::Str(""),
             },
             Field {
                 key: "pc",
@@ -2326,35 +2385,24 @@ where
             },
         ];
         let mut n = 7;
-        if let Some(number) = over.blocked_in {
-            fields[n] = Field {
-                key: "blocked_in",
-                value: tairix_log::FieldValue::Str(
-                    SyscallNumber::from_register(number)
-                        .ok()
-                        .and_then(tairix_abi::syscalls::spec_for)
-                        .map_or("unknown", |spec| spec.name),
-                ),
-            };
-            n += 1;
-            fields[n] = Field {
-                key: "blocked_in_ms",
-                value: tairix_log::FieldValue::UnsignedInt(over.blocked_in_ns / NANOS_PER_MILLI),
-            };
-            n += 1;
-        }
-        if let Some(pc) = pc_relative {
-            fields[n] = Field {
-                key: "pc",
-                value: tairix_log::FieldValue::Str(format_hex_offset(pc, &mut pc_buf)),
-            };
-            n += 1;
-        }
-        if !bt.is_empty() {
-            fields[n] = Field {
-                key: "bt",
-                value: tairix_log::FieldValue::Str(bt),
-            };
+        // Present only when the overrun actually has them, so a record never
+        // implies a blocking call, a dominant syscall, or an address it could
+        // not name.
+        let optional = [
+            over.blocked_in
+                .map(|number| ("blocked_in", FieldValue::Str(syscall_label(number)))),
+            over.blocked_in.map(|_| {
+                (
+                    "blocked_in_ms",
+                    FieldValue::UnsignedInt(over.blocked_in_ns / NANOS_PER_MILLI),
+                )
+            }),
+            (!top_calls.is_empty()).then_some(("top_calls", FieldValue::Str(top_calls))),
+            pc_relative.map(|pc| ("pc", FieldValue::Str(format_hex_offset(pc, &mut pc_buf)))),
+            (!bt.is_empty()).then_some(("bt", FieldValue::Str(bt))),
+        ];
+        for (key, value) in optional.into_iter().flatten() {
+            fields[n] = Field { key, value };
             n += 1;
         }
         crate::audit::emit(
@@ -23128,7 +23176,7 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn a_latency_overrun_reports_where_the_budget_went() {
-        use crate::latency::{EntryFrame, Overrun};
+        use crate::latency::{EntryFrame, FrequentCalls, Overrun};
         use tairix_abi::latency::{StallSample, DEFAULT_FRAME_BUDGET_NS};
         use tairix_arch_api::backtrace::FrameLayout;
 
@@ -23141,6 +23189,16 @@ mod tests {
             calls: 41,
             blocked_in: Some(u64::from(SyscallNumber::IPC_CALL.as_u16())),
             blocked_in_ns: 297_000_000,
+            // A storm split evenly between two calls: each is over a third of
+            // the span, so the sketch must name both.
+            frequent: {
+                let mut sketch = FrequentCalls::new();
+                for _ in 0..20 {
+                    sketch.count(u64::from(SyscallNumber::MEM_MAP.as_u16()));
+                    sketch.count(u64::from(SyscallNumber::MEM_UNMAP.as_u16()));
+                }
+                sketch
+            },
             frame: None,
             sample: StallSample::None,
         };
@@ -23169,6 +23227,12 @@ mod tests {
         assert_eq!(field("sampled"), Some(String::from("none")));
         assert_eq!(field("blocked_in"), Some(String::from("ipc_call")));
         assert_eq!(field("blocked_in_ms"), Some(String::from("297")));
+        // What names a stall spent in thousands of short calls: `blocked_in`
+        // is only whichever one happened to be in flight at the boundary.
+        assert_eq!(
+            field("top_calls"),
+            Some(String::from("mem_map=20,mem_unmap=20"))
+        );
         assert!(field("pc").is_none(), "no frame implies no address");
         assert!(field("bt").is_none());
 

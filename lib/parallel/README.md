@@ -33,14 +33,21 @@ and the caller keeps it.
 ## Design notes
 
 - **Nothing spins.** An idle worker is parked in `futex_wait` on the dispatch
-  epoch; a dispatcher whose workers are still running is parked in `futex_wait`
-  on the outstanding count. An idle pool costs the address space its workers'
-  stacks reserve and no CPU.
+  epoch; a dispatcher with holders left is parked in `futex_wait` on the
+  engagement word. An idle pool costs the address space its workers' stacks
+  reserve and no CPU.
 - **The dispatch lives on the dispatcher's stack.** It is published as an erased
-  pointer, and the dispatcher returns only once *every* worker has acknowledged
-  the dispatch — not merely once every piece has been claimed. A worker between
-  "saw the epoch" and "claimed a piece" has not acknowledged yet, which is why
-  the barrier is over workers rather than over pieces.
+  pointer, and a worker reaches it only by *joining* the dispatch's engagement
+  first. Once the pieces are exhausted the dispatcher closes the engagement to
+  further joins and returns as soon as the workers that joined have released, so
+  the barrier is over the workers actually holding the pointer.
+- **A dispatch costs what its work costs, not what scheduling costs.** Waiting
+  for every worker instead would make a dispatch's latency the time for the
+  scheduler to run each of them at least once — unbounded where runnable threads
+  outnumber cores, and measured at 429 ms of compositing on a four-core board.
+  Closing the engagement retracts the offer: a worker that never got a CPU finds
+  its join refused, touches nothing, and parks again. No parallelism is given up,
+  because the only join ever refused is one with no work left to claim.
 - **It cannot deadlock.** A dispatch that finds one already in flight — nested
   inside a piece of it, or issued from another thread — runs its work on the
   calling thread. There is no arrangement of callers that waits on the pool.

@@ -165,8 +165,30 @@ trait SpanStore {
 /// so they are budgeted as a fraction of the arena backing them
 /// ([`CacheBudget::from_backing`]) and shrink per band exactly as every other
 /// cache in the process does ([`shrink_target`]). Retention therefore scales
-/// with the process instead of resting on a hand-picked ceiling, and reaches
-/// zero from moderate pressure onward.
+/// with the process instead of resting on a hand-picked ceiling.
+///
+/// # Whether the band permits retention, and how much
+///
+/// Two separate questions, and conflating them is what made an idle desktop
+/// churn. A page is the granule the syscall is charged at, so a budget below
+/// one page is not a smaller cache — it is no cache, and the heap churns
+/// exactly as it did before retention existed. The per-band fraction is under a
+/// page for any modest arena and reaches zero outright at moderate pressure, so
+/// the fraction alone cannot answer "how much".
+///
+/// The **working-set floor** answers the first question: retained free pages
+/// are working set rather than speculation, so mild and moderate pressure still
+/// permit them. Severe and critical do not, because the reserved floor stays
+/// zero — under genuine exhaustion the heap gives everything back, which is the
+/// fail-closed behaviour reclaim exists for. The **page granule** then answers
+/// the second, rounding a permitted-but-sub-page figure up to the unit the
+/// kernel actually charges.
+///
+/// Without that, an allocation high-water merely oscillating across one page
+/// boundary pays an unmap and a map per iteration: two page-table walks, two
+/// kernel zeroing passes and a TLB shootdown to *every other CPU* — machine-wide
+/// cost, paid hardest exactly when the machine is busiest, to hand back a single
+/// page.
 ///
 /// An unreported band reads as [`PressureBand::Critical`], which retains
 /// nothing: a process that never wires the pressure protocol gives every free
@@ -175,15 +197,11 @@ fn retain_bytes(arena_bytes: usize, band: PressureBand) -> usize {
     let target = shrink_target(
         band,
         ReclaimClass::RuntimeCache,
-        CacheBudget::from_backing(arena_bytes),
+        CacheBudget::from_backing(arena_bytes).with_working_set_floor(PAGE_SIZE),
     );
     if target == 0 {
         return 0;
     }
-    // A page is the granule the syscall is charged at, so a budget below one
-    // page is not a smaller cache — it is no cache, and a small heap would
-    // churn exactly as it did before. The floor is therefore one page, which
-    // is the hardware's figure rather than a chosen one.
     target.max(PAGE_SIZE)
 }
 
@@ -894,10 +912,9 @@ mod tests {
     }
 
     /// The retention is the shared reclaim policy's figure, so it scales with
-    /// the arena and reaches zero from moderate pressure onward — and an
-    /// unreported band (critical) retains nothing at all, which is what makes
-    /// a process that never wires pressure behave exactly as it did before
-    /// retention existed.
+    /// the arena — and an unreported band (critical) retains nothing at all,
+    /// which is what makes a process that never wires pressure behave exactly
+    /// as it did before retention existed.
     #[test]
     fn retention_follows_the_band_and_scales_with_the_arena() {
         // Large enough that the policy's own fractions clear the page floor,
@@ -907,9 +924,6 @@ mod tests {
         assert!(budget.low() > PAGE_SIZE);
         assert_eq!(retain_bytes(arena, PressureBand::Normal), budget.hard());
         assert_eq!(retain_bytes(arena, PressureBand::Mild), budget.low());
-        assert_eq!(retain_bytes(arena, PressureBand::Moderate), 0);
-        assert_eq!(retain_bytes(arena, PressureBand::Severe), 0);
-        assert_eq!(retain_bytes(arena, PressureBand::Critical), 0);
         assert_eq!(
             ReportedPressure::unknown().band(),
             PressureBand::Critical,
@@ -922,10 +936,42 @@ mod tests {
             2 * retain_bytes(arena, PressureBand::Normal)
         );
         assert_eq!(retain_bytes(0, PressureBand::Normal), 0);
-        // Floored at the page granule, so a small heap churns no more than a
-        // large one; the floor never fabricates retention out of a band that
-        // permits none.
-        assert_eq!(retain_bytes(PAGE_SIZE, PressureBand::Normal), PAGE_SIZE);
+    }
+
+    /// Moderate pressure must still retain the page granule.
+    ///
+    /// The bare per-band fraction reaches zero here, which turns an allocation
+    /// high-water oscillating across one page boundary into an unmap and a map
+    /// per iteration — two kernel zeroing passes and a TLB shootdown to every
+    /// other CPU, to hand back one page, precisely when the machine is
+    /// busiest. Severe and critical still surrender everything, because that
+    /// is the exhaustion reclaim exists for.
+    #[test]
+    fn moderate_pressure_still_retains_the_page_granule() {
+        let arena = 64 * PAGE_SIZE;
+        for band in [PressureBand::Mild, PressureBand::Moderate] {
+            assert!(
+                retain_bytes(arena, band) >= PAGE_SIZE,
+                "{band:?} must not churn a page per allocation"
+            );
+        }
+        for band in [PressureBand::Severe, PressureBand::Critical] {
+            assert_eq!(
+                retain_bytes(arena, band),
+                0,
+                "{band:?} gives everything back"
+            );
+        }
+        // The floor is a floor, never a fabrication: a heap holding nothing
+        // retains nothing, whatever the band permits.
+        assert_eq!(retain_bytes(0, PressureBand::Moderate), 0);
+        // The page granule holds for a small arena too, whose per-band fraction
+        // is well under a page — that is the case it exists for.
+        assert_eq!(retain_bytes(PAGE_SIZE, PressureBand::Moderate), PAGE_SIZE);
+        assert_eq!(
+            retain_bytes(4 * PAGE_SIZE, PressureBand::Moderate),
+            PAGE_SIZE
+        );
         assert_eq!(retain_bytes(PAGE_SIZE, PressureBand::Severe), 0);
     }
 

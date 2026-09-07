@@ -3166,6 +3166,16 @@ impl Compositor {
             }
             FrostPlan::Blur => self.blur_backdrop(index, Rect::EMPTY),
         }
+        // Retaken into the buffer already retained wherever it is the right
+        // size, which a move always leaves it: a drag would otherwise free and
+        // re-request a screen-scale buffer on every pointer sample.
+        let epoch = self.frost_epoch();
+        let Self { frost, back, .. } = self;
+        if frost.renew(&epoch, &id, |retained| {
+            retained.recapture(back, bounds, screen, radius_px, shape)
+        }) {
+            return;
+        }
         // Nothing is lost when the copy cannot be taken: the frame is already
         // frosted, and the next one blurs again.
         if let Some(captured) =

@@ -1043,7 +1043,14 @@ weaker policy:
   free pages at its arena top mapped instead of surrendering them on
   every `free`, and the retention is this model's own figure —
   `shrink_target` for `ReclaimClass::RuntimeCache` over a
-  `CacheBudget::from_backing(arena_bytes)`, floored at one page. Not a
+  `CacheBudget::from_backing(arena_bytes)` that declares one page as a
+  working-set floor, with the result floored at the page granule. The
+  floor is what makes mild and moderate pressure still permit retention
+  while severe and critical surrender it; the granule is what stops a
+  permitted-but-sub-page figure reading as no cache at all. Both are
+  needed: on the bare fraction moderate retained nothing, and a
+  high-water oscillating across one page boundary then cost an unmap, a
+  map and a cross-CPU TLB shootdown per iteration. Not a
   `ReclaimCache`: it holds no entries and needs no ledger, because the
   retained pages are ordinary mapped anonymous memory the frame
   allocator already counts, so the retention lowers free frames

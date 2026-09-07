@@ -823,7 +823,14 @@ How a retained backdrop is known to be still right:
   as the disjoint rectangles it is, never as the box around them.
 - **A frost the frame recomputed any part of is captured whole**, so the next
   frame compares against where the window is now rather than eroding the same
-  core until nothing is left of it.
+  core until nothing is left of it. It is captured *into the pixels already
+  retained* wherever they are the right size, which a move always leaves them:
+  the alternative frees a screen-scale buffer and asks for an identical one on
+  every pointer sample of a drag, which is megabytes of allocator traffic on the
+  frame path and, with a heap that has surrendered its retention, a page's worth
+  of map, unmap and cross-CPU TLB shootdown per kilobyte of it. A resize, or a
+  move that clips differently at a screen edge, changes the extent and is
+  captured afresh.
 - **Recomputing one frost drops any frost above it that overlaps**, because a
   blur spreads the change far past the rectangle that caused it, so the window
   above reads different bytes even where the damage never reached.

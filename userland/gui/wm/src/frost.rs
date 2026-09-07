@@ -47,6 +47,11 @@
 //! (`Surface::frost_region_around`). Without that, every sample of a drag paid
 //! a full-window blur *and* a full-window composite of the layers under it, for
 //! a picture that had moved a few pixels.
+//!
+//! A move does not resize, so the retaken frost also goes straight back into
+//! the pixels already retained (`FrostedBackdrop::recapture`): a sample costs
+//! the row copy alone, rather than freeing a screen-scale buffer and asking for
+//! an identical one as well.
 
 use core::mem::size_of;
 
@@ -242,6 +247,41 @@ impl FrostedBackdrop {
             shape,
             pixels,
         })
+    }
+
+    /// Retake this frost from `back` where the window at `bounds` reaches
+    /// `screen`, reusing the pixels already allocated, reporting whether it
+    /// could.
+    ///
+    /// A move does not resize, so the dominant case — a window dragged across
+    /// its own backdrop — reaches a buffer of exactly the size it needs, and a
+    /// drag's per-sample cost becomes the row copy alone. Allocating a fresh
+    /// one instead frees a screen-scale buffer and asks for an identical one on
+    /// every pointer sample, which is a megabyte-scale allocator round trip on
+    /// the frame path.
+    ///
+    /// Refused when the clipped rectangle's extent differs — a resize, or a
+    /// move that clips differently at a screen edge — because these pixels are
+    /// then the wrong shape and the cache's charge would no longer describe
+    /// them. The caller falls back to [`capture`](Self::capture).
+    pub(crate) fn recapture(
+        &mut self,
+        back: &Surface,
+        bounds: Rect,
+        screen: Rect,
+        radius_px: u32,
+        shape: Option<WindowShape>,
+    ) -> bool {
+        let rect = bounds.intersection(&screen);
+        if rect.width != self.rect.width || rect.height != self.rect.height {
+            return false;
+        }
+        self.pixels.overwrite(-rect.left(), -rect.top(), back);
+        self.bounds = bounds;
+        self.rect = rect;
+        self.radius_px = radius_px;
+        self.shape = shape;
+        true
     }
 
     /// How much of this frost a window now occupying `bounds` on `screen`,

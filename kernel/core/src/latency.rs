@@ -80,6 +80,9 @@ pub struct Overrun {
     pub blocked_in: Option<u64>,
     /// How long that syscall had been running when it crossed the budget.
     pub blocked_in_ns: u64,
+    /// The syscalls the span made most often, which is what names a stall
+    /// spent in a storm of short calls rather than in one long one.
+    pub frequent: FrequentCalls,
     /// The captured user frame, absent on a port that publishes none.
     pub frame: Option<EntryFrame>,
     /// What `frame` names.
@@ -102,6 +105,82 @@ pub struct EntryFrame {
     pub fp_valid: bool,
     /// How one user frame is laid out on this port.
     pub layout: FrameLayout,
+}
+
+/// One syscall number and how often a [`FrequentCalls`] sketch has counted it.
+#[derive(Copy, Clone, Debug)]
+struct Frequent {
+    number: u64,
+    count: u32,
+}
+
+/// The syscall numbers a span made most often.
+///
+/// A span that spends its budget in thousands of short calls names nothing
+/// useful otherwise: [`Overrun::blocked_in`] is whichever call happened to be
+/// in flight at the boundary, which for a storm is an arbitrary member of it,
+/// and a `Running` sample names only the code that issued the latest one.
+///
+/// This is the Misra–Gries frequent-elements sketch at two counters, so any
+/// number making up more than a third of the span's calls is guaranteed to be
+/// named. Two counters rather than one because the storms worth naming come in
+/// pairs — a heap high-water oscillating across a page boundary is a map and an
+/// unmap at roughly equal counts, and a single majority counter needs a strict
+/// majority, so it would identify neither. It holds two words, allocates
+/// nothing, and costs two compares per syscall, so neither a busy thread nor a
+/// hostile one can make it expensive.
+#[derive(Copy, Clone, Debug)]
+pub struct FrequentCalls {
+    slots: [Frequent; 2],
+}
+
+impl FrequentCalls {
+    /// A sketch that has counted nothing.
+    pub(crate) const fn new() -> Self {
+        Self {
+            slots: [Frequent {
+                number: 0,
+                count: 0,
+            }; 2],
+        }
+    }
+
+    /// Count one completed call of `number`.
+    pub(crate) fn count(&mut self, number: u64) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.count > 0 && slot.number == number)
+        {
+            slot.count = slot.count.saturating_add(1);
+            return;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.count == 0) {
+            *slot = Frequent { number, count: 1 };
+            return;
+        }
+        // The sketch pays for its constant size here: a number that matches
+        // neither counter costs both of them one, which is what bounds the
+        // state to two slots and makes the counts lower bounds.
+        for slot in &mut self.slots {
+            slot.count = slot.count.saturating_sub(1);
+        }
+    }
+
+    /// The numbers this sketch names, most-counted first, `None` where it saw
+    /// fewer than two distinct numbers.
+    ///
+    /// Each count is a **lower bound** on that number's occurrences, not an
+    /// exact frequency — the decrement above is the price of the fixed size.
+    /// [`Overrun::calls`] is the exact total.
+    #[must_use]
+    pub fn ranked(&self) -> [Option<(u64, u32)>; 2] {
+        let mut slots = self.slots;
+        if slots[1].count > slots[0].count {
+            slots.swap(0, 1);
+        }
+        slots.map(|slot| (slot.count > 0).then_some((slot.number, slot.count)))
+    }
 }
 
 /// The syscall a watched thread is currently inside.
@@ -128,6 +207,8 @@ struct Watch {
     blocked_ns: u64,
     /// Syscalls completed during the open span.
     calls: u32,
+    /// Which of them were made most often.
+    frequent: FrequentCalls,
     /// Whether this span has already produced a report, so one pause is
     /// one record however many boundaries it crosses afterwards.
     reported: bool,
@@ -147,6 +228,7 @@ impl Watch {
             span_start_ns: None,
             blocked_ns: 0,
             calls: 0,
+            frequent: FrequentCalls::new(),
             reported: false,
             last_report_ns: None,
             in_flight: None,
@@ -364,6 +446,7 @@ pub fn open_span(cpu: u32, task: TaskId, now_ns: u64) {
         watch.span_start_ns = Some(now_ns);
         watch.blocked_ns = 0;
         watch.calls = 0;
+        watch.frequent = FrequentCalls::new();
         watch.reported = false;
         watch.in_flight = None;
     });
@@ -402,6 +485,7 @@ pub fn on_syscall_entry(
             // Nothing blocked: the span crossed its budget before this call.
             blocked_in: None,
             blocked_in_ns: 0,
+            frequent: watch.frequent,
             frame,
             sample: frame.map_or(StallSample::None, |_| StallSample::Running),
         })
@@ -425,6 +509,7 @@ pub fn on_syscall_exit(cpu: u32, task: TaskId, now: impl FnOnce() -> u64) -> Opt
                 .blocked_ns
                 .saturating_add(now_ns.saturating_sub(call.at_ns));
             watch.calls = watch.calls.saturating_add(1);
+            watch.frequent.count(call.number);
         }
         let elapsed_ns = watch.owes_report(now_ns)?;
         watch.reported = true;
@@ -437,6 +522,7 @@ pub fn on_syscall_exit(cpu: u32, task: TaskId, now: impl FnOnce() -> u64) -> Opt
             calls: watch.calls,
             blocked_in: in_flight.map(|call| call.number),
             blocked_in_ns: in_flight.map_or(0, |call| now_ns.saturating_sub(call.at_ns)),
+            frequent: watch.frequent,
             frame,
             sample: frame.map_or(StallSample::None, |_| StallSample::Blocking),
         })
@@ -763,5 +849,74 @@ mod tests {
             0xbeef_0000,
             "the entry that follows the overrun is the live sample"
         );
+    }
+
+    /// The pair a heap high-water oscillating across a page boundary makes:
+    /// two numbers at half the span each. A single majority counter needs a
+    /// strict majority and so would name neither, which is why there are two.
+    #[test]
+    fn an_even_split_between_two_calls_names_both() {
+        let mut sketch = FrequentCalls::new();
+        for _ in 0..500 {
+            sketch.count(11);
+            sketch.count(22);
+        }
+        let named = sketch.ranked();
+        let numbers = named.map(|slot| slot.map(|(number, _)| number));
+        assert!(
+            numbers.contains(&Some(11)) && numbers.contains(&Some(22)),
+            "both halves of the storm must be named, got {named:?}"
+        );
+    }
+
+    /// Misra–Gries at two counters guarantees any number over a third of the
+    /// calls is named, however much unrelated traffic is interleaved.
+    #[test]
+    fn a_dominant_call_is_named_through_unrelated_traffic() {
+        let mut sketch = FrequentCalls::new();
+        for step in 0..300u64 {
+            sketch.count(7);
+            sketch.count(7);
+            // A different number every time, so nothing else can accumulate.
+            sketch.count(1_000 + step);
+        }
+        let (number, count) = sketch.ranked()[0].expect("something was counted");
+        assert_eq!(number, 7, "two thirds of the calls must be named");
+        assert!(count > 0, "the named count is a lower bound, never zero");
+    }
+
+    /// Ranked most-counted first, and a sketch that saw one number names one.
+    #[test]
+    fn a_sketch_names_only_what_it_counted() {
+        let mut sketch = FrequentCalls::new();
+        assert_eq!(
+            sketch.ranked(),
+            [None, None],
+            "nothing counted, nothing named"
+        );
+        sketch.count(5);
+        sketch.count(9);
+        sketch.count(9);
+        assert_eq!(sketch.ranked(), [Some((9, 2)), Some((5, 1))]);
+    }
+
+    /// The tally belongs to the span, so the next one starts from nothing —
+    /// otherwise one busy frame would name every frame after it.
+    #[test]
+    fn a_fresh_span_counts_from_nothing() {
+        let (c, t) = (cpu(20), task(20));
+        armed(c, t);
+        on_syscall_entry(c, t, 42, || 1);
+        on_syscall_exit(c, t, || 2);
+        with_watch(c, t, |watch| {
+            assert_eq!(watch.frequent.ranked(), [Some((42, 1)), None]);
+            assert_eq!(watch.calls, 1);
+        });
+        open_span(c, t, 3);
+        with_watch(c, t, |watch| {
+            assert_eq!(watch.frequent.ranked(), [None, None]);
+            assert_eq!(watch.calls, 0);
+        });
+        forget(c, t);
     }
 }

@@ -64,30 +64,42 @@ on the calling thread.
 
 ### The protocol
 
-A dispatch publishes the work, bumps an epoch, and wakes the workers parked on it;
-every participant claims pieces off one counter until they run out; each worker
-then decrements an outstanding count, and the last one to reach zero wakes the
-dispatcher if it parked.
+A dispatch opens its *engagement*, publishes the work, bumps an epoch, and wakes
+the workers parked on it; every participant claims pieces off one counter until
+they run out. A worker reaches the work only by **joining** the engagement first,
+and releases its hold once it has drained. When the pieces are exhausted the
+dispatcher closes the engagement to further joins and returns as soon as every
+worker that joined has released.
 
-The dispatcher returns only once that count is zero, and that is the whole
-lifetime argument: the published work is a reference to a value on the
-dispatcher's own stack, so the dispatcher must not return while a worker could
-still read it. The barrier is over **workers**, not over pieces, because a worker
-between "saw the epoch" and "claimed a piece" has not yet acknowledged the
-dispatch.
+Joining is the whole lifetime argument: the published work is a reference to a
+value on the dispatcher's own stack, so the dispatcher must not return while a
+worker could still read it. A worker reads the pointer only after its join has
+succeeded, and a join succeeds only while the engagement is open, so closing it
+and waiting for the holders to reach zero is exactly the condition "no worker
+holds the pointer". Both live in one word, so a join and the dispatcher's
+retraction of the offer cannot interleave.
 
-Because the barrier is over workers, every worker must be able to reach it.
-`Pool::with_workers` therefore does not return until every worker has read its
-starting epoch and counted itself in — otherwise a worker that had not run yet
-would read the epoch already bumped, decide the dispatch was one it had seen, and
-park without acknowledging, and the dispatch would never complete.
+### A dispatch costs what its work costs
+
+Waiting for every *worker* instead — the shape this pool originally had — makes a
+dispatch's latency the time for the scheduler to run each worker at least once,
+even when the dispatching thread has already run every piece itself. Where
+runnable threads outnumber cores that is unbounded: it was measured as 429 ms of
+compositing on a four-core board, a frame spent waiting for help that was no
+longer needed.
+
+Closing the engagement retracts the offer instead. A worker that never got a CPU
+finds its join refused, touches nothing, and parks again. No parallelism is given
+up, because the dispatcher closes only once the pieces are exhausted, so the only
+join ever refused is one with no work left to claim. It also removes the need for
+any construction-time rendezvous: a pool between dispatches is closed, so a worker
+still on its way to its loop can only find a join refused.
 
 ### Nothing spins
 
-An idle worker is parked in `futex_wait` on the dispatch epoch; a dispatcher whose
-workers are still running is parked in `futex_wait` on the outstanding count. An
-idle pool costs the address space its workers' kernel-owned stacks reserve and no
-CPU at all.
+An idle worker is parked in `futex_wait` on the dispatch epoch; a dispatcher with
+holders left is parked in `futex_wait` on the engagement word. An idle pool costs
+the address space its workers' kernel-owned stacks reserve and no CPU at all.
 
 ### It cannot deadlock
 

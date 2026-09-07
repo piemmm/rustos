@@ -328,7 +328,7 @@ fn diag_sink() -> Option<&'static (dyn Sink + Sync)> {
 ///
 /// The port probes this on the boot CPU during interrupt bring-up, *before*
 /// the diagnostic sink is installed, so the verdict is stashed and flushed
-/// by [`install_diagnostic_sink`] the moment the channel exists. Recording
+/// by `install_diagnostic_sink` the moment the channel exists. Recording
 /// it after the sink is already up logs immediately instead. Either way the
 /// line is emitted exactly once. The whole self-sample discipline gates on
 /// this verdict, so a reader of a later `sampled=pre_silence` hard-lockup
@@ -446,7 +446,7 @@ static LOCK_DIAG_CPU_FN: core::sync::atomic::AtomicUsize = core::sync::atomic::A
 /// Install the debug-only lock-site diagnostics: register `current_cpu` (a
 /// lock-free resolver of the running CPU's dense id) and wire the
 /// `tairix_sync` lock observer so each CPU's current spinlock is recorded
-/// into its per-CPU [`crate::cpu_state`] slot. After this a hard-lockup
+/// into its per-CPU `cpu_state` slot. After this a hard-lockup
 /// report names the exact spinlock a wedged core is stuck on (`k_lock`) —
 /// the one culprit the maskable liveness sample cannot observe when the
 /// core wedges with interrupts off inside the critical section.

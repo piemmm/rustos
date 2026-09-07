@@ -122,6 +122,19 @@ interactive-surface rule now has a runtime witness rather than review alone.
    token. One record per span (latched) plus a per-thread rate floor bounds
    what a surface cycling through overrunning frames can write.
 
+   The record also names the syscalls the span made *most* (`top_calls`), not
+   only the one in flight at the boundary. A span whose budget went to
+   thousands of short calls has no single culprit — `blocked_in` is an
+   arbitrary member of the storm and a `running` sample names only whoever
+   issued the latest one — so without this the dominant stall shape in a real
+   log is unattributable. It is Misra–Gries at two counters (any number over a
+   third of the calls is guaranteed named), two rather than one because the
+   storms come in pairs: an allocation high-water oscillating across a page
+   boundary is a map and an unmap at roughly equal counts, and a majority
+   counter needs a strict majority. Two words per watch, no allocation, two
+   compares per syscall; the counts are honest lower bounds, with `calls` the
+   exact total.
+
 8. **`latency_watch` needs no capability and answers rather than failing.**
    A thread describes only its own responsiveness obligation. The syscall is
    in the table unconditionally, so `SYSCALL_TABLE_HASH` is identical in both

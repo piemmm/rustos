@@ -100,8 +100,11 @@ const COUNTER_INCREMENTS: u64 = 250;
 const TLS_THREADS: u64 = 3;
 
 /// Worker threads the `parallel` role's pool asks the kernel for. Three beside
-/// the dispatching thread, so the fork-join barrier genuinely waits for several
-/// acknowledgements while staying inside the frame pool below.
+/// the dispatching thread, so several of them genuinely join a dispatch and are
+/// waited for, while staying inside the frame pool below. Only the BSP is
+/// brought up here, so they time-share it: that leaves the dispatching thread
+/// routinely finishing every piece before a worker is scheduled, which is the
+/// case the engagement's retraction exists for.
 const PARALLEL_WORKERS: u64 = 3;
 
 /// Rounds the `parallel` role runs its divided pass for. Enough repetitions that

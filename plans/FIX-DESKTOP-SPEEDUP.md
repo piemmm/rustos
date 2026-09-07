@@ -901,6 +901,17 @@ released only when nothing can be kept from it. A frost the frame recomputed any
 part of is captured whole, so the next frame compares against where the window is
 *now* — otherwise the core would erode a sample at a time.
 
+The capture goes back into the pixels already retained
+(`FrostedBackdrop::recapture` through `ReclaimCache::renew`), because a move
+leaves the rectangle the same size and so the retained buffer is already the
+right shape. Building a fresh one per sample is correct but frees a screen-scale
+buffer and requests an identical one on the frame path, which a heap holding no
+retention turns into a page of map, unmap and cross-CPU TLB shootdown per
+kilobyte. `renew` requires the payload's charged size to be unchanged and treats
+a resize as a refusal, so the ledger cannot drift; a resize or an edge clip that
+changes the extent is captured afresh. The gate is the charge itself: a drag adds
+no cache insertions (`dragging_a_frosted_window_reuses_its_retained_buffer`).
+
 `Surface::frost_region_around` is the raster half: frost a rectangle *except* a
 kept inner block, writing exactly what the whole-rectangle frost would write
 around it. `blur_line` generalised into `blur_span` (the outputs of a line, not
@@ -1430,6 +1441,20 @@ index-to-element erasure, the one split policy, and the fork-join pool over
   pool from the online CPU count it reads through the System Information API —
   never a constant — and states on `stderr` when it was granted fewer threads
   than the machine has cores.
+- **A dispatch costs its work, never the scheduler's queue.** The pool's
+  fork-join barrier is over the workers that *joined* a dispatch, not over
+  every worker that exists. The earlier shape waited for all of them to be
+  scheduled at least once even when the dispatching thread had already claimed
+  every piece, which on a board with more runnable threads than cores is
+  unbounded: it cost a measured 429 ms of compositing on a four-core Pi 4B,
+  reported against the `desktop` surface as `blocked_in=futex_wait` with four
+  syscalls in the span. It is why a *drag* paused while a hover did not — a
+  hover's rectangle is under `MIN_PARALLEL_BAND_PX` so `bands` answers one and
+  `compose_span` never dispatches, while a drag promotes the whole moved
+  frosted window and does. Closing the engagement retracts the offer to join,
+  so a worker that never got a CPU is a no-op rather than a stall, and no
+  parallelism is lost because the close happens only once the pieces are
+  exhausted.
 - **Bit-identity, not near-identity.** Each scene is composed twice — once
   whole, once split into bands that run backwards — comparing the scan-out
   frame, the back buffer, and every counted pixel of `FrameStats`; the frost

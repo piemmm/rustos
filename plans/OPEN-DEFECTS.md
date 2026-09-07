@@ -6231,3 +6231,63 @@ caught it.
 the whole-project gate rather than by the per-crate runs used while building,
 which is the reason the charter makes the whole-project run the only thing
 that counts as done.
+
+## D42 — the fork-join pool has no true-SMP vertical (OPEN)
+
+`lib/parallel`'s `Pool` protocol is exercised dynamically only by
+`threads-qemu-x86_64`'s `parallel` role: three real `lib/rt` threads, twelve
+pieces, thirty-two rounds, plus a nested dispatch and one issued before the
+workers can have reached their loop. That chassis brings up the BSP alone, so
+the four threads time-share one CPU. The desktop verticals cannot stand in for
+it: they run `cpus: 1`, so `Pool::for_cpus` asks for no worker, `bands` answers
+one, and `compose_span` never dispatches at all.
+
+Single-CPU time-sharing is a real exercise of the protocol — it is where the
+dispatching thread routinely claims every piece before a worker is scheduled,
+which is the case the engagement's retraction answers — but it cannot race the
+engagement word. Two participants CAS-joining while the dispatcher sets the
+closed bit is a genuinely concurrent interleaving that only two CPUs executing
+at once can produce.
+
+**What it would take.** No existing *user-program* chassis brings up
+secondaries, so this is not the Cargo-alias reuse that
+`mem-pin-migration-qemu-aarch64` is over `mem_pin_qemu_aarch64` (same
+`src/main.rs`, different `cpus:`). It needs secondary bring-up added to a
+user-program chassis — `threads_qemu_x86_64` already has the AP code available
+(`tairix_arch_x86_64::smp`, as `scheduler-stress-qemu` drives it) but does not
+use it — after which the vertical is a Cargo.toml alias at `cpus: 4` driving the
+existing `parallel` role, with no fixture duplication.
+
+**Why it is recorded rather than done.** The engagement protocol's state
+machine is proven exactly and deterministically host-side (`lib/parallel`'s
+`Engagement` cases), and the ordering it changed is the same
+announce-then-recheck pairing the previous barrier used. The gap is a coverage
+gap, not a known defect.
+
+## D43 — switchboard spends a frame in thousands of syscalls (OPEN, instrumented)
+
+A Pi 4B debug run reported the switchboard overrunning its 250 ms budget with
+`calls=4220`, `calls=8536` and `calls=6624` — thousands of syscalls in one
+frame span — alongside `blocked_in=ipc_call` at 447 ms and a 207 ms span whose
+blocking was spread across calls rather than concentrated in one.
+
+**Ruled out by reading the code.** `Sampler::read_paged` pages 64 records per
+call and `walk_pages` stops on a short page, so no paged reading costs a call
+per record; `SOCKET_RECORD_CAP`/`PROCESS_RECORD_CAP` of 4096 are 128 and 64
+calls, not thousands. `pressure::refresh` reports only a band *movement*, and
+`trim_glyph_cache` enforces the new ceiling rather than flushing, so a
+flapping band does not empty the glyph cache and force a `FONT_ENDPOINT` round
+trip per glyph.
+
+**Most probable cause, now fixed.** Userland heap retention collapsed to zero
+from moderate pressure onward, so a per-frame allocation high-water crossing a
+page boundary cost a `mem_unmap` and a `mem_map` — with a cross-CPU TLB
+shootdown — every iteration. `RawVecInner::reserve::do_reserve_and_handle`
+appears in all four of the run's switchboard frames. That is inference, not
+proof: the switchboard walk repeats identical deep frames and is unreliable.
+
+**How it will be settled.** The overrun record now names the syscalls a span
+made most (`top_calls`), which is what a storm has instead of one culprit. A
+debug run on the same board will state whether those thousands were the heap
+pair, an IPC round trip per item, or something else, and the answer decides
+whether anything further is owed here.

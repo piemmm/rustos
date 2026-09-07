@@ -6020,6 +6020,56 @@ fn every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would() 
     both.settle("the last frost removed");
 }
 
+/// Dragging a frosted window retakes its backdrop into the buffer it already
+/// holds, rather than allocating a fresh one every pointer sample.
+///
+/// A move leaves the rectangle the same size, so the retained pixels are
+/// exactly the right shape to be rewritten in place. Building a new frost and
+/// offering it to the cache instead is correct but frees a screen-scale buffer
+/// and asks for an identical one per sample — on a real display, megabytes of
+/// allocator traffic on the frame path, and with it a page's worth of map,
+/// unmap and cross-CPU TLB shootdown per kilobyte.
+///
+/// A charge is what makes that observable: admitting a value charges the
+/// ledger, renewing one in place does not. So the drag below must add no
+/// insertions at all, while `BothWays` holds the pixels to what a fresh blur
+/// would have written.
+#[test]
+fn dragging_a_frosted_window_reuses_its_retained_buffer() {
+    let mut both = BothWays::new(mode(40, 24));
+    both.both(|c| c.add_window(Point::ORIGIN, opaque(40, 24, GREEN)));
+    let glass = both.both(|c| c.add_window(Point::new(6, 4), clear(20, 14)));
+    both.both(|c| c.set_backdrop_blur(glass, 3));
+    both.settle("the first frost");
+    assert!(
+        both.reusing.frost_resident(glass),
+        "its backdrop is retained"
+    );
+
+    let (bytes, insertions) = (
+        both.reusing.frost_cache_bytes(),
+        both.reusing.frost_cache_stats().insertions(),
+    );
+    for step in 1..=6 {
+        both.both(|c| c.move_window(glass, Point::new(6 + step, 4 + step)));
+        both.settle("a drag step");
+        assert!(
+            both.reusing.frost_resident(glass),
+            "step {step}: the frost must survive its own move"
+        );
+        assert_eq!(
+            both.reusing.frost_cache_stats().insertions(),
+            insertions,
+            "step {step}: a drag must charge no new buffer"
+        );
+        assert_eq!(
+            both.reusing.frost_cache_bytes(),
+            bytes,
+            "step {step}: the retained rectangle is the same size throughout"
+        );
+    }
+}
+
 #[test]
 fn a_frost_pushed_further_off_screen_is_not_the_one_it_clipped_to_before() {
     // A window wider than the screen clips to the same on-screen rectangle at

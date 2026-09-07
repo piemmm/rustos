@@ -457,6 +457,48 @@ where
         drop(self.admit(policy, key, value));
     }
 
+    /// Rebuild the value `key` holds **in place**, keeping its allocation,
+    /// reporting whether it now holds the wanted one.
+    ///
+    /// For a consumer whose next value would occupy a buffer the same size as
+    /// the one already retained. Building it and offering it to
+    /// [`retain`](Self::retain) is correct but frees the old payload and
+    /// allocates an identical one, which for a screen-sized payload is a
+    /// megabyte-scale round trip through the allocator on every call — and on a
+    /// frame path, a page's worth of map, unmap and cross-CPU TLB shootdown per
+    /// kilobyte of it. Mutating in place keeps both the allocation and the
+    /// ledger.
+    ///
+    /// `rebuild` **must leave `payload_bytes()` unchanged**; that is what lets
+    /// the charge stand as it is. A rebuild that resizes the payload is treated
+    /// exactly as one that refused, because the alternative is a ledger that
+    /// silently drifts from what it charged.
+    ///
+    /// A `false` from `rebuild`, a resized payload, an absent key, a poisoned
+    /// cache, or a generation that differs all invalidate the entry and answer
+    /// `false`: the caller then builds the value itself, and a value that is
+    /// neither the old one nor the wanted one is never left to be served.
+    ///
+    /// Counts no lookup and does not touch recency — the caller has already
+    /// counted the lookup that told it to come here.
+    pub fn renew<F>(&mut self, generation: &E, key: &K, rebuild: F) -> bool
+    where
+        F: FnOnce(&mut V) -> bool,
+    {
+        if self.poisoned || self.generation.as_ref() != Some(generation) {
+            return false;
+        }
+        let Some(entry) = self.entries.peek_mut(key) else {
+            return false;
+        };
+        let charged = entry.charged_payload;
+        let kept = rebuild(&mut entry.value) && entry.value.payload_bytes() == charged;
+        if !kept {
+            self.invalidate(key);
+        }
+        kept
+    }
+
     /// Drop everything retained at a different generation and adopt this
     /// one, so no lookup or admission can mix two generations' values.
     fn enter_generation(&mut self, generation: &E) {
@@ -846,6 +888,71 @@ mod tests {
             BuildFastHash::new(),
         );
         (cache, gauge, sink)
+    }
+
+    /// The point of `renew`: the retained buffer is rewritten where it lies, so
+    /// the charge is untouched and no allocator round trip happens at all.
+    #[test]
+    fn a_renewal_rewrites_the_payload_in_place_and_charges_nothing_new() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(100, 0xAA));
+        let charged = cache.charged_bytes();
+        assert_eq!(charged, 100 + METADATA);
+        assert!(cache.renew(&1, &7, |block| {
+            block.bytes.fill(0xBB);
+            true
+        }));
+        assert_eq!(
+            cache.charged_bytes(),
+            charged,
+            "an in-place rebuild is free"
+        );
+        assert_eq!(
+            cache.peek(&1, &7).map(|block| block.bytes[0]),
+            Some(0xBB),
+            "the renewed pixels are what a later read serves"
+        );
+    }
+
+    /// A rebuild that resizes the payload would leave the ledger charging a
+    /// figure it no longer holds, so it is refused exactly as a failure is.
+    #[test]
+    fn a_renewal_that_resizes_the_payload_is_refused_and_drops_the_entry() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(100, 0xAA));
+        assert!(!cache.renew(&1, &7, |block| {
+            block.bytes.truncate(50);
+            true
+        }));
+        assert!(
+            cache.peek(&1, &7).is_none(),
+            "a resized value is not served"
+        );
+        assert_eq!(cache.charged_bytes(), 0, "and its charge is given back");
+    }
+
+    /// A consumer that cannot turn the retained value into the wanted one says
+    /// so, and the stale value must not survive to be served.
+    #[test]
+    fn a_refused_renewal_drops_the_entry() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(100, 0xAA));
+        assert!(!cache.renew(&1, &7, |_| false));
+        assert!(cache.peek(&1, &7).is_none());
+        assert_eq!(cache.charged_bytes(), 0);
+    }
+
+    /// Renewing what is not there, or what belongs to a superseded generation,
+    /// answers `false` so the caller builds instead — never a stale mutation.
+    #[test]
+    fn a_renewal_of_an_absent_or_stale_entry_is_refused() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        assert!(!cache.renew(&1, &7, |_| true), "nothing retained");
+        cache.retain(&1, 7, Block::of(100, 0xAA));
+        assert!(
+            !cache.renew(&2, &7, |_| true),
+            "another generation's entry is not this one's"
+        );
     }
 
     #[test]
