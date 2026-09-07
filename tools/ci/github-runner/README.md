@@ -93,7 +93,8 @@ soaks, just register the `soak`-labelled instance there.
   Debian/Ubuntu, once:
   ```sh
   sudo apt-get install -y build-essential ninja-build meson python3-venv \
-    pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev flex bison
+    pkg-config libglib2.0-dev libpixman-1-dev nettle-dev zlib1g-dev \
+    libfdt-dev flex bison
   ```
   The build lands once in the persistent cache and every later run reuses it;
   `install-qemu.sh` fails closed with the exact missing packages if a

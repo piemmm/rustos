@@ -43,6 +43,21 @@ QEMU_SIGNING_FPR="CEACC9E15534EBABB82D3FA03353C9CEF108B584"
 # adds its `<arch>-softmmu` target here.
 QEMU_TARGETS="riscv64-softmmu,x86_64-softmmu,aarch64-softmmu"
 
+# Configure options beyond `--prefix`/`--target-list`. Every facility a vertical
+# depends on is named explicitly rather than left to meson's `auto` detection,
+# which resolves silently to "absent" when the host lacks the dev package and
+# yields a QEMU that builds and boots but fails mid-test. `nettle` is the cipher
+# library `crypto/cipher.c` compiles against for the AES-CBC sessions the
+# virtio-crypto accelerator vertical drives; meson permits only one of
+# nettle/gcrypt, and nettle is the pkg-config-discoverable one, so the
+# prerequisite probe below can report it by name.
+QEMU_CONFIGURE_OPTS=(
+    --enable-fdt
+    --enable-nettle
+    --disable-docs
+    --disable-werror
+)
+
 # Where the pinned build is cached. Defaults to the same persistent cache dir
 # the workflows use for the pinned C toolchain and `CARGO_TARGET_DIR`, so it
 # survives `actions/checkout` (which only wipes the workspace). Overridable so
@@ -50,6 +65,14 @@ QEMU_TARGETS="riscv64-softmmu,x86_64-softmmu,aarch64-softmmu"
 CACHE_DIR="${TAIRIX_CACHE_DIR:-/var/lib/actions-runner/tairix-cache}"
 PREFIX="${CACHE_DIR}/qemu-${QEMU_VERSION}"
 BINDIR="${PREFIX}/bin"
+
+# The cache is keyed on the whole build configuration, not the version alone: a
+# changed target list or configure option yields a different QEMU under the same
+# version number, and a cache holding the old one must rebuild rather than serve
+# it. Written only once the install is verified, and inside `$PREFIX` so a wiped
+# or half-installed tree has no stamp and rebuilds.
+BUILD_ID="${QEMU_VERSION} ${QEMU_TARGETS} ${QEMU_CONFIGURE_OPTS[*]}"
+STAMP="${PREFIX}/.build-id"
 
 QEMU_BASE_URL="https://download.qemu.org"
 TARBALL="qemu-${QEMU_VERSION}.tar.xz"
@@ -73,9 +96,11 @@ publish_path() {
     fi
 }
 
-# Already provisioned? The pinned binary reporting the pinned version is the
-# whole success condition — skip the (minutes-long) rebuild.
-if "${BINDIR}/qemu-system-riscv64" --version 2>/dev/null | grep -qF "version ${QEMU_VERSION}"; then
+# Already provisioned? The pinned binary reporting the pinned version, built
+# from the current configuration, is the whole success condition — skip the
+# (minutes-long) rebuild.
+if [ "$(cat "$STAMP" 2>/dev/null)" = "$BUILD_ID" ] \
+    && "${BINDIR}/qemu-system-riscv64" --version 2>/dev/null | grep -qF "version ${QEMU_VERSION}"; then
     log "qemu ${QEMU_VERSION} already installed at ${PREFIX}"
     publish_path
     exit 0
@@ -91,7 +116,7 @@ missing=""
 for tool in wget tar gpg gpgv python3 ninja meson pkg-config cc; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing} ${tool}"
 done
-for pc in glib-2.0 pixman-1; do
+for pc in glib-2.0 pixman-1 nettle; do
     pkg-config --exists "$pc" 2>/dev/null || missing="${missing} ${pc}(dev)"
 done
 if [ -n "$missing" ]; then
@@ -100,8 +125,8 @@ if [ -n "$missing" ]; then
   setup step (the runner user has no root). Install them once as admin, e.g.
   on Debian/Ubuntu:
     apt-get install -y build-essential ninja-build meson python3-venv \\
-      pkg-config libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev \\
-      flex bison
+      pkg-config libglib2.0-dev libpixman-1-dev nettle-dev zlib1g-dev \\
+      libfdt-dev flex bison
   See tools/ci/github-runner/README.md (Host prerequisites)."
 fi
 
@@ -154,9 +179,17 @@ mkdir -p "${srcdir}/build"
     ../configure \
         --prefix="$PREFIX" \
         --target-list="$QEMU_TARGETS" \
-        --enable-fdt \
-        --disable-docs \
-        --disable-werror
+        "${QEMU_CONFIGURE_OPTS[@]}"
+
+    # Prove a cipher library really was compiled in, keyed on the defines
+    # `crypto/cipher.c` itself selects on, so a pin bump that reshuffles crypto
+    # detection cannot quietly produce a QEMU that refuses every AES session.
+    # Checked here, before the minutes-long build.
+    grep -qE '^#define CONFIG_(NETTLE|GCRYPT)\b' config-host.h \
+        || die "configured qemu has no cipher library: neither CONFIG_NETTLE nor
+  CONFIG_GCRYPT is defined, so every AES session request would be refused with
+  \"no crypto library enabled in build\" and the virtio-crypto vertical fails."
+
     log "building (this takes a few minutes)"
     ninja
     log "installing into ${PREFIX}"
@@ -167,6 +200,8 @@ mkdir -p "${srcdir}/build"
 # it — fail closed rather than put a wrong build on PATH.
 "${BINDIR}/qemu-system-riscv64" --version | grep -qF "version ${QEMU_VERSION}" \
     || die "built qemu does not report version ${QEMU_VERSION}"
+
+printf '%s\n' "$BUILD_ID" >"$STAMP"
 
 log "qemu ${QEMU_VERSION} installed"
 publish_path
