@@ -1,0 +1,31 @@
+[package]
+name = "tairix-drv-accelerator-virtio-crypto"
+description = "TAIRiX virtio-crypto accelerator driver: brings a discovered virtio-crypto device up over its granted register window and DMA, and runs symmetric-cipher jobs on it through the `Accelerator` driver class."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A `lib`-only driver crate, like `drivers/storage/virtio_blk` and
+# `drivers/input/virtio_input`: the whole driver is the `register` entry, the
+# `BIND_KEYS` bind table, and the device logic behind them, loaded as a signed
+# `.rxe` module through `tairix_drvhost::Host` on a node the discovery-match
+# path resolved. The device logic is co-located here rather than in a `lib/*`
+# device-support crate because an accelerator sits above the bootstrap floor
+# and so has no charter-legal non-driver consumer for one.
+
+[dependencies]
+# The `abi-v1` surface: the `Accelerator` class trait and its cipher-job
+# vocabulary, the `HwMatchKey` / `DriverBindKey` discovery identity, and the
+# `CapabilityId` / `DriverError` types the driver fails closed with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The bus-agnostic virtio split-virtqueue protocol (Transport trait,
+# SplitQueue, DMA slabs, the MockHost/MockTransport doubles). The driver
+# consumes it from `lib/*` and never depends on the `drivers/bus/virtio`
+# transport crate: a driver may depend on `lib/*` but never on another driver.
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }

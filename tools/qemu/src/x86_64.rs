@@ -119,7 +119,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // device the `pc`/`q35` machine already carries (here over the x86
     // IOport DMA interface). This is what the vesa-display vertical
     // drives.
-    if spec.display_ramfb {
+    if spec.devices.ramfb {
         argv.push("-device".into());
         argv.push("ramfb".into());
     }
@@ -206,7 +206,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push("virtio-keyboard-pci,disable-legacy=on".into());
     }
-    if interactive || spec.input_mouse {
+    if interactive || spec.devices.mouse {
         argv.push("-device".into());
         argv.push("virtio-mouse-pci,disable-legacy=on".into());
     }
@@ -217,7 +217,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Arch, SessionKind};
+    use crate::{Arch, AttachedDevices, SessionKind};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -231,12 +231,11 @@ mod tests {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -448,7 +447,7 @@ mod tests {
     #[test]
     fn argv_attaches_ramfb_when_requested() {
         let mut spec = fixture_spec(1);
-        spec.display_ramfb = true;
+        spec.devices.ramfb = true;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv
             .iter()

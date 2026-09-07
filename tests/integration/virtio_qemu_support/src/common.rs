@@ -24,12 +24,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use tairix_abi::driver::accelerator::{Accelerator, CipherAlgorithm, CipherDirection, CipherJob};
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind, POINTER_BUTTON_CODE_BASE};
 use tairix_abi::{CapabilityId, DriverHandle, Errno, RealpathMode};
 use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
+use tairix_drv_accelerator_virtio_crypto::VirtioCrypto;
 use tairix_drv_fs_arxfs::ARXFS;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_drv_storage_virtio_blk::VirtioBlk;
@@ -873,6 +875,125 @@ pub fn virtio_input_button<Tr: Transport>(
         return Err("virtio-input: no right-button release decoded");
     }
     env.log("virtio-qemu: virtio-input right-button release decoded");
+    Ok(())
+}
+
+/// The NIST SP 800-38A F.2.1/F.2.2 AES-128-CBC key, initialisation vector,
+/// plain text and cipher text — the published known-answer vectors the
+/// accelerator tail checks the device's arithmetic against.
+///
+/// Checking against a *published* vector rather than against a second
+/// implementation is what makes this vertical meaningful: the driver's own
+/// protocol tests already prove the bytes reached the device and came back,
+/// so what is left to establish is that what came back is AES-CBC.
+mod aes_cbc_kat {
+    /// `2b7e151628aed2a6abf7158809cf4f3c`.
+    pub const KEY: [u8; 16] = [
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c,
+    ];
+    /// `000102030405060708090a0b0c0d0e0f`.
+    pub const IV: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    /// The four plain-text blocks, concatenated.
+    pub const PLAIN: [u8; 64] = [
+        0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17,
+        0x2a, 0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf,
+        0x8e, 0x51, 0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb, 0xc1, 0x19, 0x1a,
+        0x0a, 0x52, 0xef, 0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17, 0xad, 0x2b, 0x41, 0x7b,
+        0xe6, 0x6c, 0x37, 0x10,
+    ];
+    /// The four cipher-text blocks the same key and vector must produce.
+    pub const CIPHER: [u8; 64] = [
+        0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46, 0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19,
+        0x7d, 0x50, 0x86, 0xcb, 0x9b, 0x50, 0x72, 0x19, 0xee, 0x95, 0xdb, 0x11, 0x3a, 0x91, 0x76,
+        0x78, 0xb2, 0x73, 0xbe, 0xd6, 0xb8, 0xe3, 0xc1, 0x74, 0x3b, 0x71, 0x16, 0xe6, 0x9e, 0x22,
+        0x22, 0x95, 0x16, 0x3f, 0xf1, 0xca, 0xa1, 0x68, 0x1f, 0xac, 0x09, 0x12, 0x0e, 0xca, 0x30,
+        0x75, 0x86, 0xe1, 0xa7,
+    ];
+}
+
+/// Name why the accelerator refused to come up, so a failing run says which
+/// of the several honest refusals it was rather than only that bring-up
+/// failed. A silent non-zero exit is no diagnosis.
+fn open_refusal(err: tairix_abi::DriverError) -> &'static str {
+    match err {
+        tairix_abi::DriverError::Unsupported => {
+            "virtio-crypto open: the device is not ready, or offers no cipher this driver implements"
+        }
+        tairix_abi::DriverError::NoSpace | tairix_abi::DriverError::LengthOutOfRange => {
+            "virtio-crypto open: the DMA pool could not carve the driver's staging"
+        }
+        tairix_abi::DriverError::DeviceFault => {
+            "virtio-crypto open: the device advertised no data queue, or a queue failed to program"
+        }
+        _ => "virtio-crypto open: refused",
+    }
+}
+
+/// Readiness marker the accelerator tail prints once the device is up, so a
+/// runner (and a reader of the log) can tell bring-up from arithmetic.
+pub const ACCEL_READY_MARKER: &str = "virtio-qemu: virtio-crypto device open";
+
+/// virtio-crypto device tail: bring the accelerator online over
+/// `transport`, encrypt the NIST SP 800-38A AES-128-CBC known-answer plain
+/// text on the device and require the published cipher text byte for byte,
+/// then decrypt it back and require the plain text.
+///
+/// Generic over the transport, so a PCI sibling runs identical device code.
+///
+/// The two directions are both driven because a virtio-crypto session binds
+/// its direction: a driver that bound the wrong one would still produce
+/// *some* bytes one way round, and only the round trip catches it.
+pub fn virtio_crypto_aes_cbc<Tr: Transport>(
+    env: &dyn QemuEnv,
+    transport: Tr,
+    vhost: &dyn VirtioHost,
+) -> Result<(), &'static str> {
+    let mut accel = VirtioCrypto::open(transport, vhost).map_err(open_refusal)?;
+    env.log(ACCEL_READY_MARKER);
+
+    let report = accel.device_report();
+    if !report.ciphers.contains(CipherAlgorithm::AesCbc) {
+        return Err("virtio-crypto: the device offered no AES-CBC");
+    }
+    if report.max_job_bytes < aes_cbc_kat::PLAIN.len() as u64 {
+        return Err("virtio-crypto: the device's job ceiling is below the vector");
+    }
+
+    let mut encrypted = [0u8; aes_cbc_kat::PLAIN.len()];
+    accel
+        .cipher(CipherJob {
+            algorithm: CipherAlgorithm::AesCbc,
+            direction: CipherDirection::Encrypt,
+            key: &aes_cbc_kat::KEY,
+            iv: &aes_cbc_kat::IV,
+            input: &aes_cbc_kat::PLAIN,
+            output: &mut encrypted,
+        })
+        .map_err(|_| "virtio-crypto: the encrypt job was refused")?;
+    if encrypted != aes_cbc_kat::CIPHER {
+        return Err("virtio-crypto: the device did not produce the AES-CBC vector");
+    }
+    env.log("virtio-qemu: virtio-crypto encrypt matches the NIST AES-CBC vector");
+
+    let mut plain = [0u8; aes_cbc_kat::CIPHER.len()];
+    accel
+        .cipher(CipherJob {
+            algorithm: CipherAlgorithm::AesCbc,
+            direction: CipherDirection::Decrypt,
+            key: &aes_cbc_kat::KEY,
+            iv: &aes_cbc_kat::IV,
+            input: &aes_cbc_kat::CIPHER,
+            output: &mut plain,
+        })
+        .map_err(|_| "virtio-crypto: the decrypt job was refused")?;
+    if plain != aes_cbc_kat::PLAIN {
+        return Err("virtio-crypto: the decrypt did not return the plain text");
+    }
+    env.log("virtio-qemu: virtio-crypto decrypt returns the plain text");
     Ok(())
 }
 

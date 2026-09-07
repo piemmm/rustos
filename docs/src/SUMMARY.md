@@ -114,6 +114,7 @@
 - [Display drivers](./drivers/display.md)
 - [Input drivers](./drivers/input.md)
 - [Real-time-clock drivers](./drivers/rtc.md)
+- [Accelerator drivers](./drivers/accelerator.md)
 
 # Filesystem
 

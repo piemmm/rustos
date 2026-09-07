@@ -189,7 +189,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // lives in guest RAM; the guest programs its geometry over the
     // `fw_cfg` device the `virt` board already carries. This is what the
     // framebuffer-display vertical drives.
-    if spec.display_ramfb {
+    if spec.devices.ramfb {
         argv.push("-device".into());
         argv.push("ramfb".into());
     }
@@ -260,7 +260,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Arch, SessionKind};
+    use crate::{Arch, AttachedDevices, SessionKind};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -274,12 +274,11 @@ mod tests {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -510,7 +509,7 @@ mod tests {
     #[test]
     fn argv_attaches_ramfb_when_requested() {
         let mut spec = fixture_spec(1);
-        spec.display_ramfb = true;
+        spec.devices.ramfb = true;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv
             .iter()

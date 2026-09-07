@@ -1027,6 +1027,8 @@ fn device_class_from_base(base_class: u8) -> HwDeviceClass {
         // Bridge (0x06) and serial-bus controller (0x0C, incl. USB
         // host controllers) are buses to further devices.
         0x06 | 0x0C => HwDeviceClass::Bus,
+        // Processing accelerator: a device that computes rather than moves.
+        0x12 => HwDeviceClass::Accelerator,
         _ => HwDeviceClass::Other,
     }
 }

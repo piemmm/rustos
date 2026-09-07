@@ -48,6 +48,7 @@
 #define TAIRIX_HW_CLASS_STORAGE ((uint16_t)9u)
 #define TAIRIX_HW_CLASS_SERIAL ((uint16_t)10u)
 #define TAIRIX_HW_CLASS_RTC ((uint16_t)11u)
+#define TAIRIX_HW_CLASS_ACCELERATOR ((uint16_t)12u)
 #define TAIRIX_HW_CLASS_OTHER ((uint16_t)65535u)
 
 /* Match-key kinds (uint16_t). */

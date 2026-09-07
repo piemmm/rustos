@@ -13,6 +13,7 @@
 //! * [`input`] — keyboard / pointer / scroll input.
 //! * [`bus`] — bus enumeration (PCI, MMIO, virtio).
 //! * [`rtc`] — the board's battery-backed real-time clock.
+//! * [`accelerator`] — offload engines that compute rather than move.
 //!
 //! # Lifecycle
 //!
@@ -46,6 +47,7 @@ use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
 use crate::{CapabilityId, Errno};
 
+pub mod accelerator;
 pub mod block;
 pub mod bus;
 pub mod display;

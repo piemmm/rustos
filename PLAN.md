@@ -436,7 +436,8 @@ deferred to later stages (not stubbed, §15.1).
 
 **Deliverables**
 - [x] `lib/abi/src/driver/` driver traits per class
-  (`Display`, `Filesystem`, `Block`, `Net`, `Input`, `Bus`).
+  (`Display`, `Filesystem`, `Block`, `Net`, `Input`, `Bus`, `Rtc`,
+  `Accelerator`).
 - Driver host in `userland/` that loads/unloads `.rxe` driver modules,
   enforcing capabilities at load time.
 - Initial drivers:
@@ -449,6 +450,15 @@ deferred to later stages (not stubbed, §15.1).
     `drivers/input/usb_mouse` (HID boot-protocol class drivers over the
     URB transport, `plans/USB.md`).
   - `drivers/network/virtio_net`.
+  - `drivers/accelerator/virtio_crypto` — the accelerator class's first
+    member: a device that computes rather than moves. Symmetric AES-CBC
+    over the virtio-crypto control/data queues, a session created and
+    destroyed per job so no key material outlives the call that supplied
+    it, and a published per-job ceiling a larger job is refused against
+    rather than silently split. `HwDeviceClass::Accelerator` is classified
+    from PCI base class `0x12` and from the devicetree `crypto`/`dsp`/
+    `video-codec` generic names. The accelerator pane the class exists to
+    give a device to describe is `plans/NEW-SWITCHBOARD.md` V7.
 
 **Tests**
 - Mock-host unit tests for each driver.

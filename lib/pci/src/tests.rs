@@ -1541,6 +1541,35 @@ fn describe_function_emits_the_vl805_child_node() {
     assert!(!HwMatchKey::pci(0, 0, 0x0C_03_20).matches(&key));
 }
 
+/// A processing-accelerator function (PCI base class `0x12`) is classed
+/// [`HwDeviceClass::Accelerator`], not folded into `Other` — that class is
+/// what makes an offload engine a device the hardware tree names.
+#[test]
+fn describe_function_classes_a_processing_accelerator() {
+    use tairix_abi::driver::pci::PciBus;
+    use tairix_abi::HwDeviceClass;
+
+    let (mut backing, window) = vl805_ecam_region();
+    // Plant 01:01.0 as a processing accelerator: base class 0x12, sub-class
+    // and prog-if zero (the spec's "other" accelerator).
+    put_ecam(&mut backing, 1, 1, 0, 0, (0xABCDu32 << 16) | 0x1234);
+    put_ecam(&mut backing, 1, 1, 0, 2, 0x12_00_00 << 8);
+    put_ecam(&mut backing, 1, 1, 0, 3, 0x00 << 16);
+    let accelerator = ConfigAddress {
+        bus: 1,
+        device: 1,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf();
+    let pci = crate::mechanism_ecam(window);
+    let node = (&pci as &dyn PciBus)
+        .describe_function(accelerator)
+        .expect("describes the accelerator");
+    assert_eq!(node.class(), Some(HwDeviceClass::Accelerator));
+    assert_eq!(node.match_keys()[0].class(), 0x12_00_00);
+}
+
 /// `describe_function` fails closed on a `bdf` with no responding
 /// function (the all-ones vendor sentinel), never fabricating a node.
 #[test]

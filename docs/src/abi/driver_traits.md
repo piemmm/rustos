@@ -19,6 +19,8 @@ capability model, kinds) lives in
 | [`tairix_abi::driver::net`]           | `Net` trait + MAC address.             |
 | [`tairix_abi::driver::input`]         | `Input` trait + event records.         |
 | [`tairix_abi::driver::bus`]           | `Bus` trait + device records.          |
+| [`tairix_abi::driver::rtc`]           | `Rtc` trait + the shared BCD codec.    |
+| [`tairix_abi::driver::accelerator`]   | `Accelerator` trait + cipher-job types. |
 | [`tairix_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
 | [`tairix_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
 | [`tairix_abi::driver::pci`]           | `PciBus` generic BAR / bus-master seam. |
@@ -30,6 +32,8 @@ capability model, kinds) lives in
 [`tairix_abi::driver::net`]: #net
 [`tairix_abi::driver::input`]: #input
 [`tairix_abi::driver::bus`]: #bus
+[`tairix_abi::driver::rtc`]: ../drivers/rtc.md
+[`tairix_abi::driver::accelerator`]: ../drivers/accelerator.md
 [`tairix_abi::driver::virtio_pci`]: #virtio-pci-provisioning
 [`tairix_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
 [`tairix_abi::driver::pci`]: #generic-pci-provisioning

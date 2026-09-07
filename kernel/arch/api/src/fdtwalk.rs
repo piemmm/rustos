@@ -419,6 +419,10 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
         b"mmc" | b"sdhci" | b"emmc2" => HwDeviceClass::Storage,
         b"keyboard" | b"mouse" | b"touchscreen" => HwDeviceClass::Input,
         b"display" | b"gpu" | b"hdmi" | b"framebuffer" => HwDeviceClass::Display,
+        // The three generic names the devicetree spec offers for a device
+        // that computes rather than moves: a crypto offload, a signal
+        // processor, a media decode/encode engine.
+        b"crypto" | b"dsp" | b"video-codec" => HwDeviceClass::Accelerator,
         b"soc" | b"bus" | b"pci" | b"pcie" | b"usb" | b"axi" => HwDeviceClass::Bus,
         _ => HwDeviceClass::Other,
     }
@@ -430,7 +434,7 @@ mod tests {
     use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
     use std::vec::Vec;
     use tairix_abi::hwtree::bus_child_endpoint;
-    use tairix_abi::{HwNode, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES};
+    use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES};
     use tairix_fdt::fixture::DtbBuilder;
     use tairix_fdt::{BusLevel, Fdt, Node};
 
@@ -548,6 +552,55 @@ mod tests {
         b.end_node();
         b.end_node();
         b.build()
+    }
+
+    /// The three devicetree generic names for a device that computes rather
+    /// than moves are classed [`HwDeviceClass::Accelerator`]. Without the
+    /// class an offload engine is discovered as `Other`, so nothing above
+    /// discovery can tell it apart from an unmodelled device.
+    #[test]
+    fn an_offload_engine_node_is_classed_as_an_accelerator() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        for (name, compatible) in [
+            ("crypto@ff8b0000", "vendor,crypto"),
+            ("dsp@ff8c0000", "vendor,dsp"),
+            ("video-codec@ff8d0000", "vendor,vpu"),
+            // A name outside the generic set stays honestly unmodelled.
+            ("widget@ff8e0000", "vendor,widget"),
+        ] {
+            b.begin_node(name);
+            b.prop_str("compatible", compatible);
+            b.prop(
+                "reg",
+                &[
+                    &0xFF8B_0000u64.to_be_bytes()[..],
+                    &0x1000u64.to_be_bytes()[..],
+                ]
+                .concat(),
+            );
+            b.end_node();
+        }
+        b.end_node();
+        let nodes = discover(&b.build());
+        for compatible in [
+            &b"vendor,crypto"[..],
+            &b"vendor,dsp"[..],
+            &b"vendor,vpu"[..],
+        ] {
+            assert_eq!(
+                by_key(&nodes, compatible).class(),
+                Some(HwDeviceClass::Accelerator),
+                "{}",
+                core::str::from_utf8(compatible).unwrap_or("?")
+            );
+        }
+        assert_eq!(
+            by_key(&nodes, b"vendor,widget").class(),
+            Some(HwDeviceClass::Other)
+        );
     }
 
     #[test]

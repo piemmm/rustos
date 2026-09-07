@@ -1040,6 +1040,14 @@ name = "tairix-dma-barrier"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-drv-accelerator-virtio-crypto"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-virtio",
+]
+
+[[package]]
 name = "tairix-drv-bus-i2c-bcm2835"
 version = "0.0.0"
 dependencies = [
@@ -2839,6 +2847,17 @@ dependencies = [
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-accel-virtio-crypto-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "tairix-abi",
+ "tairix-drv-accelerator-virtio-crypto",
+ "tairix-itest-harness",
+ "tairix-test-virtio-qemu-support",
 ]
 
 [[package]]
@@ -5448,6 +5467,7 @@ dependencies = [
  "tairix-arch-x86_64",
  "tairix-caps",
  "tairix-crypto",
+ "tairix-drv-accelerator-virtio-crypto",
  "tairix-drv-bus-mmio",
  "tairix-drv-bus-virtio",
  "tairix-drv-fs-arxfs",

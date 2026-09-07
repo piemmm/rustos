@@ -552,6 +552,7 @@ tairix/
 │   └── tairix-kernel/   # The microkernel binary.
 │
 ├── drivers/             # Loadable modules. One folder per device class.
+│   ├── accelerator/     # Offload engines: virtio_crypto.
 │   ├── display/
 │   │   ├── vesa/
 │   │   ├── framebuffer/

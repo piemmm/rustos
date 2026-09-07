@@ -27,7 +27,7 @@ lie about.
 | **C2** | `metric::CompositionBar` — named proportional segments of a measured whole, with its key; segments that do not sum to the whole are a construction error | — | S7 | done |
 | **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | done |
 | **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | done |
-| **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | planned |
+| **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | done |
 | **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | done |
 | **Q2** | `VOLUME_IO_QUEUE` — `CAP_SYSINFO_KERNEL`, audited: `in_flight`, queue depth sum + samples, the class budget in force | `plans/FIX-IO.md` per-device counters | S8 | done |
 | **Q3** | `GPU_DEVICE_STATS` — `CAP_SYSINFO_HW`: the device's `busy_ns`/`idle_ns`, its memory, its `AccelCaps` and its scan-out mode | `plans/FIX-DISPLAY-ACCELERATION.md` accel path | S8 | done |
@@ -40,7 +40,7 @@ lie about.
 | **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
 | **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | done |
 | **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
-| **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4 | V1, P1, D1, Q4 | S4 | planned |
+| **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4. Also brings the virtio-MMIO/PCI **accelerator probe** and the driver-store bundle: D1's classifiers put a real PCI or device-tree accelerator in the tree, but a virtio accelerator's type is only visible to a runtime slot probe, and the rail is that probe's only consumer | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
 | **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
 | **V10** | Top-consumers block on the CPU, Memory and volume panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | done |
@@ -387,10 +387,11 @@ reading; a fact list cannot carry it.
   - **Graphics** (`06-graphics.png`) — the frame-work breakdown, the
     compositing path, and the graphics device.
   - **An accelerator** (`07-accelerator.png`) — what the node's discovery
-    genuinely reports, and the readings awaiting S8's query. This pane lands
-    with **D1**, not before: there is no `HwDeviceClass` for an accelerator
-    yet, so discovery reports no such node, the rail grows no `Accelerators`
-    group, and a pane written ahead of it would be code nothing can reach.
+    genuinely reports, and the readings awaiting S8's query. `D1` landed the
+    class, so `HwDeviceClass::Accelerator` exists and a real PCI or
+    device-tree accelerator is classified as one; this pane brings the virtio
+    slot probe that puts a *virtio* accelerator in the tree, because the rail
+    is that probe's only consumer.
   - **Machine** — identity and uptime; the seats and logged-in census; the
     authority summary with the resource limits and their live usage.
 
@@ -847,13 +848,45 @@ updated in the same change. None of them adds a capability: the existing
 boundaries involved, and a capability with no boundary of its own is not
 added.
 
-**An accelerator also needs a driver class before its pane has a device to
-describe.** `drivers/accelerator/` with its trait in
-`lib/abi/src/driver/accelerator.rs`, so a hardware-tree node binds through the
-ordinary discovery-match path and never by naming a part. Until then the pane
-reports what discovery genuinely knows — the node, its class, its match keys,
-and that no driver matched — which is a real state, not an error and never a
-panic.
+**The accelerator driver class is landed** (`drivers/accelerator/`, trait in
+`lib/abi/src/driver/accelerator.rs`, `HwDeviceClass::Accelerator`), so a
+hardware-tree node binds through the ordinary discovery-match path and never
+by naming a part. What the class fixed, and what it deliberately left:
+
+- **Two production classifiers, both with a live producer.** PCI base class
+  `0x12` (`lib/pci`'s `describe_function`) and the three devicetree generic
+  names for a device that computes rather than moves — `crypto`, `dsp`,
+  `video-codec` (`kernel/arch/api`'s `fdtwalk`). Both previously reported such
+  a device as `Other`, so nothing above discovery could tell an offload engine
+  from an unmodelled one.
+- **The class surface is two methods, not a general job ABI.**
+  `device_report` (memory, the algorithms the device offers, the per-job
+  ceiling) and `cipher`. A symmetric cipher is the only workload family a
+  device in this tree offers; an operation for a family with no device and no
+  consumer would be the interface-with-no-producer this plan already refused
+  once. The occupancy a reader wants beside the report is the *hosting
+  service's*, measured by bracketing the work call exactly as Q3's is — which
+  is why `in_flight` is Q4's, not the driver's.
+- **A session per job, because a retained key is a liability.**
+  virtio-crypto binds key *and* direction into a device-side session; reusing
+  one would mean holding the caller's key to compare the next job's against.
+  Two extra control-queue round trips buys the guarantee that no key material
+  outlives the call that supplied it.
+- **A job above the published ceiling is refused, never split**, because
+  splitting a chained-block job is the caller's initialisation-vector decision,
+  not a silent driver transformation.
+- **What V7 still brings.** A *virtio* accelerator's device type is visible
+  only to a runtime slot probe, not to the device tree, so no
+  `observe_virtio_mmio_accelerator_devices` and no driver-store bundle landed
+  with D1: the rail is that probe's only consumer, and a probe emitting nodes
+  nothing reads would be surface ahead of its consumer. The driver is proven
+  end to end regardless — the QEMU vertical drives QEMU's own
+  `virtio-crypto-device` through the signed `.rxe` load path and requires the
+  NIST SP 800-38A F.2 AES-128-CBC known-answer cipher text byte for byte.
+
+The pane still reports what discovery genuinely knows for an unbound node —
+the node, its class, its match keys, and that no driver matched — which is a
+real state, not an error and never a panic.
 
 ## S9 — Palette and pressure-kind additions — planned
 

@@ -126,7 +126,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // Attach QEMU's `ramfb` display device when requested (firmware-
     // programmed linear framebuffer in guest RAM, programmed over
     // `fw_cfg`), the display-class analogue of the virtio-mmio devices.
-    if spec.display_ramfb {
+    if spec.devices.ramfb {
         argv.push("-device".into());
         argv.push("ramfb".into());
     }
@@ -176,6 +176,18 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
+    // Attach a virtio-mmio crypto accelerator behind QEMU's builtin
+    // cryptodev backend, for a vertical that drives a real offload engine.
+    // The backend offers AES-CBC, so the guest's output can be checked
+    // against a published known-answer vector rather than merely against
+    // itself.
+    if spec.devices.crypto_accelerator {
+        argv.push("-object".into());
+        argv.push("cryptodev-backend-builtin,id=cryptodev0".into());
+        argv.push("-device".into());
+        argv.push("virtio-crypto-device,id=crypto0,cryptodev=cryptodev0".into());
+    }
+
     // Attach a virtio-mmio keyboard for the input vertical (the runner
     // drives the scripted key or typed text through the QEMU monitor once
     // the guest signals readiness) or for a human typing into the
@@ -187,7 +199,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("-device".into());
         argv.push("virtio-keyboard-device".into());
     }
-    if interactive || spec.input_mouse {
+    if interactive || spec.devices.mouse {
         argv.push("-device".into());
         argv.push("virtio-mouse-device".into());
     }
@@ -197,7 +209,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Arch;
+    use crate::{Arch, AttachedDevices};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -211,12 +223,11 @@ mod tests {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -275,6 +286,24 @@ mod tests {
         );
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
         assert!(argv.iter().any(|a| a == "virtio-mouse-device"));
+    }
+
+    #[test]
+    fn a_crypto_accelerator_is_attached_with_its_backend_and_only_on_request() {
+        let spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a.contains("virtio-crypto")));
+        assert!(!argv.iter().any(|a| a.contains("cryptodev")));
+
+        let spec = fixture_spec(1).with_crypto_accelerator();
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        // The device is useless without its backend, so both or neither.
+        assert!(argv
+            .iter()
+            .any(|a| a == "cryptodev-backend-builtin,id=cryptodev0"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-crypto-device,id=crypto0,cryptodev=cryptodev0"));
     }
 
     #[test]
@@ -456,7 +485,7 @@ mod tests {
             key: "a".into(),
             ready_occurrences: 1,
         });
-        spec.input_mouse = true;
+        spec.devices.mouse = true;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let kbd = argv
             .iter()

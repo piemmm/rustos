@@ -134,6 +134,9 @@ pub enum HwDeviceClass {
     Serial = 10,
     /// A real-time clock: the board's local wall-time source.
     Rtc = 11,
+    /// An offload engine that performs bounded units of work off-CPU: a
+    /// crypto offload, an NPU, a media engine.
+    Accelerator = 12,
     /// A device whose class is not modelled by `abi-v1`.
     Other = 65535,
 }
@@ -161,6 +164,7 @@ impl HwDeviceClass {
             9 => Some(Self::Storage),
             10 => Some(Self::Serial),
             11 => Some(Self::Rtc),
+            12 => Some(Self::Accelerator),
             65535 => Some(Self::Other),
             _ => None,
         }
@@ -2169,11 +2173,12 @@ mod tests {
             HwDeviceClass::Storage,
             HwDeviceClass::Serial,
             HwDeviceClass::Rtc,
+            HwDeviceClass::Accelerator,
             HwDeviceClass::Other,
         ] {
             assert_eq!(HwDeviceClass::from_u16(class.as_u16()), Some(class));
         }
-        assert_eq!(HwDeviceClass::from_u16(12), None);
+        assert_eq!(HwDeviceClass::from_u16(13), None);
         assert_eq!(HwDeviceClass::from_u16(64_000), None);
         assert_eq!(HwDeviceClass::default(), HwDeviceClass::Root);
     }

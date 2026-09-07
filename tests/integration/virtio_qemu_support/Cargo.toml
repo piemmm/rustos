@@ -47,6 +47,9 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+# The virtio-crypto accelerator driver behind the `virtio_crypto_aes_cbc`
+# device tail: the accelerator-class round trip the aarch64 vertical drives.
+tairix-drv-accelerator-virtio-crypto = { path = "../../../drivers/accelerator/virtio_crypto", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
@@ -89,6 +92,9 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+# The virtio-crypto accelerator driver behind the `virtio_crypto_aes_cbc`
+# device tail: the accelerator-class round trip the aarch64 vertical drives.
+tairix-drv-accelerator-virtio-crypto = { path = "../../../drivers/accelerator/virtio_crypto", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }
@@ -127,6 +133,9 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 tairix-drv-bus-mmio = { path = "../../../drivers/bus/mmio", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
 tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+# The virtio-crypto accelerator driver behind the `virtio_crypto_aes_cbc`
+# device tail: the accelerator-class round trip the aarch64 vertical drives.
+tairix-drv-accelerator-virtio-crypto = { path = "../../../drivers/accelerator/virtio_crypto", version = "=0.0.0" }
 tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }
 tairix-drv-fs-fat32 = { path = "../../../drivers/filesystem/fat32", version = "=0.0.0" }
 tairix-drv-fs-arxfs = { path = "../../../drivers/filesystem/arxfs", version = "=0.0.0" }

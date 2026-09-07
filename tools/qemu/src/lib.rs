@@ -624,6 +624,40 @@ impl Arch {
 /// ([`Spec::with_runtime_ceiling`]). See [`Spec::runtime_ceiling`].
 const RUNTIME_CEILING_BUDGETS: u32 = 2;
 
+/// The optional emulated devices a run attaches beyond the board's own.
+///
+/// Grouped because "which devices does this guest see" is one question a run
+/// answers once. As separate flags on [`Spec`] the answer was scattered, and
+/// each new device widened a type every vertical constructs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AttachedDevices {
+    /// A QEMU `ramfb` display device: a firmware-programmed linear
+    /// framebuffer whose scan-out surface lives in guest RAM, whose geometry
+    /// the guest programs over `fw_cfg`. The riscv64 and aarch64 `virt`
+    /// boards carry the `fw_cfg` device it rides on; x86_64 ignores it today.
+    pub ramfb: bool,
+    /// A `virtio-crypto` device backed by QEMU's builtin cryptodev backend,
+    /// for a vertical that drives a real offload engine. The backend offers
+    /// AES-CBC, which is what the accelerator vertical checks the device's
+    /// arithmetic against. Only the aarch64 argv honours it today.
+    pub crypto_accelerator: bool,
+    /// A `virtio-mouse-device` after the keyboard — the same
+    /// two-identical-virtio-input-nodes topology an interactive session
+    /// presents — so a vertical can prove the keyboard is still driven when a
+    /// pointer sibling is enumerated beside it. Only the aarch64 argv honours
+    /// it today.
+    pub mouse: bool,
+}
+
+impl AttachedDevices {
+    /// A run that attaches none of them: the board alone.
+    pub const NONE: Self = Self {
+        ramfb: false,
+        crypto_accelerator: false,
+        mouse: false,
+    };
+}
+
 /// Architecture-neutral configuration for a single QEMU test invocation.
 ///
 /// Built by the caller (typically `cargo xtask test --qemu`) and consumed by
@@ -668,14 +702,9 @@ pub struct Spec {
     /// Virtio network interfaces attached over QEMU user-mode networking,
     /// in declaration order. Empty for tests that need no network.
     pub net_devices: Vec<NetDevice>,
-    /// When `true`, attach a QEMU `ramfb` display device. `ramfb` is a
-    /// firmware-programmed linear framebuffer whose scan-out surface
-    /// lives in guest RAM; the guest programs its geometry over the
-    /// `fw_cfg` interface. The riscv64 `virt` board carries the
-    /// `fw_cfg` device `ramfb` rides on, so this is the display-class
-    /// analogue of [`Spec::with_virtio_blk`] for the framebuffer
-    /// vertical. x86_64 ignores it today.
-    pub display_ramfb: bool,
+    /// The optional devices this run attaches beyond the board's own and the
+    /// disks and interfaces above.
+    pub devices: AttachedDevices,
     /// When `Some`, start the board's emulated real-time clock at this
     /// instant (Unix seconds) instead of the host clock, through QEMU's
     /// `-rtc base=<datetime>`. Every board QEMU models an RTC for — the
@@ -702,17 +731,11 @@ pub struct Spec {
     /// a step types only after the previous step finished *and* its own
     /// marker was seen. Only the aarch64 argv honours it today.
     pub input_typing: Vec<KeyTyping>,
-    /// When `true`, attach a `virtio-mouse-device` after the keyboard —
-    /// the same two-identical-virtio-input-nodes topology an interactive
-    /// session presents — so a vertical can prove the keyboard is still
-    /// driven when a pointer sibling is enumerated beside it. Only the
-    /// aarch64 argv honours it today.
-    pub input_mouse: bool,
     /// When non-empty, inject the described pointer actions through the
     /// QEMU monitor strictly in order, each once its readiness marker has
     /// appeared on the serial console and every earlier-requested
     /// screendump has verified. Meaningful only with
-    /// [`Spec::input_mouse`]; empty injects nothing.
+    /// [`AttachedDevices::mouse`]; empty injects nothing.
     pub pointer_script: Vec<PointerStep>,
     /// When `true`, the pointer script is an upper *bound* on the gesture
     /// rather than an exchange to exhaust: an unsent tail is not a failure.
@@ -860,12 +883,11 @@ impl Spec {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -993,12 +1015,11 @@ impl Spec {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -1024,12 +1045,11 @@ impl Spec {
             declared_ram_mib: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),
@@ -1103,7 +1123,16 @@ impl Spec {
     /// vertical on the riscv64 `virt` board.
     #[must_use]
     pub fn with_ramfb(mut self) -> Self {
-        self.display_ramfb = true;
+        self.devices.ramfb = true;
+        self
+    }
+
+    /// Attach a `virtio-crypto` device backed by QEMU's builtin cryptodev
+    /// backend, so a vertical can drive a real offload engine and check the
+    /// bytes it produced.
+    #[must_use]
+    pub fn with_crypto_accelerator(mut self) -> Self {
+        self.devices.crypto_accelerator = true;
         self
     }
 
@@ -1201,7 +1230,7 @@ impl Spec {
     /// pointer sibling matches the same driver bundle.
     #[must_use]
     pub fn with_virtio_mouse(mut self) -> Self {
-        self.input_mouse = true;
+        self.devices.mouse = true;
         self
     }
 
@@ -1217,7 +1246,7 @@ impl Spec {
         occurrences: u32,
         action: PointerAction,
     ) -> Self {
-        self.input_mouse = true;
+        self.devices.mouse = true;
         self.pointer_script.push(PointerStep {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
@@ -3749,7 +3778,7 @@ mod tests {
             )
             .with_pointer_step("presented", 1, PointerAction::Press(MouseButton::Primary))
             .with_pointer_step("menu open", 1, PointerAction::Release(MouseButton::Primary));
-        assert!(s.input_mouse, "a pointer script implies the mouse device");
+        assert!(s.devices.mouse, "a pointer script implies the mouse device");
         assert_eq!(s.pointer_script.len(), 3, "steps append in order");
         let p = &s.pointer_script[0];
         assert_eq!(p.ready_marker, "presented");
@@ -3967,12 +3996,11 @@ mod tests {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],
             net_devices: Vec::new(),
-            display_ramfb: false,
+            devices: AttachedDevices::NONE,
             rtc_base_unix_secs: None,
             extra_args: Vec::new(),
             input_keyboard: None,
             input_typing: Vec::new(),
-            input_mouse: false,
             pointer_script: Vec::new(),
             bounded_pointer_script: false,
             serial_input: Vec::new(),

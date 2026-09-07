@@ -15,17 +15,19 @@ current traits express is introduced as a new versioned trait in
 
 ## Trait surface
 
-Six driver-class traits are defined under
+Eight driver-class traits are defined under
 `lib/abi/src/driver/`:
 
-| Class      | Trait                                       | Stage 4 first drivers                     |
-|------------|---------------------------------------------|-------------------------------------------|
-| Display    | [`driver::display::Display`]                | `drivers/display/{vesa,framebuffer,gpu_virtio}` |
-| Filesystem | [`driver::filesystem::Filesystem`]          | `drivers/filesystem/{fat32,ext4,arxfs}` (Stage 5) |
-| Block      | [`driver::block::Block`]                    | `drivers/storage/virtio_blk`              |
-| Net        | [`driver::net::Net`]                        | `drivers/network/virtio_net`              |
-| Input      | [`driver::input::Input`]                    | `drivers/input/{ps2,usb_kbd,usb_mouse}`             |
-| Bus        | [`driver::bus::Bus`]                        | `drivers/bus/{pci,mmio,virtio}`           |
+| Class       | Trait                                       | First drivers                     |
+|-------------|---------------------------------------------|-------------------------------------------|
+| Display     | [`driver::display::Display`]                | `drivers/display/{vesa,framebuffer,gpu_virtio,rpi_hvs}` |
+| Filesystem  | [`driver::filesystem::Filesystem`]          | `drivers/filesystem/{fat32,ext4,adfs,arxfs}` |
+| Block       | [`driver::block::Block`]                    | `drivers/storage/virtio_blk`              |
+| Net         | [`driver::net::Net`]                        | `drivers/network/virtio_net`              |
+| Input       | [`driver::input::Input`]                    | `drivers/input/{ps2,usb_kbd,usb_mouse}`             |
+| Bus         | [`driver::bus::Bus`]                        | `drivers/bus/{pcie_brcm,mmio,virtio,usb}` |
+| Rtc         | [`driver::rtc::Rtc`]                        | `drivers/rtc/{pl031,goldfish,mc146818,…}` |
+| Accelerator | [`driver::accelerator::Accelerator`]        | `drivers/accelerator/virtio_crypto`       |
 
 Each class crate (`drivers/<class>/<name>/`) ships exactly one
 `pub fn register(host: &dyn DriverHost) -> Result<DriverHandle,
@@ -109,6 +111,8 @@ surfaced through a syscall.
 [`driver::net::Net`]: ../abi/driver_traits.md#net
 [`driver::input::Input`]: ../abi/driver_traits.md#input
 [`driver::bus::Bus`]: ../abi/driver_traits.md#bus
+[`driver::rtc::Rtc`]: ./rtc.md
+[`driver::accelerator::Accelerator`]: ./accelerator.md
 [`DriverKind`]: ../abi/driver_traits.md#driverkind
 [`DriverHandle`]: ../abi/driver_traits.md#driverhandle
 [`DriverError`]: ../abi/driver_traits.md#drivererror
