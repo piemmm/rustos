@@ -123,7 +123,10 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   it emits a typed `TabsAction`. Where the pointer rests and where the keyboard
   cursor is are two separate records — both lift a tab, only the keyboard's is
   ringed — so a host re-stating its keyboard focus, which a monitoring host does
-  on every refresh, cannot erase a resting pointer's highlight.
+  on every refresh, cannot erase a resting pointer's highlight. A host whose
+  entries come and go adopts each sample through `Tabs::restate`, which keeps
+  where the pointer is and which entry holds a press rather than replacing the
+  strip and forgetting both.
 - `combo` — `ComboBox` composes the text-field focus model and the `Menu` model
   (its popup *is* a `Menu`), opening/selecting/closing by pointer and keyboard
   and emitting a typed `ComboAction`.

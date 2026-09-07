@@ -1,17 +1,26 @@
 //! Unit tests for the device rail: that a group with no entries states why
-//! it is empty, in its own rail position, and that stating it shifts no
-//! entry's index.
+//! it is empty, in its own rail position, that stating it shifts no entry's
+//! index, and that pressing an entry selects it and repaints the pane it
+//! now draws.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::PressureKind;
+use tairix_geometry::{Rect, Region, Scale};
+use tairix_input::{InputEvent, Key, NamedKey};
+use tairix_theme::Theme;
+
+use tairix_controls::{damage, PressureKind};
 
 use super::{build_rail, rail_absences};
 use crate::view::reading::{Reading, Unmeasured};
 use crate::view::resources::{
     DeviceGroup, DeviceId, PaneHero, ResourceDevice, ResourceReport, StorageId,
 };
+use crate::view::test_support::{
+    bounds, centre, click, font, model, moved, refresh, shot, unreported_change, PRESS, RELEASE,
+};
+use crate::view::{Section, Switchboard};
 
 /// A bare rail entry in `group`, with no instrument and no pane detail: this
 /// suite is about which groups the rail states, not what a pane draws.
@@ -182,5 +191,186 @@ fn stating_an_absence_shifts_no_entry_index() {
         rail.selected(),
         Some(2),
         "the graphics entry is the third *item*, whatever is drawn between them"
+    );
+}
+
+/// The screen on the Resources section, showing the shared fixture report.
+fn resources_screen() -> Switchboard {
+    let mut sb = Switchboard::new(&model());
+    sb.select_section(Section::Resources);
+    let _ = shot(&mut sb);
+    sb
+}
+
+/// The window point that hits rail entry `index`, read from the strip's own
+/// layout so a test aims where the screen really seats the entry.
+fn rail_point(sb: &Switchboard, index: usize) -> (i32, i32) {
+    let theme = Theme::dark();
+    let b = bounds();
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
+    let sidebar = ctx
+        .frame
+        .sidebar
+        .expect("the fixture window seats a sidebar");
+    let area = sb
+        .resources
+        .rail
+        .tab_area(index, sidebar, Scale::ONE, &theme)
+        .expect("the entry is seated");
+    centre(area)
+}
+
+/// The sidebar's own rectangle in the fixture window.
+fn sidebar_rect(sb: &Switchboard) -> Rect {
+    let theme = Theme::dark();
+    let b = bounds();
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
+    ctx.frame
+        .sidebar
+        .expect("the fixture window seats a sidebar")
+}
+
+/// Feed one event to the screen, accumulating what it reports into `reported`.
+fn feed(sb: &mut Switchboard, event: &InputEvent, reported: &mut Region) {
+    sb.on_pointer(
+        event,
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        reported,
+    );
+}
+
+/// The fixture's storage device, the entry these tests select onto.
+const STORAGE: DeviceId = DeviceId::Storage(StorageId::Device(0x5953_2001));
+
+#[test]
+fn selecting_a_device_reports_the_pane_it_now_draws() {
+    // The pane is the whole point of pressing a rail entry, so a press that
+    // switches device owes every pixel the new pane draws. Reporting only
+    // the strip's own lift leaves the reader looking at the previous
+    // device's readings until something else repaints the window whole.
+    let mut sb = resources_screen();
+    let before = shot(&mut sb);
+    let (x, y) = rail_point(&sb, 2);
+    let mut reported = damage::sink();
+    for event in [moved(x, y), PRESS, RELEASE] {
+        feed(&mut sb, &event, &mut reported);
+    }
+    assert_eq!(sb.resources.selected, Some(STORAGE), "the press selected");
+    let after = shot(&mut sb);
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &reported),
+        None,
+        "a press that switches pane must report every pixel it moved"
+    );
+}
+
+#[test]
+fn a_sample_landing_under_a_resting_pointer_does_not_swallow_the_click() {
+    // A reader moves onto an entry, rests, and clicks. A sample lands in
+    // between — they arrive about once a second — and the press must still
+    // select what the pointer is over.
+    let mut sb = resources_screen();
+    let (x, y) = rail_point(&sb, 2);
+    let mut reported = damage::sink();
+    feed(&mut sb, &moved(x, y), &mut reported);
+    let _ = refresh(&mut sb, &model());
+    feed(&mut sb, &PRESS, &mut reported);
+    feed(&mut sb, &RELEASE, &mut reported);
+    assert_eq!(
+        sb.resources.selected,
+        Some(STORAGE),
+        "a sample between the pointer's motion and its press swallowed the click"
+    );
+}
+
+#[test]
+fn a_sample_keeps_the_lift_under_a_resting_pointer() {
+    // The lift states where the pointer is, and the pointer has not moved,
+    // so re-deriving the strip from an identical sample must draw the same
+    // sidebar rather than blinking the highlight off.
+    let mut sb = resources_screen();
+    let (x, y) = rail_point(&sb, 2);
+    feed(&mut sb, &moved(x, y), &mut damage::sink());
+    let before = shot(&mut sb);
+    let _ = refresh(&mut sb, &model());
+    let after = shot(&mut sb);
+    assert_eq!(
+        unreported_change(&before, &after, sidebar_rect(&sb), &damage::sink()),
+        None,
+        "an identical sample must leave the rail's own pixels alone"
+    );
+}
+
+#[test]
+fn the_keyboard_reports_the_pane_it_selects_onto() {
+    // The cursor on a rail entry *is* the selection, so Down owes the new
+    // pane exactly as a press does.
+    let mut sb = resources_screen();
+    let before = shot(&mut sb);
+    let mut reported = damage::sink();
+    sb.on_key(
+        Key::Named(NamedKey::Down),
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut reported,
+    );
+    assert_ne!(
+        sb.resources.selected,
+        Some(DeviceId::Cpu),
+        "Down moved off the first entry"
+    );
+    let after = shot(&mut sb);
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &reported),
+        None,
+        "a cursor move that switches pane must report every pixel it moved"
+    );
+}
+
+#[test]
+fn the_pressure_banner_draws_nothing_outside_the_pane() {
+    // The banner's summary and detail are model text of any length. Drawn
+    // past the pane they land in the gap beside it and over the action
+    // column, where no repaint of the pane can clean them up. The entry with
+    // no banner is the control: nothing draws in the gap for either, so the
+    // two must leave it identical.
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = resources_screen();
+    let bare = shot(&mut sb);
+
+    let (x, y) = rail_point(&sb, 1);
+    let _ = click(&mut sb, b, Scale::ONE, &theme, x, y);
+    assert!(
+        sb.resources
+            .device()
+            .and_then(|device| device.banner.as_ref())
+            .is_some(),
+        "the memory entry wears a pressure banner"
+    );
+    let bannered = shot(&mut sb);
+
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
+    let pane = ctx.frame.primary;
+    let rail = ctx.frame.rail.expect("the fixture window seats a rail");
+    let gap = Rect::new(
+        pane.right(),
+        pane.top(),
+        u32::try_from(rail.left().saturating_sub(pane.right())).unwrap_or(0),
+        pane.height,
+    );
+    assert!(gap.width > 0, "the fixture seats a gap to overrun into");
+    assert_eq!(
+        unreported_change(&bare, &bannered, gap, &damage::sink()),
+        None,
+        "the banner drew outside its own pane"
     );
 }

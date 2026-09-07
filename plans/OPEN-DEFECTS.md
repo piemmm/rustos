@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 24 open, 86 closed, 110 total.
+table normalises all three to **closed**. 21 open, 89 closed, 110 total.
 
 ### Open (21)
 
@@ -52,7 +52,7 @@ table normalises all three to **closed**. 24 open, 86 closed, 110 total.
 | D109 | `stress-qemu-aarch64` never completes under the full soak fan-out | guest alive but silent 210 s at the 600 s ceiling, PC in `run_dispatch_loop`; does not reproduce on a 2x-oversubscribed host |
 | D110 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
-### Closed (86)
+### Closed (89)
 
 | ID | Subject |
 |---|---|
@@ -142,6 +142,9 @@ table normalises all three to **closed**. 24 open, 86 closed, 110 total.
 | D105 | the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left |
 | D106 | the boot-floor volumes published no I/O source, so the machine's own root and `/System` reported no service, queue or health reading at all |
 | D107 | `ResourceReport`'s `storage_absent` / `interfaces_absent` had no reader |
+| D108 | a rail press selected a device and reported none of the pane it now drew |
+| D109 | a sample rebuilt the device rail, swallowing the click a reader was resting to make |
+| D110 | the pressure banner drew its text past the pane, into the gap and over the action column |
 
 ## Scope
 

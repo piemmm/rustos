@@ -1352,6 +1352,26 @@ fn a_refresh_reports_less_than_the_client_in_every_section() {
 }
 
 #[test]
+fn a_refresh_that_changed_the_count_reports_every_pixel_it_moved() {
+    // A sample that shortens a list moves the scrollbar's thumb as well as
+    // the rows, and the bar is no section's region to report.
+    for section in Section::ALL {
+        let mut sb = Switchboard::new(&model());
+        let _ = sb.select_section(section);
+        let before = shot(&mut sb);
+
+        let damage = refresh(&mut sb, &refreshed_model(4, 2));
+        let after = shot(&mut sb);
+
+        assert_eq!(
+            unreported_change(&before, &after, bounds(), &damage),
+            None,
+            "{section:?}: a pixel the shortened sample moved was left out of its report"
+        );
+    }
+}
+
+#[test]
 fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
     for section in Section::ALL {
         let mut sb = Switchboard::new(&model());

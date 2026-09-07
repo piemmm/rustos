@@ -17,7 +17,7 @@ use tairix_controls::{
 use super::{FaultImpact, FaultPage, RecoveryControl};
 use crate::view::test_support::{
     activate, bounds, card_body_centre, card_slot, centre, click, fault_crash, fault_id, font,
-    has_ink, key, model, recovery_item, refresh,
+    has_ink, key, model, moved, recovery_item, refresh, shot, unreported_change, PRESS, RELEASE,
 };
 use crate::view::{
     resolve_section_frame, Reading, Section, SectionFrame, SectionView, Sweep, Switchboard,
@@ -426,7 +426,8 @@ fn enter_on_a_refused_rail_stop_dispatches_nothing() {
             m.recovery.push(item);
             let mut sb = Switchboard::new(&m);
             sb.select_section(Section::Recovery);
-            sb.recovery.set_content_focus(2 + slot);
+            sb.recovery
+                .set_content_focus(2 + slot, &mut Sweep::adopting(&mut damage::sink()));
             assert!(
                 activate(&mut sb, commit).is_none(),
                 "a refused command must refuse the keyboard exactly as it refuses \
@@ -519,4 +520,31 @@ fn every_detail_page_paints() {
         sb.render(&mut surface, b, Scale::ONE, &theme, font());
         assert!(has_ink(&surface, b), "the {} page must paint", page.title());
     }
+}
+
+#[test]
+fn pressing_a_card_reports_the_detail_it_now_draws() {
+    // The detail pane and the impact column are drawn wholly from the
+    // selected fault, so pressing a different card owes both of them.
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(&faults(&[0, 1, 2]));
+    sb.select_section(Section::Recovery);
+    let before = shot(&mut sb);
+    let (x, y) = recovery_body_centre(&sb, &theme, 1);
+    let mut reported = damage::sink();
+    for event in [moved(x, y), PRESS, RELEASE] {
+        sb.on_pointer(&event, b, Scale::ONE, &theme, font(), &mut reported);
+    }
+    assert_eq!(
+        sb.recovery.selected,
+        Some(fault_id(1)),
+        "the press selected"
+    );
+    let after = shot(&mut sb);
+    assert_eq!(
+        unreported_change(&before, &after, b, &reported),
+        None,
+        "a press that opens another fault's detail must report every pixel it moved"
+    );
 }

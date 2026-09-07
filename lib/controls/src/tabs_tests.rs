@@ -1757,3 +1757,159 @@ fn a_horizontal_strip_states_no_absence() {
         render(&stated, &theme).pixels()
     );
 }
+
+// --- Restating a live strip from a fresh sample --------------------------
+
+/// The vertical bounds the restate cases hit-test against.
+fn vbounds() -> Rect {
+    Rect::new(0, 0, VW, VH)
+}
+
+/// The centre of vertical entry `index`.
+fn ventry(index: u32) -> (i32, i32) {
+    (0, xi(index * veach() + veach() / 2))
+}
+
+/// The same three entries, entry `index` carrying `reading` — a live sample
+/// over an unchanged run.
+fn vertical_three_reading(index: usize, reading: &str) -> Tabs {
+    let mut fresh = vertical_three();
+    if let Some(tab) = fresh.tabs_mut().get_mut(index) {
+        tab.set_reading(Some(String::from(reading)));
+    }
+    fresh
+}
+
+#[test]
+fn restate_keeps_where_the_pointer_is() {
+    // The whole reported defect: a sample lands while the reader rests on an
+    // entry, and their press must still land on it. A replaced strip would
+    // hit-test the press against the origin and select nothing.
+    let mut tabs = vertical_three();
+    let (x, y) = ventry(1);
+    tabs.on_pointer(
+        &moved(x, y),
+        vbounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+
+    tabs.restate(vertical_three_reading(1, "41%"));
+
+    tabs.on_pointer(&PRESS, vbounds(), Scale::ONE, &Theme::dark(), &mut sink());
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, vbounds(), Scale::ONE, &Theme::dark(), &mut sink()),
+        Some(TabsAction::Selected { index: 1 }),
+        "a sample must not swallow the click the pointer is resting to make"
+    );
+}
+
+#[test]
+fn restate_completes_a_press_the_sample_landed_on_top_of() {
+    // Half a click is in flight: the press has landed and the release has
+    // not. The sample in between must not eat the latch.
+    let mut tabs = vertical_three();
+    let (x, y) = ventry(2);
+    tabs.on_pointer(
+        &moved(x, y),
+        vbounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    tabs.on_pointer(&PRESS, vbounds(), Scale::ONE, &Theme::dark(), &mut sink());
+
+    tabs.restate(vertical_three_reading(2, "12%"));
+
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, vbounds(), Scale::ONE, &Theme::dark(), &mut sink()),
+        Some(TabsAction::Selected { index: 2 })
+    );
+}
+
+#[test]
+fn restate_over_a_changed_run_drops_the_press_it_cannot_place() {
+    // The latch names an entry, and a strip that gained one no longer knows
+    // which. Failing closed here is a click that does nothing, never one
+    // that selects the wrong device.
+    let mut tabs = vertical_three();
+    let (x, y) = ventry(1);
+    tabs.on_pointer(
+        &moved(x, y),
+        vbounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    tabs.on_pointer(&PRESS, vbounds(), Scale::ONE, &Theme::dark(), &mut sink());
+
+    let mut fresh = Tabs::new(vec![
+        Tab::new("One"),
+        Tab::new("New"),
+        Tab::new("Two"),
+        Tab::new("Tri"),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    fresh.adopt_current(Some(0));
+    assert!(
+        tabs.restate(fresh),
+        "a strip that gained an entry has moved"
+    );
+
+    assert_eq!(
+        tabs.on_pointer(&RELEASE, vbounds(), Scale::ONE, &Theme::dark(), &mut sink()),
+        None,
+        "a latch that can no longer be placed selects nothing"
+    );
+}
+
+#[test]
+fn restate_keeps_the_lift_under_a_resting_pointer() {
+    // The lift states where the pointer is, and a sample does not move it.
+    let theme = Theme::dark();
+    let mut tabs = vertical_three();
+    let (x, y) = ventry(1);
+    tabs.on_pointer(&moved(x, y), vbounds(), Scale::ONE, &theme, &mut sink());
+    let hovered = render_in(&tabs, &theme, Scale::ONE, VW, VH);
+
+    assert!(
+        !tabs.restate(vertical_three()),
+        "an identical sample moved nothing"
+    );
+
+    assert_eq!(
+        render_in(&tabs, &theme, Scale::ONE, VW, VH).pixels(),
+        hovered.pixels(),
+        "an identical sample must leave the strip's own pixels alone"
+    );
+}
+
+#[test]
+fn restate_answers_whether_the_strip_moved() {
+    let mut tabs = vertical_three();
+    assert!(
+        !tabs.restate(vertical_three()),
+        "the same entries drawn the same way owe no repaint"
+    );
+    assert!(
+        tabs.restate(vertical_three_reading(0, "7%")),
+        "a moved reading owes one"
+    );
+}
+
+#[test]
+fn restate_takes_the_fresh_selection_absences_and_cursor() {
+    let mut tabs = vertical_three();
+    tabs.adopt_selected(0);
+    let mut fresh = vertical_three();
+    fresh.adopt_selected(2);
+    fresh.adopt_current(Some(2));
+    let fresh = fresh.with_absences(vec![TabGroupAbsence::new("NETWORK", "None present.", 3)]);
+
+    assert!(tabs.restate(fresh));
+
+    assert_eq!(tabs.selected(), Some(2));
+    assert_eq!(tabs.current(), Some(2));
+    assert_eq!(tabs.absences().len(), 1);
+}

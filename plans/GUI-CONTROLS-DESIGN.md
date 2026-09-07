@@ -843,8 +843,17 @@ Tabs use a lower seam for selected state.
   tab. A host may therefore re-state where its keyboard is as often as its
   model refreshes without disturbing where the pointer is.
 - A strip whose labels carry a live reading is re-labelled in place, never
-  rebuilt: a fresh strip knows neither record, nor which tab a press is
-  waiting on.
+  rebuilt: a fresh strip knows neither record, nor where the pointer is, nor
+  which tab a press is waiting on.
+- A strip whose *entries* come and go is restated in place for the same
+  reason, through the strip's own `restate`. Where the pointer is survives
+  whatever the entries became — it is a fact about the reader's hand, not a
+  claim about the sample. The hover and the press latch each name one entry,
+  so they survive an unchanged run of entries and are dropped when the run
+  gains, loses or re-orders one: a click that cannot be placed must do
+  nothing, never select the entry that slid under the pointer. A host that
+  replaces the strip instead swallows the click a reader is resting to make
+  and blinks the lift off once per sample.
 
 **The vertical strip is a sidebar list, not a column of tab shapes.** Its
 selection, focus, keyboard and action model are the horizontal strip's, whole;

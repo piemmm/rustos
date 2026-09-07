@@ -215,7 +215,19 @@ it, or frame the content that does:
   resting pointer's highlight on each refresh and blink it as the pointer
   moved. A strip whose labels carry a live reading is therefore re-labelled in
   place (`Tab::set_label`) rather than rebuilt: a fresh strip knows neither
-  record, nor which tab is holding a press.
+  record, nor where the pointer is, nor which tab is holding a press.
+- A strip whose *entries* come and go — one per device, per volume, per
+  interface — adopts each sample through `Tabs::restate`, which takes the fresh
+  entries, absences, selection and cursor and keeps the records only the strip
+  holds. The pointer coordinate survives whatever the entries became, since it
+  is where the reader's pointer is rather than a claim about the sample; the
+  hover and the press latch each name one entry, so they survive an unchanged
+  run of entries (a moved reading does not disturb them) and are dropped when
+  the run gains, loses or re-orders one. Assigning a freshly built strip over a
+  live one instead hit-tests the next press against the origin, swallows a
+  press already waiting for its release, and drops the lift from under a
+  resting pointer on every sample. It answers whether the strip's drawn state
+  moved, which is the host's repaint gate for the column it sits in.
 
 ## Plate seating: a panel or a bar
 

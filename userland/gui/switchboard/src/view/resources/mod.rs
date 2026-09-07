@@ -165,9 +165,14 @@ impl ResourcesSection {
     /// Rebuild the rail, the chooser, the commands and the pane flow from
     /// the report and the current selection.
     fn rebuild(&mut self) -> Rebuilt {
-        let rail = build_rail(&self.report, self.rail_offset, self.selected);
-        let rail_moved = rail != self.rail;
-        self.rail = rail;
+        // Restated rather than replaced: the strip holds where the pointer is,
+        // which entry it rests on and which one a press is waiting for, and a
+        // fresh strip would know none of them — so a sample landing between a
+        // reader's motion and their press would swallow the click and drop the
+        // lift from under the pointer.
+        let rail_moved =
+            self.rail
+                .restate(build_rail(&self.report, self.rail_offset, self.selected));
         self.band_combo = build_combo(&self.report.devices, self.selected_index());
         let commands = self
             .device()
@@ -278,13 +283,18 @@ impl ResourcesSection {
     ///
     /// This is the whole of what selecting a device does: no query is
     /// issued, no store opened, nothing waited on.
-    fn select(&mut self, index: usize) {
+    fn select(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         let Some(device) = self.report.devices.get(index) else {
             return;
         };
         self.selected = Some(device.id);
         self.keep_in_window(index);
-        self.rebuild();
+        let rebuilt = self.rebuild();
+        // The pane, its commands and the rail's own marks all describe the
+        // device that is selected, so switching device owes every one of them
+        // — a selection that reported only the strip's own lift would leave
+        // the reader reading the previous device's pane.
+        self.report_refresh(&rebuilt, sweep);
     }
 
     /// Scroll the rail's window so the device at `index` is inside it.
@@ -372,26 +382,32 @@ impl ResourcesSection {
             ctx.scale,
             ctx.theme,
         );
-        let text_left = band.left()
-            + to_i32(
-                pill_w.saturating_add(
-                    ctx.scale
-                        .scale_length(ctx.theme.metrics().control_gap)
-                        .max(1),
-                ),
-            );
+        let gap = ctx
+            .scale
+            .scale_length(ctx.theme.metrics().control_gap)
+            .max(1);
+        let text_left = band.left() + to_i32(pill_w.saturating_add(gap));
+        // Truncated to the room between the pill and the relief command:
+        // text drawn past the band would land in the gap beside the pane and
+        // over the action column, which no repaint of the pane can ever
+        // clean up.
+        let limit = match self.relief.as_ref() {
+            Some(_) => button.left().saturating_sub(to_i32(gap)),
+            None => band.right(),
+        };
+        let avail = u32::try_from(limit.saturating_sub(text_left)).unwrap_or(0);
         ctx.font.draw_text(
             surface,
             text_left,
             band.top(),
-            &banner.summary,
+            ctx.font.truncate_to_width(&banner.summary, avail),
             Color::from(palette.on_surface),
         );
         ctx.font.draw_text(
             surface,
             text_left,
             band.top() + to_i32(ctx.font.line_height()),
-            &banner.detail,
+            ctx.font.truncate_to_width(&banner.detail, avail),
             Color::from(palette.on_surface_muted),
         );
         if let Some(relief) = self.relief.as_ref() {
@@ -630,10 +646,10 @@ impl SectionView for ResourcesSection {
 
     /// Move the cursor, selecting the device a rail stop names so the pane
     /// and the commands always describe the entry the reader is on.
-    fn set_content_focus(&mut self, index: usize) {
+    fn set_content_focus(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         self.focus = index;
         if let Some(Stop::Device(row)) = self.stop_at(index) {
-            self.select(row);
+            self.select(row, sweep);
         }
     }
 
@@ -659,7 +675,7 @@ impl SectionView for ResourcesSection {
     ) -> Option<SectionOutcome> {
         match self.stop_at(self.focus)? {
             Stop::Device(row) => {
-                self.select(row);
+                self.select(row, &mut Sweep::reporting(ctx, damage));
                 None
             }
             Stop::Relief => {
@@ -733,8 +749,9 @@ impl SectionView for ResourcesSection {
             {
                 match action {
                     TabsAction::Selected { index } => {
-                        self.select(self.rail_offset.saturating_add(index));
-                        self.focus = self.rail_offset.saturating_add(index);
+                        let row = self.rail_offset.saturating_add(index);
+                        self.focus = row;
+                        self.select(row, &mut Sweep::reporting(ctx, damage));
                         return None;
                     }
                 }

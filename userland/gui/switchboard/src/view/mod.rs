@@ -515,7 +515,13 @@ trait SectionView {
 
     /// Move the content cursor. The caller has already clamped it into the
     /// list.
-    fn set_content_focus(&mut self, index: usize);
+    ///
+    /// A section whose cursor *is* its selection — a rail entry naming the
+    /// pane beside it, a card naming the detail beside it — selects here, so
+    /// it reports the regions that selection re-derives into `sweep`. A
+    /// section whose cursor only moves a ring reports nothing but its marks,
+    /// which [`apply_focus_marks`](Self::apply_focus_marks) states.
+    fn set_content_focus(&mut self, index: usize, sweep: &mut Sweep<'_, '_>);
 
     /// The within-row action cursor: which of the focused item's actions the
     /// keyboard is on.
@@ -937,7 +943,11 @@ impl Switchboard {
         if let Some(summary) = self.band(layout.location, theme, scale).summary {
             damage.add(summary);
         }
+        let was = self.active().item_count();
         self.adopt(model, &mut Sweep::reporting(ctx, damage));
+        // A sample that added or removed an item moved the thumb, and the bar
+        // is no section's region to report.
+        self.report_scroll_range(was, bounds, scale, theme, damage);
         self.set_scroll_range(
             self.active().item_count(),
             self.scroll.model().range().viewport_extent(),
@@ -1437,6 +1447,27 @@ impl Switchboard {
         font: BitmapFont,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
+        let was = self.active().item_count();
+        let action = self.route_pointer(event, bounds, scale, theme, font, damage);
+        self.report_scroll_range(was, bounds, scale, theme, damage);
+        action
+    }
+
+    /// Route one pointer event to whichever region owns it.
+    ///
+    /// The scrollbar is reported by [`on_pointer`](Self::on_pointer) once this
+    /// has returned, so every route through here may change how many items the
+    /// section holds without each one having to account for a bar that is not
+    /// its own.
+    fn route_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
@@ -1531,7 +1562,7 @@ impl Switchboard {
         let mut sweep = Sweep::reporting(ctx, damage);
         let action = self.select_section_index(Section::Tasks.index(), &mut sweep);
         let focus = self.tasks.focus_index_for_row(0);
-        self.tasks.set_content_focus(focus);
+        self.tasks.set_content_focus(focus, &mut sweep);
         self.tasks.set_row_action(0, &mut sweep);
         self.ensure_focus_visible(&mut sweep);
         self.apply_focus_marks(&mut sweep);
@@ -1555,6 +1586,30 @@ impl Switchboard {
         let menu = Self::build_section_menu(self.section);
         damage.add(Self::popup_rect(&menu, location, bounds, scale, theme));
         self.section_menu = Some(menu);
+    }
+
+    /// Report the scrollbar when a round changed *how many* items the section
+    /// holds, `was` being the count it started with.
+    ///
+    /// Selecting a device whose pane is a different length, or a sample that
+    /// added or removed a row, moves the thumb — and the controls the round
+    /// routed through know nothing about a bar that is not theirs. The bar is
+    /// re-ranged by the next paint, which is too late to report but exactly in
+    /// time to be drawn: the present renders inside the reported rectangle, so
+    /// naming it here is the whole of what the round owes. The count either
+    /// side of the round is what decides it, never the range the bar happens
+    /// to be carrying, which no round is responsible for having synced.
+    fn report_scroll_range(
+        &self,
+        was: usize,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if self.active().item_count() != was {
+            damage.add(self.compute_layout(bounds, scale, theme).scroll);
+        }
     }
 
     /// Adopt `offset` as the active section's scroll offset, reporting
@@ -1678,6 +1733,24 @@ impl Switchboard {
         font: BitmapFont,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
+        let was = self.active().item_count();
+        let action = self.route_key(key, bounds, scale, theme, font, damage);
+        self.report_scroll_range(was, bounds, scale, theme, damage);
+        action
+    }
+
+    /// Route one key to whichever region holds the keyboard, on the same
+    /// terms as [`route_pointer`](Self::route_pointer) — the scrollbar is
+    /// [`on_key`](Self::on_key)'s to report.
+    fn route_key(
+        &mut self,
+        key: Key,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
         let layout = self.compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
@@ -1778,7 +1851,7 @@ impl Switchboard {
     /// section.
     fn move_content_focus(&mut self, index: usize, ctx: SectionCtx<'_>, damage: &mut Region) {
         let mut sweep = Sweep::reporting(ctx, damage);
-        self.active_mut().set_content_focus(index);
+        self.active_mut().set_content_focus(index, &mut sweep);
         self.active_mut().set_row_action(0, &mut sweep);
         self.ensure_focus_visible(&mut sweep);
         self.apply_focus_marks(&mut sweep);
@@ -1813,7 +1886,7 @@ impl Switchboard {
         self.section_menu = None;
         self.section = section;
         self.trail = Self::build_trail(section);
-        self.active_mut().set_content_focus(0);
+        self.active_mut().set_content_focus(0, sweep);
         self.active_mut().set_row_action(0, sweep);
         self.apply_focus_marks(sweep);
         sweep.client();

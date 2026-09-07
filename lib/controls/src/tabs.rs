@@ -354,6 +354,18 @@ fn item_area(bands: &[Band], index: usize) -> Option<Rect> {
         .map(|band| band.rect)
 }
 
+/// Whether two runs name the same entries in the same order — the identity a
+/// strip's hover and press latch are about, since each names one entry. An
+/// entry's live reading and trend are the sample's to say, so they are not
+/// part of it.
+fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
+    live.len() == fresh.len()
+        && live
+            .iter()
+            .zip(fresh)
+            .all(|(live, fresh)| live.label() == fresh.label() && live.group() == fresh.group())
+}
+
 /// A row of equal-width tabs, or — laid out [`TabsOrientation::Vertical`] — a
 /// sidebar list of grouped entries, selecting one of several views
 /// (spec §11.12).
@@ -426,6 +438,42 @@ impl Tabs {
     #[must_use]
     pub fn absences(&self) -> &[TabGroupAbsence] {
         &self.absences
+    }
+
+    /// Take `fresh`'s entries, absences, selection and keyboard cursor, keeping
+    /// the records only this strip holds: where the pointer last was, which
+    /// entry it rests on, and which entry a press is waiting on.
+    ///
+    /// This is how a host whose entries come and go — one per device, per
+    /// volume, per interface — adopts each fresh sample. Assigning a freshly
+    /// built strip over a live one instead gives it amnesia: it no longer knows
+    /// where the pointer is, so the next press hit-tests against the origin and
+    /// selects nothing until the reader moves the pointer again, a press already
+    /// waiting for its release is swallowed, and the entry under a resting
+    /// pointer loses its lift on every sample.
+    ///
+    /// The pointer coordinate survives whatever the entries became: it is where
+    /// the reader's pointer is, not a claim about the sample. The hover and the
+    /// press latch each name one *entry*, so they survive only while the run of
+    /// entries is the same run — an entry's live reading and trend are the
+    /// sample's to say and do not disturb them, but a strip that gained, lost
+    /// or re-ordered an entry drops both and waits for the pointer's next
+    /// motion.
+    ///
+    /// Answers whether the strip's drawn state moved, which is what decides
+    /// whether the column it sits in owes a repaint.
+    pub fn restate(&mut self, mut fresh: Tabs) -> bool {
+        fresh.pointer = self.pointer;
+        if same_entries(&self.items, &fresh.items) {
+            fresh.hovered = self.hovered;
+            fresh.armed = self.armed;
+        } else {
+            fresh.hovered = None;
+            fresh.armed = RenderInvariant::new(None);
+        }
+        let moved = *self != fresh;
+        *self = fresh;
+        moved
     }
 
     /// This strip laid out along `orientation`.

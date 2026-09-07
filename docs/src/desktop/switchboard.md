@@ -113,6 +113,18 @@ The two sections that are *not* on show adopt the same reading and report
 nothing: they draw no pixel, so a rectangle resolved against a frame that is
 not theirs would name another region's.
 
+**Selecting reports what the selection re-derives, not what was pressed.** A
+rail entry names the pane beside it and a fault card names the detail beside
+it, so both routes to a selection — the press and the cursor the keyboard
+moves onto it — report the pane or detail, the commands that describe it, and
+the marks the strip or the cards moved. Reporting the pressed control alone
+would leave the reader looking at the previous device's readings until
+something else marked the window whole. The scrollbar is the round's too where
+the selection left the section holding a different number of items: the
+controls it routed through know nothing about a bar that is not theirs, and the
+bar is re-ranged by the next paint, which is too late to report but exactly in
+time to be drawn inside the reported rectangle.
+
 A change no round could describe — a resize onto a new surface, a desktop
 appearance or density change, or a session that discarded the window's retained
 pixels — marks the whole window. A round that moved something and reported
