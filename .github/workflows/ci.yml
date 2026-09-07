@@ -128,6 +128,17 @@ jobs:
       - name: cargo xtask ci
         run: cargo xtask ci
 
+      # A failing QEMU vertical names its serial log and, when a guest hangs,
+      # a dump of every core's CPU state. Both are written under
+      # `CARGO_TARGET_DIR`, which nothing uploads and the next run's clean
+      # wipes — so the one artefact a hang is diagnosable from is gone before
+      # anyone reads the failure. Collect them beside the logs uploaded below.
+      - name: Collect QEMU post-mortems
+        if: always()
+        run: |
+          . tools/ci/lib.sh
+          ci_collect_qemu_artefacts "${{ runner.temp }}/tairix-soak-logs/qemu"
+
       # Run every fuzz harness and proptest model in parallel for
       # a minimum of 120 s each. soak.sh enumerates both registries (the
       # single source of truth) and fans them out one process per target, all

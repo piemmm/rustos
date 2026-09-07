@@ -227,5 +227,7 @@ while [ "$i" -lt "${#job_pids[@]}" ]; do
     i=$((i + 1))
 done
 
+ci_collect_qemu_artefacts "$soak_dir/qemu"
+
 echo "soak: ${#job_labels[@]} job(s), $failed failed; logs in $soak_dir"
 [ "$failed" -eq 0 ] || exit 1

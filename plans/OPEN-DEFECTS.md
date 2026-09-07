@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 21 open, 86 closed, 107 total.
+table normalises all three to **closed**. 24 open, 86 closed, 110 total.
 
 ### Open (21)
 
@@ -48,6 +48,9 @@ table normalises all three to **closed**. 21 open, 86 closed, 107 total.
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
+| D108 | `rng_soak`'s uniformity arm has a derived null only for `matrix-rank` | the arm is not applied to the rest, so their p-value shape is unchecked; `longest-run` and `approximate-entropy` measure chi-square 29.9 and 71.8 of reference error |
+| D109 | `stress-qemu-aarch64` never completes under the full soak fan-out | guest alive but silent 210 s at the 600 s ceiling, PC in `run_dispatch_loop`; does not reproduce on a 2x-oversubscribed host |
+| D110 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
 ### Closed (86)
 
@@ -1260,6 +1263,81 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   press lands on. The Resources rail draws both fields through it, stating
   the refusal where the sample resolved one and "No storage device is
   present." where the query answered and found none.
+- **D108 — the uniformity arm has a derived null only for `matrix-rank`.**
+  Reduced from a defect to a coverage gap. The battery's uniformity arm used
+  to assert that every statistic's p-values are exactly Uniform(0, 1), which
+  is false for all of them: each reduces a finite sequence to a discrete
+  count and reads an asymptotic tail off it, so the arm's power to detect its
+  own reference error grows with depth until it rejects any generator. It did
+  — on `FastRng` (ChaCha12) and `CsRng` alike, not on a predictable
+  generator: `NonCryptoRng` is not a soak target at all, so the original
+  "maybe it is xoshiro's linearity" reading was wrong.
+  Measured on 144 000 `FastRng` sequences, the reference error is
+  chi-square 78.2 for `matrix-rank`, 71.8 for `approximate-entropy` and 34.2
+  for `longest-run` (against a mean of 9), with visibly different causes: the
+  first oscillates bin to bin (a discrete statistic), the second drifts
+  monotonically +8% to -5% (a skewed asymptotic tail), the third is mostly a
+  class-probability rounding. The `matrix-rank` and `longest-run` class
+  probabilities were 4-decimal roundings of exactly computable values and are
+  now exact — which *raised* `matrix-rank`'s figure to 91.4, confirming the
+  rounding had been partly masking the discreteness.
+  **Fixed for `matrix-rank`, by deriving its real null.** Its 512 matrices in
+  three rank classes are multinomial, so enumerating every reachable count
+  vector and binning its p-value through the same tail function the statistic
+  uses gives the exact distribution. That takes its chi-square from 91.4 to
+  9.0 and predicts the observed histogram bin for bin; the derived shares are
+  pinned against the measured ones as a regression test.
+  **What remains** is deriving a null for the other statistics, hardest for
+  `approximate-entropy` (a finite-`n` bias in the chi-square reference for
+  `2^(m-1)` degrees of freedom, needing either a bias-corrected statistic or
+  an exact reference). Until then those statistics are judged on the
+  proportion arm alone and the verdict says `ProportionOnly` rather than
+  implying both arms passed — a narrower claim, not a weaker gate, since the
+  proportion arm rejects the `lfsr` control on `matrix-rank` at a 100%
+  failure rate and the `counter` control on every statistic, against a 1.16%
+  ceiling. Read `plans/FIX-RANDOMNESS.md` and
+  `tests/integration/rng_soak/README.md` first.
+- **D109 — `stress-qemu-aarch64` never completes under the full soak
+  fan-out.** A nightly `soak.sh all` run reported it UNFINISHED at the 600 s
+  runtime ceiling: the guest was **alive and silent for 210.07 s** at the
+  kill, having reached `stress --cpu 10 --timeout 120s --background` on a
+  4-vcpu guest. The dumped guest PC sits in
+  `tairix_kernel_core::init::run_dispatch_loop` (+0x18c/+0x190) with
+  `watchdog::lock_observer` also named.
+  **Not slowness, and not CPU starvation.** It completes in 133 s alone and
+  145.7 s with the host deliberately oversubscribed 2x (48 spinners on 24
+  cores) — a 10% penalty, against a >4.5x overrun on the runner. A merely
+  slow guest also keeps emitting; 210 s of *total silence* with the PC in the
+  dispatch loop is no forward progress at all. `soak.sh`'s `nice` split
+  already keeps the timed matrix off the throughput soaks' CPU.
+  **Likely class: a lost wake-up**, i.e. D84's signature (every core idle in
+  the dispatch loop) rather than D13's (an IRQ-masked spin on a
+  non-interrupt-safe lock, which would show a *hard lockup*, not idleness).
+  Unproven either way.
+  **Blocked on the all-core state dump** the harness writes beside the serial
+  log and names in its failure message. It landed in `CARGO_TARGET_DIR`,
+  which no workflow uploaded and the next run's clean wiped — so the one
+  artefact that distinguishes "idle" from "wedged" was discarded before
+  anyone read the failure. `ci_collect_qemu_artefacts` (`tools/ci/lib.sh`,
+  called from `soak.sh` and `ci.yml`) now retains it; the next occurrence is
+  diagnosable. Read `plans/WATCHDOG.md` and D13/D84 first.
+- **D110 — `netstack-bond-qemu-aarch64` guest exits before its readiness
+  marker.** Same nightly run: `qemu status -1` with "monitor command script
+  incomplete: a command's readiness marker was not seen before the guest
+  exited". The serial stops at 3.826 s immediately after "inbound echo
+  request served (reply queued)", mid-scenario, with **no guest fault,
+  panic, or semihosted verdict** — the emulator stopped, rather than the
+  kernel failing. A `netstack interface config refused (interface left
+  untouched) errno=7` precedes it and may be unrelated.
+  **Cause unconfirmed.** A status with no exit code means killed by a signal,
+  which is consistent with the *host* killing the process: the QEMU admission
+  control weights jobs by vcpu only, with no memory term anywhere, while
+  `soak.sh all` fans out 89 jobs. That would make it a host-capacity defect
+  wanting bounded concurrency rather than a guest defect — but it is a
+  hypothesis, not a diagnosis, and a guest-side exit path has not been ruled
+  out. Do not close it as load without evidence.
+  **Blocked on** the full serial (now retained, see D109) and the host's
+  kernel log for the failing run. Read `plans/NETWORK.md` first.
 
 ## Coupling to be aware of
 

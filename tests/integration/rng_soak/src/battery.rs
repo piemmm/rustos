@@ -42,7 +42,7 @@
 use std::fmt::Write as _;
 
 use crate::special::chi_square_q;
-use crate::statistics::ALL;
+use crate::statistics::{bin_of, UniformityNull, ALL};
 
 /// Significance level for a single sequence's p-value.
 pub const ALPHA: f64 = 0.01;
@@ -54,7 +54,7 @@ pub const BAND_SIGMA: f64 = 6.0;
 pub const UNIFORMITY_FLOOR: f64 = 1e-6;
 
 /// Bins the p-value uniformity check divides `[0, 1)` into.
-const UNIFORMITY_BINS: usize = 10;
+pub const UNIFORMITY_BINS: usize = 10;
 
 /// Sequences a statistic needs before its verdict means anything.
 ///
@@ -77,8 +77,12 @@ pub enum Verdict {
     Accepted,
     /// Too many (or implausibly few) sequences failed at [`ALPHA`].
     ProportionOutOfBand,
-    /// The p-values are not uniform.
+    /// The p-values do not follow the statistic's null distribution.
     NotUniform,
+    /// The proportion arm is satisfied and the uniformity arm does not
+    /// apply, because this statistic's null p-value distribution has not
+    /// been derived.
+    ProportionOnly,
     /// Fewer than [`MINIMUM_SEQUENCES`] were tested.
     TooFewSequences,
 }
@@ -93,6 +97,17 @@ impl Verdict {
     #[must_use]
     pub const fn is_rejection(self) -> bool {
         matches!(self, Self::ProportionOutOfBand | Self::NotUniform)
+    }
+
+    /// Whether the generator satisfied every arm that applies to this
+    /// statistic.
+    ///
+    /// [`Verdict::ProportionOnly`] is a pass: the uniformity arm did not
+    /// apply, so there was nothing further to satisfy. An inconclusive
+    /// verdict is not a pass.
+    #[must_use]
+    pub const fn accepts(self) -> bool {
+        matches!(self, Self::Accepted | Self::ProportionOnly)
     }
 }
 
@@ -122,13 +137,7 @@ impl Accumulator {
             if p < ALPHA {
                 tally.failures += 1;
             }
-            // A p-value of exactly 1.0 belongs in the top bin rather than
-            // one past the end.
-            let scaled = p * (UNIFORMITY_BINS as f64);
-            let bin = (1..=UNIFORMITY_BINS)
-                .position(|edge| scaled < (edge as f64))
-                .unwrap_or(UNIFORMITY_BINS - 1);
-            tally.bins[bin] += 1;
+            tally.bins[bin_of(p)] += 1;
         }
     }
 
@@ -143,7 +152,7 @@ impl Accumulator {
     pub fn verdicts(&self) -> Vec<(&'static str, Verdict)> {
         ALL.iter()
             .zip(&self.tallies)
-            .map(|(statistic, tally)| (statistic.name, verdict(tally)))
+            .map(|(statistic, tally)| (statistic.name, verdict(tally, statistic.uniformity_null)))
             .collect()
     }
 
@@ -153,7 +162,7 @@ impl Accumulator {
     pub fn rejected(&self) -> Vec<&'static str> {
         self.verdicts()
             .into_iter()
-            .filter(|(_, v)| *v != Verdict::Accepted)
+            .filter(|(_, v)| !v.accepts())
             .map(|(name, _)| name)
             .collect()
     }
@@ -163,15 +172,21 @@ impl Accumulator {
     pub fn report(&self) -> String {
         let mut out = String::new();
         for (statistic, tally) in ALL.iter().zip(&self.tallies) {
-            let uniformity = uniformity_p(tally);
+            // A statistic with no derived null has no uniformity figure to
+            // print, and a NaN in a soak log reads as a fault rather than as
+            // an arm that does not apply.
+            let uniformity = statistic.uniformity_null.map_or_else(
+                || format!("{:>9}", "n/a"),
+                |null| format!("{:>9.3e}", uniformity_p(tally, null())),
+            );
             let _ = writeln!(
                 out,
-                "  {:<20} sequences {:>7}  failures {:>6}  uniformity {:>9.3e}  {:?}",
+                "  {:<20} sequences {:>7}  failures {:>6}  uniformity {}  {:?}",
                 statistic.name,
                 tally.sequences,
                 tally.failures,
                 uniformity,
-                verdict(tally)
+                verdict(tally, statistic.uniformity_null)
             );
         }
         out
@@ -185,7 +200,7 @@ impl Default for Accumulator {
 }
 
 /// The two-level decision for one statistic's tally.
-fn verdict(tally: &Tally) -> Verdict {
+fn verdict(tally: &Tally, null: Option<UniformityNull>) -> Verdict {
     if tally.sequences < MINIMUM_SEQUENCES {
         return Verdict::TooFewSequences;
     }
@@ -196,7 +211,10 @@ fn verdict(tally: &Tally) -> Verdict {
     if (proportion - expected_pass).abs() > BAND_SIGMA * sigma {
         return Verdict::ProportionOutOfBand;
     }
-    if uniformity_p(tally) < UNIFORMITY_FLOOR {
+    let Some(null) = null else {
+        return Verdict::ProportionOnly;
+    };
+    if uniformity_p(tally, null()) < UNIFORMITY_FLOOR {
         return Verdict::NotUniform;
     }
     Verdict::Accepted
@@ -204,15 +222,17 @@ fn verdict(tally: &Tally) -> Verdict {
 
 /// Chi-square goodness-of-fit p-value for the binned p-values against a
 /// uniform distribution.
-fn uniformity_p(tally: &Tally) -> f64 {
+fn uniformity_p(tally: &Tally, null: [f64; UNIFORMITY_BINS]) -> f64 {
     if tally.sequences == 0 {
         return 1.0;
     }
-    let expected = tally.sequences as f64 / UNIFORMITY_BINS as f64;
+    let sequences = tally.sequences as f64;
     let chi_square: f64 = tally
         .bins
         .iter()
-        .map(|count| {
+        .zip(null)
+        .map(|(count, share)| {
+            let expected = sequences * share;
             let deviation = *count as f64 - expected;
             deviation * deviation / expected
         })
@@ -240,12 +260,24 @@ mod tests {
         }
     }
 
+    /// A flat null, so a case built with uniform bins exercises the
+    /// proportion arm exactly as it did before the null became explicit.
+    fn flat_null() -> [f64; UNIFORMITY_BINS] {
+        [1.0 / UNIFORMITY_BINS as f64; UNIFORMITY_BINS]
+    }
+
     #[test]
     fn a_typical_failure_rate_is_accepted() {
         // Exactly the rate ALPHA predicts, at two very different counts: a
         // generator is not suspect for being ordinary.
-        assert_eq!(verdict(&tally(4_000, 40)), Verdict::Accepted);
-        assert_eq!(verdict(&tally(200_000, 2_000)), Verdict::Accepted);
+        assert_eq!(
+            verdict(&tally(4_000, 40), Some(flat_null)),
+            Verdict::Accepted
+        );
+        assert_eq!(
+            verdict(&tally(200_000, 2_000), Some(flat_null)),
+            Verdict::Accepted
+        );
     }
 
     /// The band is two-sided on purpose. A statistic that *never* rejects has
@@ -256,16 +288,22 @@ mod tests {
     fn implausibly_few_failures_are_rejected_too() {
         // The lower edge only exists once six sigma is narrower than ALPHA
         // itself, which is above roughly 3 500 sequences.
-        assert_eq!(verdict(&tally(200_000, 0)), Verdict::ProportionOutOfBand);
+        assert_eq!(
+            verdict(&tally(200_000, 0), Some(flat_null)),
+            Verdict::ProportionOutOfBand
+        );
         // Below that the band's upper edge passes 1.0, so a short run is not
         // failed for a shortage of failures it had no chance to accumulate.
-        assert_eq!(verdict(&tally(512, 0)), Verdict::Accepted);
+        assert_eq!(verdict(&tally(512, 0), Some(flat_null)), Verdict::Accepted);
     }
 
     #[test]
     fn a_grossly_inflated_failure_rate_is_rejected() {
         // Ten times the expected failures is a defect, not luck.
-        assert_eq!(verdict(&tally(4_000, 400)), Verdict::ProportionOutOfBand);
+        assert_eq!(
+            verdict(&tally(4_000, 400), Some(flat_null)),
+            Verdict::ProportionOutOfBand
+        );
     }
 
     /// The band must be exactly `BAND_SIGMA` wide — the property the
@@ -284,7 +322,7 @@ mod tests {
                 Verdict::ProportionOutOfBand
             };
             assert_eq!(
-                verdict(&tally(sequences, failures)),
+                verdict(&tally(sequences, failures), Some(flat_null)),
                 expected,
                 "{failures} failures of {sequences}"
             );
@@ -293,9 +331,12 @@ mod tests {
 
     #[test]
     fn too_few_sequences_is_not_a_pass_and_not_a_rejection() {
-        let inconclusive = verdict(&tally(MINIMUM_SEQUENCES - 1, 0));
+        let inconclusive = verdict(&tally(MINIMUM_SEQUENCES - 1, 0), Some(flat_null));
         assert_eq!(inconclusive, Verdict::TooFewSequences);
-        assert_eq!(verdict(&tally(MINIMUM_SEQUENCES, 0)), Verdict::Accepted);
+        assert_eq!(
+            verdict(&tally(MINIMUM_SEQUENCES, 0), Some(flat_null)),
+            Verdict::Accepted
+        );
         // A generator is failed for an inconclusive verdict — fail closed —
         // but a *control* must not be credited as rejected by one, or a
         // too-small control run would satisfy every statistic vacuously.
@@ -319,13 +360,48 @@ mod tests {
             failures: 0,
             bins,
         };
-        assert!(uniformity_p(&piled) < UNIFORMITY_FLOOR);
-        assert_eq!(verdict(&piled), Verdict::NotUniform);
+        assert!(uniformity_p(&piled, flat_null()) < UNIFORMITY_FLOOR);
+        assert_eq!(verdict(&piled, Some(flat_null)), Verdict::NotUniform);
+    }
+
+    /// A statistic whose null p-value distribution has not been derived is
+    /// judged on the proportion arm alone — and that arm still bites, so
+    /// skipping the uniformity claim is not a weakening of the battery.
+    #[test]
+    fn a_statistic_without_a_derived_null_skips_only_the_uniformity_arm() {
+        let mut bins = [0u64; UNIFORMITY_BINS];
+        bins[UNIFORMITY_BINS - 1] = 4_000;
+        let piled = Tally {
+            sequences: 4_000,
+            failures: 40,
+            bins,
+        };
+        // Against a flat null this histogram is a rejection.
+        assert_eq!(verdict(&piled, Some(flat_null)), Verdict::NotUniform);
+        // With no null derived there is no such claim to make, and the
+        // verdict says which arm was reached rather than implying both.
+        let skipped = verdict(&piled, None);
+        assert_eq!(skipped, Verdict::ProportionOnly);
+        assert!(skipped.accepts());
+        assert!(!skipped.is_rejection());
+        // The proportion arm is untouched by the null being absent.
+        assert_eq!(
+            verdict(&tally(4_000, 400), None),
+            Verdict::ProportionOutOfBand
+        );
+        assert_eq!(
+            verdict(&tally(200_000, 0), None),
+            Verdict::ProportionOutOfBand
+        );
+        // An inconclusive run is still not a pass.
+        let short = verdict(&tally(MINIMUM_SEQUENCES - 1, 0), None);
+        assert_eq!(short, Verdict::TooFewSequences);
+        assert!(!short.accepts());
     }
 
     #[test]
     fn evenly_spread_p_values_are_uniform() {
-        assert!(uniformity_p(&tally(4_000, 40)) > 0.5);
+        assert!(uniformity_p(&tally(4_000, 40), flat_null()) > 0.5);
     }
 
     /// A mild lean must not fire: the uniformity floor exists to catch
@@ -340,7 +416,7 @@ mod tests {
             failures: 40,
             bins,
         };
-        assert_eq!(verdict(&leaning), Verdict::Accepted);
+        assert_eq!(verdict(&leaning, Some(flat_null)), Verdict::Accepted);
     }
 
     /// A recorded sequence must land in every statistic's tally, and a

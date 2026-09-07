@@ -92,6 +92,46 @@ arrangement: the band narrows as the sequence count grows, so a long soak
 becomes strictly more sensitive, while re-deciding after every pass would
 multiply the false-alarm rate by the number of looks.
 
+### What that demands of each statistic
+
+A narrowing band is only a test of the *generator* while each statistic's own
+null distribution is exact. At a full soak's sequence count the band is a few
+tenths of a percent wide and the uniformity arm resolves per-bin deviations
+below one percent — finer than SP 800-22's formulas, which are asymptotic
+approximations over discrete counts, are actually calibrated. Past that point
+a statistic is judged on its own approximation error rather than on anything
+the generator did.
+
+Both arms hit this, in different ways, and both are fixed rather than
+tolerated:
+
+- **The proportion arm** needs the tail to be right. `maurer-universal`'s was
+  not: SP 800-22 corrects for the dependence between block distances with a
+  heuristic factor that is 3.8% low at this crate's parameters, inflating
+  every z-score by as much and rejecting *any* generator at 1.32%. It now
+  derives that variance by summing the dependence exactly, and measures
+  1.004% on a reference source.
+- **The uniformity arm** needs the whole distribution to be right, which is a
+  stronger demand: a p-value is exactly uniform only for a continuous
+  statistic read off an exact reference, and none of these is both. So the
+  arm compares each statistic's histogram against *that statistic's* null,
+  declared beside it as `uniformity_null`. `matrix-rank` is the worked case —
+  512 matrices in three rank classes make its p-value visibly discrete, and
+  the exact multinomial enumeration of that null takes its uniformity
+  chi-square on 144 000 ChaCha12 sequences from 91.4 (against a flat
+  reference) to 9.0, which is the mean for nine degrees of freedom.
+
+Where a statistic's null has not been derived the arm is **not applied** and
+the verdict says `ProportionOnly` rather than implying both arms passed. That
+is a narrower claim, not a weaker gate: the proportion arm still applies in
+full, and it is the arm carrying the detection power — it rejects the `lfsr`
+control on `matrix-rank` at a 100% failure rate and the `counter` control on
+every statistic, against a band whose ceiling is 1.16%.
+
+A statistic added here is held to the same bar: its rejection rate and, if it
+claims the uniformity arm, its null distribution are numbers someone has
+measured against a reference source.
+
 ## Running it
 
 ```sh

@@ -102,7 +102,7 @@ fn the_matrix_rank_test_catches_the_lfsr_specifically() {
             .find(|(n, _)| *n == name)
             .map(|(_, v)| *v)
             .expect("the statistic is in the battery");
-        assert_eq!(v, Verdict::Accepted, "{name} rejected the LFSR: {v:?}");
+        assert!(v.accepts(), "{name} rejected the LFSR: {v:?}");
     }
 }
 

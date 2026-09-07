@@ -10,7 +10,7 @@ belongs in a *named* `cargo xtask` subcommand (`tools/xtask`), not here.
 
 | File | Purpose |
 |------|---------|
-| `lib.sh` | Sourced by the others. Puts the pinned toolchain on `PATH`, resolves the repo root, sets the log directory, and (opt-in) syncs the checkout. |
+| `lib.sh` | Sourced by the others. Puts the pinned toolchain on `PATH`, resolves the repo root, sets the log directory, (opt-in) syncs the checkout, and collects the QEMU verticals' serial/hang post-mortems into an uploaded log directory — they live in the build cache, which nothing uploads and the next run's clean wipes. |
 | `ci-run.sh` | Run one `cargo xtask` subcommand, logging to a timestamped file. Default subcommand is `ci` (the full per-PR gate, §7). |
 | `soak.sh` | Run the nightly 24 h soaks (§19.6 fuzz, §19.7 proptest, and the §7 repeated-test soak) with every harness/model/the test matrix **in parallel**, one log per job. |
 | `install-qemu.sh` | Provision the one pinned QEMU version the QEMU integration tests need (built from GPG-verified official source, cached on the runner). Idempotent; called by the GitHub workflows. A distro QEMU is too old for the riscv64 `svade` CPU pin, and the build names its features explicitly so meson's `auto` detection cannot drop one a vertical needs (the cipher library the virtio-crypto vertical's AES sessions require). |
