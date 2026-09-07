@@ -16,10 +16,14 @@
 //! `mem_map` / `mem_unmap` `svc`s through the producer.
 //!
 //! The fixture program (`tests/integration/heap_program`) Box-allocates, grows
-//! a `Vec` across several pages, reallocates after freeing, verifies every
-//! value, and exits 0 — a clean `exit(0)` is the PASS signal. Any shortfall (a
-//! non-zero exit code, an unexpected syscall, or a fault) trips a distinct
-//! failure finisher or times out, so the run fails loudly.
+//! a `Vec` across several pages, reallocates after freeing, drives the
+//! pressure-band trim that hands the arena back, verifies every value, and
+//! exits 0. A clean `exit(0)` is the PASS signal *and* at least one range must
+//! have reached `mem_unmap`, since the arena is resized in granules and a
+//! fixture whose whole traffic fits inside one would otherwise leave the
+//! release path untested. Any shortfall (a non-zero exit code, an unexpected
+//! syscall, a fault, or no unmap at all) trips a distinct failure finisher or
+//! times out, so the run fails loudly.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]

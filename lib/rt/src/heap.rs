@@ -23,14 +23,21 @@
 //!   alignment; the residual head/tail of a carved span is returned to the free
 //!   list so alignment padding is never leaked. When no span fits, the arena is
 //!   grown by `mem_map` and the new pages are added as a free span (coalesced
-//!   with the arena's top span).
+//!   with the arena's top span). The growth is at least the retention the
+//!   pressure model permits ([`retain_bytes`]), so a run of small allocations
+//!   does not pay a syscall per page; mapping beyond what the caller asked for
+//!   is speculation about the next allocation, so that pad shrinks with the
+//!   band and is gone under real pressure.
 //! * **Free.** The released region is inserted into the free list and coalesced
 //!   with its neighbours. Whole trailing pages left free at the very top of the
-//!   arena are returned to the kernel with `mem_unmap`, above a retention the
-//!   pressure model sets ([`retain_bytes`]). Retaining them is what stops an
-//!   allocation high-water that oscillates across a page boundary — every paint
-//!   loop with a transient buffer — from trading `mem_unmap` plus `mem_map`,
-//!   two page-table walks and a TLB shootdown for each cycle.
+//!   arena are returned to the kernel with `mem_unmap`, above that same
+//!   retention and once there are at least [`ARENA_RESIZE_BYTES`] of them to
+//!   return. Retaining them is what stops an allocation high-water that
+//!   oscillates across a page boundary — every paint loop with a transient
+//!   buffer — from trading `mem_unmap` plus `mem_map`, two page-table walks and
+//!   a TLB shootdown for each cycle; releasing them in granules is what stops a
+//!   *teardown* from paying that per page, thousands of times over, with the
+//!   global address-space registry's write lock held each time.
 //! * **Reallocate.** `realloc` resizes in place whenever it can, avoiding the
 //!   copy entirely. A **shrink** always succeeds in place:
 //!   the surrendered tail is returned to the free list (and top pages above the
@@ -205,6 +212,78 @@ fn retain_bytes(arena_bytes: usize, band: PressureBand) -> usize {
     target.max(PAGE_SIZE)
 }
 
+/// The least the arena is unmapped by on the allocation path.
+///
+/// [`retain_bytes`] answers *how much free memory the process may keep*. This
+/// answers a different question — *how much arena one syscall is worth* — and
+/// conflating the two is what let a teardown storm the machine. A retention is
+/// a **level**, and a level alone slides down with the free span it bounds:
+/// once the free top exceeds it, every further free of a page finds one more
+/// page above the line and hands that single page back. A descending teardown
+/// of a 16 MiB arena cost 3840 `mem_unmap` calls that way, each one a
+/// page-table walk, a kernel zeroing pass, the *global* address-space
+/// registry's write lock and a TLB shootdown to every other CPU — one
+/// process's teardown serialising the machine, which is how a switchboard
+/// panel closing stalled a desktop drag for a second.
+///
+/// Sixty-four pages, and **not** scaled with the machine, the process or the
+/// band, because it does not describe a capacity: it is the ratio at which one
+/// call's fixed cost stops mattering. That fixed cost is a lock acquisition and
+/// a cross-CPU shootdown — some microseconds — against per-page work of a
+/// page-table entry and a 4 KiB zeroing, so a few dozen pages already reduce
+/// the per-call share to a small percentage of the call's own work, and a
+/// larger granule buys no measurable further amortisation. A *proportional*
+/// granule would cost something real: a sixteenth of a gibibyte arena is
+/// 64 MiB, which is that much free memory a process would hold back from a
+/// machine already asking for it, to save syscalls that had stopped costing
+/// anything.
+///
+/// It is deliberately band-independent. The band decides what may be *kept*; it
+/// has no say in what a syscall is worth, and making the granule vanish under
+/// pressure would restore the storm exactly where the machine can least afford
+/// it. The price is a residue — on the allocation path a process can hold up to
+/// this much free top even at critical pressure — which is small by
+/// construction and not held indefinitely: the band-change trim
+/// ([`crate::pressure::report`]) is exact and ignores the granule, so a process
+/// told the machine is critical surrenders everything above its retention in
+/// one call.
+const ARENA_RESIZE_BYTES: usize = 64 * PAGE_SIZE;
+
+/// What the arena's mapped extent may do on one allocation-path call: how much
+/// free top the process may keep, and the least it is mapped or unmapped by at
+/// a time.
+///
+/// The two travel together because every allocation-path call reads both, and
+/// apart because they answer different questions — see [`retain_bytes`] and
+/// [`ARENA_RESIZE_BYTES`].
+#[derive(Clone, Copy)]
+struct ArenaPolicy {
+    /// Free top-of-arena bytes to keep mapped ([`retain_bytes`]).
+    retain: usize,
+    /// The least one unmap releases ([`ARENA_RESIZE_BYTES`]). Zero releases
+    /// exactly what the call freed, on the spot.
+    granule: usize,
+}
+
+impl ArenaPolicy {
+    /// The policy for an arena of `arena_bytes` at `band`.
+    fn new(arena_bytes: usize, band: PressureBand) -> Self {
+        Self {
+            retain: retain_bytes(arena_bytes, band),
+            granule: ARENA_RESIZE_BYTES,
+        }
+    }
+
+    /// Keep `retain`, and move the rest now rather than in granules.
+    ///
+    /// The band-change trim, which owes the machine its pages at once: a
+    /// process told that memory is critical surrenders everything above its
+    /// (then zero) retention in one call, with no granule left behind.
+    const fn exact(retain: usize) -> Self {
+        Self { retain, granule: 0 }
+    }
+}
+
 /// Round `value` down to a whole multiple of `PAGE_SIZE`.
 const fn round_down_to_page(value: usize) -> usize {
     value & !(PAGE_SIZE - 1)
@@ -361,7 +440,7 @@ impl<S: SpanStore> HeapState<S> {
     ///
     /// On no fit the arena is grown once through `pager`; a failed grow is a
     /// deterministic OOM (`None`, never a panic).
-    fn alloc(&mut self, layout: Layout, pager: &dyn Pager) -> Option<usize> {
+    fn alloc(&mut self, layout: Layout, pager: &dyn Pager, policy: ArenaPolicy) -> Option<usize> {
         let align = layout.align();
         let size = layout.size().max(1);
         let mut grown = false;
@@ -379,7 +458,7 @@ impl<S: SpanStore> HeapState<S> {
             if grown {
                 return None;
             }
-            self.grow(size, align, pager)?;
+            self.grow(size, align, pager, policy)?;
             grown = true;
         }
     }
@@ -387,7 +466,21 @@ impl<S: SpanStore> HeapState<S> {
     /// Map fresh pages at the arena top sufficient for a `size`/`align`
     /// allocation and record them as a free span. Returns `None` on a failed
     /// map (OOM) or address overflow.
-    fn grow(&mut self, size: usize, align: usize, pager: &dyn Pager) -> Option<()> {
+    ///
+    /// The arena grows by at least the policy's retention, so a run of small
+    /// allocations does not pay a `mem_map` — a page-table walk, a kernel
+    /// zeroing pass and the global address-space registry's write lock — per
+    /// page. That pad is the *retention* rather than the resize granule,
+    /// because mapping beyond what this allocation needs is speculation about
+    /// the next one: it is exactly the free top the band already permits the
+    /// process to hold, and it vanishes with it under real pressure.
+    fn grow(
+        &mut self,
+        size: usize,
+        align: usize,
+        pager: &dyn Pager,
+        policy: ArenaPolicy,
+    ) -> Option<()> {
         // A page-aligned base satisfies any alignment up to a page with no head
         // padding; a larger alignment needs the extra `align` slack so an
         // aligned sub-range is guaranteed to fit.
@@ -396,14 +489,21 @@ impl<S: SpanStore> HeapState<S> {
         } else {
             size
         };
-        let bytes = round_up_to_page(want)?;
+        let needed = round_up_to_page(want)?;
+        let padded = needed.max(round_down_to_page(policy.retain));
         let base = self.mapped_end;
-        let new_end = base.checked_add(bytes)?;
-        let page_count = bytes / PAGE_SIZE;
-        if !pager.map(base as u64, page_count) {
+        // The pad is an optimisation, so it must never turn a satisfiable
+        // allocation into a refusal: a padded map the kernel declines — for the
+        // address-space limit, or for want of frames — is retried at exactly
+        // what the caller asked for.
+        let bytes = if map_arena(base, padded, pager) {
+            padded
+        } else if padded != needed && map_arena(base, needed, pager) {
+            needed
+        } else {
             return None;
-        }
-        self.mapped_end = new_end;
+        };
+        self.mapped_end = base.checked_add(bytes)?;
         self.insert_free(Span {
             start: base,
             len: bytes,
@@ -413,13 +513,13 @@ impl<S: SpanStore> HeapState<S> {
 
     /// Return the region of `size` bytes based at `addr` to the free table and
     /// shrink the arena to the trailing pages `retain_bytes` keeps.
-    fn free(&mut self, addr: usize, layout: Layout, pager: &dyn Pager, retain_bytes: usize) {
+    fn free(&mut self, addr: usize, layout: Layout, pager: &dyn Pager, policy: ArenaPolicy) {
         let size = layout.size().max(1);
         self.insert_free(Span {
             start: addr,
             len: size,
         });
-        self.try_shrink_top(pager, retain_bytes);
+        self.try_shrink_top(pager, policy);
     }
 
     /// Bytes of arena currently mapped — the backing the retention is a
@@ -466,7 +566,7 @@ impl<S: SpanStore> HeapState<S> {
         old_layout: Layout,
         new_size: usize,
         pager: &dyn Pager,
-        retain_bytes: usize,
+        policy: ArenaPolicy,
     ) -> bool {
         let old_size = old_layout.size().max(1);
         let new_size = new_size.max(1);
@@ -478,7 +578,7 @@ impl<S: SpanStore> HeapState<S> {
                 start: addr + new_size,
                 len: old_size - new_size,
             });
-            self.try_shrink_top(pager, retain_bytes);
+            self.try_shrink_top(pager, policy);
             return true;
         }
         let extra = new_size - old_size;
@@ -498,13 +598,13 @@ impl<S: SpanStore> HeapState<S> {
                 if span.end() != self.mapped_end {
                     return false;
                 }
-                if self.grow(extra - span.len, 1, pager).is_none() {
+                if self.grow(extra - span.len, 1, pager, policy).is_none() {
                     return false;
                 }
             } else if tail_start != self.mapped_end {
                 // The next bytes are allocated, not free: no room to grow.
                 return false;
-            } else if self.grow(extra, 1, pager).is_none() {
+            } else if self.grow(extra, 1, pager, policy).is_none() {
                 // The block abuts the arena top; grow the arena to cover it.
                 return false;
             }
@@ -512,15 +612,20 @@ impl<S: SpanStore> HeapState<S> {
     }
 
     /// Release the whole pages the free span at the arena top covers *above*
-    /// `retain_bytes`, lowering `mapped_end` to what is kept. A failed unmap
-    /// leaves the pages mapped and tracked (no loss;).
+    /// `retain_bytes`, lowering `mapped_end` to what is kept, once there are at
+    /// least the policy's granule to release. A failed unmap leaves the pages
+    /// mapped and tracked (no loss;).
     ///
     /// The retained pages stay recorded as free, so they are the next
     /// allocation's first fit at the top — which is the whole point: they are
     /// kept precisely because the next allocation is likely to want them.
     /// `retain_bytes` of zero releases everything, as it must when the process
     /// is under real memory pressure.
-    fn try_shrink_top(&mut self, pager: &dyn Pager, retain_bytes: usize) {
+    ///
+    /// The policy's granule is what keeps the release *amortised* rather than
+    /// paid a page at a time ([`ARENA_RESIZE_BYTES`]); the band-change trim
+    /// passes zero to release on the spot.
+    fn try_shrink_top(&mut self, pager: &dyn Pager, policy: ArenaPolicy) {
         if self.count == 0 {
             return;
         }
@@ -537,12 +642,15 @@ impl<S: SpanStore> HeapState<S> {
         }
         // Rounded down, and never past the top, so the boundary stays
         // page-aligned and the page count below is exact.
-        let retained = round_down_to_page(retain_bytes.min(self.mapped_end - page_base));
+        let retained = round_down_to_page(policy.retain.min(self.mapped_end - page_base));
         let freeable_start = page_base + retained;
         if freeable_start >= self.mapped_end {
             return;
         }
         let bytes = self.mapped_end - freeable_start;
+        if bytes < policy.granule {
+            return;
+        }
         let page_count = bytes / PAGE_SIZE;
         if !pager.unmap(freeable_start as u64, page_count) {
             return;
@@ -554,6 +662,13 @@ impl<S: SpanStore> HeapState<S> {
             self.store.slots_mut()[top].len = freeable_start - span.start;
         }
     }
+}
+
+/// Map `bytes` of fresh arena at `base`, reporting whether the kernel granted
+/// it. An extent that would overflow the address space is declined without a
+/// syscall.
+fn map_arena(base: usize, bytes: usize, pager: &dyn Pager) -> bool {
+    base.checked_add(bytes).is_some() && pager.map(base as u64, bytes / PAGE_SIZE)
 }
 
 /// Round `addr` up to the next multiple of `align` (a power of two per the
@@ -596,23 +711,29 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     /// Free top-of-arena bytes to keep mapped right now, at the band the
     /// process has been told about.
     ///
-    /// One relaxed load, no syscall: this is read on every free, so the band
-    /// has to be something the caller already holds rather than something it
-    /// asks for.
-    fn retention(state: &HeapState<S>) -> usize {
-        retain_bytes(state.mapped_bytes(), crate::pressure::gauge().band())
+    /// One relaxed load, no syscall: this is read on every allocation-path
+    /// call, so the band has to be something the caller already holds rather
+    /// than something it asks for.
+    fn policy(state: &HeapState<S>) -> ArenaPolicy {
+        ArenaPolicy::new(state.mapped_bytes(), crate::pressure::gauge().band())
     }
 
-    /// Release every retained top page the current band no longer permits.
+    /// Release every retained top page the current band no longer permits, on
+    /// the spot.
     ///
     /// The retention is re-read on each free, so ordinary allocation traffic
     /// already collapses it as the machine tightens. This is the path for a
     /// process that has *stopped* allocating: a band that deepens while the
     /// heap is idle would otherwise leave the pages held until the next free.
+    ///
+    /// Exact, not granular: the allocation path amortises its syscalls over a
+    /// granule because it is about to want those pages back, while this is the
+    /// machine asking for them — so it hands back everything the band no longer
+    /// permits, leaving no granule behind at critical pressure.
     fn trim(&self) {
         let mut state = self.state.lock();
-        let retain = Self::retention(&state);
-        state.try_shrink_top(&self.pager, retain);
+        let retain = retain_bytes(state.mapped_bytes(), crate::pressure::gauge().band());
+        state.try_shrink_top(&self.pager, ArenaPolicy::exact(retain));
     }
 }
 
@@ -623,7 +744,9 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
 // shared `HeapState`.
 unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        match self.state.lock().alloc(layout, &self.pager) {
+        let mut state = self.state.lock();
+        let policy = Self::policy(&state);
+        match state.alloc(layout, &self.pager, policy) {
             Some(addr) => addr as *mut u8,
             None => core::ptr::null_mut(),
         }
@@ -631,8 +754,8 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         let mut state = self.state.lock();
-        let retain = Self::retention(&state);
-        state.free(ptr as usize, layout, &self.pager, retain);
+        let policy = Self::policy(&state);
+        state.free(ptr as usize, layout, &self.pager, policy);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -641,8 +764,8 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         // the arena top (no copy, the cheap path).
         {
             let mut state = self.state.lock();
-            let retain = Self::retention(&state);
-            if state.resize_in_place(ptr as usize, layout, new_size, &self.pager, retain) {
+            let policy = Self::policy(&state);
+            if state.resize_in_place(ptr as usize, layout, new_size, &self.pager, policy) {
                 return ptr;
             }
         }
@@ -653,9 +776,13 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
         let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
             return core::ptr::null_mut();
         };
-        let new_ptr = match self.state.lock().alloc(new_layout, &self.pager) {
-            Some(addr) => addr as *mut u8,
-            None => return core::ptr::null_mut(),
+        let new_ptr = {
+            let mut state = self.state.lock();
+            let policy = Self::policy(&state);
+            match state.alloc(new_layout, &self.pager, policy) {
+                Some(addr) => addr as *mut u8,
+                None => return core::ptr::null_mut(),
+            }
         };
         // SAFETY: `ptr` is a live allocation of `layout.size()` bytes and
         // `new_ptr` is a fresh allocation carved from a disjoint arena range of
@@ -666,8 +793,8 @@ unsafe impl<P: Pager, S: SpanStore> GlobalAlloc for Heap<P, S> {
             core::ptr::copy_nonoverlapping(ptr, new_ptr, layout.size().min(new_size));
         }
         let mut state = self.state.lock();
-        let retain = Self::retention(&state);
-        state.free(ptr as usize, layout, &self.pager, retain);
+        let policy = Self::policy(&state);
+        state.free(ptr as usize, layout, &self.pager, policy);
         new_ptr
     }
 }
@@ -820,6 +947,38 @@ mod tests {
         }
     }
 
+    /// A pager that grants a map of at most `limit` pages, to drive the case
+    /// where the kernel refuses the growth pad but could still satisfy what the
+    /// caller actually asked for.
+    struct StingyPager {
+        limit: usize,
+        events: core::cell::RefCell<Vec<usize>>,
+    }
+
+    impl StingyPager {
+        fn new(limit: usize) -> Self {
+            Self {
+                limit,
+                events: core::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The page counts it was asked for, refusals included.
+        fn asked(&self) -> Vec<usize> {
+            self.events.borrow().clone()
+        }
+    }
+
+    impl Pager for StingyPager {
+        fn map(&self, _base: u64, pages: usize) -> bool {
+            self.events.borrow_mut().push(pages);
+            pages <= self.limit
+        }
+        fn unmap(&self, _base: u64, _pages: usize) -> bool {
+            true
+        }
+    }
+
     /// A pager whose `map` always fails, to drive the deterministic-OOM path.
     struct DeadPager;
     impl Pager for DeadPager {
@@ -878,10 +1037,11 @@ mod tests {
         }
     }
 
-    /// Retention of zero: give every free top page straight back. It is what
-    /// a process under real memory pressure does, and what every test that
-    /// asserts an unmap is about.
-    const NO_RETENTION: usize = 0;
+    /// Retention of zero, released on the spot: give every free top page
+    /// straight back and map exactly what an allocation needs. It is what a
+    /// process under real memory pressure does, and what every test that
+    /// asserts a particular map or unmap is about.
+    const NO_RETENTION: ArenaPolicy = ArenaPolicy::exact(0);
 
     fn layout(size: usize, align: usize) -> Layout {
         Layout::from_size_align(size, align).expect("valid layout")
@@ -901,7 +1061,9 @@ mod tests {
     fn first_allocation_maps_one_page_and_returns_the_arena_base() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let addr = heap.alloc(layout(64, 8), &pager).expect("allocates");
+        let addr = heap
+            .alloc(layout(64, 8), &pager, NO_RETENTION)
+            .expect("allocates");
         assert_eq!(addr, base());
         assert_eq!(pager.maps(), 1);
         // One page mapped, 64 bytes carved off the front: the tail is free.
@@ -975,6 +1137,152 @@ mod tests {
         assert_eq!(retain_bytes(PAGE_SIZE, PressureBand::Severe), 0);
     }
 
+    /// The arena is resized in granules, so a bulk teardown costs syscalls in
+    /// proportion to the arena rather than to its pages.
+    ///
+    /// This is the defect the switchboard's frame report caught: 4254
+    /// `mem_unmap` calls inside one 275 ms frame as a panel's ~18 MiB of live
+    /// heap went away. A retention alone cannot prevent it — being a level, it
+    /// slides down with the free span, so every further free of a page finds
+    /// one more page above the line and hands back that single page, each call
+    /// taking the global address-space registry's write lock and shooting down
+    /// the TLB on every other CPU.
+    #[test]
+    fn a_bulk_teardown_resizes_the_arena_in_granules_not_a_page_at_a_time() {
+        let teardown = |band: PressureBand| {
+            let pager = FakePager::new();
+            let mut heap = heap_state();
+            let block = layout(PAGE_SIZE, 8);
+            let mut addrs = Vec::new();
+            for _ in 0..PAGES {
+                let policy = ArenaPolicy::new(heap.mapped_bytes(), band);
+                addrs.push(
+                    heap.alloc(block, &pager, policy)
+                        .expect("the arena grows for each block"),
+                );
+            }
+            // Highest address first: the free span at the top then grows
+            // downwards one block at a time, which is the shape that paid a
+            // syscall per page.
+            addrs.sort_unstable();
+            for addr in addrs.iter().rev() {
+                let policy = ArenaPolicy::new(heap.mapped_bytes(), band);
+                heap.free(*addr, block, &pager, policy);
+            }
+            (pager.maps(), pager.unmaps())
+        };
+
+        for band in PressureBand::ALL {
+            let (maps, unmaps) = teardown(band);
+            // Releasing is amortised at every band: the granule is what one
+            // syscall is worth, which pressure has no say in.
+            assert!(
+                unmaps <= PAGES / 32,
+                "{band:?} tore a {PAGES}-page arena down in {unmaps} unmaps"
+            );
+            // Mapping *ahead* is a different matter: it is speculation about
+            // the next allocation, so the pad is the retention and answers to
+            // the band. While free pages may be held it grows the arena in
+            // strides; once the band refuses them it maps exactly the page each
+            // allocation asked for and not one more, which is the whole point
+            // of a pad that shrinks with pressure.
+            match band {
+                PressureBand::Normal | PressureBand::Mild => assert!(
+                    maps <= PAGES / 8,
+                    "{band:?} grew a {PAGES}-page arena in {maps} maps"
+                ),
+                _ => assert_eq!(
+                    maps, PAGES,
+                    "{band:?} must map no page the caller did not ask for"
+                ),
+            }
+        }
+    }
+
+    /// Pages of a bulk teardown, chosen to match the ~18 MiB arena the
+    /// switchboard's report implied so the assertion is about the case that was
+    /// actually observed.
+    const PAGES: usize = 4096;
+
+    /// The growth pad is an optimisation, so a kernel that refuses it must not
+    /// cost the caller an allocation it could have had.
+    #[test]
+    fn a_refused_growth_pad_falls_back_to_what_the_caller_asked_for() {
+        // Room for the one page asked for, but not for the pad above it.
+        let pager = StingyPager::new(1);
+        let mut heap = heap_state();
+        let policy = ArenaPolicy {
+            retain: 64 * PAGE_SIZE,
+            granule: ARENA_RESIZE_BYTES,
+        };
+        let addr = heap
+            .alloc(layout(PAGE_SIZE, 8), &pager, policy)
+            .expect("the pad is refused, the page asked for is not");
+        assert_eq!(addr, base());
+        assert_eq!(heap.mapped_bytes(), PAGE_SIZE, "only what was needed");
+        assert_eq!(pager.asked(), Vec::from([64, 1]), "the pad, then the need");
+
+        // And a pager that refuses even that still fails closed, with no retry
+        // of an identical request.
+        let pager = StingyPager::new(0);
+        let mut heap = heap_state();
+        assert_eq!(heap.alloc(layout(PAGE_SIZE, 8), &pager, NO_RETENTION), None);
+        assert_eq!(pager.asked(), Vec::from([1]));
+    }
+
+    /// The granule is what a syscall is worth and the retention is what may be
+    /// kept, so only the retention answers to the band.
+    #[test]
+    fn the_granule_is_a_cost_ratio_and_ignores_the_band_and_the_arena() {
+        // Whole pages, and more than one, so the arena never moves in a unit
+        // too small to amortise the call that moves it.
+        const {
+            assert!(ARENA_RESIZE_BYTES > PAGE_SIZE);
+            assert!(ARENA_RESIZE_BYTES.is_multiple_of(PAGE_SIZE));
+        }
+        for arena in [0, PAGE_SIZE, 4096 * PAGE_SIZE] {
+            for band in PressureBand::ALL {
+                assert_eq!(
+                    ArenaPolicy::new(arena, band).granule,
+                    ARENA_RESIZE_BYTES,
+                    "{band:?} at {arena} moved the granule"
+                );
+            }
+        }
+        // The retention, by contrast, is the band's answer and reaches zero.
+        let arena = 4096 * PAGE_SIZE;
+        assert!(ArenaPolicy::new(arena, PressureBand::Normal).retain > ARENA_RESIZE_BYTES);
+        assert_eq!(ArenaPolicy::new(arena, PressureBand::Critical).retain, 0);
+    }
+
+    /// The band-change trim is exact: a process told the machine is critical
+    /// hands back everything, with no granule left mapped behind it.
+    #[test]
+    fn the_pressure_trim_leaves_no_granule_behind() {
+        let pager = FakePager::new();
+        let mut heap = heap_state();
+        let block = layout(PAGE_SIZE, 8);
+        let mut addrs = Vec::new();
+        for _ in 0..16 {
+            let policy = ArenaPolicy::new(heap.mapped_bytes(), PressureBand::Normal);
+            addrs.push(heap.alloc(block, &pager, policy).expect("the arena grows"));
+        }
+        addrs.sort_unstable();
+        for addr in addrs.iter().rev() {
+            let policy = ArenaPolicy::new(heap.mapped_bytes(), PressureBand::Normal);
+            heap.free(*addr, block, &pager, policy);
+        }
+        // Comfortable, so the arena still holds what the band permits plus
+        // whatever the granule has not yet made worth releasing.
+        assert!(heap.mapped_bytes() > 0);
+        // The machine now asks for it. Everything goes, in one call.
+        let unmaps = pager.unmaps();
+        let retain = retain_bytes(heap.mapped_bytes(), PressureBand::Critical);
+        heap.try_shrink_top(&pager, ArenaPolicy::exact(retain));
+        assert_eq!(pager.unmaps(), unmaps + 1);
+        assert_eq!(heap.mapped_bytes(), 0);
+    }
+
     /// A transient buffer allocated and dropped over a stable live set is the
     /// shape of every paint loop, and it is what the desktop's frame-budget
     /// reports caught: with no retention each cycle trades a `mem_unmap` for a
@@ -983,16 +1291,17 @@ mod tests {
     /// covers the buffer must reduce that to nothing.
     #[test]
     fn a_transient_buffer_costs_no_syscall_once_the_top_page_is_retained() {
-        let churn = |retain: usize| {
+        let churn = |retain: ArenaPolicy| {
             let pager = FakePager::new();
             let mut heap = heap_state();
             let live = layout(2048, 8);
             let transient = layout(3000, 8);
-            heap.alloc(live, &pager).expect("the live set allocates");
+            heap.alloc(live, &pager, NO_RETENTION)
+                .expect("the live set allocates");
             let before = (pager.maps(), pager.unmaps());
             for _ in 0..100 {
                 let addr = heap
-                    .alloc(transient, &pager)
+                    .alloc(transient, &pager, NO_RETENTION)
                     .expect("the transient buffer allocates");
                 heap.free(addr, transient, &pager, retain);
             }
@@ -1008,7 +1317,7 @@ mod tests {
         assert_eq!(churn(NO_RETENTION), (100, 100, base() + PAGE_SIZE));
         // One retained page spans the whole oscillation, so every cycle after
         // the first reuses it and the arena never moves.
-        let (maps, unmaps, end) = churn(PAGE_SIZE);
+        let (maps, unmaps, end) = churn(ArenaPolicy::exact(PAGE_SIZE));
         assert_eq!(
             (maps, unmaps),
             (1, 0),
@@ -1024,11 +1333,18 @@ mod tests {
         let pager = FakePager::new();
         let mut heap = heap_state();
         let block = layout(8 * PAGE_SIZE, 8);
-        let addr = heap.alloc(block, &pager).expect("the arena grows");
+        let addr = heap
+            .alloc(block, &pager, NO_RETENTION)
+            .expect("the arena grows");
         assert_eq!(heap.mapped_end, base() + 8 * PAGE_SIZE);
         // Retain two and a half pages: the half page is not a whole page and
         // is given back with the rest.
-        heap.free(addr, block, &pager, 2 * PAGE_SIZE + PAGE_SIZE / 2);
+        heap.free(
+            addr,
+            block,
+            &pager,
+            ArenaPolicy::exact(2 * PAGE_SIZE + PAGE_SIZE / 2),
+        );
         assert_eq!(heap.mapped_end, base() + 2 * PAGE_SIZE);
         assert_eq!(pager.unmaps(), 1);
         // What is kept is still tracked as free, so it is available rather
@@ -1049,18 +1365,23 @@ mod tests {
         let pager = FakePager::new();
         let mut heap = heap_state();
         let block = layout(4 * PAGE_SIZE, 8);
-        let addr = heap.alloc(block, &pager).expect("the arena grows");
+        let addr = heap
+            .alloc(block, &pager, NO_RETENTION)
+            .expect("the arena grows");
         let arena = heap.mapped_bytes();
         heap.free(
             addr,
             block,
             &pager,
-            retain_bytes(arena, PressureBand::Normal),
+            ArenaPolicy::exact(retain_bytes(arena, PressureBand::Normal)),
         );
         let held = heap.mapped_end;
         assert!(held > base(), "normal pressure retains something");
         // No further allocation happens; only the band moves.
-        heap.try_shrink_top(&pager, retain_bytes(arena, PressureBand::Severe));
+        heap.try_shrink_top(
+            &pager,
+            ArenaPolicy::exact(retain_bytes(arena, PressureBand::Severe)),
+        );
         assert_eq!(heap.mapped_end, base(), "severe pressure keeps nothing");
         assert_eq!(heap.count, 0);
     }
@@ -1069,8 +1390,8 @@ mod tests {
     fn two_allocations_share_one_mapped_page() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         assert_eq!(a, base());
         assert_eq!(b, base() + 64);
         // The second fits in the page already mapped — no extra map.
@@ -1081,8 +1402,8 @@ mod tests {
     fn free_coalesces_adjacent_blocks_back_into_one_span() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // Free out of order; the two freed blocks plus the page tail must
         // coalesce into a single free span covering the whole page.
         heap.free(b, layout(64, 8), &pager, NO_RETENTION);
@@ -1098,8 +1419,8 @@ mod tests {
     fn freeing_a_middle_block_records_a_span_without_unmapping() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // Free the first block: it sits below an allocated block, so it cannot
         // reach the arena top and stays a tracked free span (no shrink).
         heap.free(a, layout(64, 8), &pager, NO_RETENTION);
@@ -1113,11 +1434,11 @@ mod tests {
     fn freed_block_is_reused_by_a_later_fitting_allocation() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         heap.free(a, layout(64, 8), &pager, NO_RETENTION);
         // `a`'s hole is the first fit for an equal request — reused, no growth.
-        let c = heap.alloc(layout(64, 8), &pager).unwrap();
+        let c = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         assert_eq!(c, a);
         assert_eq!(pager.maps(), 1);
     }
@@ -1126,7 +1447,9 @@ mod tests {
     fn large_allocation_grows_the_arena_by_multiple_pages() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let addr = heap.alloc(layout(3 * PAGE_SIZE, 8), &pager).unwrap();
+        let addr = heap
+            .alloc(layout(3 * PAGE_SIZE, 8), &pager, NO_RETENTION)
+            .unwrap();
         assert_eq!(addr, base());
         assert_eq!(heap.mapped_end, base() + 3 * PAGE_SIZE);
         assert_eq!(pager.maps(), 1);
@@ -1137,8 +1460,8 @@ mod tests {
         let pager = FakePager::new();
         let mut heap = heap_state();
         // Burn one small block so the next span does not start page-aligned.
-        let _a = heap.alloc(layout(8, 8), &pager).unwrap();
-        let p = heap.alloc(layout(64, 4096), &pager).unwrap();
+        let _a = heap.alloc(layout(8, 8), &pager, NO_RETENTION).unwrap();
+        let p = heap.alloc(layout(64, 4096), &pager, NO_RETENTION).unwrap();
         assert_eq!(p % 4096, 0, "alignment honoured");
         // The pre-alignment gap is a free span, not leaked.
         assert!(heap.store.slots()[..heap.count]
@@ -1149,7 +1472,7 @@ mod tests {
     #[test]
     fn allocation_fails_closed_when_the_pager_cannot_map() {
         let mut heap = heap_state();
-        assert_eq!(heap.alloc(layout(64, 8), &DeadPager), None);
+        assert_eq!(heap.alloc(layout(64, 8), &DeadPager, NO_RETENTION), None);
         assert_eq!(heap.mapped_end, base());
         assert_eq!(heap.count, 0);
     }
@@ -1230,10 +1553,10 @@ mod tests {
         });
         // Aligning to 4096 within a page-based span needs no head, so force a
         // head by first reserving the page start with a tiny carve.
-        let _first = heap.alloc(layout(8, 8), &pager).unwrap();
+        let _first = heap.alloc(layout(8, 8), &pager, NO_RETENTION).unwrap();
         // Now the free span starts at base()+8; a 4096-aligned request leaves a
         // head gap *and* a tail — the true/true carve that needs a new slot.
-        assert_eq!(heap.alloc(layout(64, 4096), &pager), None);
+        assert_eq!(heap.alloc(layout(64, 4096), &pager, NO_RETENTION), None);
     }
 
     #[test]
@@ -1258,16 +1581,30 @@ mod tests {
         assert_eq!(p as usize, base());
         // SAFETY: `p` was just returned by this allocator for `l`.
         unsafe { heap.dealloc(p, l) };
-        // The whole page freed and was returned to the kernel: the process
-        // gauge has been told no band, which reads as critical and retains
-        // nothing.
-        assert_eq!(heap.pager.unmaps(), 1);
+        // The page is free again and the next allocation of it costs no
+        // syscall. It is not handed back here: one page is far below the
+        // granule one `mem_unmap` is worth, and the process gauge has been told
+        // no band, which reads as critical and so retains nothing — the
+        // band-change trim is what surrenders it.
+        assert_eq!(heap.pager.unmaps(), 0);
+        // SAFETY: `l` is the layout just freed.
+        assert_eq!(unsafe { heap.alloc(l) } as usize, base());
+        assert_eq!(
+            heap.pager.maps(),
+            1,
+            "the freed page was reused, not remapped"
+        );
     }
 
-    /// The trim `pressure::report` drives, over the whole wrapper: it reads
-    /// the process band, holds the lock once, and gives back what that band
-    /// no longer permits — nothing at all at the unreported (critical)
-    /// default, and never a second unmap of pages already released.
+    /// The trim `pressure::report` drives, over the whole wrapper: it reads the
+    /// process band, holds the lock once, and gives back what that band no
+    /// longer permits — everything at the unreported (critical) default, and
+    /// never a second unmap of pages already released.
+    ///
+    /// It is also the path that clears the allocation path's granule residue:
+    /// freeing a few pages is below the granule one `mem_unmap` is worth, so
+    /// the free leaves them mapped, and this is what hands them over when the
+    /// machine asks.
     #[test]
     fn the_pressure_trim_releases_what_the_band_refuses_and_repeats_harmlessly() {
         let heap = Heap::new(FakePager::new(), VecSpanStore::unbounded());
@@ -1281,8 +1618,13 @@ mod tests {
         assert_eq!(heap.pager.unmaps(), 0);
         // SAFETY: `p` was just returned by this allocator for `l`.
         unsafe { heap.dealloc(p, l) };
-        assert_eq!(heap.pager.unmaps(), 1);
+        assert_eq!(
+            heap.pager.unmaps(),
+            0,
+            "three pages is below the granule a release is worth"
+        );
         heap.trim();
+        assert_eq!(heap.pager.unmaps(), 1, "the trim is exact, granule or not");
         heap.trim();
         assert_eq!(heap.pager.unmaps(), 1, "a repeated trim unmaps nothing");
         assert_eq!(heap.state.lock().mapped_bytes(), 0);
@@ -1292,7 +1634,7 @@ mod tests {
     fn resize_to_the_same_size_is_a_no_op_in_place() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         let before = heap.count;
         assert!(heap.resize_in_place(a, layout(64, 8), 64, &pager, NO_RETENTION));
         assert_eq!(heap.count, before, "no span churn for an unchanged size");
@@ -1302,8 +1644,8 @@ mod tests {
     fn shrink_in_place_returns_the_surrendered_tail_to_the_free_list() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // Shrinking `a` from 64 to 16 frees `[a+16, a+64)`; `_b` sits above it,
         // so the tail cannot reach the arena top and stays a tracked span.
         assert!(heap.resize_in_place(a, layout(64, 8), 16, &pager, NO_RETENTION));
@@ -1318,7 +1660,9 @@ mod tests {
         let pager = FakePager::new();
         let mut heap = heap_state();
         // A two-page allocation that exactly fills the mapped arena.
-        let a = heap.alloc(layout(2 * PAGE_SIZE, 8), &pager).unwrap();
+        let a = heap
+            .alloc(layout(2 * PAGE_SIZE, 8), &pager, NO_RETENTION)
+            .unwrap();
         assert_eq!(heap.count, 0);
         assert_eq!(heap.mapped_end, base() + 2 * PAGE_SIZE);
         // Shrinking to 64 bytes frees the rest; the whole second page (and the
@@ -1333,9 +1677,9 @@ mod tests {
     fn grow_in_place_consumes_the_adjacent_free_span() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let b = heap.alloc(layout(64, 8), &pager).unwrap();
-        let _c = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let _c = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // Free the middle block, then grow `a` into the hole it left — no copy,
         // no new mapping, and the hole is fully consumed.
         heap.free(b, layout(64, 8), &pager, NO_RETENTION);
@@ -1351,7 +1695,7 @@ mod tests {
     fn grow_in_place_at_the_arena_top_grows_the_arena() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // Growing past the mapped page extends the top free span by mapping one
         // more page, then carves the extra — still in place at `a`.
         assert!(heap.resize_in_place(a, layout(64, 8), PAGE_SIZE + 64, &pager, NO_RETENTION));
@@ -1363,8 +1707,8 @@ mod tests {
     fn grow_in_place_is_refused_when_the_next_block_is_allocated() {
         let pager = FakePager::new();
         let mut heap = heap_state();
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
-        let _b = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
+        let _b = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         // `_b` immediately follows `a` and is live, so there is no room to grow
         // in place: the caller must relocate.
         assert!(!heap.resize_in_place(a, layout(64, 8), 128, &pager, NO_RETENTION));
@@ -1376,7 +1720,7 @@ mod tests {
         let mut heap = heap_state();
         // Lay the arena out with the live pager, then attempt a top-growing
         // resize against a pager that cannot map: the grow must fail closed.
-        let a = heap.alloc(layout(64, 8), &pager).unwrap();
+        let a = heap.alloc(layout(64, 8), &pager, NO_RETENTION).unwrap();
         let mapped_end = heap.mapped_end;
         assert!(!heap.resize_in_place(a, layout(64, 8), 4 * PAGE_SIZE, &DeadPager, NO_RETENTION));
         assert_eq!(
@@ -1412,7 +1756,7 @@ mod tests {
             return addr;
         }
         let moved = heap
-            .alloc(layout(new_size, old.align()), pager)
+            .alloc(layout(new_size, old.align()), pager, NO_RETENTION)
             .expect("relocating grow succeeds under the live pager");
         heap.free(addr, old, pager, NO_RETENTION);
         moved
@@ -1438,15 +1782,21 @@ mod tests {
             // The broker's record vector: starts small and doubles as
             // `extend_from_slice` fills it, exactly the `Vec` growth curve.
             let mut rows_len = 64usize;
-            let mut rows = heap.alloc(layout(rows_len, 8), &pager).unwrap();
+            let mut rows = heap
+                .alloc(layout(rows_len, 8), &pager, NO_RETENTION)
+                .unwrap();
             while rows_len < 8192 {
                 rows =
                     realloc_bookkeeping(&mut heap, &pager, rows, layout(rows_len, 8), rows_len * 2);
                 rows_len *= 2;
             }
             // The introspect paging scratch and a handful of boxed values.
-            let scratch = heap.alloc(layout(6 * 1024, 8), &pager).unwrap();
-            let smalls: Vec<usize> = (0..8).map(|_| heap.alloc(small, &pager).unwrap()).collect();
+            let scratch = heap
+                .alloc(layout(6 * 1024, 8), &pager, NO_RETENTION)
+                .unwrap();
+            let smalls: Vec<usize> = (0..8)
+                .map(|_| heap.alloc(small, &pager, NO_RETENTION).unwrap())
+                .collect();
             // Free in mixed order so coalescing is exercised from both
             // sides, as real drop order interleaves.
             heap.free(scratch, layout(6 * 1024, 8), &pager, NO_RETENTION);

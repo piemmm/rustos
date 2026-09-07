@@ -7434,6 +7434,20 @@ of how much code was produced.
 Amendments to `AGENTS.md` (the binding charter) are logged here so an agent
 can see *why* a rule exists without diffing the charter's history.
 
+- **2026-09-07 — §25 gains the arena resize granule, so the userland heap's
+  retention is no longer the only thing bounding its syscalls.** Owner decision.
+  §25 said the retention "reaches zero from moderate pressure onward", which is
+  right for what a process may *keep* and useless against a teardown: a level
+  slides down with the free span it bounds, so a descending teardown paid one
+  `mem_unmap` per page — measured at 3840 calls for a 16 MiB arena, and observed
+  as 4254 in one switchboard frame — each taking the global address-space
+  registry's write lock and shooting down every other CPU's TLB. The granule is
+  stated as explicitly *not* derived from the machine, process or band, because
+  the obvious reading of §24.1/§24.2 would have made it proportional, which
+  holds 64 MiB of a gibibyte arena back from a machine already asking for it.
+  The band keeps the last word through the exact `pressure::report` trim, so the
+  residue is bounded and never outlives a band change.
+
 - **2026-09-03 — §28 states the rule the desktop kept re-deriving: an
   interactive surface never waits on I/O.** New section (owner decision). Every
   freeze found in the desktop so far — the synchronous app launch, the picker's

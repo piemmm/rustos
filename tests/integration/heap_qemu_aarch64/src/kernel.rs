@@ -93,6 +93,9 @@ const FAIL_SPAWN: NonZeroU16 = fail_point!(7);
 const FAIL_DEADLOCK: NonZeroU16 = fail_point!(8);
 const FAIL_UNEXPECTED_SYSCALL: NonZeroU16 = fail_point!(9);
 const FAIL_FAULT: NonZeroU16 = fail_point!(10);
+/// The fixture verified every value and exited cleanly, but no range ever
+/// reached `mem_unmap` — the release path went untested.
+const FAIL_NO_UNMAP: NonZeroU16 = fail_point!(11);
 /// Base finisher for a non-zero `exit` from the fixture (a verification
 /// failure); the program's exit code is added so the failing step is
 /// identifiable.
@@ -185,6 +188,11 @@ struct LiveSpace {
 /// the production handler reaches (`plans/SPAWN.md` SP5b).
 struct AnonProducer {
     inner: UnsafeCell<Option<LiveSpace>>,
+    /// Ranges handed back through `mem_unmap`. The arena is resized in
+    /// granules, so no *individual* free need reach the syscall — but the
+    /// fixture's pressure-band trim must, and a run where it never arrived has
+    /// left `mem_unmap` untested rather than proved it.
+    unmaps: AtomicUsize,
 }
 
 // SAFETY: the test runs on a single CPU and the producer is reached only
@@ -199,7 +207,13 @@ impl AnonProducer {
     const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(None),
+            unmaps: AtomicUsize::new(0),
         }
+    }
+
+    /// Ranges released through `mem_unmap` so far.
+    fn unmaps(&self) -> usize {
+        self.unmaps.load(Ordering::Relaxed)
     }
 
     /// Install the retained live space. Called once at boot, before the
@@ -292,7 +306,9 @@ impl MemMap for AnonProducer {
             page_count,
             |_frame| {},
         )
-        .map_err(anon_to_errno)
+        .map_err(anon_to_errno)?;
+        self.unmaps.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -347,9 +363,20 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     } else if call == Some(SyscallNumber::EXIT) {
         let exit_code = i32_from_register(args[0]);
         if exit_code == 0 {
+            if PRODUCER.unmaps() == 0 {
+                // The fixture verifies its own values, so a clean exit says
+                // nothing about the release path: without this a granule wide
+                // enough to swallow the whole fixture would leave `mem_unmap`
+                // uncovered and the run would still pass.
+                note(
+                    TEST_FAIL,
+                    "heap test: fixture exited 0 but never released a range through mem_unmap",
+                );
+                qemu_exit::exit_failure(FAIL_NO_UNMAP);
+            }
             note(
                 TEST_PASS,
-                "heap test: EL0 program allocated, grew, freed, reused, and exited 0",
+                "heap test: EL0 program allocated, grew, freed, reused, trimmed, and exited 0",
             );
             qemu_exit::exit_success();
         }

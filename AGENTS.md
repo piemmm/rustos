@@ -3192,7 +3192,28 @@ one writes a second.
   critical and retains nothing, so a process that never wires the pressure
   protocol behaves exactly as one with no retention at all (fail closed);
   `pressure::report` releases the retention on a band change, so a process that
-  has stopped allocating still gives it back.
+  has stopped allocating still gives it back. The retention is also the least
+  the arena **grows** by, so a run of small allocations pays no `mem_map` per
+  page; mapping beyond what the caller asked for is speculation about the next
+  allocation, so that pad shrinks with the band and is zero under real pressure.
+- **The arena is resized in granules, so a teardown cannot storm the machine
+  (§2.16, §26.1).** A retention bounds what may be *kept*; it cannot bound a
+  teardown's syscalls, because a level slides down with the free span it bounds
+  — once the free top exceeds it, every further free of a page hands that single
+  page back. A descending teardown of a 16 MiB arena cost 3840 `mem_unmap`
+  calls that way, each taking the **global** address-space registry's write lock
+  and shooting down the TLB on every other CPU, so one process's teardown
+  serialised every other process's frame. The heap therefore releases a free top
+  only once at least `ARENA_RESIZE_BYTES` of it stands above the retention, and
+  then releases all of it. That figure is deliberately **not** derived from the
+  machine, the process, or the band: it is not a capacity (§24.1) but the ratio
+  at which one call's fixed cost stops mattering against the per-page work the
+  same call already does, and a proportional granule would hold a sixteenth of a
+  gibibyte arena back from a machine already asking for it. The band keeps the
+  last word: the trim `pressure::report` drives is **exact** — it ignores the
+  granule and releases everything above the retention in one call — so the
+  residue an allocation path may leave, even at critical pressure, is never held
+  past the next band change.
 - **The free-span table is a growable capacity, not a fixed ceiling (§24.1).**
   It maps further metadata pages on demand rather than capping a fragmented
   workload at a hand-picked `const`.

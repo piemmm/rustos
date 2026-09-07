@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 20 open, 82 closed, 102 total.
+table normalises all three to **closed**. 21 open, 84 closed, 105 total.
 
-### Open (20)
+### Open (21)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -47,8 +47,9 @@ table normalises all three to **closed**. 20 open, 82 closed, 102 total.
 | D97 | a userland service's log threshold cannot be lowered on a shipped system | four documents told the reader to lower it; corrected. The device manager's `13002`/`13006`/`13007` are unreachable on a real boot |
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
+| D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 
-### Closed (82)
+### Closed (84)
 
 | ID | Subject |
 |---|---|
@@ -134,6 +135,8 @@ table normalises all three to **closed**. 20 open, 82 closed, 102 total.
 | D100 | the PIE load base was never recorded, so every user code address in a diagnostic was unplaceable |
 | D101 | the debug image's kernel diagnostics were never linted by any clippy pass |
 | D102 | a new syscall's handler default answered a value instead of refusing, and its C-ABI stub was missing |
+| D104 | switchboard spent a frame in thousands of syscalls |
+| D105 | the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left |
 
 ## Scope
 
@@ -6232,7 +6235,7 @@ the whole-project gate rather than by the per-crate runs used while building,
 which is the reason the charter makes the whole-project run the only thing
 that counts as done.
 
-## D42 — the fork-join pool has no true-SMP vertical (OPEN)
+## D103 — the fork-join pool has no true-SMP vertical (OPEN)
 
 `lib/parallel`'s `Pool` protocol is exercised dynamically only by
 `threads-qemu-x86_64`'s `parallel` role: three real `lib/rt` threads, twelve
@@ -6243,11 +6246,11 @@ it: they run `cpus: 1`, so `Pool::for_cpus` asks for no worker, `bands` answers
 one, and `compose_span` never dispatches at all.
 
 Single-CPU time-sharing is a real exercise of the protocol — it is where the
-dispatching thread routinely claims every piece before a worker is scheduled,
-which is the case the engagement's retraction answers — but it cannot race the
-engagement word. Two participants CAS-joining while the dispatcher sets the
-closed bit is a genuinely concurrent interleaving that only two CPUs executing
-at once can produce.
+dispatching thread routinely draws every piece before a worker is scheduled,
+which is the case the claim word answers (D105) — but it cannot race that word.
+Two participants compare-exchanging a draw against the dispatcher's own is a
+genuinely concurrent interleaving that only two CPUs executing at once can
+produce.
 
 **What it would take.** No existing *user-program* chassis brings up
 secondaries, so this is not the Cargo-alias reuse that
@@ -6258,18 +6261,19 @@ user-program chassis — `threads_qemu_x86_64` already has the AP code available
 use it — after which the vertical is a Cargo.toml alias at `cpus: 4` driving the
 existing `parallel` role, with no fixture duplication.
 
-**Why it is recorded rather than done.** The engagement protocol's state
-machine is proven exactly and deterministically host-side (`lib/parallel`'s
-`Engagement` cases), and the ordering it changed is the same
-announce-then-recheck pairing the previous barrier used. The gap is a coverage
-gap, not a known defect.
+**Why it is recorded rather than done.** The claim protocol's state machine is
+proven exactly and deterministically host-side (`lib/parallel`'s `Claim` cases),
+and the wake handshake is the same announce-then-recheck pairing every barrier
+this pool has had used. The gap is a coverage gap, not a known defect.
 
-## D43 — switchboard spends a frame in thousands of syscalls (OPEN, instrumented)
+## D104 — switchboard spent a frame in thousands of syscalls (FIXED)
 
 A Pi 4B debug run reported the switchboard overrunning its 250 ms budget with
 `calls=4220`, `calls=8536` and `calls=6624` — thousands of syscalls in one
 frame span — alongside `blocked_in=ipc_call` at 447 ms and a 207 ms span whose
-blocking was spread across calls rather than concentrated in one.
+blocking was spread across calls rather than concentrated in one. This entry
+recorded two hypotheses and named the instrument that would decide between
+them; a later run on the same board settled it.
 
 **Ruled out by reading the code.** `Sampler::read_paged` pages 64 records per
 call and `walk_pages` stops on a short page, so no paged reading costs a call
@@ -6279,15 +6283,77 @@ calls, not thousands. `pressure::refresh` reports only a band *movement*, and
 flapping band does not empty the glyph cache and force a `FONT_ENDPOINT` round
 trip per glyph.
 
-**Most probable cause, now fixed.** Userland heap retention collapsed to zero
-from moderate pressure onward, so a per-frame allocation high-water crossing a
-page boundary cost a `mem_unmap` and a `mem_map` — with a cross-CPU TLB
-shootdown — every iteration. `RawVecInner::reserve::do_reserve_and_handle`
-appears in all four of the run's switchboard frames. That is inference, not
-proof: the switchboard walk repeats identical deep frames and is unreliable.
+**What the instrumented run answered.** `top_calls=mem_unmap=4254,ipc_call=13`
+of `calls=4279` — the heap, and *not* the map/unmap pair this entry had
+predicted. Fewer than twelve calls remain for everything else, so there were
+essentially **no** `mem_map`s: not a high-water oscillating across a page
+boundary but a monotonic descent, some 18 MiB of live heap going away in one
+frame as a panel closed.
 
-**How it will be settled.** The overrun record now names the syscalls a span
-made most (`top_calls`), which is what a storm has instead of one culprit. A
-debug run on the same board will state whether those thousands were the heap
-pair, an IPC round trip per item, or something else, and the answer decides
-whether anything further is owed here.
+That distinction mattered, because the retention this entry called the fix
+could not have addressed it. A retention is a **level**, and a level slides
+down with the free span it bounds: once the free top exceeds it, every further
+free of a page finds one more page above the line and hands back that single
+page. Reproduced host-side at 3840 `mem_unmap` calls for a descending teardown
+of a 4096-page arena — each one a page-table walk, a kernel zeroing pass, the
+**global** `AddressSpaceRegistry` write lock and a TLB shootdown to every other
+CPU. One process's teardown therefore serialised every other process's frame,
+which is how it appeared in the same log as a desktop drag frame blocked for
+992 ms (D105).
+
+**Fixed** by giving the arena a resize granule as well as a retention
+(`ARENA_RESIZE_BYTES`, `lib/rt/src/heap.rs`): a free top is released only once
+at least a granule of it stands above the retention, and then all of it goes.
+The same figure floors arena *growth*, which the run also showed costing a
+`mem_map` per page for a run of page-sized allocations. The granule is
+deliberately not derived from the machine, process or band — a proportional one
+would hold 64 MiB of a gibibyte arena back from a machine already asking for it
+— and the band keeps the last word, because the trim `pressure::report` drives
+ignores the granule and releases everything above the retention in one call
+(`AGENTS.md` §25, amended; rationale in `PLAN.md` "Charter Amendments").
+
+The same teardown now costs 64 unmaps at every band, and its growth 116 maps
+where the band permits a pad
+(`a_bulk_teardown_resizes_the_arena_in_granules_not_a_page_at_a_time`).
+
+## D105 — the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left (FIXED)
+
+A Pi 4B debug run reported the desktop overrunning its 250 ms budget by
+`elapsed_ms=1004 blocked_ms=992 calls=4 blocked_in=futex_wait`, resolving
+through `WindowServer::serve` → `present_window_content` →
+`winframe::decode` → `parallel::for_each` → `Pool::run` →
+`Shared::await_holders`. A frame spent 992 ms of its 1004 in one park, waiting
+for the fork-join pool.
+
+**Why the previous fix did not close it.** `plans/FIX-DESKTOP-SPEEDUP.md`
+recorded this signature as closed: the barrier had been narrowed from *every
+worker* to every worker that had **joined** the dispatch, after the same report
+at 429 ms. But a worker joined *before* it knew whether any piece was left —
+"is there work for me" and "I am now reading this dispatch" were two words, so
+the hold had to be registered first and the question asked afterwards. A worker
+is woken by every dispatch, so it does reach a CPU, take its hold, and then
+risk preemption with or without work, and the dispatcher waited for it either
+way. The barrier was still over the scheduler's run queue rather than over the
+work.
+
+**Fixed** by making the draw and the hold the same atomic (`Claim`,
+`lib/parallel/src/pool.rs`): one word carries the pieces left to hand out and
+the workers still reading, so a worker becomes a holder *by* taking a piece,
+and a worker that finds the pieces exhausted touches nothing, holds nothing,
+and is never waited for however long it is descheduled. What remains waited for
+is a piece genuinely in flight, whose result the dispatch needs anyway.
+
+The separate `CLOSED` flag went with it — no pieces left *is* closed — so an
+idle pool, a drained dispatch and a spurious wake are one state. Indices are
+handed out descending, because the count must live in the same word as the hold
+(a second atomic holding it would let a worker pair one dispatch's count with a
+later dispatch's word and draw an out-of-range index); `JobRunner` already
+contracts that the order is unobservable and `Reversed` holds consumers to it.
+The dispatcher now also wakes only as many workers as there are pieces besides
+its own.
+
+**Coverage.** The state machine is proven host-side, including the case this
+was about — a dispatcher that drew every piece itself has no holder to wait for
+(`a_dispatch_the_dispatcher_drew_has_nothing_to_wait_for`). Racing the word on
+two CPUs at once remains the open coverage gap D103, which the rewrite does not
+change.

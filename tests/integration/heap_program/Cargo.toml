@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-heap"
-description = "PI P6e-3b prerequisite fixture: a minimal, separately-linked pure-Rust EL0 program that exercises the `tairix-rt` mem_map-backed global allocator end to end — it Box-allocates, grows a Vec across several pages, and reallocates after freeing, verifying every value, then exits 0. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
+description = "PI P6e-3b prerequisite fixture: a minimal, separately-linked pure-Rust EL0 program that exercises the `tairix-rt` mem_map-backed global allocator end to end — it Box-allocates, grows a Vec across several pages, reallocates after freeing, and drives the pressure-band trim that hands the arena back, verifying every value, then exits 0. Built PIE for a native Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,3 +23,6 @@ path = "src/main.rs"
 # is an inert stub so `cargo build --workspace` / clippy still cover it.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The pressure band the fixture reports to drive the heap's trim, which is what
+# reaches `mem_unmap`.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0", default-features = false }

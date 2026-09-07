@@ -2,47 +2,72 @@
 //!
 //! # The protocol
 //!
-//! A dispatch opens its `Engagement`, publishes the work, bumps `epoch`, and
-//! wakes the workers parked on it; every participant — the workers *and* the
-//! dispatching thread — claims pieces off `claim` until they run out. A worker
-//! reaches the work only by *joining* the engagement first, and releases its
-//! hold when it is done. Once the pieces are exhausted the dispatcher closes the
-//! engagement to further joins and returns as soon as every worker that joined
-//! has released.
+//! A dispatch publishes the work, opens its claim on `count` pieces, bumps
+//! `epoch` and wakes the workers parked on it; every participant — the workers
+//! *and* the dispatching thread — draws pieces off the claim until they run
+//! out. A worker's draw and its hold on the dispatch are the **same** atomic:
+//! it becomes a holder by taking a piece, and stops being one when it runs out
+//! of them. The dispatcher returns once the pieces are exhausted and no holder
+//! is left.
 //!
 //! # The lifetime argument
 //!
-//! The published work is a reference to a value on the **dispatcher's stack**, so
-//! the dispatcher must not return while any worker could still read it. Joining
-//! is what makes that decidable: a worker reads the published pointer only after
-//! its join has succeeded, and a join succeeds only while the engagement is open,
-//! so closing it and waiting for the holders to reach zero is exactly the
-//! condition "no worker holds the pointer".
+//! The published work is a reference to a value on the **dispatcher's stack**,
+//! so the dispatcher must not return while any worker could still read it. The
+//! claim word makes that decidable, because the holder count and the pieces
+//! left sit in one word: a worker reads the published pointer only after a draw
+//! that took a piece *and* incremented the holders in a single
+//! compare-exchange, so the dispatcher can never observe "no pieces left and no
+//! holders" while a worker is still reading. Waiting for the holders to reach
+//! zero after the pieces run out is therefore exactly the condition "no worker
+//! holds the pointer".
 //!
-//! # Why the barrier is over holders, not over workers
+//! Two words cannot express that. Deciding "is there a piece for me" separately
+//! from "I am now reading this dispatch" leaves a window in between, so a
+//! worker had to register its hold *first* and discover only afterwards whether
+//! any work was left.
 //!
-//! Waiting for *every worker* instead would make a dispatch's latency the time
-//! for the scheduler to run every worker at least once, even when the dispatching
-//! thread had already run every piece itself. On a machine with more runnable
-//! threads than cores that is unbounded, and it was measured at 429 ms on a
-//! four-core board — a frame's worth of compositing spent waiting for help that
-//! was no longer needed. Closing the engagement retracts the offer instead: a
-//! worker that never got a CPU finds the join refused, touches nothing, and parks
-//! again, so the dispatch costs what its work costs.
+//! # Why the barrier is over pieces in flight, not over workers
 //!
-//! No parallelism is given up. The dispatcher closes only once the pieces are
-//! exhausted, and a worker that joined stays a holder until it has drained, so
-//! the only join ever refused is one with no work left to do.
+//! A hold taken before the work is known makes a dispatch's latency the time
+//! for the scheduler to run a woken worker to completion, whether or not that
+//! worker got any work. A worker is woken at the start of every dispatch, so it
+//! does reach a CPU, take its hold and then risk preemption — and the
+//! dispatcher waits for it either way. On a machine with more runnable threads
+//! than cores that is a run-queue wait, not a work wait: it was measured first
+//! at 429 ms and then, once the barrier had been narrowed to the workers that
+//! registered, at 992 ms on a four-core board — a frame's worth of compositing
+//! spent waiting for help it had not been given.
+//!
+//! Taking the hold *with* the piece removes the case outright. A worker that
+//! finds the pieces exhausted touches nothing, holds nothing and parks again,
+//! so the dispatcher never waits for it however long it is descheduled. What
+//! remains waited for is a piece genuinely in flight, whose result the dispatch
+//! needs before it can return.
+//!
+//! No parallelism is given up: a worker is refused only when there is no piece
+//! left to give it.
+//!
+//! # Pieces are handed out from the top down
+//!
+//! The index a draw yields is `remaining - 1`, so pieces run in descending
+//! order. The count has to live in the same word as the hold, and a *second*
+//! atomic holding it would let a worker that read one dispatch's count draw
+//! against a later dispatch's word — an out-of-range index, which is unsound
+//! rather than merely wrong. [`JobRunner`] contracts that the order pieces run
+//! in is not observable, and the `Reversed` test runner exists to hold
+//! consumers to it.
 //!
 //! # Nothing spins
 //!
 //! A worker with no dispatch to run parks in `futex_wait` on `epoch`; a
-//! dispatcher with holders left parks in `futex_wait` on the engagement word. The
-//! only cost of an idle pool is the address space its workers' stacks reserve.
+//! dispatcher with pieces still in flight parks in `futex_wait` on the claim
+//! word. The only cost of an idle pool is the address space its workers' stacks
+//! reserve.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use tairix_rt::sync::Mutex;
 use tairix_rt::thread::{JoinHandle, Thread};
@@ -54,9 +79,11 @@ const NO_TIMEOUT: u64 = u64::MAX;
 
 /// The work one dispatch is running, borrowed from the dispatching thread's own
 /// frame for exactly as long as that dispatch lasts.
+///
+/// A struct rather than the bare reference because a `&dyn Fn` is a fat
+/// pointer and what is published is a thin one: this is the value on the
+/// dispatcher's frame that the thin pointer names.
 struct Dispatch<'a> {
-    /// The number of pieces, so a participant knows when the work is exhausted.
-    count: usize,
     /// The piece body, indexed by piece number.
     job: &'a (dyn Fn(usize) + Sync),
 }
@@ -66,84 +93,151 @@ struct Dispatch<'a> {
 /// protocol carries it instead.
 type Published = Dispatch<'static>;
 
-/// Set in an [`Engagement`] word once no further worker may join the dispatch.
-const CLOSED: u32 = 1 << 31;
+/// Bits of a [`Claim`] word given to the pieces still to be handed out; the
+/// rest count the workers holding the dispatch.
+const REMAINING_BITS: u32 = 16;
 
-/// Workers still holding the dispatch an engagement word describes.
-const fn holders(word: u32) -> u32 {
-    word & !CLOSED
+/// Mask of the pieces-left half of a [`Claim`] word.
+const REMAINING_MASK: u32 = (1 << REMAINING_BITS) - 1;
+
+/// Most pieces one dispatch may be split into. A wider `count` is run on the
+/// calling thread instead ([`Pool::run`]); [`crate::bands`] answers at most
+/// four per participant, so no real caller approaches it.
+const PIECES_MAX: u32 = REMAINING_MASK;
+
+/// Most workers one pool may hold, so the holder half of the word cannot carry
+/// into the pieces half. [`Pool::with_workers`] creates no more than this and
+/// reports what it got, exactly as it does for a thread the kernel refuses.
+const HOLDERS_MAX: u32 = REMAINING_MASK;
+
+/// Pieces of the current dispatch still to be handed out.
+const fn remaining(word: u32) -> u32 {
+    word & REMAINING_MASK
 }
 
-/// Most holders one engagement word can count, which is every bit below
-/// [`CLOSED`].
-const HOLDERS_MAX: u32 = CLOSED - 1;
+/// Workers still holding the dispatch a claim word describes.
+const fn holders(word: u32) -> u32 {
+    word >> REMAINING_BITS
+}
 
-/// Who may still reach one dispatch's published work, and who is still reading
-/// it.
-///
-/// Both questions live in one word so that joining, and the dispatcher's
-/// retraction of the offer to join, are a single atomic each and cannot
-/// interleave into a state where a worker believes it may read a dispatch the
-/// dispatcher believes it has finished with.
-///
-/// A pool between dispatches is closed, so a worker that wakes spuriously — or
-/// that starts late and mistakes the epoch it found for a fresh dispatch — is
-/// refused rather than reading a stale pointer.
-struct Engagement(AtomicU32);
+/// A claim word from its two halves.
+const fn claim_word(holders: u32, remaining: u32) -> u32 {
+    (holders << REMAINING_BITS) | remaining
+}
 
-impl Engagement {
+/// What a holder's [`Claim::next`] found.
+enum Next {
+    /// Another piece, still under the same hold.
+    Piece(usize),
+    /// No pieces left; the hold is released, and `last` says whether this was
+    /// the one the dispatcher is waiting for.
+    Released { last: bool },
+}
+
+/// The pieces of one dispatch still to be handed out, and the workers still
+/// reading it.
+///
+/// One word, because the two questions must be answered together: a worker
+/// becomes a holder *by* taking a piece, so there is no state in which it may
+/// read a dispatch the dispatcher believes it has finished with, and none in
+/// which the dispatcher waits for a worker that got no work.
+///
+/// A pool between dispatches has no pieces left, which is the same state as a
+/// drained one — so a worker that wakes spuriously, or that starts late and
+/// mistakes the epoch it found for a fresh dispatch, is refused rather than
+/// reading a stale pointer. There is no separate "closed" flag to keep in step.
+struct Claim(AtomicU32);
+
+impl Claim {
     const fn new() -> Self {
-        Self(AtomicU32::new(CLOSED))
+        Self(AtomicU32::new(0))
     }
 
-    /// Admit joins to a fresh dispatch, with nobody holding it yet.
+    /// Offer `count` pieces of a fresh dispatch, with nobody holding it yet.
     ///
-    /// Ordered by the dispatcher's own epoch bump, which is the release that
-    /// publishes this alongside the work pointer.
-    fn open(&self) {
-        self.0.store(0, Ordering::Relaxed);
+    /// The release that publishes the dispatch: a participant whose draw
+    /// succeeds observes the work pointer stored before this.
+    fn open(&self, count: u32) {
+        self.0.store(count, Ordering::Release);
     }
 
-    /// Take a hold on the dispatch if it is still admitting them, reporting
-    /// whether this thread may now read the published work.
+    /// Draw a piece for a thread that does not hold the dispatch yet, taking a
+    /// hold along with it.
     ///
-    /// Refused at [`HOLDERS_MAX`] as well as when closed, so the count can
-    /// never carry into [`CLOSED`] and spuriously retract a live dispatch. No
-    /// real pool reaches it — holders are bounded by the worker count — and a
-    /// refused join costs only the help of one worker, since the dispatching
-    /// thread claims every piece nobody else does.
-    fn join(&self) -> bool {
+    /// `None` leaves the word untouched and takes no hold, so a worker that
+    /// arrives with the pieces exhausted has read nothing and delays nothing.
+    /// Refused at [`HOLDERS_MAX`] for the same reason: a holder count that
+    /// carried into the pieces half would fabricate work.
+    fn take(&self) -> Option<usize> {
         let mut word = self.0.load(Ordering::Acquire);
         loop {
-            if word & CLOSED != 0 || holders(word) == HOLDERS_MAX {
-                return false;
+            let (held, left) = (holders(word), remaining(word));
+            if left == 0 || held == HOLDERS_MAX {
+                return None;
             }
+            let next = claim_word(held + 1, left - 1);
             match self
                 .0
-                .compare_exchange_weak(word, word + 1, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return true,
+                Ok(_) => return Some(left as usize - 1),
                 Err(seen) => word = seen,
             }
         }
     }
 
-    /// Refuse further joins, reporting how many workers still hold the dispatch.
-    fn close(&self) -> u32 {
-        holders(self.0.fetch_or(CLOSED, Ordering::SeqCst))
+    /// Draw the next piece for a thread that already holds the dispatch,
+    /// releasing the hold when there is none.
+    fn next(&self) -> Next {
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let (held, left) = (holders(word), remaining(word));
+            let (next, outcome) = if left == 0 {
+                // Saturating because only a holder calls this, so the count is
+                // at least one: a decrement that could not underflow into the
+                // pieces half is the fail-closed spelling of that invariant.
+                (
+                    claim_word(held.saturating_sub(1), 0),
+                    Next::Released { last: held == 1 },
+                )
+            } else {
+                (claim_word(held, left - 1), Next::Piece(left as usize - 1))
+            };
+            // Sequentially consistent on the release so it orders against the
+            // dispatcher's announce-then-recheck in `await_holders`.
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::SeqCst, Ordering::Acquire)
+            {
+                Ok(_) => return outcome,
+                Err(seen) => word = seen,
+            }
+        }
     }
 
-    /// Release this thread's hold, reporting the holders left after it.
-    ///
-    /// Only ever called by a thread whose [`join`](Self::join) succeeded, so the
-    /// count is at least one and the decrement cannot reach into [`CLOSED`].
-    fn release(&self) -> u32 {
-        holders(self.0.fetch_sub(1, Ordering::SeqCst).saturating_sub(1))
+    /// Draw a piece without taking a hold, for the dispatching thread — which
+    /// cannot outlive itself and so needs none.
+    fn advance(&self) -> Option<usize> {
+        let mut word = self.0.load(Ordering::Acquire);
+        loop {
+            let left = remaining(word);
+            if left == 0 {
+                return None;
+            }
+            let next = claim_word(holders(word), left - 1);
+            match self
+                .0
+                .compare_exchange_weak(word, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Some(left as usize - 1),
+                Err(seen) => word = seen,
+            }
+        }
     }
 
     /// The word as it stands, which is what a park compares against.
     fn load(&self) -> u32 {
-        self.0.load(Ordering::Acquire)
+        self.0.load(Ordering::SeqCst)
     }
 
     /// The word's address, for the futex calls.
@@ -160,12 +254,11 @@ struct Shared {
     /// Bumped once per dispatch. A parked worker waits on this word, so the bump
     /// plus a wake is what starts a dispatch.
     epoch: AtomicU32,
-    /// The next piece number a participant claims. Reset per dispatch.
-    claim: AtomicUsize,
-    /// Who may reach the current dispatch, and who still holds it.
-    engagement: Engagement,
-    /// Non-zero while the dispatching thread is parked on the engagement word,
-    /// so the last holder pays for a wake syscall only when there is someone to
+    /// The pieces of the current dispatch left to hand out, and who is still
+    /// reading it.
+    claim: Claim,
+    /// Non-zero while the dispatching thread is parked on the claim word, so
+    /// the last holder pays for a wake syscall only when there is someone to
     /// wake.
     waiting: AtomicU32,
     /// Non-zero once the pool is being dropped, so a woken worker leaves its loop
@@ -178,85 +271,86 @@ impl Shared {
         Self {
             dispatch: AtomicPtr::new(core::ptr::null_mut()),
             epoch: AtomicU32::new(0),
-            claim: AtomicUsize::new(0),
-            engagement: Engagement::new(),
+            claim: Claim::new(),
             waiting: AtomicU32::new(0),
             stop: AtomicU32::new(0),
         }
     }
 
-    /// Claim and run pieces of `dispatch` until none are left.
-    fn drain(&self, dispatch: &Dispatch<'_>) {
-        loop {
-            let index = self.claim.fetch_add(1, Ordering::Relaxed);
-            if index >= dispatch.count {
-                return;
-            }
-            (dispatch.job)(index);
-        }
-    }
-
-    /// Join the current dispatch and run it, or return having touched nothing
-    /// because the dispatcher has already retracted it.
-    fn join_and_drain(&self) {
-        if !self.engagement.join() {
+    /// Take a piece of the live dispatch and run it, and every further piece
+    /// nobody else got to, or return having touched nothing because the pieces
+    /// were already exhausted.
+    ///
+    /// The hold comes with the first piece, so a worker that finds none has
+    /// read no pointer and the dispatcher is not waiting for it.
+    fn take_and_drain(&self) {
+        let Some(first) = self.claim.take() else {
             return;
-        }
+        };
         let published = self.dispatch.load(Ordering::Acquire);
-        // SAFETY: this join succeeded, so the engagement was open — the
-        // dispatcher had therefore neither closed it nor cleared the pointer,
-        // and it will not return until this hold is released below. The pointer
-        // is non-null because the epoch bump that woke this worker is a release
-        // over both the publication and the open engagement, so observing the
-        // new epoch observes them. The value outlives every read here and the
+        // SAFETY: this draw took a piece and a hold in one compare-exchange, so
+        // the dispatcher cannot have passed its `await_holders` and will not
+        // return until the hold below is released. The pointer is non-null
+        // because opening the claim is a release over the publication, and this
+        // draw acquired it. The value outlives every read here and the
         // reinstated lifetime is no wider: the borrow ends with this function.
         let dispatch = unsafe { &*published };
-        self.drain(dispatch);
-        self.finish();
+        let mut index = first;
+        loop {
+            (dispatch.job)(index);
+            match self.claim.next() {
+                Next::Piece(further) => index = further,
+                Next::Released { last } => {
+                    if last {
+                        self.wake_dispatcher();
+                    }
+                    return;
+                }
+            }
+        }
     }
 
-    /// Release this worker's hold, waking the dispatching thread if it was the
-    /// last and that thread is parked.
-    fn finish(&self) {
-        if self.engagement.release() != 0 {
-            return;
-        }
-        // Sequentially consistent with the dispatcher's announce-then-recheck in
-        // `await_holders`: between this thread's release and its read of
+    /// Wake the dispatching thread if it is parked waiting for the hold this
+    /// thread just released.
+    fn wake_dispatcher(&self) {
+        // Sequentially consistent with the dispatcher's announce-then-recheck
+        // in `await_holders`: between this thread's release and its read of
         // `waiting`, and that thread's store to `waiting` and its read of the
-        // engagement, at least one must observe the other — so the wake is never
+        // claim, at least one must observe the other — so the wake is never
         // both skipped here and waited for there.
         if self.waiting.load(Ordering::SeqCst) != 0 {
-            wake(self.engagement.word(), 1);
+            wake(self.claim.word(), 1);
         }
     }
 
-    /// Refuse further joins, then park until every worker that joined has
-    /// released its hold.
+    /// Park until every piece handed to a worker has been run.
     ///
-    /// A dispatch whose pieces the dispatching thread ran itself closes with no
-    /// holders and returns here without a single syscall, which is what keeps a
-    /// dispatch's latency the cost of its work rather than of scheduling every
-    /// worker.
+    /// A dispatch whose pieces the dispatching thread drew itself has no holder
+    /// and returns here without a single syscall, however many workers exist
+    /// and whether or not any of them was ever scheduled. That is what keeps a
+    /// dispatch's latency the cost of its work.
     fn await_holders(&self) {
-        if self.engagement.close() == 0 {
+        // The common case, and the one worth keeping free of barriers: no
+        // worker took a piece, so there is nothing to announce and nothing to
+        // clear.
+        if holders(self.claim.load()) == 0 {
             return;
         }
         loop {
-            let word = self.engagement.load();
+            let word = self.claim.load();
             if holders(word) == 0 {
                 break;
             }
             self.waiting.store(1, Ordering::SeqCst);
             // Re-read after announcing: a holder that released in between would
             // have seen `waiting` still clear and skipped its wake.
-            if holders(self.engagement.load()) == 0 {
+            if holders(self.claim.load()) == 0 {
                 break;
             }
             // The kernel compares the word as it parks, so a value that has since
             // changed refuses the park and re-tests above rather than stranding
             // this thread on a stale expectation.
-            wait(self.engagement.word(), word);
+            wait(self.claim.word(), word);
         }
         self.waiting.store(0, Ordering::SeqCst);
     }
@@ -294,6 +388,9 @@ impl Pool {
     /// that cares can say so.
     #[must_use]
     pub fn with_workers(workers: usize) -> Self {
+        // Bounded by the claim word's holder half, so a hold can never carry
+        // into the pieces it counts alongside.
+        let workers = workers.min(HOLDERS_MAX as usize);
         let shared = Arc::new(Shared::new());
         let mut threads = Vec::new();
         // Reserved once, so no `push` below can reallocate and a machine that
@@ -311,9 +408,9 @@ impl Pool {
                 Err(_) => break,
             }
         }
-        // No rendezvous: a pool between dispatches is closed, so a worker still
-        // on its way to its loop can only find a join refused. Nothing waits for
-        // one to arrive.
+        // No rendezvous: a pool between dispatches has no pieces to give, so a
+        // worker still on its way to its loop can only find a draw refused.
+        // Nothing waits for one to arrive.
         Self {
             shared,
             workers: threads,
@@ -347,17 +444,18 @@ impl Pool {
 
 // SAFETY: `run` satisfies both of `JobRunner`'s obligations.
 //
-// 1. Each index reaches `job` at most once: `claim` is reset to zero per dispatch
-//    and every participant takes its index with a single `fetch_add`, so no two
-//    participants can be handed the same one.
+// 1. Each index reaches `job` at most once: the pieces left are set to `count`
+//    per dispatch and every draw decrements them by one under a
+//    compare-exchange, so an index is handed to exactly one participant.
 // 2. `run` does not return until every invocation has: a worker reaches `job`
-//    only through a successful join, the dispatcher drains until the pieces are
-//    exhausted and then closes the engagement and waits for its holders to reach
-//    zero, and a holder releases only after its own draining has returned. A join
-//    refused by the close ran no piece at all.
+//    only through a draw that took a piece and a hold in one atomic, the
+//    dispatcher draws until the pieces are exhausted and then waits for the
+//    holders to reach zero, and a hold is released only after its holder has
+//    run every piece it drew. A draw that took no piece ran none.
 //
-// The inline paths (no workers, one piece, or a dispatch already in flight) run
-// the jobs in a plain loop on the calling thread and are trivially both.
+// The inline paths (no workers, one piece, a count wider than the claim word,
+// or a dispatch already in flight) run the jobs in a plain loop on the calling
+// thread and are trivially both.
 unsafe impl JobRunner for Pool {
     fn width(&self) -> usize {
         // The dispatching thread is a participant, so a pool with no workers is
@@ -370,30 +468,39 @@ unsafe impl JobRunner for Pool {
             return;
         }
         // A dispatch already in flight — a nested one, or a second thread's —
-        // runs here rather than waiting for the pool. This is what makes the pool
-        // total: no arrangement of callers can deadlock it.
+        // runs on the calling thread rather than waiting for the pool. This is
+        // what makes the pool total: no arrangement of callers can deadlock it.
         let held = self.gate.try_lock();
-        if held.is_none() || count == 1 || self.workers.is_empty() {
+        // A count wider than the pieces half of the claim word saturates past
+        // the bound and runs on the calling thread with the other shapes that
+        // are not worth a dispatch.
+        let pieces = u32::try_from(count).unwrap_or(u32::MAX);
+        if held.is_none() || count == 1 || pieces > PIECES_MAX || self.workers.is_empty() {
             for index in 0..count {
                 job(index);
             }
             return;
         }
-        let dispatch = Dispatch { count, job };
+        let dispatch = Dispatch { job };
         let shared = &*self.shared;
-        let workers = u32::try_from(self.workers.len()).unwrap_or(u32::MAX);
-        shared.claim.store(0, Ordering::Relaxed);
-        shared.engagement.open();
+        // The dispatching thread takes one piece itself, so a worker beyond the
+        // rest could only wake, find the pieces gone and park again — two
+        // syscalls and a scheduler activation for nothing.
+        let rousing = u32::try_from(self.workers.len().min(count - 1)).unwrap_or(u32::MAX);
         shared.dispatch.store(erase(&dispatch), Ordering::Relaxed);
-        // The release: a worker that observes the new epoch observes the pointer,
-        // the open engagement, and the reset claim with it.
+        // Opening the claim releases the publication: a participant whose draw
+        // succeeds observes the pointer stored above.
+        shared.claim.open(pieces);
+        // And the epoch bump releases it to a worker that is still parked.
         shared.epoch.fetch_add(1, Ordering::Release);
-        wake(&shared.epoch, workers);
+        wake(&shared.epoch, rousing);
 
-        shared.drain(&dispatch);
+        while let Some(index) = shared.claim.advance() {
+            job(index);
+        }
         shared.await_holders();
-        // No worker can read it again: the engagement is closed to further joins
-        // and every hold taken under it has been released.
+        // No worker can read it again: the pieces are exhausted, so no further
+        // draw can take a hold, and every hold already taken has been released.
         shared
             .dispatch
             .store(core::ptr::null_mut(), Ordering::Relaxed);
@@ -402,8 +509,8 @@ unsafe impl JobRunner for Pool {
 
 impl Drop for Pool {
     fn drop(&mut self) {
-        // `&mut self` excludes a concurrent dispatch, so the engagement is closed
-        // and no worker is holding a published pointer.
+        // `&mut self` excludes a concurrent dispatch, so the claim has no pieces
+        // left and no worker is holding a published pointer.
         self.shared.stop.store(1, Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::Release);
         wake(
@@ -420,20 +527,21 @@ impl Drop for Pool {
 
 /// Erase a dispatch's borrow of its dispatching frame, for publication.
 ///
-/// The lifetime is reinstated by `Shared::join_and_drain` under the protocol's
+/// The lifetime is reinstated by `Shared::take_and_drain` under the protocol's
 /// guarantee, which is where the argument for it lives.
 fn erase(dispatch: &Dispatch<'_>) -> *mut Published {
     core::ptr::from_ref(dispatch).cast_mut().cast::<Published>()
 }
 
-/// One worker's whole life: park, join and run a dispatch, park again.
+/// One worker's whole life: park, take and run what a dispatch has left, park
+/// again.
 fn work(shared: &Shared) {
     // The epoch this worker has already run. One dispatch completes before the
     // next begins, so a worker is never more than one dispatch behind and the
     // counter cannot wrap past what it has seen. A worker that starts mid-flight
     // reads whatever epoch it finds: taking that for a dispatch it has run only
-    // costs it the next one, and taking it for a fresh one only reaches a join
-    // the engagement decides.
+    // costs it the next one, and taking it for a fresh one only reaches a draw
+    // the claim decides.
     let mut seen = shared.epoch.load(Ordering::Acquire);
     loop {
         while shared.epoch.load(Ordering::Acquire) == seen {
@@ -445,10 +553,10 @@ fn work(shared: &Shared) {
         seen = shared.epoch.load(Ordering::Acquire);
         if shared.stop.load(Ordering::Acquire) != 0 {
             // The teardown bump publishes no dispatch and waits for nobody, so
-            // leaving without joining is correct.
+            // leaving without drawing is correct.
             return;
         }
-        shared.join_and_drain();
+        shared.take_and_drain();
     }
 }
 
@@ -476,6 +584,7 @@ fn wake(word: &AtomicU32, count: u32) {
 mod tests {
     use super::*;
     use crate::{bands, for_each};
+    use core::sync::atomic::AtomicUsize;
 
     /// On the host there is no syscall trap, so no thread is ever created and
     /// every pool is a one-participant pool. That is the degradation path, and it
@@ -530,80 +639,144 @@ mod tests {
         drop(Pool::with_workers(2));
     }
 
-    /// A pool between dispatches admits nobody, so a worker that wakes without a
-    /// dispatch — spuriously, or having started late and misread the epoch —
-    /// never reaches a stale published pointer.
+    /// A pool between dispatches has no piece to give, so a worker that wakes
+    /// without a dispatch — spuriously, or having started late and misread the
+    /// epoch — never reaches a stale published pointer, and takes no hold on
+    /// the way to finding that out.
     #[test]
-    fn an_idle_pool_refuses_a_join() {
-        let engagement = Engagement::new();
-        assert!(!engagement.join());
-        assert_eq!(engagement.close(), 0);
+    fn an_idle_pool_refuses_a_draw_without_taking_a_hold() {
+        let claim = Claim::new();
+        assert!(claim.take().is_none());
+        assert!(claim.advance().is_none());
+        assert_eq!(holders(claim.load()), 0);
     }
 
-    /// The whole point of the engagement: a dispatcher that ran every piece
-    /// itself closes with nothing held and is free to return, however many
-    /// workers exist and whether or not any of them was ever scheduled.
+    /// The whole point of the claim word, and the regression test for the
+    /// 992 ms drag pause: a dispatcher that drew every piece itself has no
+    /// holder to wait for, however many workers exist and whether or not any of
+    /// them was ever scheduled. A worker arriving afterwards holds nothing.
     #[test]
-    fn a_dispatch_no_worker_joined_has_nothing_to_wait_for() {
-        let engagement = Engagement::new();
-        engagement.open();
-        assert_eq!(engagement.close(), 0, "no holder means no wait");
+    fn a_dispatch_the_dispatcher_drew_has_nothing_to_wait_for() {
+        let claim = Claim::new();
+        claim.open(3);
+        assert_eq!(claim.advance(), Some(2));
+        assert_eq!(claim.advance(), Some(1));
+        assert_eq!(claim.advance(), Some(0));
+        assert_eq!(claim.advance(), None);
+        assert_eq!(holders(claim.load()), 0, "drawing takes no hold");
         assert!(
-            !engagement.join(),
-            "a worker arriving after the close is refused"
+            claim.take().is_none(),
+            "a worker arriving with the pieces gone takes no hold"
         );
+        assert_eq!(holders(claim.load()), 0);
     }
 
-    /// A worker that joined before the close is waited for, and the count the
-    /// close reports is what the dispatcher must see released.
+    /// A worker's first draw takes the piece and the hold together, so the
+    /// dispatcher can never see the pieces exhausted while that worker still
+    /// reads the dispatch.
     #[test]
-    fn a_close_reports_the_holders_it_must_wait_for() {
-        let engagement = Engagement::new();
-        engagement.open();
-        assert!(engagement.join());
-        assert!(engagement.join());
-        assert_eq!(engagement.close(), 2);
-        assert_eq!(engagement.release(), 1);
-        assert_eq!(engagement.release(), 0, "the last release frees the frame");
+    fn a_holder_is_counted_from_the_draw_that_took_its_piece() {
+        let claim = Claim::new();
+        claim.open(1);
+        assert_eq!(claim.take(), Some(0));
+        let word = claim.load();
+        assert_eq!((holders(word), remaining(word)), (1, 0));
+        assert!(matches!(claim.next(), Next::Released { last: true }));
+        assert_eq!(holders(claim.load()), 0);
     }
 
-    /// Releasing before the dispatcher closes is ordinary: the holder count is
-    /// already zero by the time it asks, so it still returns without parking.
+    /// One hold covers every piece its holder goes on to draw: a worker pays
+    /// one hold for the dispatch, not one per piece.
     #[test]
-    fn a_holder_that_releases_before_the_close_is_not_waited_for() {
-        let engagement = Engagement::new();
-        engagement.open();
-        assert!(engagement.join());
-        assert_eq!(engagement.release(), 0);
-        assert_eq!(engagement.close(), 0);
+    fn a_holder_keeps_its_hold_across_the_pieces_it_draws() {
+        let claim = Claim::new();
+        claim.open(3);
+        assert_eq!(claim.take(), Some(2));
+        assert!(matches!(claim.next(), Next::Piece(1)));
+        assert!(matches!(claim.next(), Next::Piece(0)));
+        assert_eq!(holders(claim.load()), 1, "still one hold, not three");
+        assert!(matches!(claim.next(), Next::Released { last: true }));
+        assert_eq!(claim.load(), 0);
     }
 
-    /// The closed flag survives every release, so a park that compares the whole
-    /// word is comparing a value only a release can change.
+    /// Only the release that empties the holders wakes the dispatcher, so a
+    /// dispatch with several workers pays one wake syscall rather than one each.
     #[test]
-    fn the_closed_flag_outlives_its_holders() {
-        let engagement = Engagement::new();
-        engagement.open();
-        assert!(engagement.join());
-        engagement.close();
-        assert_eq!(engagement.load(), CLOSED | 1);
-        engagement.release();
-        assert_eq!(engagement.load(), CLOSED);
-        assert!(!engagement.join(), "a closed engagement stays closed");
+    fn only_the_last_release_reports_itself_as_last() {
+        let claim = Claim::new();
+        claim.open(2);
+        assert_eq!(claim.take(), Some(1));
+        assert_eq!(claim.take(), Some(0));
+        assert_eq!(holders(claim.load()), 2);
+        assert!(matches!(claim.next(), Next::Released { last: false }));
+        assert!(matches!(claim.next(), Next::Released { last: true }));
+        assert_eq!(holders(claim.load()), 0);
     }
 
-    /// Reopening is what makes the next dispatch reachable, and it clears the
-    /// previous one's holders rather than inheriting them.
+    /// Every index is handed out exactly once across the dispatching thread and
+    /// the workers, whatever order they interleave in — the first of
+    /// `JobRunner`'s two obligations, over the word that decides it.
     #[test]
-    fn reopening_admits_joins_again_with_no_holders_carried_over() {
-        let engagement = Engagement::new();
-        engagement.open();
-        assert!(engagement.join());
-        engagement.close();
-        engagement.release();
-        engagement.open();
-        assert_eq!(holders(engagement.load()), 0);
-        assert!(engagement.join());
-        assert_eq!(engagement.close(), 1);
+    fn every_piece_is_handed_out_exactly_once() {
+        const COUNT: usize = 8;
+        let claim = Claim::new();
+        claim.open(8);
+        let mut seen = Vec::new();
+        // A worker takes its first piece, and from then on it and the
+        // dispatching thread alternate draws against the same word.
+        let mut worker = claim.take();
+        while let Some(index) = worker {
+            seen.push(index);
+            if let Some(drawn) = claim.advance() {
+                seen.push(drawn);
+            }
+            worker = match claim.next() {
+                Next::Piece(further) => Some(further),
+                Next::Released { .. } => None,
+            };
+        }
+        while let Some(index) = claim.advance() {
+            seen.push(index);
+        }
+        assert_eq!(holders(claim.load()), 0);
+        seen.sort_unstable();
+        assert_eq!(seen, (0..COUNT).collect::<Vec<_>>());
+    }
+
+    /// Opening the next dispatch offers its own pieces and carries no holder
+    /// over from the last one.
+    #[test]
+    fn reopening_offers_fresh_pieces_with_no_holders_carried_over() {
+        let claim = Claim::new();
+        claim.open(1);
+        assert_eq!(claim.take(), Some(0));
+        assert!(matches!(claim.next(), Next::Released { last: true }));
+        claim.open(2);
+        let word = claim.load();
+        assert_eq!((holders(word), remaining(word)), (0, 2));
+    }
+
+    /// A count the claim word cannot express runs on the calling thread rather
+    /// than being split wrongly. `bands` answers at most four pieces per
+    /// participant, so only a direct `run` can reach this.
+    #[test]
+    fn a_count_wider_than_the_claim_word_still_visits_every_piece() {
+        let pool = Pool::with_workers(4);
+        let count = PIECES_MAX as usize + 1;
+        let visits = AtomicUsize::new(0);
+        pool.run(count, &|_| {
+            visits.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(visits.load(Ordering::Relaxed), count);
+    }
+
+    /// More workers than the holder half of the word can count are not created,
+    /// and the pool reports the number it holds rather than the number asked
+    /// for — the same degradation as a thread the kernel refuses.
+    #[test]
+    fn a_worker_request_beyond_the_word_is_bounded_not_wrapped() {
+        let pool = Pool::with_workers(HOLDERS_MAX as usize + 7);
+        assert!(pool.worker_count() <= HOLDERS_MAX as usize);
+        assert_eq!(pool.width(), pool.worker_count() + 1);
     }
 }

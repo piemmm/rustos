@@ -950,7 +950,7 @@ is the consumer the `mem_map` ABI exists for (§7c).
   contiguous virtual arena that starts at a fixed base and grows upward, one or
   more whole pages at a time, by `mem_map`ping with `MapFlags::FIXED` at the
   arena's current top. Freed regions are tracked as a coalesced,
-  address-sorted free list held *inside the allocator* (a fixed-capacity span
+  address-sorted free list held *inside the allocator* (a grow-on-demand span
   table), not as intrusive links in user memory, so the bookkeeping never
   dereferences freed memory and every returned pointer is range-checked before
   it is handed out (`AGENTS.md` §4 — no `unsafe` allocator doing raw pointer
@@ -960,6 +960,22 @@ is the consumer the `mem_map` ABI exists for (§7c).
   neighbours, and when whole trailing pages become free at the arena top they
   are returned to the kernel with `mem_unmap` — both syscalls are genuinely
   exercised, no dead path (`AGENTS.md` §2.14).
+- **The arena moves at a retention and in granules (`AGENTS.md` §25).** Two
+  separate figures, and conflating them cost the desktop a second of drag
+  latency. The **retention** — the reclaim model's own `RuntimeCache` figure
+  over a `CacheBudget::from_backing(arena)` — is how much free top the process
+  may keep, so an allocation high-water oscillating across a page boundary
+  costs nothing; it also floors arena *growth*, so a run of small allocations
+  pays no `mem_map` per page, and it shrinks to zero with the band because
+  mapping ahead is speculation. The **granule**
+  (`ARENA_RESIZE_BYTES`) is how much arena one `mem_unmap` is worth, which is a
+  cost ratio rather than a capacity and so answers to neither the machine nor
+  the band: without it a teardown handed pages back one at a time, 3840 calls
+  for a 16 MiB arena, each taking the global `AddressSpaceRegistry` write lock
+  and shooting down every other CPU's TLB. The band keeps the last word,
+  because the trim `pressure::report` drives ignores the granule and releases
+  everything above the retention at once (`lib/rt/README.md`,
+  `plans/OPEN-DEFECTS.md` D104).
 - **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A failed `mem_map` or an
   overflowed span table returns a null pointer per the `GlobalAlloc` contract,
   never a panic.

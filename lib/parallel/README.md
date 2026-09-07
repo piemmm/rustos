@@ -33,21 +33,33 @@ and the caller keeps it.
 ## Design notes
 
 - **Nothing spins.** An idle worker is parked in `futex_wait` on the dispatch
-  epoch; a dispatcher with holders left is parked in `futex_wait` on the
-  engagement word. An idle pool costs the address space its workers' stacks
+  epoch; a dispatcher with pieces still in flight is parked in `futex_wait` on
+  the claim word. An idle pool costs the address space its workers' stacks
   reserve and no CPU.
 - **The dispatch lives on the dispatcher's stack.** It is published as an erased
-  pointer, and a worker reaches it only by *joining* the dispatch's engagement
-  first. Once the pieces are exhausted the dispatcher closes the engagement to
-  further joins and returns as soon as the workers that joined have released, so
-  the barrier is over the workers actually holding the pointer.
-- **A dispatch costs what its work costs, not what scheduling costs.** Waiting
-  for every worker instead would make a dispatch's latency the time for the
-  scheduler to run each of them at least once — unbounded where runnable threads
-  outnumber cores, and measured at 429 ms of compositing on a four-core board.
-  Closing the engagement retracts the offer: a worker that never got a CPU finds
-  its join refused, touches nothing, and parks again. No parallelism is given up,
-  because the only join ever refused is one with no work left to claim.
+  pointer, and a worker reaches it only through a draw that took a piece of the
+  work *and* a hold on the dispatch in one atomic. Both halves live in one
+  word — the pieces left to hand out and the workers still reading — so the
+  dispatcher can never observe "no pieces left and no holders" while a worker is
+  still reading, and waiting for the holders to reach zero once the pieces run
+  out is exactly the condition "no worker holds the pointer".
+- **A dispatch costs what its work costs, not what scheduling costs.** A hold
+  taken *before* the work is known makes a dispatch's latency the time for the
+  scheduler to run a woken worker to completion whether or not it got any work,
+  which is unbounded where runnable threads outnumber cores: measured at 429 ms
+  of compositing on a four-core board when the barrier was over every worker,
+  and still 992 ms once it had been narrowed to the workers that registered — a
+  worker is woken by every dispatch, so it does reach a CPU, take its hold and
+  then risk preemption. Taking the hold *with* the piece removes the case: a
+  worker that finds the pieces exhausted touches nothing, holds nothing and parks
+  again, so the dispatcher never waits for it however long it is descheduled. No
+  parallelism is given up, because a worker is refused only when there is no
+  piece left to give it.
+- **Pieces run from the top down.** The count must live in the same word as the
+  hold — a second atomic holding it would let a worker pair one dispatch's count
+  with a later dispatch's word and draw an out-of-range index — so a draw yields
+  `remaining - 1`. `JobRunner` contracts that the order is not observable and
+  `Reversed` holds consumers to it.
 - **It cannot deadlock.** A dispatch that finds one already in flight — nested
   inside a piece of it, or issued from another thread — runs its work on the
   calling thread. There is no arrangement of callers that waits on the pool.

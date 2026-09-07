@@ -4317,9 +4317,13 @@ static TESTS: &[QemuTest] = &[
     // resumable user kthread (`spawn_user_kthread`), and routes the
     // program's allocator-issued `mem_map`/`mem_unmap` `svc`s through the
     // producer. The fixture Box-allocates, grows a `Vec` across several pages,
-    // reallocates after freeing, verifies every value, and exits 0 — reported
-    // as PASS. A non-zero exit, an unexpected syscall, or a fault writes a
-    // distinct failure finisher; a stall times out (fail-loud). Single CPU and a 60-second budget match the other
+    // reallocates after freeing, drives the pressure-band trim that hands the
+    // arena back, verifies every value, and exits 0 — reported as PASS, but
+    // only if a range also reached `mem_unmap`, since the arena is resized in
+    // granules and a fixture that fits inside one would otherwise leave the
+    // release path untested. A non-zero exit, an unexpected syscall, a fault,
+    // or no unmap writes a distinct failure finisher; a stall times out
+    // (fail-loud). Single CPU and a 60-second budget match the other
     // boot-then-do-fixed-work aarch64 tests.
     QemuTest {
         package: "tairix-test-heap-qemu-aarch64",

@@ -64,42 +64,64 @@ on the calling thread.
 
 ### The protocol
 
-A dispatch opens its *engagement*, publishes the work, bumps an epoch, and wakes
-the workers parked on it; every participant claims pieces off one counter until
-they run out. A worker reaches the work only by **joining** the engagement first,
-and releases its hold once it has drained. When the pieces are exhausted the
-dispatcher closes the engagement to further joins and returns as soon as every
-worker that joined has released.
+A dispatch publishes the work, opens its *claim* on `count` pieces, bumps an
+epoch, and wakes the workers parked on it; every participant — the workers and
+the dispatching thread — draws pieces off the claim until they run out. A
+worker's draw and its hold on the dispatch are the **same** atomic: it becomes a
+holder by taking a piece, and stops being one when it runs out of them. The
+dispatcher returns once the pieces are exhausted and no holder is left.
 
-Joining is the whole lifetime argument: the published work is a reference to a
-value on the dispatcher's own stack, so the dispatcher must not return while a
-worker could still read it. A worker reads the pointer only after its join has
-succeeded, and a join succeeds only while the engagement is open, so closing it
-and waiting for the holders to reach zero is exactly the condition "no worker
-holds the pointer". Both live in one word, so a join and the dispatcher's
-retraction of the offer cannot interleave.
+That single word is the whole lifetime argument. The published work is a
+reference to a value on the dispatcher's own stack, so the dispatcher must not
+return while a worker could still read it. Because the pieces left and the
+holders sit in one word, a worker reads the pointer only after a draw that took
+a piece *and* incremented the holders in one compare-exchange, so the dispatcher
+can never observe "no pieces left and no holders" while a worker is still
+reading. Two words cannot express that: deciding "is there a piece for me"
+separately from "I am now reading this dispatch" leaves a window in between, so
+a worker would have to register its hold first and discover only afterwards
+whether any work was left.
+
+A draw yields `remaining - 1`, so pieces run from the top down. The count has to
+live in the same word as the hold — a second atomic holding it would let a
+worker pair one dispatch's count with a later dispatch's word and draw an
+out-of-range index, which is unsound rather than merely wrong — and `JobRunner`
+contracts that the order pieces run in is not observable.
 
 ### A dispatch costs what its work costs
 
-Waiting for every *worker* instead — the shape this pool originally had — makes a
-dispatch's latency the time for the scheduler to run each worker at least once,
-even when the dispatching thread has already run every piece itself. Where
-runnable threads outnumber cores that is unbounded: it was measured as 429 ms of
-compositing on a four-core board, a frame spent waiting for help that was no
-longer needed.
+A hold taken *before* the work is known makes a dispatch's latency the time for
+the scheduler to run a woken worker to completion, whether or not that worker
+got any work. Where runnable threads outnumber cores that is a run-queue wait
+rather than a work wait, and it is unbounded. It was measured twice on a
+four-core Pi 4B: 429 ms of compositing when the barrier was over every worker
+that existed, and 992 ms after it had been narrowed to the workers that
+registered — because a worker is woken by every dispatch, so it does reach a
+CPU, take its hold, and then risk preemption before releasing it. Both appeared
+in the desktop's frame-budget reports as `blocked_in=futex_wait` with four
+syscalls in the span.
 
-Closing the engagement retracts the offer instead. A worker that never got a CPU
-finds its join refused, touches nothing, and parks again. No parallelism is given
-up, because the dispatcher closes only once the pieces are exhausted, so the only
-join ever refused is one with no work left to claim. It also removes the need for
-any construction-time rendezvous: a pool between dispatches is closed, so a worker
-still on its way to its loop can only find a join refused.
+Taking the hold with the piece removes the case outright. A worker that finds
+the pieces exhausted touches nothing, holds nothing, and parks again, so the
+dispatcher never waits for it however long it is descheduled; what remains
+waited for is a piece genuinely in flight, whose result the dispatch needs
+before it can return. No parallelism is given up, because a worker is refused
+only when there is no piece left to give it. It also removes the need for any
+construction-time rendezvous, and for a separate "closed" flag: a pool between
+dispatches has no pieces to give, which is the same state as a drained one, so a
+worker still on its way to its loop — or waking spuriously — can only find a
+draw refused.
+
+The dispatcher also wakes only as many workers as there are pieces besides its
+own, since a worker beyond that could do nothing but wake, find the pieces gone
+and park again.
 
 ### Nothing spins
 
 An idle worker is parked in `futex_wait` on the dispatch epoch; a dispatcher with
-holders left is parked in `futex_wait` on the engagement word. An idle pool costs
-the address space its workers' kernel-owned stacks reserve and no CPU at all.
+pieces still in flight is parked in `futex_wait` on the claim word. An idle pool
+costs the address space its workers' kernel-owned stacks reserve and no CPU at
+all.
 
 ### It cannot deadlock
 

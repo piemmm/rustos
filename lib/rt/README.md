@@ -50,8 +50,8 @@ a coalesced, address-sorted free list held inside the allocator (not as
 intrusive links in user memory), so every returned pointer is bounds-checked
 before it is handed out (`AGENTS.md` §4). When coalescing frees whole trailing
 pages they are returned to the kernel with `mem_unmap` above a **retention**
-(below), so the arena shrinks without trading a syscall pair for every
-allocation cycle. `realloc` resizes in place wherever it can, avoiding the copy
+and in whole **granules** (both below), so the arena shrinks without trading a
+syscall pair for every allocation cycle or a syscall per page for a teardown. `realloc` resizes in place wherever it can, avoiding the copy
 (`AGENTS.md` §2.16): a shrink always succeeds in place (the surrendered tail
 returns to the free list, and top pages above the retention are unmapped if it
 reaches the arena top), and a
@@ -117,6 +117,45 @@ otherwise hold them until its next `free`. The retention is ordinary mapped
 anonymous memory the kernel already accounts for, so it needs no cache-report
 ledger: it lowers the free-frame count directly, which deepens the band, which
 shrinks the retention.
+
+The same figure is the least the arena **grows** by, so a run of small
+allocations does not pay a `mem_map` per page either. Mapping beyond what the
+caller asked for is speculation about the next allocation, which is exactly what
+the band should suppress: the pad is the free top the band already permits the
+process to hold, and under real pressure it is zero and the heap maps precisely
+the page it was asked for.
+
+### The resize granule
+
+A retention is a **level**, and a level alone does not stop a *teardown*. It
+slides down with the free span it bounds: once the free top exceeds it, every
+further free of a page finds one more page above the line and hands that single
+page back. A descending teardown of a 16 MiB arena cost 3840 `mem_unmap` calls
+that way — each a page-table walk, a kernel zeroing pass, the **global**
+address-space registry's write lock and a TLB shootdown to every other CPU. One
+process's teardown therefore serialised the machine: it was measured in the
+desktop's frame-budget reports as 4254 `mem_unmap` calls inside one 275 ms
+switchboard frame, alongside a desktop drag frame that spent 992 ms blocked.
+
+So the arena also moves in a granule (`ARENA_RESIZE_BYTES`): a free top is
+released only once there is at least that much of it above the retention, and
+then all of it goes at once. Sixty-four pages, and deliberately **not** scaled
+with the machine, the process or the band, because it is not a capacity — it is
+the ratio at which one call's fixed cost stops mattering against the per-page
+work that call does anyway. A proportional granule would cost something real: a
+sixteenth of a gibibyte arena is 64 MiB of free memory held back from a machine
+already asking for it, to save syscalls that had stopped costing anything.
+
+The band has no say in it, because the band decides what may be *kept*, not what
+a syscall is worth — and a granule that vanished under pressure would restore
+the storm exactly where the machine can least afford it. The price is a residue:
+on the allocation path a process can hold up to one granule of free top even at
+critical pressure. That residue is what makes `pressure::report`'s trim
+**exact** — it ignores the granule and releases everything above the retention
+in one call, so a process told the machine is critical still surrenders the lot.
+
+The teardown above now costs 64 unmaps at every band, and its growth 116 maps
+where the band permits a pad.
 
 ## I/O abstraction (`io` module)
 

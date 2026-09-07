@@ -3515,6 +3515,7 @@ dependencies = [
 name = "tairix-test-heap"
 version = "0.0.0"
 dependencies = [
+ "tairix-reclaim",
  "tairix-rt",
 ]
 

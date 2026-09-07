@@ -1054,10 +1054,32 @@ weaker policy:
   `ReclaimCache`: it holds no entries and needs no ledger, because the
   retained pages are ordinary mapped anonymous memory the frame
   allocator already counts, so the retention lowers free frames
-  directly, which deepens the band, which shrinks the retention. An
+  directly, which deepens the band, which shrinks the retention. The
+  retention is also the least the arena *grows* by, since mapping ahead
+  is speculation about the next allocation and so is exactly what the
+  band should suppress. An
   unwired process retains nothing, and `pressure::report` releases the
   retention on a band change so a process that has stopped allocating
   still gives it back.
+- **The userland heap's resize granule.** The retention above bounds what
+  the process may *keep*; it cannot bound the syscalls a **teardown**
+  pays, because a level slides down with the free span it bounds — once
+  the free top exceeds it, every further free of a page hands that single
+  page back. A descending teardown of a 16 MiB arena cost 3840
+  `mem_unmap` calls that way, each taking the global address-space
+  registry's write lock and shooting down the TLB on every other CPU, so
+  one process's teardown serialised the machine. The arena therefore also
+  moves in a granule (`ARENA_RESIZE_BYTES`, 64 pages): a free top is
+  released only once that much of it stands above the retention, and then
+  all of it goes. It is deliberately *outside* this model — not scaled
+  with the machine, the process or the band — because it is not a
+  capacity but the ratio at which one call's fixed cost stops mattering
+  against the per-page work that call already does; a proportional
+  granule would hold 64 MiB of a gibibyte arena back from a machine
+  already asking for it. The band still has the last word: the trim
+  `pressure::report` drives ignores the granule and releases everything
+  above the retention in one call, so the granule residue an allocation
+  path may leave is never held past the next band change.
 - **The desktop caches.** Every rasterised desktop asset is a
   `ReclaimCache`: the window manager's cursor rasters, the taskbar's
   notification glyphs, the session's pinned-application artwork, the

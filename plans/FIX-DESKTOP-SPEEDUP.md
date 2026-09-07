@@ -1442,19 +1442,31 @@ index-to-element erasure, the one split policy, and the fork-join pool over
   never a constant — and states on `stderr` when it was granted fewer threads
   than the machine has cores.
 - **A dispatch costs its work, never the scheduler's queue.** The pool's
-  fork-join barrier is over the workers that *joined* a dispatch, not over
-  every worker that exists. The earlier shape waited for all of them to be
-  scheduled at least once even when the dispatching thread had already claimed
-  every piece, which on a board with more runnable threads than cores is
-  unbounded: it cost a measured 429 ms of compositing on a four-core Pi 4B,
+  fork-join barrier is over the pieces of a dispatch still *in flight*, and a
+  worker's hold on the dispatch is taken by the same atomic that hands it a
+  piece — so a worker with no work holds nothing and is never waited for. This
+  took two attempts, and the first is worth recording because the report that
+  caught it looked identical both times. Waiting for every worker to be
+  scheduled at least once, even when the dispatching thread had already claimed
+  every piece, cost a measured 429 ms of compositing on a four-core Pi 4B,
   reported against the `desktop` surface as `blocked_in=futex_wait` with four
-  syscalls in the span. It is why a *drag* paused while a hover did not — a
-  hover's rectangle is under `MIN_PARALLEL_BAND_PX` so `bands` answers one and
-  `compose_span` never dispatches, while a drag promotes the whole moved
-  frosted window and does. Closing the engagement retracts the offer to join,
-  so a worker that never got a CPU is a no-op rather than a stall, and no
-  parallelism is lost because the close happens only once the pieces are
-  exhausted.
+  syscalls in the span. Narrowing the barrier to the workers that had
+  *registered* did not fix it — a worker is woken by every dispatch, so it does
+  reach a CPU, take its hold, and then risk preemption with or without work —
+  and the same report came back at 992 ms. Only taking the hold with the piece
+  removes the case. It is why a *drag* paused while a hover did not: a hover's
+  rectangle is under `MIN_PARALLEL_BAND_PX` so `bands` answers one and
+  `compose_span` never dispatches, while a drag promotes the whole moved frosted
+  window and does.
+- **A teardown must not storm the machine either.** The same drag pause had a
+  second contributor in the same log: a switchboard frame making 4254
+  `mem_unmap` calls as a closing panel's ~18 MiB of live heap went away, each
+  one taking the *global* address-space registry's write lock and shooting down
+  the TLB on every other CPU. The userland heap's retention could not prevent
+  it — a retention is a level, and a level slides down with the free span it
+  bounds — so the arena now also moves in a granule (`lib/rt/README.md`). A
+  process's own teardown is no longer able to serialise every other process's
+  frame.
 - **Bit-identity, not near-identity.** Each scene is composed twice — once
   whole, once split into bands that run backwards — comparing the scan-out
   frame, the back buffer, and every counted pixel of `FrameStats`; the frost

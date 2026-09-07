@@ -15,13 +15,21 @@
 //! 1. A `Box` round-trips a value (a small allocation off the first page).
 //! 2. A `Vec` grows across several pages (forcing the arena to grow through
 //!    repeated `mem_map`), and every element reads back the value written.
-//! 3. After the `Vec` is dropped (freeing — and shrinking the arena through
-//!    `mem_unmap`), a fresh, larger allocation succeeds and reads back its
-//!    fill, proving reclaimed space is reusable.
+//! 3. After the `Vec` is dropped, a fresh, larger allocation succeeds and
+//!    reads back its fill, proving reclaimed space is reusable. The drop
+//!    itself does *not* have to reach `mem_unmap`: the arena is resized in
+//!    granules, so a few pages coming free stay mapped for the next
+//!    allocation.
 //! 4. A `Vec` is reserved (forcing the allocator's `realloc` to **grow** the
 //!    block) and then `shrink_to_fit` (forcing `realloc` to **shrink** it),
 //!    and every original element still reads back — proving `realloc`
 //!    preserves the live bytes across both an in-place resize and a move.
+//! 5. Reporting a memory-pressure band change drives the heap's trim, which
+//!    *is* what returns the arena to the kernel through `mem_unmap`, and a
+//!    further allocation then reads back — proving the pages really left the
+//!    address space and the arena regrows over them. This is the step that
+//!    keeps `mem_unmap` off the dead-code list (the consuming vertical fails
+//!    the run if the syscall never arrives).
 //!
 //! Each step that can fail returns a distinct non-zero exit code; a clean
 //! `exit(0)` is the success signal the vertical reports as PASS (fail loud, never silently pass).
@@ -46,6 +54,8 @@ mod program {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
+    use tairix_reclaim::PressureBand;
+
     /// Clean run: every allocation, write, read-back, and free succeeded.
     const EXIT_OK: i32 = 0;
     /// A `Box` did not read back the value stored in it.
@@ -59,6 +69,9 @@ mod program {
     /// A `realloc` (grow via `reserve`, then shrink via `shrink_to_fit`) did
     /// not preserve the vector's contents.
     const FAIL_REALLOC: i32 = 14;
+    /// The pressure-driven trim did not report a band change, or the arena
+    /// could not be reallocated over after it was handed back.
+    const FAIL_TRIM: i32 = 15;
 
     /// Number of `u32`s the growing `Vec` accumulates: 4096 elements is 16 KiB,
     /// several pages, so the arena must grow through repeated `mem_map`.
@@ -99,8 +112,6 @@ mod program {
             }
             i += 1;
         }
-        // Free the whole vector: the heap returns the trailing pages to the
-        // kernel via `mem_unmap` (arena shrink).
         drop(values);
 
         // 3. Reallocate after the free; reclaimed arena space must be reusable.
@@ -138,6 +149,26 @@ mod program {
             i += 1;
         }
         drop(grown);
+
+        // 5. A band change drives the heap's exact trim, which hands the free
+        // arena top back through `mem_unmap`. Critical is the band an
+        // unreported gauge already answers, so a comfortable band has to be
+        // reported first for the second report to be a change at all.
+        if !tairix_rt::pressure::report(PressureBand::Normal) {
+            return FAIL_TRIM;
+        }
+        if !tairix_rt::pressure::report(PressureBand::Critical) {
+            return FAIL_TRIM;
+        }
+        // The arena regrows over the range just unmapped, so a wrong unmap —
+        // pages left mapped but untracked, or a live range released — shows up
+        // here as a fault or a bad read-back rather than passing silently.
+        let mut regrown: Vec<u8> = Vec::new();
+        regrown.resize(REUSE_LEN, 0x5C);
+        if regrown.iter().any(|&b| b != 0x5C) {
+            return FAIL_TRIM;
+        }
+        drop(regrown);
 
         EXIT_OK
     }
