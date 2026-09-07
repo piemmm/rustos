@@ -4441,8 +4441,11 @@ impl DesktopFrameTotals {
     /// arithmetic. Each rule holds of every sequence of frames a compositor
     /// can actually compose:
     ///
-    /// * A `frames` of zero admits no work at all — a counter can only move
-    ///   in a frame.
+    /// * A `frames` of zero admits no other counter at all — `screen_px`
+    ///   included, since it is the denominator *of the counted frames* and
+    ///   the accumulator sets it only when counting one against it. So an
+    ///   epoch that has composed nothing is [`ZERO`](Self::ZERO) and nothing
+    ///   else.
     /// * `dirty_rects` is zero exactly when `damaged_px` is: an empty
     ///   rectangle is never recomposed, so each counted rectangle carries at
     ///   least one pixel.
@@ -4466,7 +4469,11 @@ impl DesktopFrameTotals {
     /// pixel at all.
     const fn validate(&self) -> Result<(), Errno> {
         let no_frames = self.frames == 0;
-        let work = self.damaged_px
+        // The screen extent is one of those counters: it is the denominator
+        // *of the counted frames*, and the accumulator only ever sets it in
+        // the same step that counts a frame against it.
+        let work = self.screen_px
+            | self.damaged_px
             | self.blended_px
             | self.opaque_px
             | self.blur_px
@@ -9159,6 +9166,27 @@ mod tests {
         reject(|t| t.peak_damaged_px = 0);
         reject(|t| t.peak_blended_px = t.blended_px + 1);
         reject(|t| t.peak_blended_px = 0);
+    }
+
+    #[test]
+    fn desktop_frame_totals_with_no_frame_are_all_zero_or_nothing() {
+        // A screen extent is the denominator *of the counted frames*, so
+        // reporting one while having counted none is a shape the accumulator
+        // cannot reach — it sets the extent only in the step that counts a
+        // frame against it. Accepting it handed a reader totals that were
+        // neither divisible nor the withdrawal `ZERO` means.
+        let mut screen_only = DesktopFrameTotals::ZERO;
+        screen_only.screen_px = 1920 * 1080;
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&screen_only.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+        // The withdrawal itself still decodes, which is what a publisher
+        // leaving the table sends.
+        assert_eq!(
+            DesktopFrameTotals::from_bytes(&DesktopFrameTotals::ZERO.to_le_bytes()),
+            Ok(DesktopFrameTotals::ZERO)
+        );
     }
 
     #[test]

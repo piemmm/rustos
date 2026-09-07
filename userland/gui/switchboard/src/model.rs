@@ -8,14 +8,14 @@
 //! effects through its host seam; this module decides *what* to do, never
 //! *how*.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkIoCounters, BlkQueueCounters};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::net_ipc::NetCounters;
-use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport};
+use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, OWNER_BUNDLES_MAX};
 use tairix_abi::sysinfo::{
     CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState, VolumeIoQueueRecord,
     VolumeIoStatsRecord,
@@ -876,6 +876,82 @@ impl PressureClock {
     }
 }
 
+/// Which application bundle each window owner was launched from, as the
+/// desktop session has reported it.
+///
+/// The kernel's process record carries a name and no image path, and the
+/// launch that produced a process is the session's own, so this is a fact
+/// only the session can state. It accumulates one owner at a time as
+/// applications launch, rather than arriving as a whole roster, and is pruned
+/// against each sample's own process list — so it cannot outgrow the
+/// machine's live processes, and a numeric pid recycled onto a new process
+/// cannot inherit a picture, because owners are keyed by the kernel-attested
+/// identity that is never reused.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OwnerBundles {
+    by_owner: BTreeMap<ProcId, String>,
+}
+
+impl OwnerBundles {
+    /// Nothing reported yet: every row draws its class icon.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `owner` was launched from the bundle directory `dir`,
+    /// replacing anything held for it.
+    ///
+    /// Refused once [`OWNER_BUNDLES_MAX`] owners are already held and this is
+    /// a new one, so a stream of reports arriving faster than the prune cannot
+    /// grow this without bound; the refused owner draws its class icon, which
+    /// is the honest degradation rather than a wrong picture.
+    pub fn record(&mut self, owner: ProcId, dir: &str) {
+        if self.by_owner.len() >= OWNER_BUNDLES_MAX && !self.by_owner.contains_key(&owner) {
+            return;
+        }
+        self.by_owner.insert(owner, String::from(dir));
+    }
+
+    /// Drop every owner `live` does not name — the sample's own process list,
+    /// so the set follows the machine rather than the history of it.
+    ///
+    /// Walked process-first rather than owner-first: a busy machine's process
+    /// list is thousands of rows and the retained set is at most
+    /// [`OWNER_BUNDLES_MAX`], so one pass looking each process up costs a
+    /// lookup per process instead of a whole scan of the list per owner.
+    pub fn retain_live(&mut self, live: &[ProcessSummary]) {
+        if self.by_owner.is_empty() {
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for process in live {
+            if self.by_owner.contains_key(&process.proc_id) {
+                seen.insert(process.proc_id);
+            }
+        }
+        self.by_owner.retain(|owner, _| seen.contains(owner));
+    }
+
+    /// The bundle directory `owner` was launched from, if one was reported.
+    #[must_use]
+    pub fn of(&self, owner: ProcId) -> Option<&str> {
+        self.by_owner.get(&owner).map(String::as_str)
+    }
+
+    /// How many owners are held.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.by_owner.len()
+    }
+
+    /// Whether nothing has been reported.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_owner.is_empty()
+    }
+}
+
 /// Everything the desktop session has told this instance about itself: the
 /// seat's unresponsive-owner report and what its last composited frame cost.
 ///
@@ -1049,16 +1125,22 @@ pub fn build_model(
     title: &str,
     sample: &Sample,
     session: &SessionReport,
+    bundles: &OwnerBundles,
     meters: &mut RollingMeters,
     authority: &dyn CapabilityQuery,
 ) -> PanelModel {
     let mut model = SwitchboardModel::new(title);
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
-    let (tasks, task_owners, task_idents) =
-        build_tasks(&sample.processes, &session.seat, &meters.tasks, can_force);
+    let (tasks, task_owners, task_idents) = build_tasks(
+        &sample.processes,
+        &session.seat,
+        &meters.tasks,
+        bundles,
+        can_force,
+    );
     let (recovery, recovery_owners) = build_recovery(sample, &session.seat, meters, can_force);
-    let resources = build_resource_report(sample, meters, session, authority);
+    let resources = build_resource_report(sample, meters, bundles, session, authority);
 
     model.tasks = tasks;
     model.recovery = recovery;
@@ -1095,6 +1177,7 @@ fn build_tasks(
     processes: &[ProcessSummary],
     seat_report: &SeatReport,
     meters: &TaskMeters,
+    bundles: &OwnerBundles,
     can_force: bool,
 ) -> (Vec<TaskSummary>, Vec<u64>, Vec<TaskIdent>) {
     let mut tasks = Vec::with_capacity(processes.len());
@@ -1105,6 +1188,7 @@ fn build_tasks(
         tasks.push(TaskSummary {
             proc_id: process.proc_id,
             name: name.clone(),
+            bundle: bundles.of(process.proc_id).map(String::from),
             owner: TaskOwner::new(process.uid),
             core: Some(process.cpu),
             lifecycle: Some(process.state),

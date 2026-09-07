@@ -26,7 +26,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery};
 
 use super::{build_resource_report, used_permille};
 use crate::derive::{derive_summary, Hysteresis};
-use crate::model::{RollingMeters, SessionReport, VolumeService};
+use crate::model::{OwnerBundles, RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
 use crate::view::resources::{BlockBody, DeviceGroup, DeviceId, HeroInstrument, StorageId};
 use crate::view::{
@@ -61,7 +61,13 @@ fn permitted() -> Sample {
 /// The report `sample` produces under no authority at all.
 fn report_of(sample: &Sample) -> ResourceReport {
     let mut meters = RollingMeters::new();
-    build_resource_report(sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority)
+    build_resource_report(
+        sample,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    )
 }
 
 /// The device with `id`, which the report must carry.
@@ -497,7 +503,13 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
         ..permitted()
     };
     let first = projected(io_stats(0, 0, 0, 0, 0, 0, 0));
-    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let _ = build_resource_report(
+        &first,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let second = projected(io_stats(
         4 << 20,
         1 << 20,
@@ -507,7 +519,13 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
         64_000_000,
         32_000_000,
     ));
-    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let report = build_resource_report(
+        &second,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let device = device(&report, SERVED);
     assert_eq!(device.hero.value, Reading::measured("5.0 MiB/s"));
     // One interval, one trace point — not one per projection.
@@ -743,7 +761,13 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
     // writes 32 ms. Every row below is one of those deltas over another.
     let mut meters = RollingMeters::new();
     let first = volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), Some(io_queue(0, 0, 0)));
-    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let _ = build_resource_report(
+        &first,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let second = volume_sample(
         io_stats(
             4 << 20,
@@ -756,7 +780,13 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         ),
         Some(io_queue(3, 1_280, 640)),
     );
-    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let report = build_resource_report(
+        &second,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let volume = device(&report, SERVED);
 
     // busy_ns delta over the interval.
@@ -818,7 +848,13 @@ fn a_denied_queue_scope_costs_the_queue_rows_alone() {
         scopes: denied,
         ..volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None)
     };
-    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let _ = build_resource_report(
+        &first,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let second = Sample {
         scopes: denied,
         ..volume_sample(
@@ -826,7 +862,13 @@ fn a_denied_queue_scope_costs_the_queue_rows_alone() {
             None,
         )
     };
-    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let report = build_resource_report(
+        &second,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let volume = device(&report, SERVED);
     assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
     assert_eq!(fact(volume, "Await, read"), &Reading::measured("125.0 us"));
@@ -862,6 +904,7 @@ fn a_sample_with_no_counters_breaks_the_series_rather_than_deltaing_over_the_gap
         last = Some(build_resource_report(
             &sample,
             &mut meters,
+            &OwnerBundles::new(),
             &SessionReport::HEALTHY,
             &NoAuthority,
         ));
@@ -902,7 +945,13 @@ fn the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap() {
         ..permitted()
     };
     let step = |meters: &mut RollingMeters, sample: &Sample| {
-        build_resource_report(sample, meters, &SessionReport::HEALTHY, &NoAuthority)
+        build_resource_report(
+            sample,
+            meters,
+            &OwnerBundles::new(),
+            &SessionReport::HEALTHY,
+            &NoAuthority,
+        )
     };
 
     let _ = step(&mut meters, &graphics(1_000_000_000, None, true));
@@ -947,7 +996,13 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
         volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None),
         volume_sample(stats, None),
     ] {
-        let _ = build_resource_report(&sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+        let _ = build_resource_report(
+            &sample,
+            &mut meters,
+            &OwnerBundles::new(),
+            &SessionReport::HEALTHY,
+            &NoAuthority,
+        );
     }
     let id = SERVED;
     assert!(!meters.devices.primary_history(id).is_empty());
@@ -956,6 +1011,7 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
     let _ = build_resource_report(
         &permitted(),
         &mut meters,
+        &OwnerBundles::new(),
         &SessionReport::HEALTHY,
         &NoAuthority,
     );
@@ -967,6 +1023,7 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
     let report = build_resource_report(
         &volume_sample(stats, None),
         &mut meters,
+        &OwnerBundles::new(),
         &SessionReport::HEALTHY,
         &NoAuthority,
     );
@@ -1004,10 +1061,17 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
     // tracking.
     let mut meters = RollingMeters::new();
     let first = interface_sample(0, 0);
-    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let _ = build_resource_report(
+        &first,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     let report = build_resource_report(
         &interface_sample(4 << 20, 1 << 20),
         &mut meters,
+        &OwnerBundles::new(),
         &SessionReport::HEALTHY,
         &NoAuthority,
     );
@@ -1041,7 +1105,13 @@ fn the_memory_entry_carries_its_own_committed_share_trace() {
         let _ = derive_summary(&sample, &mut hysteresis);
         meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     }
-    let report = build_resource_report(&sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let report = build_resource_report(
+        &sample,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
     assert_eq!(
         device(&report, DeviceId::Memory).trend,
         alloc::vec![530, 530]
@@ -1134,7 +1204,13 @@ fn the_graphics_rail_entry_reads_the_frames_damage_not_the_hero_figure() {
         frame: Some(frame_report()),
         ..SessionReport::HEALTHY
     };
-    let report = build_resource_report(&permitted(), &mut meters, &session, &NoAuthority);
+    let report = build_resource_report(
+        &permitted(),
+        &mut meters,
+        &OwnerBundles::new(),
+        &session,
+        &NoAuthority,
+    );
     let graphics = device(&report, DeviceId::Graphics);
     assert_eq!(graphics.reading, Reading::measured("3.2k px"));
     assert_eq!(graphics.hero.value, Reading::measured("4.2M px"));

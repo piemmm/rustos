@@ -56,9 +56,12 @@
 //! session sends [`SwitchboardCommand::OpenPanel`] when the user opens the
 //! tray icon, and [`SwitchboardCommand::SeatReport`] to hand over the one
 //! fact only the session holds — which window owners have stopped draining
-//! their event mailbox and are therefore unresponsive. The service
-//! authenticates every command against the session [`ProcId`] the publish
-//! reply attested, never a wire claim, and joins the reported owner ids
+//! their event mailbox and are therefore unresponsive.
+//! [`SwitchboardCommand::OwnerBundle`] is the other such fact: which
+//! application bundle a window owner was launched from, which the kernel's
+//! process record does not carry and only the launching session knows. The
+//! service authenticates every command against the session [`ProcId`] the
+//! publish reply attested, never a wire claim, and joins the reported owners
 //! against the process list it already samples rather than trusting names
 //! from the wire.
 
@@ -851,6 +854,8 @@ const OP_SEAT_REPORT: u16 = 2;
 const OP_POWER: u16 = 3;
 /// Wire operation discriminant of [`SwitchboardCommand::FrameReport`].
 const OP_FRAME_REPORT: u16 = 4;
+/// Wire operation discriminant of [`SwitchboardCommand::OwnerBundle`].
+const OP_OWNER_BUNDLE: u16 = 5;
 
 /// Byte offset of an [`SwitchboardCommand::OpenPanel`] section.
 const SECTION_OFFSET: usize = 8;
@@ -886,6 +891,48 @@ const FRAME_CHROME_MISSES_OFFSET: usize = FRAME_CHROME_HITS_OFFSET + 4;
 /// First reserved byte past a frame report's payload.
 const FRAME_END_OFFSET: usize = FRAME_CHROME_MISSES_OFFSET + 4;
 
+/// Byte offset of an owner-bundle report's attested process identity.
+const OWNER_BUNDLE_PROC_OFFSET: usize = 8;
+/// Byte offset of its bundle-directory length prefix.
+const OWNER_BUNDLE_LEN_OFFSET: usize = OWNER_BUNDLE_PROC_OFFSET + PROC_ID_LEN;
+/// Byte offset of its bundle-directory bytes.
+const OWNER_BUNDLE_DIR_OFFSET: usize = OWNER_BUNDLE_LEN_OFFSET + 1;
+/// First byte past an owner-bundle report's payload.
+const OWNER_BUNDLE_END_OFFSET: usize = OWNER_BUNDLE_DIR_OFFSET + OWNER_BUNDLE_MAX;
+
+/// Maximum encoded length, in bytes, of an application-bundle directory on
+/// the [`SwitchboardCommand::OwnerBundle`] wire.
+///
+/// A validation bound on a fixed-width frame, not a capacity
+/// ([`crate::rlimit`] governs capacities): the frame carries the directory
+/// inline, so it is sized to hold every path the OS's own program stores
+/// (`/System/Applications/<name>.app`) and a user's own nested ones
+/// (`/Users/<user>/Applications/<folder>/<name>.app`) rather than the whole
+/// [`crate::fs::FS_PATH_MAX`] a filesystem admits. A longer path is refused,
+/// and the row it would have named draws its *class* icon — the honest
+/// degradation, never a wrong picture.
+pub const OWNER_BUNDLE_MAX: usize = 128;
+
+/// How many window owners' bundles a Switchboard instance retains at once.
+///
+/// A containment bound on accumulated protocol state, not a capacity
+/// ([`crate::rlimit`] governs capacities): owners are reported one at a time
+/// as applications launch and the retained set is pruned against the live
+/// process list, so this bounds only how far it can run ahead of a prune.
+/// One seat's windowed applications are bounded by the screen that shows
+/// them, and an owner beyond this simply draws its *class* icon.
+pub const OWNER_BUNDLES_MAX: usize = 128;
+
+/// A validated application-bundle directory: at least one and at most
+/// [`OWNER_BUNDLE_MAX`] bytes of well-formed UTF-8 with no control
+/// characters.
+///
+/// Built on the shared [`BoundedText`] validator, so its construction and
+/// decode rules are identical to the tray summary's task name. `MIN` is `1`:
+/// an empty directory names nothing, and a process the desktop did not launch
+/// is simply never reported.
+pub type OwnerBundleDir = BoundedText<1, OWNER_BUNDLE_MAX>;
+
 /// One command the desktop session sends a Switchboard instance on its
 /// per-instance mailbox ([`command_endpoint_for`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -905,6 +952,25 @@ pub enum SwitchboardCommand {
         /// The report.
         report: FrameReport,
     },
+    /// Name the application bundle one window owner was launched from, so
+    /// the monitor can draw that application's own icon against its rows
+    /// instead of one generic executable glyph for every process.
+    ///
+    /// Only the session knows this: the kernel's process record carries a
+    /// name and no image path, and the launch that produced the process is
+    /// the session's own. It is reported per owner as the strip changes
+    /// rather than as a whole roster, so a newly launched application costs
+    /// one frame and every other frame on this mailbox keeps its size.
+    ///
+    /// The owner is its kernel-attested [`ProcId`], never its numeric pid:
+    /// a pid is recycled, and a recycled one would hand a stranger's process
+    /// the icon of the application that held the number before it.
+    OwnerBundle {
+        /// The process the bundle launched, as the kernel attests it.
+        owner: ProcId,
+        /// The `<Name>.app` directory it was launched from.
+        bundle: OwnerBundleDir,
+    },
     /// Perform the machine power transition `action`. Sent only after the
     /// desktop session's own confirmation prompt has been accepted — the
     /// session holds no authority to act itself, so it relays the user's
@@ -918,10 +984,17 @@ pub enum SwitchboardCommand {
 
 impl SwitchboardCommand {
     /// Encoded size on the wire: magic (4), version (2), op (2), and the
-    /// widest operation's fixed payload (the seat report; every other
-    /// operation's payload, the frame report's counts included, fits inside
-    /// it).
-    pub const WIRE_LEN: usize = REPORT_OWNERS_OFFSET + 8 * SEAT_REPORT_OWNERS_MAX;
+    /// widest operation's fixed payload — the owner-bundle report, whose
+    /// inline directory outruns the seat report's named owners and the frame
+    /// report's counts alike.
+    pub const WIRE_LEN: usize = {
+        let seat = REPORT_OWNERS_OFFSET + 8 * SEAT_REPORT_OWNERS_MAX;
+        if OWNER_BUNDLE_END_OFFSET > seat {
+            OWNER_BUNDLE_END_OFFSET
+        } else {
+            seat
+        }
+    };
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -956,6 +1029,14 @@ impl SwitchboardCommand {
             Self::Power { action } => {
                 put_u16(&mut out, 6, OP_POWER);
                 put_u32(&mut out, POWER_ACTION_OFFSET, action.as_u32());
+            }
+            Self::OwnerBundle { owner, bundle } => {
+                put_u16(&mut out, 6, OP_OWNER_BUNDLE);
+                out[OWNER_BUNDLE_PROC_OFFSET..OWNER_BUNDLE_LEN_OFFSET]
+                    .copy_from_slice(&owner.to_le_bytes());
+                out[OWNER_BUNDLE_LEN_OFFSET] = bundle.len_byte();
+                out[OWNER_BUNDLE_DIR_OFFSET..OWNER_BUNDLE_END_OFFSET]
+                    .copy_from_slice(bundle.raw_bytes());
             }
         }
         out
@@ -1016,9 +1097,34 @@ impl SwitchboardCommand {
                     action: PowerAction::from_u32(read_u32(bytes, POWER_ACTION_OFFSET))?,
                 })
             }
+            OP_OWNER_BUNDLE => decode_owner_bundle(bytes),
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Decode an owner-bundle report: the attested process identity and the
+/// bundle directory it was launched from.
+///
+/// The reserved zero identity names no process, and the directory passes the
+/// shared bounded-text validator, so a malformed or over-long path is refused
+/// rather than reaching the icon path as a partial name.
+fn decode_owner_bundle(bytes: &[u8]) -> Result<SwitchboardCommand, Errno> {
+    if bytes[OWNER_BUNDLE_END_OFFSET..SwitchboardCommand::WIRE_LEN]
+        .iter()
+        .any(|&byte| byte != 0)
+    {
+        return Err(Errno::BadMagic);
+    }
+    let owner = ProcId::from_bytes(&bytes[OWNER_BUNDLE_PROC_OFFSET..OWNER_BUNDLE_LEN_OFFSET])?;
+    // The all-zero identity is the kernel's, which launches no bundle.
+    if owner.is_kernel() {
+        return Err(Errno::OutOfRange);
+    }
+    let mut dir = [0u8; OWNER_BUNDLE_MAX];
+    dir.copy_from_slice(&bytes[OWNER_BUNDLE_DIR_OFFSET..OWNER_BUNDLE_END_OFFSET]);
+    let bundle = OwnerBundleDir::from_wire(bytes[OWNER_BUNDLE_LEN_OFFSET], &dir)?;
+    Ok(SwitchboardCommand::OwnerBundle { owner, bundle })
 }
 
 /// Decode a seat report, refusing a dirty reserved byte, an over-long

@@ -901,6 +901,89 @@ fn wash_region_takes_the_mask_at_the_rectangles_own_coordinates() {
 }
 
 #[test]
+fn wash_polygon_subpixel_multiplies_the_shapes_coverage_by_the_mask() {
+    // A square covering exactly [1, 5) × [0, 4), washed by a field that varies
+    // down the rows: inside the shape the source scales with the field, and
+    // outside it nothing is touched however strong the field is.
+    let mut surface = Surface::new(8, 4).expect("allocates");
+    surface.fill(BLUE);
+    let before = surface.pixels().to_vec();
+    let square = [
+        (SUBPIXEL, 0),
+        (5 * SUBPIXEL, 0),
+        (5 * SUBPIXEL, 4 * SUBPIXEL),
+        (SUBPIXEL, 4 * SUBPIXEL),
+    ];
+    surface.wash_polygon_subpixel(&square, Color::rgba(255, 0, 0, 255), |_, y| match y {
+        0 => 255,
+        1 => 128,
+        _ => 0,
+    });
+
+    assert_eq!(
+        surface.get(2, 0),
+        Some(Color::rgba(255, 0, 0, 255).premultiply()),
+        "a fully covered pixel under a full field composites the source outright"
+    );
+    let half = surface.get(2, 1).expect("in bounds");
+    assert!(
+        half.r > 0 && half.b > 0,
+        "a half field leaves both the wash and the ground: {half:?}"
+    );
+    assert_eq!(
+        surface.get(2, 2),
+        Some(before[2 * 8 + 2]),
+        "a zero field leaves the pixel bit-identical"
+    );
+    assert_eq!(
+        surface.get(0, 0),
+        Some(before[0]),
+        "and the shape's own coverage still bounds it"
+    );
+}
+
+#[test]
+fn wash_polygon_subpixel_agrees_with_the_flat_fill_under_a_full_mask() {
+    // The masked path is the same scan converter and the same shape, so a
+    // field of full strength must land where the flat fill does. Only the
+    // rounding differs (the wash spreads it across the area), so the two are
+    // compared to within a level.
+    let triangle = [(0, 0), (12 * SUBPIXEL, 0), (0, 9 * SUBPIXEL)];
+    let mut washed = Surface::new(12, 9).expect("allocates");
+    washed.fill(BLUE);
+    washed.wash_polygon_subpixel(&triangle, Color::rgba(255, 0, 0, 160), |_, _| 255);
+
+    let mut filled = Surface::new(12, 9).expect("allocates");
+    filled.fill(BLUE);
+    filled.fill_polygon_subpixel(&triangle, Color::rgba(255, 0, 0, 160));
+
+    for (at, (w, f)) in washed.pixels().iter().zip(filled.pixels()).enumerate() {
+        let close = |a: u8, b: u8| a.abs_diff(b) <= 1;
+        assert!(
+            close(w.r, f.r) && close(w.g, f.g) && close(w.b, f.b) && close(w.a, f.a),
+            "pixel {at}: {w:?} vs {f:?}"
+        );
+    }
+}
+
+#[test]
+fn wash_polygon_subpixel_is_a_no_op_for_a_transparent_wash_or_no_shape() {
+    let mut surface = Surface::new(4, 4).expect("allocates");
+    surface.fill(BLUE);
+    let before = surface.pixels().to_vec();
+    let square = [
+        (0, 0),
+        (4 * SUBPIXEL, 0),
+        (4 * SUBPIXEL, 4 * SUBPIXEL),
+        (0, 4 * SUBPIXEL),
+    ];
+    surface.wash_polygon_subpixel(&square, Color::rgba(255, 0, 0, 0), |_, _| 255);
+    assert_eq!(surface.pixels(), &before[..], "a transparent wash");
+    surface.wash_polygon_subpixel(&[(0, 0), (SUBPIXEL, 0)], RED, |_, _| 255);
+    assert_eq!(surface.pixels(), &before[..], "fewer than three vertices");
+}
+
+#[test]
 fn wash_region_is_a_no_op_for_a_transparent_or_empty_wash() {
     let mut surface = Surface::new(4, 4).expect("allocates");
     surface.fill(BLUE);

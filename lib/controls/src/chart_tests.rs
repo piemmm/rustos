@@ -60,6 +60,95 @@ fn cpu(theme: &Theme) -> Pixel {
     premul(theme.palette().cpu_pressure)
 }
 
+/// The mean "distance from the plate" of the fill in row `y`, over columns
+/// `[from, to)`: how much ink the area fill laid down there, in the trace's
+/// own hue, summed across the row so the ordered dither cannot swing one
+/// sample.
+///
+/// Measured against the chart's own quiet plate rather than against an
+/// expected colour, because a ramp has no single expected pixel: what the
+/// assertion needs is *more ink here than there*.
+fn fill_weight(surface: &Surface, y: u32, from: u32, to: u32, plate: Pixel) -> u32 {
+    (from..to.min(surface.width()))
+        .filter_map(|x| surface.get(x, y))
+        .map(|px| u32::from(px.r.abs_diff(plate.r)) + u32::from(px.b.abs_diff(plate.b)))
+        .sum()
+}
+
+// --- The area fill ramps out at the zero line -----------------------------
+
+#[test]
+fn the_area_fill_fades_toward_the_zero_line() {
+    let theme = Theme::dark();
+    let plate = premul(theme.palette().scroll_track);
+    // A saturated series, so the fill spans the whole band and every row is
+    // under the trace rather than under the plate alone.
+    let surface = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([1000; 16]),
+        &theme,
+    );
+
+    // Sampled well apart: the dither spends a fraction of a level across the
+    // area, so adjacent rows may tie, but a quarter of the band apart cannot.
+    let quarters: Vec<u32> = [H / 4, H / 2, H * 3 / 4, H - 1]
+        .into_iter()
+        .map(|y| fill_weight(&surface, y, 0, W, plate))
+        .collect();
+    for pair in quarters.windows(2) {
+        assert!(
+            pair[0] > pair[1],
+            "the fill must thin toward the floor: {quarters:?}"
+        );
+    }
+    // And it reaches the floor as nothing: the zero line is the axis, never a
+    // second drawn edge.
+    assert_eq!(quarters.last().copied(), Some(0), "{quarters:?}");
+}
+
+#[test]
+fn the_area_fill_is_not_the_flat_slab_it_replaced() {
+    let theme = Theme::dark();
+    let plate = premul(theme.palette().scroll_track);
+    let surface = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([1000; 16]),
+        &theme,
+    );
+    // A flat fill weighs the same at every height under the trace. Two rows a
+    // half-band apart must differ, and by more than a rounding step.
+    let high = fill_weight(&surface, H / 4, 0, W, plate);
+    let low = fill_weight(&surface, H * 3 / 4, 0, W, plate);
+    assert!(high > low.saturating_mul(2), "high {high} low {low}");
+}
+
+#[test]
+fn a_mirrored_band_ramps_the_other_way() {
+    let theme = Theme::dark();
+    let plate = premul(theme.palette().scroll_track);
+    // Half-scale in both directions, so each band's trace sits mid-band and
+    // the rows sampled below carry fill alone rather than the trace's own ink.
+    let surface = chart_surface(
+        &Chart::new(PressureKind::Cpu)
+            .with_samples([500; 16])
+            .with_opposing(PressureKind::Cpu, [500; 16]),
+        &theme,
+    );
+    let weight = |y| fill_weight(&surface, y, 0, W, plate);
+    // Each band's fill thins toward the axis it is read against, so the two
+    // halves ramp in opposite directions about it.
+    assert!(
+        weight(H / 4 + 2) > weight(H / 2 - 2),
+        "the upper band must thin toward the axis: {} then {}",
+        weight(H / 4 + 2),
+        weight(H / 2 - 2)
+    );
+    assert!(
+        weight(H * 3 / 4 - 2) > weight(H / 2 + 2),
+        "the lower band must thin toward the axis: {} then {}",
+        weight(H * 3 / 4 - 2),
+        weight(H / 2 + 2)
+    );
+}
+
 // --- The reading maps across the whole box --------------------------------
 
 #[test]

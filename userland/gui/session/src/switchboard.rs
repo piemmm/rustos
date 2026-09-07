@@ -4,8 +4,9 @@
 //! ([`SwitchboardRequest::ActivateOwner`] /
 //! [`SwitchboardRequest::RestartOwner`]), and the reverse direction — the
 //! tray-icon press that opens the panel, the seat's unresponsive-owner
-//! report, and what the last composited frame cost — that the session sends
-//! on the service's own command mailbox.
+//! report, what the last composited frame cost, and which bundle each window
+//! owner was launched from — that the session sends on the service's own
+//! command mailbox.
 //!
 //! Every side effect (raising a window, relaunching a bundle, sending on
 //! the mailbox) is an injected seam ([`OwnerWindow`], the `relaunch`
@@ -13,14 +14,17 @@
 //! valid, where an open with no live service is remembered, when a report
 //! is worth sending — are pure and host-tested without a running kernel.
 
+use alloc::collections::BTreeSet;
+
 use tairix_abi::switchboard_ipc::{
-    CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
-    SEAT_REPORT_OWNERS_MAX,
+    CommandSection, FrameReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
+    SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_log::EventId;
 use tairix_wm::{Compositor, WindowId};
 
+use crate::apps::AppGroup;
 use crate::config::SWITCHBOARD_RUN_PATH;
 use crate::confirm::Answer;
 use crate::launch::LaunchTable;
@@ -402,6 +406,97 @@ pub fn maybe_send_seat_report(
     let bounded = &owners[..owners.len().min(SEAT_REPORT_OWNERS_MAX)];
     if let Ok(report) = SeatReport::new(total, bounded) {
         let _ = mailbox.send(pid, SwitchboardCommand::SeatReport { report });
+    }
+}
+
+/// Which window owners a live Switchboard instance has already been told the
+/// bundle of.
+///
+/// The application strip is re-resolved whenever a window opens or closes or
+/// an application declares, so re-sending every owner's bundle each time would
+/// put a burst on the mailbox for a fact that has not changed. Only what is
+/// new is sent; an owner that leaves the strip is forgotten, and a *different*
+/// instance is told everything again — a monitor that has just started holds
+/// no roster, and nothing else would ever tell it.
+///
+/// A refused send simply leaves the owner untold, so the next strip change
+/// carries it. There is no retry loop and no lost fact: the strip is the
+/// standing truth, not a queue of events.
+#[derive(Debug, Default)]
+pub struct OwnerBundleGate {
+    told: BTreeSet<ProcId>,
+    attested: Option<u64>,
+}
+
+impl OwnerBundleGate {
+    /// Nothing told yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Note that the instance named by `pid` has published, and so has named
+    /// this session as the sender it will accept commands from.
+    ///
+    /// Nothing is told before this. An instance exists from the moment it is
+    /// spawned but ignores every command until its own first publish has
+    /// attested the session, so a roster sent into that gap is taken by the
+    /// mailbox and dropped unread by the service — and the gate would have
+    /// recorded it as told and never offered it again. A *different* instance
+    /// clears what was told, because a monitor that has just started holds no
+    /// roster and nothing else would ever tell it.
+    pub fn attest(&mut self, pid: u64) {
+        if self.attested != Some(pid) {
+            self.told.clear();
+            self.attested = Some(pid);
+        }
+    }
+
+    /// Tell `live` the bundle of every owner on `groups` it has not been told,
+    /// forgetting owners the strip no longer holds.
+    ///
+    /// A group the desktop did not launch attests no bundle, so it is never
+    /// reported: the monitor then draws that process's class icon rather than
+    /// an application's picture it has no claim to.
+    pub fn publish(
+        &mut self,
+        live: Option<u64>,
+        groups: &[AppGroup],
+        mailbox: &mut dyn SwitchboardMailbox,
+    ) {
+        let Some(pid) = live else {
+            self.told.clear();
+            self.attested = None;
+            return;
+        };
+        if self.attested != Some(pid) {
+            return;
+        }
+        let strip: BTreeSet<ProcId> = groups.iter().map(|group| group.owner).collect();
+        self.told.retain(|owner| strip.contains(owner));
+        for group in groups {
+            let Some(dir) = group.bundle.as_deref() else {
+                continue;
+            };
+            if self.told.contains(&group.owner) {
+                continue;
+            }
+            // A path the fixed-width frame cannot carry is not sent at all:
+            // the monitor draws the class icon, never a truncated path it
+            // would resolve to somebody else's bundle.
+            let Ok(bundle) = OwnerBundleDir::new(dir) else {
+                continue;
+            };
+            if mailbox.send(
+                pid,
+                SwitchboardCommand::OwnerBundle {
+                    owner: group.owner,
+                    bundle,
+                },
+            ) {
+                self.told.insert(group.owner);
+            }
+        }
     }
 }
 

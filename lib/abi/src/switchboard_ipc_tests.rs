@@ -2,8 +2,8 @@
 
 use super::{
     command_endpoint_for, decode_publish_reply, encode_publish_reply, CommandSection, FrameReport,
-    SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPermille, TrayPressure,
-    TrayPressureCount, TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
+    OwnerBundleDir, SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPermille, TrayPressure,
+    TrayPressureCount, TrayPressureKind, TraySummary, TrayTask, TrayTaskName, OWNER_BUNDLE_MAX,
     SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_PUBLISH_REPLY_LEN, TRAY_PRESSURE_KIND_COUNT,
     TRAY_TASK_NAME_MAX,
 };
@@ -581,6 +581,95 @@ fn round_trips_seat_reports_at_the_bounds() {
             Ok(command)
         );
     }
+}
+
+#[test]
+fn round_trips_owner_bundles_at_the_bounds() {
+    let owner = ProcId::from_raw([9u8; crate::PROC_ID_LEN]);
+    for dir in [
+        "/System/Applications/terminal.app",
+        &"x".repeat(OWNER_BUNDLE_MAX),
+        "/",
+    ] {
+        let command = SwitchboardCommand::OwnerBundle {
+            owner,
+            bundle: OwnerBundleDir::new(dir).expect("within bounds"),
+        };
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(command)
+        );
+    }
+}
+
+#[test]
+fn an_over_long_bundle_directory_is_refused_rather_than_truncated() {
+    assert_eq!(
+        OwnerBundleDir::new(&"x".repeat(OWNER_BUNDLE_MAX + 1)),
+        Err(Errno::LengthOutOfRange)
+    );
+    // And so is an empty one: a process the desktop did not launch is simply
+    // never reported, never reported as launched from nowhere.
+    assert_eq!(OwnerBundleDir::new(""), Err(Errno::LengthOutOfRange));
+}
+
+#[test]
+fn the_owner_bundle_payload_is_the_widest_a_command_frame_carries() {
+    // Which is why no other operation's tail check can reach past it, and why
+    // the frame is sized from this operation rather than from the seat report.
+    assert_eq!(
+        SwitchboardCommand::WIRE_LEN,
+        8 + crate::PROC_ID_LEN + 1 + OWNER_BUNDLE_MAX
+    );
+}
+
+#[test]
+fn an_owner_bundle_frame_refuses_the_kernel_a_dirty_tail_and_a_bad_length() {
+    let owner = ProcId::from_raw([1u8; crate::PROC_ID_LEN]);
+    let good = SwitchboardCommand::OwnerBundle {
+        owner,
+        bundle: OwnerBundleDir::new("/Apps/A.app").expect("within bounds"),
+    }
+    .to_le_bytes();
+
+    // The kernel launches no bundle, so its all-zero identity never names an
+    // owner (fail closed rather than icon a process nothing attests).
+    let mut kernel = good;
+    kernel[8..8 + crate::PROC_ID_LEN].fill(0);
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&kernel),
+        Err(Errno::OutOfRange)
+    );
+
+    // A length prefix beyond the directory bytes cannot be honoured.
+    let mut long = good;
+    long[8 + crate::PROC_ID_LEN] = u8::MAX;
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&long),
+        Err(Errno::LengthOutOfRange)
+    );
+
+    // A length prefix of zero would name nothing.
+    let mut empty = good;
+    empty[8 + crate::PROC_ID_LEN] = 0;
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&empty),
+        Err(Errno::LengthOutOfRange)
+    );
+
+    // A dirty tail *inside* the directory field is refused too: the bytes
+    // past the stated length are the wire's reserved zeroes.
+    let mut tail = good;
+    tail[8 + crate::PROC_ID_LEN + 1 + OWNER_BUNDLE_MAX - 1] = b'x';
+    assert_eq!(SwitchboardCommand::from_bytes(&tail), Err(Errno::BadMagic));
+
+    // And a control character in the path.
+    let mut control = good;
+    control[8 + crate::PROC_ID_LEN + 1] = 0x07;
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&control),
+        Err(Errno::OutOfRange)
+    );
 }
 
 #[test]

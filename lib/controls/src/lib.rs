@@ -307,7 +307,7 @@ pub use metric::{
     MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
-pub use paint::{ground_fill, paint_surface_plate, plate_border, ChromeLayer};
+pub use paint::{ground_fill, inset, paint_surface_plate, plate_border, ChromeLayer};
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{

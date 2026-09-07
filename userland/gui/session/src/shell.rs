@@ -46,8 +46,8 @@ use tairix_controls::damage::{self, Repaint};
 use tairix_cursor::{CursorRegistry, CursorSetId, CursorTheme};
 use tairix_geometry::Region;
 use tairix_icon::{
-    artwork_cache, ArtworkCache, ArtworkRasteriser, ArtworkReader, ArtworkResolver,
-    IconArtworkSource, IconKind, IconRequest, IconSet, InlineArtwork,
+    artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
+    IconSet, InlineArtwork, NoArtworkSeam,
 };
 use tairix_log::Sink;
 use tairix_proglib::Catalog;
@@ -211,27 +211,6 @@ impl core::fmt::Debug for DesktopShell {
             .field("artwork_bytes", &self.artwork.charged_bytes())
             .field("active_frame", &self.active_frame)
             .finish_non_exhaustive()
-    }
-}
-
-/// The artwork seams a shell starts with: nothing is found and nothing is
-/// decoded, so every icon falls back to its built-in glyph until the
-/// embedder installs the real resolver with
-/// [`DesktopShell::set_artwork_resolver`].
-///
-/// One type for both halves because both are the same refusal; two would be
-/// the same emptiness written twice.
-struct NoArtworkSeam;
-
-impl ArtworkReader for NoArtworkSeam {
-    fn read(&mut self, _path: &str) -> Option<Vec<u8>> {
-        None
-    }
-}
-
-impl ArtworkRasteriser for NoArtworkSeam {
-    fn rasterise(&mut self, _side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
-        None
     }
 }
 

@@ -25,10 +25,11 @@ use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::damage;
 use crate::paint::{
-    foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
-    paint_surface_plate, paint_text_line, plate_border, pointer_activation, rail_thickness,
-    resolve_bead, resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
+    authority_rgba, foreground, inset, key_activation, paint_bead, paint_count_badge,
+    paint_icon_slot, paint_plate, paint_surface_plate, paint_text_line, plate_border,
+    pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail, role_font,
+    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
+    ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -1004,7 +1005,10 @@ impl TrayCapsule {
         let mut beads = Vec::new();
         match self.state.disposition() {
             ControlDisposition::DeniedByAuthority => {
-                beads.push((Color::from(palette.denied), BeadShape::Lock));
+                beads.push((
+                    Color::from(authority_rgba(palette, self.state.authority)),
+                    BeadShape::Lock,
+                ));
             }
             ControlDisposition::FailedClosed => {
                 beads.push((Color::from(palette.recovery), BeadShape::Diamond));

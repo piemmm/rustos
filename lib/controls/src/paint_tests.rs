@@ -495,18 +495,23 @@ fn disabled_overrides_every_role_with_the_quiet_muted_treatment() {
 }
 
 #[test]
-fn denial_outlines_the_denied_role_over_the_controls_own_role() {
+fn denial_outlines_the_refusals_own_colour_over_the_controls_own_role() {
     let theme = Theme::dark();
     let palette = theme.palette();
-    for authority in [AuthorityState::Denied, AuthorityState::NeedsCapability] {
+    // A refusal the caller could hold the authority to lift is amber; one
+    // policy forecloses is the denied red. Both outline over the role.
+    for (authority, colour) in [
+        (AuthorityState::Denied, palette.denied),
+        (AuthorityState::NeedsCapability, palette.warning),
+    ] {
         let state = ControlState {
             authority,
             ..ControlState::idle()
         };
         let frame = resolve_frame(&theme, ControlRole::Primary, state);
         assert_eq!(frame.plate, rgb(palette.surface_raised), "{authority:?}");
-        assert_eq!(frame.rim, rgb(palette.denied), "{authority:?}");
-        assert_eq!(frame.label, rgb(palette.denied), "{authority:?}");
+        assert_eq!(frame.rim, rgb(colour), "{authority:?}");
+        assert_eq!(frame.label, rgb(colour), "{authority:?}");
     }
 }
 

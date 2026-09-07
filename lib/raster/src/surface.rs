@@ -47,6 +47,17 @@ struct SpanPaint {
     mode: PaintMode,
 }
 
+/// One pixel a scan-converted fill covers: where it is on the surface, how
+/// much of the shape it holds, and the ordered-dither bias its row rounds
+/// with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Covered {
+    x: u32,
+    y: u32,
+    coverage: u8,
+    bias: u32,
+}
+
 /// What a rounded-rectangle paint does with the pixels it covers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum PaintMode {
@@ -934,6 +945,60 @@ impl Surface {
         );
     }
 
+    /// Fill an anti-aliased polygon whose vertices are in *device* sub-pixel
+    /// units ([`fill_polygon_subpixel`](Self::fill_polygon_subpixel)) with
+    /// `color`, scaling its alpha by the coverage `mask` reports for each
+    /// pixel at that pixel's own surface coordinates.
+    ///
+    /// The polygon sibling of [`wash_region`](Self::wash_region), for a field
+    /// whose strength varies across a *shape* rather than a rectangle: a
+    /// history chart's area fill, opaque against its trace and fading out at
+    /// the zero line it is read against. The shape's own anti-aliased coverage
+    /// and the caller's field multiply, so no scratch surface, second
+    /// rasterisation, or per-row re-fill is needed to vary a fill across the
+    /// shape it covers.
+    ///
+    /// Composited from the straight-alpha `color` through the surface row's
+    /// own ordered-dither bias, exactly as [`wash_region`](Self::wash_region)
+    /// is: a ramp spread over a few dozen rows holds fewer output levels than
+    /// input ones, and rounding every row the same way is what turns it into
+    /// visible flat bands.
+    ///
+    /// A fully uncovered pixel — by the shape or by the mask — is left
+    /// bit-identical rather than blended with a transparent source, and a
+    /// transparent `color` paints nothing at all.
+    pub fn wash_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+    ) {
+        if color.a == 0 {
+            return;
+        }
+        let Some(mut fill) = ScanFill::new(
+            slice::from_ref(&polygon),
+            SampleSpace::device(),
+            FillRule::EvenOdd,
+        ) else {
+            return;
+        };
+        self.scan_rows(&mut fill, |pixel, dst| {
+            let strength = mask(pixel.x, pixel.y);
+            if strength == 0 {
+                return;
+            }
+            let held = div255(u32::from(pixel.coverage) * u32::from(strength));
+            let source = Color::rgba(
+                color.r,
+                color.g,
+                color.b,
+                div255(u32::from(color.a) * u32::from(held)),
+            );
+            *dst = source.over_biased(*dst, pixel.bias);
+        });
+    }
+
     /// Stroke the open polyline through `points` — vertices in device
     /// [`SUBPIXEL`] units — `weight` sub-pixel units wide.
     ///
@@ -1007,15 +1072,44 @@ impl Surface {
 
     /// Composite `paint` over every pixel `fill` covers, scaled by that
     /// pixel's own coverage.
+    fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
+        // A flat colour is the same premultiplied pixel everywhere, so it is
+        // converted once rather than per pixel; a gradient is sampled per
+        // pixel below, through a copy of the space so the walk keeps its own
+        // mutable borrow of the fill.
+        let solid = match paint {
+            Paint::Solid(color) => Some(color.premultiply()),
+            Paint::Gradient(_) => None,
+        };
+        let space = fill.space();
+        self.scan_rows(&mut fill, |pixel, dst| {
+            let source = match solid {
+                Some(pixel) => pixel,
+                None => paint
+                    .sample(space.pixel_centre(pixel.x, pixel.y))
+                    .premultiply(),
+            };
+            // A premultiplied pixel of zero alpha leaves the destination
+            // exactly as it found it.
+            if source.a != 0 {
+                *dst = source.scale_alpha(pixel.coverage).over(*dst);
+            }
+        });
+    }
+
+    /// Walk every pixel `fill` covers, handing each one's position, coverage,
+    /// and row dither bias to `paint`.
     ///
-    /// Kept separate from [`fill_scan`](Self::fill_scan) so this loop — the
-    /// whole of the compositing work — exists once however many contour
-    /// container types the entry points offer.
+    /// The whole of the scan-converted compositing plumbing — the clipped
+    /// bounds, the one row of coverage, and the advance past columns the clip
+    /// window cut — so a flat fill, a gradient, and a masked wash differ only
+    /// in what they do with a covered pixel rather than each carrying its own
+    /// copy of the walk.
     ///
     /// A fill whose one row of coverage the allocator refuses paints nothing,
     /// exactly as one the clip window admits nothing of does — the entry
     /// points report no outcome, and an undrawn shape beats a dead process.
-    fn fill_coverage(&mut self, mut fill: ScanFill, paint: &Paint) {
+    fn scan_rows(&mut self, fill: &mut ScanFill, mut paint: impl FnMut(Covered, &mut Pixel)) {
         let Some((x_start, x_end, y_start, y_end)) = fill.bounds(self.space_rect()) else {
             return;
         };
@@ -1023,17 +1117,11 @@ impl Surface {
         let Ok(pixels) = usize::try_from(span_w) else {
             return;
         };
-        // A flat colour is the same premultiplied pixel everywhere, so it is
-        // converted once rather than per pixel; a gradient is sampled per
-        // pixel below.
-        let solid = match paint {
-            Paint::Solid(color) => Some(color.premultiply()),
-            Paint::Gradient(_) => None,
-        };
         let Some(mut alphas) = fallible::filled(pixels, 0_u8) else {
             return;
         };
         for py in self.admitted_rows(y_start, y_end - y_start) {
+            let dither = DitherRow::at(py);
             let Some((first, row)) = self.row_span_mut(py, x_start, span_w) else {
                 continue;
             };
@@ -1051,16 +1139,15 @@ impl Surface {
                 if coverage == 0 {
                     continue;
                 }
-                let source = match solid {
-                    Some(pixel) => pixel,
-                    None => paint.sample(fill.pixel_centre(px, py)).premultiply(),
-                };
-                // A premultiplied pixel of zero alpha leaves the destination
-                // exactly as it found it.
-                if source.a == 0 {
-                    continue;
-                }
-                *dst = source.scale_alpha(coverage).over(*dst);
+                paint(
+                    Covered {
+                        x: px,
+                        y: py,
+                        coverage,
+                        bias: dither.bias(px),
+                    },
+                    dst,
+                );
             }
         }
     }

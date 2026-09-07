@@ -7,10 +7,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_icon::IconKind;
-
 use crate::format::{format_bytes, format_rate, percent};
-use crate::model::TaskMeters;
+use crate::model::{OwnerBundles, TaskMeters};
 use crate::sample::{ProcessSummary, Sample};
 use crate::view::resources::ConsumerRow;
 
@@ -30,17 +28,23 @@ pub(super) const NOT_A_TOTAL: &str =
     "A sum of tasks is not the device's total: filesystem, RAID and swap work belongs to no process.";
 
 /// The tasks costing the processor most.
-pub(super) fn by_cpu(sample: &Sample) -> Vec<ConsumerRow> {
+pub(super) fn by_cpu(sample: &Sample, bundles: &OwnerBundles) -> Vec<ConsumerRow> {
     rank(
         sample,
+        bundles,
         |process| process.cpu_permille.map(u64::from),
         |value| percent(u16::try_from(value).unwrap_or(u16::MAX)),
     )
 }
 
 /// The tasks holding the most memory.
-pub(super) fn by_memory(sample: &Sample) -> Vec<ConsumerRow> {
-    rank(sample, |process| Some(process.mem_bytes), format_bytes)
+pub(super) fn by_memory(sample: &Sample, bundles: &OwnerBundles) -> Vec<ConsumerRow> {
+    rank(
+        sample,
+        bundles,
+        |process| Some(process.mem_bytes),
+        format_bytes,
+    )
 }
 
 /// The tasks transferring the most to and from storage.
@@ -48,9 +52,14 @@ pub(super) fn by_memory(sample: &Sample) -> Vec<ConsumerRow> {
 /// The rate is the delta `meters` measured between this sample and the last,
 /// so a task first seen this sample contributes no rate rather than its
 /// whole-of-life total dressed as one.
-pub(super) fn by_disk(sample: &Sample, meters: &TaskMeters) -> Vec<ConsumerRow> {
+pub(super) fn by_disk(
+    sample: &Sample,
+    meters: &TaskMeters,
+    bundles: &OwnerBundles,
+) -> Vec<ConsumerRow> {
     rank(
         sample,
+        bundles,
         |process| meters.disk_rate(process.proc_id),
         format_rate,
     )
@@ -63,6 +72,7 @@ pub(super) fn by_disk(sample: &Sample, meters: &TaskMeters) -> Vec<ConsumerRow> 
 /// missing reading is not a small one.
 fn rank(
     sample: &Sample,
+    bundles: &OwnerBundles,
     cost: impl Fn(&ProcessSummary) -> Option<u64>,
     text: impl Fn(u64) -> alloc::string::String,
 ) -> Vec<ConsumerRow> {
@@ -83,7 +93,7 @@ fn rank(
         .into_iter()
         .map(|(process, value)| ConsumerRow {
             name: crate::model::display_name(&process.name),
-            icon: IconKind::Executable,
+            bundle: bundles.of(process.proc_id).map(alloc::string::String::from),
             amount: text(value),
             share: share_of(value, largest),
         })

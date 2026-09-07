@@ -11,7 +11,7 @@ use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
 use super::{refusal_notice, Panel, PANEL_TITLE};
-use crate::model::{build_model, PanelModel, RollingMeters, SessionReport};
+use crate::model::{build_model, OwnerBundles, PanelModel, RollingMeters, SessionReport};
 use crate::sample::Sample;
 use crate::test_host::{
     process_summary, sample_with, RecordingHost, NO_AUTHORITY, PROC_CONTROL_AUTHORITY,
@@ -39,6 +39,7 @@ fn stopped_model(pid: u64, can_force: bool) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
         &mut RollingMeters::new(),
         authority,
     )
@@ -56,6 +57,7 @@ fn task_model(pid: u64) -> PanelModel {
         PANEL_TITLE,
         &sample,
         &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
         &mut RollingMeters::new(),
         &NO_AUTHORITY,
     )
@@ -78,6 +80,7 @@ fn busy_at(first_pid: u64, permille: Option<u16>) -> PanelModel {
         PANEL_TITLE,
         &sample_with(processes),
         &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
         &mut RollingMeters::new(),
         &NO_AUTHORITY,
     )
@@ -104,6 +107,7 @@ fn frame_model(damaged_px: u64) -> PanelModel {
         PANEL_TITLE,
         &Sample::default(),
         &session,
+        &OwnerBundles::new(),
         &mut RollingMeters::new(),
         &NO_AUTHORITY,
     )
@@ -115,6 +119,7 @@ fn empty_model() -> PanelModel {
         PANEL_TITLE,
         &Sample::default(),
         &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
         &mut RollingMeters::new(),
         &NO_AUTHORITY,
     )

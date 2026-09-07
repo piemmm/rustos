@@ -62,11 +62,17 @@
 // host tooling builds only this crate's *library*, so this module (and
 // `tairix-rt`) never enter those builds.
 #[cfg(all(freestanding, feature = "program"))]
+extern crate alloc;
+
+#[cfg(all(freestanding, feature = "program"))]
 mod program {
+    use alloc::boxed::Box;
+
     use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::reply::decode_status_reply;
+    use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::switchboard_ipc::{
         command_endpoint_for, decode_publish_reply, SwitchboardCommand, SwitchboardRequest,
         TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
@@ -79,6 +85,10 @@ mod program {
     use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
+    use tairix_icon::{
+        artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, InlineArtwork,
+        NoArtworkSeam,
+    };
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
@@ -268,13 +278,61 @@ mod program {
         /// keyed to a window that has gone must not read for the next one.
         events: Option<WindowEvents<EventMailbox>>,
         session: Option<ProcId>,
+        /// Every icon the panel draws, decoded once per (picture, pixel side)
+        /// and retained under the shared memory-pressure model.
+        ///
+        /// Without one, every metric tile, task row and census tile
+        /// re-resolved its glyph's coverage on the draw path, every frame —
+        /// tens of microseconds each for the multi-layer kinds, paid per icon
+        /// per paint. The cache is this process's own memory, so this process
+        /// is what a cache monitor charges for it.
+        artwork: ArtworkCache,
+        /// What a cache miss is produced through — and this service's answer
+        /// is *refusal*.
+        ///
+        /// Reading a shipped asset or a bundle's own icon needs filesystem
+        /// authority, and decoding untrusted image bytes needs a sandbox
+        /// child, so a monitor that draws each application's real artwork
+        /// would need `CAP_FS_ACCESS` and `CAP_PROC_SPAWN`. This service's
+        /// manifest deliberately requests neither: it already holds the
+        /// system-wide process scope, task control, and the machine's power
+        /// authority, and it is the last process on the desktop that should
+        /// also be able to read a user's files or start a child. So every
+        /// request refuses and each icon draws its built-in glyph — which is
+        /// what the cache above retains, and resolving that glyph's coverage
+        /// is the cost this cache exists to pay once.
+        artwork_resolver: Box<dyn ArtworkResolver>,
     }
 
     impl RtHost {
         /// A host with no window open, whose mailboxes are already bound
         /// (the window's not yet armed in `set`) and whose session identity
         /// is not yet known.
-        fn new(set: u64, event_endpoint: u64, command_endpoint: u64, desktop: Desktop) -> Self {
+        ///
+        /// `output_bytes` is one frame of the output this panel draws on; the
+        /// artwork cache derives its budget from it, so a 4K desktop is
+        /// allowed proportionately more retained pixels than a small panel and
+        /// none carries a hand-picked ceiling.
+        fn new(
+            set: u64,
+            event_endpoint: u64,
+            command_endpoint: u64,
+            desktop: Desktop,
+            output_bytes: usize,
+        ) -> Self {
+            // The reclaim bookkeeping's audit sink. The shared constructor
+            // takes a `'static` borrow, and the runtime sink owns nothing.
+            static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
+            let artwork = artwork_cache(
+                "switchboard.icon-artwork",
+                SEAT_PRIMARY,
+                output_bytes,
+                tairix_rt::pressure::gauge(),
+                &LOG_SINK,
+            );
+            if let Some(ledger) = artwork.ledger() {
+                tairix_rt::cachereport::register(ledger);
+            }
             Self {
                 set,
                 event_endpoint,
@@ -285,7 +343,19 @@ mod program {
                 window: None,
                 events: None,
                 session: None,
+                artwork,
+                artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
             }
+        }
+
+        /// Give back every retained icon pixel the current memory-pressure
+        /// band requires.
+        ///
+        /// Called on the band wake rather than from a paint: memory goes back
+        /// when the machine asks for it, not at whatever later frame happens
+        /// to resolve an icon.
+        fn trim_artwork(&mut self) {
+            self.artwork.trim();
         }
 
         /// The desktop session's kernel-attested identity, learned from the
@@ -446,6 +516,8 @@ mod program {
                 desktop,
                 themes,
                 window,
+                artwork,
+                artwork_resolver,
                 ..
             } = self;
             let window = window.as_mut().ok_or(Errno::NotFound)?;
@@ -465,12 +537,14 @@ mod program {
             window
                 .surface
                 .with_clip(rect.x, rect.y, rect.width_px, rect.height_px, |surface| {
+                    let mut icons = IconArtworkSource::new(artwork, artwork_resolver.as_mut());
                     panel.render(
                         surface,
                         bounds,
                         desktop.scale(),
                         theme,
                         panel_font(theme, desktop.scale()),
+                        &mut icons,
                     );
                 });
             let pixels = client
@@ -1100,7 +1174,12 @@ mod program {
 
         let transport = IpcTransport;
         let authority = RtAuthority;
-        let mut host = RtHost::new(set, events, commands, desktop);
+        // The artwork budget follows the surface the panel actually draws on,
+        // so it is derived from this desktop's own window frame through the
+        // one sizing the window itself is opened with.
+        let (frame_w, frame_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let output_bytes = region_bytes(&mode_for(frame_w, frame_h));
+        let mut host = RtHost::new(set, events, commands, desktop, output_bytes);
         host.client = client;
         let mut service = Service::new(pid, probe_scopes(&transport), &authority);
 
@@ -1141,6 +1220,12 @@ mod program {
                     drain_window_events(&mut service, &mut host, &authority);
                 }
                 Some(WaitToken::MemoryPressure) if tairix_procinfo::pressure::refresh() => {
+                    // The machine's band moved: give back whatever the new
+                    // band says the retained artwork and glyphs may no longer
+                    // keep, here at the wake rather than at whatever later
+                    // frame happens to touch a cache. A band that did not
+                    // really move costs one read and no eviction work.
+                    host.trim_artwork();
                     tairix_font::trim_glyph_cache();
                 }
                 // A band that did not move needs no trim, and a token the

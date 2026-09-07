@@ -27,7 +27,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
 use crate::format::{format_bytes, format_duration};
-use crate::model::{display_name, RollingMeters, SessionReport};
+use crate::model::{display_name, OwnerBundles, RollingMeters, SessionReport};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{HealthSeverity, Reading, ReadingFact as SystemFact, Unmeasured};
 use crate::view::resources::{DeviceId, ResourceReport};
@@ -51,10 +51,14 @@ mod storage;
 pub fn build_resource_report(
     sample: &Sample,
     meters: &mut RollingMeters,
+    bundles: &OwnerBundles,
     session: &SessionReport,
     authority: &dyn CapabilityQuery,
 ) -> ResourceReport {
-    let mut devices = alloc::vec![cpu::device(sample, meters), memory::device(sample, meters),];
+    let mut devices = alloc::vec![
+        cpu::device(sample, meters, bundles),
+        memory::device(sample, meters, bundles),
+    ];
     let mut recorded = alloc::vec![DeviceId::Cpu, DeviceId::Memory];
 
     // Grouped into devices before anything is folded: the counters belong to
@@ -75,7 +79,7 @@ pub fn build_resource_report(
             find_volume(sample.volume_io_queue.as_deref(), &key),
             sample.elapsed_ns,
         );
-        devices.push(storage::device(sample, meters, &subject));
+        devices.push(storage::device(sample, meters, &subject, bundles));
         recorded.push(id);
     }
     for iface in sample.net_facts.iter().flatten() {

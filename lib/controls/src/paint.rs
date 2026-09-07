@@ -20,8 +20,8 @@ pub(crate) use tairix_geometry::to_i32;
 
 use crate::damage;
 use crate::state::{
-    ActivityState, ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState,
-    PressureKind, PressureState, RecoveryState, ValidationState,
+    ActivityState, AuthorityState, ControlDisposition, ControlRole, ControlState, PlateSeating,
+    PointerState, PressureKind, PressureState, RecoveryState, ValidationState,
 };
 
 /// Which layer of a floating desktop-chrome surface a background belongs to,
@@ -167,8 +167,12 @@ pub(crate) fn withheld(surface: &Surface, bounds: Rect) -> bool {
 }
 
 /// Inset a surface rectangle by `by` on every side, or `None` if it collapses.
+///
+/// The one plate-geometry inset the desktop shares, so a surface painted
+/// outside this crate ([`paint_surface_plate`]) shrinks past its own rim and
+/// padding by exactly the arithmetic the controls seated on it use.
 #[must_use]
-pub(crate) fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
+pub fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
     let iw = w.checked_sub(by.saturating_mul(2))?;
     let ih = h.checked_sub(by.saturating_mul(2))?;
     if iw == 0 || ih == 0 {
@@ -763,6 +767,27 @@ enum Emphasis {
     Tinted(Rgba),
 }
 
+/// The colour an authority refusal is stated in.
+///
+/// A missing capability takes the warning amber and a policy refusal the
+/// denied red: the first is a refusal the caller could hold the authority to
+/// lift, the second one that forecloses it, and a reader who cannot act on a
+/// refusal should not be told to try. Both keep the same Authority Mark shape,
+/// so the distinction never rests on colour alone and survives a
+/// monochrome-safe theme.
+///
+/// One definition, read by every family's rim, label, mark, and bead
+/// resolution, so a gated command cannot read as amber on its label and red on
+/// its edge. Anything but a refusal answers the denied red, which is the
+/// stronger of the two (fail closed).
+#[must_use]
+pub(crate) fn authority_rgba(palette: &Palette, authority: AuthorityState) -> Rgba {
+    match authority {
+        AuthorityState::NeedsCapability => palette.warning,
+        _ => palette.denied,
+    }
+}
+
 /// The emphasis a role carries on an interactive control.
 ///
 /// The main action of a surface is filled, the action the model recommends and
@@ -889,7 +914,9 @@ fn resolve_emphasis(theme: &Theme, interactive: Emphasis, state: ControlState) -
 
     let emphasis = match disposition {
         ControlDisposition::DisabledByState => Emphasis::Quiet,
-        ControlDisposition::DeniedByAuthority => Emphasis::Outlined(palette.denied),
+        ControlDisposition::DeniedByAuthority => {
+            Emphasis::Outlined(authority_rgba(palette, state.authority))
+        }
         ControlDisposition::FailedClosed => Emphasis::Outlined(palette.recovery),
         ControlDisposition::PendingCheck => Emphasis::Outlined(palette.rim_active),
         ControlDisposition::Interactive | ControlDisposition::NeedsConfirmation => interactive,
@@ -1032,7 +1059,7 @@ pub(crate) fn resolve_mark(theme: &Theme, role: ControlRole, state: ControlState
     let palette = theme.palette();
     let rgba = match state.disposition() {
         ControlDisposition::DisabledByState => palette.on_surface_muted,
-        ControlDisposition::DeniedByAuthority => palette.denied,
+        ControlDisposition::DeniedByAuthority => authority_rgba(palette, state.authority),
         ControlDisposition::FailedClosed => palette.recovery,
         _ => match role {
             ControlRole::Destructive => palette.danger,
@@ -1060,7 +1087,9 @@ pub(crate) fn resolve_rail(theme: &Theme, state: ControlState) -> Option<Color> 
 pub(crate) fn resolve_bead(theme: &Theme, state: ControlState) -> Option<(Color, BeadShape)> {
     let palette = theme.palette();
     let bead = match state.disposition() {
-        ControlDisposition::DeniedByAuthority => (palette.denied, BeadShape::Lock),
+        ControlDisposition::DeniedByAuthority => {
+            (authority_rgba(palette, state.authority), BeadShape::Lock)
+        }
         ControlDisposition::FailedClosed => (palette.recovery, BeadShape::Diamond),
         _ => match state.recovery {
             RecoveryState::None => match state.activity {
@@ -1408,7 +1437,7 @@ pub(crate) fn dominant_color(theme: &Theme, role: ControlRole, state: ControlSta
     }
     let palette = theme.palette();
     let rgba = match state.disposition() {
-        ControlDisposition::DeniedByAuthority => palette.denied,
+        ControlDisposition::DeniedByAuthority => authority_rgba(palette, state.authority),
         ControlDisposition::FailedClosed => palette.recovery,
         _ if state.recovery != RecoveryState::None => palette.recovery,
         _ if state.validation == ValidationState::Warning => palette.warning,

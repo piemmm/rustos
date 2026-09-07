@@ -371,11 +371,33 @@ reading; a fact list cannot carry it.
   whole (memory, capacity). The choice belongs to the reading, not the
   renderer. A rate has no fixed ceiling to fill a bar against.
 
+  **The figure leads and the unit trails quietly**, so the hero reads as one
+  number rather than a sentence: the value is set in `TextRole::Heading` — the
+  role that means "the largest text in a surface", which is exactly what a
+  pane's headline reading is — against a body-size unit on the *same
+  baseline*. The boards draw the figure a little larger still (their `18`
+  measures about 2.9 body cap-heights against the unit's 1.4, so ~2.07×), and
+  the shipped ladder has no rung between `Heading` (133%) and `Display`
+  (250%). `Display` is the whole-screen readout role and its line does not fit
+  the hero's four-row allocation without dropping a context line, so `Heading`
+  is the rung; closing the remaining gap means a new ladder rung, which is a
+  theme change and not this surface's to make.
+
 - **primary — the pane's own detail**, per device:
 
-  - **CPU** (`02-cpu.png`) — the per-core grid: one unplated cell per logical
-    CPU carrying the core's own trace, its busy percentage, its live measured
+  - **CPU** (`02-cpu.png`) — the per-core grid: one cell per logical CPU
+    carrying the core's own trace, its busy percentage, its live measured
     clock and its performance class. Then the processor fact columns.
+    "Unplated" is the *tile's* property — `MetricTile::unplated()`, no Alloy
+    Plate and no padding of its own, so a core's name, trace and two readings
+    share one surface instead of nesting a plate per reading. The **cell** is
+    the pane's own concept and draws its own hairline rounded rim around that
+    tile (`paint_surface_plate` at the shared `plate_border`), because in a
+    grid of a dozen cores nothing else separates one core's figures from its
+    neighbour's; the boards show that rim in both themes. The class badge is a
+    toned, *outlined* `StatusPill` — orange `P`, green `E` — because a
+    resting pill's wash is a few levels off the plate behind it and reads as
+    nothing at badge size.
   - **Memory** (`03-memory.png`) — the composition bar (S7) answering *where
     did it go* in one row, then the memory and kernel fact columns, then the
     bounded-cache reclaim ledger.
@@ -788,7 +810,8 @@ reading-with-a-track in the design language.
 Controls this surface deliberately does **not** add, because they are
 composition rather than behaviour: the pressure banner (`Panel` +
 `StatusPill` + `Button`), the per-core cell (an unplated `MetricTile` with a
-`Chart` instrument and a `StatusPill` badge), the top-consumers row
+`Chart` instrument and an outlined `StatusPill` badge, inside the cell's own
+rim), the top-consumers row
 (`TableRow` with a track cell), and the per-core grid itself, which is the
 pane's layout and belongs to the pane.
 
@@ -1094,3 +1117,48 @@ this wrong on.
 - **The frame report never measures this window.** The suppression rule in S4
   is a responsiveness obligation as much as an honesty one: without it the
   Graphics pane re-excites its own repaint forever.
+
+## S13 — Open: what the storyboards still show that the surface does not
+
+Recorded so the remaining gap between `plans/switchboard/*.png` and the
+running surface is a list rather than a rediscovery. None of these is a
+correctness defect; each is a place the boards say something the composition
+does not yet say.
+
+- **A per-core cell stacks its readings over its own trace.** The boards put
+  the core's name and badge on a top line, the trace under them, and the busy
+  share beside the clock on *one* line beneath — the cell's whole point being
+  the shape *and* the figures. The tile's `Stacked` layout instead puts
+  label / value / detail on three lines and the flow overlays the trace across
+  the middle of them, so the busy share is drawn over its own trace. Fixing it
+  means the cell laying its three bands out itself and asking the tile for
+  each, rather than one tile spanning the cell with a chart on top.
+- **The class badge is about twice the height the boards draw it.** It takes
+  `StatusPill::measured_height` — a body line plus the control padding above
+  and below — where the boards draw a small rounded square barely taller than
+  its letter. A badge-sized pill is a control-family question (the health
+  pills read the same metric), not a switchboard one.
+- **A gated command's rim is drawn at full strength.** The label, the leading
+  mark and the rim all take the warning amber, which is the boards' colour and
+  the shared `Emphasis::Outlined` weight every outlined control in the family
+  uses; `02-cpu.png` draws its rim at about a fifth of that intensity
+  (`#362e15`). Dimming it is a change to *every* outlined control's rim, so it
+  belongs with the emphasis recipe rather than here.
+- **The pressure banner has a warm horizontal wash** — sampled `#20150a` at
+  its leading edge fading to `#161a1c` at its trailing one. It draws no
+  background at all. Nearly free now that the chart's ramp exists: it is the
+  same `Surface::wash_region` ramp a title bar's hue already uses.
+- **The band's shed route is built but never drawn.** The narrow-window
+  `ComboBox` (`09-theme-and-shed.png`'s "▼ CPU") is constructed on every
+  sample and neither rendered nor hit-tested.
+- **Not yet audited against the boards at all:** the census tiles, the filter
+  pills, the task row's leading pressure gutter, the faulted-task Signal Bead,
+  the composition-bar legend, and the block section-header colour.
+- **Each application's *real* icon needs a capability decision.** The
+  resolution order is wired end to end and every row asks for the launching
+  bundle's own picture, but this service's resolver refuses: reading an asset
+  needs `CAP_FS_ACCESS` and decoding it needs a `CAP_PROC_SPAWN` sandbox
+  child, and the manifest requests neither on purpose (`plans/ICONS.md` §10).
+  Until that is granted — or the pixels arrive some other way — an attested
+  application draws the application-bundle glyph and everything else the
+  executable one.

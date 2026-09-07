@@ -34,8 +34,8 @@ use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
-    paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
+    authority_rgba, draw_outline, heavy_contrast, icon_slot_side, inset, key_activation,
+    paint_bead, paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
     resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, PlateBleed, PlateStyle,
 };
 use crate::state::{
@@ -2384,7 +2384,9 @@ impl ResizeGrabber {
         let palette = theme.palette();
         let color = match self.state.disposition() {
             ControlDisposition::DisabledByState => Color::from(palette.on_surface_muted),
-            ControlDisposition::DeniedByAuthority => Color::from(palette.denied),
+            ControlDisposition::DeniedByAuthority => {
+                Color::from(authority_rgba(palette, self.state.authority))
+            }
             _ if self.dragging || self.state.pointer == PointerState::Pressed => {
                 Color::from(palette.rim_active)
             }

@@ -20,14 +20,16 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::sysinfo::CpuCoreClass;
 use tairix_geometry::{to_i32, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::IconArtwork;
 use tairix_raster::{Color, Surface};
-use tairix_theme::{SignalRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
 use tairix_controls::{
-    Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue, MetricInstrument,
-    MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
+    inset, paint_surface_plate, plate_border, Chart, ChromeLayer, CompositionBar,
+    CompositionSegment, Fact, FactList, MeterValue, MetricInstrument, MetricLayout, MetricTile,
+    PressureKind, ProgressValue, StatusPill,
 };
 
 use crate::view::reading::{reading_text, HealthSeverity, Reading, ReadingFact, Unmeasured};
@@ -204,8 +206,11 @@ pub struct CompositionPart {
 pub struct CoreCell {
     /// The core's name.
     pub label: String,
-    /// Its performance class, as the badge states it.
-    pub badge: String,
+    /// Its performance class, which names both the badge's letter and the
+    /// tone it wears — a throughput core reads as the compute colour and an
+    /// efficiency core as the healthy one, so a heterogeneous machine's two
+    /// kinds separate at a glance.
+    pub class: CpuCoreClass,
     /// Its busy share.
     pub busy: Reading,
     /// Its live measured clock.
@@ -219,8 +224,10 @@ pub struct CoreCell {
 pub struct ConsumerRow {
     /// The task's display name.
     pub name: String,
-    /// The glyph naming what the row is.
-    pub icon: IconKind,
+    /// The application-bundle directory the desktop launched the task from,
+    /// when it launched it — what the row draws its icon from. [`None`] for a
+    /// process nothing attests a bundle for.
+    pub bundle: Option<String>,
     /// What it costs this device.
     pub amount: String,
     /// That cost as a share of the largest consumer, so the track compares
@@ -305,7 +312,13 @@ pub(in crate::view) enum ItemBody {
     },
     /// One top-consumer row: the task, what it costs, and the track
     /// comparing it with the largest consumer.
-    Consumer(MetricTile),
+    Consumer {
+        /// The reading itself.
+        tile: MetricTile,
+        /// The bundle the task was launched from, so the row's icon is that
+        /// application's own picture rather than one generic glyph.
+        bundle: Option<String>,
+    },
     /// A status pill.
     Pill(StatusPill),
     /// A line of quiet prose: a block's note, or a statement of absence.
@@ -389,8 +402,11 @@ pub(super) fn compile(
 /// The hero's own drawable: its reading beside its instrument.
 fn hero_body(hero: &PaneHero, kind: PressureKind) -> ItemBody {
     let mut context = hero.context.iter();
+    // The pane's headline figure is the largest text in the surface, which is
+    // what the heading role names; its unit stays at body size beside it.
     let mut tile = MetricTile::new(String::new(), reading_text(&hero.value), kind)
         .with_layout(MetricLayout::Stacked)
+        .with_value_role(TextRole::Heading)
         .unplated();
     if !hero.unit.is_empty() {
         tile = tile.with_unit(hero.unit.clone());
@@ -479,7 +495,13 @@ fn push_block(
         }
         BlockBody::Consumers(rows) => {
             for consumer in rows {
-                push(1, ItemBody::Consumer(consumer_row(consumer, kind)));
+                push(
+                    1,
+                    ItemBody::Consumer {
+                        tile: consumer_row(consumer, kind),
+                        bundle: consumer.bundle.clone(),
+                    },
+                );
             }
         }
         BlockBody::Health {
@@ -534,13 +556,24 @@ fn composition(kind: PressureKind, parts: &[CompositionPart]) -> Option<Composit
 
 /// One per-core cell, built.
 fn cell_view(cell: &CoreCell, kind: PressureKind) -> CellView {
+    let (letter, tone) = class_badge(cell.class);
     CellView {
         tile: MetricTile::new(cell.label.clone(), reading_text(&cell.busy), kind)
             .with_detail(reading_text(&cell.clock))
             .with_layout(MetricLayout::Stacked)
             .unplated(),
         trend: Chart::new(kind).with_samples(cell.trend.iter().copied()),
-        badge: StatusPill::new(cell.badge.clone()),
+        // Outlined because the badge is a few pixels in a dense grid's corner:
+        // its wash alone is indistinguishable from the cell behind it.
+        badge: StatusPill::new(letter).with_tone(tone).outlined(),
+    }
+}
+
+/// The letter one core's class badge shows and the signal tone it wears.
+const fn class_badge(class: CpuCoreClass) -> (&'static str, SignalRole) {
+    match class {
+        CpuCoreClass::Performance => ("P", SignalRole::Cpu),
+        CpuCoreClass::Efficiency => ("E", SignalRole::Success),
     }
 }
 
@@ -553,7 +586,7 @@ fn cell_view(cell: &CoreCell, kind: PressureKind) -> CellView {
 /// tinted by the resource it is about.
 fn consumer_row(consumer: &ConsumerRow, kind: PressureKind) -> MetricTile {
     MetricTile::new(consumer.name.clone(), consumer.amount.clone(), kind)
-        .with_icon(consumer.icon)
+        .with_icon(crate::view::task_icon(consumer.bundle.as_deref()).icon_kind())
         .with_layout(MetricLayout::Inline)
         .with_instrument(MetricInstrument::Track(MeterValue::Measured(
             ProgressValue::new(consumer.share),
@@ -691,19 +724,45 @@ fn column_bounds(column: PaneColumn, primary: Rect, gap: u32) -> (i32, u32) {
 pub(super) fn render(
     surface: &mut Surface,
     items: &[PaneItem],
-    primary: Rect,
-    start: u32,
-    scale: Scale,
-    theme: &Theme,
-    font: tairix_font::BitmapFont,
+    window: PaneWindow<'_>,
+    artwork: &mut dyn IconArtwork,
 ) {
+    let PaneWindow {
+        primary,
+        start,
+        scale,
+        theme,
+        font,
+    } = window;
     let (pitch, gap) = metrics(scale, theme);
     for item in items {
         let Some(rect) = item_rect(item, primary, start, pitch, gap) else {
             continue;
         };
-        render_item(surface, &item.body, rect, scale, theme, font);
+        render_item(surface, &item.body, rect, scale, theme, font, artwork);
     }
+}
+
+/// The window a pane's flow is drawn through: the rectangle it fills, the row
+/// it is scrolled to, and the theme, scale and face every control resolves
+/// from.
+///
+/// Grouped because the section already holds them together — it is the drawing
+/// half of its own [`SectionCtx`](crate::view::SectionCtx) — and passing them
+/// one by one alongside the items and the artwork lookup made a parameter list
+/// nobody could read.
+#[derive(Copy, Clone)]
+pub(super) struct PaneWindow<'a> {
+    /// The pane's own rectangle within the section.
+    pub(super) primary: Rect,
+    /// The first visible row of the flow.
+    pub(super) start: u32,
+    /// The active UI scale.
+    pub(super) scale: Scale,
+    /// The active theme.
+    pub(super) theme: &'a Theme,
+    /// The text face the flow's own prose is drawn in.
+    pub(super) font: tairix_font::BitmapFont,
 }
 
 /// Paint one item into the rectangle the flow resolved for it.
@@ -714,6 +773,7 @@ fn render_item(
     scale: Scale,
     theme: &Theme,
     font: tairix_font::BitmapFont,
+    artwork: &mut dyn IconArtwork,
 ) {
     let palette = theme.palette();
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
@@ -784,7 +844,11 @@ fn render_item(
         ItemBody::Cells { cells, columns } => {
             render_cells(surface, cells, *columns, rect, scale, theme);
         }
-        ItemBody::Consumer(tile) => tile.render(surface, rect, scale, theme, None),
+        ItemBody::Consumer { tile, bundle } => {
+            let side = tile.icon_side(rect, scale, theme);
+            let picture = artwork.artwork(crate::view::task_icon(bundle.as_deref()), side);
+            tile.render(surface, rect, scale, theme, picture);
+        }
         ItemBody::Pill(pill) => {
             let width = pill.measured_width(scale, theme).min(rect.width);
             let height = StatusPill::measured_height(scale, theme).min(rect.height);
@@ -831,26 +895,38 @@ fn render_cells(
             .saturating_add(gap)
             .saturating_mul(u32::try_from(index).unwrap_or(0));
         let left = rect.left() + to_i32(step);
-        let bounds = Rect::new(left, rect.top(), width, rect.height);
+        let Some(inner) = cell_plate(
+            surface,
+            Rect::new(left, rect.top(), width, rect.height),
+            scale,
+            theme,
+        ) else {
+            continue;
+        };
         // The trace sits between the cell's name and its readings, which is
         // the whole point of a per-core cell: the shape, not just the figure.
-        let trend_h = bounds.height / 3;
-        let head_h = bounds.height.saturating_sub(trend_h);
+        let trend_h = inner.height / 3;
+        let head_h = inner.height.saturating_sub(trend_h);
         cell.trend.render(
             surface,
-            Rect::new(left, bounds.top() + to_i32(head_h / 2), width, trend_h),
+            Rect::new(
+                inner.left(),
+                inner.top() + to_i32(head_h / 2),
+                inner.width,
+                trend_h,
+            ),
             scale,
             theme,
         );
-        cell.tile.render(surface, bounds, scale, theme, None);
+        cell.tile.render(surface, inner, scale, theme, None);
         let badge_w = cell.badge.measured_width(scale, theme);
         let badge_h = StatusPill::measured_height(scale, theme);
-        if badge_w < width && badge_h <= bounds.height {
+        if badge_w < inner.width && badge_h <= inner.height {
             cell.badge.render(
                 surface,
                 Rect::new(
-                    left + to_i32(width.saturating_sub(badge_w)),
-                    bounds.top(),
+                    inner.left() + to_i32(inner.width.saturating_sub(badge_w)),
+                    inner.top(),
                     badge_w,
                     badge_h,
                 ),
@@ -859,6 +935,37 @@ fn render_cells(
             );
         }
     }
+}
+
+/// Paint one cell's rim and quiet ground, reporting the rectangle its readings
+/// draw inside — or [`None`] when the cell is too small to seat one.
+///
+/// The tile inside is unplated so a cell's name, trace, and two readings share
+/// one surface rather than nesting a plate per reading; the *cell* draws the
+/// rim, because in a grid of a dozen cores nothing else separates one core's
+/// figures from its neighbour's.
+fn cell_plate(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let (x, y, w, h) = (
+        u32::try_from(bounds.left()).ok()?,
+        u32::try_from(bounds.top()).ok()?,
+        bounds.width,
+        bounds.height,
+    );
+    let border = plate_border(theme, scale);
+    let radius = scale
+        .scale_length(theme.metrics().control_corner_radius)
+        .min(w / 2)
+        .min(h / 2);
+    let interior = paint_surface_plate(
+        surface,
+        (x, y, w, h),
+        (radius, border),
+        theme,
+        (theme.palette().surface, ChromeLayer::Ground),
+    )?;
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let (ix, iy, iw, ih) = inset(interior.0, interior.1, interior.2, interior.3, pad)?;
+    Some(Rect::new(to_i32(ix), to_i32(iy), iw, ih))
 }
 
 #[cfg(test)]

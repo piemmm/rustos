@@ -4,7 +4,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardCommand};
+use tairix_abi::switchboard_ipc::{
+    CommandSection, FrameReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
+};
 use tairix_abi::sysinfo::{ProcessRecord, ProcessState};
 use tairix_abi::{Errno, PowerAction, ProcId};
 
@@ -277,6 +279,95 @@ fn a_seat_report_is_folded_into_the_panel_at_once() {
     );
 
     assert_eq!(service.panel().session_report().seat.owners(), &[11]);
+}
+
+#[test]
+fn an_owner_bundle_report_reaches_the_task_rows_it_names() {
+    let target_pid = 50;
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    // A cycle first, so the service holds a real process list to key against.
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+    // The target row's own attested identity, as the fixture mints it.
+    let owner = ProcId::from_raw([2; 16]);
+
+    service.command(
+        &mut host,
+        SwitchboardCommand::OwnerBundle {
+            owner,
+            bundle: OwnerBundleDir::new("/System/Applications/terminal.app").expect("in bounds"),
+        },
+        &NO_AUTHORITY,
+    );
+    // Applied on the next rebuild, which opening the panel takes.
+    service.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+        &NO_AUTHORITY,
+    );
+    let row = service
+        .panel()
+        .model()
+        .model
+        .tasks
+        .iter()
+        .find(|task| task.proc_id == owner)
+        .expect("the owner is still sampled");
+    assert_eq!(
+        row.bundle.as_deref(),
+        Some("/System/Applications/terminal.app"),
+        "the reported bundle must reach the row it names"
+    );
+    // And only that row: a process nothing was reported for keeps no bundle.
+    assert!(
+        service
+            .panel()
+            .model()
+            .model
+            .tasks
+            .iter()
+            .any(|task| task.proc_id != owner && task.bundle.is_none()),
+        "an unreported process must stay on its class icon"
+    );
+}
+
+#[test]
+fn an_owner_bundle_for_a_process_that_is_not_running_names_no_row() {
+    let transport = ProcessListTransport::new(two_row_records(OWN_PID, 50));
+    let mut host = RecordingHost::new();
+    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
+
+    // A stranger's identity: reported, then pruned against the live process
+    // list, so it can never lend its picture to a row it does not name.
+    service.command(
+        &mut host,
+        SwitchboardCommand::OwnerBundle {
+            owner: ProcId::from_raw([0xAB; 16]),
+            bundle: OwnerBundleDir::new("/Apps/Stranger.app").expect("in bounds"),
+        },
+        &NO_AUTHORITY,
+    );
+    service.command(
+        &mut host,
+        SwitchboardCommand::OpenPanel {
+            section: CommandSection::Tasks,
+        },
+        &NO_AUTHORITY,
+    );
+    assert!(
+        service
+            .panel()
+            .model()
+            .model
+            .tasks
+            .iter()
+            .all(|task| task.bundle.is_none()),
+        "no row may wear a bundle reported for a process that is not there"
+    );
 }
 
 /// A frame report the tests below feed the service.

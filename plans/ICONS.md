@@ -319,25 +319,54 @@ so the first reading above normal is mild — and the zero-drift bound therefore
 applies on **every** run rather than being relaxed on the deep ones. There is
 no scope-out left to read a transcript for.
 
-## 10. Open — two surfaces still rasterise their glyphs per frame
+## 10. Open — one surface still rasterises its glyphs per frame
 
 The glyph tier is cached and the draw path blits, but a control only benefits
-where its owner holds a cache to resolve through. Two surfaces hold none, so
-their `paint_icon_slot` calls still take the inline path and re-resolve
-coverage every frame:
+where its owner holds a cache to resolve through. One surface holds none, so
+its `paint_icon_slot` calls still take the inline path and re-resolve coverage
+every frame:
 
-- **The Switchboard** (`userland/gui/switchboard`) owns no `ArtworkCache` at
-  all. Its metric tiles and task rows each draw a glyph per frame, and its
-  resource tiles use the multi-layer kinds that cost most (20–38 µs per icon
-  at a row-height side, measured). Closing it means giving the crate a cache
-  built through the one shared `artwork_cache` constructor with its own seat,
-  frame size, pressure gauge and audit sink — as `files.app` and the session
-  do — and threading the lookup through `SectionCtx`, which every section
-  render already receives.
 - **The widgets gallery** (`userland/apps/widgets`) is a demo of the control
   family; it draws each control once per frame with `NoArtwork` deliberately,
   and is not a surface a user scrolls. It needs a cache only if the gallery is
   ever meant to demonstrate the cached path.
+
+The Switchboard now holds one (`userland/gui/switchboard/src/run.rs`), built
+through the shared `artwork_cache` constructor with its own label, the primary
+seat, its window's frame bytes, `tairix_rt::pressure::gauge()` and the crate's
+own log sink, trimmed on the memory-pressure wake like every other cache on the
+desktop. That closes the per-frame rasterisation for this surface: the glyph
+tier is resolved *in this process* and retained like any other entry, so the
+20–38 µs of coverage work is paid once per (kind, side) rather than per icon
+per frame.
+
+**Its resolver refuses, deliberately, and its icons are therefore the *class*
+tier.** Reading a shipped asset or a bundle's own icon needs `CAP_FS_ACCESS`,
+and decoding untrusted image bytes needs `CAP_PROC_SPAWN` for the sandbox
+child. The Switchboard's manifest requests neither and says so explicitly: it
+already holds the system-wide process scope, task control, and the machine's
+power authority, and it is the last process on the desktop that should also be
+able to read a user's files or start a child. So the cache resolves through
+`NoArtworkSeam` and every icon draws its built-in glyph.
+
+The *request* still names the bundle, so the resolution order is wired and
+correct end to end: the desktop session reports which bundle it launched each
+window owner from (`SwitchboardCommand::OwnerBundle`) and each row asks for
+that bundle's own icon first. Today that means an attested application draws
+the application-bundle glyph and a process nothing attests — PID 1, a time
+service, a kernel thread — draws the executable one, which is the distinction
+`01-tasks.png` shows between them. Drawing each application's *real* artwork
+needs those two capabilities granted to this service, which is a security
+decision this plan does not take on its own.
+
+**The lookup is passed to the render methods, not carried on `SectionCtx`.**
+This plan said "through `SectionCtx`", which turned out not to fit: that
+context is `Copy` and is passed *by value* to `render`, `on_pointer`, `adopt`
+and the keyboard paths, and only the render paths need artwork. A
+`&mut dyn IconArtwork` field would make it non-`Copy` and mutably borrowing
+across every one of those call sites. It is therefore a parameter of `render`,
+`render_band` and `render_overlay` — the pattern `lib/browse/src/render.rs` and
+`lib/controls/src/toolbar.rs` already use.
 
 Three controls also draw their glyph outside the shared icon slot, so they
 resolve coverage per frame even when their owner *does* hold a cache: a

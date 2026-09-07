@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use tairix_geometry::Scale;
+use tairix_icon::NoArtwork;
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -495,7 +496,7 @@ fn both_themes_and_the_heavier_contrast_path_render() {
         sb.select_section(Section::Recovery);
         let b = bounds();
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         assert!(
             has_ink(&surface, b),
             "the Recovery screen must paint under every theme"
@@ -517,7 +518,7 @@ fn every_detail_page_paints() {
             .select_page(page, &mut Sweep::adopting(&mut damage::sink()));
         let b = bounds();
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         assert!(has_ink(&surface, b), "the {} page must paint", page.title());
     }
 }

@@ -26,7 +26,7 @@ use tairix_theme::Theme;
 use tairix_window::Repaint;
 
 use crate::derive::{derive_summary, Hysteresis};
-use crate::model::{build_model, RollingMeters, SessionReport};
+use crate::model::{build_model, OwnerBundles, RollingMeters, SessionReport};
 use crate::panel::{Panel, PANEL_TITLE};
 use crate::publish::Publisher;
 use crate::sample::{DegradedField, Sample, Sampler, ScopeVerdicts};
@@ -209,6 +209,9 @@ pub struct Service {
     publisher: Publisher,
     meters: RollingMeters,
     last_sample: Sample,
+    /// Which bundle each window owner was launched from, as the session has
+    /// reported it — the one fact the process list cannot carry.
+    bundles: OwnerBundles,
     panel: Panel,
     next_sample_ns: u64,
 }
@@ -221,10 +224,12 @@ impl Service {
     pub fn new(self_pid: u64, scopes: ScopeVerdicts, authority: &dyn CapabilityQuery) -> Self {
         let last_sample = Sample::default();
         let mut meters = RollingMeters::new();
+        let bundles = OwnerBundles::new();
         let model = build_model(
             PANEL_TITLE,
             &last_sample,
             &SessionReport::HEALTHY,
+            &bundles,
             &mut meters,
             authority,
         );
@@ -235,6 +240,7 @@ impl Service {
             publisher: Publisher::new(),
             meters,
             last_sample,
+            bundles,
             next_sample_ns: 0,
         }
     }
@@ -370,6 +376,10 @@ impl Service {
                 self.panel.set_frame_report(report);
                 self.rebuild_if_shown(host, authority);
             }
+            SwitchboardCommand::OwnerBundle { owner, bundle } => {
+                self.bundles.record(owner, bundle.as_str());
+                self.rebuild_if_shown(host, authority);
+            }
             SwitchboardCommand::Power { action } => Self::power(host, action, authority),
         }
     }
@@ -422,10 +432,15 @@ impl Service {
     /// hand it to the panel, which re-renders only if it actually changed.
     fn rebuild(&mut self, host: &dyn ServiceHost, authority: &dyn CapabilityQuery) {
         let session = *self.panel.session_report();
+        // The reported owners follow the machine, not the history of it: an
+        // owner the live process list no longer names is dropped here rather
+        // than kept until some later prune.
+        self.bundles.retain_live(&self.last_sample.processes);
         let model = build_model(
             PANEL_TITLE,
             &self.last_sample,
             &session,
+            &self.bundles,
             &mut self.meters,
             authority,
         );

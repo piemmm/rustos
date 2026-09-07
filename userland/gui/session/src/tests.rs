@@ -11,7 +11,7 @@ use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMod
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::switchboard_ipc::{
     CommandSection, FrameReport, SeatReport, SwitchboardCommand, SwitchboardRequest,
-    SEAT_REPORT_OWNERS_MAX,
+    OWNER_BUNDLE_MAX, SEAT_REPORT_OWNERS_MAX,
 };
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
@@ -56,13 +56,13 @@ use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
     load_library, load_programs, maybe_send_seat_report, open_tray, picker_cells,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
-    AppBarService, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell, FrameContent,
-    FramePacer, FrameReportGate, IconRasteriser, InputSource, LaunchTable, LockOutcome,
-    LockedDrain, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock, SessionFileReader,
-    SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost,
-    SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge,
-    TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE,
-    DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
+    AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
+    FrameContent, FramePacer, FrameReportGate, IconRasteriser, InputSource, LaunchTable,
+    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
+    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
+    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
+    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
+    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::WindowSizing;
@@ -6301,6 +6301,153 @@ fn the_seat_report_is_sent_only_on_change_and_tells_the_whole_truth() {
     assert_eq!(report.total(), 12, "the total counts every hung owner");
     assert_eq!(report.owners(), &hung[..SEAT_REPORT_OWNERS_MAX]);
     assert_eq!(mailbox.sent.len(), 1);
+}
+
+/// A window owner on the strip: the process, and the bundle (if any) the
+/// desktop launched it from.
+fn group(tag: u8, bundle: Option<&str>) -> AppGroup {
+    AppGroup {
+        owner: ProcId::from_raw([tag; tairix_abi::PROC_ID_LEN]),
+        bundle: bundle.map(alloc::string::String::from),
+        windows: Vec::new(),
+    }
+}
+
+/// The `(owner, bundle)` pairs a recording mailbox was told, in order.
+fn owner_bundles(mailbox: &RecordingMailbox) -> Vec<(ProcId, alloc::string::String)> {
+    mailbox
+        .sent
+        .iter()
+        .filter_map(|(_, command)| match command {
+            SwitchboardCommand::OwnerBundle { owner, bundle } => {
+                Some((*owner, alloc::string::String::from(bundle.as_str())))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn each_owners_bundle_is_told_once_and_only_while_it_is_on_the_strip() {
+    let mut gate = OwnerBundleGate::new();
+    let mut mailbox = RecordingMailbox::default();
+    let strip = alloc::vec![
+        group(1, Some("/System/Applications/terminal.app")),
+        group(2, None),
+    ];
+
+    // An instance that has not published yet ignores every command, so
+    // nothing is told into that gap.
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert!(
+        mailbox.sent.is_empty(),
+        "a roster sent before the instance attested would be dropped unread"
+    );
+
+    gate.attest(MONITOR_PID);
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert_eq!(
+        owner_bundles(&mailbox),
+        alloc::vec![(
+            ProcId::from_raw([1; tairix_abi::PROC_ID_LEN]),
+            alloc::string::String::from("/System/Applications/terminal.app")
+        )],
+        "a process the desktop did not launch attests no bundle, so it is \
+         never reported"
+    );
+
+    // The strip is re-resolved on every window open and close; a fact that has
+    // not changed must not be re-sent.
+    mailbox.sent.clear();
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert!(mailbox.sent.is_empty(), "nothing new to tell");
+}
+
+#[test]
+fn a_fresh_monitor_instance_is_told_the_whole_strip_again() {
+    let mut gate = OwnerBundleGate::new();
+    let mut mailbox = RecordingMailbox::default();
+    let strip = alloc::vec![group(1, Some("/Apps/A.app"))];
+    gate.attest(MONITOR_PID);
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert_eq!(owner_bundles(&mailbox).len(), 1);
+
+    // A monitor that has just started holds no roster, and nothing else would
+    // ever tell it.
+    mailbox.sent.clear();
+    gate.attest(MONITOR_PID + 1);
+    gate.publish(Some(MONITOR_PID + 1), &strip, &mut mailbox);
+    assert_eq!(owner_bundles(&mailbox).len(), 1, "told again");
+
+    // With none live there is nobody to tell, and the next instance is told
+    // everything once it has published.
+    mailbox.sent.clear();
+    gate.publish(None, &strip, &mut mailbox);
+    assert!(mailbox.sent.is_empty());
+    gate.attest(MONITOR_PID + 1);
+    gate.publish(Some(MONITOR_PID + 1), &strip, &mut mailbox);
+    assert_eq!(owner_bundles(&mailbox).len(), 1);
+}
+
+#[test]
+fn an_owner_that_leaves_the_strip_is_told_again_when_it_returns() {
+    let mut gate = OwnerBundleGate::new();
+    let mut mailbox = RecordingMailbox::default();
+    let strip = alloc::vec![group(3, Some("/Apps/C.app"))];
+    gate.attest(MONITOR_PID);
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert_eq!(owner_bundles(&mailbox).len(), 1);
+
+    mailbox.sent.clear();
+    gate.publish(Some(MONITOR_PID), &[], &mut mailbox);
+    assert!(mailbox.sent.is_empty(), "an empty strip tells nothing");
+
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert_eq!(owner_bundles(&mailbox).len(), 1, "and is told afresh");
+}
+
+#[test]
+fn a_path_the_frame_cannot_carry_is_not_sent_at_all() {
+    let mut gate = OwnerBundleGate::new();
+    let mut mailbox = RecordingMailbox::default();
+    let long = "x".repeat(OWNER_BUNDLE_MAX + 1);
+    let strip = alloc::vec![group(4, Some(&long))];
+
+    gate.attest(MONITOR_PID);
+    gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
+    assert!(
+        mailbox.sent.is_empty(),
+        "a truncated path would resolve to somebody else's bundle"
+    );
+}
+
+#[test]
+fn a_refused_send_leaves_the_owner_to_be_told_on_the_next_strip_change() {
+    /// A mailbox that refuses everything: a spawned instance that has not
+    /// bound its command mailbox yet.
+    #[derive(Default)]
+    struct RefusingMailbox {
+        offered: usize,
+    }
+    impl SwitchboardMailbox for RefusingMailbox {
+        fn send(&mut self, _pid: u64, _command: SwitchboardCommand) -> bool {
+            self.offered += 1;
+            false
+        }
+    }
+
+    let mut gate = OwnerBundleGate::new();
+    let mut refusing = RefusingMailbox::default();
+    let strip = alloc::vec![group(5, Some("/Apps/E.app"))];
+    gate.attest(MONITOR_PID);
+    gate.publish(Some(MONITOR_PID), &strip, &mut refusing);
+    assert_eq!(refusing.offered, 1);
+
+    // Not marked told, so the next strip change carries it — no retry loop,
+    // and no lost fact.
+    let mut accepting = RecordingMailbox::default();
+    gate.publish(Some(MONITOR_PID), &strip, &mut accepting);
+    assert_eq!(owner_bundles(&accepting).len(), 1);
 }
 
 /// The frame report the mailbox received, or `None` when it received

@@ -1260,12 +1260,29 @@ re-renders when any of them changes.
 - A metric tile narrower or shorter than its own icon, label, reading,
   detail, and instrument degrades by omitting the instrument, then the
   detail line, never by drawing past its own bounds.
+- **The reading's *value* may name its own text role**, defaulting to Body.
+  A hero reading leads with a loud figure against a quiet unit, so the two are
+  not one face — but they are still one *line*, aligned on the baseline they
+  share rather than on their own line boxes, which would leave the unit
+  floating at the figure's cap. The tile names a `TextRole` and the theme
+  answers with the face: a control never accepts a typeface. The line box is
+  the tallest ascent over the deepest descent of the pair, and the tile's own
+  `reading_height` / `measured_height` / `icon_side` grow with it, so an owner
+  placing content beneath a hero never has to know which role it chose.
 
 A StatusPill is a compact, read-only capsule that names a condition —
 "Healthy", "Denied", "Recovering" — with no action of its own, toned by the
 theme's own signal roles exactly as a Pressure Rail or Signal Bead of that
 role is elsewhere. It fills the gap neither a metric tile nor any other
 control covers: badging a state without offering a button.
+
+- **A resting pill collapses its rim onto its fill; an *outlined* one draws it
+  in its own tone.** A pill sitting alone in a row of prose says enough with a
+  wash and a label. A pill *badging* a dense grid — a core's performance class
+  in the corner of its cell — has no such room: the wash is a few levels off
+  the plate it sits on and reads as nothing, so the rim is what makes the badge
+  a badge. The heavier-contrast themes already rim every pill, so asking for a
+  rim there changes nothing rather than doubling it.
 
 ### 11.34 IconTile
 
@@ -1376,6 +1393,21 @@ that plots one bounded oldest-to-newest series of readings as a line.
   filled area beneath the line gives it a body, so a low-amplitude series still
   reads as a shape rather than a wandering hairline; the line stays the thing
   being read.
+- **That area fades out at the zero line it is read against.** A flat fill
+  draws the floor as a second hard edge across the box, which reads as a
+  measurement the chart never took; ramping the fill out means the only edges
+  the eye finds are the trace and the axis. The ramp is the *band's*, not the
+  trace's — full strength at the edge a rising reading grows toward, nothing at
+  the zero line — so the fill's weight at a given height means the same thing
+  whatever the reading happens to be there, which is what lets a reader compare
+  two columns of one chart, or the same row of two charts, by eye. A mirrored
+  opposing band grows the other way and so ramps the other way. Its peak is
+  twice a flat fill's weight, so the ink is redistributed toward the trace
+  rather than reduced. The shape's own anti-aliased coverage and the ramp
+  multiply in one pass (`Surface::wash_polygon_subpixel`), composited through
+  the surface's ordered dither, because a ramp over a few dozen rows holds
+  fewer output levels than input ones and rounding every row the same way is
+  what turns it into visible flat bands.
 - The trace is tinted by the resource's own semantic rail colour, exactly as a
   MetricTile's track is (§11.33) — the resource's fixed identity, never the
   accent and never a transient severity.
@@ -1769,6 +1801,20 @@ Controls must distinguish these cases:
 | `FailedClosed` | Warning or recovery state with typed reason | Action was refused safely. |
 
 Never render an authority denial as though the control is merely inactive. Users should be able to understand whether they cannot act because the object is done, because the action is not valid, or because they lack authority.
+
+**A missing capability is amber; a policy refusal is the denied red.** Both
+resolve to `DeniedByAuthority` and both keep the Authority Mark's own shape, so
+the distinction never rests on colour alone and survives a monochrome-safe
+theme — but they are not the same refusal to a reader. `NeedsCapability` says
+"you could hold the authority to lift this", so it takes `palette.warning` on
+its rim, its label and its leading mark; `Denied` says "policy forecloses it"
+and keeps `palette.denied`. The rim, label, mark and Signal Bead read one
+shared resolution (`paint::authority_rgba`), so a gated command cannot read
+amber on its text and red on its edge. The plate is untouched either way: the
+storyboards draw the gated command as an amber-labelled, amber-rimmed button on
+the same quiet plate as its neighbours (`plans/switchboard/02-cpu.png`, whose
+"Scheduler policy…" rim samples `#362e15` against its neighbours' neutral
+`#20272c`).
 
 Security-sensitive controls must not display secrets, raw capability tokens, or hidden policy internals. They may show concise user-facing reasons such as "requires system permission" or "action blocked by policy".
 

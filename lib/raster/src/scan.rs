@@ -186,7 +186,7 @@ impl SampleSpace {
 
     /// The contour-space coordinate of pixel `(x, y)`'s centre — where a
     /// gradient is sampled for that pixel.
-    fn pixel_centre(self, x: u32, y: u32) -> (f64, f64) {
+    pub(crate) fn pixel_centre(self, x: u32, y: u32) -> (f64, f64) {
         (
             (f64::from(x.saturating_sub(self.origin.0)) + 0.5) * self.contour_per_pixel.0,
             (f64::from(y.saturating_sub(self.origin.1)) + 0.5) * self.contour_per_pixel.1,
@@ -544,10 +544,11 @@ impl ScanFill {
         }
     }
 
-    /// Where in the contours' own coordinates pixel `(x, y)`'s centre lies —
-    /// the point a gradient paint is sampled at for that pixel.
-    pub(crate) fn pixel_centre(&self, x: u32, y: u32) -> (f64, f64) {
-        self.space.pixel_centre(x, y)
+    /// The space this fill's vertices reach sample sub-units through, copied
+    /// out so a caller can map pixel centres back while the fill itself is
+    /// mutably borrowed by the row walk.
+    pub(crate) fn space(&self) -> SampleSpace {
+        self.space
     }
 }
 

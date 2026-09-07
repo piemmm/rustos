@@ -14,6 +14,7 @@
 //! the layout scales.
 
 use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -102,7 +103,14 @@ fn render_paints_content() {
     let theme = Theme::dark();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
-    sb.render(&mut surface, bounds(), Scale::ONE, &theme, font());
+    sb.render(
+        &mut surface,
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
     assert!(surface.pixels().iter().any(|p| p.a > 0));
 }
 
@@ -212,7 +220,7 @@ fn the_location_band_paints_the_trail_and_its_command() {
     let mut sb = Switchboard::new(&model());
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     let band = sb.band(layout.location, &theme, Scale::ONE);
     let (trail, command) = (band.trail, band.command);
@@ -310,7 +318,14 @@ fn keyboard_scrolls_the_focused_scrollbar() {
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
     // Render once so the scroll model matches the layout.
-    sb.render(&mut surface, bounds(), Scale::ONE, &theme, font());
+    sb.render(
+        &mut surface,
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
     // Cycle focus Content -> Scrollbar (one Tab).
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
     let action = key(&mut sb, Key::Named(NamedKey::Down));
@@ -339,7 +354,7 @@ fn no_part_of_the_client_is_left_transparent() {
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut sb = Switchboard::new(&model());
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
         // The window manager decorates the window; its content pixels are the
         // client's own. Any pixel left clear shows whatever the shared frame
@@ -357,7 +372,7 @@ fn the_client_is_laid_over_the_theme_surface_tint() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     assert!(
         surface
             .pixels()
@@ -413,7 +428,14 @@ fn light_theme_renders() {
     let theme = Theme::light();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
-    sb.render(&mut surface, bounds(), Scale::ONE, &theme, font());
+    sb.render(
+        &mut surface,
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
     assert!(surface.pixels().iter().any(|p| p.a > 0));
 }
 
@@ -422,7 +444,14 @@ fn high_contrast_theme_renders() {
     let theme = high_contrast();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
-    sb.render(&mut surface, bounds(), Scale::ONE, &theme, font());
+    sb.render(
+        &mut surface,
+        bounds(),
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
     assert!(surface.pixels().iter().any(|p| p.a > 0));
 }
 
@@ -452,7 +481,7 @@ fn window_too_short_for_the_anatomy_still_renders_in_bounds() {
     let b = Rect::new(0, 0, 600, 24);
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     // Must not panic: every region clips to the bounds instead.
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     assert!(layout.location.bottom() <= b.bottom());
     assert!(layout.content.bottom() <= b.bottom());
@@ -520,7 +549,7 @@ fn select_section_shows_that_section_and_names_it_in_the_trail() {
             Some(section.title())
         );
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         painted.push((section, surface.pixels().to_vec()));
     }
     for (i, (section, pixels)) in painted.iter().enumerate() {
@@ -558,7 +587,7 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
             section: Section::Recovery
         })
     );
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
     assert_eq!(range.content_extent(), 6);
     assert_eq!(sb.scroll_offset(), 0);
@@ -571,7 +600,7 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
             section: Section::Tasks
         })
     );
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
     assert_eq!(range.content_extent(), 50);
     assert_eq!(sb.scroll_offset(), deep);
@@ -711,7 +740,7 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     pointer(
         &mut sb,
         b,
@@ -736,7 +765,7 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
         "the offset must land inside the new list"
     );
 
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
     assert_eq!(range.content_extent(), 5);
     assert!(range.offset() <= range.max_offset());
@@ -748,7 +777,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     for _ in 0..4 {
         assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
@@ -770,7 +799,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
         None,
         "an emptied section has nothing to activate"
     );
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     assert!(layout.content.bottom() <= b.bottom());
 }
@@ -781,12 +810,12 @@ fn pointer_after_set_model_addresses_the_new_rows() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
     // Three tasks replace fifty, and the first of the three refuses every
     // command while the rest permit them.
     let _ = refresh(&mut sb, &refreshed_model(3, 3));
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
     // Choosing row 2 must select the task the refresh put there.
     select_task_row(&mut sb, b, Scale::ONE, &theme, 2);
@@ -832,7 +861,7 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     let b = bounds();
     let mut sb = Switchboard::new(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     // Move the selection off row 0 first, so a press completing there would
     // be visible as a change rather than hidden by the resting selection.
     select_task_row(&mut sb, b, Scale::ONE, &theme, 3);
@@ -873,8 +902,22 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
 
     let mut refreshed_surface = Surface::new(b.width, b.height).expect("surface");
     let mut built_surface = Surface::new(b.width, b.height).expect("surface");
-    refreshed.render(&mut refreshed_surface, b, Scale::ONE, &theme, font());
-    built.render(&mut built_surface, b, Scale::ONE, &theme, font());
+    refreshed.render(
+        &mut refreshed_surface,
+        b,
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
+    built.render(
+        &mut built_surface,
+        b,
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut NoArtwork,
+    );
 
     assert_eq!(
         refreshed_surface.pixels(),
@@ -933,7 +976,7 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
 fn painted(sb: &mut Switchboard, theme: &Theme) -> Surface {
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, theme, font());
+    sb.render(&mut surface, b, Scale::ONE, theme, font(), &mut NoArtwork);
     surface
 }
 

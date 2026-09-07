@@ -29,7 +29,7 @@ use super::{
     VolumeBytes,
 };
 use crate::format::{format_bytes, format_latency, format_rate, percent};
-use crate::model::{RollingMeters, VolumeService};
+use crate::model::{OwnerBundles, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, HealthSeverity, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
@@ -226,6 +226,7 @@ pub(super) fn device(
     sample: &Sample,
     meters: &RollingMeters,
     subject: &StorageSubject<'_>,
+    bundles: &OwnerBundles,
 ) -> ResourceDevice {
     let id = subject.device_id();
     let share = subject
@@ -246,7 +247,7 @@ pub(super) fn device(
         kind: PressureKind::Disk,
         trend: meters.devices.primary_history(id).to_vec(),
         hero: hero(sample, meters, id, &service),
-        blocks: blocks(sample, meters, subject, &service),
+        blocks: blocks(sample, meters, subject, &service, bundles),
         banner: None,
         actions: actions(),
     }
@@ -310,6 +311,7 @@ fn blocks(
     meters: &RollingMeters,
     subject: &StorageSubject<'_>,
     service: &VolumeService,
+    bundles: &OwnerBundles,
 ) -> Vec<PaneBlock> {
     alloc::vec![
         PaneBlock::half(
@@ -333,7 +335,7 @@ fn blocks(
         PaneBlock::half("HEALTH — EVERY COMPLETION, BUCKETED", health(sample, subject)),
         PaneBlock::half(
             "TOP CONSUMERS — DISK",
-            BlockBody::Consumers(super::consumers::by_disk(sample, &meters.tasks)),
+            BlockBody::Consumers(super::consumers::by_disk(sample, &meters.tasks, bundles)),
         )
         .with_note(super::consumers::NOT_A_TOTAL),
     ]

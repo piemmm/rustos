@@ -10,7 +10,7 @@ use tairix_controls::{ControlRole, PressureKind};
 
 use super::{consumers, reading as reading_of};
 use crate::format::{format_bytes, format_duration, percent};
-use crate::model::RollingMeters;
+use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{BlockBody, CompositionPart, HeroInstrument, PaneBlock, PaneHero};
@@ -20,7 +20,11 @@ use crate::view::resources::{
 };
 
 /// The machine's memory: its rail entry and its pane.
-pub(super) fn device(sample: &Sample, meters: &RollingMeters) -> ResourceDevice {
+pub(super) fn device(
+    sample: &Sample,
+    meters: &RollingMeters,
+    bundles: &OwnerBundles,
+) -> ResourceDevice {
     let committed = reading_of(
         sample,
         DegradedField::MemoryPressure,
@@ -46,7 +50,7 @@ pub(super) fn device(sample: &Sample, meters: &RollingMeters) -> ResourceDevice 
             instrument: HeroInstrument::Track(sample.memory_pressure.map(|m| m.used_permille)),
             caption: String::new(),
         },
-        blocks: blocks(sample),
+        blocks: blocks(sample, bundles),
         banner: banner(sample, meters),
         actions: actions(),
     }
@@ -104,7 +108,7 @@ fn band_age(sample: &Sample, meters: &RollingMeters) -> Option<String> {
 
 /// The composition, the memory and kernel facts, the tasks holding the
 /// most, and the bounded caches' own ledger.
-fn blocks(sample: &Sample) -> Vec<PaneBlock> {
+fn blocks(sample: &Sample, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     alloc::vec![
         PaneBlock::full("COMPOSITION — WHERE THE RAM IS", composition(sample)).with_note(
             "Every part is a measured query; what the named parts do not account for is stated as its own share.",
@@ -114,7 +118,7 @@ fn blocks(sample: &Sample) -> Vec<PaneBlock> {
         ),
         PaneBlock::half(
             "TOP CONSUMERS — MEMORY",
-            BlockBody::Consumers(consumers::by_memory(sample)),
+            BlockBody::Consumers(consumers::by_memory(sample, bundles)),
         )
         .with_note(consumers::NOT_A_TOTAL),
         PaneBlock::full("BOUNDED CACHES — RECLAIM LEDGER", ledger(sample)).with_note(

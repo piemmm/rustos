@@ -12,6 +12,7 @@ use core::mem;
 use tairix_abi::ProcId;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
+use tairix_icon::IconArtwork;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, Theme};
@@ -1030,7 +1031,9 @@ impl SectionView for RecoverySection {
         }
     }
 
-    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+    /// No control in this section carries an icon — a fault is named in
+    /// words, not by a picture — so the artwork lookup goes unused here.
+    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, _artwork: &mut dyn IconArtwork) {
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
         for slot in 0..info.visible() {
             let Some(card) = self.cards.get(ctx.start + slot as usize) else {

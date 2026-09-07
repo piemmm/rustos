@@ -132,6 +132,7 @@ pub struct MetricTile {
     instrument: MetricInstrument,
     icon: Option<IconKind>,
     layout: MetricLayout,
+    value_role: TextRole,
     plated: bool,
 }
 
@@ -152,6 +153,7 @@ impl MetricTile {
             instrument: MetricInstrument::None,
             icon: None,
             layout: MetricLayout::Stacked,
+            value_role: TextRole::Body,
             plated: true,
         }
     }
@@ -218,6 +220,27 @@ impl MetricTile {
         self.layout
     }
 
+    /// This tile with its reading's *value* set in `role`, replacing the
+    /// default [`TextRole::Body`] — the loud figure a hero reading leads with,
+    /// against a unit that stays at body size beside it.
+    ///
+    /// The unit, label, and detail keep the body role, so naming a taller role
+    /// here is what makes the figure dominate rather than a second knob per
+    /// line. The two share a baseline whichever roles they take, and the
+    /// tile's own measured height grows with the taller line, so an owner
+    /// placing content beneath a hero never has to know which role it chose.
+    #[must_use]
+    pub fn with_value_role(mut self, role: TextRole) -> Self {
+        self.value_role = role;
+        self
+    }
+
+    /// The role this tile's reading value is set in.
+    #[must_use]
+    pub fn value_role(&self) -> TextRole {
+        self.value_role
+    }
+
     /// This tile with no plate, rim, or padding of its own — for a tile
     /// seated inside a container, such as a [`Panel`](crate::collection::Panel),
     /// that already provides the surface, so several readings can share one
@@ -244,17 +267,44 @@ impl MetricTile {
     /// can never disagree about where the instrument slot begins.
     #[must_use]
     pub fn reading_height(&self, scale: Scale, theme: &Theme) -> u32 {
-        let font = role_font(theme, scale, TextRole::Body);
         let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let line_h = font.line_height();
-        let mut height = match self.layout {
-            MetricLayout::Stacked => line_h.saturating_add(gap).saturating_add(line_h),
-            MetricLayout::Inline => line_h,
-        };
+        let mut height = self.primary_height(scale, theme);
         if self.detail.is_some() {
-            height = height.saturating_add(gap).saturating_add(line_h);
+            height = height
+                .saturating_add(gap)
+                .saturating_add(self.reading_fonts(scale, theme).unit.line_height());
         }
         height.saturating_add(gap)
+    }
+
+    /// The fonts this tile's reading is set in: its value in the role it names
+    /// and everything else in the body role.
+    fn reading_fonts(&self, scale: Scale, theme: &Theme) -> ReadingFonts {
+        ReadingFonts {
+            value: role_font(theme, scale, self.value_role),
+            unit: role_font(theme, scale, TextRole::Body),
+        }
+    }
+
+    /// The height this tile's label/reading block claims: two lines for
+    /// [`MetricLayout::Stacked`] and one for [`MetricLayout::Inline`], the
+    /// reading line sized to whichever of its two faces is taller.
+    ///
+    /// The one definition [`reading_height`](Self::reading_height),
+    /// [`icon_side`](Self::icon_side) and [`render`](Self::render) all read,
+    /// so the icon's slot, the reported height, and the drawn layout cannot
+    /// disagree.
+    fn primary_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let fonts = self.reading_fonts(scale, theme);
+        let (reading_h, _) = fonts.line_box();
+        match self.layout {
+            MetricLayout::Stacked => fonts
+                .unit
+                .line_height()
+                .saturating_add(scale.scale_length(theme.metrics().control_gap).max(1))
+                .saturating_add(reading_h),
+            MetricLayout::Inline => reading_h,
+        }
     }
 
     /// The minimum height, in physical pixels, the whole tile needs at
@@ -294,8 +344,27 @@ impl MetricTile {
     /// size), capped at `avail_h` so a tile too short for its full anatomy
     /// never grows the icon past what actually fits.
     #[must_use]
-    fn icon_side(primary_h: u32, avail_h: u32) -> u32 {
+    fn icon_slot(primary_h: u32, avail_h: u32) -> u32 {
         primary_h.min(avail_h)
+    }
+
+    /// The pixel side this tile's leading icon paints at inside `bounds`.
+    ///
+    /// An owner resolves its picture at this side, so what it caches is what
+    /// the tile draws — the two read one definition and can never disagree.
+    /// Zero for a tile with no icon, or one whose bounds seat none.
+    #[must_use]
+    pub fn icon_side(&self, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        if self.icon.is_none() {
+            return 0;
+        }
+        let Some(rect) = surface_rect(bounds) else {
+            return 0;
+        };
+        let Some((_, _, _, ch)) = self.content_extent(rect, scale, theme) else {
+            return 0;
+        };
+        Self::icon_slot(self.primary_height(scale, theme), ch)
     }
 
     /// Paint the tile into `surface` at `bounds` for the active theme.
@@ -323,7 +392,8 @@ impl MetricTile {
         if withheld(surface, bounds) {
             return;
         }
-        let font = role_font(theme, scale, TextRole::Body);
+        let fonts = self.reading_fonts(scale, theme);
+        let font = fonts.unit;
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -340,15 +410,11 @@ impl MetricTile {
         let bottom = cy.saturating_add(ch);
         let full_limits = (bottom, cw, gap);
 
-        let line_h = font.line_height();
-        let primary_h = match self.layout {
-            MetricLayout::Stacked => line_h.saturating_add(gap).saturating_add(line_h),
-            MetricLayout::Inline => line_h,
-        };
+        let primary_h = self.primary_height(scale, theme);
         let mut primary_x = cx;
         let mut primary_w = cw;
         if let Some(kind) = self.icon {
-            let side = Self::icon_side(primary_h, ch);
+            let side = Self::icon_slot(primary_h, ch);
             if side > 0 {
                 let tint = signal_color(theme, self.kind);
                 paint_icon_slot(surface, (cx, cy, side), kind, tint, artwork, FULL_COLOUR);
@@ -380,7 +446,7 @@ impl MetricTile {
                     self.unit.as_deref(),
                     (primary_x, cursor_y),
                     primary_limits,
-                    font,
+                    fonts,
                     colors,
                 )
             }
@@ -393,7 +459,7 @@ impl MetricTile {
                 },
                 (primary_x, cy),
                 primary_limits,
-                font,
+                fonts,
                 label_color,
                 colors,
             ),
@@ -429,28 +495,46 @@ impl MetricTile {
         theme: &Theme,
     ) -> Option<(u32, u32, u32, u32)> {
         let (x, y, w, h) = rect;
+        if self.plated {
+            let palette = theme.palette();
+            let radius = scale
+                .scale_length(theme.metrics().control_corner_radius)
+                .min(w / 2)
+                .min(h / 2);
+            paint_plate(
+                surface,
+                (x, y, w, h),
+                &PlateStyle {
+                    radius,
+                    border: plate_border(theme, scale),
+                    plate: Color::from(palette.surface),
+                    rim: Color::from(palette.rim),
+                    focused: false,
+                    ring: Color::from(palette.rim_active),
+                },
+            );
+        }
+        self.content_extent(rect, scale, theme)
+    }
+
+    /// Where this tile's content sits within `rect`, without painting: the
+    /// rectangle unchanged for an [`unplated`](Self::unplated) tile, and inset
+    /// past the plate's rim and padding otherwise.
+    ///
+    /// Split from [`content_rect`](Self::content_rect) so
+    /// [`icon_side`](Self::icon_side) can ask where the icon lands without
+    /// drawing a plate to find out.
+    fn content_extent(
+        &self,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (x, y, w, h) = rect;
         if !self.plated {
             return Some((x, y, w, h));
         }
-        let palette = theme.palette();
-        let radius = scale
-            .scale_length(theme.metrics().control_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
         let border = plate_border(theme, scale);
-        paint_plate(
-            surface,
-            (x, y, w, h),
-            &PlateStyle {
-                radius,
-                border,
-                plate: Color::from(palette.surface),
-                rim: Color::from(palette.rim),
-                focused: false,
-                ring: Color::from(palette.rim_active),
-            },
-        );
-
         let (ix, iy, iw, ih) = inset(x, y, w, h, border)?;
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
         inset(ix, iy, iw, ih, pad)
@@ -490,6 +574,49 @@ impl MetricTile {
     }
 }
 
+/// The two faces one reading is set in: its value's, and the body face its
+/// unit, label, and detail share.
+///
+/// A hero leads with a large figure against a quiet unit, so the pair is not
+/// one font — but it is still one *line*, aligned on the baseline the two
+/// share rather than on their own line boxes. Carrying both together is what
+/// keeps every measurement of a reading (its fit, its width, its line box, and
+/// where each part is drawn) reading the same pair.
+#[derive(Copy, Clone, Debug)]
+struct ReadingFonts {
+    /// The face the value figure is set in.
+    value: BitmapFont,
+    /// The body face the unit — and the label and detail lines — are set in.
+    unit: BitmapFont,
+}
+
+impl ReadingFonts {
+    /// The line box the two share: its height, and how far below its top the
+    /// baseline sits.
+    ///
+    /// The tallest ascent over the deepest descent, so the box holds both
+    /// faces whichever of them is larger, and a unit beside a large figure
+    /// sits on the figure's own baseline instead of floating at its cap.
+    fn line_box(self) -> (u32, u32) {
+        let baseline = self.value.baseline().max(self.unit.baseline());
+        let descent = self
+            .value
+            .line_height()
+            .saturating_sub(self.value.baseline())
+            .max(self.unit.line_height().saturating_sub(self.unit.baseline()));
+        (baseline.saturating_add(descent), baseline)
+    }
+
+    /// The y each face draws at for a line box whose top is `y`, value first.
+    fn baselines(self, y: u32) -> (u32, u32) {
+        let (_, baseline) = self.line_box();
+        (
+            y.saturating_add(baseline.saturating_sub(self.value.baseline())),
+            y.saturating_add(baseline.saturating_sub(self.unit.baseline())),
+        )
+    }
+}
+
 /// The truncated value text, and the truncated unit text (if room remains
 /// after the value), for a reading fitted into at most `max_w` physical
 /// pixels.
@@ -500,23 +627,26 @@ impl MetricTile {
 /// right-aligned one both compute their fit from this one definition, so the
 /// two can never disagree about how a reading degrades under width pressure.
 fn fit_reading<'a>(
-    font: BitmapFont,
+    fonts: ReadingFonts,
     value: &'a str,
     unit: Option<&'a str>,
     max_w: u32,
 ) -> (&'a str, Option<&'a str>) {
-    let value_fitted = font.truncate_to_width(value, max_w);
+    let value_fitted = fonts.value.truncate_to_width(value, max_w);
     let Some(unit) = unit else {
         return (value_fitted, None);
     };
-    let value_w = font.text_width(value_fitted);
-    let space = font.advance(' ');
+    let value_w = fonts.value.text_width(value_fitted);
+    let space = fonts.unit.advance(' ');
     let used = value_w.saturating_add(space).min(max_w);
     let remaining = max_w.saturating_sub(used);
     if remaining == 0 {
         return (value_fitted, None);
     }
-    (value_fitted, Some(font.truncate_to_width(unit, remaining)))
+    (
+        value_fitted,
+        Some(fonts.unit.truncate_to_width(unit, remaining)),
+    )
 }
 
 /// The physical width `value_fitted` plus, if present, a space and
@@ -524,12 +654,12 @@ fn fit_reading<'a>(
 /// [`paint_reading_line`] and [`paint_inline_reading_line`] use to place the
 /// unit after the value and, for the inline form, to right-align the whole
 /// reading.
-fn reading_width(font: BitmapFont, value_fitted: &str, unit_fitted: Option<&str>) -> u32 {
-    let value_w = font.text_width(value_fitted);
+fn reading_width(fonts: ReadingFonts, value_fitted: &str, unit_fitted: Option<&str>) -> u32 {
+    let value_w = fonts.value.text_width(value_fitted);
     match unit_fitted {
         Some(unit_fitted) => value_w
-            .saturating_add(font.advance(' '))
-            .saturating_add(font.text_width(unit_fitted)),
+            .saturating_add(fonts.unit.advance(' '))
+            .saturating_add(fonts.unit.text_width(unit_fitted)),
         None => value_w,
     }
 }
@@ -547,22 +677,37 @@ fn paint_reading_line(
     unit: Option<&str>,
     pos: (u32, u32),
     limits: (u32, u32, u32),
-    font: BitmapFont,
+    fonts: ReadingFonts,
     colors: (Color, Color),
 ) -> u32 {
     let (x, y) = pos;
     let (bottom, w, gap) = limits;
     let (value_color, unit_color) = colors;
-    let line_h = font.line_height();
+    let (line_h, _) = fonts.line_box();
     if w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
-    let (value_fitted, unit_fitted) = fit_reading(font, value, unit, w);
-    font.draw_text(surface, to_i32(x), to_i32(y), value_fitted, value_color);
+    let (value_y, unit_y) = fonts.baselines(y);
+    let (value_fitted, unit_fitted) = fit_reading(fonts, value, unit, w);
+    fonts.value.draw_text(
+        surface,
+        to_i32(x),
+        to_i32(value_y),
+        value_fitted,
+        value_color,
+    );
     if let Some(unit_fitted) = unit_fitted {
-        let value_w = font.text_width(value_fitted);
-        let unit_x = x.saturating_add(value_w).saturating_add(font.advance(' '));
-        font.draw_text(surface, to_i32(unit_x), to_i32(y), unit_fitted, unit_color);
+        let value_w = fonts.value.text_width(value_fitted);
+        let unit_x = x
+            .saturating_add(value_w)
+            .saturating_add(fonts.unit.advance(' '));
+        fonts.unit.draw_text(
+            surface,
+            to_i32(unit_x),
+            to_i32(unit_y),
+            unit_fitted,
+            unit_color,
+        );
     }
     y.saturating_add(line_h).saturating_add(gap)
 }
@@ -596,7 +741,7 @@ fn paint_inline_reading_line(
     reading: &InlineReading<'_>,
     pos: (u32, u32),
     limits: (u32, u32, u32),
-    font: BitmapFont,
+    fonts: ReadingFonts,
     label_color: Color,
     colors: (Color, Color),
 ) -> u32 {
@@ -606,33 +751,46 @@ fn paint_inline_reading_line(
     let (x, y) = pos;
     let (bottom, w, gap) = limits;
     let (value_color, unit_color) = colors;
-    let line_h = font.line_height();
+    let (line_h, _) = fonts.line_box();
     if w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
-    let (value_fitted, unit_fitted) = fit_reading(font, value, unit, w);
-    let reading_w = reading_width(font, value_fitted, unit_fitted).min(w);
+    let (value_y, unit_y) = fonts.baselines(y);
+    let (value_fitted, unit_fitted) = fit_reading(fonts, value, unit, w);
+    let reading_w = reading_width(fonts, value_fitted, unit_fitted).min(w);
     let reading_x = x.saturating_add(w).saturating_sub(reading_w);
 
     let label_avail = reading_x.saturating_sub(gap).saturating_sub(x);
     if label_avail > 0 {
-        let label_fitted = font.truncate_to_width(label, label_avail);
-        font.draw_text(surface, to_i32(x), to_i32(y), label_fitted, label_color);
+        let label_fitted = fonts.unit.truncate_to_width(label, label_avail);
+        fonts.unit.draw_text(
+            surface,
+            to_i32(x),
+            to_i32(unit_y),
+            label_fitted,
+            label_color,
+        );
     }
 
-    font.draw_text(
+    fonts.value.draw_text(
         surface,
         to_i32(reading_x),
-        to_i32(y),
+        to_i32(value_y),
         value_fitted,
         value_color,
     );
     if let Some(unit_fitted) = unit_fitted {
-        let value_w = font.text_width(value_fitted);
+        let value_w = fonts.value.text_width(value_fitted);
         let unit_x = reading_x
             .saturating_add(value_w)
-            .saturating_add(font.advance(' '));
-        font.draw_text(surface, to_i32(unit_x), to_i32(y), unit_fitted, unit_color);
+            .saturating_add(fonts.unit.advance(' '));
+        fonts.unit.draw_text(
+            surface,
+            to_i32(unit_x),
+            to_i32(unit_y),
+            unit_fitted,
+            unit_color,
+        );
     }
     y.saturating_add(line_h).saturating_add(gap)
 }
@@ -648,6 +806,7 @@ fn paint_inline_reading_line(
 pub struct StatusPill {
     label: String,
     tone: Option<SignalRole>,
+    outlined: bool,
 }
 
 impl StatusPill {
@@ -658,6 +817,7 @@ impl StatusPill {
         Self {
             label: label.into(),
             tone: None,
+            outlined: false,
         }
     }
 
@@ -667,6 +827,28 @@ impl StatusPill {
     pub fn with_tone(mut self, tone: SignalRole) -> Self {
         self.tone = Some(tone);
         self
+    }
+
+    /// This pill with its capsule rim drawn in its own tone rather than
+    /// collapsed onto its fill.
+    ///
+    /// A resting pill states its condition with a wash and a label, which is
+    /// enough where it sits alone in a row of prose. A pill *badging* a
+    /// dense grid — a core's performance class in the corner of its cell —
+    /// has no such room: the wash is a few levels off the plate it sits on and
+    /// reads as nothing, so the rim is what makes the badge a badge. The
+    /// heavier-contrast themes already rim every pill, so this only affects
+    /// the normal ones.
+    #[must_use]
+    pub fn outlined(mut self) -> Self {
+        self.outlined = true;
+        self
+    }
+
+    /// Whether this pill draws a visible rim in its own tone.
+    #[must_use]
+    pub fn is_outlined(&self) -> bool {
+        self.outlined
     }
 
     /// The pill's label text.
@@ -729,7 +911,7 @@ impl StatusPill {
 
         let radius = h / 2;
         let border = plate_border(theme, scale);
-        let rim = if heavy_contrast(theme) {
+        let rim = if self.outlined || heavy_contrast(theme) {
             label_color
         } else {
             fill

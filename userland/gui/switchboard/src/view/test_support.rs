@@ -4,6 +4,7 @@
 //! section's tests, so no section carries its own copy of the fixture the
 //! others already use.
 
+use tairix_abi::sysinfo::CpuCoreClass;
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -14,7 +15,7 @@ use tairix_theme::Theme;
 use tairix_controls::{
     damage, ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState,
 };
-use tairix_icon::IconKind;
+use tairix_icon::NoArtwork;
 
 use super::resources::{
     BlockBody, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceGroup, DeviceId,
@@ -128,7 +129,7 @@ fn cpu_device() -> ResourceDevice {
                     (0..4)
                         .map(|i| CoreCell {
                             label: alloc::format!("core {i}"),
-                            badge: alloc::string::String::from("P"),
+                            class: CpuCoreClass::Performance,
                             busy: Reading::measured("41%"),
                             clock: Reading::measured("3.9 GHz"),
                             trend: alloc::vec![300, 500, 400],
@@ -140,7 +141,7 @@ fn cpu_device() -> ResourceDevice {
                 "TOP CONSUMERS — CPU",
                 BlockBody::Consumers(alloc::vec![ConsumerRow {
                     name: alloc::string::String::from("task 3"),
-                    icon: IconKind::Executable,
+                    bundle: None,
                     amount: alloc::string::String::from("9.7%"),
                     share: 970,
                 }]),
@@ -416,7 +417,14 @@ pub(super) fn unreported_change(
 pub(super) fn shot(sb: &mut Switchboard) -> Surface {
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &Theme::dark(), font());
+    sb.render(
+        &mut surface,
+        b,
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut NoArtwork,
+    );
     surface
 }
 

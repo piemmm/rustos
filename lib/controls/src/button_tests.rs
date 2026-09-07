@@ -201,6 +201,48 @@ fn denied_and_disabled_render_distinctly() {
 }
 
 #[test]
+fn a_missing_capability_wears_amber_where_a_policy_refusal_wears_the_denied_red() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let mut gated = Button::new(
+            ButtonContent::IconLabel {
+                icon: IconKind::Priority,
+                label: "Scheduler policy…".into(),
+            },
+            ControlRole::Neutral,
+        );
+        gated.set_state(ControlState::idle().with_authority(AuthorityState::NeedsCapability));
+        let mut refused = Button::labelled("Scheduler policy…");
+        refused.set_state(ControlState::idle().with_authority(AuthorityState::Denied));
+
+        let amber = premul(theme.palette().warning);
+        let red = premul(theme.palette().denied);
+        let gated_surface = render(&gated, &theme);
+        // The label, the leading mark and the rim all state the one colour, so
+        // a gated command cannot read amber on its text and red on its edge.
+        assert!(has_pixel(&gated_surface, amber), "{}", theme.name());
+        assert!(!has_pixel(&gated_surface, red), "{}", theme.name());
+        assert_eq!(gated_surface.get(0, H / 2), Some(amber), "{}", theme.name());
+        // A policy refusal keeps the denied red: the two are told apart.
+        let refused_surface = render(&refused, &theme);
+        assert!(has_pixel(&refused_surface, red), "{}", theme.name());
+        assert!(!has_pixel(&refused_surface, amber), "{}", theme.name());
+    }
+}
+
+#[test]
+fn a_missing_capability_keeps_the_lock_bead_so_the_mark_is_never_colour_alone() {
+    let theme = Theme::dark();
+    let mut gated = Button::labelled("Drop clean caches");
+    gated.set_state(ControlState::idle().with_authority(AuthorityState::NeedsCapability));
+    let mut allowed = Button::labelled("Drop clean caches");
+    allowed.set_state(ControlState::idle());
+
+    let amber = premul(theme.palette().warning);
+    assert!(interior_has(&render(&gated, &theme), amber));
+    assert!(!interior_has(&render(&allowed, &theme), amber));
+}
+
+#[test]
 fn pressure_paints_a_leading_rail() {
     let theme = Theme::dark();
     let mut button = Button::labelled("Sleep");

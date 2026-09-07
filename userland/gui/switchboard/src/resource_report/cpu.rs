@@ -14,7 +14,7 @@ use tairix_controls::PressureKind;
 
 use super::{consumers, reading as reading_of};
 use crate::format::percent;
-use crate::model::RollingMeters;
+use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{BlockBody, CoreCell, HeroInstrument, PaneBlock, PaneHero};
@@ -23,7 +23,11 @@ use crate::view::resources::{
 };
 
 /// The processor's rail entry and pane.
-pub(super) fn device(sample: &Sample, meters: &RollingMeters) -> ResourceDevice {
+pub(super) fn device(
+    sample: &Sample,
+    meters: &RollingMeters,
+    bundles: &OwnerBundles,
+) -> ResourceDevice {
     let busy = reading_of(
         sample,
         DegradedField::CpuTime,
@@ -48,7 +52,7 @@ pub(super) fn device(sample: &Sample, meters: &RollingMeters) -> ResourceDevice 
             },
             caption: String::from("busy share, all cores"),
         },
-        blocks: blocks(sample, meters),
+        blocks: blocks(sample, meters, bundles),
         banner: None,
         actions: actions(),
     }
@@ -79,7 +83,7 @@ fn context(sample: &Sample) -> Vec<String> {
 
 /// The per-core grid, the processor's own facts, and the tasks costing it
 /// most.
-fn blocks(sample: &Sample, meters: &RollingMeters) -> Vec<PaneBlock> {
+fn blocks(sample: &Sample, meters: &RollingMeters, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     let cores = core_cells(sample, meters);
     let heading = match core_count(sample) {
         Some(count) => format!("PER-CORE BUSY — {count} LOGICAL CORES"),
@@ -102,7 +106,7 @@ fn blocks(sample: &Sample, meters: &RollingMeters) -> Vec<PaneBlock> {
         ),
         PaneBlock::half(
             "TOP CONSUMERS — CPU",
-            BlockBody::Consumers(consumers::by_cpu(sample)),
+            BlockBody::Consumers(consumers::by_cpu(sample, bundles)),
         )
         .with_note(consumers::NOT_A_TOTAL),
     ]
@@ -116,7 +120,7 @@ fn core_cells(sample: &Sample, meters: &RollingMeters) -> Vec<CoreCell> {
     cpus.iter()
         .map(|cpu| CoreCell {
             label: format!("core {}", cpu.cpu),
-            badge: String::from(class_badge(cpu.class)),
+            class: cpu.class,
             busy: sample
                 .core_busy
                 .iter()
@@ -294,14 +298,6 @@ fn fixed(value: u32) -> String {
         LoadAverage::whole(value),
         LoadAverage::centis(value)
     )
-}
-
-/// The performance-class badge one core's cell wears.
-const fn class_badge(class: CpuCoreClass) -> &'static str {
-    match class {
-        CpuCoreClass::Performance => "P",
-        CpuCoreClass::Efficiency => "E",
-    }
 }
 
 /// The commands the rail offers for the processor.

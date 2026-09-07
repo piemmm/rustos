@@ -126,12 +126,24 @@ it, or frame the content that does:
   with no reading behind it is left off, so the chart stays a single-series
   trend over the whole box rather than showing an empty half as a quiet
   nothing.
+  A chart's filled area fades out at the zero line it is read against: a flat
+  fill draws the floor as a second hard edge, which reads as a measurement the
+  chart never took. The ramp is the *band's* rather than the trace's, so the
+  fill's weight at a given height means the same thing whatever the reading is
+  there, and a mirrored opposing band ramps the other way.
   `MetricLayout` picks the anatomy: `Stacked` puts the label above the reading
   for a tile with a column of its own, `Inline` puts the label leading and the
-  reading trailing so a narrow stack of readings can be scanned down. A tile
-  takes no input and reports nothing.
+  reading trailing so a narrow stack of readings can be scanned down. The
+  reading's *value* may name its own `TextRole` (`with_value_role`, `Body` by
+  default) so a hero leads with a loud figure against a quiet unit: the two are
+  aligned on the baseline they share, and the tile's reported heights and icon
+  slot grow with the taller line. A tile takes no input and reports nothing.
 - `StatusPill` is the compact capsule that names a state in a word, toned by
-  its signal role, for a place a full tile would not fit.
+  its signal role, for a place a full tile would not fit. A resting pill
+  collapses its rim onto its fill; an `outlined` one draws it in its own tone,
+  for a pill *badging* a dense grid — a core's performance class in the corner
+  of its cell — where the wash alone is a few levels off the plate behind it
+  and reads as nothing.
 - `CompositionBar` splits a measured whole into its named parts: one
   proportional row through the very same measured-track geometry a tile's
   `Track` draws with, then a key naming each part and its amount. The parts
@@ -260,7 +272,12 @@ Nothing about the control's feedback is discarded, only moved off the edge:
   focused one, so the ring can never be dropped along with the plate.
 - A **disposition** (denied, failed-closed, pending, disabled) states itself on
   the glyph tint and its shape-coded Signal Bead rather than a coloured edge, so
-  it stays legible without colour vision.
+  it stays legible without colour vision. A *missing capability* is stated in
+  the warning amber and a policy refusal in the denied red — one shared
+  resolution read by every family's rim, label, mark and bead — because a
+  reader who could acquire the authority should not be told the same thing as
+  one who may not. The Authority Mark's shape is unchanged either way, so the
+  distinction never rests on colour alone.
 - Activity and pressure use the marks the control already owns: the Heat Seam,
   the Pressure Rail, the bead. An icon-bar slot states no *window* state at
   all: it is an application, and windows are shown in the picker

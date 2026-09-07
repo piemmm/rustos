@@ -51,13 +51,24 @@ use crate::state::PressureKind;
 /// enough to hold inline in a model that must not allocate.
 pub const MAX_CHART_SAMPLES: usize = 64;
 
-/// How much of the trace's own colour the area beneath it carries.
+/// How much of the trace's own colour the area beneath it carries *at the
+/// band's full-scale edge*, fading to nothing at the zero line.
 ///
 /// The filled area gives the trace a body, so a low-amplitude series still
-/// reads as a shape rather than a wandering hairline. It stays well below the
-/// line's own weight so the line remains the thing being read, and so anything
-/// drawn behind the chart still shows through.
-const AREA_ALPHA: u8 = 64;
+/// reads as a shape rather than a wandering hairline. Filling it flat instead
+/// draws the zero line as a second hard edge across the box, which reads as a
+/// measurement the chart never took; ramping it out means the only edges the
+/// eye finds are the trace and the axis.
+///
+/// The ramp's mean is half its peak, so this is twice the weight a flat fill
+/// would carry: the same ink, redistributed toward the trace rather than
+/// spread evenly down to the floor. It stays below the line's own weight so
+/// the line remains the thing being read, and so anything drawn behind the
+/// chart still shows through.
+const AREA_ALPHA: u8 = 128;
+
+/// Full strength of the area fill's vertical ramp.
+const AREA_RAMP_FULL: u32 = 255;
 
 /// A chart's second, mirrored series and the resource it reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,14 +297,38 @@ fn paint_series(
         return;
     };
     let color = signal_color(theme, kind);
-    surface.fill_polygon_subpixel(
+    let (_, top, _, height) = band.box_px;
+    let rising_up = band.rising_up;
+    surface.wash_polygon_subpixel(
         &poly,
         Color {
             a: AREA_ALPHA,
             ..color
         },
+        |_, y| area_ramp(y, top, height, rising_up),
     );
     surface.stroke_polyline(trace, weight, color);
+}
+
+/// How much of the area fill's opacity surface row `y` carries, for a band
+/// `height` rows tall starting at `band_top`: full at the edge a rising
+/// reading grows toward, nothing at the zero line it is read against.
+///
+/// The ramp is the band's, not the trace's, so the fill's weight at a given
+/// height means the same thing whatever the reading happens to be there —
+/// which is what lets a reader compare two columns of one chart, or the same
+/// row of two charts, by eye. A mirrored opposing band grows the other way and
+/// so ramps the other way.
+fn area_ramp(y: u32, band_top: u32, height: u32, rising_up: bool) -> u8 {
+    let Some(last) = height.checked_sub(1) else {
+        return 0;
+    };
+    if last == 0 {
+        return u8::try_from(AREA_RAMP_FULL).unwrap_or(u8::MAX);
+    }
+    let row = y.saturating_sub(band_top).min(last);
+    let reach = if rising_up { last - row } else { row };
+    u8::try_from(AREA_RAMP_FULL.saturating_mul(reach) / last).unwrap_or(u8::MAX)
 }
 
 /// `samples` as one closed polygon in device sub-pixel units: the band's own

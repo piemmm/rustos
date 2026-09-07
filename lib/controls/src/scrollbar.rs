@@ -26,8 +26,8 @@ use tairix_theme::Theme;
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32, withheld,
-    ChevronDir, ChromeLayer,
+    authority_rgba, draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32,
+    withheld, ChevronDir, ChromeLayer,
 };
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
@@ -579,7 +579,7 @@ impl ScrollBar {
         let thumb_color = if disabled {
             Color::from(palette.border)
         } else if denied {
-            Color::from(palette.denied)
+            Color::from(authority_rgba(palette, self.state.authority))
         } else if draggable && active {
             Color::from(palette.rim_active)
         } else {

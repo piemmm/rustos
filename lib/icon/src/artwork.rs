@@ -395,6 +395,32 @@ pub trait IconArtwork {
     fn artwork(&mut self, request: IconRequest<'_>, side: u32) -> Option<IconPicture<'_>>;
 }
 
+/// The refusing read-and-decode seam: no asset is ever produced.
+///
+/// What a cache resolves through before its embedder installs the real one,
+/// and what a process holding no filesystem or spawn authority resolves
+/// through permanently — a monitor that may sample the system but must not
+/// read a user's files, say. Every request refuses, so every icon falls to its
+/// built-in glyph.
+///
+/// A cache built on this is still worth holding: the glyph tier is resolved in
+/// this process and retained like any other entry, and resolving a
+/// multi-layer glyph's coverage is the expensive part (tens of microseconds
+/// per icon), so the surface pays it once instead of once per frame.
+pub struct NoArtworkSeam;
+
+impl ArtworkReader for NoArtworkSeam {
+    fn read(&mut self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+impl ArtworkRasteriser for NoArtworkSeam {
+    fn rasterise(&mut self, _side: u32, _bytes: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 /// The all-glyph lookup: never any artwork.
 ///
 /// Used by a headless build with no shipped raster assets and by tests: every

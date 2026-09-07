@@ -843,6 +843,31 @@ above:
   name: the id list is bounded by `SEAT_REPORT_OWNERS_MAX`, so the monitor
   sees an honest count alongside the ids it can act on rather than a
   silently truncated one.
+- **`OwnerBundle { owner, bundle }`** — which application bundle one window
+  owner was launched from. Only the session knows it: the kernel's process
+  record carries a name and no image path, and the launch that produced the
+  process is the session's own. The monitor draws the named application's own
+  icon against that process's rows instead of one generic executable glyph for
+  every row.
+  - **Reported per owner as the application strip changes**, not as a whole
+    roster per frame: the strip is re-resolved whenever a window opens or
+    closes or an application declares, so `OwnerBundleGate` tells the live
+    instance only what is new, forgets an owner that leaves the strip, and
+    tells a *different* instance everything again (a monitor that has just
+    started holds no roster and nothing else would ever tell it).
+  - **Nothing is told until the instance has published.** An instance exists
+    from the moment it is spawned but ignores every command until its own
+    first publish has attested the session, so a roster sent into that gap is
+    taken by the mailbox and dropped unread. The publish is therefore what
+    both attests the instance and sends it the roster it needs, rather than
+    the roster waiting for the next window to open or close.
+  - **Keyed by the owner's kernel-attested `ProcId`, never its numeric pid**,
+    which the kernel reuses — a recycled pid would hand a stranger's process
+    the icon of the application that held the number before it. A refused send
+    leaves the owner untold, so the next strip change carries it: no retry
+    loop, and no lost fact. A directory the fixed-width frame cannot carry
+    (`OWNER_BUNDLE_MAX`) is not sent at all, because a truncated path would
+    resolve to somebody else's bundle; that row then draws its class icon.
 - **`FrameReport { report }`** — what the last composited frame cost, read
   straight from the compositor's own per-frame counters
   (`Compositor::frame_stats`). The session is the only party that can count

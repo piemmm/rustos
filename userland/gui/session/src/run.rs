@@ -127,11 +127,11 @@ mod program {
         Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
         DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
         FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
-        KeyboardInputSource, LaunchTable, LoadedPinboard, LoadedPrograms, LockedDrain, OwnerWindow,
-        PickConclusion, Prepared, PresentedOwners, PromptOutcome, ScreenFade, ScreenLock,
-        SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader, SessionPicker,
-        SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
+        KeyboardInputSource, LaunchTable, LoadedPinboard, LoadedPrograms, LockedDrain,
+        OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners, PromptOutcome,
+        ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
         CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
         MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
@@ -2051,6 +2051,9 @@ mod program {
         // — and the very same bring-up serves a later tray press that
         // finds no instance live.
         let mut switchboard_pid = spawn_switchboard(&mut launched);
+        // Which window owners the live monitor has been told the bundle of, so
+        // a launch costs one send and a fresh instance is told everything.
+        let mut owner_bundles = OwnerBundleGate::new();
         // Start the desktop's file manager in its core role. It is a
         // component of the desktop, not an application the user starts, so it
         // comes up with the session and holds its icon-bar slot from here on.
@@ -2393,6 +2396,16 @@ mod program {
                     // that answered rather than to a guess.
                     if let Ok(SwitchboardOutcome::Published { publisher, .. }) = result {
                         switchboard_pid = Some(publisher);
+                        // The publish is also what makes the instance willing
+                        // to *take* a command, so the roster it needs to draw
+                        // task icons goes out here rather than waiting for the
+                        // next window to open or close.
+                        owner_bundles.attest(publisher);
+                        owner_bundles.publish(
+                            Some(publisher),
+                            &apps.strip,
+                            &mut RtSwitchboardMailbox,
+                        );
                         deliver_pending_open(
                             &mut pending_open,
                             publisher,
@@ -2523,6 +2536,12 @@ mod program {
                         &identity,
                         &launched,
                     );
+                    // The monitor draws these same applications against its
+                    // task rows, and the bundle each was launched from is a
+                    // fact only this session holds. Offered where the strip
+                    // has just been re-resolved, so a launch is one send
+                    // rather than a re-send of the whole roster per frame.
+                    owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
                     resolve_window_identities(
                         &mut shell,
                         &mut compositor,
@@ -3048,6 +3067,7 @@ mod program {
                     &identity,
                     &launched,
                 );
+                owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
             }
             // Nothing an application does may surface over a locked
             // screen: whatever opened, raised, or resized behind the lock

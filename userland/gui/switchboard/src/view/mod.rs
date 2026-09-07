@@ -78,7 +78,7 @@ use tairix_controls::{
     ControlRole, ControlState, Crumb, IconButton, Menu, MenuAction, MenuItem, RenderInvariant,
     ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SelectionState,
 };
-use tairix_icon::IconKind;
+use tairix_icon::{IconArtwork, IconKind, IconRequest};
 
 pub mod frame;
 pub mod reading;
@@ -282,6 +282,24 @@ const APP_NAME: &str = "Switchboard";
 /// than a dash or a zero: a reader must be able to tell "nothing measured
 /// this" from "measured, and it was nothing".
 pub const UNMEASURED_READING: &str = "unknown";
+
+/// The picture one process's row draws.
+///
+/// An application the desktop launched resolves its *own* icon from the bundle
+/// it was launched from, falling back to the application-bundle class artwork
+/// and then to its built-in glyph; a process nothing attests a bundle for —
+/// PID 1, a time service, a kernel thread — takes the executable class and is
+/// never handed an application's picture it has no claim to.
+///
+/// The one statement of that rule, read by the task table and by every
+/// device's top-consumers block, so a process cannot be drawn as one thing in
+/// one place and another elsewhere.
+fn task_icon(bundle: Option<&str>) -> IconRequest<'_> {
+    match bundle {
+        Some(dir) => IconRequest::bundle(IconKind::AppBundle, dir),
+        None => IconRequest::kind(IconKind::Executable),
+    }
+}
 
 /// The composed [`ControlState`] for an action whose availability is `allowed`.
 ///
@@ -554,7 +572,14 @@ trait SectionView {
     }
 
     /// Paint the section into its own regions.
-    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>);
+    ///
+    /// `artwork` resolves every icon the section draws — an application's own
+    /// picture where one is attested, its class's shipped artwork otherwise —
+    /// so no draw site rasterises a glyph itself. It is passed to the render
+    /// paths rather than carried on [`SectionCtx`] because only they need it:
+    /// the context is `Copy` and reaches the input paths too, and a mutable
+    /// borrow on it would have to be threaded through every one of them.
+    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork);
 
     /// Paint the summary this section asked the location band to seat
     /// ([`SectionAnatomy::band_summary`]), into the rectangle the band
@@ -562,8 +587,15 @@ trait SectionView {
     ///
     /// Nothing by default: a section with no census in its anatomy is never
     /// given a rectangle to paint into, so the two can never disagree.
-    fn render_band(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
-        let _ = (surface, rect, scale, theme);
+    fn render_band(
+        &self,
+        surface: &mut Surface,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
+        let _ = (surface, rect, scale, theme, artwork);
     }
 
     /// Route a pointer event to the section's items, reporting every control
@@ -601,7 +633,13 @@ trait SectionView {
 
     /// Paint this section's overlay, above every other region including the
     /// scrollbar.
-    fn render_overlay(&self, _surface: &mut Surface, _ctx: SectionCtx<'_>) {}
+    fn render_overlay(
+        &self,
+        _surface: &mut Surface,
+        _ctx: SectionCtx<'_>,
+        _artwork: &mut dyn IconArtwork,
+    ) {
+    }
 
     /// Route a pointer event to this section's overlay while it
     /// [`holds_pointer`](Self::holds_pointer), reporting every control whose
@@ -1364,6 +1402,7 @@ impl Switchboard {
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        artwork: &mut dyn IconArtwork,
     ) {
         self.sync_scroll(bounds, scale, theme);
         let layout = self.compute_layout(bounds, scale, theme);
@@ -1374,8 +1413,8 @@ impl Switchboard {
         // pixel no control covers keeps whatever the shared frame region held
         // before, which reads as a transparent window.
         Self::fill_client(surface, bounds, theme);
-        self.render_location(surface, layout.location, scale, theme);
-        self.render_section(surface, ctx);
+        self.render_location(surface, layout.location, scale, theme, artwork);
+        self.render_section(surface, ctx, artwork);
 
         // The scrollbar, drawn after the content so its thumb sits above it.
         self.scroll.render(surface, layout.scroll, scale, theme);
@@ -1384,7 +1423,7 @@ impl Switchboard {
         // region, including the scrollbar. Only one can be open:
         // each is modal over the whole composition while it is, so no input
         // can reach the control that would open the other.
-        self.active().render_overlay(surface, ctx);
+        self.active().render_overlay(surface, ctx, artwork);
         if let Some(menu) = &self.section_menu {
             let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme);
             menu.render(surface, rect, scale, theme);
@@ -1394,11 +1433,19 @@ impl Switchboard {
     /// Paint the location band: the trail naming where the reader is, the
     /// section's own summary beside it, then the command that opens the
     /// section list, over the one [`Switchboard::band`] the hit test reads.
-    fn render_location(&self, surface: &mut Surface, location: Rect, scale: Scale, theme: &Theme) {
+    fn render_location(
+        &self,
+        surface: &mut Surface,
+        location: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
         let band = self.band(location, theme, scale);
         self.trail.render(surface, band.trail, scale, theme);
         if let Some(summary) = band.summary {
-            self.active().render_band(surface, summary, scale, theme);
+            self.active()
+                .render_band(surface, summary, scale, theme, artwork);
         }
         self.section_list
             .render(surface, band.command, scale, theme, None);
@@ -1422,9 +1469,14 @@ impl Switchboard {
     /// neither a scrolled window of a longer list nor the Activities list's
     /// button-less member rows between its header rows
     /// (`plans/NEW-SWITCHBOARD.md` S3).
-    fn render_section(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+    fn render_section(
+        &self,
+        surface: &mut Surface,
+        ctx: SectionCtx<'_>,
+        artwork: &mut dyn IconArtwork,
+    ) {
         let section = self.active();
-        section.render(surface, ctx);
+        section.render(surface, ctx, artwork);
         let info = section.list_info(&ctx.frame, ctx.scale, ctx.theme);
         if let Some(column) = Self::action_column(info, section.row_buttons(), ctx.scale, ctx.theme)
         {

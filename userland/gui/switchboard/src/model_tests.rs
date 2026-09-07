@@ -8,9 +8,11 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{Duration64, ProcId, Signal, Time64};
 
+use tairix_abi::switchboard_ipc::OWNER_BUNDLES_MAX;
+
 use super::{
-    apply_action, build_model, signal_pid, Effect, RollingMeters, SessionReport, TaskMeters,
-    TASK_HISTORY_LEN,
+    apply_action, build_model, signal_pid, Effect, OwnerBundles, RollingMeters, SessionReport,
+    TaskMeters, TASK_HISTORY_LEN,
 };
 use crate::derive::{derive_summary, Hysteresis};
 use crate::sample::{ProcessSummary, Sample};
@@ -46,7 +48,14 @@ fn model(
     meters: &mut RollingMeters,
     authority: &dyn tairix_abi::CapabilityQuery,
 ) -> super::PanelModel {
-    build_model("Switchboard", sample, session, meters, authority)
+    build_model(
+        "Switchboard",
+        sample,
+        session,
+        &OwnerBundles::new(),
+        meters,
+        authority,
+    )
 }
 
 #[test]
@@ -989,4 +998,91 @@ fn a_system_trace_is_bounded_and_drops_its_oldest_reading() {
         .collect();
     assert_eq!(meters.system.cpu_history(), expected.as_slice());
     assert_eq!(meters.system.memory_history(), expected.as_slice());
+}
+
+// --- Which bundle each owner was launched from -----------------------------
+
+#[test]
+fn a_reported_owner_reaches_its_task_row() {
+    // Before this the Tasks table drew one generic executable glyph down every
+    // row, so a reader could not tell one process from another at a glance.
+    let sample = sample_with(alloc::vec![
+        process(11, ProcessState::Running, b"shell", Some(100)),
+        process(12, ProcessState::Running, b"terminal", Some(200)),
+    ]);
+    let mut bundles = OwnerBundles::new();
+    let terminal = sample.processes[1].proc_id;
+    bundles.record(terminal, "/System/Applications/terminal.app");
+
+    let panel = build_model(
+        "Switchboard",
+        &sample,
+        &SessionReport::HEALTHY,
+        &bundles,
+        &mut meters_for(&sample),
+        &NONE,
+    );
+    let rows = &panel.model.tasks;
+    assert_eq!(
+        rows[0].bundle, None,
+        "a process nothing attests a bundle for"
+    );
+    assert_eq!(
+        rows[1].bundle.as_deref(),
+        Some("/System/Applications/terminal.app")
+    );
+}
+
+#[test]
+fn a_reported_owner_is_dropped_once_the_process_is_gone() {
+    let first = sample_with(alloc::vec![process(
+        11,
+        ProcessState::Running,
+        b"terminal",
+        Some(100)
+    )]);
+    let owner = first.processes[0].proc_id;
+    let mut bundles = OwnerBundles::new();
+    bundles.record(owner, "/Apps/Terminal.app");
+    assert_eq!(bundles.of(owner), Some("/Apps/Terminal.app"));
+
+    // A different process list no longer names it, so the roster follows the
+    // machine rather than accumulating every application ever launched.
+    let second = sample_with(alloc::vec![process(
+        12,
+        ProcessState::Running,
+        b"shell",
+        Some(100)
+    )]);
+    bundles.retain_live(&second.processes);
+    assert!(bundles.is_empty(), "a departed owner is forgotten");
+    assert_eq!(bundles.of(owner), None);
+}
+
+#[test]
+fn the_retained_roster_refuses_to_grow_past_its_stated_bound() {
+    let mut bundles = OwnerBundles::new();
+    let owner_of = |index: usize| {
+        let mut raw = [0u8; tairix_abi::PROC_ID_LEN];
+        let tag = (index + 1).to_le_bytes();
+        raw[..tag.len()].copy_from_slice(&tag);
+        ProcId::from_raw(raw)
+    };
+    for index in 0..OWNER_BUNDLES_MAX {
+        bundles.record(owner_of(index), "/Apps/A.app");
+    }
+    assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
+
+    // One more *new* owner is refused, so a stream of reports arriving faster
+    // than the prune cannot grow this without bound; its row draws the class
+    // icon, which is the honest degradation.
+    let beyond = owner_of(OWNER_BUNDLES_MAX);
+    bundles.record(beyond, "/Apps/B.app");
+    assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
+    assert_eq!(bundles.of(beyond), None);
+
+    // An owner already held is still *replaced*, so a re-launch corrects it.
+    bundles.record(owner_of(0), "/Apps/C.app");
+    assert_eq!(bundles.of(owner_of(0)), Some("/Apps/C.app"));
+    assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
 }

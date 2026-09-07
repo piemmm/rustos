@@ -35,7 +35,7 @@ use core::mem;
 use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -52,6 +52,7 @@ use tairix_controls::{
 use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::{carry_hover, restate_rail};
 use super::resources::TaskCostColumn;
+use super::task_icon;
 use super::{
     resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView, Sweep,
     Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
@@ -206,6 +207,11 @@ pub struct TaskSummary {
     pub proc_id: ProcId,
     /// The task's display name.
     pub name: String,
+    /// The application-bundle directory the desktop launched the task from,
+    /// when it launched it — what its row draws its icon from. [`None`] for a
+    /// process nothing attests a bundle for, whose row then draws the
+    /// executable class icon rather than an application's picture.
+    pub bundle: Option<String>,
     /// Which principal owns the task, for the Owner column.
     pub owner: TaskOwner,
     /// The CPU the scheduler last dispatched the task on, for the Core
@@ -243,6 +249,7 @@ impl Default for TaskSummary {
         Self {
             proc_id: ProcId::KERNEL,
             name: String::new(),
+            bundle: None,
             owner: TaskOwner::default(),
             core: None,
             lifecycle: None,
@@ -685,6 +692,9 @@ pub(super) struct TaskEntry {
     pub(super) row: TableRow,
     /// The task's own CPU history, as the Activity column's sparkline.
     pub(super) spark: Chart,
+    /// The bundle the task was launched from, so the row's leading icon is
+    /// that application's own picture.
+    pub(super) bundle: Option<String>,
 }
 
 /// Where the footer's controls sit: the shown/total count and the
@@ -1086,9 +1096,12 @@ impl TasksSection {
             state = state.with_selection(SelectionState::Selected);
         }
         let mut cells = Vec::with_capacity(COLUMNS.len());
-        // Every row the process list produces is a process, so the glyph
-        // names that rather than a classification nothing measures.
-        cells.push(TaskEntry::cell(COL_TASK, &task.name).with_icon(IconKind::Executable));
+        // An application the desktop launched wears its own picture; a
+        // process nothing attests a bundle for takes the executable class.
+        cells.push(
+            TaskEntry::cell(COL_TASK, &task.name)
+                .with_icon(task_icon(task.bundle.as_deref()).icon_kind()),
+        );
         cells.push(TaskEntry::cell(COL_OWNER, &task.owner.label()));
         cells.push(TaskEntry::cell(COL_STATE, task.state_text()));
         // The Activity column's reading is the sparkline drawn over it, so
@@ -1118,6 +1131,7 @@ impl TasksSection {
         TaskEntry {
             row: TableRow::new(cells).with_state(state),
             spark: Chart::new(PressureKind::Cpu).with_samples(task.cpu_history.iter().copied()),
+            bundle: task.bundle.clone(),
         }
     }
 
@@ -1871,17 +1885,30 @@ impl SectionView for TasksSection {
     }
 
     /// Paint the census tiles the location band seated for this section.
-    fn render_band(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
+    fn render_band(
+        &self,
+        surface: &mut Surface,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
         for (tile, rect) in self
             .census
             .iter()
             .zip(self.census_rects(rect, scale, theme))
         {
-            tile.render(surface, rect, scale, theme, None);
+            // A census tile counts a class of thing, so its picture is that
+            // class's — resolved through the cache like every other icon so
+            // the band rasterises nothing per frame.
+            let picture = tile.icon().and_then(|kind| {
+                artwork.artwork(IconRequest::kind(kind), tile.icon_side(rect, scale, theme))
+            });
+            tile.render(surface, rect, scale, theme, picture);
         }
     }
 
-    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
         let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         self.filters.render(surface, filters, ctx.scale, ctx.theme);
         self.search.render(surface, search, ctx.scale, ctx.theme);
@@ -1900,9 +1927,19 @@ impl SectionView for TasksSection {
                 break;
             };
             let item = info.item_rect(slot);
-            entry
-                .row
-                .render(surface, item, ctx.scale, ctx.theme, &COLUMN_WEIGHTS, None);
+            // The row's leading icon is the application's own picture where
+            // the desktop attests a bundle for the process, resolved at the
+            // side the row will draw it at.
+            let side = TableRow::icon_side(item, ctx.scale, ctx.theme);
+            let picture = artwork.artwork(task_icon(entry.bundle.as_deref()), side);
+            entry.row.render(
+                surface,
+                item,
+                ctx.scale,
+                ctx.theme,
+                &COLUMN_WEIGHTS,
+                picture,
+            );
             if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
                 entry.spark.render(surface, rect, ctx.scale, ctx.theme);
             }
@@ -2070,7 +2107,12 @@ impl SectionView for TasksSection {
         self.grouping.is_expanded()
     }
 
-    fn render_overlay(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+    fn render_overlay(
+        &self,
+        surface: &mut Surface,
+        ctx: SectionCtx<'_>,
+        _artwork: &mut dyn IconArtwork,
+    ) {
         if self.grouping.is_expanded() {
             self.grouping.render_popup(
                 surface,

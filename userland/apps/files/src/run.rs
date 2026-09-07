@@ -1232,34 +1232,19 @@ mod program {
         association_from_appinfo(bundle_path, &bytes)
     }
 
-    /// Read up to `max` bytes of the file at `path` (opened read-only), or
-    /// `None` on any refusal. Bounded so a path that resolves to an
+    /// Read the file at `path` (opened read-only), stopping one chunk past
+    /// `max`, or `None` on any refusal. Bounded so a path that resolves to an
     /// unexpectedly huge file is refused rather than read without limit; the
     /// descriptor is closed either way.
     ///
-    /// The one bounded read every consumer here shares — the bundle-manifest
-    /// scan and the icon-artwork reader differ only in their ceiling, so
-    /// neither carries its own copy of the open/read/close loop.
+    /// The streaming is the runtime's one whole-file policy
+    /// ([`tairix_rt::read_fd_to_end`]), so this app cannot drift to a chunk
+    /// size of its own; the open/close bracket is all that is local.
     fn read_bounded_file(path: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
         let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
-        let mut content = alloc::vec::Vec::new();
-        // A modest heap read buffer: the files read here are small, and a stack
-        // array of the full per-call I/O maximum would be a large-stack-array
-        // defect.
-        let mut chunk = alloc::vec![0u8; FS_IO_MAX];
-        while content.len() < max {
-            let want = chunk.len().min(max - content.len());
-            let Ok(got) = tairix_rt::fs_read(fd, content.len() as u64, &mut chunk[..want]) else {
-                let _ = tairix_rt::fs_close(fd);
-                return None;
-            };
-            if got == 0 {
-                break;
-            }
-            content.extend_from_slice(&chunk[..got]);
-        }
+        let content = tairix_rt::read_fd_to_end(fd, max).ok();
         let _ = tairix_rt::fs_close(fd);
-        Some(content)
+        content
     }
 
     /// Bound on one icon-artwork read: a single byte past the shared artwork

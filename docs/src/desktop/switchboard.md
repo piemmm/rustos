@@ -40,9 +40,11 @@ Commands travel the other way, over the per-instance mailbox
 the overview on a named section), `SeatReport` (which window owners the
 session's liveness vigil finds unresponsive), `Power` (the machine
 transition the user confirmed in the taskbar's quick-actions menu — see
-[Power transitions](#power-transitions)), and `FrameReport` (what the
+[Power transitions](#power-transitions)), `FrameReport` (what the
 session's last composited frame cost — see
-[The Desktop block](#the-desktop-block)). Every command is authenticated
+[The Desktop block](#the-desktop-block)), and `OwnerBundle` (which
+application bundle one window owner was launched from, so a task row can draw
+that application's own icon). Every command is authenticated
 against the kernel-attested sender of that very message, never a claim on
 the wire; a command from anyone but the attested session, a command that
 arrives before any session has been attested, and a frame that does not
@@ -204,7 +206,23 @@ fresh strip each sample would know none of the three, so a count moving under a
 resting pointer would blink the highlight off and swallow a click in flight.
 
 The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
-name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. Every
+name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. A row's
+icon asks for the launching *application's own* picture first: the desktop
+session reports which bundle it launched each window owner from
+(`SwitchboardCommand::OwnerBundle`), because the kernel's process record
+carries a name and no image path. A process nothing attests a bundle for —
+PID 1, a time service, a kernel thread — draws the executable class icon rather
+than being handed an application's picture.
+
+This service resolves the *class* tier and no further, by design. Reading a
+shipped asset or a bundle's own icon would need `CAP_FS_ACCESS`, and decoding
+untrusted image bytes a `CAP_PROC_SPAWN` sandbox child; the manifest requests
+neither, because this process already holds the system-wide process scope,
+task control and the machine's power authority and is the last one that should
+also read a user's files. Every icon therefore draws its built-in glyph —
+resolved once per (kind, pixel side) into the panel's retained artwork cache
+and blitted thereafter, which is what stopped every tile and row re-resolving
+its coverage on the draw path each frame. Every
 column is a *reading* about the task. The sort is the header's own, applied
 over the filtered rows and stable — rows a column cannot separate keep the
 order the sample reported them in. *Activity* is the task's own CPU sparkline,
@@ -349,6 +367,12 @@ A block holds whatever its reading *is* — a composition, a grid of per-core
 cells each with its own trace, the tasks costing the device most, a status
 pill the health buckets resolve to, or genuine facts. Rendering a resource as
 key/value text is the defect this section exists to fix.
+
+Each cell draws its own hairline rounded rim around an *unplated* tile, so a
+core's name, trace and two readings share one surface while a dozen cores stay
+told apart; its performance class is an outlined, toned `StatusPill` — orange
+for a throughput core, green for an efficiency one — because a resting pill's
+wash reads as nothing at badge size.
 
 **The per-core grid spreads evenly and every cell is one size.** How many
 cells a row can seat is a function of the pane's width, so the grid wraps

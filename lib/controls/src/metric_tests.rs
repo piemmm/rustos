@@ -18,11 +18,13 @@
 //! `measured_height` contract, progressive dropping of key lines under
 //! shrinking heights, and fail-closed degenerate bounds.
 
+use alloc::vec::Vec;
+
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{SignalRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::metric::{
@@ -30,7 +32,7 @@ use crate::metric::{
     MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 use crate::state::{MeterValue, PressureKind, PressureState, ProgressValue};
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::{control_font, high_contrast, text_ladder};
 
 fn font() -> BitmapFont {
     control_font(&Theme::dark(), Scale::ONE)
@@ -283,6 +285,116 @@ fn reading_height_grows_with_a_detail_line() {
     assert!(detailed.reading_height(Scale::ONE, &theme) > bare.reading_height(Scale::ONE, &theme));
 }
 
+// --- The value's own text role --------------------------------------------
+
+/// The topmost and bottommost rows within columns `[x_from, x_to)` holding a
+/// pixel of `want`, if any — the ink extent of the text drawn there.
+fn ink_rows(surface: &Surface, x_from: u32, x_to: u32, want: Pixel) -> Option<(u32, u32)> {
+    let rows: Vec<u32> = (0..surface.height())
+        .filter(|&y| (x_from..x_to.min(surface.width())).any(|x| surface.get(x, y) == Some(want)))
+        .collect();
+    Some((*rows.first()?, *rows.last()?))
+}
+
+#[test]
+fn the_value_role_names_a_larger_face_rather_than_a_hardcoded_size() {
+    // The role is resolved from the theme's ladder, so a theme authored at a
+    // larger base draws the same role larger. A hardcoded size would not move.
+    let small = text_ladder(12);
+    let large = text_ladder(24);
+    let tile = MetricTile::new("CPU", "18", PressureKind::Cpu).with_value_role(TextRole::Heading);
+    assert!(
+        tile.reading_height(Scale::ONE, &large) > tile.reading_height(Scale::ONE, &small),
+        "the heading role must follow the theme's own ladder"
+    );
+}
+
+#[test]
+fn a_heading_value_is_drawn_taller_than_a_body_one() {
+    let theme = Theme::dark();
+    let body = MetricTile::new("", "18", PressureKind::Cpu);
+    let heading = body.clone().with_value_role(TextRole::Heading);
+    let ink = premul(theme.palette().on_surface);
+
+    let body_h = tile_surface_at(&body, &theme, Scale::ONE, 220, 200);
+    let heading_h = tile_surface_at(&heading, &theme, Scale::ONE, 220, 200);
+    let (bt, bb) = ink_rows(&body_h, 0, 220, ink).expect("body value ink");
+    let (ht, hb) = ink_rows(&heading_h, 0, 220, ink).expect("heading value ink");
+    assert!(
+        hb - ht > bb - bt,
+        "heading {} rows vs body {} rows",
+        hb - ht + 1,
+        bb - bt + 1
+    );
+}
+
+#[test]
+fn a_large_value_and_a_body_unit_share_one_baseline() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let tile = MetricTile::new("", "18", PressureKind::Cpu)
+        .with_unit("% busy")
+        .with_value_role(TextRole::Heading);
+    let surface = tile_surface_at(&tile, &theme, scale, 220, 200);
+    let value_ink = premul(theme.palette().on_surface);
+    let unit_ink = premul(theme.palette().on_surface_muted);
+
+    let (_, value_bottom) = ink_rows(&surface, 0, 220, value_ink).expect("value ink");
+    // The unit trails the value on the same line, so it is measured over the
+    // columns to the right of where the figure ends.
+    let value_right = (0..220)
+        .rfind(|&x| (0..surface.height()).any(|y| surface.get(x, y) == Some(value_ink)))
+        .expect("value columns");
+    let (_, unit_bottom) =
+        ink_rows(&surface, value_right + 1, 220, unit_ink).expect("unit ink beside it");
+    // Baselines agree, so the two bottoms differ only by a descender's worth
+    // rather than by the difference between the two line boxes.
+    let gap = value_bottom.abs_diff(unit_bottom);
+    assert!(
+        gap <= font().line_height() / 3,
+        "value bottom {value_bottom}, unit bottom {unit_bottom}"
+    );
+}
+
+#[test]
+fn the_value_role_grows_the_reading_height_the_owner_positions_from() {
+    let theme = Theme::dark();
+    let body = MetricTile::new("", "18", PressureKind::Cpu).with_unit("% busy");
+    let heading = body.clone().with_value_role(TextRole::Heading);
+    // An owner placing context lines beneath a hero measures from these, so a
+    // taller figure must be reported rather than silently overrun.
+    assert!(heading.reading_height(Scale::ONE, &theme) > body.reading_height(Scale::ONE, &theme));
+    assert!(heading.measured_height(Scale::ONE, &theme) > body.measured_height(Scale::ONE, &theme));
+}
+
+#[test]
+fn an_inline_reading_takes_the_value_role_too() {
+    let theme = Theme::dark();
+    let body = MetricTile::new("VM", "9.7%", PressureKind::Cpu).with_layout(MetricLayout::Inline);
+    let heading = body.clone().with_value_role(TextRole::Heading);
+    assert!(heading.reading_height(Scale::ONE, &theme) > body.reading_height(Scale::ONE, &theme));
+
+    let ink = premul(theme.palette().on_surface);
+    let plain = tile_surface_at(&body, &theme, Scale::ONE, 220, 200);
+    let loud = tile_surface_at(&heading, &theme, Scale::ONE, 220, 200);
+    let (pt, pb) = ink_rows(&plain, 0, 220, ink).expect("body reading ink");
+    let (lt, lb) = ink_rows(&loud, 0, 220, ink).expect("heading reading ink");
+    assert!(lb - lt > pb - pt);
+}
+
+#[test]
+fn the_default_value_role_is_the_body_face() {
+    let theme = Theme::dark();
+    let tile = MetricTile::new("CPU", "62%", PressureKind::Cpu).with_unit("of 4 cores");
+    assert_eq!(tile.value_role(), TextRole::Body);
+    // So an existing consumer's layout is bit-identical to naming Body itself.
+    let named = tile.clone().with_value_role(TextRole::Body);
+    assert_eq!(
+        tile_surface(&tile, &theme, Scale::ONE).pixels(),
+        tile_surface(&named, &theme, Scale::ONE).pixels()
+    );
+}
+
 // --- Progressive omission under shrinking heights -------------------------
 
 #[test]
@@ -481,6 +593,55 @@ fn without_an_icon_the_stacked_layout_is_unchanged_from_before() {
     assert_eq!(tile.icon(), None);
     assert_eq!(tile.layout(), MetricLayout::Stacked);
     assert!(tile.is_plated());
+}
+
+#[test]
+fn icon_side_is_what_the_render_actually_draws_at() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    // An owner resolves its picture at this side, so a mismatch would cache a
+    // picture the tile never draws at that size.
+    let tile = MetricTile::new("VM", "9.7%", PressureKind::Cpu)
+        .with_icon(IconKind::AppBundle)
+        .with_layout(MetricLayout::Inline)
+        .unplated();
+    let bounds = Rect::new(0, 0, 220, tile.measured_height(scale, &theme));
+    let side = tile.icon_side(bounds, scale, &theme);
+    assert!(side > 0);
+
+    // The drawn slot is a square of that side in the leading gutter: the tint
+    // reaches its far column and not the one past it.
+    let mut surface = Surface::new(220, bounds.height).expect("surface");
+    tile.render(&mut surface, bounds, scale, &theme, None);
+    let tint = premul(theme.palette().cpu_pressure);
+    let has_column = |x: u32| (0..surface.height()).any(|y| surface.get(x, y) == Some(tint));
+    assert!((0..side).any(has_column), "the slot holds the icon");
+    assert!(
+        !(side..surface.width()).any(has_column),
+        "and nothing tinted lands past it"
+    );
+}
+
+#[test]
+fn a_tile_with_no_icon_reserves_no_slot() {
+    let theme = Theme::dark();
+    let tile = MetricTile::new("VM", "9.7%", PressureKind::Cpu);
+    let bounds = Rect::new(0, 0, 220, tile.measured_height(Scale::ONE, &theme));
+    assert_eq!(tile.icon_side(bounds, Scale::ONE, &theme), 0);
+}
+
+#[test]
+fn the_value_role_moves_the_icon_slot_with_the_line_it_is_sized_from() {
+    let theme = Theme::dark();
+    let body = MetricTile::new("CPU", "18", PressureKind::Cpu).with_icon(IconKind::AppBundle);
+    let heading = body.clone().with_value_role(TextRole::Heading);
+    // A taller reading is a taller primary block, so the icon that names it
+    // grows with it rather than staying at the body line's size.
+    let bounds = |tile: &MetricTile| Rect::new(0, 0, 220, tile.measured_height(Scale::ONE, &theme));
+    assert!(
+        heading.icon_side(bounds(&heading), Scale::ONE, &theme)
+            > body.icon_side(bounds(&body), Scale::ONE, &theme)
+    );
 }
 
 // --- MetricLayout::Inline ------------------------------------------------
@@ -904,6 +1065,51 @@ fn measured_width_grows_with_the_label_and_with_scale() {
     let unit = short.measured_width(Scale::ONE, &theme);
     let doubled = short.measured_width(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit, "a larger scale must need more width");
+}
+
+#[test]
+fn an_outlined_pill_rims_itself_in_its_own_tone_on_a_normal_theme() {
+    let theme = Theme::dark();
+    let resting = StatusPill::new("P").with_tone(SignalRole::Cpu);
+    let badge = resting.clone().outlined();
+    let tone = premul(theme.palette().cpu_pressure);
+
+    let resting_surface = pill_surface(&resting, &theme, Scale::ONE);
+    let badge_surface = pill_surface(&badge, &theme, Scale::ONE);
+    // The rim runs along the capsule's own top row, which the resting form
+    // leaves as its fill.
+    let rim_row = |surface: &Surface| {
+        (0..surface.width()).any(|x| surface.get(x, 0) == Some(tone))
+            || (0..surface.width()).any(|x| surface.get(x, surface.height() - 1) == Some(tone))
+    };
+    assert!(
+        !rim_row(&resting_surface),
+        "a resting pill collapses its rim"
+    );
+    assert!(rim_row(&badge_surface), "an outlined one draws it");
+    assert!(badge.is_outlined() && !resting.is_outlined());
+}
+
+#[test]
+fn an_outlined_neutral_pill_still_rims_itself() {
+    let theme = Theme::dark();
+    let neutral = StatusPill::new("--");
+    assert_ne!(
+        pill_surface(&neutral, &theme, Scale::ONE).pixels(),
+        pill_surface(&neutral.clone().outlined(), &theme, Scale::ONE).pixels()
+    );
+}
+
+#[test]
+fn an_outlined_pill_is_already_what_heavier_contrast_draws() {
+    // The heavier-contrast themes rim every pill, so asking for a rim there
+    // changes nothing rather than doubling it.
+    let heavy = high_contrast();
+    let pill = StatusPill::new("E").with_tone(SignalRole::Success);
+    assert_eq!(
+        pill_surface(&pill, &heavy, Scale::ONE).pixels(),
+        pill_surface(&pill.clone().outlined(), &heavy, Scale::ONE).pixels()
+    );
 }
 
 #[test]

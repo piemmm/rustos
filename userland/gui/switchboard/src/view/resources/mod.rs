@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use core::mem;
 
 use tairix_geometry::{to_i32, Rect, Region, Scale};
+use tairix_icon::IconArtwork;
 use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
@@ -699,7 +700,7 @@ impl SectionView for ResourcesSection {
         }
     }
 
-    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
+    fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
         if let Some(rect) = ctx.frame.sidebar {
             self.rail.render(surface, rect, ctx.scale, ctx.theme);
         }
@@ -718,11 +719,14 @@ impl SectionView for ResourcesSection {
         pane::render(
             surface,
             &self.items,
-            pane,
-            start,
-            ctx.scale,
-            ctx.theme,
-            ctx.font,
+            pane::PaneWindow {
+                primary: pane,
+                start,
+                scale: ctx.scale,
+                theme: ctx.theme,
+                font: ctx.font,
+            },
+            artwork,
         );
         if let Some(rect) = ctx.frame.rail {
             self.action_panel

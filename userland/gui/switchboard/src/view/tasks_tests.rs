@@ -3,7 +3,7 @@
 
 use tairix_abi::ProcessState;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
-use tairix_icon::IconKind;
+use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -671,7 +671,7 @@ fn the_activity_sparkline_is_drawn_into_its_own_column() {
     let mut sb = Switchboard::new(&m);
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font());
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
     let layout = sb.compute_layout(b, Scale::ONE, &theme);
     let info = sb.list_info(&layout, Scale::ONE, &theme);
@@ -721,7 +721,7 @@ fn a_tasks_activity_changes_nothing_the_table_draws() {
         }
         let mut sb = Switchboard::new(&m);
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         surface
     };
 
@@ -1084,11 +1084,130 @@ fn the_table_renders_in_both_themes_and_under_heavier_contrast() {
         let mut sb = Switchboard::new(&m);
         let b = bounds();
         let mut surface = Surface::new(b.width, b.height).expect("surface");
-        sb.render(&mut surface, b, Scale::ONE, &theme, font());
+        sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         let layout = sb.compute_layout(b, Scale::ONE, &theme);
         let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, &theme);
         assert!(has_ink(&surface, layout.content), "the table draws");
         assert!(has_ink(&surface, frame.header), "so does its header band");
         assert!(has_ink(&surface, frame.footer), "and its footer band");
     }
+}
+
+// --- The row's identity icon -----------------------------------------------
+
+/// A one-task model whose sole task was launched from `bundle`.
+fn one_task_from(bundle: Option<&str>) -> SwitchboardModel {
+    let mut m = SwitchboardModel::new("Switchboard");
+    m.tasks.push(TaskSummary {
+        proc_id: task_id(0),
+        name: alloc::string::String::from("terminal"),
+        bundle: bundle.map(alloc::string::String::from),
+        ..TaskSummary::default()
+    });
+    m
+}
+
+#[test]
+fn a_row_launched_from_a_bundle_names_the_application_icon() {
+    // Every row used to name the executable class, so a reader could not tell
+    // one process from another at a glance.
+    let launched = Switchboard::new(&one_task_from(Some("/System/Applications/terminal.app")));
+    let unattested = Switchboard::new(&one_task_from(None));
+
+    let leading = |sb: &Switchboard| {
+        sb.tasks.entries[0]
+            .row
+            .cells()
+            .iter()
+            .find_map(TableCell::icon)
+    };
+    assert_eq!(leading(&launched), Some(IconKind::AppBundle));
+    assert_eq!(
+        leading(&unattested),
+        Some(IconKind::Executable),
+        "a process nothing attests keeps the executable class"
+    );
+}
+
+#[test]
+fn a_rows_bundle_is_carried_to_the_paint_that_resolves_its_picture() {
+    // The row's own picture is resolved from the bundle at draw time, so the
+    // entry has to keep it: without this the render could only ask for a kind.
+    let sb = Switchboard::new(&one_task_from(Some("/Apps/Terminal.app")));
+    assert_eq!(
+        sb.tasks.entries[0].bundle.as_deref(),
+        Some("/Apps/Terminal.app")
+    );
+}
+
+#[test]
+fn a_row_draws_its_icon_whether_or_not_a_cache_answers() {
+    // `NoArtwork` holds no cache, so the row falls back to the inline glyph
+    // arithmetic. Either way the leading gutter must carry ink: a row with no
+    // picture at all would be the blank slot the glyph tier exists to prevent.
+    let theme = Theme::dark();
+    let sb = Switchboard::new(&one_task_from(Some("/Apps/Terminal.app")));
+    let b = bounds();
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    let mut sb = sb;
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
+
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let info = sb.list_info(&layout, Scale::ONE, &theme);
+    let item = info.item_rect(0);
+    let side = tairix_controls::TableRow::icon_side(item, Scale::ONE, &theme);
+    assert!(side > 0, "the row reserves a slot for its icon");
+    let gutter = Rect::new(item.left(), item.top(), side, item.height);
+    assert!(has_ink(&surface, gutter), "the icon slot draws something");
+}
+
+/// An artwork lookup that records every request it is asked for and answers
+/// none, so a test can see what the render *asked* for rather than only what
+/// it drew.
+#[derive(Default)]
+struct RecordingArtwork {
+    asked: alloc::vec::Vec<(IconKind, u32)>,
+}
+
+impl tairix_icon::IconArtwork for RecordingArtwork {
+    fn artwork(
+        &mut self,
+        request: tairix_icon::IconRequest<'_>,
+        side: u32,
+    ) -> Option<tairix_icon::IconPicture<'_>> {
+        self.asked.push((request.icon_kind(), side));
+        None
+    }
+}
+
+#[test]
+fn every_drawn_row_asks_the_cache_for_its_own_picture() {
+    // The lookup is threaded to the render so no draw site rasterises a glyph
+    // itself. A render that never asked would still *look* right — it would
+    // fall back to the inline path — and would keep the defect the cache was
+    // added to close, so what matters is that it asks.
+    let theme = Theme::dark();
+    let mut sb = Switchboard::new(&one_task_from(Some("/Apps/Terminal.app")));
+    let b = bounds();
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    let mut artwork = RecordingArtwork::default();
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut artwork);
+
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let info = sb.list_info(&layout, Scale::ONE, &theme);
+    let side = tairix_controls::TableRow::icon_side(info.item_rect(0), Scale::ONE, &theme);
+    assert!(
+        artwork.asked.contains(&(IconKind::AppBundle, side)),
+        "the row must ask for its own picture at the side it draws at: {:?}",
+        artwork.asked
+    );
+    // The census tiles ask too, each for the class it counts.
+    assert!(
+        artwork
+            .asked
+            .iter()
+            .any(|&(kind, _)| kind == IconKind::User),
+        "the census band must ask as well: {:?}",
+        artwork.asked
+    );
 }

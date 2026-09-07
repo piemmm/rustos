@@ -392,7 +392,9 @@ that. So the API carries the figures both ways:
   read against `screen_px` as its denominator.
 
   `DesktopFrameTotals::from_bytes` refuses counts no composite pass could
-  have produced — work without a frame to do it in, damage without a
+  have produced — any other counter without a frame to do it in (`screen_px`
+  included, since it is the denominator *of the counted frames*, so an epoch
+  that has composed nothing is all-zero and nothing else), damage without a
   rectangle, more copied or scanned-out pixels than damaged ones, more
   damage than the counted frames could clip to the screen, more driver
   calls than one per rectangle plus one per frame, or a peak above its own
