@@ -6,24 +6,30 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkIoCounters, BlkQueueCounters};
+use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
-use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
+use tairix_abi::net_ipc::{
+    NetCounters, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord, IF_NAME_LEN,
+};
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
     CpuCoreClass, CpuInfoRecord, KernelMemoryStats, MountAvailability, MountRecord,
-    MountVolumeState, VolumeIoQueueRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
+    MountVolumeState, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
 use super::{build_resource_report, used_permille};
+use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
-use crate::view::resources::{BlockBody, DeviceGroup, DeviceId, HeroInstrument};
-use crate::view::{Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured};
+use crate::view::resources::{BlockBody, DeviceGroup, DeviceId, HeroInstrument, StorageId};
+use crate::view::{
+    HealthSeverity, Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured,
+};
 
 /// A caller holding nothing, so a refusal is a refusal of authority.
 struct NoAuthority;
@@ -79,10 +85,32 @@ fn fact<'a>(device: &'a ResourceDevice, label: &str) -> &'a Reading {
     panic!("no pane block carries a fact named {label}");
 }
 
-/// A mount record with `total`/`avail` blocks of `block` bytes each.
-fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
+/// The volume identity the one-volume fixtures use.
+const VOLUME: [u8; MOUNT_VOLUME_ID_LEN] = [7; MOUNT_VOLUME_ID_LEN];
+
+/// The block-service endpoint the fixtures' service counters name.
+const DEV: u64 = 0x5953_2001;
+
+/// The rail id of the device serving [`VOLUME`], as a sample carrying its
+/// service counters names it.
+const SERVED: DeviceId = DeviceId::Storage(StorageId::Device(DEV));
+
+/// The rail id of [`VOLUME`] where no sample publishes a serving device for
+/// it, so the volume stands as its own subject.
+const UNSERVED: DeviceId = DeviceId::Storage(StorageId::Volume(VOLUME));
+
+/// A mount of `volume` at `target`, projected from `source`, with
+/// `total`/`avail` blocks of `block` bytes each.
+fn mount_of(
+    source: &str,
+    target: &str,
+    volume: [u8; MOUNT_VOLUME_ID_LEN],
+    block: u32,
+    total: u64,
+    avail: u64,
+) -> MountRecord {
     MountRecord::new(
-        b"nvme0",
+        source.as_bytes(),
         target.as_bytes(),
         b"arxfs",
         MountFlags::default(),
@@ -98,7 +126,30 @@ fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
             availability: MountAvailability::Available,
             medium: None,
         },
-        [7; MOUNT_VOLUME_ID_LEN],
+        volume,
+    )
+    .expect("a valid mount record")
+}
+
+/// A mount of [`VOLUME`] at `target` with `total`/`avail` blocks of `block`
+/// bytes each.
+fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
+    mount_of("nvme0", target, VOLUME, block, total, avail)
+}
+
+/// `record` with the live availability the mount snapshot would overlay.
+fn with_availability(record: &MountRecord, availability: MountAvailability) -> MountRecord {
+    MountRecord::new(
+        record.source_bytes(),
+        record.target_bytes(),
+        record.fstype_bytes(),
+        record.flags(),
+        MountVolumeState {
+            usage: record.usage(),
+            availability,
+            medium: record.medium(),
+        },
+        record.volume_id(),
     )
     .expect("a valid mount record")
 }
@@ -203,25 +254,28 @@ fn the_rail_always_carries_the_processor_memory_graphics_and_machine_panes() {
         .any(|device| device.group == DeviceGroup::Network));
 }
 
+/// The rail's `Storage` entries, in rail order, with their names.
+fn storage(report: &ResourceReport) -> Vec<(DeviceId, alloc::string::String)> {
+    report
+        .devices
+        .iter()
+        .filter(|d| d.group == DeviceGroup::Storage)
+        .map(|d| (d.id, d.name.clone()))
+        .collect()
+}
+
 #[test]
-fn the_rail_grows_one_entry_per_discovered_volume_and_interface() {
+fn the_rail_grows_one_entry_per_discovered_device_and_interface() {
     let sample = Sample {
         mounts: Some(alloc::vec![
-            mount("System:", 4_096, 100, 40),
-            mount("Backup:", 4_096, 200, 10),
+            mount_of("nvme0", "System:", [7; MOUNT_VOLUME_ID_LEN], 4_096, 100, 40),
+            mount_of("sda", "Backup:", [9; MOUNT_VOLUME_ID_LEN], 4_096, 200, 10),
         ]),
         net_facts: Some(alloc::vec![iface("eth0"), iface("eth1"), iface("lo")]),
         ..permitted()
     };
     let report = report_of(&sample);
-    assert_eq!(
-        report
-            .devices
-            .iter()
-            .filter(|d| d.group == DeviceGroup::Storage)
-            .count(),
-        2
-    );
+    assert_eq!(storage(&report).len(), 2);
     assert_eq!(
         report
             .devices
@@ -230,6 +284,207 @@ fn the_rail_grows_one_entry_per_discovered_volume_and_interface() {
             .count(),
         3
     );
+}
+
+#[test]
+fn a_volume_projected_at_many_paths_is_one_rail_entry() {
+    // The boot namespace projects one writable volume at `/` and at every
+    // flag-bearing subtree beneath it. Those are views of one volume, not
+    // six devices, and drawing one per mount is the defect this grouping
+    // exists to fix.
+    let sample = Sample {
+        mounts: Some(alloc::vec![
+            mount("/", 4_096, 100, 40),
+            mount("/System/Logs", 4_096, 100, 40),
+            mount("/System/Settings", 4_096, 100, 40),
+            mount("/Users", 4_096, 100, 40),
+            mount("/Apps", 4_096, 100, 40),
+            mount("/Storage", 4_096, 100, 40),
+        ]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    assert_eq!(
+        storage(&report),
+        alloc::vec![(UNSERVED, alloc::string::String::from("nvme0"))]
+    );
+    // Every projection is still reachable from the pane, so collapsing the
+    // rail loses nothing: each mount point states its own permission policy.
+    let device = device(&report, UNSERVED);
+    for target in [
+        "/",
+        "/System/Logs",
+        "/System/Settings",
+        "/Users",
+        "/Apps",
+        "/Storage",
+    ] {
+        let _ = fact(device, target);
+    }
+    // The capacity is the volume's, counted once rather than six times.
+    assert_eq!(
+        fact(device, "Capacity"),
+        &Reading::measured("240.0 KiB of 400.0 KiB")
+    );
+    assert_eq!(fact(device, "Volumes"), &Reading::measured("1"));
+}
+
+#[test]
+fn volumes_sharing_one_served_device_are_one_rail_entry() {
+    // Two partitions of one disk report the *same* device fold, so drawing
+    // one entry each would state that disk's throughput twice.
+    let root = [7; MOUNT_VOLUME_ID_LEN];
+    let system = [8; MOUNT_VOLUME_ID_LEN];
+    let counters = BlkIoCounters {
+        read_bytes: 4 << 20,
+        write_bytes: 1 << 20,
+        read_ops: 512,
+        write_ops: 128,
+        busy_ns: 500_000_000,
+        read_wait_ns: 64_000_000,
+        write_wait_ns: 32_000_000,
+    };
+    let sample = Sample {
+        mounts: Some(alloc::vec![
+            mount_of("ARXFSRoot", "/", root, 4_096, 100, 40),
+            mount_of("ARXFSSystem", "/System", system, 4_096, 50, 10),
+        ]),
+        volume_io_stats: Some(alloc::vec![
+            VolumeIoStatsRecord::new(root, DEV, counters),
+            VolumeIoStatsRecord::new(system, DEV, counters),
+        ]),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    assert_eq!(
+        storage(&report),
+        alloc::vec![(
+            SERVED,
+            alloc::string::String::from("ARXFSRoot · ARXFSSystem")
+        )]
+    );
+    let device = device(&report, SERVED);
+    assert_eq!(fact(device, "Volumes"), &Reading::measured("2"));
+    // Both volumes' capacities, each counted once: 240 KiB of 400 KiB and
+    // 160 KiB of 200 KiB.
+    assert_eq!(
+        fact(device, "Capacity"),
+        &Reading::measured("400.0 KiB of 600.0 KiB")
+    );
+    // Each volume names its own filesystem and capacity, then its mounts.
+    let _ = fact(device, "ARXFSRoot");
+    let _ = fact(device, "ARXFSSystem");
+    let _ = fact(device, "/");
+    let _ = fact(device, "/System");
+}
+
+#[test]
+fn a_devices_health_pill_takes_the_worst_of_the_volumes_on_it() {
+    // A volume that has gone unavailable overrides the device's live overlay
+    // in *its own* record alone, so reading only the first volume would
+    // report a healthy device with a dirty volume sitting on it. The
+    // buckets are the device's own fold and identical in every record.
+    let root = [7; MOUNT_VOLUME_ID_LEN];
+    let system = [8; MOUNT_VOLUME_ID_LEN];
+    let counters = BlkHealthCounters {
+        completions: 12,
+        ok: 12,
+        ..BlkHealthCounters::default()
+    };
+    let sample = Sample {
+        mounts: Some(alloc::vec![
+            mount_of("ARXFSRoot", "/", root, 4_096, 100, 40),
+            with_availability(
+                &mount_of("ARXFSSystem", "/System", system, 512, 50, 10),
+                MountAvailability::UnavailableDirty,
+            ),
+        ]),
+        volume_io_stats: Some(alloc::vec![
+            VolumeIoStatsRecord::new(root, DEV, BlkIoCounters::default()),
+            VolumeIoStatsRecord::new(system, DEV, BlkIoCounters::default()),
+        ]),
+        volume_health: Some(alloc::vec![
+            VolumeIoHealthRecord::new(root, DEV, MountAvailability::Available, counters),
+            VolumeIoHealthRecord::new(system, DEV, MountAvailability::UnavailableDirty, counters),
+        ]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let device = device(&report, SERVED);
+    let health = device
+        .blocks
+        .iter()
+        .find_map(|block| match &block.body {
+            BlockBody::Health { pill, severity, .. } => Some((pill.clone(), *severity)),
+            _ => None,
+        })
+        .expect("the pane carries a health block");
+    assert_eq!(health.1, HealthSeverity::Failing);
+    assert_eq!(health.0, "Failing");
+    // Each volume's own availability is still stated beside it.
+    assert_eq!(
+        fact(device, "ARXFSSystem"),
+        &Reading::measured("arxfs · 20.0 KiB of 25.0 KiB · unavailable (dirty)")
+    );
+    // Two volumes formatted differently name both block sizes rather than
+    // reporting whichever came first as the device's.
+    assert_eq!(
+        fact(device, "Block size"),
+        &Reading::measured("4.0 KiB · 512 B")
+    );
+}
+
+#[test]
+fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
+    // Folding per mount deltas a device's cumulative counters against
+    // themselves: the second fold of one sample sees the first fold's own
+    // reading as the interval's earlier end, derives a nought rate, and
+    // plots it. The rail then shows an idle disk and a flat trace for the
+    // volume the machine is actually running from.
+    let mut meters = RollingMeters::new();
+    let projected = |stats: VolumeIoStatsRecord| Sample {
+        mounts: Some(alloc::vec![
+            mount("/", 4_096, 100, 40),
+            mount("/Users", 4_096, 100, 40),
+            mount("/Apps", 4_096, 100, 40),
+        ]),
+        volume_io_stats: Some(alloc::vec![stats]),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    };
+    let first = projected(io_stats(0, 0, 0, 0, 0, 0, 0));
+    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let second = projected(io_stats(
+        4 << 20,
+        1 << 20,
+        512,
+        128,
+        500_000_000,
+        64_000_000,
+        32_000_000,
+    ));
+    let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let device = device(&report, SERVED);
+    assert_eq!(device.hero.value, Reading::measured("5.0 MiB/s"));
+    // One interval, one trace point — not one per projection.
+    assert_eq!(device.trend.len(), 1);
+    assert_eq!(meters.devices.primary_history(SERVED).len(), 1);
+}
+
+#[test]
+fn a_mount_with_no_backing_volume_is_no_storage_device() {
+    // The in-RAM layout directories the default namespace lays out carry no
+    // volume, no capacity and no device. They are view plumbing, and
+    // reporting them as disks is the per-mount defect wearing another hat.
+    let sample = Sample {
+        mounts: Some(alloc::vec![
+            mount_of("", "/System", [0; MOUNT_VOLUME_ID_LEN], 0, 0, 0),
+            mount_of("", "/Users", [0; MOUNT_VOLUME_ID_LEN], 0, 0, 0),
+        ]),
+        ..permitted()
+    };
+    assert!(storage(&report_of(&sample)).is_empty());
 }
 
 #[test]
@@ -330,13 +585,15 @@ fn the_per_core_grid_states_its_absence_when_the_inventory_did_not_answer() {
 }
 
 #[test]
-fn a_volumes_capacity_comes_from_its_block_counts() {
+fn a_storage_devices_capacity_comes_from_its_volumes_block_counts() {
     let sample = Sample {
         mounts: Some(alloc::vec![mount("System:", 4_096, 100, 40)]),
         ..permitted()
     };
     let report = report_of(&sample);
-    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    // With no service counters published there is no serving device to
+    // group on, so the volume stands as its own subject.
+    let volume = device(&report, UNSERVED);
     // 60 of 100 blocks of 4 KiB used.
     assert_eq!(volume.reading, Reading::measured("60%"));
     assert_eq!(
@@ -365,8 +622,8 @@ fn io_stats(
     write_wait_ns: u64,
 ) -> VolumeIoStatsRecord {
     VolumeIoStatsRecord::new(
-        [7; MOUNT_VOLUME_ID_LEN],
-        0x5953_2001,
+        VOLUME,
+        DEV,
         BlkIoCounters {
             read_bytes,
             write_bytes,
@@ -382,8 +639,8 @@ fn io_stats(
 /// A volume's queue occupancy on a solid-state device's budget.
 fn io_queue(in_flight: u64, depth_sum: u64, samples: u64) -> VolumeIoQueueRecord {
     VolumeIoQueueRecord::new(
-        [7; MOUNT_VOLUME_ID_LEN],
-        0x5953_2001,
+        VOLUME,
+        DEV,
         BlkQueueCounters {
             in_flight,
             queue_depth_sum: depth_sum,
@@ -415,7 +672,7 @@ fn a_volumes_first_sample_yields_no_rate_at_all() {
         Some(io_queue(1, 256, 256)),
     );
     let report = report_of(&sample);
-    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    let volume = device(&report, SERVED);
     for label in ["Utilisation", "Await, read", "Service time", "Queue depth"] {
         assert_eq!(
             fact(volume, label),
@@ -456,7 +713,7 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         Some(io_queue(3, 1_280, 640)),
     );
     let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
-    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    let volume = device(&report, SERVED);
 
     // busy_ns delta over the interval.
     assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
@@ -526,7 +783,7 @@ fn a_denied_queue_scope_costs_the_queue_rows_alone() {
         )
     };
     let report = build_resource_report(&second, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
-    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    let volume = device(&report, SERVED);
     assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
     assert_eq!(fact(volume, "Await, read"), &Reading::measured("125.0 us"));
     for label in ["Queue depth", "In-flight requests"] {
@@ -566,7 +823,7 @@ fn a_sample_with_no_counters_breaks_the_series_rather_than_deltaing_over_the_gap
         ));
     }
     let report = last.expect("three samples were folded");
-    let volume = device(&report, DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]));
+    let volume = device(&report, SERVED);
     assert_eq!(volume.hero.value, Reading::Absent(Unmeasured::Unavailable));
     assert_eq!(
         fact(volume, "Utilisation"),
@@ -648,7 +905,7 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
     ] {
         let _ = build_resource_report(&sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
     }
-    let id = DeviceId::Volume([7; MOUNT_VOLUME_ID_LEN]);
+    let id = SERVED;
     assert!(!meters.devices.primary_history(id).is_empty());
 
     // Unmounted: the sample names no volume at all.
@@ -674,6 +931,76 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
     assert_eq!(
         fact(volume, "Utilisation"),
         &Reading::Absent(Unmeasured::Unavailable)
+    );
+}
+
+/// A sample naming `eth0` with `rx`/`tx` cumulative bytes on it, over a
+/// one-second interval.
+fn interface_sample(rx: u64, tx: u64) -> Sample {
+    Sample {
+        net_facts: Some(alloc::vec![iface("eth0")]),
+        net_counters: Some(alloc::vec![NetInterfaceCountersRecord {
+            name: if_name("eth0"),
+            counters: NetCounters {
+                rx_bytes: rx,
+                tx_bytes: tx,
+                ..NetCounters::default()
+            },
+        }]),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    }
+}
+
+#[test]
+fn an_interface_entry_carries_the_trace_its_counters_derive() {
+    // The rail folds every interface's cumulative counters; an entry that
+    // then drew no trace would be measuring and discarding. A rate has no
+    // ceiling to fill a bar against, so the hero trends duplex rather than
+    // tracking.
+    let mut meters = RollingMeters::new();
+    let first = interface_sample(0, 0);
+    let _ = build_resource_report(&first, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    let report = build_resource_report(
+        &interface_sample(4 << 20, 1 << 20),
+        &mut meters,
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
+    let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
+    assert_eq!(eth0.trend.len(), 1);
+    match &eth0.hero.instrument {
+        HeroInstrument::Trend { samples, opposing } => {
+            assert_eq!(samples.len(), 1);
+            assert_eq!(opposing.as_ref().map(Vec::len), Some(1));
+        }
+        other => panic!("a rate's instrument is a duplex trend, not {other:?}"),
+    }
+}
+
+#[test]
+fn the_memory_entry_carries_its_own_committed_share_trace() {
+    // Its trace is the memory reading's own history, never the CPU's and
+    // never an empty vector dressed up as a decision.
+    let mut hysteresis = Hysteresis::new();
+    let mut meters = RollingMeters::new();
+    let sample = Sample {
+        memory_pressure: Some(MemoryPressureSample {
+            band: 0,
+            used_permille: 530,
+            total_bytes: 16_000_000_000,
+        }),
+        cpu_busy_permille: Some(180),
+        ..permitted()
+    };
+    for _ in 0..2 {
+        let _ = derive_summary(&sample, &mut hysteresis);
+        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
+    }
+    let report = build_resource_report(&sample, &mut meters, &SessionReport::HEALTHY, &NoAuthority);
+    assert_eq!(
+        device(&report, DeviceId::Memory).trend,
+        alloc::vec![530, 530]
     );
 }
 

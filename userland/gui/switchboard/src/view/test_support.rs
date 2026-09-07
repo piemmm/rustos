@@ -19,7 +19,7 @@ use tairix_icon::IconKind;
 use super::resources::{
     BlockBody, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceGroup, DeviceId,
     HeroInstrument, PaneBlock, PaneHero, PressureBanner, ResourceControl, ResourceDevice,
-    ResourceReport, TaskCostColumn,
+    ResourceReport, StorageId, TaskCostColumn,
 };
 use super::{
     ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, HealthSeverity, Reading, ReadingFact,
@@ -94,10 +94,10 @@ pub(super) fn resource_report() -> ResourceReport {
         devices: alloc::vec![
             cpu_device(),
             memory_device(),
-            volume_device(),
+            storage_device(),
             machine_device(),
         ],
-        volumes_absent: None,
+        storage_absent: None,
         interfaces_absent: Some(Unmeasured::NotPermitted),
     }
 }
@@ -208,12 +208,13 @@ fn memory_device() -> ResourceDevice {
     }
 }
 
-/// A volume: a health block, and a rate block stated absent in words.
-fn volume_device() -> ResourceDevice {
+/// A storage device: a health block, and a rate block stated absent in
+/// words.
+fn storage_device() -> ResourceDevice {
     ResourceDevice {
-        id: DeviceId::Volume([7; 16]),
+        id: DeviceId::Storage(StorageId::Device(0x5953_2001)),
         group: DeviceGroup::Storage,
-        name: alloc::string::String::from("nvme0 · System:"),
+        name: alloc::string::String::from("nvme0"),
         kind: PressureKind::Disk,
         reading: Reading::measured("72%"),
         trend: alloc::vec![],

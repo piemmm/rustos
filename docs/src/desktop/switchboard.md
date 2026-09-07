@@ -107,7 +107,7 @@ what is this machine doing, what broke.
 | Section | Source |
 |---|---|
 | Tasks | the sampled process list, as a filterable, searchable, sortable table with the selected task's commands beside it — see below |
-| Resources | one pane per resource *device* the sample names: the processor, the machine's memory, each mounted volume, each managed interface, the display path, and the machine's own identity, seats and authority — see below |
+| Resources | one pane per resource *device* the sample names: the processor, the machine's memory, each storage device, each managed interface, the display path, and the machine's own identity, seats and authority — see below |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
 
 A resource the service could not measure this cycle reads `unknown` with an
@@ -236,7 +236,7 @@ never a dash that reads like one, and never a plausible number.
 Resources is **one pane per resource device**, instrument-led. A vertical
 `Tabs` **sidebar** — the device rail — lists what discovery actually found,
 grouped: `Resources` (the processor, the machine's memory), `Storage` (one
-entry per mounted volume), `Network` (one per managed interface), `Graphics`
+entry per storage device), `Network` (one per managed interface), `Graphics`
 (the display path), then `Machine` (identity and uptime, sessions and seats,
 permissions and limits). Each entry carries its name, its current reading and
 its own bounded trace, so the rail is a live summary of the whole machine and
@@ -244,12 +244,42 @@ the pane is the detail of one part of it. The `Machine` entries carry no
 trace: they are facts rather than rates, and the absent instrument is what
 says so.
 
-**The rail's length is discovered, never declared.** Twelve cores, four
-volumes and three interfaces is the design case; a hundred-core machine with a
-dozen volumes gets a scrolling rail, not a truncated one, and no entry count
-is a compile-time constant. A machine with nothing mounted has no `Storage`
-group at all rather than an empty slot — but a rail group missing because the
-*inventory* was refused is a different statement, and the report carries which.
+**A `Storage` entry is a device, never a mount.** `VOLUME_IO_STATS` reports
+the *device's* cumulative counters — every volume on one disk reads the same
+fold, and the record names the serving block endpoint beside the volume id
+precisely because of it — while the boot namespace projects one writable
+volume at `/` and at each flag-bearing subtree beneath it. So the section
+groups the mount table before it draws anything: one entry per serving
+endpoint, carrying the volumes on it and the paths each is reachable at. Per
+mount, one disk's throughput would be reported once per projection *and* once
+per partition, and its counters would be deltaed against themselves — a
+second fold of one sample sees the first fold's own reading as the interval's
+earlier end, derives nought, and plots a flat trace for the disk the machine
+is running from. Where the kernel publishes no serving device for a volume
+there are no shared counters to collapse, so that volume stands as its own
+entry with its capacity alone; a mount with no backing volume at all (the
+in-RAM layout directories) is view plumbing and no storage device.
+
+**Every rail entry with a rate behind it carries a trace, from the counters
+the service deltas itself.** A storage device's entry carries both readings:
+its figure is how full it is — a level, which a trace would not say — and its
+trace is the throughput its byte counters delta into. An interface's figure
+is the rates query's already-averaged reading, which states its own averaging
+window beside the figure so nothing inherits it, while its trace is that
+interface's cumulative counters over *this* service's sample interval: the
+same fold and the same shared full-scale reference a storage device's trace
+uses, so two rail traces stay comparable by eye. Memory's trace is its
+committed share's own bounded history, recorded beside the CPU's through one
+series definition, so a refused reading on either side never shortens the
+other. Only the `Machine` entries have no instrument.
+
+**The rail's length is discovered, never declared.** Twelve cores, four disks
+and three interfaces is the design case; a hundred-core machine with a dozen
+disks gets a scrolling rail, not a truncated one, and no entry count is a
+compile-time constant. A machine with no storage device mounted has no
+`Storage` group at all rather than an empty slot — but a rail group missing
+because the *inventory* was refused is a different statement, and the report
+carries which.
 
 Cores are deliberately **not** rail entries: the CPU pane shows every core at
 once, so a per-core rail would state the same readings twice and push the
@@ -267,6 +297,17 @@ cells each with its own trace, the tasks costing the device most, a status
 pill the health buckets resolve to, or genuine facts. Rendering a resource as
 key/value text is the defect this section exists to fix.
 
+**The per-core grid spreads evenly and every cell is one size.** How many
+cells a row can seat is a function of the pane's width, so the grid wraps
+rather than squeezing; when it wraps it *balances* — four cores in a pane
+three cells wide draw as two rows of two, not a full row and a lone
+straggler. Every row then divides the grid's own column count, so a row that
+cannot be filled leaves its trailing slots empty instead of stretching its
+cells across them: a reader compares core against core by eye, which a cell
+three times its neighbour's width defeats. The column count is a layout input
+to the compile, so a resize recompiles the flow and the scroll range keeps
+describing what is on screen.
+
 **A resource under pressure wears a banner on its own pane**, above the hero:
 the band, how long it has stood there, and the relief the model recommends. A
 cause and its resource were never two places. A band's age has no interface
@@ -274,7 +315,7 @@ behind it — nothing timestamps a band change — so the service clocks it off
 the monotonic uptime reading and reads unmeasured where there is none, never a
 fabricated zero.
 
-**A volume's service readings are two-sample deltas, never a served
+**A storage device's service readings are two-sample deltas, never a served
 average.** `VOLUME_IO_STATS` publishes the device's cumulative bytes,
 completed requests, busy time and summed waits, and `VOLUME_IO_QUEUE` its
 occupancy and the `BlkDeviceClass` budget bounding it; the pane derives
@@ -287,7 +328,7 @@ every user may see, a queue depth is a driver internal — so a session without
 `CAP_SYSINFO_KERNEL` still reads its throughput and await while the two queue
 rows say which refusal they met.
 
-**The CPU, Memory and volume panes each carry the five tasks costing that
+**The CPU, Memory and storage panes each carry the five tasks costing that
 resource most**, from the per-task readings the process record already
 provides, so a pane and the Tasks table can never disagree. **Summing them is
 not the device's total** and the block says so: filesystem, RAID and swap

@@ -2,10 +2,10 @@
 //! entry that reaches it (`plans/NEW-SWITCHBOARD.md` S4).
 //!
 //! A device is whatever discovery reports — a processor, the machine's RAM,
-//! a mounted volume, a managed interface, the display path — plus the
+//! a storage device, a managed interface, the display path — plus the
 //! `Machine` group's three fact panes. Nothing here is a class: the rail
-//! grows with the machine, so twelve cores, four volumes and three
-//! interfaces need no redesign and neither does the fifth disk.
+//! grows with the machine, so twelve cores, four disks and three interfaces
+//! need no redesign and neither does the fifth disk.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -27,7 +27,7 @@ use crate::view::ActionVerdict;
 pub enum DeviceGroup {
     /// The processor and the machine's memory.
     Resources,
-    /// One entry per mounted volume.
+    /// One entry per storage device.
     Storage,
     /// One entry per managed interface.
     Network,
@@ -51,21 +51,39 @@ impl DeviceGroup {
     }
 }
 
+/// Which storage subject a [`DeviceGroup::Storage`] entry is about.
+///
+/// The I/O counters the per-volume queries report are the *device's*: every
+/// volume on one disk reads the same fold, and one volume is projected at as
+/// many mount points as the namespace needs. Keying an entry on the mount
+/// would draw one volume once per projection and delta its counters against
+/// themselves; keying it on the volume would report one disk's throughput
+/// once per partition. Where the kernel publishes no serving device for a
+/// volume there are no shared counters to collapse, so the volume stands as
+/// its own subject with its capacity alone.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StorageId {
+    /// A served block device, by the block-service endpoint id serving it.
+    Device(u64),
+    /// A volume the kernel publishes no serving device for.
+    Volume([u8; MOUNT_VOLUME_ID_LEN]),
+}
+
 /// A device's own stable identity, which the selection remembers.
 ///
 /// A rail position would silently re-point at a different device the moment
 /// one above it went away, so the selection is remembered as the subject
-/// itself and re-resolved against each fresh sample. The volume and
+/// itself and re-resolved against each fresh sample. The storage and
 /// interface variants carry the identity their own report keys on — a
-/// volume id and an interface name — never a rail index.
+/// serving endpoint or volume id and an interface name — never a rail index.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DeviceId {
     /// The processor.
     Cpu,
     /// The machine's memory.
     Memory,
-    /// One mounted volume, by its volume id.
-    Volume([u8; MOUNT_VOLUME_ID_LEN]),
+    /// One storage device.
+    Storage(StorageId),
     /// One managed interface, by its NUL-padded name.
     Interface([u8; IF_NAME_LEN]),
     /// The display path.
@@ -239,8 +257,8 @@ pub struct ResourceReport {
     /// The devices, in rail order.
     pub devices: Vec<ResourceDevice>,
     /// Why the mount table produced no `Storage` entries, when that is a
-    /// refusal rather than a machine with nothing mounted.
-    pub volumes_absent: Option<Unmeasured>,
+    /// refusal rather than a machine with no storage device mounted.
+    pub storage_absent: Option<Unmeasured>,
     /// Why the interface inventory produced no `Network` entries, when that
     /// is a refusal rather than a machine with no interfaces.
     pub interfaces_absent: Option<Unmeasured>,

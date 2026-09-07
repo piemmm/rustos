@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 21 open, 84 closed, 105 total.
+table normalises all three to **closed**. 23 open, 84 closed, 107 total.
 
-### Open (21)
+### Open (23)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -48,6 +48,8 @@ table normalises all three to **closed**. 21 open, 84 closed, 105 total.
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
+| D106 | the boot-floor volumes publish no I/O source, so the machine's own root and `/System` report no service, queue or health reading at all | the three per-volume `sysinfo` queries omit them; every consumer sees the machine's own disk as a storage device with no rate |
+| D107 | `ResourceReport`'s `storage_absent` / `interfaces_absent` have no reader | the report resolves why a rail group is empty and no surface states it |
 
 ### Closed (84)
 
@@ -1213,6 +1215,35 @@ for a taken name, a populated directory and a retryable transient at once, so a
 name taken between the VFS's pre-check and the driver call was reported as an
 I/O error, and any consumer reaching a filesystem driver without the VFS's
 per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
+
+- **D106 — the boot-floor volumes publish no I/O source.** `VolumeIoSource`
+  is attached only by the runtime attach/recover path
+  (`volume_service::register_with_health`); the two boot-floor registrations
+  in `system_mount` (`ARXFSRoot` at `/`, `ARXFSSystem` at `/System`) pass
+  none. `MountRegistry::io_records` — the one walk behind
+  `VOLUME_IO_STATS`, `VOLUME_IO_QUEUE` and `VOLUME_IO_HEALTH` — skips an
+  entry with no source, so on a normal boot those three queries report
+  *nothing* about the disk the machine is running from: no throughput, no
+  utilisation, no await, no queue depth, no health bucket. Every consumer
+  inherits it (`sysinfo storage`, the Switchboard Storage pane, any future
+  health surface): the volume reads its capacity and states its rate
+  unmeasured, which is honest but is not the reading a reader needs about a
+  failing boot disk (§26.5). The counters are folded by `BlkClient` on the
+  block-service path, and the boot floor reaches its disk as an in-kernel
+  `Block` behind `BlockCache`/`SharedBlock` with no serving endpoint and so
+  no `dev`, which is why the wiring is not a one-liner: the fold and a
+  synthetic device identity have to exist below the block-service client.
+  Owner: `plans/FIX-IO.md` (IO2/IO3/IO5 per-device counters). Needs its own
+  vertical asserting the boot volume appears in all three queries.
+- **D107 — the report states why a rail group is empty and nothing draws
+  it.** `ResourceReport::storage_absent` / `interfaces_absent` carry the
+  refusal the sample resolved, so "no storage device is mounted" and "the
+  inventory was refused" are distinguishable — but the Resources rail is a
+  vertical `Tabs`, which has no affordance for a group heading with a stated
+  absence under it, and no other surface reads the two fields. Either
+  `lib/controls`' `Tabs` gains that affordance (and both fields are drawn) or
+  the fields are deleted as speculative surface (§2.3). Producer-with-no-
+  consumer today; not a wrong reading, an undrawn one.
 
 ## Coupling to be aware of
 

@@ -33,12 +33,7 @@ pub(super) fn device(sample: &Sample, meters: &RollingMeters) -> ResourceDevice 
         name: String::from("Memory"),
         kind: PressureKind::Memory,
         reading: committed.clone(),
-        trend: meters
-            .system
-            .cpu_history()
-            .is_empty()
-            .then(Vec::new)
-            .unwrap_or_else(Vec::new),
+        trend: meters.system.memory_history().to_vec(),
         hero: PaneHero {
             value: reading_of(
                 sample,

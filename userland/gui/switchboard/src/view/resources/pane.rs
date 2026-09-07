@@ -295,7 +295,14 @@ pub(in crate::view) enum ItemBody {
     /// A measured whole split into its named parts.
     Composition(CompositionBar),
     /// One row of the per-core grid.
-    Cells(Vec<CellView>),
+    Cells {
+        /// The row's cells, in grid order.
+        cells: Vec<CellView>,
+        /// The grid's column count, which every row divides by — so a
+        /// final short row's cells are the size of every other row's
+        /// rather than stretching to fill it.
+        columns: u32,
+    },
     /// One top-consumer row: the task, what it costs, and the track
     /// comparing it with the largest consumer.
     Consumer(MetricTile),
@@ -459,10 +466,14 @@ fn push_block(
             ),
         },
         BlockBody::Cores(cells) => {
-            for chunk in cells.chunks(usize::try_from(cells_per_row.max(1)).unwrap_or(1)) {
+            let columns = grid_columns(cells.len(), cells_per_row);
+            for chunk in cells.chunks(usize::try_from(columns).unwrap_or(1)) {
                 push(
                     CELL_ROWS,
-                    ItemBody::Cells(chunk.iter().map(|cell| cell_view(cell, kind)).collect()),
+                    ItemBody::Cells {
+                        cells: chunk.iter().map(|cell| cell_view(cell, kind)).collect(),
+                        columns,
+                    },
                 );
             }
         }
@@ -583,6 +594,30 @@ pub(super) fn extent(items: &[PaneItem]) -> usize {
 pub(super) fn cells_per_row(width: u32, scale: Scale) -> u32 {
     let cell = scale.scale_length(CELL_WIDTH).max(1);
     (width / cell).clamp(1, CELLS_PER_ROW_MAX)
+}
+
+/// The per-core grid's column count for `count` cells where a row this wide
+/// holds at `most` of them.
+///
+/// The grid spreads its cells evenly over the rows it needs rather than
+/// filling each row and leaving a straggler: four cores in a pane three
+/// cells wide draw as two rows of two. Every row then divides this one
+/// count, so a final short row's cells are the size of every other row's.
+fn grid_columns(count: usize, most: u32) -> u32 {
+    let most = usize::try_from(most.max(1)).unwrap_or(1);
+    let count = count.max(1);
+    let columns = count.div_ceil(count.div_ceil(most));
+    u32::try_from(columns).unwrap_or(1)
+}
+
+/// One per-core cell's width in a grid `columns` wide across `width`, with
+/// `gap` between neighbours.
+///
+/// A function of the grid rather than of a row, so every cell of the grid is
+/// the same size — the last row's included.
+fn cell_width(width: u32, columns: u32, gap: u32) -> u32 {
+    let columns = columns.max(1);
+    width.saturating_sub(gap.saturating_mul(columns.saturating_sub(1))) / columns
 }
 
 /// Where one item draws within `primary`, given the first visible row.
@@ -737,7 +772,9 @@ fn render_item(
         }
         ItemBody::Fact(list) => list.render(surface, rect, scale, theme),
         ItemBody::Composition(bar) => bar.render(surface, rect, scale, theme),
-        ItemBody::Cells(cells) => render_cells(surface, cells, rect, scale, theme),
+        ItemBody::Cells { cells, columns } => {
+            render_cells(surface, cells, *columns, rect, scale, theme);
+        }
         ItemBody::Consumer(tile) => tile.render(surface, rect, scale, theme, None),
         ItemBody::Pill(pill) => {
             let width = pill.measured_width(scale, theme).min(rect.width);
@@ -763,19 +800,20 @@ fn render_item(
 
 /// Paint one grid row's cells side by side, each with its own trace under
 /// its name and its class badge in the corner.
+///
+/// The cell width comes from the grid's `columns`, never from this row's own
+/// length, so a final short row draws its cells at the grid's pitch and
+/// leaves the trailing slots empty instead of stretching them.
 fn render_cells(
     surface: &mut Surface,
     cells: &[CellView],
+    columns: u32,
     rect: Rect,
     scale: Scale,
     theme: &Theme,
 ) {
-    let count = u32::try_from(cells.len()).unwrap_or(1).max(1);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-    let width = rect
-        .width
-        .saturating_sub(gap.saturating_mul(count.saturating_sub(1)))
-        / count;
+    let width = cell_width(rect.width, columns, gap);
     if width == 0 {
         return;
     }
@@ -813,3 +851,7 @@ fn render_cells(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pane_tests.rs"]
+mod tests;

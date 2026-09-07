@@ -938,3 +938,55 @@ fn a_fault_carries_its_own_resource_cost_with_network_unmeasured() {
         "no query reports a process's network use, so the tile must say so"
     );
 }
+
+/// A sample whose CPU busy share and committed-memory share are `busy` and
+/// `memory` permille, either absent where the reading is [`None`].
+fn shares(busy: Option<u16>, memory: Option<u16>) -> Sample {
+    Sample {
+        cpu_busy_permille: busy,
+        memory_pressure: memory.map(|used_permille| crate::sample::MemoryPressureSample {
+            band: 0,
+            used_permille,
+            total_bytes: 16_000_000_000,
+        }),
+        ..Sample::default()
+    }
+}
+
+#[test]
+fn the_memory_trace_records_its_own_reading_rather_than_the_cpus() {
+    let meters = meters_over(&[shares(Some(100), Some(500)), shares(Some(200), Some(600))]);
+    assert_eq!(meters.system.cpu_history(), &[100, 200]);
+    assert_eq!(meters.system.memory_history(), &[500, 600]);
+}
+
+#[test]
+fn a_system_trace_takes_no_point_from_a_reading_it_could_not_measure() {
+    // A zero point would plot as a genuinely idle moment. The two readings
+    // are independent, so a refused memory reading never breaks the CPU
+    // trace and neither shortens the other.
+    let meters = meters_over(&[
+        shares(Some(100), None),
+        shares(None, Some(600)),
+        shares(Some(300), Some(700)),
+    ]);
+    assert_eq!(meters.system.cpu_history(), &[100, 300]);
+    assert_eq!(meters.system.memory_history(), &[600, 700]);
+}
+
+#[test]
+fn a_system_trace_is_bounded_and_drops_its_oldest_reading() {
+    let window = tairix_controls::MAX_CHART_SAMPLES;
+    let samples: Vec<Sample> = (0..window + 3)
+        .map(|i| {
+            let point = u16::try_from(i).unwrap_or(u16::MAX);
+            shares(Some(point), Some(point))
+        })
+        .collect();
+    let meters = meters_over(&samples);
+    let expected: Vec<u16> = (3..window + 3)
+        .map(|i| u16::try_from(i).unwrap_or(u16::MAX))
+        .collect();
+    assert_eq!(meters.system.cpu_history(), expected.as_slice());
+    assert_eq!(meters.system.memory_history(), expected.as_slice());
+}

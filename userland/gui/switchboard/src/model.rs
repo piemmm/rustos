@@ -68,18 +68,53 @@ pub(crate) fn display_name(bytes: &[u8]) -> String {
         .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// The rolling instrument state the panel's resource rows need that no single
-/// [`Sample`] carries: the CPU chart's bounded history, and the pressure
-/// verdicts the tray summary's own derivation already reached for the same
-/// readings.
+/// A bounded series of readings, oldest first, capped at the chart's own
+/// [`MAX_CHART_SAMPLES`] window.
 ///
-/// The history is held inline, capped at the chart's own
-/// [`MAX_CHART_SAMPLES`] window, so recording a sample never allocates
-/// and a service that runs for weeks never grows an unbounded log.
+/// Held inline and kept contiguous, so recording a sample never allocates, a
+/// service that runs for weeks never grows an unbounded log, and a reader
+/// takes the whole series as one slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Series {
+    points: [u16; MAX_CHART_SAMPLES],
+    len: usize,
+}
+
+impl Series {
+    /// An empty series.
+    const fn new() -> Self {
+        Self {
+            points: [0; MAX_CHART_SAMPLES],
+            len: 0,
+        }
+    }
+
+    /// Record `point`, dropping the oldest once the window is full.
+    fn push(&mut self, point: u16) {
+        if self.len == MAX_CHART_SAMPLES {
+            self.points.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        if let Some(slot) = self.points.get_mut(self.len) {
+            *slot = point;
+            self.len += 1;
+        }
+    }
+
+    /// The recorded readings, oldest first.
+    fn points(&self) -> &[u16] {
+        self.points.get(..self.len).unwrap_or(&[])
+    }
+}
+
+/// The rolling instrument state the panel's resource rows need that no single
+/// [`Sample`] carries: the CPU and memory charts' bounded histories, and the
+/// pressure verdicts the tray summary's own derivation already reached for
+/// the same readings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveMeters {
-    cpu_history: [u16; MAX_CHART_SAMPLES],
-    cpu_len: usize,
+    cpu: Series,
+    memory: Series,
     cpu_pressured: bool,
     memory_pressured: bool,
 }
@@ -91,12 +126,12 @@ impl Default for LiveMeters {
 }
 
 impl LiveMeters {
-    /// Empty history, neither resource pressured.
+    /// Empty histories, neither resource pressured.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            cpu_history: [0; MAX_CHART_SAMPLES],
-            cpu_len: 0,
+            cpu: Series::new(),
+            memory: Series::new(),
             cpu_pressured: false,
             memory_pressured: false,
         }
@@ -106,28 +141,31 @@ impl LiveMeters {
     /// latched for the very same reading, so the panel's meter and the tray
     /// icon's rail can never disagree.
     ///
-    /// Only a measured CPU reading enters the history: an interval the service
+    /// Only a measured reading enters a history: an interval the service
     /// could not measure contributes no point rather than a zero one, which
-    /// would plot as a genuine idle moment. The oldest point is dropped once
-    /// the window is full.
+    /// would plot as a genuine idle moment. The two are recorded
+    /// independently, so a refused memory reading never breaks the CPU trace.
     pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis) {
         self.cpu_pressured = hysteresis.cpu_pressured();
         self.memory_pressured = memory_pressured(sample);
-        let Some(busy) = sample.cpu_busy_permille else {
-            return;
-        };
-        if self.cpu_len == MAX_CHART_SAMPLES {
-            self.cpu_history.copy_within(1.., 0);
-            self.cpu_len -= 1;
+        if let Some(busy) = sample.cpu_busy_permille {
+            self.cpu.push(busy);
         }
-        self.cpu_history[self.cpu_len] = busy;
-        self.cpu_len += 1;
+        if let Some(memory) = sample.memory_pressure {
+            self.memory.push(memory.used_permille);
+        }
     }
 
     /// The recorded CPU readings, oldest first.
     #[must_use]
     pub fn cpu_history(&self) -> &[u16] {
-        &self.cpu_history[..self.cpu_len]
+        self.cpu.points()
+    }
+
+    /// The recorded committed-memory shares, oldest first.
+    #[must_use]
+    pub fn memory_history(&self) -> &[u16] {
+        self.memory.points()
     }
 
     /// Whether CPU pressure is latched active.
@@ -148,12 +186,12 @@ impl LiveMeters {
 /// busy history, and each device's previous cumulative counters with the
 /// rates they produce.
 ///
-/// Keyed on the subject's own identity — a CPU index, a volume id, an
-/// interface name — rather than a rail position, so a device that appears
-/// or goes away between samples can never inherit another's trace. Every
-/// entry is rebuilt from the sample rather than mutated in place, so a
-/// volume unmounted or an interface removed leaks neither history nor
-/// counters.
+/// Keyed on the subject's own identity — a CPU index, a serving block
+/// endpoint (or the volume standing in for one), an interface name — rather
+/// than a rail position, so a device that appears or goes away between
+/// samples can never inherit another's trace. Every entry is rebuilt from
+/// the sample rather than mutated in place, so a detached device or a
+/// removed interface leaks neither history nor counters.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeviceMeters {
     cores: BTreeMap<u32, Vec<u16>>,
@@ -318,11 +356,15 @@ impl DeviceMeters {
         self.devices.insert(id, track);
     }
 
-    /// Fold one volume's cumulative service and queue counters in, deriving
-    /// its whole interval reading.
+    /// Fold one storage device's cumulative service and queue counters in,
+    /// deriving its whole interval reading.
+    ///
+    /// Called once per device: the counters belong to the device rather than
+    /// to a mount, so folding them again in the same sample would delta them
+    /// against themselves and derive a nought rate.
     ///
     /// The two counter blocks are separately gated, so either may be absent
-    /// without costing the other its reading; a volume the sample names with
+    /// without costing the other its reading; a device the sample names with
     /// neither still gets its entry, and simply reads unmeasured.
     pub fn record_volume(
         &mut self,
@@ -416,8 +458,8 @@ impl DeviceMeters {
             .and_then(|track| track.gpu_busy_permille)
     }
 
-    /// This volume's derived interval readings, all-absent for a device the
-    /// sample carried no counters for.
+    /// This storage device's derived interval readings, all-absent for a
+    /// device the sample carried no counters for.
     #[must_use]
     pub fn volume_service(&self, id: DeviceId) -> VolumeService {
         self.devices

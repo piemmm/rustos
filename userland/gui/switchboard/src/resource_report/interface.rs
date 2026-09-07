@@ -1,6 +1,10 @@
-//! One pane per managed interface: a duplex rate trace over its stated
-//! averaging window, and the stack behind it
-//! (`plans/switchboard/05-network.png`).
+//! One pane per managed interface: a duplex rate trace, and the stack behind
+//! it (`plans/switchboard/05-network.png`).
+//!
+//! The headline figure is the served rates reading, which states its own
+//! averaging window; the trace is the interface's own cumulative counters
+//! deltaed over this sample's interval, folded once in the rolling meters.
+//! Each states which it is, so neither inherits the other's window.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -11,7 +15,7 @@ use tairix_controls::PressureKind;
 
 use super::{format_addr, kind_name, mac, reading, server_address, trim_nul};
 use crate::format::{format_bytes, format_duration, format_rate};
-use crate::model::display_name;
+use crate::model::{display_name, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
@@ -20,7 +24,12 @@ use crate::view::resources::{
 };
 
 /// One interface's rail entry and pane.
-pub(super) fn device(sample: &Sample, iface: &NetInterfaceFactsRecord) -> ResourceDevice {
+pub(super) fn device(
+    sample: &Sample,
+    meters: &RollingMeters,
+    iface: &NetInterfaceFactsRecord,
+) -> ResourceDevice {
+    let id = DeviceId::Interface(name_key(iface));
     let rate = sample.net_rates.as_ref().and_then(|rates| {
         rates
             .iter()
@@ -28,21 +37,24 @@ pub(super) fn device(sample: &Sample, iface: &NetInterfaceFactsRecord) -> Resour
     });
     let total = rate.map(|rate| rate.rx_bps.saturating_add(rate.tx_bps));
     ResourceDevice {
-        id: DeviceId::Interface(name_key(iface)),
+        id,
         group: DeviceGroup::Network,
         name: display_name(trim_nul(&iface.name)),
         kind: PressureKind::Network,
         reading: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
-        // The rates query serves an already-averaged reading rather than a
-        // counter to delta, so the trace plots the window it states rather
-        // than a history this service derived.
-        trend: Vec::new(),
+        trend: meters.devices.primary_history(id).to_vec(),
         hero: PaneHero {
             value: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
             unit: String::new(),
             context: context(sample, iface),
-            instrument: HeroInstrument::Track(None),
-            caption: window_caption(sample, iface),
+            // A rate has no fixed ceiling to fill a bar against, so it
+            // trends: the interface's own counters deltaed over this
+            // sample's interval, received above the line and sent below.
+            instrument: HeroInstrument::Trend {
+                samples: meters.devices.primary_history(id).to_vec(),
+                opposing: Some(meters.devices.opposing_history(id).to_vec()),
+            },
+            caption: String::from("received above the line, sent below"),
         },
         blocks: blocks(sample, iface),
         banner: None,
@@ -57,7 +69,11 @@ fn name_key(iface: &NetInterfaceFactsRecord) -> [u8; IF_NAME_LEN] {
     iface.name
 }
 
-/// Which way the traffic is going, and how fast.
+/// Which way the traffic is going, how fast, and over what span.
+///
+/// The window belongs beside the figure it averages rather than under the
+/// trace, which plots this service's own sample interval: a rate a reader
+/// acts on is never a number over an unstated span.
 fn context(sample: &Sample, iface: &NetInterfaceFactsRecord) -> Vec<String> {
     let Some(rates) = sample.net_rates.as_ref() else {
         return Vec::new();
@@ -75,22 +91,8 @@ fn context(sample: &Sample, iface: &NetInterfaceFactsRecord) -> Vec<String> {
             format_rate(rate.tx_bps)
         ),
         format!("{} pps in · {} pps out", rate.rx_pps, rate.tx_pps),
+        format!("{} averaging window", format_duration(rate.window)),
     ]
-}
-
-/// The averaging window the rates reading states for itself, so a rate a
-/// reader acts on is never a number over an unstated span.
-fn window_caption(sample: &Sample, iface: &NetInterfaceFactsRecord) -> String {
-    let window = sample.net_rates.as_ref().and_then(|rates| {
-        rates
-            .iter()
-            .find(|r| trim_nul(&r.name) == trim_nul(&iface.name))
-            .map(|rate| rate.window)
-    });
-    match window {
-        Some(window) => format!("{} averaging window", format_duration(window)),
-        None => String::new(),
-    }
 }
 
 /// Link and addresses, counters and offloads, the stack, and the one honest

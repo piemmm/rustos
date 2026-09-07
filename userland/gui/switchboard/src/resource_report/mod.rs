@@ -38,7 +38,7 @@ mod graphics;
 mod interface;
 mod machine;
 mod memory;
-mod volume;
+mod storage;
 
 /// Build the Resources section's whole report from this sample.
 ///
@@ -57,19 +57,25 @@ pub fn build_resource_report(
     let mut devices = alloc::vec![cpu::device(sample, meters), memory::device(sample, meters),];
     let mut recorded = alloc::vec![DeviceId::Cpu, DeviceId::Memory];
 
-    for mount in sample.mounts.iter().flatten() {
-        // The counters are cumulative, so this volume's rates are the delta
+    // Grouped into devices before anything is folded: the counters belong to
+    // the device, so a volume projected at several mount points and several
+    // volumes on one disk each fold exactly once. Folding per mount deltas a
+    // device's counters against themselves and plots the nought that
+    // produces.
+    for subject in storage::subjects(sample) {
+        // The counters are cumulative, so this device's rates are the delta
         // this fold produces rather than anything one sample carries. The two
         // blocks are separately gated: a denied queue costs the queue reading
         // alone.
-        let id = DeviceId::Volume(mount.volume_id());
+        let id = subject.device_id();
+        let key = subject.key();
         meters.devices.record_volume(
             id,
-            find_volume(sample.volume_io_stats.as_deref(), &mount.volume_id()),
-            find_volume(sample.volume_io_queue.as_deref(), &mount.volume_id()),
+            find_volume(sample.volume_io_stats.as_deref(), &key),
+            find_volume(sample.volume_io_queue.as_deref(), &key),
             sample.elapsed_ns,
         );
-        devices.push(volume::device(sample, meters, mount));
+        devices.push(storage::device(sample, meters, &subject));
         recorded.push(id);
     }
     for iface in sample.net_facts.iter().flatten() {
@@ -88,7 +94,7 @@ pub fn build_resource_report(
                 .map(|record| record.counters),
             sample.elapsed_ns,
         );
-        devices.push(interface::device(sample, iface));
+        devices.push(interface::device(sample, meters, iface));
         recorded.push(id);
     }
 
@@ -124,7 +130,7 @@ pub fn build_resource_report(
 
     ResourceReport {
         devices,
-        volumes_absent: absent_unless(sample, DegradedField::Mounts, sample.mounts.is_some()),
+        storage_absent: absent_unless(sample, DegradedField::Mounts, sample.mounts.is_some()),
         interfaces_absent: absent_unless(
             sample,
             DegradedField::NetInterfaceFacts,

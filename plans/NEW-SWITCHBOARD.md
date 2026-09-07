@@ -37,13 +37,13 @@ lie about.
 | **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | done |
 | **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | done |
 | **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
-| **V4** | Volume pane — capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
-| **V5** | Interface pane — duplex rate trace over its stated window, link, counters, stack | V1, C1 | S4 | done |
+| **V4** | Storage pane — one entry per *device* (mounts grouped by serving block endpoint), its volumes and their mount points, capacity, medium and the bucketed health block; the service-and-queue block fills from Q1/Q2 | V1, C1, Q1, Q2 | S4 | done |
+| **V5** | Interface pane — duplex rate trace from its own counters, the served window stated beside the figure, link, counters, stack | V1, C1 | S4 | done |
 | **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4. Also brings the virtio-MMIO/PCI **accelerator probe** and the driver-store bundle: D1's classifiers put a real PCI or device-tree accelerator in the tree, but a virtio accelerator's type is only visible to a runtime slot probe, and the rail is that probe's only consumer | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
 | **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
-| **V10** | Top-consumers block on the CPU, Memory and volume panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | done |
+| **V10** | Top-consumers block on the CPU, Memory and storage panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | done |
 | **X1** | Delete `view/{background,pressure,activities}.rs` and their tests; `PressureClock` and the cause model move to V3's banner, the group model to V9's grouping | V3, V9 | S10 | done |
 | **X2** | Delete `view/{system,system_data}.rs`, the `PageLine` vocabulary and `SystemReport`'s `cores`/`memory`/`compositor` fact vectors | V2, V3, V4, V5, V6, V8 | S10 | done |
 | **X3** | Re-point `view/tasks.rs`'s three board citations at `plans/switchboard/01-tasks.png` | V9 | S10 | done |
@@ -346,7 +346,7 @@ is the defect this section exists to fix. A resource's shape over time is the
 reading; a fact list cannot carry it.
 
 - **sidebar — the device rail.** One entry per *discovered device*, grouped:
-  `Resources` (CPU, Memory), `Storage` (one per mounted volume), `Network`
+  `Resources` (CPU, Memory), `Storage` (one per storage device), `Network`
   (one per managed interface), `Graphics` (the compositor), `Accelerators`
   (one per matching hardware-tree node, S8), then `Machine` (Identity &
   uptime, Sessions & seats, Permissions & limits). Each device entry carries
@@ -361,8 +361,8 @@ reading; a fact list cannot carry it.
   rail would state the same readings twice and push the devices off screen.
 
   **The rail's length is discovered, never declared.** Twelve cores, four
-  volumes and three interfaces is the design case; a hundred-core machine with
-  a dozen volumes gets a scrolling rail, not a truncated one, and no entry
+  disks and three interfaces is the design case; a hundred-core machine with
+  a dozen disks gets a scrolling rail, not a truncated one, and no entry
   count is a compile-time constant.
 
 - **header — the pane's hero.** The device's headline reading, its context
@@ -379,9 +379,29 @@ reading; a fact list cannot carry it.
   - **Memory** (`03-memory.png`) — the composition bar (S7) answering *where
     did it go* in one row, then the memory and kernel fact columns, then the
     bounded-cache reclaim ledger.
-  - **A volume** (`04-disk.png`) — the service-and-queue block, the capacity
-    and medium block, and the health block: every completion bucketed, with
-    the status pill the buckets resolve to.
+  - **A storage device** (`04-disk.png`) — the service-and-queue block, the
+    capacity and medium block, the volumes-and-mounts block, and the health
+    block: every completion bucketed, with the status pill the buckets
+    resolve to.
+
+    **The entry is a device, never a mount** (a deliberate divergence from
+    the board's "one pane per volume", which the readings do not support).
+    `VOLUME_IO_STATS` reports the *device's* counters — every volume on one
+    disk reads the same fold, which is why the record names the serving block
+    endpoint beside the volume id — and the boot namespace projects one
+    writable volume at `/` and at each flag-bearing subtree beneath it. So
+    the mount table is grouped by serving endpoint before anything is folded:
+    per mount, a disk's throughput is reported once per projection *and* once
+    per partition, and its cumulative counters are deltaed against
+    themselves — the second fold of one sample reads the first fold's own
+    value as the interval's earlier end, derives nought and plots it, so the
+    volume the machine runs from draws a flat trace and an idle rate. A
+    volume the kernel publishes no serving device for has no shared counters
+    to collapse and stands as its own entry with its capacity alone; a mount
+    with no backing volume (the in-RAM layout directories) is view plumbing
+    and no storage device. The volumes on a device, and the paths each is
+    reachable at with its own mount flags, are the pane's own
+    volumes-and-mounts block, so collapsing the rail loses nothing.
   - **An interface** (`05-network.png`) — link and addresses, counters and
     offloads, and the stack block (sockets, resolver, time servers, defence).
   - **Graphics** (`06-graphics.png`) — the frame-work breakdown, the
@@ -410,7 +430,7 @@ reading; a fact list cannot carry it.
   comes back under pressure is timed from its new band. With no uptime reading
   the age reads unmeasured, never a fabricated zero.
 
-- **Top consumers.** The CPU, Memory and volume panes each carry the five
+- **Top consumers.** The CPU, Memory and storage panes each carry the five
   tasks costing that resource most, from the per-task readings the process
   record already provides, so the pane and the Tasks table can never disagree.
   **Summing them is not the device's total** and the pane says so: filesystem,
@@ -455,6 +475,15 @@ consequences:
   `SectionView`, called from `Switchboard::render` before `sync_scroll`.
   Recompiling per paint instead is the §28 defect (work scaling with the
   surface rather than with the change).
+- **A wrapped grid is *balanced*, and every cell of it is one size.** The
+  column count is `ceil(n / ceil(n / most))`, so four cores in a pane three
+  cells wide are two rows of two rather than a full row and a lone straggler,
+  and balancing never costs an extra row. Each compiled row carries that
+  column count and the paint divides by *it*, never by the row's own length,
+  so a row that cannot be filled leaves its trailing slots empty instead of
+  stretching. Deriving the width from the row is what drew one core three
+  times its neighbours' width, which defeats the comparison the grid exists
+  for.
 
 **The memory composition's parts are the ones the kernel accounts.** The board
 sketches a Linux-shaped anonymous / file-cache / slab split; no reading behind
@@ -475,13 +504,21 @@ Every other one is plainly disabled for want of an endpoint — never marked for
 authority, because acquiring a capability would not make an absent endpoint
 appear.
 
-**The interface rail entry carries no trace, and that is a reading about
-it.** The interface rates query serves an already-averaged reading rather
-than a counter, so a trace would plot someone else's averaging window; the
-entry therefore shows its reading without an instrument. A volume's entry has
-both: its reading is how full it is (a level, so no trace would say it) and
-its trace is the throughput Q1's byte counters delta into, against the one
-shared full-scale reference every device trace plots at.
+**Every rail entry with a rate behind it carries a trace, from the counters
+this service deltas itself.** A storage device's entry carries both readings:
+its figure is how full it is (a level, so no trace would say it) and its
+trace is the throughput Q1's byte counters delta into, against the one shared
+full-scale reference every device trace plots at. An interface's figure is
+the rates query's own already-averaged reading — which states its averaging
+window beside the figure, in the hero's context, so nothing inherits it — and
+its trace is the interface's cumulative counters over *this* service's sample
+interval, the same fold and the same reference a storage device's uses, so two
+rail traces stay comparable by eye. Its hero trends duplex for the same
+reason a device's does: a rate has no fixed ceiling to fill a bar against.
+Memory's trace is its committed share's own bounded history, recorded beside
+the CPU's through one series definition, so a refused reading on either side
+never shortens the other. Only the `Machine` group has no instrument, and
+that absence is what says its readings are facts.
 
 **Both `06-graphics.png` mismatches are closed, and the trace's reference is
 the frame's own screen.** The rail entry reads `damaged_px` — what changed on
@@ -621,9 +658,10 @@ sample contributes no share — a cumulative total is not a share.
 **The rail's traces and the per-core cells need a rolling store the sample
 does not carry**, the per-device counterpart of `TaskMeters`: each core's own
 bounded busy history, and each device's previous cumulative counters with the
-rates they produce. Keyed on the subject's own identity (a CPU index, a volume
-id, an interface name) rather than a rail position, and rebuilt from the
-sample so an unmounted volume leaks neither history nor counters. A byte rate
+rates they produce. Keyed on the subject's own identity (a CPU index, a
+serving block endpoint or the volume standing in for one, an interface name)
+rather than a rail position, and rebuilt from the sample so a detached device
+leaks neither history nor counters. A byte rate
 needs a shared full-scale reference to be plotted in permille at all; one
 reference across every device is what makes two rail traces comparable by eye.
 

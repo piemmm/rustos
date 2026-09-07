@@ -184,7 +184,10 @@ impl ReadingFact {
 /// Its own three-state vocabulary rather than a task's recovery posture: a
 /// disk is not a process, and borrowing a type whose other states can never
 /// arise here would leave unreachable cases for a reader to puzzle over.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+///
+/// Ordered by severity, so a device summarising several volumes takes the
+/// worst of them rather than whichever it read first.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub enum HealthSeverity {
     /// The volume is available and reports no fault.
     #[default]

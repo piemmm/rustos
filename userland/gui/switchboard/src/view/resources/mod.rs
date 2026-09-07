@@ -39,7 +39,7 @@ mod pane;
 
 pub use device::{
     DeviceAction, DeviceGroup, DeviceId, PressureBanner, ResourceControl, ResourceDevice,
-    ResourceReport, TaskCostColumn,
+    ResourceReport, StorageId, TaskCostColumn,
 };
 pub use pane::{
     BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, HeroInstrument, PaneBlock,

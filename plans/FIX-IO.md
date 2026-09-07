@@ -910,13 +910,25 @@ Remaining deliverables:
   fold and the snapshot cannot diverge. Proven host-side end to end (ABI
   round-trip/fail-closed, the `BlkClient` fold over a scripted device, the
   mount-registry walk, the ungated/gated/audited/paged broker, the CLI
-  render, and the Switchboard volume pane's derivation).
+  render, and the Switchboard storage pane's derivation).
   Retry/reset *ladder* counts the driver performs on the hardware, and the
   fault-domain **node** identity, are **not** in this record: they need the
   endpoint→hardware-tree-node association and the live serving-driver ladder,
   which are IO4 (fault-domain tree wiring) — this query reports the health the
   kernel block *consumer* observes, a complete and coherent surface on its own.
   Never a `/proc`-style scrape (§16.1).
+
+  **Open: the boot-floor volumes publish none of it** (`plans/OPEN-DEFECTS.md`
+  D106). `VolumeIoSource` is attached only by the runtime attach/recover path,
+  so the two boot-floor registrations — the encrypted root at `/` and the
+  read-only `/System` — carry no source, and `io_records` skips an entry
+  without one: on a normal boot all three queries report nothing at all about
+  the disk the machine is running from. The counters are folded by `BlkClient`
+  on the block-service path, and the boot floor reaches its disk as an
+  in-kernel `Block` behind `BlockCache`/`SharedBlock` with no serving endpoint
+  and so no `dev`, so the fold and a synthetic device identity have to exist
+  below the block-service client. Needs its own vertical asserting the boot
+  volume appears in all three queries.
 - **Watchdog tie-in** (`plans/WATCHDOG.md`, `plans/NEW-SERVICEMANAGER.md`): a
   driver process that itself wedges is a lockup the supervisor detects and
   recovers (restart the driver, so the device recovers rather than staying
