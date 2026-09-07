@@ -1060,12 +1060,30 @@ this wrong on.
     `invalidate_presented`: with damage authoritative an empty region is that
     answer for free, and every geometry/theme/scale change already reaches the
     panel as a window event answered with `repaint_whole`.
+  - **A selection is a round that reports, not a control that was pressed.**
+    A rail entry names the pane beside it and a fault card names the detail
+    beside it, so every route to a selection — the press, the cursor the
+    keyboard moves onto it, and the Enter that commits it — reports the pane or
+    detail, the commands describing it, and the marks the strip or cards moved.
+    `SectionView::set_content_focus` therefore carries the `Sweep` its
+    `set_row_action` sibling always did, since in two of the three sections the
+    cursor *is* the selection. Recovery's `rebuild_selection` takes the
+    selection it re-derives *from*: its detail pane and impact column have no
+    retained control to compare, so only a moved selection can tell them they
+    owe a repaint, and reporting them unconditionally would repaint both every
+    second for no change. The scrollbar is the round's where the selection left
+    the section holding a different number of items — the routed controls know
+    nothing about a bar that is not theirs, and the next paint re-ranges it
+    inside the rectangle the round named.
   - **The risk this moves, and what holds it.** An unreported change now leaves
     a stale pixel rather than over-covering, so the burden is on every
-    section's `adopt`. The proof is `unreported_change`, already the crate's
-    soundness helper: over all three sections, a refresh's reported region must
-    contain every pixel a whole re-render moved. Beside it, a refresh reports
-    less than the client, and an unmoved reading reports nothing.
+    section's `adopt` and on every round that selects. The proof is
+    `unreported_change`, already the crate's soundness helper: over all three
+    sections, a refresh's reported region must contain every pixel a whole
+    re-render moved, and so must a selection round's. Beside it, a refresh
+    reports less than the client, and an unmoved reading reports nothing. The
+    proof is also what catches a control drawing *outside* the region that owns
+    it, since no report scoped to that region can ever cover it.
   - **Measured.** Tasks 916 µs → 185 µs per refresh-and-repaint, Resources
     569 → 32, Recovery 448 → 31, and the presented rectangle 442×144 rather
     than 760×560 — which is what the session's serve thread decodes.

@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 21 open, 86 closed, 107 total.
+table normalises all three to **closed**. 21 open, 89 closed, 110 total.
 
 ### Open (21)
 
@@ -49,7 +49,7 @@ table normalises all three to **closed**. 21 open, 86 closed, 107 total.
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 
-### Closed (86)
+### Closed (89)
 
 | ID | Subject |
 |---|---|
@@ -139,6 +139,9 @@ table normalises all three to **closed**. 21 open, 86 closed, 107 total.
 | D105 | the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left |
 | D106 | the boot-floor volumes published no I/O source, so the machine's own root and `/System` reported no service, queue or health reading at all |
 | D107 | `ResourceReport`'s `storage_absent` / `interfaces_absent` had no reader |
+| D108 | a rail press selected a device and reported none of the pane it now drew |
+| D109 | a sample rebuilt the device rail, swallowing the click a reader was resting to make |
+| D110 | the pressure banner drew its text past the pane, into the gap and over the action column |
 
 ## Scope
 
@@ -1260,6 +1263,47 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   press lands on. The Resources rail draws both fields through it, stating
   the refusal where the sample resolved one and "No storage device is
   present." where the query answered and found none.
+- **D108 — a rail press selected a device and reported none of the pane it
+  now drew (FIXED).** The Resources rail's press ran `select`, which
+  re-derives the pane flow, the device's commands and the rail's own marks,
+  and then returned without reporting any of it — so the reader kept the
+  previous device's pane until a resize, a re-theme or another whole-window
+  mark repainted it. `select` now reports through the `Rebuilt` account
+  `adopt` already fed to `report_refresh`, and both keyboard routes onto an
+  entry (the cursor `set_content_focus` moves and the Enter
+  `activate_focused` commits) report the same way, which is why
+  `SectionView::set_content_focus` now carries the `Sweep` its
+  `set_row_action` sibling always did. The identical defect in Recovery — a
+  card press and the cursor both selecting a fault without reporting the
+  detail pane, impact column or rail beside it — is fixed with it;
+  `rebuild_selection` takes the selection it re-derives *from*, because the
+  detail and impact have no retained control to compare and only a moved
+  selection can tell them they owe a repaint. The round also reports the
+  scrollbar when the selection left the section holding a different number of
+  items: the bar is not the routed controls' to report, and the next paint
+  re-ranges it inside the reported rectangle.
+- **D109 — a sample rebuilt the device rail, swallowing the click a reader
+  was resting to make (FIXED).** `rebuild` assigned a freshly built `Tabs`
+  over the live one on every sample, discarding the three records only the
+  strip holds: where the pointer last was, which entry it rests on, and which
+  entry a press is waiting on. A sample landing between a reader's motion and
+  their press therefore hit-tested the press against the origin and selected
+  nothing — the reported "it takes several clicks to select storage" — and the
+  entry under a resting pointer lost its lift once a second. `lib/controls`
+  gained `Tabs::restate`, the strip's own "take fresh entries, keep what the
+  screen put here": the pointer coordinate survives whatever the entries
+  became, and the hover and latch survive an unchanged run of entries and are
+  dropped when the run gains, loses or re-orders one. This is the rule
+  `refresh.rs` already stated for `ActionRail` and the Tasks filter strip; the
+  device rail was the one strip still replaced wholesale.
+- **D110 — the pressure banner drew its text past the pane, into the gap and
+  over the action column (FIXED).** The banner's summary and detail are model
+  text of any length and were drawn untruncated from the pane's left edge, so
+  they ran past `frame.primary` — pixels no repaint of the pane can ever clean
+  up, which is what surfaced it: D108's damage proof could not be satisfied
+  while the pane drew outside itself. Both lines are now truncated to the room
+  between the band's pill and its relief command, exactly as the rail's
+  absence statement already truncates to its own column.
 
 ## Coupling to be aware of
 

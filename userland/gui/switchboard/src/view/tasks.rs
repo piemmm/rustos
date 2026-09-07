@@ -1816,7 +1816,7 @@ impl SectionView for TasksSection {
         self.focus
     }
 
-    fn set_content_focus(&mut self, index: usize) {
+    fn set_content_focus(&mut self, index: usize, _sweep: &mut Sweep<'_, '_>) {
         self.focus = index;
     }
 

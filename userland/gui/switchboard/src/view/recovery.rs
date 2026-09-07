@@ -365,10 +365,10 @@ impl RecoverySection {
     }
 
     /// Select the fault at `row`, if there is one.
-    fn select_row(&mut self, row: usize) {
+    fn select_row(&mut self, row: usize, sweep: &mut Sweep<'_, '_>) {
         if let Some(item) = self.items.get(row) {
-            self.selected = Some(item.proc_id);
-            self.rebuild_selection();
+            let previous = self.selected.replace(item.proc_id);
+            self.rebuild_selection(previous, sweep);
         }
     }
 
@@ -398,16 +398,58 @@ impl RecoverySection {
 
     /// Rebuild everything that depends on *which* fault is selected: the
     /// cards' selection marks and the rail's commands.
-    fn rebuild_selection(&mut self) {
+    ///
+    /// `previous` is the selection this re-derives *from*. The detail pane and
+    /// the impact column are drawn straight from the selected fault with no
+    /// retained control to compare, so a moved selection is the only thing
+    /// that can tell them they owe a repaint — and reporting them on a sample
+    /// that moved nothing would repaint them every second for no change.
+    fn rebuild_selection(&mut self, previous: Option<ProcId>, sweep: &mut Sweep<'_, '_>) {
         let selected = self.selected;
-        for (card, item) in self.cards.iter_mut().zip(self.items.iter()) {
-            card.set_state(card_state(item, selected == Some(item.proc_id)));
+        let mut moved = Vec::new();
+        for (row, (card, item)) in self.cards.iter_mut().zip(self.items.iter()).enumerate() {
+            let state = card_state(item, selected == Some(item.proc_id));
+            if card.state() == state {
+                continue;
+            }
+            card.set_state(state);
+            moved.push(row);
+        }
+        // The common case is a sample that moved no mark and no selection, so
+        // the list geometry is resolved only where there is something to
+        // report against.
+        if let Some(ctx) = sweep
+            .ctx()
+            .filter(|_| !moved.is_empty() || previous != selected)
+        {
+            let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+            for row in moved {
+                if let Some(slot) = row.checked_sub(ctx.start) {
+                    if let Ok(slot) = u32::try_from(slot) {
+                        if slot < info.visible() {
+                            sweep.report(info.item_rect(slot));
+                        }
+                    }
+                }
+            }
+            if previous != selected {
+                if let Some(detail) = ctx.frame.detail {
+                    sweep.report(detail);
+                }
+                if let Some(impact) = ctx.frame.impact {
+                    sweep.report(impact);
+                }
+            }
         }
         let commands = match self.selected_item() {
             Some(item) => alloc::vec![restart_button(item), force_button(item)],
             None => Vec::new(),
         };
-        restate_rail(&mut self.rail, commands);
+        if restate_rail(&mut self.rail, commands) {
+            if let Some(rail) = sweep.ctx().and_then(|ctx| ctx.frame.rail) {
+                sweep.report(rail);
+            }
+        }
     }
 
     /// Where the detail pane's parts sit inside `content`, or [`None`]
@@ -835,7 +877,7 @@ impl SectionView for RecoverySection {
             .iter()
             .map(|item| build_card(item, self.selected == Some(item.proc_id)))
             .collect();
-        self.rebuild_selection();
+        self.rebuild_selection(previous, sweep);
         // A card holds its own record of which footer action the pointer is on
         // and which one a press began on, neither of which can be restated
         // from outside, so a card the sample did not change is kept — and the
@@ -921,10 +963,10 @@ impl SectionView for RecoverySection {
 
     /// Move the cursor, selecting the fault a card stop names so the
     /// detail, impact and rail always describe the card the reader is on.
-    fn set_content_focus(&mut self, index: usize) {
+    fn set_content_focus(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         self.focus = index;
         if let Some(Stop::Card(row)) = self.stop_at(index) {
-            self.select_row(row);
+            self.select_row(row, sweep);
         }
     }
 
@@ -958,7 +1000,7 @@ impl SectionView for RecoverySection {
     ) -> Option<SectionOutcome> {
         match self.stop_at(self.focus)? {
             Stop::Card(row) => {
-                self.select_row(row);
+                self.select_row(row, &mut Sweep::reporting(ctx, damage));
                 None
             }
             Stop::Pages => {
@@ -1022,7 +1064,7 @@ impl SectionView for RecoverySection {
         });
         if let Some((row, _)) = chosen {
             self.focus = row;
-            self.select_row(row);
+            self.select_row(row, &mut Sweep::reporting(ctx, damage));
             return None;
         }
 
