@@ -424,6 +424,18 @@ impl CallEndpoint {
             return Err(Errno::LengthOutOfRange);
         }
 
+        // The kernel-driven block-device identities name devices the kernel
+        // drives itself, not rendezvous, and a consumer that groups volumes by
+        // the device serving them relies on the two spaces being disjoint: an
+        // endpoint sharing an identity with the boot disk would fold its
+        // counters into that disk's and let its volumes answer for the disk's
+        // removal check. Refused outright rather than merely privileged, so no
+        // holder of any capability can create the collision.
+        if tairix_abi::blkio::is_kernel_block_device(id.0) {
+            record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+            return Err(Errno::OutOfRange);
+        }
+
         if !required_recv_caps.is_subset_of(creator.effective()) {
             record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
             return Err(Errno::PermissionDenied);

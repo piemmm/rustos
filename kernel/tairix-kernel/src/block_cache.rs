@@ -71,7 +71,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -756,6 +756,10 @@ impl<B: Block> Block for BlockCache<B> {
     /// survives this layer.
     fn device_class(&self) -> BlkDeviceClass {
         self.device.device_class()
+    }
+
+    fn device_name(&self) -> BlkDeviceName {
+        self.device.device_name()
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

@@ -27,6 +27,7 @@
 
 use core::convert::Infallible;
 
+use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{VolumeKey, ARXFS};
@@ -39,6 +40,8 @@ use tairix_kernel_sec::identity::UserId;
 use tairix_log::{Level, Sink};
 use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 use tairix_reclaim::MemoryPressure;
+
+use tairix_kernel_core::fs::blkmeter::MeteredBlock;
 
 use crate::block_cache::BlockCache;
 use crate::driver_catalog::KERNEL_DRIVER_SIGNER_PUBKEY;
@@ -114,6 +117,16 @@ pub struct UnlockEnv {
     /// before the unlock kthread spawns.
     pub pressure: &'static MemoryPressure,
 }
+
+/// The identity the bootstrap-floor disk's readings are reported under.
+///
+/// The floor brings up exactly **one** block device, and it is driven
+/// in-kernel with no serving block-service endpoint, so its identity comes
+/// from the reserved kernel-driven device space rather than from an endpoint
+/// id. Index zero is that one disk; the space cannot collide with an endpoint
+/// id, so a consumer grouping volumes by device can never fold this disk
+/// together with a served one.
+const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 
 /// The live [`WritableRootSink`]: on a successful unlock it opens a second,
 /// independent `'static` read-write [`ARXFS`] window onto the `ARXFSRoot`
@@ -215,7 +228,13 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         // leaves the writable tree and `users_admin` failing closed.
         let volume_uuid = fs.volume_uuid();
         let driver: alloc::boxed::Box<dyn KernelFs> = alloc::boxed::Box::new(fs);
-        register_writable_state(driver, volume_uuid, self.audit, self.pressure)
+        register_writable_state(
+            driver,
+            volume_uuid,
+            self.store.io_source(),
+            self.audit,
+            self.pressure,
+        )
     }
 }
 
@@ -269,6 +288,14 @@ pub fn finish_unlock<B: Block + 'static>(
     // storage floor passes through.
     crate::writeback_service::start(ctx, audit);
 
+    // The boot disk has no serving block-service endpoint to fold its
+    // counters at, so the fold is wrapped directly around the device here,
+    // *under* the cache: a cache hit never reaches the medium, and counting
+    // one as device work would report throughput and utilisation the disk
+    // never did. The readings travel with the store below so both boot-floor
+    // mounts publish them.
+    let blk = MeteredBlock::new(blk, BOOT_DISK_DEV, audit);
+    let io = blk.io_source();
     // The one brought-up disk, boot-leaked to `'static` behind the
     // block-sharing layer so two independent preemptive tasks drive it through
     // their own serialised windows: *this* task is the driver-store serve loop
@@ -285,9 +312,10 @@ pub fn finish_unlock<B: Block + 'static>(
     if let Some(ledger) = blk.ledger() {
         tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
     }
-    let store: &'static DriverStoreService<BlockCache<B>> =
+    let store: &'static DriverStoreService<BlockCache<MeteredBlock<B>>> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(DriverStoreService::new(
             SharedBlock::new(blk).map_err(|_| "root-unlock: block device geometry")?,
+            io,
         )));
 
     // Spawn the encrypted-root unlock as its own preemptive task. The

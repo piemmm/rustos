@@ -4,7 +4,7 @@
 //! first driver is `virtio_blk`; the trait carries only the minimum
 //! the filesystem layer needs.
 
-use crate::blkio::BlkDeviceClass;
+use crate::blkio::{BlkDeviceClass, BlkDeviceName};
 use crate::sysinfo::MountAvailability;
 
 use super::{BufferClass, DriverError};
@@ -414,6 +414,34 @@ pub trait Block {
         BlkDeviceClass::Virtual
     }
 
+    /// This device's own short name, for a consumer that reports the device
+    /// to a reader.
+    ///
+    /// Declared by the driver that binds the hardware, for the same reason
+    /// the class is: nothing above the driver knows what the device *is*, and
+    /// a surface listing storage devices has otherwise only the volumes that
+    /// happen to sit on one to name it by — which names a filesystem, not a
+    /// disk. It grants no authority and selects no behaviour.
+    ///
+    /// The default is the unnamed device, which a reader states as such
+    /// rather than inventing an identity. A device that *wraps* another (a
+    /// partition window, a cache, a retention journal, a client over the
+    /// block-service seam) forwards the inner name, so the real hardware's
+    /// name survives every layer above it; a device that *composes* others
+    /// has an identity of its own and declares it.
+    ///
+    /// Naming the device is a pure observation: it touches no hardware and
+    /// cannot fail.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's [`DriverHandle`].
+    ///
+    /// [`DriverHandle`]: crate::driver::DriverHandle
+    fn device_name(&self) -> BlkDeviceName {
+        BlkDeviceName::UNNAMED
+    }
+
     /// What this device can currently promise a consumer that is deciding
     /// whether to spend *discretionary* I/O on it.
     ///
@@ -508,6 +536,10 @@ impl<B: Block + ?Sized> Block for &mut B {
 
     fn device_class(&self) -> BlkDeviceClass {
         (**self).device_class()
+    }
+
+    fn device_name(&self) -> BlkDeviceName {
+        (**self).device_name()
     }
 
     fn backing_availability(&self) -> MountAvailability {

@@ -18,8 +18,9 @@
 //! no privileged path that bypasses the capability check.
 
 use crate::blkio::{
-    BlkDeviceClass, BlkHealthCounters, BlkHealthState, BlkIoCounters, BlkQueueCounters, BlkStatus,
-    IoBudget, BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
+    BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkHealthState, BlkIoCounters,
+    BlkQueueCounters, BlkStatus, IoBudget, BLK_DEVICE_NAME_LEN, BLK_HEALTH_COUNTERS_LEN,
+    BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
 };
 use crate::driver::filesystem::{MountFlags, VolumeStats};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -5591,32 +5592,62 @@ impl VolumeIoHealthRecord {
 /// [`VolumeIoHealthRecord`], so a client walking either list never skips or
 /// repeats a record and can join the two. Every volume on one disk shares
 /// that disk's counters — service is a property of the device, not of a
-/// mount — which is why the serving endpoint is named alongside the id. It
-/// holds no secret.
+/// mount — which is why the device is identified and named alongside the id.
+/// It holds no secret.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct VolumeIoStatsRecord {
     /// The volume's durable 16-byte identity (the mount registry's
     /// `volume_id`), zero when the volume has no published identity.
     volume_id: [u8; 16],
-    /// The block-service call-endpoint id serving this volume's device.
+    /// The identity of the device serving this volume: its block-service
+    /// call-endpoint id, or its
+    /// [`kernel_block_device`](crate::blkio::kernel_block_device) identity
+    /// where the kernel drives the device itself.
     dev: u64,
     /// The cumulative service counters folded from every attempt.
     counters: BlkIoCounters,
+    /// The serving device's own name, as its driver declares it
+    /// ([`crate::driver::block::Block::device_name`]), or the unnamed device.
+    ///
+    /// It rides this record rather than the per-mount [`MountRecord`] because
+    /// it names the *device*: a consumer grouping volumes into devices by
+    /// `dev` needs the name keyed the same way, and a per-mount copy would
+    /// repeat one device's name once per projection of every volume on it.
+    /// This is the ungated one of the three per-volume reads, so a surface
+    /// that may read no queue depth and no health can still name what it
+    /// lists.
+    device: BlkDeviceName,
 }
 
 impl VolumeIoStatsRecord {
-    /// Encoded size on the wire: `volume_id(16) || dev(8) || counters`.
-    pub const WIRE_LEN: usize = 16 + 8 + BLK_IO_COUNTERS_LEN;
+    /// Encoded size on the wire: `volume_id(16) || dev(8) || counters ||
+    /// device_name`.
+    pub const WIRE_LEN: usize = 16 + 8 + BLK_IO_COUNTERS_LEN + BLK_DEVICE_NAME_LEN;
+
+    /// Offset of the device-name field.
+    const DEVICE_OFF: usize = 16 + 8 + BLK_IO_COUNTERS_LEN;
 
     /// Build a record from its parts.
     #[must_use]
-    pub const fn new(volume_id: [u8; 16], dev: u64, counters: BlkIoCounters) -> Self {
+    pub const fn new(
+        volume_id: [u8; 16],
+        dev: u64,
+        counters: BlkIoCounters,
+        device: BlkDeviceName,
+    ) -> Self {
         Self {
             volume_id,
             dev,
             counters,
+            device,
         }
+    }
+
+    /// The serving device's own name, or the unnamed device.
+    #[must_use]
+    pub const fn device(&self) -> BlkDeviceName {
+        self.device
     }
 
     /// The volume's durable 16-byte identity.
@@ -5643,7 +5674,8 @@ impl VolumeIoStatsRecord {
         let mut out = [0u8; Self::WIRE_LEN];
         out[0..16].copy_from_slice(&self.volume_id);
         put_u64(&mut out, 16, self.dev);
-        out[24..].copy_from_slice(&self.counters.to_le_bytes());
+        out[24..Self::DEVICE_OFF].copy_from_slice(&self.counters.to_le_bytes());
+        out[Self::DEVICE_OFF..].copy_from_slice(&self.device.to_le_bytes());
         out
     }
 
@@ -5653,7 +5685,8 @@ impl VolumeIoStatsRecord {
     ///
     /// [`Errno::BufferTooSmall`] if `bytes` is shorter than
     /// [`Self::WIRE_LEN`]. Every counter value is valid (a tally is any
-    /// `u64`), so there is no further shape to fail closed on.
+    /// `u64`) and an unusable device name resolves to the unnamed device, so
+    /// there is no further shape to fail closed on.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -5663,7 +5696,8 @@ impl VolumeIoStatsRecord {
         Ok(Self {
             volume_id,
             dev: read_u64(bytes, 16),
-            counters: BlkIoCounters::from_bytes(&bytes[24..Self::WIRE_LEN])?,
+            counters: BlkIoCounters::from_bytes(&bytes[24..Self::DEVICE_OFF])?,
+            device: BlkDeviceName::from_bytes(&bytes[Self::DEVICE_OFF..Self::WIRE_LEN]),
         })
     }
 }
@@ -6435,8 +6469,8 @@ mod tests {
     use super::{IrqListRequest, IrqRecord, IRQ_FLAG_QUARANTINED};
     use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoRequest, VolumeIoStatsRecord};
     use crate::blkio::{
-        BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
-        BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
+        BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
+        BLK_DEVICE_NAME_LEN, BLK_HEALTH_COUNTERS_LEN, BLK_IO_COUNTERS_LEN, BLK_QUEUE_COUNTERS_LEN,
     };
     use crate::driver::filesystem::MountFlags;
     use crate::origin::ProcId;
@@ -8736,23 +8770,59 @@ mod tests {
             write_wait_ns: 300_000_000,
         };
         let volume_id = [0x5Au8; 16];
-        let record = VolumeIoStatsRecord::new(volume_id, 0x5953_2001, counters);
+        let device = BlkDeviceName::new("virtio-blk");
+        let record = VolumeIoStatsRecord::new(volume_id, 0x5953_2001, counters, device);
         let decoded = VolumeIoStatsRecord::from_bytes(&record.to_le_bytes()).expect("round trip");
         assert_eq!(decoded, record);
         assert_eq!(decoded.volume_id(), volume_id);
         assert_eq!(decoded.dev(), 0x5953_2001);
         assert_eq!(decoded.counters(), counters);
+        assert_eq!(decoded.device().as_str(), "virtio-blk");
         // Keyed like its health sibling — volume id first — with the counters
-        // block as the tail, so the two lists join by the same bytes.
+        // block and then the device's name as the tail, so the two lists join
+        // by the same bytes.
         let bytes = record.to_le_bytes();
         assert_eq!(&bytes[0..16], &volume_id);
-        assert_eq!(&bytes[24..], &counters.to_le_bytes());
-        assert_eq!(VolumeIoStatsRecord::WIRE_LEN, 24 + BLK_IO_COUNTERS_LEN);
+        assert_eq!(
+            &bytes[24..24 + BLK_IO_COUNTERS_LEN],
+            &counters.to_le_bytes()
+        );
+        assert_eq!(&bytes[24 + BLK_IO_COUNTERS_LEN..], &device.to_le_bytes());
+        assert_eq!(
+            VolumeIoStatsRecord::WIRE_LEN,
+            24 + BLK_IO_COUNTERS_LEN + BLK_DEVICE_NAME_LEN
+        );
         // Short buffer fails closed rather than half-reading a record.
         assert_eq!(
             VolumeIoStatsRecord::from_bytes(&[0u8; VolumeIoStatsRecord::WIRE_LEN - 1]),
             Err(Errno::BufferTooSmall)
         );
+    }
+
+    /// A device name that reaches a reader's screen is validated on the way
+    /// in, so no untrusted driver can smuggle an escape sequence or a control
+    /// byte through the record.
+    #[test]
+    fn a_device_name_survives_the_wire_only_when_it_is_printable() {
+        let counters = BlkIoCounters::default();
+        let mut bytes =
+            VolumeIoStatsRecord::new([1u8; 16], 7, counters, BlkDeviceName::new("ok-name"))
+                .to_le_bytes();
+        assert_eq!(
+            VolumeIoStatsRecord::from_bytes(&bytes)
+                .expect("round trip")
+                .device()
+                .as_str(),
+            "ok-name"
+        );
+
+        // A hostile driver writing an escape introducer straight into the
+        // field reads as the unnamed device, not as a terminal command.
+        bytes[VolumeIoStatsRecord::DEVICE_OFF] = 0x1B;
+        assert!(!VolumeIoStatsRecord::from_bytes(&bytes)
+            .expect("a bad name is not a bad record")
+            .device()
+            .is_named());
     }
 
     #[test]

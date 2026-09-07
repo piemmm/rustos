@@ -325,7 +325,7 @@ pub use state::{
     RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-pub use tabs::{Tab, Tabs, TabsAction, TabsOrientation};
+pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{SearchField, TextAction, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction};
 pub use value::{Progress, Slider, SliderAction};

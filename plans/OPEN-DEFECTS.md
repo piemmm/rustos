@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 84 closed, 107 total.
+table normalises all three to **closed**. 21 open, 86 closed, 107 total.
 
-### Open (23)
+### Open (21)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -48,10 +48,8 @@ table normalises all three to **closed**. 23 open, 84 closed, 107 total.
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
-| D106 | the boot-floor volumes publish no I/O source, so the machine's own root and `/System` report no service, queue or health reading at all | the three per-volume `sysinfo` queries omit them; every consumer sees the machine's own disk as a storage device with no rate |
-| D107 | `ResourceReport`'s `storage_absent` / `interfaces_absent` have no reader | the report resolves why a rail group is empty and no surface states it |
 
-### Closed (84)
+### Closed (86)
 
 | ID | Subject |
 |---|---|
@@ -139,6 +137,8 @@ table normalises all three to **closed**. 23 open, 84 closed, 107 total.
 | D102 | a new syscall's handler default answered a value instead of refusing, and its C-ABI stub was missing |
 | D104 | switchboard spent a frame in thousands of syscalls |
 | D105 | the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left |
+| D106 | the boot-floor volumes published no I/O source, so the machine's own root and `/System` reported no service, queue or health reading at all |
+| D107 | `ResourceReport`'s `storage_absent` / `interfaces_absent` had no reader |
 
 ## Scope
 
@@ -1216,34 +1216,50 @@ name taken between the VFS's pre-check and the driver call was reported as an
 I/O error, and any consumer reaching a filesystem driver without the VFS's
 per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
 
-- **D106 — the boot-floor volumes publish no I/O source.** `VolumeIoSource`
-  is attached only by the runtime attach/recover path
-  (`volume_service::register_with_health`); the two boot-floor registrations
-  in `system_mount` (`ARXFSRoot` at `/`, `ARXFSSystem` at `/System`) pass
-  none. `MountRegistry::io_records` — the one walk behind
-  `VOLUME_IO_STATS`, `VOLUME_IO_QUEUE` and `VOLUME_IO_HEALTH` — skips an
-  entry with no source, so on a normal boot those three queries report
-  *nothing* about the disk the machine is running from: no throughput, no
-  utilisation, no await, no queue depth, no health bucket. Every consumer
-  inherits it (`sysinfo storage`, the Switchboard Storage pane, any future
-  health surface): the volume reads its capacity and states its rate
-  unmeasured, which is honest but is not the reading a reader needs about a
-  failing boot disk (§26.5). The counters are folded by `BlkClient` on the
-  block-service path, and the boot floor reaches its disk as an in-kernel
-  `Block` behind `BlockCache`/`SharedBlock` with no serving endpoint and so
-  no `dev`, which is why the wiring is not a one-liner: the fold and a
-  synthetic device identity have to exist below the block-service client.
-  Owner: `plans/FIX-IO.md` (IO2/IO3/IO5 per-device counters). Needs its own
-  vertical asserting the boot volume appears in all three queries.
-- **D107 — the report states why a rail group is empty and nothing draws
-  it.** `ResourceReport::storage_absent` / `interfaces_absent` carry the
-  refusal the sample resolved, so "no storage device is mounted" and "the
-  inventory was refused" are distinguishable — but the Resources rail is a
-  vertical `Tabs`, which has no affordance for a group heading with a stated
-  absence under it, and no other surface reads the two fields. Either
-  `lib/controls`' `Tabs` gains that affordance (and both fields are drawn) or
-  the fields are deleted as speculative surface (§2.3). Producer-with-no-
-  consumer today; not a wrong reading, an undrawn one.
+- **D106 — the boot-floor volumes publish no I/O source (FIXED).** The fold
+  behind the three per-volume queries now has one home
+  (`kernel/core/src/fs/blkmeter`) and both kernel-side paths to a disk drive
+  it: `BlkClient` over a serving endpoint, and `MeteredBlock` around a device
+  the kernel drives itself. The boot floor is the second case — it has no
+  endpoint, so nothing folded its counters and `MountRegistry::io_records`,
+  the one walk behind all three queries, skipped its volumes. The bring-up
+  wraps the disk in a `MeteredBlock` **under** the whole-disk cache (a cache
+  hit never reaches the medium, so counting one would report a busy disk that
+  is idle), the driver-store service carries the resulting `VolumeIoSource`,
+  and both boot-floor registrations attach it — so the `/System` and root
+  volumes share one device fold, as every volume on a disk must.
+  - **The device identity is reserved, not synthetic-and-hoped.**
+    `blkio::kernel_block_device(0)` names the floor's one disk;
+    `CallEndpoint::create` refuses any id in that block outright, so the two
+    identity spaces are disjoint by construction and a consumer grouping
+    volumes by device can never fold a served device together with this one.
+  - **Two defects the fix surfaced, both closed with it.** A deadline the
+    device consumed whole, and an endpoint torn down under an attempt, folded
+    no health at all — so a wedged disk showed zero timeouts; both now
+    classify through the shared errno mapping as unanswered attempts (device
+    time and a health bucket, no latency to average). And `note_done`'s
+    decrement was wrapping, so an unpaired completion would have reported an
+    absurd queue depth; it saturates.
+  - **Regression cover.** `blkmeter`'s own suite pins the fold, the
+    `Attempt::Answered`/`Unanswered` split, the overlay edges and the
+    wrapper's forwarding; `mounted_tests` pins that a volume with no source
+    is in none of the three queries and one with a source is in all three;
+    and the `value-pipe` vertical types `sysinfo storage` on a real boot and
+    requires the boot disk's own rows — its reserved identity beside
+    `virtio-blk` in the ungated service table, and beside `available` in the
+    health table, which prints last.
+- **D107 — the report states why a rail group is empty and nothing draws it
+  (FIXED).** `lib/controls`' `Tabs` gained the affordance rather than the two
+  fields being deleted: deleting them would have discarded a real
+  distinction a reader needs. `Tabs::with_absences` takes a
+  `TabGroupAbsence` per empty group — its heading, one line under it, and the
+  item index it draws *before*, so an empty group appears in its own rail
+  position rather than after everything. It is not an item: it selects
+  nothing, is never hit-tested, takes no keyboard cursor and shifts no item's
+  index, so a statement drawn among the entries cannot move the device a
+  press lands on. The Resources rail draws both fields through it, stating
+  the refusal where the sample resolved one and "No storage device is
+  present." where the query answered and found none.
 
 ## Coupling to be aware of
 

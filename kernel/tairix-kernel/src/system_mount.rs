@@ -72,6 +72,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::DriverHandle;
 use tairix_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
+use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::{
     CachedFs, LateFilesystem, MountBacking, MountedFilesystemService, Path, SleepLock, Vfs,
     VfsError, VolumeForest,
@@ -428,6 +429,10 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
+    // Attach the boot disk's fold, so the three per-volume queries report
+    // this volume's device rather than omitting the disk the machine is
+    // running from. Cannot miss: the handle was registered immediately above.
+    let _ = LATE_FILESYSTEM.set_io_source(system_handle, store.io_source());
     log(
         audit,
         &Event {
@@ -481,6 +486,7 @@ pub fn install_system_mount<B: Block + 'static>(
 pub fn register_writable_state(
     driver: Box<dyn KernelFs>,
     volume_uuid: [u8; 16],
+    io: VolumeIoSource,
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
 ) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
@@ -498,6 +504,11 @@ pub fn register_writable_state(
         unavailable(audit, "writable_already_installed");
         return None;
     };
+    // The same disk the `/System` volume is on, so the same fold: service is
+    // a property of the device, and both boot-floor volumes read one set of
+    // counters rather than a divergent copy each. Cannot miss: the handle was
+    // registered immediately above.
+    let _ = LATE_FILESYSTEM.set_io_source(handle, io);
     log(
         audit,
         &Event {

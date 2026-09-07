@@ -93,7 +93,8 @@ use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::callreg::EndpointVanishObserver;
 use tairix_kernel_core::devres::installed_shared_mem_facility;
-use tairix_kernel_core::fs::blkclient::{BlkClient, VolumeIoSource};
+use tairix_kernel_core::fs::blkclient::BlkClient;
+use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{

@@ -78,6 +78,57 @@ pub enum TabsOrientation {
     Vertical,
 }
 
+/// A group of a vertical [`Tabs`] strip that has no entries, and why.
+///
+/// A group heading is drawn by the item that *starts* its group, so a group
+/// with nothing in it has nothing to hang a heading on and simply vanishes —
+/// leaving a reader unable to tell "this machine has no such device" from
+/// "this session was refused the inventory". This states the difference: the
+/// heading, and one line under it saying why the group is empty. It selects
+/// nothing, takes no keyboard cursor, and does not shift any item's index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TabGroupAbsence {
+    /// The heading the empty group would have carried.
+    heading: String,
+    /// One line saying why it is empty.
+    statement: String,
+    /// The item index this group would have started at, so the strip draws
+    /// the empty group in its own rail position rather than at the end.
+    before: usize,
+}
+
+impl TabGroupAbsence {
+    /// A group `heading` with `statement` under it, positioned where the
+    /// group's first item *would* have been — the index of the first item
+    /// that follows it, or the item count to place it last.
+    #[must_use]
+    pub fn new(heading: impl Into<String>, statement: impl Into<String>, before: usize) -> Self {
+        Self {
+            heading: heading.into(),
+            statement: statement.into(),
+            before,
+        }
+    }
+
+    /// The heading.
+    #[must_use]
+    pub fn heading(&self) -> &str {
+        &self.heading
+    }
+
+    /// The line stating why the group is empty.
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+
+    /// The item index this empty group is drawn before.
+    #[must_use]
+    pub const fn before(&self) -> usize {
+        self.before
+    }
+}
+
 /// One tab in a [`Tabs`] strip (spec §11.12).
 ///
 /// A tab's selected/loading/error state is read from its composed
@@ -282,6 +333,9 @@ enum BandKind {
     Heading(usize),
     /// The item at this index.
     Item(usize),
+    /// The stated absence at this index into the strip's absences: its own
+    /// heading and the line under it. Selects nothing and is never hit-tested.
+    Absence(usize),
 }
 
 /// One band of a strip's stack and the rectangle it occupies.
@@ -334,6 +388,10 @@ pub struct Tabs {
     /// slides onto another tab does not select it; the pressed tab keeps its
     /// lift meanwhile.
     armed: RenderInvariant<Option<usize>>,
+    /// The groups that have no entries, and why — drawn in rail position, in
+    /// `before` order. Vertical strips only: a horizontal strip has one row
+    /// and no group headings to state an absence under.
+    absences: Vec<TabGroupAbsence>,
 }
 
 impl Tabs {
@@ -347,7 +405,27 @@ impl Tabs {
             current: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(None),
+            absences: Vec::new(),
         }
+    }
+
+    /// This strip with `absences` stating the groups that have no entries.
+    ///
+    /// Drawn in rail position and in `before` order, so an empty group
+    /// appears where it belongs rather than after everything. Absences shift
+    /// no item's index: [`TabsAction::Selected`], [`Tabs::len`], and every
+    /// selection entry point still count items alone.
+    #[must_use]
+    pub fn with_absences(mut self, mut absences: Vec<TabGroupAbsence>) -> Self {
+        absences.sort_by_key(|absence| absence.before);
+        self.absences = absences;
+        self
+    }
+
+    /// The groups this strip states as empty, in rail order.
+    #[must_use]
+    pub fn absences(&self) -> &[TabGroupAbsence] {
+        &self.absences
     }
 
     /// This strip laid out along `orientation`.
@@ -392,21 +470,26 @@ impl Tabs {
     ///
     /// A horizontal strip is one row, so this is its
     /// [`measured_extent`](Self::measured_extent). A vertical strip stacks, so
-    /// this is every group heading plus every entry at its own content height
-    /// — which is what an owner whose entry list is *discovered* rather than
-    /// fixed reserves and scrolls, instead of squeezing entries into whatever
-    /// column it happens to have.
+    /// this is every group heading plus every entry at its own content height,
+    /// plus every stated absence — which is what an owner whose entry list is
+    /// *discovered* rather than fixed reserves and scrolls, instead of
+    /// squeezing entries into whatever column it happens to have.
     #[must_use]
     pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
         match self.orientation {
             TabsOrientation::Horizontal => self.measured_extent(scale, theme),
             TabsOrientation::Vertical => {
                 let heading = heading_height(scale, theme);
-                self.items.iter().fold(0, |total, tab| {
+                let statement = text_plate_height(theme, scale, TextRole::Body);
+                let entries = self.items.iter().fold(0u32, |total, tab| {
                     total
                         .saturating_add(if tab.group.is_some() { heading } else { 0 })
                         .saturating_add(entry_height(tab, scale, theme))
-                })
+                });
+                let absences = u32::try_from(self.absences.len())
+                    .unwrap_or(u32::MAX)
+                    .saturating_mul(heading.saturating_add(statement));
+                entries.saturating_add(absences)
             }
         }
     }
@@ -555,9 +638,31 @@ impl Tabs {
                 .collect(),
             TabsOrientation::Vertical => {
                 let heading_h = heading_height(scale, theme);
+                let absence_h =
+                    heading_h.saturating_add(text_plate_height(theme, scale, TextRole::Body));
                 let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
+                let mut absences = self.absences.iter().enumerate().peekable();
                 for (index, tab) in self.items.iter().enumerate() {
+                    // The empty groups that belong above this item, in their
+                    // own rail position.
+                    while let Some((slot, _)) =
+                        absences.next_if(|(_, absence)| absence.before <= index)
+                    {
+                        if top.saturating_add(absence_h) > h {
+                            return bands;
+                        }
+                        bands.push(Band {
+                            kind: BandKind::Absence(slot),
+                            rect: Rect::new(
+                                to_i32(x),
+                                to_i32(y).saturating_add(to_i32(top)),
+                                w,
+                                absence_h,
+                            ),
+                        });
+                        top = top.saturating_add(absence_h);
+                    }
                     let own_heading = if tab.group.is_some() { heading_h } else { 0 };
                     let entry_h = entry_height(tab, scale, theme);
                     // A heading never appears without at least its own first
@@ -568,7 +673,7 @@ impl Tabs {
                         .saturating_add(1)
                         > h.saturating_add(1)
                     {
-                        break;
+                        return bands;
                     }
                     if own_heading > 0 {
                         bands.push(Band {
@@ -592,6 +697,24 @@ impl Tabs {
                         ),
                     });
                     top = top.saturating_add(entry_h);
+                }
+                // An absence after the last item — a trailing group with
+                // nothing in it, and the whole-strip case where there are no
+                // items at all.
+                for (slot, _) in absences {
+                    if top.saturating_add(absence_h) > h {
+                        break;
+                    }
+                    bands.push(Band {
+                        kind: BandKind::Absence(slot),
+                        rect: Rect::new(
+                            to_i32(x),
+                            to_i32(y).saturating_add(to_i32(top)),
+                            w,
+                            absence_h,
+                        ),
+                    });
+                    top = top.saturating_add(absence_h);
                 }
                 bands
             }
@@ -639,8 +762,60 @@ impl Tabs {
                 BandKind::Item(index) => {
                     self.paint_tab(surface, index, rect, scale, theme, font);
                 }
+                BandKind::Absence(slot) => {
+                    self.paint_absence(surface, slot, rect, scale, theme, font);
+                }
             }
         }
+    }
+
+    /// Paint one empty group: its heading, then the line saying why it is
+    /// empty, both quiet and on the surface behind them with no plate — the
+    /// group is a break in the list carrying a statement, never an entry a
+    /// reader could try to select.
+    fn paint_absence(
+        &self,
+        surface: &mut Surface,
+        slot: usize,
+        rect: (u32, u32, u32, u32),
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) {
+        let Some(absence) = self.absences.get(slot) else {
+            return;
+        };
+        let (x, y, w, h) = rect;
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+        let Some(avail) = w.checked_sub(pad.saturating_mul(2)) else {
+            return;
+        };
+        if avail == 0 || h < font.line_height() {
+            return;
+        }
+        let left = to_i32(x.saturating_add(pad));
+        let muted = Color::from(theme.palette().on_surface_muted);
+        font.draw_text(
+            surface,
+            left,
+            to_i32(y.saturating_add(gap)),
+            font.truncate_to_width(absence.heading(), avail),
+            muted,
+        );
+        let statement_top = y
+            .saturating_add(heading_height(scale, theme))
+            .saturating_add(gap);
+        if statement_top.saturating_add(font.line_height()) > y.saturating_add(h) {
+            return;
+        }
+        font.draw_text(
+            surface,
+            left,
+            to_i32(statement_top),
+            font.truncate_to_width(absence.statement(), avail),
+            muted,
+        );
     }
 
     /// Paint the quiet group heading above the entry at `index`: its own text

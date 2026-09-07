@@ -31,7 +31,7 @@ use tairix_kernel_sec::{
 use tairix_log::{Event, Sink};
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
-use crate::fs::blkclient::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
+use crate::fs::blkmeter::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
@@ -1245,6 +1245,7 @@ fn mount_snapshot_overlays_reported_block_health() {
         handle,
         VolumeIoSource {
             dev: 0x42,
+            device: tairix_abi::blkio::BlkDeviceName::new("mounted-blk"),
             availability: Arc::clone(&availability),
             counters: Arc::clone(&counters),
             stats: Arc::clone(&stats),
@@ -1279,6 +1280,10 @@ fn mount_snapshot_overlays_reported_block_health() {
     assert_eq!(stats_records[0].dev(), 0x42);
     assert_eq!(queue_records[0].dev(), 0x42);
     assert_eq!(stats_records[0].counters(), BlkIoCounters::default());
+    // The device's own name rides the ungated service record, so a consumer
+    // that may read no queue depth and no health can still name what it
+    // lists rather than naming a volume on it.
+    assert_eq!(stats_records[0].device().as_str(), "mounted-blk");
     assert_eq!(queue_records[0].queue(), BlkQueueCounters::default());
     assert_eq!(queue_records[0].budget_depth(), budget.queue_depth);
     assert_eq!(queue_records[0].budget_deadline_ns(), budget.deadline_ns);

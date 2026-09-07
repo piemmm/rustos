@@ -29,6 +29,130 @@ use crate::{DriverError, Errno};
 /// request length (the `virtio_blk` staging-window precedent).
 pub const BLK_DATA_LEN: usize = 32 * 1024;
 
+/// Byte length of a block device's name field: NUL-padded ASCII, sized like
+/// the interface-name field ([`crate::net_ipc::IF_NAME_LEN`]).
+pub const BLK_DEVICE_NAME_LEN: usize = 16;
+
+/// Base of the device-identity block reserved for a block device the
+/// **kernel itself** drives, rather than one served over a block-service
+/// endpoint.
+///
+/// Every per-volume reading is keyed by the identity of the device serving
+/// it, which for a served volume is its endpoint id. The bootstrap-floor
+/// disk has no serving endpoint at all, so it needs an identity from a space
+/// that cannot collide with one: two devices sharing an identity would fold
+/// their counters together and let one device's volumes answer for another's
+/// removal check. Ids in this block are therefore refused at endpoint
+/// creation, which makes the two spaces disjoint by construction rather than
+/// by convention.
+pub const KERNEL_BLOCK_DEVICE_BASE: u64 = 0x424B_0000_0000_0000;
+
+/// Number of ids the [`KERNEL_BLOCK_DEVICE_BASE`] block reserves — one per
+/// possible in-kernel device index, mirroring the bus-child block's span.
+const KERNEL_BLOCK_DEVICE_SPAN: u64 = 1 << u32::BITS;
+
+/// The reserved identity of the `index`-th block device the kernel drives
+/// itself.
+#[must_use]
+pub const fn kernel_block_device(index: u32) -> u64 {
+    KERNEL_BLOCK_DEVICE_BASE + index as u64
+}
+
+/// Whether `id` names a block device the kernel drives itself, and therefore
+/// cannot be a block-service endpoint.
+#[must_use]
+pub const fn is_kernel_block_device(id: u64) -> bool {
+    id >= KERNEL_BLOCK_DEVICE_BASE && id < KERNEL_BLOCK_DEVICE_BASE + KERNEL_BLOCK_DEVICE_SPAN
+}
+
+/// A block device's own short name, as the driver that binds the hardware
+/// declares it ([`Block::device_name`]).
+///
+/// The name travels from an untrusted driver to surfaces that print it — the
+/// Switchboard's storage rail, `sysinfo storage` — so it is validated once
+/// here, on the way in, rather than by each reader: only a bounded run of
+/// printable non-space ASCII survives and anything else resolves to the
+/// unnamed device, so no driver can smuggle an escape sequence into a
+/// terminal or a control character into a rail entry. A name too long for
+/// the field is refused rather than truncated, because a truncation could
+/// silently give two devices the same name.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct BlkDeviceName {
+    /// The name, NUL-padded. All-NUL is the unnamed device.
+    bytes: [u8; BLK_DEVICE_NAME_LEN],
+}
+
+impl BlkDeviceName {
+    /// The unnamed device: what a driver that declares no name reports, and
+    /// what an unusable declaration resolves to.
+    pub const UNNAMED: Self = Self {
+        bytes: [0; BLK_DEVICE_NAME_LEN],
+    };
+
+    /// The name `name` declares, or [`Self::UNNAMED`] when it is empty, too
+    /// long for the field, or carries any byte outside printable non-space
+    /// ASCII (fail closed).
+    #[must_use]
+    pub const fn new(name: &str) -> Self {
+        Self::from_bytes(name.as_bytes())
+    }
+
+    /// The name `bytes` declares — the same admission rule as [`Self::new`],
+    /// additionally ignoring the NUL padding a wire field carries.
+    #[must_use]
+    pub const fn from_bytes(bytes: &[u8]) -> Self {
+        let mut out = Self::UNNAMED;
+        let mut i = 0;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            if byte == 0 {
+                break;
+            }
+            if i == BLK_DEVICE_NAME_LEN || !byte.is_ascii_graphic() {
+                return Self::UNNAMED;
+            }
+            out.bytes[i] = byte;
+            i += 1;
+        }
+        // Padding after the name must be NUL: a second name hiding behind
+        // the terminator is a malformed field, not two names.
+        while i < bytes.len() {
+            if bytes[i] != 0 {
+                return Self::UNNAMED;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The name as text, or the empty string when unnamed.
+    ///
+    /// Printable by construction: the admission rule above admits only
+    /// graphic ASCII, so a caller may render this without escaping it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        let len = self
+            .bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(BLK_DEVICE_NAME_LEN);
+        core::str::from_utf8(&self.bytes[..len]).unwrap_or("")
+    }
+
+    /// Whether the device declared a usable name.
+    #[must_use]
+    pub fn is_named(&self) -> bool {
+        self.bytes[0] != 0
+    }
+
+    /// The field's wire bytes.
+    #[must_use]
+    pub const fn to_le_bytes(&self) -> [u8; BLK_DEVICE_NAME_LEN] {
+        self.bytes
+    }
+}
+
 /// One block-service operation.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -391,9 +515,13 @@ const COMPLETION_HEADER_LEN: usize = COMPLETION_GEOMETRY_OFF;
 
 /// Encoded length of a block-service completion: the health/status word, an
 /// [`Errno`] detail word (`0` when none), then the geometry payload
-/// (`block_size(4) || block_count(8) || flags(4) || class(4)`, zero-filled
-/// for the non-geometry operations). Also the endpoint's maximum reply size.
-pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4 + 4;
+/// (`block_size(4) || block_count(8) || flags(4) || class(4) || name`,
+/// zero-filled for the non-geometry operations). Also the endpoint's maximum
+/// reply size.
+pub const BLK_COMPLETION_LEN: usize = COMPLETION_HEADER_LEN + 4 + 8 + 4 + 4 + BLK_DEVICE_NAME_LEN;
+
+/// Offset of the declared device name within the geometry payload.
+const COMPLETION_NAME_OFF: usize = COMPLETION_GEOMETRY_OFF + 20;
 
 /// [`BlkCompletion::flags`] bit: the logical unit is write-protected; a
 /// [`BlkOp::Write`] will be refused [`Errno::PermissionDenied`].
@@ -435,6 +563,17 @@ pub struct BlkCompletion {
     /// driver that overstates its patience only delays its own deadline; one
     /// that understates it only fails itself sooner.
     pub class: Option<BlkDeviceClass>,
+    /// The device's own short name, as the serving driver declares it
+    /// ([`Block::device_name`]).
+    ///
+    /// Declared here for the same reason the class is: the driver that binds
+    /// the hardware is the one component that knows what the device *is*, and
+    /// a consumer that reports a storage device to a reader needs to name the
+    /// device rather than the volumes that happen to sit on it. It grants no
+    /// authority and is validated by [`BlkDeviceName`] on the way in, so an
+    /// untrusted driver can neither forge an identity that means anything nor
+    /// inject an unprintable byte into a reader's screen.
+    pub name: BlkDeviceName,
 }
 
 /// The class word written for a device whose declared class this build does
@@ -487,6 +626,8 @@ fn encode_frame(
         COMPLETION_GEOMETRY_OFF + 16,
         class_to_wire(geometry.class),
     );
+    buf[COMPLETION_NAME_OFF..COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN]
+        .copy_from_slice(&geometry.name.to_le_bytes());
     Ok(BLK_COMPLETION_LEN)
 }
 
@@ -618,6 +759,12 @@ pub fn decode_outcome(reply: &[u8]) -> BlkOutcome {
                 // device never declared; patience comes from `served_as`,
                 // which grants an unknown no more than a paravirtual device.
                 class: class_from_wire(read_u32(reply, COMPLETION_GEOMETRY_OFF + 16)),
+                // Re-validated on the way in, so an unprintable or
+                // overlong declaration reads as the unnamed device rather
+                // than reaching a surface that prints it.
+                name: BlkDeviceName::from_bytes(
+                    &reply[COMPLETION_NAME_OFF..COMPLETION_NAME_OFF + BLK_DEVICE_NAME_LEN],
+                ),
             },
             error: status.default_errno(),
         }
@@ -2387,13 +2534,17 @@ fn classify<B: Block>(
             // The geometry reply is where a consumer learns what this device
             // *is*: its declared class travels with its size and write policy
             // so the consumer derives its deadline, reissue, and grace budget
-            // from the same shared policy the driver serves it with.
+            // from the same shared policy the driver serves it with, and its
+            // name travels with them so a consumer reporting the device can
+            // name it rather than the volumes on it.
             let class = Some(device.device_class());
+            let name = device.device_name();
             Served::Device(device.geometry().map(|geometry| BlkCompletion {
                 block_size: geometry.block_size,
                 block_count: geometry.block_count,
                 flags: if read_only { BLK_FLAG_READ_ONLY } else { 0 },
                 class,
+                name,
             }))
         }
         BlkOp::Read => match data_extent(device, request.blocks, window.len()) {
@@ -2446,6 +2597,108 @@ fn data_extent<B: Block>(device: &B, blocks: u32, window_len: usize) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_device_name_admits_only_printable_ascii() {
+        assert_eq!(BlkDeviceName::new("virtio-blk").as_str(), "virtio-blk");
+        assert_eq!(BlkDeviceName::new("nvme0n1").as_str(), "nvme0n1");
+        assert_eq!(
+            BlkDeviceName::new("bcm2711_emmc2").as_str(),
+            "bcm2711_emmc2"
+        );
+        assert!(BlkDeviceName::new("virtio-blk").is_named());
+
+        // No name is a valid answer; it simply is not a name.
+        assert!(!BlkDeviceName::new("").is_named());
+        assert_eq!(BlkDeviceName::new("").as_str(), "");
+        assert_eq!(BlkDeviceName::UNNAMED, BlkDeviceName::new(""));
+    }
+
+    #[test]
+    fn a_device_name_refuses_anything_a_reader_could_not_safely_print() {
+        // An escape introducer, a newline, a tab and a NUL-in-the-middle are
+        // each a terminal command or a line break on a reader's screen, so
+        // the whole declaration is refused rather than sanitised.
+        for hostile in ["\u{1b}[2J", "one\ntwo", "a\tb", "sneaky\u{7f}"] {
+            assert!(
+                !BlkDeviceName::new(hostile).is_named(),
+                "{hostile:?} must not reach a reader"
+            );
+        }
+        // A space would break a caller that joins names into one line, so a
+        // name is a single token.
+        assert!(!BlkDeviceName::new("two words").is_named());
+        // Non-ASCII is outside the field's alphabet.
+        assert!(!BlkDeviceName::new("disqué").is_named());
+    }
+
+    #[test]
+    fn a_device_name_too_long_for_the_field_is_refused_not_truncated() {
+        let longest = "x".repeat(BLK_DEVICE_NAME_LEN);
+        assert_eq!(BlkDeviceName::new(&longest).as_str(), longest);
+        // One byte more: truncating would let two devices share a name, so
+        // the declaration is refused outright.
+        let overlong = "x".repeat(BLK_DEVICE_NAME_LEN + 1);
+        assert!(!BlkDeviceName::new(&overlong).is_named());
+    }
+
+    #[test]
+    fn a_device_name_wire_field_round_trips_and_refuses_a_second_name() {
+        let name = BlkDeviceName::new("usb-msd");
+        assert_eq!(BlkDeviceName::from_bytes(&name.to_le_bytes()), name);
+
+        // A field carrying a second string after the terminator is malformed,
+        // not two names: a reader must never see the first and a relay must
+        // never carry the second.
+        let mut smuggled = name.to_le_bytes();
+        smuggled[BLK_DEVICE_NAME_LEN - 1] = b'x';
+        assert!(!BlkDeviceName::from_bytes(&smuggled).is_named());
+    }
+
+    #[test]
+    fn the_kernel_driven_device_identities_are_a_closed_disjoint_block() {
+        assert_eq!(kernel_block_device(0), KERNEL_BLOCK_DEVICE_BASE);
+        assert!(is_kernel_block_device(kernel_block_device(0)));
+        assert!(is_kernel_block_device(kernel_block_device(u32::MAX)));
+        assert!(!is_kernel_block_device(KERNEL_BLOCK_DEVICE_BASE - 1));
+        assert!(!is_kernel_block_device(
+            KERNEL_BLOCK_DEVICE_BASE + KERNEL_BLOCK_DEVICE_SPAN
+        ));
+        // Nothing that is already an endpoint rendezvous may fall in the
+        // block: an endpoint id and a kernel-driven device identity must
+        // never name the same device.
+        assert!(!is_kernel_block_device(0));
+        assert!(!is_kernel_block_device(crate::sysinfo::SYSINFO_ENDPOINT));
+        assert!(!is_kernel_block_device(crate::hwtree::bus_child_endpoint(
+            0
+        )));
+        assert!(!is_kernel_block_device(
+            crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE
+        ));
+    }
+
+    #[test]
+    fn a_geometry_completion_carries_the_name_its_device_declared() {
+        let completion = BlkCompletion {
+            block_size: 512,
+            block_count: 8,
+            flags: 0,
+            class: Some(BlkDeviceClass::Rotational),
+            name: BlkDeviceName::new("fixture-blk"),
+        };
+        let mut frame = [0u8; BLK_COMPLETION_LEN];
+        completion.encode(&mut frame).expect("the frame fits");
+        let decoded = decode_outcome(&frame);
+        assert_eq!(decoded.geometry.name.as_str(), "fixture-blk");
+        assert_eq!(decoded.geometry, completion);
+
+        // A hostile driver's unprintable declaration reaches the consumer as
+        // the unnamed device, and the rest of the completion still decodes.
+        frame[COMPLETION_NAME_OFF] = 0x1B;
+        let decoded = decode_outcome(&frame);
+        assert!(!decoded.geometry.name.is_named());
+        assert_eq!(decoded.geometry.block_count, 8);
+    }
 
     /// A device that declares what it can promise, so the serve engine's
     /// success status can be observed against it.
@@ -2813,6 +3066,7 @@ mod tests {
             block_count: 0x2_0000_0000,
             flags: BLK_FLAG_READ_ONLY,
             class: Some(BlkDeviceClass::Rotational),
+            name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         let n = completion.encode(&mut buf).expect("encodes");
@@ -2835,6 +3089,7 @@ mod tests {
                 block_count: 9,
                 flags: 0,
                 class: Some(class),
+                name: BlkDeviceName::UNNAMED,
             };
             let mut buf = [0u8; BLK_COMPLETION_LEN];
             completion.encode(&mut buf).expect("encodes");
@@ -2854,6 +3109,7 @@ mod tests {
             block_count: 4,
             flags: 0,
             class: Some(BlkDeviceClass::Rotational),
+            name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         completion.encode(&mut buf).expect("encodes");
@@ -2987,6 +3243,7 @@ mod tests {
             block_count: 7,
             flags: BLK_FLAG_READ_ONLY,
             class: Some(BlkDeviceClass::Removable),
+            name: BlkDeviceName::UNNAMED,
         };
         let mut buf = [0u8; BLK_COMPLETION_LEN];
         geometry
@@ -4237,6 +4494,7 @@ mod tests {
                 block_count: BLOCK_COUNT,
                 flags: 0,
                 class: Some(MEM_BLOCK_CLASS),
+                name: BlkDeviceName::UNNAMED,
             })
         );
         assert_eq!(
@@ -4246,6 +4504,7 @@ mod tests {
                 block_count: BLOCK_COUNT,
                 flags: BLK_FLAG_READ_ONLY,
                 class: Some(MEM_BLOCK_CLASS),
+                name: BlkDeviceName::UNNAMED,
             })
         );
     }

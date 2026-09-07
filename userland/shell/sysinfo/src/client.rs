@@ -982,13 +982,14 @@ fn run_storage(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysinf
 
 /// Fetch and render the cumulative per-volume service counters, one aligned
 /// row per fault-aware block-backed volume: a short prefix of its durable id,
-/// the serving block-service endpoint, and the raw tallies a reader deltas
-/// into throughput, IOPS, utilisation and await. Nothing is pre-derived here,
-/// so two readers never inherit one averaging window. Ungated.
+/// the serving device's identity and its own name, and the raw tallies a
+/// reader deltas into throughput, IOPS, utilisation and await. Nothing is
+/// pre-derived here, so two readers never inherit one averaging window.
+/// Ungated.
 fn run_volume_service(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     emit(
         out,
-        "volume            dev                    read-B     write-B  read-ops  write-ops     busy-ms",
+        "volume            dev                 device               read-B     write-B  read-ops  write-ops     busy-ms",
     )?;
     let mut offset: u32 = 0;
     loop {
@@ -1010,12 +1011,21 @@ fn run_volume_service(transport: &dyn Transport, out: &dyn Output) -> Result<(),
             let record = VolumeIoStatsRecord::from_bytes(chunk).map_err(SysinfoError::Service)?;
             let volume_id = record.volume_id();
             let counters = record.counters();
+            let device = record.device();
             emit(
                 out,
                 &format!(
-                    "{:<16}  {:#018x}  {:>10}  {:>10}  {:>8}  {:>9}  {:>10}",
+                    "{:<16}  {:#018x}  {:<16}  {:>10}  {:>10}  {:>8}  {:>9}  {:>10}",
                     hex(&volume_id[..8]),
                     record.dev(),
+                    // Printable by construction: the field's decode admits
+                    // only graphic ASCII, so a driver's declaration cannot
+                    // carry an escape sequence into a terminal.
+                    if device.is_named() {
+                        device.as_str()
+                    } else {
+                        "-"
+                    },
                     counters.read_bytes,
                     counters.write_bytes,
                     counters.read_ops,
@@ -1774,6 +1784,7 @@ mod tests {
                             read_wait_ns: 128_000_000,
                             write_wait_ns: 64_000_000,
                         },
+                        tairix_abi::blkio::BlkDeviceName::new("fixture-blk"),
                     )],
                     |record| record.to_le_bytes().to_vec(),
                 )

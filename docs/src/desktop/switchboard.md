@@ -260,6 +260,19 @@ there are no shared counters to collapse, so that volume stands as its own
 entry with its capacity alone; a mount with no backing volume at all (the
 in-RAM layout directories) is view plumbing and no storage device.
 
+**A `Storage` entry is named by its device, then by what is on it.** The
+entry reads `<device> · <volumes>` — `virtio-blk · ARXFSSystem · ARXFSRoot`
+for the one QEMU disk the boot floor brings up — because a reader scanning
+the rail is choosing which *disk* to look at, and naming the entry after the
+volumes on it names a filesystem instead. The device's name comes from the
+device: its driver declares it (`Block::device_name`) and it rides the same
+ungated `VOLUME_IO_STATS` record the grouping key comes from, so a session
+that may read no queue depth and no health can still name what it lists. The
+volumes follow so two disks of the same kind are still told apart by what is
+on them, and a device whose driver declares no name is named by its volumes
+alone rather than by an invented identity — which the pane's capacity block
+states as an absent reading, never as a fabricated one.
+
 **Every rail entry with a rate behind it carries a trace, from the counters
 the service deltas itself.** A storage device's entry carries both readings:
 its figure is how full it is — a level, which a trace would not say — and its
@@ -276,10 +289,19 @@ other. Only the `Machine` entries have no instrument.
 **The rail's length is discovered, never declared.** Twelve cores, four disks
 and three interfaces is the design case; a hundred-core machine with a dozen
 disks gets a scrolling rail, not a truncated one, and no entry count is a
-compile-time constant. A machine with no storage device mounted has no
-`Storage` group at all rather than an empty slot — but a rail group missing
-because the *inventory* was refused is a different statement, and the report
-carries which.
+compile-time constant.
+
+**A group with no entries states why, in its own rail position.** A heading
+is drawn by the entry that *starts* its group, so an empty group would
+otherwise vanish and leave a reader unable to tell a machine with no such
+device from a session that was refused the inventory. `Storage` and `Network`
+are the two groups that can be empty, and the report carries the verdict the
+sample reached for each: the rail draws the heading with one line under it —
+the refusal where there was one, "No storage device is present." where the
+query answered and found none. The `Tabs` sidebar draws these through
+`with_absences`, which selects nothing, takes no keyboard cursor and shifts
+no entry's index, so a statement drawn among the entries can never move the
+device a press lands on.
 
 Cores are deliberately **not** rail entries: the CPU pane shows every core at
 once, so a per-core rail would state the same readings twice and push the

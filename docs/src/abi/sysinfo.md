@@ -188,10 +188,31 @@ kernel-wide operational state:
   internals, hence the gate the utilisation split does not carry.
 - `VOLUME_IO_STATS` — one `VolumeIoStatsRecord` per fault-aware
   block-backed volume the kernel serves (paged by a `VolumeIoRequest`):
-  the volume's durable id, the serving block-service endpoint, and the
-  cumulative `blkio::BlkIoCounters` the kernel filesystem client folds
-  from every attempt — `read_bytes`/`write_bytes`,
-  `read_ops`/`write_ops`, `busy_ns`, and `read_wait_ns`/`write_wait_ns`.
+  the volume's durable id, the identity and name of the device serving
+  it, and the cumulative `blkio::BlkIoCounters` the kernel folds from
+  every attempt — `read_bytes`/`write_bytes`, `read_ops`/`write_ops`,
+  `busy_ns`, and `read_wait_ns`/`write_wait_ns`.
+
+  The device's identity is its block-service call-endpoint id where a
+  user-space driver serves it, and its
+  `blkio::kernel_block_device` identity where the kernel drives the
+  device itself — the bootstrap-floor disk, which has no serving endpoint
+  at all. The two spaces are disjoint by construction (an endpoint may
+  not be created in the kernel-driven block), so one identity always
+  names one device and a consumer grouping volumes into devices can never
+  fold two together.
+
+  The device's `name` is what its own driver declares
+  (`driver::block::Block::device_name`, relayed in the geometry
+  completion), or the unnamed device where it declares none. It rides
+  this record rather than the per-mount `MountRecord` because it names
+  the *device*: a consumer grouping by identity needs the name keyed the
+  same way, and a per-mount copy would repeat one device's name once per
+  projection of every volume on it. Being on the ungated read means a
+  surface that may read no queue depth and no health can still name what
+  it lists. The field admits only printable non-space ASCII and refuses
+  anything else to the unnamed device, so an untrusted driver cannot
+  reach a reader's terminal through it.
   The storage analogue of `CPU_TIME_STATS`, and ungated for the same
   reason: a machine-wide throughput and utilisation figure is one every
   user may see, and it exposes strictly less than the ungated

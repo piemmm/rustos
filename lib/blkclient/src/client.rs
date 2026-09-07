@@ -9,8 +9,8 @@
 //! playing the serving driver.
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkOp, BlkOutcome, BlkRequest, IoBudget,
-    BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkOp, BlkOutcome, BlkRequest,
+    IoBudget, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::sysinfo::MountAvailability;
@@ -97,6 +97,11 @@ pub struct RemoteBlock<'w, C: BlkCall> {
     /// this build does not recognise, held distinct from every named class so
     /// nothing above reports a medium the device never declared.
     declared_class: Option<BlkDeviceClass>,
+    /// The name the device declared for itself, kept so a consumer that
+    /// reports a storage device names the real hardware rather than the
+    /// volumes on it. Validated on decode, so an untrusted driver cannot
+    /// reach a reader's screen through it.
+    device_name: BlkDeviceName,
     /// What the served device last said it could promise, reflected from each
     /// completion's health status through the one shared mapping. The serving
     /// driver owns the state machine and its grace window; this client only
@@ -154,6 +159,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
             // the geometry query itself runs on the bounded unclassified
             // envelope; the device's own class is adopted below.
             declared_class: None,
+            device_name: BlkDeviceName::UNNAMED,
             budget: BlkDeviceClass::served_as(None).budget(),
             // Nothing has been served yet, so there is nothing to stand
             // background work down for until a completion says otherwise.
@@ -186,6 +192,7 @@ impl<'w, C: BlkCall> RemoteBlock<'w, C> {
         };
         client.read_only = completion.flags & BLK_FLAG_READ_ONLY != 0;
         client.declared_class = completion.class;
+        client.device_name = completion.name;
         client.budget = BlkDeviceClass::served_as(completion.class).budget();
         Ok(client)
     }
@@ -276,6 +283,13 @@ impl<C: BlkCall> Block for RemoteBlock<'_, C> {
     /// unclassified envelope, which buys it no extra patience.
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::served_as(self.declared_class)
+    }
+
+    /// The served device's own name, as its driver declared it at connect.
+    /// A client is a window onto the device, not a device of its own, so a
+    /// composition layered over this one names the real hardware.
+    fn device_name(&self) -> BlkDeviceName {
+        self.device_name
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

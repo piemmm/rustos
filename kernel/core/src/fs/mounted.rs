@@ -62,7 +62,7 @@ use tairix_sync::{OnceCell, RwLock, SpinLock};
 use crate::fswatch;
 use crate::sleeplock::SleepLock;
 
-use super::blkclient::VolumeIoSource;
+use super::blkmeter::VolumeIoSource;
 
 use super::delegate::FinalLink;
 use super::path::Path;
@@ -484,7 +484,12 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// [`volume_io_health_records`](Self::volume_io_health_records).
     fn volume_io_stats_records(&self) -> Vec<VolumeIoStatsRecord> {
         self.io_records(|entry, source| {
-            VolumeIoStatsRecord::new(entry.volume_id, source.dev, source.stats.io_snapshot())
+            VolumeIoStatsRecord::new(
+                entry.volume_id,
+                source.dev,
+                source.stats.io_snapshot(),
+                source.device,
+            )
         })
     }
 

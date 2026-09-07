@@ -48,11 +48,12 @@
 use alloc::sync::Arc;
 use core::ops::Deref;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::DriverError;
+use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::{CooperativeYield, SleepLock};
 
 /// A [`Block`] device shared behind a lock so several concurrent windows
@@ -79,6 +80,10 @@ pub struct SharedBlock<B: Block> {
     /// geometry, and forwarded rather than defaulted so a consumer above
     /// this sharing boundary still derives the real device's I/O budget.
     class: BlkDeviceClass,
+    /// The device's own name, read once at construction and served lock-free
+    /// like the class, so a consumer above this boundary reports the disk
+    /// rather than whatever sits on it.
+    name: BlkDeviceName,
 }
 
 impl<B: Block> SharedBlock<B> {
@@ -92,10 +97,12 @@ impl<B: Block> SharedBlock<B> {
     pub fn new(device: B) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
         let class = device.device_class();
+        let name = device.device_name();
         Ok(Self {
             device: SleepLock::new(device),
             geometry,
             class,
+            name,
         })
     }
 
@@ -109,6 +116,12 @@ impl<B: Block> SharedBlock<B> {
     #[must_use]
     pub fn device_class(&self) -> BlkDeviceClass {
         self.class
+    }
+
+    /// The device's own name (lock-free; see the module docs).
+    #[must_use]
+    pub fn device_name(&self) -> BlkDeviceName {
+        self.name
     }
 
     /// A new independent window onto the shared device, borrowing it. Each
@@ -237,6 +250,12 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
         self.shared.class
     }
 
+    /// The shared device's own name, served from the cache like the class:
+    /// a window is not a device of its own.
+    fn device_name(&self) -> BlkDeviceName {
+        self.shared.name
+    }
+
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
         // Served from the cache: immutable for the life of the disk, so no
         // lock and no device round-trip.
@@ -315,13 +334,32 @@ impl<B: Block, R: Deref<Target = SharedBlock<B>>> Block for SharedBlockHandle<R>
 /// for life when it has no endpoint to serve.
 pub struct DriverStoreService<B: Block> {
     shared: SharedBlock<B>,
+    /// The boot disk's live I/O readings, folded below the cache by the
+    /// [`MeteredBlock`](tairix_kernel_core::fs::blkmeter::MeteredBlock) the
+    /// bring-up wrapped the device in.
+    ///
+    /// The service is the one `'static` handle on the boot disk that both
+    /// boot-floor mount registrations reach — the read-only `/System` volume
+    /// and, later, the writable root — so it is where the source they each
+    /// attach to their volume lives. Without it those two volumes publish no
+    /// source at all and the three per-volume queries report nothing about
+    /// the disk the machine is running from.
+    io: VolumeIoSource,
 }
 
 impl<B: Block> DriverStoreService<B> {
-    /// Take ownership of the boot disk's [`SharedBlock`] as the driver store.
+    /// Take ownership of the boot disk's [`SharedBlock`] as the driver store,
+    /// carrying the `io` readings its metered device folds.
     #[must_use]
-    pub fn new(shared: SharedBlock<B>) -> Self {
-        Self { shared }
+    pub fn new(shared: SharedBlock<B>, io: VolumeIoSource) -> Self {
+        Self { shared, io }
+    }
+
+    /// The boot disk's live I/O readings, for a boot-floor mount to attach to
+    /// its volume. Cheap to clone: every volume on the disk shares one fold.
+    #[must_use]
+    pub fn io_source(&self) -> VolumeIoSource {
+        self.io.clone()
     }
 
     /// A fresh read-only window onto the boot disk holding the `/System`
@@ -354,7 +392,18 @@ impl<B: Block> DriverStoreService<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::blkio::kernel_block_device;
     use tairix_abi::driver::block::HealthSnapshot;
+    use tairix_kernel_core::fs::blkmeter::MeteredBlock;
+    use tairix_log::Event;
+
+    /// A sink that discards every event: these tests assert sharing, not the
+    /// audit trail.
+    struct NullSink;
+    impl tairix_log::Sink for NullSink {
+        fn write_event(&self, _event: &Event<'_>) {}
+    }
+    static SINK: NullSink = NullSink;
 
     /// A minimal in-memory [`Block`] over a fixed byte store, with a
     /// staging buffer so the classified-read scrub contract can be
@@ -651,7 +700,9 @@ mod tests {
         // `/System` store through independent windows: a write through one
         // window is visible through a second, exactly as the boot autoload
         // window and the encrypted-root unlock window share one disk.
-        let service = DriverStoreService::new(SharedBlock::new(MemBlock::new()).unwrap());
+        let device = MeteredBlock::new(MemBlock::new(), kernel_block_device(0), &SINK);
+        let io = device.io_source();
+        let service = DriverStoreService::new(SharedBlock::new(device).unwrap(), io);
         let mut writer = service.window();
         let payload = [0x3Cu8; 64];
         writer.write_blocks(7, &payload).unwrap();

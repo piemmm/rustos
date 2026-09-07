@@ -25,7 +25,7 @@ lie about.
 | **F1** | Resources' `SectionAnatomy`: the device rail as `sidebar`, the pane as `primary`, and the shed route replacing the rail with a band `ComboBox` | A1 | S3 | done |
 | **C1** | `chart::Chart` gains an optional opposing series, mirrored below a drawn midline and tinted by its own `PressureKind` | — | S7 | done |
 | **C2** | `metric::CompositionBar` — named proportional segments of a measured whole, with its key; segments that do not sum to the whole are a construction error | — | S7 | done |
-| **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend | — | S7 | done |
+| **C3** | vertical `tabs::Tabs` gains group headings and per-item reading + bounded trend, plus a stated absence for a group with no entries (`with_absences`) | — | S7 | done |
 | **P1** | `PressureKind::{Gpu, Accelerator}` and `gpu_pressure` / `accelerator_pressure` in both built-in themes | — | S9 | done |
 | **D1** | `drivers/accelerator/` class with its trait in `lib/abi/src/driver/accelerator.rs`, bound through the ordinary discovery-match path | — | S8 | done |
 | **Q1** | `VOLUME_IO_STATS` — ungated, per volume: bytes, ops, `busy_ns`, read/write `wait_ns` | `plans/FIX-IO.md` per-device counters | S8 | done |
@@ -437,6 +437,17 @@ reading; a fact list cannot carry it.
   RAID and swap traffic belongs to no process. The interface pane has no such
   block — per-task network has no interface (S6) — and states that in words
   rather than showing an empty list, because an empty list reads as *none*.
+
+- **A rail group with no entries states why, in its own rail position.** A
+  heading is drawn by the entry that starts its group, so an empty group
+  would vanish and leave a reader unable to tell a machine with no such
+  device from a session refused the inventory. `Storage` and `Network` are
+  the two that can be empty, and `ResourceReport`'s `storage_absent` /
+  `interfaces_absent` carry the verdict the sample reached for each. The
+  sidebar draws them through `Tabs::with_absences` (`TabGroupAbsence`:
+  heading, one line, and the item index it precedes), which selects nothing,
+  takes no keyboard cursor and shifts no item's index — so a statement drawn
+  among the entries can never move the device a press lands on.
 
 - **rail** — the commands for the *selected device*, seated in a `Panel`
   because `ActionRail` carries no caption of its own. Every action emits a

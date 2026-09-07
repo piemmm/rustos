@@ -130,13 +130,23 @@ impl<'a> StorageSubject<'a> {
             .filter_map(|volume| volume.mounts.first().map(|mount| (&volume.id, *mount)))
     }
 
-    /// The device's name: what its volumes are called.
+    /// The device's own name, as its driver declares it, or [`None`] where
+    /// it declares none.
     ///
-    /// A device is not at a path, so the rail names the volumes on it and
-    /// the pane states where each is mounted. A volume the mount table gives
-    /// no source for falls back to its first mount point, so no entry is
-    /// ever nameless.
-    fn name(&self) -> String {
+    /// Read from the ungated service query, which is where the name rides
+    /// precisely because that is the query the grouping key comes from: a
+    /// session that may read no queue depth and no health can still name what
+    /// it lists.
+    fn device_name(&self, sample: &Sample) -> Option<String> {
+        let name = super::find_volume(sample.volume_io_stats.as_deref(), &self.key())
+            .map(VolumeIoStatsRecord::device)?;
+        name.is_named().then(|| name.as_str().to_string())
+    }
+
+    /// The volumes on the device, in rail order. A volume the mount table
+    /// gives no source for falls back to its first mount point, so no volume
+    /// is ever nameless.
+    fn volume_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for (_, mount) in self.heads() {
             let source = String::from_utf8_lossy(mount.source_bytes()).into_owned();
@@ -149,7 +159,24 @@ impl<'a> StorageSubject<'a> {
                 names.push(name);
             }
         }
-        names.join(" · ")
+        names
+    }
+
+    /// The rail entry's name: the **device** first, then the volumes on it.
+    ///
+    /// A device is not at a path and is not a filesystem, so naming the entry
+    /// after the volumes that happen to sit on it names a filesystem to a
+    /// reader who is choosing which disk to look at. The device leads, and its
+    /// volumes follow so two disks of the same kind are still told apart by
+    /// what is on them. A device whose driver declares no name is named by its
+    /// volumes alone rather than by an invented identity.
+    fn name(&self, sample: &Sample) -> String {
+        let volumes = self.volume_names();
+        match self.device_name(sample) {
+            Some(device) if volumes.is_empty() => device,
+            Some(device) => format!("{device} · {}", volumes.join(" · ")),
+            None => volumes.join(" · "),
+        }
     }
 }
 
@@ -215,7 +242,7 @@ pub(super) fn device(
             || Reading::Absent(Unmeasured::Unavailable),
             |permille| Reading::measured(percent(permille)),
         ),
-        name: subject.name(),
+        name: subject.name(sample),
         kind: PressureKind::Disk,
         trend: meters.devices.primary_history(id).to_vec(),
         hero: hero(sample, meters, id, &service),
@@ -294,7 +321,7 @@ fn blocks(
         ),
         PaneBlock::half(
             "CAPACITY & MEDIUM",
-            BlockBody::Facts(capacity_facts(subject, service))
+            BlockBody::Facts(capacity_facts(sample, subject, service))
         ),
         PaneBlock::half(
             "VOLUMES & MOUNTS",
@@ -387,8 +414,19 @@ fn derived(
 
 /// What the device holds between its volumes, what it is, and the envelope it
 /// is served with.
-fn capacity_facts(subject: &StorageSubject<'_>, service: &VolumeService) -> Vec<ReadingFact> {
+fn capacity_facts(
+    sample: &Sample,
+    subject: &StorageSubject<'_>,
+    service: &VolumeService,
+) -> Vec<ReadingFact> {
     let mut facts = alloc::vec![
+        match subject.device_name(sample) {
+            Some(device) => ReadingFact::text("Device", device),
+            // Stated rather than invented: nothing above the driver knows
+            // what the device is, and a fabricated identity would read like a
+            // measurement.
+            None => ReadingFact::absent("Device", Unmeasured::Unavailable),
+        },
         ReadingFact::text("Volumes", subject.volumes.len().to_string()),
         ReadingFact::text("Medium", medium_name(subject.medium())),
     ];

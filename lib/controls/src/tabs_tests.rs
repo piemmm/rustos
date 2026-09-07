@@ -24,7 +24,7 @@ use tairix_theme::{Rgba, Theme};
 use crate::chart::Chart;
 use crate::damage::sink;
 use crate::state::{ActivityState, ControlState, PressureKind, SelectionState, ValidationState};
-use crate::tabs::{Tab, Tabs, TabsAction, TabsOrientation};
+use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 use crate::testkit::{control_font, high_contrast};
 
 const W: u32 = 240;
@@ -1560,4 +1560,200 @@ fn the_sidebar_anatomy_reads_in_both_themes_and_under_heavy_contrast() {
         );
         assert!(untouched_outside(&surface, VW, height));
     }
+}
+
+/// A rail whose middle group is empty and says why, positioned before the
+/// entry that follows it.
+fn rail_with_absent_group() -> Tabs {
+    device_rail().with_absences(vec![TabGroupAbsence::new(
+        "STORAGE",
+        "— storage device — not permitted",
+        2,
+    )])
+}
+
+#[test]
+fn a_stated_absence_adds_its_own_band_without_adding_an_item() {
+    let rail = rail_with_absent_group();
+    // The selection model counts items, so an absence must not appear as one.
+    assert_eq!(rail.len(), 3);
+    assert_eq!(rail.absences().len(), 1);
+}
+
+#[test]
+fn a_stated_absence_claims_height_the_owner_must_reserve() {
+    let theme = Theme::dark();
+    let plain = device_rail();
+    let stated = rail_with_absent_group();
+    let grew =
+        stated.measured_height(Scale::ONE, &theme) - plain.measured_height(Scale::ONE, &theme);
+    assert_eq!(
+        grew,
+        heading_band(&theme)
+            + crate::paint::text_plate_height(&theme, Scale::ONE, tairix_theme::TextRole::Body),
+        "a heading plus the line under it"
+    );
+}
+
+#[test]
+fn a_stated_absence_is_drawn_in_its_rail_position_not_at_the_end() {
+    let theme = Theme::dark();
+    let rail = rail_with_absent_group();
+    let height = rail.measured_height(Scale::ONE, &theme);
+    // The entry that follows the empty group is pushed down by exactly the
+    // absence's own band, which is what "in rail position" means.
+    let plain = device_rail();
+    let before = plain
+        .tab_area(2, Rect::new(0, 0, VW, height), Scale::ONE, &theme)
+        .expect("the third entry is seated");
+    let after = rail
+        .tab_area(2, Rect::new(0, 0, VW, height), Scale::ONE, &theme)
+        .expect("the third entry is still seated");
+    assert!(
+        after.top() > before.top(),
+        "the entry after an empty group moves down, not the other way round"
+    );
+    // The two entries above it are where they were.
+    for index in [0, 1] {
+        assert_eq!(
+            rail.tab_area(index, Rect::new(0, 0, VW, height), Scale::ONE, &theme),
+            plain.tab_area(index, Rect::new(0, 0, VW, height), Scale::ONE, &theme),
+        );
+    }
+}
+
+#[test]
+fn a_stated_absence_selects_nothing_and_takes_no_press() {
+    let theme = Theme::dark();
+    let mut rail = rail_with_absent_group();
+    let height = rail.measured_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, VW, height);
+    // The band the absence occupies: between the second entry and the third.
+    let second = rail
+        .tab_area(1, bounds, Scale::ONE, &theme)
+        .expect("seated");
+    let inside = Point::new(4, second.bottom() + 2);
+    assert_eq!(
+        rail.tab_at(bounds, Scale::ONE, &theme, inside),
+        None,
+        "a statement is not an entry a reader can press"
+    );
+
+    let mut damage = sink();
+    let pressed = rail.on_pointer(
+        &InputEvent::PointerMoved { to: inside },
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut damage,
+    );
+    assert_eq!(pressed, None);
+    let mut damage = sink();
+    assert_eq!(
+        rail.on_pointer(
+            &InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        ),
+        None
+    );
+    let mut damage = sink();
+    assert_eq!(
+        rail.on_pointer(
+            &InputEvent::PointerReleased {
+                button: PointerButton::Primary
+            },
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage,
+        ),
+        None,
+        "releasing over a statement selects nothing"
+    );
+}
+
+#[test]
+fn the_keyboard_walks_entries_only_and_skips_a_stated_absence() {
+    let theme = Theme::dark();
+    let mut rail = rail_with_absent_group();
+    let height = rail.measured_height(Scale::ONE, &theme);
+    let bounds = Rect::new(0, 0, VW, height);
+    let mut damage = sink();
+    rail.set_current(Some(1), bounds, Scale::ONE, &theme, &mut damage);
+    let mut damage = sink();
+    assert_eq!(
+        rail.on_key(
+            Key::Named(NamedKey::Down),
+            bounds,
+            Scale::ONE,
+            &theme,
+            &mut damage
+        ),
+        None
+    );
+    assert_eq!(
+        rail.current(),
+        Some(2),
+        "the cursor lands on the next entry, never on a statement"
+    );
+}
+
+#[test]
+fn a_stated_absence_reads_in_every_theme() {
+    let rail = rail_with_absent_group();
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let height = rail.measured_height(Scale::ONE, &theme);
+        let surface = render_in(&rail, &theme, Scale::ONE, VW, height);
+        assert!(
+            has_pixel(&surface, premul(theme.palette().on_surface_muted)),
+            "the heading and the line under it must read in every theme"
+        );
+        assert!(untouched_outside(&surface, VW, height));
+    }
+}
+
+#[test]
+fn a_strip_of_nothing_but_a_stated_absence_still_says_why() {
+    // The whole-rail case: every group empty. A reader must not face a blank
+    // column with no explanation.
+    let theme = Theme::dark();
+    let rail = Tabs::new(vec![])
+        .with_orientation(TabsOrientation::Vertical)
+        .with_absences(vec![TabGroupAbsence::new(
+            "STORAGE",
+            "No storage device is present.",
+            0,
+        )]);
+    assert!(rail.is_empty());
+    let height = rail.measured_height(Scale::ONE, &theme);
+    assert!(height > 0, "the statement claims height of its own");
+    let surface = render_in(&rail, &theme, Scale::ONE, VW, height);
+    assert!(has_pixel(
+        &surface,
+        premul(theme.palette().on_surface_muted)
+    ));
+}
+
+#[test]
+fn a_horizontal_strip_states_no_absence() {
+    // A row has no group headings, so it has nothing to state an absence
+    // under; the layout must simply ignore them rather than draw a stray band.
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("One"), Tab::new("Two")]);
+    let stated = Tabs::new(vec![Tab::new("One"), Tab::new("Two")]).with_absences(vec![
+        TabGroupAbsence::new("STORAGE", "No storage device is present.", 1),
+    ]);
+    assert_eq!(
+        stated.measured_height(Scale::ONE, &theme),
+        plain.measured_height(Scale::ONE, &theme)
+    );
+    assert_eq!(
+        render(&plain, &theme).pixels(),
+        render(&stated, &theme).pixels()
+    );
 }

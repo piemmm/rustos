@@ -6,7 +6,9 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::{BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkQueueCounters};
+use tairix_abi::blkio::{
+    BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
+};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
@@ -90,6 +92,10 @@ const VOLUME: [u8; MOUNT_VOLUME_ID_LEN] = [7; MOUNT_VOLUME_ID_LEN];
 
 /// The block-service endpoint the fixtures' service counters name.
 const DEV: u64 = 0x5953_2001;
+
+/// The name the fixtures' device declares for itself, so a test asserting a
+/// rail entry's name proves the *device* leads it rather than its volumes.
+const DEVICE_NAME: BlkDeviceName = BlkDeviceName::new("virtio-blk");
 
 /// The rail id of the device serving [`VOLUME`], as a sample carrying its
 /// service counters names it.
@@ -350,21 +356,25 @@ fn volumes_sharing_one_served_device_are_one_rail_entry() {
             mount_of("ARXFSSystem", "/System", system, 4_096, 50, 10),
         ]),
         volume_io_stats: Some(alloc::vec![
-            VolumeIoStatsRecord::new(root, DEV, counters),
-            VolumeIoStatsRecord::new(system, DEV, counters),
+            VolumeIoStatsRecord::new(root, DEV, counters, DEVICE_NAME),
+            VolumeIoStatsRecord::new(system, DEV, counters, DEVICE_NAME),
         ]),
         elapsed_ns: Some(1_000_000_000),
         ..permitted()
     };
     let report = report_of(&sample);
+    // The **device** leads the entry, then the volumes on it: a reader
+    // choosing which disk to look at must be told the disk, not a filesystem
+    // that happens to sit on it.
     assert_eq!(
         storage(&report),
         alloc::vec![(
             SERVED,
-            alloc::string::String::from("ARXFSRoot · ARXFSSystem")
+            alloc::string::String::from("virtio-blk · ARXFSRoot · ARXFSSystem")
         )]
     );
     let device = device(&report, SERVED);
+    assert_eq!(fact(device, "Device"), &Reading::measured("virtio-blk"));
     assert_eq!(fact(device, "Volumes"), &Reading::measured("2"));
     // Both volumes' capacities, each counted once: 240 KiB of 400 KiB and
     // 160 KiB of 200 KiB.
@@ -377,6 +387,39 @@ fn volumes_sharing_one_served_device_are_one_rail_entry() {
     let _ = fact(device, "ARXFSSystem");
     let _ = fact(device, "/");
     let _ = fact(device, "/System");
+}
+
+#[test]
+fn a_device_whose_driver_declares_no_name_is_named_by_its_volumes_alone() {
+    // Nothing above the driver knows what the device is, so an unnamed one
+    // states the absence rather than inventing an identity — and the entry
+    // still reaches its volumes.
+    let sample = Sample {
+        mounts: Some(alloc::vec![mount_of(
+            "Backup",
+            "/Storage/Backup",
+            VOLUME,
+            4_096,
+            100,
+            40
+        )]),
+        volume_io_stats: Some(alloc::vec![VolumeIoStatsRecord::new(
+            VOLUME,
+            DEV,
+            BlkIoCounters::default(),
+            BlkDeviceName::UNNAMED,
+        )]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    assert_eq!(
+        storage(&report),
+        alloc::vec![(SERVED, alloc::string::String::from("Backup"))]
+    );
+    assert_eq!(
+        fact(device(&report, SERVED), "Device"),
+        &Reading::Absent(Unmeasured::Unavailable)
+    );
 }
 
 #[test]
@@ -401,8 +444,8 @@ fn a_devices_health_pill_takes_the_worst_of_the_volumes_on_it() {
             ),
         ]),
         volume_io_stats: Some(alloc::vec![
-            VolumeIoStatsRecord::new(root, DEV, BlkIoCounters::default()),
-            VolumeIoStatsRecord::new(system, DEV, BlkIoCounters::default()),
+            VolumeIoStatsRecord::new(root, DEV, BlkIoCounters::default(), DEVICE_NAME),
+            VolumeIoStatsRecord::new(system, DEV, BlkIoCounters::default(), DEVICE_NAME),
         ]),
         volume_health: Some(alloc::vec![
             VolumeIoHealthRecord::new(root, DEV, MountAvailability::Available, counters),
@@ -633,6 +676,7 @@ fn io_stats(
             read_wait_ns,
             write_wait_ns,
         },
+        DEVICE_NAME,
     )
 }
 

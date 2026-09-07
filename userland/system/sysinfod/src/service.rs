@@ -1595,8 +1595,14 @@ mod tests {
                         read_wait_ns: 300_000_000,
                         write_wait_ns: 120_000_000,
                     },
+                    tairix_abi::blkio::BlkDeviceName::new("fixture-blk"),
                 ),
-                VolumeIoStatsRecord::new([0xBB; 16], 0x5953_2002, BlkIoCounters::default(),),
+                VolumeIoStatsRecord::new(
+                    [0xBB; 16],
+                    0x5953_2002,
+                    BlkIoCounters::default(),
+                    tairix_abi::blkio::BlkDeviceName::UNNAMED,
+                ),
             ])
         }
         fn volume_io_queue(

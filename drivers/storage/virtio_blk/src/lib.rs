@@ -50,7 +50,7 @@
 extern crate alloc;
 
 use core::convert::TryFrom;
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::{BufferClass, CompletionSignal};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
@@ -674,6 +674,11 @@ impl<T: Transport> Block for VirtioBlk<'_, T> {
     /// never stalls a consumer for a spinning disk's spin-up budget.
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::Virtual
+    }
+
+    /// The virtio block device, named as its specification names it.
+    fn device_name(&self) -> BlkDeviceName {
+        BlkDeviceName::new("virtio-blk")
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

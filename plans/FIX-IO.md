@@ -918,17 +918,23 @@ Remaining deliverables:
   kernel block *consumer* observes, a complete and coherent surface on its own.
   Never a `/proc`-style scrape (§16.1).
 
-  **Open: the boot-floor volumes publish none of it** (`plans/OPEN-DEFECTS.md`
-  D106). `VolumeIoSource` is attached only by the runtime attach/recover path,
-  so the two boot-floor registrations — the encrypted root at `/` and the
-  read-only `/System` — carry no source, and `io_records` skips an entry
-  without one: on a normal boot all three queries report nothing at all about
-  the disk the machine is running from. The counters are folded by `BlkClient`
-  on the block-service path, and the boot floor reaches its disk as an
-  in-kernel `Block` behind `BlockCache`/`SharedBlock` with no serving endpoint
-  and so no `dev`, so the fold and a synthetic device identity have to exist
-  below the block-service client. Needs its own vertical asserting the boot
-  volume appears in all three queries.
+  **The boot-floor volumes publish it too** (`plans/OPEN-DEFECTS.md` D106,
+  closed). The fold has one home (`kernel/core/src/fs/blkmeter`) and both
+  kernel-side paths to a disk drive it: `BlkClient` over a serving endpoint,
+  and `MeteredBlock` around a device the kernel drives itself. The floor's
+  disk is wrapped in the latter *under* the whole-disk cache — a cache hit
+  never reaches the medium, so counting one as device work would report
+  throughput and utilisation the disk never did — and reports under a
+  reserved `blkio::kernel_block_device` identity that endpoint creation
+  refuses, so the two identity spaces cannot collide. Both boot-floor
+  registrations attach that one source, so the root and `/System` volumes
+  read one device fold.
+
+  The record additionally carries the device's **own name**, as its driver
+  declares it (`Block::device_name`, relayed in the geometry completion), so
+  a consumer listing storage devices names the disk rather than the volumes
+  that happen to sit on it. It rides this ungated read because that is where
+  the grouping identity is.
 - **Watchdog tie-in** (`plans/WATCHDOG.md`, `plans/NEW-SERVICEMANAGER.md`): a
   driver process that itself wedges is a lockup the supervisor detects and
   recovers (restart the driver, so the device recovers rather than staying

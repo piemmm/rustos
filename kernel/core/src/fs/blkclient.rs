@@ -19,23 +19,21 @@
 //! wakes the parked task.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::blkio::{
-    decode_outcome, BlkCompletion, BlkDeviceClass, BlkHealthCounters, BlkIoCounters, BlkOp,
-    BlkOutcome, BlkQueueCounters, BlkRequest, BlkStatus, IoBudget, BLK_COMPLETION_LEN,
-    BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
+    decode_outcome, BlkCompletion, BlkDeviceClass, BlkDeviceName, BlkOp, BlkOutcome, BlkRequest,
+    BlkStatus, BLK_COMPLETION_LEN, BLK_DATA_LEN, BLK_FLAG_READ_ONLY, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::DriverError;
-use tairix_abi::sysinfo::{BlkHealthTransition, MountAvailability};
+use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
 use tairix_kernel_sec::{ProcessId as SecProcessId, TaskCapabilities, UserId};
-use tairix_log::{Field, FieldValue, Level, Sink};
+use tairix_log::Sink;
 
-use crate::audit::AuditEvent;
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
 use crate::sharedreg::KernelHold;
@@ -43,6 +41,8 @@ use crate::waitq::{
     nearest_timed_deadline, serve_wake, serve_wake_task, wait_arch, WaitQueueArch, CALL_WAITQ,
     NO_DEADLINE,
 };
+
+use super::blkmeter::{Attempt, DeviceIoMeter, VolumeIoSource};
 
 /// Reserved id space for the kernel blkio clients' claimant identities.
 ///
@@ -59,229 +59,6 @@ const MIN_BLOCK_SIZE: u32 = 512;
 
 /// Largest logical block size the client accepts from a device.
 const MAX_BLOCK_SIZE: u32 = 4096;
-
-/// Lock-free cumulative I/O-health tallies for one served block device.
-///
-/// The atomic mirror of [`BlkHealthCounters`]: the block client folds every
-/// completion into these counters on the I/O path (never a lock — a driver may
-/// park across a completion), and the mount registry snapshots them for the
-/// `sysinfo` volume-health query. The status → bucket assignment is *not*
-/// duplicated here: it is the one shared [`BlkHealthCounters::bucket_index`]
-/// mapping, so the atomic tallies and the pure value type can never disagree
-/// on what a "reset" or a "medium error" counts as.
-#[derive(Debug)]
-pub struct BlkHealthCountersAtomic {
-    fields: [AtomicU64; BlkHealthCounters::FIELD_COUNT],
-}
-
-impl Default for BlkHealthCountersAtomic {
-    fn default() -> Self {
-        Self {
-            fields: core::array::from_fn(|_| AtomicU64::new(0)),
-        }
-    }
-}
-
-impl BlkHealthCountersAtomic {
-    /// Fold one device-level completion of `status`: bump the completion
-    /// total and the single bucket `status` maps to, through the shared
-    /// [`BlkHealthCounters::bucket_index`]. A plain `fetch_add` — a `u64`
-    /// completion tally cannot wrap on any real device lifetime.
-    fn fold(&self, status: BlkStatus) {
-        self.fields[BlkHealthCounters::COMPLETIONS].fetch_add(1, Ordering::Relaxed);
-        self.fields[BlkHealthCounters::bucket_index(status)].fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record one consumer reissue (retry) of a reissuable completion.
-    fn note_reissue(&self) {
-        self.fields[BlkHealthCounters::REISSUES].fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A consistent-enough point-in-time snapshot of the tallies, rebuilt
-    /// through the shared [`BlkHealthCounters::from_fields`]. The reads are
-    /// individually atomic and observability-only, so a snapshot taken during
-    /// a concurrent fold may straddle a single increment — never a torn or
-    /// invalid value.
-    #[must_use]
-    pub fn snapshot(&self) -> BlkHealthCounters {
-        let mut fields = [0u64; BlkHealthCounters::FIELD_COUNT];
-        for (slot, atomic) in fields.iter_mut().zip(self.fields.iter()) {
-            *slot = atomic.load(Ordering::Relaxed);
-        }
-        BlkHealthCounters::from_fields(fields)
-    }
-}
-
-/// Lock-free cumulative service and queue counters for one served block
-/// device.
-///
-/// The atomic mirror of [`BlkIoCounters`] and [`BlkQueueCounters`]: the block
-/// client folds every attempt into these on the I/O path (never a lock — a
-/// driver may park across a completion), and the mount registry snapshots
-/// them for the `sysinfo` per-volume service and queue queries. The two
-/// counter blocks live in one type because one attempt touches both: issuing
-/// it samples the queue depth and may open the device-busy interval, and its
-/// end closes that interval and folds its bytes and wait. The field order and
-/// the read/write field mapping are *not* duplicated here — they are the
-/// shared [`BlkIoCounters::direction`] and `from_fields` definitions, so the
-/// atomic tallies and the pure value types cannot disagree.
-#[derive(Debug, Default)]
-pub struct BlkIoStatsAtomic {
-    /// The cumulative service tallies, in [`BlkIoCounters`] wire order.
-    io: [AtomicU64; BlkIoCounters::FIELD_COUNT],
-    /// The queue gauge and its mean-depth accumulators, in
-    /// [`BlkQueueCounters`] wire order.
-    queue: [AtomicU64; BlkQueueCounters::FIELD_COUNT],
-    /// The monotonic reading the open device-busy interval started at, read
-    /// only on the edge that closes it.
-    busy_since_ns: AtomicU64,
-}
-
-impl BlkIoStatsAtomic {
-    /// Record one attempt being issued at `now_ns`: take the queue-depth
-    /// observation the arriving request sees (itself included, so a device
-    /// served one request at a time reads a mean depth of `1` rather than
-    /// `0`) and open the device-busy interval if the device was idle.
-    fn note_issue(&self, now_ns: u64) {
-        let depth = self.queue[BlkQueueCounters::IN_FLIGHT].fetch_add(1, Ordering::AcqRel) + 1;
-        add(&self.queue[BlkQueueCounters::QUEUE_DEPTH_SUM], depth);
-        add(&self.queue[BlkQueueCounters::QUEUE_SAMPLES], 1);
-        if depth == 1 {
-            self.busy_since_ns.store(now_ns, Ordering::Release);
-        }
-    }
-
-    /// Record one attempt leaving the device at `now_ns`, answered or not:
-    /// drop it from the in-flight count and, if it was the last outstanding
-    /// request, close the device-busy interval into `busy_ns`.
-    ///
-    /// A timed-out or cancelled attempt reaches here too — the device held it
-    /// for the whole deadline, and utilisation has to show that dead time.
-    ///
-    /// The interval is exact while the device is served serially, which the
-    /// shared-data-window discipline guarantees: were two attempts ever to
-    /// overlap, an interval could be attributed slightly short. That is
-    /// observability drift, never a torn or invalid value.
-    fn note_done(&self, now_ns: u64) {
-        if self.queue[BlkQueueCounters::IN_FLIGHT].fetch_sub(1, Ordering::AcqRel) != 1 {
-            return;
-        }
-        let since = self.busy_since_ns.load(Ordering::Acquire);
-        add(
-            &self.io[BlkIoCounters::BUSY_NS],
-            now_ns.saturating_sub(since),
-        );
-    }
-
-    /// Fold one attempt the device **answered**: its direction's completed
-    /// count, the `bytes` its completion actually moved, and the `wait_ns` it
-    /// spent between issue and completion.
-    ///
-    /// A data-less operation folds nothing — it belongs to neither direction
-    /// — and an attempt the device never answered never reaches here, so
-    /// await stays a mean over requests that have a latency at all.
-    fn note_answered(&self, op: BlkOp, bytes: u64, wait_ns: u64) {
-        let Some(direction) = BlkIoCounters::direction(op) else {
-            return;
-        };
-        add(&self.io[direction.bytes], bytes);
-        add(&self.io[direction.ops], 1);
-        add(&self.io[direction.wait_ns], wait_ns);
-    }
-
-    /// A consistent-enough point-in-time snapshot of the service tallies,
-    /// rebuilt through the shared [`BlkIoCounters::from_fields`]. The reads
-    /// are individually atomic and observability-only, so a snapshot taken
-    /// during a concurrent fold may straddle a single increment — never a
-    /// torn or invalid value.
-    #[must_use]
-    pub fn io_snapshot(&self) -> BlkIoCounters {
-        BlkIoCounters::from_fields(snapshot_fields(&self.io))
-    }
-
-    /// The same for the queue gauge and its accumulators, through
-    /// [`BlkQueueCounters::from_fields`].
-    #[must_use]
-    pub fn queue_snapshot(&self) -> BlkQueueCounters {
-        BlkQueueCounters::from_fields(snapshot_fields(&self.queue))
-    }
-}
-
-/// Add `delta` to `counter`, saturating: a tally is operational
-/// observability, so an implausibly-long-lived device pins at [`u64::MAX`]
-/// rather than wrapping to a smaller, misleading value — the same discipline
-/// the pure value types' folds keep.
-fn add(counter: &AtomicU64, delta: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(delta))
-    });
-}
-
-/// Read `counters` into a plain array in the same order, for the shared
-/// `from_fields` rebuild.
-fn snapshot_fields<const N: usize>(counters: &[AtomicU64; N]) -> [u64; N] {
-    core::array::from_fn(|i| counters[i].load(Ordering::Relaxed))
-}
-
-/// One served block device's live I/O readings, shared by [`Arc`] with the
-/// mount registry so the `sysinfo` per-volume health, service and queue
-/// queries and the mount snapshot can read a live device without holding any
-/// I/O-path lock (`plans/FIX-IO.md` IO2/IO3/IO5).
-///
-/// It names the serving block-service endpoint (`dev`), the availability
-/// overlay the client updates on every completion, the cumulative
-/// [`BlkHealthCountersAtomic`] outcome tallies, the [`BlkIoStatsAtomic`]
-/// service and queue counters, and the [`IoBudget`] those are read against.
-/// It carries no capability token and no secret.
-///
-/// It is cloneable because every reading here is a property of the *device*,
-/// not of a mount: every volume on one disk registers the same handles, so
-/// they all read one fold rather than a divergent copy each.
-#[derive(Clone)]
-pub struct VolumeIoSource {
-    /// The block-service call-endpoint id serving this volume's device.
-    pub dev: u64,
-    /// The volume-availability overlay (a [`MountAvailability`] wire byte).
-    pub availability: Arc<AtomicU8>,
-    /// The cumulative I/O-health tallies folded from every completion.
-    pub counters: Arc<BlkHealthCountersAtomic>,
-    /// The cumulative service tallies and live queue occupancy folded from
-    /// every attempt.
-    pub stats: Arc<BlkIoStatsAtomic>,
-    /// The per-device budget in force, derived once at connect from the
-    /// device's declared class, so a reported depth is read against the
-    /// ceiling that applies to that medium.
-    pub budget: IoBudget,
-}
-
-impl VolumeIoSource {
-    /// The live health state the block client last reflected onto this
-    /// device's overlay, or [`None`] when the byte names no live state.
-    #[must_use]
-    pub fn live_availability(&self) -> Option<MountAvailability> {
-        live_availability(&self.availability)
-    }
-}
-
-/// The live health state an availability `overlay` byte names, or [`None`] when
-/// it names none.
-///
-/// Only the overlay's own three live states are live readings; the
-/// authoritative vanish states belong to the surprise-removal path and never
-/// travel through here. This is the one decode of that byte, read by the mount
-/// snapshot and by the block client's own
-/// [`Block::backing_availability`] answer, so the two cannot report one
-/// device's health differently.
-fn live_availability(overlay: &AtomicU8) -> Option<MountAvailability> {
-    match MountAvailability::from_u8(overlay.load(Ordering::Relaxed)) {
-        Ok(
-            live @ (MountAvailability::Available
-            | MountAvailability::Degraded
-            | MountAvailability::Recovering),
-        ) => Some(live),
-        _ => None,
-    }
-}
 
 /// A [`Block`] device served by a user-space block driver over a call
 /// endpoint and a shared data window.
@@ -300,21 +77,6 @@ pub struct BlkClient {
     geometry: BlockGeometry,
     /// Whether the device reported itself write-protected.
     read_only: bool,
-    /// The per-device I/O budget this client serves the device with: the
-    /// per-request deadline (Invariant 1: every I/O is time-bounded, so a
-    /// wedged device fails closed rather than parking the filesystem path
-    /// forever) and the number of times a driver-framed *reissuable* failure
-    /// may be reissued before it fails closed. It is the single shared policy
-    /// both the serving driver and this consumer read, so the deadline and
-    /// retry count can never diverge between them.
-    ///
-    /// It is derived from the device's own declared [`BlkDeviceClass`],
-    /// reported in the geometry completion at [`connect`](Self::connect) —
-    /// never one envelope assumed for every device, which would either fail a
-    /// spinning disk that is merely spinning up or let a wedged paravirtual
-    /// device stall this mount's callers three times longer than its class
-    /// allows.
-    budget: IoBudget,
     /// The device's declared class, as reported at
     /// [`connect`](Self::connect). Kept so a consumer layered over this
     /// client (a RAID composition, a cache) reports the real hardware's
@@ -326,28 +88,21 @@ pub struct BlkClient {
     /// says "unknown" instead of asserting a medium nobody declared; for
     /// patience it is served the bounded unclassified envelope.
     declared_class: Option<BlkDeviceClass>,
-    /// The volume-availability overlay this device's reported health drives,
-    /// shared by [`Arc`] with the mount registry so the mount snapshot can
-    /// show a live-but-unwell device as `Degraded`/`Recovering` rather than
-    /// healthy (`plans/FIX-IO.md` IO2/IO3). It holds the wire byte of a
-    /// [`MountAvailability`]; the serving driver owns the sticky health
-    /// state machine and its grace window, so this consumer only *reflects*
-    /// each completion's reported [`tairix_abi::blkio::BlkStatus`] through
-    /// the single shared [`MountAvailability::from_block_status`] mapping
-    /// (no second, divergent state machine). Lock-free: written on the I/O
-    /// path, read asynchronously by the snapshot.
-    health: Arc<AtomicU8>,
-    /// The cumulative I/O-health tallies this client folds from every
-    /// completion (and every reissue it performs), shared by [`Arc`] with the
-    /// mount registry so the `sysinfo` volume-health query reports the same
-    /// live counters the client observes (`plans/FIX-IO.md` IO5). Lock-free,
-    /// like `health`.
-    counters: Arc<BlkHealthCountersAtomic>,
-    /// The cumulative service tallies and live queue occupancy this client
-    /// folds from every attempt, shared by [`Arc`] with the mount registry so
-    /// the `sysinfo` per-volume service and queue queries report the same
-    /// live counters the client observes. Lock-free, like `counters`.
-    stats: Arc<BlkIoStatsAtomic>,
+    /// This device's fold: its identity and name, the availability overlay,
+    /// every counter the three per-volume queries report, and the per-device
+    /// [`IoBudget`](tairix_abi::blkio::IoBudget) this client serves it with.
+    /// Shared by [`Arc`] with the
+    /// mount registry, so every volume on the disk reads one fold rather than
+    /// a divergent copy each.
+    ///
+    /// The budget is the single shared policy both the serving driver and
+    /// this consumer read, so the per-request deadline and reissue count can
+    /// never diverge between them; it is derived from the device's own
+    /// declared class at [`connect`](Self::connect) rather than assumed, so a
+    /// spinning disk that is merely spinning up is not failed early and a
+    /// wedged paravirtual device cannot stall this mount's callers for three
+    /// times its class's patience.
+    meter: DeviceIoMeter,
 }
 
 impl BlkClient {
@@ -371,6 +126,7 @@ impl BlkClient {
         window: KernelHold,
         audit: &'static (dyn Sink + Sync),
     ) -> Result<Self, Errno> {
+        let endpoint_id = endpoint;
         let endpoint = crate::callreg::lookup(EndpointId(endpoint)).ok_or(Errno::NotFound)?;
         if window.len() < BLK_DATA_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -408,10 +164,7 @@ impl BlkClient {
             // endpoint that never answers fails closed promptly rather than
             // being granted a spinning disk's patience on nothing but hope.
             declared_class: None,
-            budget: BlkDeviceClass::served_as(None).budget(),
-            health: Arc::new(AtomicU8::new(MountAvailability::Available.as_u8())),
-            counters: Arc::new(BlkHealthCountersAtomic::default()),
-            stats: Arc::new(BlkIoStatsAtomic::default()),
+            meter: DeviceIoMeter::new(endpoint_id, audit),
         };
         let completion = client.transfer(BlkRequest {
             op: BlkOp::Geometry,
@@ -438,7 +191,11 @@ impl BlkClient {
         // unknown and served the bounded unclassified envelope, so it cannot
         // buy patience and cannot be reported as a medium it never declared.
         client.declared_class = completion.class;
-        client.budget = BlkDeviceClass::served_as(completion.class).budget();
+        // The device has now answered for itself, so the fold adopts the
+        // envelope its class earns and the name its driver declares. The name
+        // is validated on the way in, so an untrusted driver cannot reach a
+        // reader's screen through it.
+        client.meter.adopt_device(completion.class, completion.name);
         Ok(client)
     }
 
@@ -471,65 +228,7 @@ impl BlkClient {
     /// path as this client folds each attempt.
     #[must_use]
     pub fn io_source(&self) -> VolumeIoSource {
-        VolumeIoSource {
-            dev: self.endpoint.id().0,
-            availability: Arc::clone(&self.health),
-            counters: Arc::clone(&self.counters),
-            stats: Arc::clone(&self.stats),
-            budget: self.budget,
-        }
-    }
-
-    /// Reflect one completion's reported device-level health into the shared
-    /// availability overlay, through the single shared status→availability
-    /// mapping, and record a health-transition audit event on a genuine
-    /// change of state. A status that carries no volume-availability signal
-    /// (a per-request medium error, or a gone/dead device owned by the
-    /// surprise-removal path) leaves the overlay unchanged and logs nothing.
-    ///
-    /// The overlay update is a single atomic swap that yields the prior
-    /// state, so the transition is classified edge-triggered through the one
-    /// shared [`MountAvailability::health_transition`] rule: a run of
-    /// identical completions logs one event, not one per request, and a disk
-    /// that comes back is logged exactly once as a recovery. The overlay byte
-    /// is only ever a state this method stored, so its decode cannot fail;
-    /// were it ever corrupt, it fails closed to "no transition" (no forged
-    /// health event).
-    fn note_health(&self, status: tairix_abi::blkio::BlkStatus) {
-        let Some(next) = MountAvailability::from_block_status(status) else {
-            return;
-        };
-        let prev = self.health.swap(next.as_u8(), Ordering::Relaxed);
-        if prev == next.as_u8() {
-            return;
-        }
-        if let Ok(prev) = MountAvailability::from_u8(prev) {
-            if let Some(transition) = MountAvailability::health_transition(prev, next) {
-                self.emit_health(transition);
-            }
-        }
-    }
-
-    /// Emit one storage-health audit record for a real availability edge,
-    /// naming the block-service endpoint in the `dev` field (never a secret
-    /// or a capability token). A degrade or entry into recovery is a
-    /// recoverable anomaly ([`Level::Warn`]); a recovery — the disk came
-    /// back — is a routine operational event ([`Level::Info`]).
-    fn emit_health(&self, transition: BlkHealthTransition) {
-        let (event, level) = match transition {
-            BlkHealthTransition::Degraded => (AuditEvent::VolumeDegraded, Level::Warn),
-            BlkHealthTransition::Recovering => (AuditEvent::VolumeRecovering, Level::Warn),
-            BlkHealthTransition::Recovered => (AuditEvent::VolumeRecovered, Level::Info),
-        };
-        crate::audit::emit(
-            self.audit,
-            level,
-            event,
-            &[Field {
-                key: "dev",
-                value: FieldValue::UnsignedInt(self.endpoint.id().0),
-            }],
-        );
+        self.meter.io_source()
     }
 
     /// Commit every completed write to the medium (the blkio flush
@@ -553,7 +252,7 @@ impl BlkClient {
 
     /// Issue one request, blocking until the device answers or the
     /// per-request deadline fails it closed, reissuing a *reissuable*
-    /// completion up to the device's [`IoBudget::max_retries`].
+    /// completion up to the device's [`IoBudget::max_retries`](tairix_abi::blkio::IoBudget::max_retries).
     ///
     /// This is the consumer half of the reply-reissuable recovery model
     /// (`plans/FIX-IO.md` IO3): when the serving driver rides out a device
@@ -575,10 +274,8 @@ impl BlkClient {
         let mut attempts: u32 = 0;
         loop {
             let outcome = self.transfer_once(request)?;
-            self.note_health(outcome.status);
-            self.counters.fold(outcome.status);
-            if self.budget.should_reissue(outcome.status, attempts) {
-                self.counters.note_reissue();
+            if self.meter.budget().should_reissue(outcome.status, attempts) {
+                self.meter.reissued();
                 attempts += 1;
                 continue;
             }
@@ -616,7 +313,7 @@ impl BlkClient {
         let poster = sched.map_or(0, |(_, task)| task);
         let issued_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
         let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
-            issued_ns.saturating_add(self.budget.deadline_ns)
+            issued_ns.saturating_add(self.meter.budget().deadline_ns)
         });
         let ticket =
             self.endpoint
@@ -624,7 +321,7 @@ impl BlkClient {
         // Only now is the attempt genuinely outstanding to the device: a
         // refused post never reached it and must not read as queue occupancy
         // or as busy time.
-        self.stats.note_issue(issued_ns);
+        self.meter.issued(issued_ns);
 
         // Wake the serving driver parked between requests — exactly the
         // endpoint's recorded server where known, the broadcast fallback
@@ -674,17 +371,35 @@ impl BlkClient {
             }
         }
         // The attempt has left the device either way: a deadline miss and a
-        // torn-down endpoint both consumed device time, so both close the
-        // busy interval. Only an answered attempt has a latency to average,
-        // so only that folds its wait, and only a completion the data
-        // survived moved bytes.
+        // torn-down endpoint both consumed device time, and both say
+        // something about the device, so both are folded. A deadline the
+        // device consumed whole classifies through the same shared errno
+        // mapping a driver-framed refusal would, so a wedged disk lands in
+        // the timeouts bucket rather than vanishing from the health reading
+        // altogether.
         let done_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
-        self.stats.note_done(done_ns);
-        let outcome = decode_outcome(&outcome?);
-        self.stats.note_answered(
+        let outcome = match outcome {
+            Ok(reply) => decode_outcome(&reply),
+            Err(err) => {
+                self.meter.completed(
+                    request.op,
+                    issued_ns,
+                    done_ns,
+                    Attempt::Unanswered {
+                        status: BlkStatus::for_errno(err),
+                    },
+                );
+                return Err(err);
+            }
+        };
+        self.meter.completed(
             request.op,
-            self.transferred_bytes(request, outcome.status),
-            done_ns.saturating_sub(issued_ns),
+            issued_ns,
+            done_ns,
+            Attempt::Answered {
+                status: outcome.status,
+                bytes: self.transferred_bytes(request, outcome.status),
+            },
         );
         Ok(outcome)
     }
@@ -751,10 +466,11 @@ impl BlkClient {
 
 impl Block for BlkClient {
     /// The class this client *serves* the device as, from which its
-    /// [`IoBudget`] is derived. Reported rather than defaulted so a
-    /// composition layered over this client (a RAID array, a cache) inherits
-    /// the real hardware's envelope; a device whose declared class word this
-    /// build does not recognise is served the bounded unclassified envelope.
+    /// [`IoBudget`](tairix_abi::blkio::IoBudget) is derived. Reported rather
+    /// than defaulted so a composition layered over this client (a RAID
+    /// array, a cache) inherits the real hardware's envelope; a device whose
+    /// declared class word this build does not recognise is served the
+    /// bounded unclassified envelope.
     /// What the device *said* it is stays on
     /// [`declared_class`](BlkClient::declared_class).
     /// What the served device last said it could promise, reflected from each
@@ -767,7 +483,16 @@ impl Block for BlkClient {
     /// the client seeds it available and only ever stores a live reading, so
     /// there is nothing to fabricate an unavailable backing from.
     fn backing_availability(&self) -> MountAvailability {
-        live_availability(&self.health).unwrap_or(MountAvailability::Available)
+        self.meter
+            .live_availability()
+            .unwrap_or(MountAvailability::Available)
+    }
+
+    /// The served device's own name, as its driver declared it at connect.
+    /// A client is a window onto the device, not a device of its own, so a
+    /// composition layered over this one names the real hardware.
+    fn device_name(&self) -> BlkDeviceName {
+        self.meter.device_name()
     }
 
     fn device_class(&self) -> BlkDeviceClass {
@@ -850,8 +575,21 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
 
-    use tairix_abi::blkio::{encode_error_completion, BLK_FLAG_READ_ONLY};
+    use tairix_abi::blkio::{encode_error_completion, BlkQueueCounters, BLK_FLAG_READ_ONLY};
     use tairix_kernel_ipc::{CallEndpointLimits, RecvCall};
+    use tairix_log::Level;
+
+    use crate::audit::AuditEvent;
+
+    /// Fold one completion of `status` through `client`'s own per-device
+    /// meter — the same call the live transfer path makes — so a test drives
+    /// the real fold rather than a stand-in for it.
+    fn fold_health(client: &BlkClient, status: BlkStatus) {
+        client.meter.issued(0);
+        client
+            .meter
+            .completed(BlkOp::Read, 0, 0, Attempt::Answered { status, bytes: 0 });
+    }
 
     /// A throwaway audit sink.
     struct NullSink;
@@ -868,6 +606,12 @@ mod tests {
     /// the client's budget proves it adopted the *device's* class rather
     /// than keeping an assumed envelope.
     const MEM_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
+    /// The name the scripted double declares, so a test asserting the
+    /// client's reported name proves it adopted the *device's* rather than
+    /// keeping the unnamed placeholder.
+    const SCRIPTED_DEVICE_NAME: &str = "scripted-blk";
+    /// The name the in-memory double declares, for the same reason.
+    const MEM_DEVICE_NAME: &str = "mem-blk";
     /// The class the scripted double declares: a spinning disk, whose
     /// reissue budget the bounded-reissue tests are written against.
     const SCRIPTED_DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Rotational;
@@ -984,6 +728,7 @@ mod tests {
                         let mut device = device.lock().unwrap();
                         match request.op {
                             BlkOp::Geometry => BlkCompletion {
+                                name: BlkDeviceName::new(MEM_DEVICE_NAME),
                                 block_size: device.reported_block_size,
                                 block_count: device.block_count(),
                                 flags: if device.read_only {
@@ -1090,7 +835,7 @@ mod tests {
         let (client, _device, server) = connected(64, 1);
         assert_eq!(client.device_class(), MEM_DEVICE_CLASS);
         assert_eq!(client.declared_class(), Some(MEM_DEVICE_CLASS));
-        assert_eq!(client.budget, MEM_DEVICE_CLASS.budget());
+        assert_eq!(client.meter.budget(), MEM_DEVICE_CLASS.budget());
         assert_ne!(MEM_DEVICE_CLASS, BlkDeviceClass::Virtual);
         assert_ne!(
             MEM_DEVICE_CLASS.budget().deadline_ns,
@@ -1106,7 +851,7 @@ mod tests {
         // paravirtual device gets — but what it *is* stays unknown, so the
         // mount it backs never asserts a medium nobody declared.
         let (client, _device, server) = connected_declaring(64, 1, None);
-        assert_eq!(client.budget, BlkDeviceClass::Virtual.budget());
+        assert_eq!(client.meter.budget(), BlkDeviceClass::Virtual.budget());
         assert_eq!(client.device_class(), BlkDeviceClass::Virtual);
         assert_eq!(client.declared_class(), None);
         server.join().unwrap();
@@ -1300,6 +1045,7 @@ mod tests {
                             block_count: 8,
                             flags: 0,
                             class: Some(SCRIPTED_DEVICE_CLASS),
+                            name: BlkDeviceName::new(SCRIPTED_DEVICE_NAME),
                         }
                         .encode(&mut reply)
                         .unwrap(),
@@ -1673,21 +1419,21 @@ mod tests {
         // A composed backing short of redundancy, and a device riding out its
         // recovery window, each reach the layer above so its background passes
         // stand down.
-        client.note_health(BlkStatus::Degraded);
+        fold_health(&client, BlkStatus::Degraded);
         assert_eq!(client.backing_availability(), MountAvailability::Degraded);
-        client.note_health(BlkStatus::Reset);
+        fold_health(&client, BlkStatus::Reset);
         assert_eq!(client.backing_availability(), MountAvailability::Recovering);
 
         // A per-request bad-sector verdict says nothing about the volume, so
         // the promise stands; a valid answer clears the overlay.
-        client.note_health(BlkStatus::MediumError);
+        fold_health(&client, BlkStatus::MediumError);
         assert_eq!(client.backing_availability(), MountAvailability::Recovering);
-        client.note_health(BlkStatus::Ok);
+        fold_health(&client, BlkStatus::Ok);
         assert_eq!(client.backing_availability(), MountAvailability::Available);
 
         // The mount snapshot reads the same overlay through the same decode,
         // so the two can never disagree about one device.
-        client.note_health(BlkStatus::Degraded);
+        fold_health(&client, BlkStatus::Degraded);
         assert_eq!(
             client.io_source().live_availability(),
             Some(MountAvailability::Degraded)
@@ -1709,12 +1455,12 @@ mod tests {
             // degrade edge, a duplicate that is *not* re-logged, a move into
             // recovery, the disk coming back, a medium error that carries no
             // availability signal (no event), and finally another degrade.
-            client.note_health(BlkStatus::Degraded); // available -> degraded
-            client.note_health(BlkStatus::Degraded); // no edge: not re-logged
-            client.note_health(BlkStatus::Reset); // degraded -> recovering
-            client.note_health(BlkStatus::Ok); // recovering -> available
-            client.note_health(BlkStatus::MediumError); // no signal, no event
-            client.note_health(BlkStatus::Degraded); // available -> degraded
+            fold_health(&client, BlkStatus::Degraded); // available -> degraded
+            fold_health(&client, BlkStatus::Degraded); // no edge: not re-logged
+            fold_health(&client, BlkStatus::Reset); // degraded -> recovering
+            fold_health(&client, BlkStatus::Ok); // recovering -> available
+            fold_health(&client, BlkStatus::MediumError); // no signal, no event
+            fold_health(&client, BlkStatus::Degraded); // available -> degraded
 
             assert_eq!(
                 recorded_for(id),

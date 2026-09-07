@@ -282,18 +282,28 @@ carries the caller's task id (`caller`), the target's pid and task id
 capability token or other secret.
 
 `VOLUME_DEGRADED` / `VOLUME_RECOVERING` / `VOLUME_RECOVERED` are the
-storage-health audit trail (`plans/FIX-IO.md` IO5). The kernel block client
-(`tairix_kernel_core::fs::blkclient`) keeps a live per-volume availability
-overlay folded from each completion's reported `BlkStatus`, and emits exactly
-one record on a genuine *edge* of that overlay — classified through the one
+storage-health audit trail (`plans/FIX-IO.md` IO5). One per-device fold
+(`tairix_kernel_core::fs::blkmeter`) keeps a live availability overlay and
+every counter the three per-volume `sysinfo` queries report, and both paths a
+kernel-side consumer reaches a disk through drive that same fold: the block
+client (`BlkClient`) as it posts and reaps each attempt over a serving
+endpoint, and `MeteredBlock` around a device the kernel drives itself. The
+bootstrap-floor disk is the second case — it has no serving endpoint, so
+without that wrapper nothing folded its counters and all three queries
+reported nothing at all about the disk the machine is running from
+(`plans/OPEN-DEFECTS.md` D106). `MeteredBlock` sits directly over the device
+and *under* the whole-disk block cache, because a cache hit never reaches the
+medium and counting one as device work would report a busy disk that is in
+fact idle. The fold emits exactly one record on a genuine *edge* of the
+overlay — classified through the one
 shared `MountAvailability::health_transition` rule, so a run of identical
 completions logs once, not per request. A device reporting itself unwell while
 still serving is `VOLUME_DEGRADED` (`Warn`); a device that stalled or reset and
 entered its bounded recovery grace window is `VOLUME_RECOVERING` (`Warn`); and a
 degraded/recovering volume returning to healthy service — the disk came back —
 is `VOLUME_RECOVERED` (`Info`), logged as a recovery rather than a fault. Each
-carries `dev`, the block-service endpoint id, and never a secret or capability
-token. Transitions into or out of the surprise-removal vanish states
+carries `dev` — the device's identity, its block-service endpoint id or its
+reserved kernel-driven identity — and never a secret or capability token. Transitions into or out of the surprise-removal vanish states
 (`plans/DEVICES.md` D4) carry no health edge here: that path owns its own
 records, so a removal is never double-counted and a re-insert never fabricates a
 recovery. A user-space block driver that later owns the finer device-level

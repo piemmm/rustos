@@ -37,7 +37,7 @@ extern crate alloc;
 pub mod gpt;
 pub mod mbr;
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry, DeviceHealth, DiscardCapability};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::sysinfo::MountAvailability;
@@ -348,6 +348,12 @@ impl<B: Block> Block for PartitionBlock<B> {
     /// budget rather than the unclassified default.
     fn device_class(&self) -> BlkDeviceClass {
         self.inner.device_class()
+    }
+
+    /// A window onto a disk is not a device of its own, so it is named by
+    /// the disk it is a window onto.
+    fn device_name(&self) -> BlkDeviceName {
+        self.inner.device_name()
     }
 
     /// Health telemetry is a property of the disk, not of a window onto it,

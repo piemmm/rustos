@@ -13,7 +13,7 @@
 //! `MODE SENSE(10)`, USB Mass Storage UFI 1.0). [`CommandSet`] carries that
 //! per-device spelling so the logic exists once.
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::BufferClass;
 use tairix_abi::{DriverError, Errno};
@@ -646,6 +646,13 @@ impl<T: ScsiTransport> Block for LunBlock<'_, T> {
     /// promptly once genuinely unplugged.
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::Removable
+    }
+
+    /// A USB mass-storage logical unit, named by what it is: the standard
+    /// INQUIRY this driver issues reports the unit's type and removability,
+    /// not an identity that would distinguish one stick from another.
+    fn device_name(&self) -> BlkDeviceName {
+        BlkDeviceName::new("usb-msd")
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

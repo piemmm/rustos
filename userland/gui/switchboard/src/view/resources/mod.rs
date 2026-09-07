@@ -23,8 +23,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActionRail, Button, ButtonContent, ComboBox, Panel, RailAction, StatusPill, Tab, Tabs,
-    TabsAction, TabsOrientation,
+    ActionRail, Button, ButtonContent, ComboBox, Panel, RailAction, StatusPill, Tab,
+    TabGroupAbsence, Tabs, TabsAction, TabsOrientation,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
@@ -151,7 +151,7 @@ impl ResourcesSection {
     /// Rebuild the rail, the chooser, the commands and the pane flow from
     /// the report and the current selection.
     fn rebuild(&mut self) {
-        self.rail = build_rail(&self.report.devices, self.rail_offset, self.selected);
+        self.rail = build_rail(&self.report, self.rail_offset, self.selected);
         self.band_combo = build_combo(&self.report.devices, self.selected_index());
         let commands = self
             .device()
@@ -355,7 +355,12 @@ const CADENCE: &str = "Sampling every 1.0 s";
 /// The rail's entries: a window of the report from `offset`, each carrying
 /// its own reading and trace, and a group heading on the entry that *starts*
 /// its group so a heading can never point at one that is not there.
-fn build_rail(devices: &[ResourceDevice], offset: usize, selected: Option<DeviceId>) -> Tabs {
+///
+/// A group the report has no devices for still appears, stating why it is
+/// empty: a reader must be able to tell a machine with no such device from a
+/// session that was refused the inventory.
+fn build_rail(report: &ResourceReport, offset: usize, selected: Option<DeviceId>) -> Tabs {
+    let devices = &report.devices;
     let mut tabs = Vec::new();
     let mut previous: Option<DeviceGroup> = None;
     for (index, device) in devices.iter().enumerate() {
@@ -376,7 +381,9 @@ fn build_rail(devices: &[ResourceDevice], offset: usize, selected: Option<Device
         }
         tabs.push(tab);
     }
-    let mut rail = Tabs::new(tabs).with_orientation(TabsOrientation::Vertical);
+    let mut rail = Tabs::new(tabs)
+        .with_orientation(TabsOrientation::Vertical)
+        .with_absences(rail_absences(report, offset));
     if let Some(id) = selected {
         if let Some(position) = devices
             .iter()
@@ -388,6 +395,55 @@ fn build_rail(devices: &[ResourceDevice], offset: usize, selected: Option<Device
         }
     }
     rail
+}
+
+/// The empty groups the rail states, in rail order.
+///
+/// Only `Storage` and `Network` can be empty: the processor and the machine's
+/// memory always answer, the display path always has a pane, and the
+/// `Machine` group is facts about the session. Each is stated whether the
+/// query was refused or simply found nothing — the two read differently, and
+/// silence reads as neither.
+fn rail_absences(report: &ResourceReport, offset: usize) -> Vec<TabGroupAbsence> {
+    [
+        (
+            DeviceGroup::Storage,
+            report.storage_absent,
+            "storage device",
+        ),
+        (
+            DeviceGroup::Network,
+            report.interfaces_absent,
+            "managed interface",
+        ),
+    ]
+    .into_iter()
+    .filter(|(group, _, _)| !report.devices.iter().any(|device| device.group == *group))
+    .map(|(group, refusal, subject)| {
+        let statement = match refusal {
+            Some(reason) => crate::view::reading::absence_statement(subject, reason),
+            None => alloc::format!("No {subject} is present."),
+        };
+        TabGroupAbsence::new(
+            group.heading(),
+            statement,
+            group_start(report, group, offset),
+        )
+    })
+    .collect()
+}
+
+/// The rail position an empty `group` would have started at, within the
+/// window from `offset`: before the first seated device of a later group, or
+/// last where no later group has one.
+fn group_start(report: &ResourceReport, group: DeviceGroup, offset: usize) -> usize {
+    report
+        .devices
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .position(|(_, device)| device.group > group)
+        .unwrap_or(report.devices.len().saturating_sub(offset))
 }
 
 /// The band's device chooser, holding the same device set the rail does.
@@ -670,3 +726,7 @@ impl SectionView for ResourcesSection {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rail_tests.rs"]
+mod rail_tests;

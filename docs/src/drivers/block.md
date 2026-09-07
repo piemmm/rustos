@@ -14,6 +14,7 @@ loaded as user-space drivers unless their manifest declares
 |--------------------------------|-----------------------------------------------|--------------------------------|
 | `geometry`                     | report `BlockGeometry { block_size, block_count }` | `DriverHandle` ownership |
 | `device_class`                 | report the `BlkDeviceClass` the I/O budget derives from | `DriverHandle` ownership |
+| `device_name`                  | report the device's own short name, for a consumer that lists devices | `DriverHandle` ownership |
 | `backing_availability`         | report what the device can promise a background consumer | `DriverHandle` ownership |
 | `read_blocks` / `write_blocks` | bulk transfer (multiple of `block_size`)      | `DriverHandle` ownership       |
 | `read_blocks_with_class` / `write_blocks_with_class` | classed transfer (see below) | `DriverHandle` ownership |
@@ -109,6 +110,23 @@ knows what the hardware is — the driver that binds it — declares it:
   bounded unclassified envelope, so an endpoint that never answers fails closed
   promptly rather than being granted a spinning disk's patience on nothing but
   hope.
+- `Block::device_name` reports the device's own short name, declared by the
+  driver for the same reason the class is: nothing above the driver knows what
+  the device *is*, and a surface listing storage devices has otherwise only
+  the volumes that happen to sit on one to name it by — which names a
+  filesystem, not a disk. It travels to the consumer in the same geometry
+  completion (`BlkCompletion::name`) and reaches a reader on the ungated
+  `VOLUME_IO_STATS` record. The trait default is the *unnamed* device, which
+  a reader states as such rather than inventing an identity; a wrapper (a
+  partition window, a cache, a retention journal, a client over the
+  block-service seam) forwards the inner name so the real hardware's name
+  survives every layer above it, while a composition with an identity of its
+  own declares that instead. A `BlkDeviceName` admits only printable
+  non-space ASCII, refuses an over-long declaration rather than truncating it
+  (a truncation could give two devices one name), and resolves anything else
+  to the unnamed device — so an untrusted driver can neither forge an
+  identity that means anything nor put an escape sequence on a reader's
+  screen.
 - The serving driver is untrusted, and this field needs no trust: the class
   selects only how patient the consumer is with this one device, grants no
   authority, and is bounded by the widest class budget either way. A driver
@@ -528,6 +546,17 @@ port shares the one definition (§2.2 / §2.20). The aarch64 root-unlock tail
 (`finish_unlock`) wraps its brought-up virtio-blk or EMMC2 device in a
 `SharedBlock` and drives both the `/System` autoload and the interactive unlock
 through concurrent handles rather than borrowing then moving the one device.
+
+The floor's disk is additionally wrapped in a `MeteredBlock`
+(`tairix_kernel_core::fs::blkmeter`) *innermost* — below the whole-disk block
+cache, which is itself below the sharing lock — so the counters the three
+per-volume `sysinfo` queries report are folded for a device that has no
+serving block-service endpoint to fold them at, and folded from what actually
+reached the medium rather than from cache hits that never did. It reports its
+readings under a reserved `blkio::kernel_block_device` identity, disjoint from
+the endpoint-id space by construction, and hands them to the driver-store
+service so both boot-floor mount registrations — the read-only `/System`
+volume and the writable root — attach the one fold to their volume.
 
 Because *every* in-kernel device operation funnels through this one
 implementation, it is also where a **burst** of them is paced. A caller

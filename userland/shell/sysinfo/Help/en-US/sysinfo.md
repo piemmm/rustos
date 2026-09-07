@@ -55,11 +55,16 @@ The queries:
   nothing prints no row (needs `CAP_SYSINFO_GLOBAL`).
 - `storage`, `io` — three per-volume tables, one row per fault-aware
   block-backed volume in each, keyed by a prefix of the volume's durable
-  id and naming the serving block-service endpoint. **Service** carries
-  the cumulative bytes, completed requests and device-busy time a reader
-  deltas into throughput, IOPS, utilisation and await — nothing is
-  pre-derived, so two readers never inherit one averaging window (no
-  capability needed). **Queue** carries what is outstanding now, the
+  id and naming the device serving it. That identity is the serving
+  block-service endpoint where a user-space driver serves the device, and
+  a reserved kernel-driven identity where the kernel drives it itself —
+  the disk the machine booted from, which has no serving endpoint at all.
+  **Service** additionally names the device: the short name its own
+  driver declares (`virtio-blk`, `emmc2`, `usb-msd`), or `-` where it
+  declares none. It carries the cumulative bytes, completed requests and
+  device-busy time a reader deltas into throughput, IOPS, utilisation and
+  await — nothing is pre-derived, so two readers never inherit one
+  averaging window (no capability needed). **Queue** carries what is outstanding now, the
   accumulators a mean depth deltas out of, and the depth and deadline
   the device's own class permits. **Health** carries the volume's
   current availability (available/degraded/recovering/lost) and the

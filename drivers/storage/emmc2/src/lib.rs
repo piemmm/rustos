@@ -51,7 +51,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::blkio::BlkDeviceClass;
+use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
@@ -1107,6 +1107,11 @@ impl<H: SdhciHost> Block for Emmc2<H> {
     /// solid-state device's shorter patience.
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::Removable
+    }
+
+    /// The second external mass-media controller, as the silicon names it.
+    fn device_name(&self) -> BlkDeviceName {
+        BlkDeviceName::new("emmc2")
     }
 
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {

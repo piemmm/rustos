@@ -28,6 +28,9 @@ struct MemDevice {
 /// unclassified default, so a test asserting the client's budget proves
 /// the device was asked rather than assumed.
 const DEVICE_CLASS: BlkDeviceClass = BlkDeviceClass::Removable;
+/// The name the doubles declare, so a test asserting what the client reports
+/// proves it adopted the *device's* name rather than the unnamed placeholder.
+const DEVICE_NAME: &str = "fixture-blk";
 
 fn fill(buf: &mut [u8], byte_base: u64) {
     for (i, out) in buf.iter_mut().enumerate() {
@@ -52,6 +55,7 @@ impl BlkCall for MemDevice {
                 block_count: self.block_count,
                 flags: self.flags,
                 class: Some(self.class),
+                name: BlkDeviceName::new(DEVICE_NAME),
             }
             .encode(reply),
             BlkOp::Read => {
@@ -276,6 +280,7 @@ fn an_error_completion_surfaces_as_a_typed_fault() {
                     block_count: 8,
                     flags: 0,
                     class: Some(DEVICE_CLASS),
+                    name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
             } else {
@@ -310,6 +315,7 @@ fn a_truncated_or_corrupt_reply_fails_closed() {
                     block_count: 8,
                     flags: 0,
                     class: Some(DEVICE_CLASS),
+                    name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
             } else {
@@ -346,6 +352,7 @@ fn a_truncated_or_corrupt_completion_on_a_write_fails_closed() {
                     block_count: 8,
                     flags: 0,
                     class: Some(DEVICE_CLASS),
+                    name: BlkDeviceName::new(DEVICE_NAME),
                 }
                 .encode(reply)
             } else {
@@ -382,6 +389,7 @@ impl BlkCall for FaultingDevice {
                 block_count: 64,
                 flags: 0,
                 class: Some(DEVICE_CLASS),
+                name: BlkDeviceName::new(DEVICE_NAME),
             }
             .encode(reply)
         } else {
@@ -410,6 +418,7 @@ impl BlkCall for PromisingDevice {
                 block_count: 64,
                 flags: 0,
                 class: Some(DEVICE_CLASS),
+                name: BlkDeviceName::new(DEVICE_NAME),
             }
         } else {
             BlkCompletion::default()

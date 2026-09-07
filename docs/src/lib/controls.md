@@ -196,6 +196,18 @@ it, or frame the content that does:
   Because a vertical entry's rectangle depends on the theme's own metrics, the
   hit test and every damage-reporting entry point take the scale and theme the
   strip was laid out with, exactly as `ActionRail` does.
+- A group with *no* entries states why, through `Tabs::with_absences`. A
+  heading is declared by the entry that starts its group, so a group with
+  nothing in it has nothing to hang one on and simply vanishes — leaving a
+  reader unable to tell "there is no such thing" from "this session was
+  refused the list". A `TabGroupAbsence` carries the heading, one line under
+  it, and the item index it is drawn *before*, so an empty group appears in
+  its own list position rather than after everything. It is not an item: it
+  selects nothing, is never hit-tested, takes no keyboard cursor, and does
+  not shift any item's index — so `TabsAction::Selected`, `Tabs::len` and
+  every selection entry point still count entries alone and a statement drawn
+  among them cannot move what a press lands on. `Tabs::measured_height`
+  includes them. A horizontal strip has no group headings and so states none.
 - `Tabs` keeps where the *pointer* rests and where the *keyboard cursor* is as
   two separate records: both lift their tab's plate, and only the keyboard's is
   ringed. A monitoring host re-states where its keyboard is every time its

@@ -914,6 +914,31 @@ const VALUE_OPERAND_PHYSICAL_MARKER: &str = "VALUE-OPERAND-PHYSICAL-OK";
 /// line. Pinned to the errno's own `Display` text by a unit test below.
 const VALUE_PIPE_WRITE_REFUSED_MARKER: &str = "not supported by the backing";
 
+/// Serial marker proving the **boot disk** appears in the ungated per-volume
+/// service query with its own device name: the `sysinfo storage` service
+/// row's device-identity and device-name columns, adjacent.
+///
+/// The identity is the boot floor's reserved kernel-driven device identity —
+/// the floor has no serving block-service endpoint, so a volume on it can
+/// only be reported under that identity — and the name is what the
+/// virtio-blk driver declares for itself. Seeing the two together proves the
+/// boot-floor mounts publish an I/O source at all, which is the defect this
+/// vertical guards (`plans/OPEN-DEFECTS.md` D106): without one the mount
+/// registry's single per-volume walk skips them and all three queries report
+/// nothing about the disk the machine is running from. The identity half is
+/// pinned to `tairix_abi::blkio::kernel_block_device` by a unit test below.
+const BOOT_DISK_SERVICE_MARKER: &str = "0x424b000000000000  virtio-blk";
+
+/// Serial marker proving the same disk reaches the **last** of the three
+/// per-volume queries: the health row's identity and availability columns.
+///
+/// `sysinfo storage` runs the service, queue and health reads in that order
+/// and propagates a refusal, so the health table printing at all proves the
+/// two before it answered — and this row proves the boot disk is in the walk
+/// they share rather than in one of them. The identity half is pinned as
+/// above.
+const BOOT_DISK_HEALTH_MARKER: &str = "0x424b000000000000  available";
+
 /// Serial marker the memory-stability vertical waits for before typing the
 /// shell `exit` that completes its PASS chain: the leading prefix of the
 /// memsoak fixture's success report line. Pinned to the fixture's own
@@ -5289,9 +5314,27 @@ static TESTS: &[QemuTest] = &[
                 Duration::ZERO,
                 VALUE_OPERAND_PHYSICAL_LINE,
             ),
-            // The write direction is still the kernel's refusal.
+            // The boot disk's own service and health readings
+            // (`plans/OPEN-DEFECTS.md` D106). The boot floor drives its disk
+            // in-kernel with no serving endpoint, so nothing folded its
+            // counters and the three per-volume queries reported nothing at
+            // all about the disk the machine is running from. Both rows come
+            // from the one `sysinfo storage`, whose health table prints last;
+            // the bare newline between the markers only reprints the prompt.
+            //
+            // It runs *before* the write refusal below, not after: the guest
+            // sink arms on that refusal and passes on the next audited
+            // `exit`, so a program exiting between the two would end the run
+            // early and take the refusal's proof with it.
             (
                 VALUE_OPERAND_PHYSICAL_MARKER,
+                Duration::ZERO,
+                "sysinfo storage\n",
+            ),
+            (BOOT_DISK_SERVICE_MARKER, Duration::ZERO, "\n"),
+            // The write direction is still the kernel's refusal.
+            (
+                BOOT_DISK_HEALTH_MARKER,
                 Duration::ZERO,
                 "ls > info:mem/physical\n",
             ),
@@ -12123,15 +12166,32 @@ mod tests {
         appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fold_peer_verdict, login_type_plant, persist_serial,
         qemu_host_budget_for, qemu_job_weight, sidecar_path, FsDisk, PrimePlan, QemuTest,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE,
-        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        MEMSOAK_PASS_PREFIX, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
+        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
         VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
         VALUE_PIPE_WRITE_REFUSED_MARKER,
     };
     use std::path::Path;
     use std::time::Duration;
+
+    /// The boot-disk serial markers name the *reserved kernel-driven device
+    /// identity* the boot floor reports its readings under, and the shell
+    /// renders it as a fixed-width hex word. A change to that base would
+    /// otherwise leave both markers silently unmatchable, so the run would
+    /// fail with a timeout rather than naming the cause.
+    #[test]
+    fn the_boot_disk_markers_carry_the_kernel_driven_device_identity() {
+        let dev = format!("{:#018x}", tairix_abi::blkio::kernel_block_device(0));
+        for marker in [BOOT_DISK_SERVICE_MARKER, BOOT_DISK_HEALTH_MARKER] {
+            assert!(
+                marker.starts_with(&dev),
+                "{marker:?} must lead with the boot disk's identity {dev}"
+            );
+        }
+    }
 
     /// Every desktop click a pointer script drives is **one** step.
     ///

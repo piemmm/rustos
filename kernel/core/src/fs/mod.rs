@@ -45,6 +45,7 @@
 //! mode bits, failing closed and never branching on `uid == 0`.
 
 pub mod blkclient;
+pub mod blkmeter;
 mod delegate;
 mod fscache;
 #[cfg(any(test, feature = "fs-conformance"))]
