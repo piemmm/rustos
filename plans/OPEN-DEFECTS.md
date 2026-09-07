@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 21 open, 89 closed, 110 total.
+table normalises all three to **closed**. 24 open, 89 closed, 113 total.
 
 ### Open (21)
 
@@ -48,9 +48,9 @@ table normalises all three to **closed**. 21 open, 89 closed, 110 total.
 | D98 | the harness cannot order a typed key after a pointer click | blocks FM9-a's rename + toolbar gestures and FM9-c's delete click-through; needs one ordered script and a typed-key vocabulary |
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
-| D108 | `rng_soak`'s uniformity arm has a derived null only for `matrix-rank` | the arm is not applied to the rest, so their p-value shape is unchecked; `longest-run` and `approximate-entropy` measure chi-square 29.9 and 71.8 of reference error |
-| D109 | `stress-qemu-aarch64` never completes under the full soak fan-out | guest alive but silent 210 s at the 600 s ceiling, PC in `run_dispatch_loop`; does not reproduce on a 2x-oversubscribed host |
-| D110 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
+| D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
+| D112 | `stress-qemu-aarch64` never completes under the full soak fan-out | guest alive but silent 210 s at the 600 s ceiling, PC in `run_dispatch_loop`; does not reproduce on a 2x-oversubscribed host |
+| D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
 ### Closed (89)
 
@@ -1266,41 +1266,48 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   press lands on. The Resources rail draws both fields through it, stating
   the refusal where the sample resolved one and "No storage device is
   present." where the query answered and found none.
-- **D108 — the uniformity arm has a derived null only for `matrix-rank`.**
-  Reduced from a defect to a coverage gap. The battery's uniformity arm used
-  to assert that every statistic's p-values are exactly Uniform(0, 1), which
-  is false for all of them: each reduces a finite sequence to a discrete
-  count and reads an asymptotic tail off it, so the arm's power to detect its
-  own reference error grows with depth until it rejects any generator. It did
-  — on `FastRng` (ChaCha12) and `CsRng` alike, not on a predictable
-  generator: `NonCryptoRng` is not a soak target at all, so the original
-  "maybe it is xoshiro's linearity" reading was wrong.
-  Measured on 144 000 `FastRng` sequences, the reference error is
-  chi-square 78.2 for `matrix-rank`, 71.8 for `approximate-entropy` and 34.2
-  for `longest-run` (against a mean of 9), with visibly different causes: the
-  first oscillates bin to bin (a discrete statistic), the second drifts
-  monotonically +8% to -5% (a skewed asymptotic tail), the third is mostly a
-  class-probability rounding. The `matrix-rank` and `longest-run` class
-  probabilities were 4-decimal roundings of exactly computable values and are
-  now exact — which *raised* `matrix-rank`'s figure to 91.4, confirming the
-  rounding had been partly masking the discreteness.
-  **Fixed for `matrix-rank`, by deriving its real null.** Its 512 matrices in
-  three rank classes are multinomial, so enumerating every reachable count
-  vector and binning its p-value through the same tail function the statistic
-  uses gives the exact distribution. That takes its chi-square from 91.4 to
-  9.0 and predicts the observed histogram bin for bin; the derived shares are
-  pinned against the measured ones as a regression test.
-  **What remains** is deriving a null for the other statistics, hardest for
-  `approximate-entropy` (a finite-`n` bias in the chi-square reference for
-  `2^(m-1)` degrees of freedom, needing either a bias-corrected statistic or
-  an exact reference). Until then those statistics are judged on the
-  proportion arm alone and the verdict says `ProportionOnly` rather than
-  implying both arms passed — a narrower claim, not a weaker gate, since the
-  proportion arm rejects the `lfsr` control on `matrix-rank` at a 100%
-  failure rate and the `counter` control on every statistic, against a 1.16%
-  ceiling. Read `plans/FIX-RANDOMNESS.md` and
+- **D111 — `approximate-entropy`'s reference distribution runs 0.8 high.**
+  What is left of a larger defect. The battery's uniformity arm used to
+  assert that every statistic's p-values are exactly Uniform(0, 1), which is
+  false for several of them: a p-value is exactly uniform only for a
+  continuous statistic read off an exact reference. The arm's power to detect
+  its own reference error therefore grew with depth until it rejected any
+  generator — and did, on `FastRng` (ChaCha12) and `CsRng` alike, not on a
+  predictable one: `NonCryptoRng` is not a soak target at all, so the
+  original "maybe it is xoshiro's linearity" reading was wrong.
+  **Fixed for four statistics** by deriving the exact distribution of the
+  quantity each p-value actually reads — the binomial ones-count
+  (`frequency`), an exact multinomial enumeration over three rank classes
+  (`matrix-rank`), and the two-barrier reflection expansion for the walk's
+  largest excursion (both cumulative sums, which share one null). Chi-square
+  on nine degrees of freedom over 144 000 sequences, flat then derived:
+  10.7 -> 5.0, 91.4 -> 9.0, 19.9 -> 12.4, 17.5 -> 8.7. The reflection
+  expansion was checked against brute force for every barrier at n = 6..12
+  before use; each derived null is pinned against its measured histogram.
+  **Four statistics keep no derived null and need none urgently.**
+  `block-frequency`, `runs`, `longest-run` and `maurer-universal` measure
+  consistent with a flat null on two independent generators, and the two
+  whose moments were checked match their references exactly (`longest-run`
+  5.015 against 5, `block-frequency` 63.93 against 64). `longest-run`'s
+  earlier 29.9 was a fluke of one seed set — 5.4 on another — not reference
+  error, correcting an earlier note here.
+  **What remains is `approximate-entropy`**, the one statistic whose
+  reference really is wrong: 71.8 and 55.7 on two independent generators. Its
+  chi-square measures 1024.818 +/- 0.119 against the reference's 1024 with the
+  variance exact (2050.1 against 2048) — a pure location bias. The
+  first-order bias is derivable and equals the independent-sample
+  `(2^m - 1) / 2n` exactly, because the words with a period-`d` self-overlap
+  number `2^d` and their weighted sum telescopes to `m - 1`, leaving the
+  leading correction unchanged; so the residual 0.8 is a higher-order overlap
+  term. Deriving it, or replacing the statistic with a non-overlapping form
+  whose null is exactly computable, is the open work. Until then its
+  uniformity arm is withheld and the verdict says `ProportionOnly`, which is
+  a narrower claim and not a weaker gate — its proportion arm is in band and
+  the proportion arm is what rejects the controls (`lfsr` on `matrix-rank` at
+  a 100% failure rate, `counter` on every statistic, against a 1.16%
+  ceiling). Read `plans/FIX-RANDOMNESS.md` and
   `tests/integration/rng_soak/README.md` first.
-- **D109 — `stress-qemu-aarch64` never completes under the full soak
+- **D112 — `stress-qemu-aarch64` never completes under the full soak
   fan-out.** A nightly `soak.sh all` run reported it UNFINISHED at the 600 s
   runtime ceiling: the guest was **alive and silent for 210.07 s** at the
   kill, having reached `stress --cpu 10 --timeout 120s --background` on a
@@ -1324,7 +1331,7 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   anyone read the failure. `ci_collect_qemu_artefacts` (`tools/ci/lib.sh`,
   called from `soak.sh` and `ci.yml`) now retains it; the next occurrence is
   diagnosable. Read `plans/WATCHDOG.md` and D13/D84 first.
-- **D110 — `netstack-bond-qemu-aarch64` guest exits before its readiness
+- **D113 — `netstack-bond-qemu-aarch64` guest exits before its readiness
   marker.** Same nightly run: `qemu status -1` with "monitor command script
   incomplete: a command's readiness marker was not seen before the guest
   exited". The serial stops at 3.826 s immediately after "inbound echo
@@ -1339,7 +1346,7 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   wanting bounded concurrency rather than a guest defect — but it is a
   hypothesis, not a diagnosis, and a guest-side exit path has not been ruled
   out. Do not close it as load without evidence.
-  **Blocked on** the full serial (now retained, see D109) and the host's
+  **Blocked on** the full serial (now retained, see D112) and the host's
   kernel log for the failing run. Read `plans/NETWORK.md` first.
 
 ## Coupling to be aware of

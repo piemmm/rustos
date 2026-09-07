@@ -174,26 +174,46 @@ fixed rather than tolerated:
   `FastRng`, `CsRng`, and the platform CSPRNG alike. It now sums that
   dependence exactly and measures 1.004%.
 * **The uniformity arm asserted a false null.** A p-value is exactly uniform
-  only for a continuous statistic read off an exact reference, and none of
-  these is both, so the arm's power to detect its own reference error grows
-  with depth until it rejects anything. It now compares each statistic's
-  histogram against that statistic's own null (`uniformity_null` beside the
-  statistic), exact where derived. `matrix-rank` is the worked case: 512
-  matrices in three rank classes make its p-value discrete, and enumerating
-  the exact multinomial null takes its chi-square on 144 000 `FastRng`
-  sequences from 91.4 to 9.0 — the mean for nine degrees of freedom.
+  only for a continuous statistic read off an exact reference, and several of
+  these are neither, so the arm's power to detect its own reference error
+  grows with depth until it rejects anything. It now compares each
+  statistic's histogram against that statistic's own null (`uniformity_null`
+  beside the statistic), derived from the exact distribution of the quantity
+  the p-value actually reads: the binomial ones-count for `frequency`, an
+  exact multinomial enumeration over three rank classes for `matrix-rank`,
+  and the two-barrier reflection expansion for the walk's largest excursion
+  for both cumulative sums. Chi-square on nine degrees of freedom over
+  144 000 `FastRng` sequences, flat null then derived: 10.7 -> 5.0,
+  91.4 -> 9.0, 19.9 -> 12.4, 17.5 -> 8.7. `matrix-rank` is the case that
+  forced it — three classes over 512 matrices make its p-value visibly
+  discrete.
 
 Where a statistic's null is not derived the arm is not applied and the
 verdict is `ProportionOnly`. That is a narrower claim, not a weaker gate: the
 proportion arm carries the detection power, rejecting the `lfsr` control on
 `matrix-rank` at a 100% failure rate and the `counter` control on every
-statistic, against a 1.16% ceiling. Deriving a null for `longest-run`,
-`approximate-entropy`, or the rest is the remaining work — their measured
-reference error at 144 000 sequences is chi-square 29.9 and 71.8
-respectively, with distinct causes (a residual class-probability error, and a
-skewed asymptotic tail) — tracked as D108 in `plans/OPEN-DEFECTS.md`. The
-shipped `matrix-rank` and `longest-run` class probabilities were also only
-4-decimal roundings and are now exact.
+statistic, against a 1.16% ceiling.
+
+**Open: `approximate-entropy`.** It is the only statistic whose reference is
+genuinely wrong — 71.8 and 55.7 on two independent generators. Its
+chi-square measures 1024.818 +/- 0.119 against the reference's 1024 with the
+variance exact (2050.1 against 2048), so it is a pure location bias. The
+first-order bias *is* derivable and comes out to exactly the same
+`(2^m - 1) / 2n` as the independent-sample case, because for overlapping
+windows the self-overlap terms cancel: the words with a period-`d` overlap
+number `2^d`, so their weighted sum telescopes to `m - 1` and the leading
+correction is unchanged. The residual 0.8 is therefore a higher-order overlap
+term, and deriving it is the remaining work. `block-frequency`, `runs`,
+`longest-run` and `maurer-universal` also have no derived null, but they
+measure consistent with a flat one on two independent generators and the two
+whose moments were checked match their references, so for them a derivation
+would confirm rather than correct. Tracked as D111 in
+`plans/OPEN-DEFECTS.md`.
+
+The shipped `matrix-rank` and `longest-run` class probabilities were also
+only 4-decimal roundings of exactly computable values and are now exact;
+correcting them *raised* `matrix-rank`'s flat-null chi-square, confirming the
+rounding had been partly masking the discreteness.
 
 ## Deliberately out of scope
 

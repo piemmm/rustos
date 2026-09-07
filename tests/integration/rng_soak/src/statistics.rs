@@ -77,7 +77,7 @@ pub const ALL: &[Statistic] = &[
     Statistic {
         name: "frequency",
         p_value: frequency,
-        uniformity_null: None,
+        uniformity_null: Some(frequency_uniformity_null),
     },
     Statistic {
         name: "block-frequency",
@@ -107,12 +107,12 @@ pub const ALL: &[Statistic] = &[
     Statistic {
         name: "cusum-forward",
         p_value: cumulative_sums_forward,
-        uniformity_null: None,
+        uniformity_null: Some(excursion_uniformity_null),
     },
     Statistic {
         name: "cusum-backward",
         p_value: cumulative_sums_backward,
-        uniformity_null: None,
+        uniformity_null: Some(excursion_uniformity_null),
     },
     Statistic {
         name: "maurer-universal",
@@ -120,6 +120,55 @@ pub const ALL: &[Statistic] = &[
         uniformity_null: None,
     },
 ];
+
+/// Relative weight below which a binomial tail is dropped from an
+/// enumeration: the neglected mass is then far under any soak's resolution.
+const NEGLIGIBLE_WEIGHT: f64 = 1e-25;
+
+/// Exact null distribution of [`frequency`]'s p-value.
+///
+/// The statistic reads the sequence only through its ones-count, which is
+/// binomial, so the p-value takes one value per count and the exact bin
+/// probabilities follow from walking the binomial outward from its mode.
+/// Weights are relative — each step multiplies by the pmf ratio — and
+/// normalised at the end, so no factorial of half a million is ever formed
+/// and the dropped tail lands in the normalisation.
+fn frequency_uniformity_null() -> [f64; UNIFORMITY_BINS] {
+    static NULL: OnceLock<[f64; UNIFORMITY_BINS]> = OnceLock::new();
+    *NULL.get_or_init(|| {
+        let n = SEQUENCE_BITS;
+        let mode = n / 2;
+
+        let mut null = [0.0f64; UNIFORMITY_BINS];
+        let mut total = 0.0;
+        let mut add = |ones: usize, weight: f64| {
+            null[bin_of(monobit_p_value(ones, n))] += weight;
+            total += weight;
+        };
+        add(mode, 1.0);
+        // The pmf is symmetric about the mode and so is the p-value, so one
+        // side is walked and both counted.
+        let mut weight = 1.0;
+        for ones in mode + 1..=n {
+            // C(n, k) / C(n, k-1) = (n - k + 1) / k
+            weight *= (n - ones + 1) as f64 / ones as f64;
+            if weight < NEGLIGIBLE_WEIGHT {
+                break;
+            }
+            add(ones, weight);
+            add(n - ones, weight);
+        }
+        null.map(|share| share / total)
+    })
+}
+
+/// The monobit p-value for a ones-count, shared by [`frequency`] and the
+/// enumeration of its null so the two cannot drift apart.
+fn monobit_p_value(ones: usize, n: usize) -> f64 {
+    let n_f = n as f64;
+    let excess = 2.0 * ones as f64 - n_f;
+    erfc((excess / n_f.sqrt()).abs() / core::f64::consts::SQRT_2)
+}
 
 /// Frequency (monobit): are there as many ones as zeros?
 ///
@@ -131,8 +180,7 @@ pub fn frequency(seq: BitSeq<'_>) -> f64 {
     if n == 0 {
         return 1.0;
     }
-    let excess = 2.0 * seq.ones() as f64 - n as f64;
-    erfc((excess / (n as f64).sqrt()).abs() / core::f64::consts::SQRT_2)
+    monobit_p_value(seq.ones(), n)
 }
 
 /// Block length for [`block_frequency`]: above SP 800-22's `M > 0.01n`
@@ -450,18 +498,14 @@ pub fn cumulative_sums_backward(seq: BitSeq<'_>) -> f64 {
     cumulative_sums(seq, true)
 }
 
-fn cumulative_sums(seq: BitSeq<'_>, backward: bool) -> f64 {
-    let n = seq.len();
-    if n == 0 {
-        return 1.0;
-    }
-    let mut partial = 0i64;
-    let mut excursion = 0i64;
-    for step in 0..n {
-        let index = if backward { n - 1 - step } else { step };
-        partial += if seq.bit(index) == 1 { 1 } else { -1 };
-        excursion = excursion.max(partial.abs());
-    }
+/// Widest walk displacement kept in the null enumeration, in standard
+/// deviations. A normal tail at ten sigma is 1e-23, so what is dropped is
+/// far below any soak's resolution.
+const WALK_SIGMA_REACH: usize = 10;
+
+/// The cumulative-sums p-value for a given excursion, shared by
+/// [`cumulative_sums`] and the enumeration of its null.
+fn excursion_p_value(excursion: i64, n: usize) -> f64 {
     if excursion == 0 {
         return 1.0;
     }
@@ -489,6 +533,108 @@ fn cumulative_sums(seq: BitSeq<'_>, backward: bool) -> f64 {
             normal_cdf((4.0 * k + 3.0) * z / sqrt_n) - normal_cdf((4.0 * k + 1.0) * z / sqrt_n);
     }
     (1.0 - inner + outer).clamp(0.0, 1.0)
+}
+
+/// Exact null distribution of the cumulative-sums p-value, shared by both
+/// directions — reversing a uniform sequence leaves it uniform, so the two
+/// walks have the same null.
+///
+/// The p-value reads the sequence only through its largest excursion, so the
+/// null follows from `Pr[max|S_k| <= z]` for the +/-1 walk. That is the
+/// two-barrier problem, whose reflection expansion over end positions `m`
+/// and images `j` is exact:
+///
+/// `Pr[|S_k| < B for all k, S_n = m] = sum_j [ p(m + 4jB) - p(2B - m + 4jB) ]`
+///
+/// with `p` the walk's end-position mass and `B = z + 1`. Terms beyond
+/// [`WALK_SIGMA_REACH`] sigma are zero to double precision, which is what
+/// keeps the image sum a handful of terms rather than a sweep.
+fn excursion_uniformity_null() -> [f64; UNIFORMITY_BINS] {
+    static NULL: OnceLock<[f64; UNIFORMITY_BINS]> = OnceLock::new();
+    *NULL.get_or_init(|| {
+        let n = SEQUENCE_BITS;
+        // The walk's end position and its largest excursion are both bounded
+        // by this; `n` is even, so only even displacements are reachable.
+        let reach = (WALK_SIGMA_REACH * n.isqrt()).next_multiple_of(2);
+
+        // mass[i] = Pr[S_n = 2i - reach], by the pmf ratio outward from the
+        // mode so no factorial of half a million is formed.
+        let mut mass = vec![0.0f64; reach + 1];
+        let centre = reach / 2;
+        mass[centre] = 1.0;
+        let mut weight = 1.0;
+        for step in 1..=centre {
+            let x = 2 * step;
+            // Pr[S_n = x] / Pr[S_n = x - 2] = (n - x + 2) / (n + x)
+            weight *= (n - x + 2) as f64 / (n + x) as f64;
+            mass[centre + step] = weight;
+            mass[centre - step] = weight;
+        }
+        let total: f64 = mass.iter().sum();
+        for m in &mut mass {
+            *m /= total;
+        }
+        let at = |x: i64| -> f64 {
+            let Ok(reach_i) = i64::try_from(reach) else {
+                return 0.0;
+            };
+            if x.rem_euclid(2) != 0 || x < -reach_i || x > reach_i {
+                return 0.0;
+            }
+            // The index is in range by the bound just checked.
+            mass[usize::try_from(i64::midpoint(x, reach_i)).unwrap_or(0)]
+        };
+
+        // Pr[max|S| <= z] for each reachable z, then differenced.
+        let mut null = [0.0f64; UNIFORMITY_BINS];
+        let mut previous = 0.0;
+        for z in 1..=reach {
+            let barrier = i64::try_from(z + 1).unwrap_or(i64::MAX);
+            let z_i = i64::try_from(z).unwrap_or(i64::MAX);
+            let mut confined = 0.0;
+            let mut end = -z_i + z_i.rem_euclid(2);
+            while end <= z_i {
+                let mut image = 0i64;
+                loop {
+                    let offset = 4 * image * barrier;
+                    let forward = at(end + offset) - at(2 * barrier - end + offset);
+                    let backward = if image == 0 {
+                        0.0
+                    } else {
+                        at(end - offset) - at(2 * barrier - end - offset)
+                    };
+                    if image > 0 && forward == 0.0 && backward == 0.0 {
+                        break;
+                    }
+                    confined += forward + backward;
+                    image += 1;
+                }
+                end += 2;
+            }
+            let reached = (confined - previous).max(0.0);
+            previous = confined;
+            if reached > 0.0 {
+                null[bin_of(excursion_p_value(z_i, n))] += reached;
+            }
+        }
+        let total: f64 = null.iter().sum();
+        null.map(|share| share / total)
+    })
+}
+
+fn cumulative_sums(seq: BitSeq<'_>, backward: bool) -> f64 {
+    let n = seq.len();
+    if n == 0 {
+        return 1.0;
+    }
+    let mut partial = 0i64;
+    let mut excursion = 0i64;
+    for step in 0..n {
+        let index = if backward { n - 1 - step } else { step };
+        partial += if seq.bit(index) == 1 { 1 } else { -1 };
+        excursion = excursion.max(partial.abs());
+    }
+    excursion_p_value(excursion, n)
 }
 
 /// Block length for [`maurer_universal`]. SP 800-22's table gives `L = 6`
@@ -721,23 +867,6 @@ mod tests {
         );
     }
 
-    /// The enumerated null must be a probability distribution: the
-    /// multinomial weights are summed independently of the binning, so a
-    /// missed or double-counted count vector shows up here.
-    #[test]
-    fn the_derived_rank_null_is_a_distribution() {
-        let null = rank_uniformity_null();
-        let total: f64 = null.iter().sum();
-        assert!(
-            (total - 1.0).abs() < 1e-9,
-            "the enumerated rank null sums to {total}, not 1"
-        );
-        assert!(
-            null.iter().all(|share| *share > 0.0),
-            "every bin must be reachable: {null:?}"
-        );
-    }
-
     /// The point of deriving it: this statistic's p-value is *not* uniform,
     /// so testing it against a flat reference rejects a sound generator.
     /// Measured on `ChaCha12` that reference error reaches chi-square 91 on
@@ -758,23 +887,93 @@ mod tests {
         );
     }
 
-    /// The derived null must be what the statistic actually produces, not
-    /// merely a distribution: these are the bin shares 144 000 `ChaCha12`
-    /// sequences landed in, whose sampling error is 0.0008 per share. A
-    /// uniformity check against a flat reference scores chi-square 91 on
-    /// that histogram and against this one 9.0, which is the whole point.
+    /// Every derived null must be a probability distribution over the bins.
+    /// Each is built from weights normalised at the end, so a missed or
+    /// double-counted term shows up as an unreachable bin rather than as a
+    /// total that misses one.
     #[test]
-    fn the_derived_rank_null_matches_the_measured_distribution() {
-        const MEASURED: [f64; UNIFORMITY_BINS] = [
-            0.0998, 0.0974, 0.1024, 0.1036, 0.0951, 0.0997, 0.1032, 0.1012, 0.0988, 0.0988,
-        ];
-        let null = rank_uniformity_null();
-        for (bin, (derived, measured)) in null.iter().zip(MEASURED).enumerate() {
+    fn every_derived_null_is_a_distribution() {
+        for statistic in ALL {
+            let Some(null) = statistic.uniformity_null else {
+                continue;
+            };
+            let null = null();
+            let total: f64 = null.iter().sum();
             assert!(
-                (derived - measured).abs() < 0.003,
-                "bin {bin}: derived {derived:.4} against a measured {measured:.4}"
+                (total - 1.0).abs() < 1e-9,
+                "{}'s null sums to {total}, not 1",
+                statistic.name
+            );
+            assert!(
+                null.iter().all(|share| *share > 0.0),
+                "{}'s null leaves a bin unreachable: {null:?}",
+                statistic.name
             );
         }
+    }
+
+    /// Each derived null must be what its statistic actually produces, not
+    /// merely a distribution. These are the bin shares 144 000 `ChaCha12`
+    /// sequences landed in, whose sampling error is 0.0008 per share.
+    /// Scored against a flat reference instead, `matrix-rank` reaches
+    /// chi-square 91 on nine degrees of freedom and the cumulative sums 20
+    /// and 18; against these, 9.0, 12.4 and 8.7.
+    #[test]
+    fn every_derived_null_matches_the_measured_distribution() {
+        const MEASURED: [(&str, [f64; UNIFORMITY_BINS]); 4] = [
+            (
+                "frequency",
+                [
+                    0.0994, 0.1007, 0.0984, 0.1004, 0.1000, 0.1008, 0.0997, 0.1014, 0.0989, 0.1004,
+                ],
+            ),
+            (
+                "matrix-rank",
+                [
+                    0.0998, 0.0974, 0.1024, 0.1036, 0.0951, 0.0997, 0.1032, 0.1012, 0.0988, 0.0988,
+                ],
+            ),
+            (
+                "cusum-forward",
+                [
+                    0.0995, 0.1007, 0.0973, 0.1006, 0.1001, 0.0995, 0.0997, 0.0995, 0.1018, 0.1012,
+                ],
+            ),
+            (
+                "cusum-backward",
+                [
+                    0.0985, 0.1004, 0.0986, 0.1003, 0.1015, 0.0983, 0.1009, 0.0999, 0.1005, 0.1012,
+                ],
+            ),
+        ];
+        for (name, measured) in MEASURED {
+            let statistic = ALL
+                .iter()
+                .find(|s| s.name == name)
+                .expect("the statistic is in the battery");
+            let null = statistic
+                .uniformity_null
+                .expect("the statistic declares a derived null")();
+            for (bin, (derived, measured)) in null.iter().zip(measured).enumerate() {
+                assert!(
+                    (derived - measured).abs() < 0.003,
+                    "{name} bin {bin}: derived {derived:.4} against a measured {measured:.4}"
+                );
+            }
+        }
+    }
+
+    /// Both cumulative-sums directions share one null, because reversing a
+    /// uniform sequence leaves it uniform.
+    #[test]
+    fn the_two_cumulative_sums_directions_share_a_null() {
+        let of = |name: &str| {
+            ALL.iter()
+                .find(|s| s.name == name)
+                .and_then(|s| s.uniformity_null)
+                .map(|null| null())
+        };
+        assert_eq!(of("cusum-forward"), of("cusum-backward"));
     }
 
     /// A p-value of exactly 1.0 belongs in the last bin, not one past the
@@ -787,6 +986,9 @@ mod tests {
         assert_eq!(bin_of(0.1), 1);
     }
 
+    /// Scratch calibration probe: measures each statistic's p-value
+    /// histogram and scores it against its declared null (or a flat one
+    /// where none is declared).
     /// The geometric sums are truncated, so the kept terms must be enough
     /// that doubling them does not move the answer.
     #[test]

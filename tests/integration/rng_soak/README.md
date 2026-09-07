@@ -113,13 +113,22 @@ tolerated:
   1.004% on a reference source.
 - **The uniformity arm** needs the whole distribution to be right, which is a
   stronger demand: a p-value is exactly uniform only for a continuous
-  statistic read off an exact reference, and none of these is both. So the
-  arm compares each statistic's histogram against *that statistic's* null,
-  declared beside it as `uniformity_null`. `matrix-rank` is the worked case —
-  512 matrices in three rank classes make its p-value visibly discrete, and
-  the exact multinomial enumeration of that null takes its uniformity
-  chi-square on 144 000 ChaCha12 sequences from 91.4 (against a flat
-  reference) to 9.0, which is the mean for nine degrees of freedom.
+  statistic read off an exact reference, and several of these are neither. So
+  the arm compares each statistic's histogram against *that statistic's* own
+  null, declared beside it as `uniformity_null` and derived from the exact
+  distribution of the quantity the p-value actually reads:
+
+  | statistic | what the p-value reads | derived from | chi-square, flat -> derived |
+  |---|---|---|---|
+  | `frequency` | the ones-count | the binomial, walked from its mode | 10.7 -> 5.0 |
+  | `matrix-rank` | 512 matrices in three rank classes | exact multinomial enumeration | 91.4 -> 9.0 |
+  | `cusum-forward` | the walk's largest excursion | the two-barrier reflection expansion | 19.9 -> 12.4 |
+  | `cusum-backward` | the same, reversed | the same null, shared | 17.5 -> 8.7 |
+
+  `matrix-rank` is the case that forced this: three classes over 512 matrices
+  make its p-value visibly discrete, so a flat reference scored 91.4 on nine
+  degrees of freedom against 144 000 `ChaCha12` sequences and rejected a
+  sound generator outright.
 
 Where a statistic's null has not been derived the arm is **not applied** and
 the verdict says `ProportionOnly` rather than implying both arms passed. That
@@ -127,6 +136,16 @@ is a narrower claim, not a weaker gate: the proportion arm still applies in
 full, and it is the arm carrying the detection power — it rejects the `lfsr`
 control on `matrix-rank` at a 100% failure rate and the `counter` control on
 every statistic, against a band whose ceiling is 1.16%.
+
+Four statistics are in that position. `block-frequency`, `runs`,
+`longest-run` and `maurer-universal` all measure consistent with a flat null
+on two independent generators, and the two whose moments were checked
+(`longest-run` 5.015 against 5, `block-frequency` 63.93 against 64) match
+their references — so a derived null would confirm rather than correct them.
+`approximate-entropy` is the one that would *not*: it scores 71.8 and 55.7 on
+two independent generators, because its chi-square runs 0.8 high against the
+reference's 1024 while its variance is exact. That is a finite-length bias of
+the overlapping-window entropy, and it is the open half of this work.
 
 A statistic added here is held to the same bar: its rejection rate and, if it
 claims the uniformity arm, its null distribution are numbers someone has
