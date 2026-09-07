@@ -30,10 +30,12 @@ use std::time::Instant;
 
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::seat::SEAT_PRIMARY;
+use tairix_controls::ListRow;
 use tairix_cpuops::{BenchHarness, CycleCounter};
 use tairix_display::ChannelOrder;
 use tairix_font::{glyph_cache_budget, glyph_cache_candidate, set_glyph_cache, BitmapFont};
 use tairix_geometry::Scale;
+use tairix_icon::IconKind;
 use tairix_log::DiscardSink;
 use tairix_parallel::JobRunner;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
@@ -304,6 +306,11 @@ static FAMILIES: &[Family] = &[
         what: "Compositor::composite over a window stack",
         measure: composite,
     },
+    Family {
+        name: "controls",
+        what: "a control-composed list rendered whole against one clipped to a row",
+        measure: controls,
+    },
 ];
 
 fn surface(width: u32, height: u32, color: Color) -> Result<Surface, String> {
@@ -488,6 +495,95 @@ fn text(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
 /// The pixels a run of `text` covers at `font`: its measured extent.
 fn text_pixels(font: BitmapFont, text: &str) -> u64 {
     u64::from(font.text_width(text)) * u64::from(font.glyph_height())
+}
+
+/// How many rows the scoped-repaint cases compose.
+///
+/// A monitor's or file manager's list, not a toolbar: the case that matters is
+/// the one where a repaint scoped to a row has many rows to skip.
+const LIST_ROWS: usize = 40;
+
+/// A control-composed list rendered whole against the same list rendered with
+/// the surface clipped to one row.
+///
+/// This is what a scoped repaint actually costs. Clipping withholds only the
+/// *writes*, so before every family gated its paint on `Surface::admits` a
+/// one-row repaint still measured, elided and glyph-composited all forty rows;
+/// the two rows below are that difference. `whole` is the baseline a surface
+/// pays when its model changed everywhere and nothing can be skipped.
+fn controls(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
+    struct Warm {
+        dst: RefCell<Surface>,
+        rows: Vec<ListRow>,
+        theme: Theme,
+        row_h: u32,
+    }
+
+    impl Warm {
+        /// Paint every row at its own slot, as a section's primary column does.
+        fn paint(&self, surface: &mut Surface) {
+            for (index, row) in self.rows.iter().enumerate() {
+                let top =
+                    i32::try_from(index).unwrap_or(0) * i32::try_from(self.row_h).unwrap_or(0);
+                row.render(
+                    surface,
+                    Rect::new(0, top, SCREEN_W, self.row_h),
+                    Scale::ONE,
+                    &self.theme,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn whole(_: (), warm: &Warm) -> u32 {
+        let mut dst = warm.dst.borrow_mut();
+        warm.paint(&mut dst);
+        warm.row_h
+    }
+
+    fn one_row(_: (), warm: &Warm) -> u32 {
+        let mut dst = warm.dst.borrow_mut();
+        dst.with_clip(0, 0, SCREEN_W, warm.row_h, |surface| warm.paint(surface));
+        warm.row_h
+    }
+
+    warm_font_client();
+    let theme = Theme::dark();
+    let row_h = Scale::ONE
+        .scale_length(theme.metrics().control_height)
+        .max(1);
+    let height = row_h.saturating_mul(u32::try_from(LIST_ROWS).unwrap_or(1));
+    let warm = Warm {
+        dst: RefCell::new(surface(SCREEN_W, height, Color::rgb(18, 20, 26))?),
+        rows: (0..LIST_ROWS)
+            .map(|index| {
+                ListRow::new(format!("Row {index}"))
+                    .with_icon(IconKind::File)
+                    .with_trailing(LABEL)
+            })
+            .collect(),
+        theme,
+        row_h,
+    };
+    // The first pass fetches the runs' glyphs; the timed ones then measure the
+    // steady state a repainting surface is in.
+    whole((), &warm);
+
+    let all = u64::from(SCREEN_W) * u64::from(height);
+    let one = u64::from(SCREEN_W) * u64::from(row_h);
+    Ok(vec![
+        Measurement::new(
+            format!("{LIST_ROWS} list rows, whole"),
+            all,
+            harness.median_cycles((), whole, &warm),
+        ),
+        Measurement::new(
+            format!("{LIST_ROWS} list rows, clipped to one"),
+            one,
+            harness.median_cycles((), one_row, &warm),
+        ),
+    ])
 }
 
 /// Install the glyph cache the text cases draw through.

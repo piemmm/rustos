@@ -22,7 +22,7 @@ use crate::damage;
 use crate::menu::{Menu, MenuAction, MenuItem};
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, plate_border, resolve_bead, resolve_frame, role_font,
-    surface_rect, to_i32, ChevronDir, PlateStyle,
+    surface_rect, to_i32, withheld, ChevronDir, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
 
@@ -250,6 +250,9 @@ impl ComboBox {
 
     /// Paint the collapsed field into `surface` at `bounds` for the theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -331,6 +334,9 @@ impl ComboBox {
     /// Paint the expanded popup menu into `surface` at `bounds` for the theme.
     /// The owner only calls this while [`ComboBox::is_expanded`] is true.
     pub fn render_popup(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         self.menu.render(surface, bounds, scale, theme);
     }
 

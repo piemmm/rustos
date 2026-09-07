@@ -32,7 +32,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
-use crate::paint::{paint_filled_circle, plate_border, role_font, surface_rect, to_i32};
+use crate::paint::{paint_filled_circle, plate_border, role_font, surface_rect, to_i32, withheld};
 
 /// One label/value pair of a [`FactList`].
 ///
@@ -159,6 +159,9 @@ impl FactList {
     /// truncates into whatever remains, because the reading is what the
     /// reader came for. An empty list draws nothing at all.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         if self.facts.is_empty() {
             return;
@@ -369,6 +372,9 @@ impl Timeline {
     /// aligns on one shared measurement. An empty timeline draws nothing at
     /// all.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         if self.events.is_empty() {
             return;

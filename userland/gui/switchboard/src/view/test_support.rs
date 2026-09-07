@@ -335,6 +335,24 @@ pub(super) fn fault_crash() -> CrashSnapshot {
     }
 }
 
+/// Publish `model` into `sb` against the fixture window, answering the
+/// rectangles the refresh reported.
+///
+/// Every section's refresh is asserted through this, so a test cannot pass by
+/// handing a refresh geometry no paint would use.
+pub(super) fn refresh(sb: &mut Switchboard, model: &SwitchboardModel) -> Region {
+    let mut reported = damage::sink();
+    sb.set_model(
+        model,
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut reported,
+    );
+    reported
+}
+
 pub(super) fn bounds() -> Rect {
     Rect::new(0, 0, 600, 400)
 }

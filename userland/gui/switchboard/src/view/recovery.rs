@@ -26,8 +26,8 @@ use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_
 use super::reading::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::refresh::{resettle_cards, restate_rail};
 use super::{
-    action_state, resolve_selection, select_pressed_card, FocusSweep, ListInfo, SectionCtx,
-    SectionOutcome, SectionView, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    action_state, resolve_selection, select_pressed_card, ListInfo, SectionCtx, SectionOutcome,
+    SectionView, Sweep, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 
 /// One hung or recoverable object (`plans/NEW-SWITCHBOARD.md`).
@@ -377,7 +377,7 @@ impl RecoverySection {
     ///
     /// A pane too small to seat the strip draws it nowhere, so there is no
     /// rectangle to report against.
-    fn select_page(&mut self, page: FaultPage, sweep: &mut FocusSweep<'_, '_>) {
+    fn select_page(&mut self, page: FaultPage, sweep: &mut Sweep<'_, '_>) {
         self.page = page;
         if let Some(ctx) = sweep.ctx {
             let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
@@ -822,9 +822,10 @@ impl SectionView for RecoverySection {
     /// selection. The cursor is put back on the same *kind* of stop for the
     /// same reason — a row cursor follows the fault it was on rather than
     /// staying on a number that now names a different one.
-    fn adopt(&mut self, model: &SwitchboardModel) {
+    fn adopt(&mut self, model: &SwitchboardModel, sweep: &mut Sweep<'_, '_>) {
         let previous = self.selected;
         let stop = self.stop_at(self.focus);
+        let counted = self.items.len() != model.recovery.len();
         self.resolved = model.recovery_resolved;
         self.items.clone_from(&model.recovery);
         self.selected = resolve_selection(previous, self.items.iter().map(|item| item.proc_id));
@@ -837,8 +838,31 @@ impl SectionView for RecoverySection {
         self.rebuild_selection();
         // A card holds its own record of which footer action the pointer is on
         // and which one a press began on, neither of which can be restated
-        // from outside, so a card the sample did not change is kept.
-        resettle_cards(retired, &mut self.cards);
+        // from outside, so a card the sample did not change is kept — and the
+        // slots it *did* change are exactly the ones the screen owes.
+        let info = sweep
+            .ctx()
+            .map(|ctx| self.list_info(&ctx.frame, ctx.scale, ctx.theme));
+        let mut changed = Vec::new();
+        resettle_cards(retired, &mut self.cards, &mut |slot| changed.push(slot));
+        if let (Some(ctx), Some(info)) = (sweep.ctx(), info) {
+            // A list that gained or lost a fault has moved every card below the
+            // change, and the detail, impact and rail beside it all describe
+            // whatever the re-resolved selection landed on.
+            if counted {
+                sweep.client();
+            } else {
+                for slot in changed {
+                    if let Some(visible) = slot.checked_sub(ctx.start) {
+                        if let Ok(visible) = u32::try_from(visible) {
+                            if visible < info.visible() {
+                                sweep.report(info.item_rect(visible));
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         self.focus = match stop {
             Some(Stop::Card(_)) | None => self.selected_index().unwrap_or(0),
@@ -911,7 +935,7 @@ impl SectionView for RecoverySection {
     /// Move the within-stop cursor. On the page strip that *is* the page
     /// selection, so Left/Right walk the pages the way they walk any other
     /// row's actions.
-    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>) {
+    fn set_row_action(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         self.action = index;
         if matches!(self.stop_at(self.focus), Some(Stop::Pages)) {
             if let Some(page) = FaultPage::from_index(index) {
@@ -945,7 +969,7 @@ impl SectionView for RecoverySection {
                     .pages
                     .on_key(key, pages, ctx.scale, ctx.theme, damage)?;
                 let page = FaultPage::from_index(index)?;
-                self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
+                self.select_page(page, &mut Sweep::reporting(ctx, damage));
                 self.action = index;
                 None
             }
@@ -1008,7 +1032,7 @@ impl SectionView for RecoverySection {
                 .on_pointer(event, pages, ctx.scale, ctx.theme, damage)
             {
                 if let Some(page) = FaultPage::from_index(index) {
-                    self.select_page(page, &mut FocusSweep::reporting(ctx, damage));
+                    self.select_page(page, &mut Sweep::reporting(ctx, damage));
                 }
                 return None;
             }
@@ -1025,7 +1049,7 @@ impl SectionView for RecoverySection {
         }))
     }
 
-    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
         for (i, card) in self.cards.iter_mut().enumerate() {
             card.set_in_focus_field(stop == Some(Stop::Card(i)));

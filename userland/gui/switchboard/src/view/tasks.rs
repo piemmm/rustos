@@ -53,8 +53,8 @@ use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH}
 use super::refresh::{carry_hover, restate_rail};
 use super::resources::TaskCostColumn;
 use super::{
-    resolve_selection, ActionVerdict, FocusSweep, ListInfo, SectionCtx, SectionOutcome,
-    SectionView, Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    resolve_selection, ActionVerdict, ListInfo, SectionCtx, SectionOutcome, SectionView, Sweep,
+    Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 use crate::format::{format_bytes, format_rate, percent};
 
@@ -827,7 +827,13 @@ impl TasksSection {
     /// applied over the *filtered* rows, so re-filtering never reshuffles
     /// rows the reader was already looking at, and rows the active sort
     /// cannot separate keep the order the sample reported them in.
-    fn arrange(&mut self) {
+    ///
+    /// It is also the one place the rows' *pixels* change, so it reports them:
+    /// a fresh sample, a filter, a search keystroke, a sort and a grouping all
+    /// re-derive the table here, and each would otherwise leave the reported
+    /// damage naming only the control the reader touched while the table on
+    /// screen still showed the previous arrangement.
+    fn arrange(&mut self, sweep: &mut Sweep<'_, '_>) {
         let band = self.focus_band();
         let grouping = self.grouping();
         let sort = self.header.sort();
@@ -880,9 +886,46 @@ impl TasksSection {
             retired.iter().map(|entry| &entry.row),
             self.entries.iter_mut().map(|entry| &mut entry.row),
         );
-        self.count = StatusPill::new(count_line(self.entries.len(), self.tasks.len()));
+        let count = StatusPill::new(count_line(self.entries.len(), self.tasks.len()));
+        let counted = count != self.count;
+        self.count = count;
         self.rebuild_rail();
         self.restore_band(band);
+        self.report_arrangement(&retired, counted, sweep);
+    }
+
+    /// Report what re-deriving the rows repainted: the visible slots whose row
+    /// or trace differs from the one they held, and the footer's readout when
+    /// its count moved.
+    ///
+    /// A list whose *length* changed has moved every row below the change, and
+    /// the rail beside it commands whatever the re-resolved selection landed
+    /// on, so both are reported whole rather than slot by slot — the honest
+    /// answer, and the cheap one to be sure of.
+    fn report_arrangement(&self, retired: &[TaskEntry], counted: bool, sweep: &mut Sweep<'_, '_>) {
+        let Some(ctx) = sweep.ctx() else {
+            return;
+        };
+        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        if retired.len() == self.entries.len() {
+            for slot in 0..info.visible() {
+                let row = ctx.start + slot as usize;
+                let (Some(was), Some(now)) = (retired.get(row), self.entries.get(row)) else {
+                    continue;
+                };
+                if was != now {
+                    sweep.report(info.item_rect(slot));
+                }
+            }
+        } else {
+            sweep.report(info.list_rect);
+            if let Some(rail) = ctx.frame.rail {
+                sweep.report(rail);
+            }
+        }
+        if counted {
+            sweep.report(Self::footer_split(&ctx.frame).count);
+        }
     }
 
     /// The model index of the selected task, or `None` when nothing is
@@ -1141,11 +1184,15 @@ impl TasksSection {
     /// one the keyboard cursor is on, and any press waiting for its release
     /// — so a count moving under a resting pointer would blink the highlight
     /// off and swallow a click in flight.
-    fn relabel_filters(&mut self) {
+    ///
+    /// Answers whether any label actually moved, which is what decides whether
+    /// the strip owes a repaint.
+    fn relabel_filters(&mut self) -> bool {
         let counts: Vec<usize> = TaskFilter::ALL
             .iter()
             .map(|filter| self.count_of(*filter))
             .collect();
+        let mut moved = false;
         for ((tab, filter), count) in self
             .filters
             .tabs_mut()
@@ -1153,8 +1200,11 @@ impl TasksSection {
             .zip(TaskFilter::ALL.iter())
             .zip(counts)
         {
-            tab.set_label(tab_label(*filter, count));
+            let label = tab_label(*filter, count);
+            moved |= tab.label() != label;
+            tab.set_label(label);
         }
+        moved
     }
 
     /// The content-cursor stop that focuses shown row `row`, for a caller
@@ -1299,7 +1349,7 @@ impl TasksSection {
 
     /// Mark the column headings' focused heading, against the pinned heading
     /// rectangle the paint and the hit test share.
-    fn mark_header(&mut self, index: Option<usize>, sweep: &mut FocusSweep<'_, '_>) {
+    fn mark_header(&mut self, index: Option<usize>, sweep: &mut Sweep<'_, '_>) {
         match sweep.ctx {
             Some(ctx) => self.header.set_focus(
                 index,
@@ -1315,7 +1365,7 @@ impl TasksSection {
 
     /// Mark the filter strip's keyboard cursor, against the strip rectangle
     /// the paint and the hit test share.
-    fn mark_filters(&mut self, index: Option<usize>, sweep: &mut FocusSweep<'_, '_>) {
+    fn mark_filters(&mut self, index: Option<usize>, sweep: &mut Sweep<'_, '_>) {
         match sweep.ctx {
             Some(ctx) => {
                 let (filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
@@ -1443,7 +1493,7 @@ impl TasksSection {
             &COLUMN_WEIGHTS,
             damage,
         );
-        self.arrange();
+        self.arrange(&mut Sweep::reporting(ctx, damage));
     }
 
     /// Feed a key to whichever header control the cursor is on.
@@ -1462,7 +1512,7 @@ impl TasksSection {
                 {
                     self.filters
                         .set_selected(index, filters, ctx.scale, ctx.theme, damage);
-                    self.arrange();
+                    self.arrange(&mut Sweep::reporting(ctx, damage));
                 }
                 None
             }
@@ -1472,7 +1522,7 @@ impl TasksSection {
                     .on_key(key, Modifiers::default(), search, damage)
                     .is_some()
                 {
-                    self.arrange();
+                    self.arrange(&mut Sweep::reporting(ctx, damage));
                 }
                 None
             }
@@ -1529,7 +1579,7 @@ impl TasksSection {
                     damage,
                 ) {
                     self.grouping.set_selected(index);
-                    self.arrange();
+                    self.arrange(&mut Sweep::reporting(ctx, damage));
                 }
                 None
             }
@@ -1714,14 +1764,19 @@ impl SectionView for TasksSection {
     /// Adopt a fresh sample — unless the reader has turned auto-refresh
     /// off, in which case the table keeps showing the sample it already
     /// has rather than moving under them.
-    fn adopt(&mut self, model: &SwitchboardModel) {
+    fn adopt(&mut self, model: &SwitchboardModel, sweep: &mut Sweep<'_, '_>) {
         if !self.auto_refresh.is_on() {
             return;
         }
         self.tasks.clone_from(&model.tasks);
-        self.relabel_filters();
+        let filters = self.relabel_filters();
         self.census = self.build_census();
-        self.arrange();
+        self.arrange(sweep);
+        if filters {
+            if let Some(ctx) = sweep.ctx() {
+                sweep.report(Self::header_rows(&ctx.frame, ctx.scale).0);
+            }
+        }
         self.action = 0;
     }
 
@@ -1778,7 +1833,7 @@ impl SectionView for TasksSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>) {
+    fn set_row_action(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         self.action = index;
         // The filter strip and the column headings hold their own internal
         // cursor, so the shared action cursor is mirrored onto them rather
@@ -1890,7 +1945,7 @@ impl SectionView for TasksSection {
         {
             self.filters
                 .set_selected(index, tabs, ctx.scale, ctx.theme, damage);
-            self.arrange();
+            self.arrange(&mut Sweep::reporting(ctx, damage));
             return None;
         }
         if self
@@ -1898,7 +1953,7 @@ impl SectionView for TasksSection {
             .on_pointer(event, search, ctx.scale, ctx.theme, damage)
             .is_some()
         {
-            self.arrange();
+            self.arrange(&mut Sweep::reporting(ctx, damage));
             return None;
         }
         if let Some(HeaderAction::Sort { column, order }) = self.header.on_pointer(
@@ -1921,7 +1976,7 @@ impl SectionView for TasksSection {
             {
                 Some(ComboAction::Selected { index }) => {
                     self.grouping.set_selected(index);
-                    self.arrange();
+                    self.arrange(&mut Sweep::reporting(ctx, damage));
                     return None;
                 }
                 Some(ComboAction::Opened | ComboAction::Closed) => return None,
@@ -1974,7 +2029,7 @@ impl SectionView for TasksSection {
         None
     }
 
-    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let (stop, action) = (self.focus, self.action);
         let row_focus = self.focused_row();
         let rail_focus = self.focused_rail();
@@ -2040,7 +2095,7 @@ impl SectionView for TasksSection {
                 .on_pointer(event, field, popup, ctx.scale, ctx.theme, damage)
             {
                 self.grouping.set_selected(index);
-                self.arrange();
+                self.arrange(&mut Sweep::reporting(ctx, damage));
             }
         }
         None
@@ -2062,7 +2117,7 @@ impl SectionView for TasksSection {
                 damage,
             ) {
                 self.grouping.set_selected(index);
-                self.arrange();
+                self.arrange(&mut Sweep::reporting(ctx, damage));
             }
         }
         None

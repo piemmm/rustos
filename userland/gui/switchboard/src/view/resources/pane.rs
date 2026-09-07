@@ -620,6 +620,16 @@ fn cell_width(width: u32, columns: u32, gap: u32) -> u32 {
     width.saturating_sub(gap.saturating_mul(columns.saturating_sub(1))) / columns
 }
 
+/// The flow's row pitch and inter-column gap, so the paint and a refresh
+/// resolving the rectangle an item owes read one arithmetic.
+#[must_use]
+pub(super) fn metrics(scale: Scale, theme: &Theme) -> (u32, u32) {
+    (
+        crate::view::Switchboard::row_item_height(scale, theme),
+        scale.scale_length(theme.metrics().control_gap).max(1),
+    )
+}
+
 /// Where one item draws within `primary`, given the first visible row.
 ///
 /// The rectangle is clamped into `primary`: an item the reader has scrolled
@@ -687,8 +697,7 @@ pub(super) fn render(
     theme: &Theme,
     font: tairix_font::BitmapFont,
 ) {
-    let pitch = crate::view::Switchboard::row_item_height(scale, theme);
-    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let (pitch, gap) = metrics(scale, theme);
     for item in items {
         let Some(rect) = item_rect(item, primary, start, pitch, gap) else {
             continue;

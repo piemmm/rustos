@@ -80,26 +80,45 @@ monitoring. The system is re-sampled strictly on its 2 s deadline: an input
 or command wake never re-queries the system.
 
 The model is rebuilt on the same sample cadence, and the panel presents at
-most once per wake, and only when what it would draw differs from what it
-last drew — the composition itself, the window's bounds, the active
-theme, and the render scale. A wake that delivered an event but left every
-one of those unchanged, such as a pointer move that crosses no control,
-costs no render and no present.
+most once per wake — and only what it still owes the screen. That account is
+authoritative: a wake that reports no rectangle presents nothing at all, so a
+pointer move that crosses no control, and a sample whose readings all read the
+same, each cost no render and no present.
 
-A present that does happen covers what the wake's control rounds reported and
-no more. The window holds one surface for its whole life, so the render is
-clipped to that rectangle and only those pixels are copied into the shared
-frame: every pixel outside it is the one already on screen. Every control the
-input path reaches reports the rectangle it redraws into one sink the panel
-owns, so hovering a row costs the row it left and the row it entered; a
-composition-wide transition reports what it re-lays instead (a scroll marks the
-content column, a section change the whole client, and opening or dismissing
-the section list the pixels the popup covers). A change no control round could
-describe — a fresh reading, a resize onto a new surface, a desktop appearance
-or density change, or a session that discarded the window's retained pixels —
-marks the whole window, and so does a round that moved something and reported
-nothing, so an under-report can only ever cost pixels rather than leave a stale
-frame. What it carries:
+A present that does happen covers what the wake reported and no more. The
+window holds one surface for its whole life, so the render is clipped to that
+rectangle and only those pixels are copied into the shared frame: every pixel
+outside it is the one already on screen. Every control the input path reaches
+reports the rectangle it redraws into one sink the panel owns, so hovering a
+row costs the row it left and the row it entered; a composition-wide transition
+reports what it re-lays instead (a scroll marks the content column, a section
+change the whole client, and opening or dismissing the section list the pixels
+the popup covers).
+
+**A fresh reading reports the instruments and cells that moved**, not the
+client. The reading is adopted against the very frame the composition will next
+be drawn in, so each section compares what it derived against what it held:
+Tasks reports the visible rows whose cells moved and its footer's readout when
+that count changed, Recovery the fault cards the sample changed, and Resources
+the pane items whose readings moved plus its device rail and command column
+when either did. A list that gained or lost an entry has moved everything below
+the change and reports its list whole; the location band's own summary is the
+host's to report, because the band is shared chrome rather than any section's
+region. Measured over the fixture window, a sample that moves every task's CPU
+cell costs 185 µs against 916 µs for the whole client, and presents 442×144
+pixels instead of 760×560 — which is also what the session's serve thread pays
+to decode the frame.
+
+The two sections that are *not* on show adopt the same reading and report
+nothing: they draw no pixel, so a rectangle resolved against a frame that is
+not theirs would name another region's.
+
+A change no round could describe — a resize onto a new surface, a desktop
+appearance or density change, or a session that discarded the window's retained
+pixels — marks the whole window. A round that moved something and reported
+nothing leaves it stale, which is why reporting is each section's stated
+obligation and why a section over-reports where the two pull against each
+other. What the window carries:
 
 **Three sections, one per question a reader arrives with:** what is running,
 what is this machine doing, what broke.

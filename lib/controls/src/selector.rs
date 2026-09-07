@@ -25,7 +25,8 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     key_activation, paint_bead, paint_plate, plate_border, pointer_activation, resolve_bead,
-    resolve_frame, resolve_mark, resolve_rail, role_font, surface_rect, to_i32, PlateStyle,
+    resolve_frame, resolve_mark, resolve_rail, role_font, surface_rect, to_i32, withheld,
+    PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, RenderInvariant, SelectionState,
@@ -381,6 +382,9 @@ impl Toggle {
 
     /// Paint the toggle into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let metrics = theme.metrics();
         let Some(track) = toggle_track_rect(bounds, scale, theme) else {
@@ -544,6 +548,9 @@ impl Checkbox {
 
     /// Paint the checkbox into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some(glyph) = square_glyph_rect(bounds, scale, theme) else {
             return;
@@ -678,6 +685,9 @@ impl Radio {
 
     /// Paint the radio into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some(glyph) = square_glyph_rect(bounds, scale, theme) else {
             return;

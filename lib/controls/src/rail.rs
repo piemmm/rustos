@@ -35,7 +35,7 @@ use crate::button::{icon_content_side, Button, ButtonContent, ContentAlign};
 use crate::damage;
 use crate::paint::{
     grab_after, paint_edge_wake, plate_border, role_font, route_pointer, surface_rect,
-    text_plate_height, to_i32,
+    text_plate_height, to_i32, withheld,
 };
 use crate::state::RenderInvariant;
 
@@ -327,6 +327,9 @@ impl ActionRail {
     /// many whole items as fit, each rendering itself, then the leading-edge
     /// Edge Wake when lit — painted last so it reads over every item.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let rects = self.layout(bounds, scale, theme);
         for (item, rect) in self.items.iter().zip(rects.iter()) {
             item.render(surface, *rect, scale, theme);

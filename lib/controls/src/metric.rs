@@ -68,8 +68,8 @@ use crate::chart::Chart;
 use crate::paint::{
     clamp_permille, composition_remainder_tint, composition_tint, heavy_contrast, inset,
     paint_icon_slot, paint_measured_track, paint_plate, paint_text_line, plate_border,
-    progress_thickness, role_font, signal_color, surface_rect, to_i32, PlateStyle, TrackBand,
-    COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
+    progress_thickness, role_font, signal_color, surface_rect, to_i32, withheld, PlateStyle,
+    TrackBand, COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -320,6 +320,9 @@ impl MetricTile {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -698,6 +701,9 @@ impl StatusPill {
     /// small for one full line paints nothing; a label wider than `bounds`
     /// truncates.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -947,6 +953,9 @@ impl CompositionBar {
     /// fit rather than overlapping them or drawing past its own edge, and one
     /// too short to seat the bar itself draws nothing at all (fail closed).
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };

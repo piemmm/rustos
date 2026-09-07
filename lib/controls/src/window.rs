@@ -36,7 +36,7 @@ use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
     paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
-    resolve_tinted_frame, role_font, surface_rect, to_i32, PlateBleed, PlateStyle,
+    resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, PlateBleed, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
@@ -438,6 +438,9 @@ impl WindowControl {
         theme: &Theme,
         corner: BandCorner,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1287,14 +1290,9 @@ impl TitleBar {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
-        // The band composes its title and may rasterise an identity glyph
-        // before its first write, so a surface holding a part of the window
-        // the band does not reach is left alone rather than paying for pixels
-        // nothing can keep.
-        if surface_rect(bounds).is_some_and(|(x, y, w, h)| !surface.admits(x, y, w, h)) {
+        if withheld(surface, bounds) {
             return;
         }
-
         // Window furniture is titling text, not interface body text.
         let font = role_font(theme, scale, TextRole::WindowTitle);
         let palette = theme.palette();
@@ -2200,6 +2198,9 @@ impl WindowFrame {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -2370,6 +2371,9 @@ impl ResizeGrabber {
     /// already sized through the shared [`Scale`], so they scale with it while
     /// keeping a whole-pixel stroke weight.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, _scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -2519,6 +2523,9 @@ impl ScrollCorner {
 
     /// Paint the neutral corner plate into `surface` at `bounds`.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, _scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };

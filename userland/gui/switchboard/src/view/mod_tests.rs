@@ -26,13 +26,13 @@ use tairix_controls::{
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, report,
-    resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point,
+    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, refresh,
+    report, resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point,
     unreported_change, PRESS, RELEASE,
 };
 use super::{
-    resolve_section_frame, ActionVerdict, RecoveryControl, Section, Switchboard, SwitchboardAction,
-    SwitchboardModel, TaskAuthority, TaskControl, TaskSummary,
+    resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, Switchboard,
+    SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskSummary,
 };
 
 /// A point over the first row of the active section's scrollable list.
@@ -726,7 +726,7 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
 
     // Five tasks have nowhere near that far to scroll: the refresh re-ranges
     // there and then, rather than leaving a dangling offset for the next frame.
-    sb.set_model(&refreshed_model(5, 3));
+    let _ = refresh(&mut sb, &refreshed_model(5, 3));
 
     let range = sb.scroll.model().range();
     assert_eq!(range.content_extent(), 5);
@@ -761,7 +761,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     );
     assert!(sb.scroll_offset() > 0);
 
-    sb.set_model(&SwitchboardModel::new("Switchboard"));
+    let _ = refresh(&mut sb, &SwitchboardModel::new("Switchboard"));
 
     assert_eq!(sb.scroll_offset(), 0, "an empty list has nowhere to scroll");
     assert_eq!(sb.active().content_focus(), 0);
@@ -785,7 +785,7 @@ fn pointer_after_set_model_addresses_the_new_rows() {
 
     // Three tasks replace fifty, and the first of the three refuses every
     // command while the rest permit them.
-    sb.set_model(&refreshed_model(3, 3));
+    let _ = refresh(&mut sb, &refreshed_model(3, 3));
     sb.render(&mut surface, b, Scale::ONE, &theme, font());
 
     // Choosing row 2 must select the task the refresh put there.
@@ -844,7 +844,7 @@ fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     // from selecting it.
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
-    sb.set_model(&model());
+    let _ = refresh(&mut sb, &model());
 
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE), None);
     assert_eq!(
@@ -868,7 +868,7 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
     // Neither has been interacted with, so there is no preserved state to
     // account for: any difference would be a second derivation.
     let mut refreshed = Switchboard::new(&model());
-    refreshed.set_model(&refreshed_model(4, 2));
+    let _ = refresh(&mut refreshed, &refreshed_model(4, 2));
     let mut built = Switchboard::new(&refreshed_model(4, 2));
 
     let mut refreshed_surface = Surface::new(b.width, b.height).expect("surface");
@@ -1134,7 +1134,7 @@ fn model_refresh_changes_the_composition() {
 
     let mut refreshed = model();
     refreshed.tasks[0].cpu_permille = Some(990);
-    sb.set_model(&refreshed);
+    let _ = refresh(&mut sb, &refreshed);
 
     assert_ne!(sb, before, "a re-derived row shows the new reading");
 }
@@ -1288,4 +1288,82 @@ fn a_scroll_reports_the_whole_list_the_bar_alone_does_not_describe() {
         None,
         "every row is drawn somewhere new, not just the scrollbar's thumb"
     );
+}
+
+// --- What a fresh reading reports ---------------------------------------
+
+/// A model whose readings have all moved: every task's CPU cell, every fault
+/// card's state, and the CPU pane's hero value.
+///
+/// One fixture rather than three, so the three tests below all publish the
+/// same kind of change and none can pass on a section the edit missed.
+fn moved_reading() -> SwitchboardModel {
+    let mut m = model();
+    for (index, task) in m.tasks.iter_mut().enumerate() {
+        task.cpu_permille = Some(u16::try_from(index).unwrap_or(0) * 7 + 3);
+    }
+    for item in &mut m.recovery {
+        item.recovery = RecoveryState::RestartRecommended;
+    }
+    if let Some(cpu) = m.resources.devices.first_mut() {
+        cpu.reading = Reading::measured("77%");
+        cpu.hero.value = Reading::measured("77");
+    }
+    m
+}
+
+#[test]
+fn a_refresh_reports_every_pixel_it_moved_in_every_section() {
+    for section in Section::ALL {
+        let mut sb = Switchboard::new(&model());
+        let _ = sb.select_section(section);
+        let before = shot(&mut sb);
+
+        let damage = refresh(&mut sb, &moved_reading());
+        let after = shot(&mut sb);
+
+        assert!(
+            !damage.is_empty(),
+            "{section:?}: a reading that moved reports the instrument it moved in"
+        );
+        assert_eq!(
+            unreported_change(&before, &after, bounds(), &damage),
+            None,
+            "{section:?}: a pixel the refresh moved was left out of its report"
+        );
+    }
+}
+
+#[test]
+fn a_refresh_reports_less_than_the_client_in_every_section() {
+    for section in Section::ALL {
+        let mut sb = Switchboard::new(&model());
+        let _ = sb.select_section(section);
+        let _ = shot(&mut sb);
+
+        let damage = refresh(&mut sb, &moved_reading());
+
+        assert_ne!(
+            damage.bounds(),
+            bounds(),
+            "{section:?}: the whole client is what this exists to avoid"
+        );
+    }
+}
+
+#[test]
+fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
+    for section in Section::ALL {
+        let mut sb = Switchboard::new(&model());
+        let _ = sb.select_section(section);
+        let _ = shot(&mut sb);
+
+        let damage = refresh(&mut sb, &model());
+
+        assert!(
+            damage.is_empty(),
+            "{section:?}: an unmoved reading owes the screen nothing, reported {:?}",
+            damage.rects()
+        );
+    }
 }

@@ -28,7 +28,7 @@ use crate::paint::{
     foreground, inset, key_activation, paint_bead, paint_count_badge, paint_icon_slot, paint_plate,
     paint_surface_plate, paint_text_line, plate_border, pointer_activation, rail_thickness,
     resolve_bead, resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
-    text_plate_height, to_i32, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
+    text_plate_height, to_i32, withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -168,6 +168,9 @@ impl Notification {
 
     /// Paint the notification into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         if let Some(source) = &self.source {
             if let Some((x, y, w, _)) = surface_rect(bounds) {
@@ -365,6 +368,9 @@ impl TaskbarItem {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -635,6 +641,9 @@ impl WindowPreview {
         thumbnail: Option<&Surface>,
         artwork: Option<IconPicture<'_>>,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -1213,6 +1222,9 @@ impl TraySignal {
         theme: &Theme,
         artwork: Option<IconPicture<'_>>,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         self.capsule.render(surface, bounds, scale, theme, artwork);
     }
 
@@ -1265,6 +1277,9 @@ impl TraySignal {
     /// this when [`is_expanded`](Self::is_expanded) is set, at the popup
     /// rectangle it sized from [`readout_size`](Self::readout_size).
     pub fn render_readout(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;

@@ -11,21 +11,47 @@
 //! for the same reason: which children one sample reaches is one decision,
 //! not one per family.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_geometry::Point;
+use tairix_geometry::{Point, Rect, Scale};
+use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{InputEvent, PointerButton};
-use tairix_raster::Color;
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Appearance, Rgba, Theme};
 
+use crate::button::{Button, ButtonContent, IconButton, SplitButton};
+use crate::chart::Chart;
+use crate::collection::{
+    Card, HeaderColumn, IconTile, ListRow, Panel, TableCell, TableHeader, TableRow,
+};
+use crate::combo::ComboBox;
+use crate::decision::{Dialog, HelpTip, Tooltip};
+use crate::menu::{Menu, MenuItem};
+use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
+use crate::nav::{Breadcrumb, Crumb};
 use crate::paint::{
     grab_after, ground_fill, resolve_frame, route_pointer, ChromeLayer, FrameColors,
 };
+use crate::rail::ActionRail;
+use crate::record::{Fact, FactList, Timeline, TimelineEvent};
+use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use crate::scrollbar::ScrollBar;
+use crate::selector::{Checkbox, Radio, Toggle};
+use crate::shell::{Notification, TaskbarItem, TraySignal, WindowPreview};
 use crate::state::{
     AuthorityState, ControlRole, ControlState, FocusState, PlateSeating, PointerState,
-    ValidationState,
+    PressureKind, SelectionState, ValidationState, WindowActivationState, WindowControlKind,
+    WindowFurnitureState, WindowSizeState,
 };
+use crate::tabs::{Tab, Tabs};
 use crate::testkit::high_contrast;
+use crate::text::{SearchField, TextField};
+use crate::toolbar::Toolbar;
+use crate::value::{Progress, Slider};
+use crate::window::{
+    BandCorner, ResizeGrabber, ScrollCorner, TitleBar, WindowControl, WindowFrame,
+};
 
 fn pointer(pointer: PointerState) -> ControlState {
     ControlState {
@@ -812,4 +838,335 @@ fn the_pointer_wash_on_floating_chrome_reads_against_the_ground_on_both_themes()
             theme.name()
         );
     }
+}
+
+// --- The paint gate every family opens with ----------------------------
+
+/// The rectangle every family is painted into below: seated well inside the
+/// surface, so a stray pixel on any side has somewhere to land and be seen.
+const SEAT: Rect = Rect {
+    origin: Point { x: 24, y: 20 },
+    width: 176,
+    height: 104,
+};
+
+/// Two even columns, for the families that take a column run.
+const COLUMNS: [u32; 2] = [88, 88];
+
+/// One family in [`EVERY_FAMILY`]: its name, the rectangle it is contracted to
+/// be drawn in, and the one call that paints it there.
+type Family = (&'static str, Rect, fn(&mut Surface, Rect, Scale, &Theme));
+
+/// The band a title bar is contracted to be given: wide and short, and at
+/// least [`TitleBar::min_band_width`] across.
+///
+/// A band sizes its command cells from its own *height*, so the tall, narrow
+/// [`SEAT`] would be a band a third of its documented minimum — below which
+/// `TitleBar::layout` deliberately abuts the two clusters rather than stacking
+/// one under the other, and they then reach past the band's end. A window
+/// manager sizes a decorated window against that floor, so a band below it is
+/// not geometry any caller hands one.
+const BAND: Rect = Rect {
+    origin: Point { x: 24, y: 20 },
+    width: 320,
+    height: 32,
+};
+
+/// Every drawn family, as the one call each makes to paint itself into
+/// [`SEAT`].
+///
+/// [`withheld`](crate::paint::withheld) lets a family skip its whole paint —
+/// measurement, elision, glyph composition and all — when the surface admits
+/// none of its `bounds`. That is sound only while no family paints outside its
+/// own `bounds`, so the two tests below assert both halves over the whole set.
+/// One table, walked by both, so a family added later joins both at once.
+/// Each entry carries the rectangle its family is contracted to be drawn in.
+const EVERY_FAMILY: &[Family] = &[
+    ("Button", SEAT, |sf, b, s, th| {
+        Button::labelled("OK").render(sf, b, s, th);
+    }),
+    ("IconButton", SEAT, |sf, b, s, th| {
+        IconButton::new(IconKind::File, ControlRole::Neutral).render(sf, b, s, th, None);
+    }),
+    ("SplitButton", SEAT, |sf, b, s, th| {
+        SplitButton::new(
+            ButtonContent::Label(String::from("Open")),
+            ControlRole::Neutral,
+        )
+        .render(sf, b, s, th);
+    }),
+    ("Chart", SEAT, |sf, b, s, th| {
+        Chart::new(PressureKind::Cpu)
+            .with_samples([10_u16, 400, 900, 250])
+            .render(sf, b, s, th);
+    }),
+    ("ListRow", SEAT, |sf, b, s, th| {
+        ListRow::new("Documents")
+            .with_icon(IconKind::Folder)
+            .with_trailing("12 items")
+            .render(sf, b, s, th, None);
+    }),
+    ("TableRow", SEAT, |sf, b, s, th| {
+        TableRow::new(alloc::vec![
+            TableCell::new("elsh"),
+            TableCell::numeric("42")
+        ])
+        .render(sf, b, s, th, &COLUMNS, None);
+    }),
+    ("TableHeader", SEAT, |sf, b, s, th| {
+        TableHeader::new(alloc::vec![
+            HeaderColumn::new("Name"),
+            HeaderColumn::fixed("CPU")
+        ])
+        .render(sf, b, s, th, &COLUMNS);
+    }),
+    ("Card", SEAT, |sf, b, s, th| {
+        Card::new("Recovery").render(sf, b, s, th);
+    }),
+    ("IconTile", SEAT, |sf, b, s, th| {
+        IconTile::new("notes.txt", IconKind::Text).render(sf, b, s, th, None);
+    }),
+    ("Panel", SEAT, |sf, b, s, th| {
+        Panel::new("Details").render(sf, b, s, th);
+    }),
+    ("ComboBox", SEAT, |sf, b, s, th| {
+        ComboBox::new(choices()).render(sf, b, s, th);
+    }),
+    ("ComboBox popup", SEAT, |sf, b, s, th| {
+        ComboBox::new(choices()).render_popup(sf, b, s, th);
+    }),
+    ("Dialog", SEAT, |sf, b, s, th| {
+        Dialog::new("Discard changes?").render(sf, b, s, th);
+    }),
+    ("Tooltip", SEAT, |sf, b, s, th| {
+        Tooltip::new("Close the window").render(sf, b, s, th);
+    }),
+    ("HelpTip", SEAT, |sf, b, s, th| {
+        HelpTip::new("No authority").render(sf, b, s, th);
+    }),
+    ("Menu", SEAT, |sf, b, s, th| {
+        Menu::new(items()).render(sf, b, s, th);
+    }),
+    ("Menu rows", SEAT, |sf, b, s, th| {
+        Menu::new(items()).render_rows(sf, b, s, th);
+    }),
+    ("MetricTile", SEAT, |sf, b, s, th| {
+        MetricTile::new("Memory", "8.6 GB", PressureKind::Memory).render(sf, b, s, th, None);
+    }),
+    ("StatusPill", SEAT, |sf, b, s, th| {
+        StatusPill::new("Healthy").render(sf, b, s, th);
+    }),
+    ("CompositionBar", SEAT, |sf, b, s, th| {
+        CompositionBar::new(
+            PressureKind::Memory,
+            alloc::vec![
+                CompositionSegment::new("Anonymous", "4 GB", 600),
+                CompositionSegment::new("Cache", "2 GB", 400),
+            ],
+        )
+        .expect("the segments sum to the whole")
+        .render(sf, b, s, th);
+    }),
+    ("Breadcrumb", SEAT, |sf, b, s, th| {
+        Breadcrumb::new(alloc::vec![Crumb::new("Switchboard"), Crumb::new("Tasks")])
+            .render(sf, b, s, th);
+    }),
+    ("ActionRail", SEAT, |sf, b, s, th| {
+        ActionRail::new(alloc::vec![Button::labelled("Stop")]).render(sf, b, s, th);
+    }),
+    ("FactList", SEAT, |sf, b, s, th| {
+        FactList::new(alloc::vec![Fact::new("Uptime", "3 days")]).render(sf, b, s, th);
+    }),
+    ("Timeline", SEAT, |sf, b, s, th| {
+        Timeline::new(alloc::vec![
+            TimelineEvent::new("09:15", "mounted"),
+            TimelineEvent::new("09:16", "unlocked"),
+        ])
+        .render(sf, b, s, th);
+    }),
+    ("ScrollBar", SEAT, |sf, b, s, th| {
+        ScrollBar::new(
+            ScrollOrientation::Vertical,
+            ScrollModel::new(ScrollRange::new(400, 100, 20), 10, 100),
+        )
+        .render(sf, b, s, th);
+    }),
+    ("Toggle", SEAT, |sf, b, s, th| {
+        Toggle::new("Auto refresh", true).render(sf, b, s, th);
+    }),
+    ("Checkbox", SEAT, |sf, b, s, th| {
+        Checkbox::new("Show hidden", SelectionState::Selected).render(sf, b, s, th);
+    }),
+    ("Radio", SEAT, |sf, b, s, th| {
+        Radio::new("Dark", true).render(sf, b, s, th);
+    }),
+    ("Notification", SEAT, |sf, b, s, th| {
+        Notification::new("Volume ready").render(sf, b, s, th);
+    }),
+    ("TaskbarItem", SEAT, |sf, b, s, th| {
+        TaskbarItem::new(IconKind::AppBundle).render(sf, b, s, th, None);
+    }),
+    ("WindowPreview", SEAT, |sf, b, s, th| {
+        WindowPreview::new("Documents", IconKind::Folder).render(sf, b, s, th, None, None);
+    }),
+    ("TraySignal", SEAT, |sf, b, s, th| {
+        TraySignal::new(IconKind::Network, "net0").render(sf, b, s, th, None);
+    }),
+    ("TraySignal readout", SEAT, |sf, b, s, th| {
+        TraySignal::new(IconKind::Network, "net0").render_readout(sf, b, s, th);
+    }),
+    ("Tabs", SEAT, |sf, b, s, th| {
+        Tabs::new(alloc::vec![Tab::new("Tasks"), Tab::new("Resources")]).render(sf, b, s, th);
+    }),
+    ("TextField", SEAT, |sf, b, s, th| {
+        TextField::new().render(sf, b, s, th);
+    }),
+    ("SearchField", SEAT, |sf, b, s, th| {
+        SearchField::new().render(sf, b, s, th);
+    }),
+    ("Toolbar", SEAT, |sf, b, s, th| {
+        Toolbar::new().render(sf, b, s, th, &mut NoArtwork);
+    }),
+    ("Slider", SEAT, |sf, b, s, th| {
+        Slider::new(500).render(sf, b, s, th);
+    }),
+    ("Progress", SEAT, |sf, b, s, th| {
+        Progress::new().render(sf, b, s, th);
+    }),
+    ("WindowControl", SEAT, |sf, b, s, th| {
+        WindowControl::new(WindowControlKind::Close).render(sf, b, s, th, BandCorner::Square);
+    }),
+    ("TitleBar", BAND, |sf, b, s, th| {
+        TitleBar::new(active_furniture()).render(sf, b, s, th, None);
+    }),
+    ("WindowFrame", SEAT, |sf, b, s, th| {
+        WindowFrame::new(active_furniture()).render(sf, b, s, th, None);
+    }),
+    ("ResizeGrabber", SEAT, |sf, b, s, th| {
+        ResizeGrabber::new().render(sf, b, s, th);
+    }),
+    ("ScrollCorner", SEAT, |sf, b, s, th| {
+        ScrollCorner::new().render(sf, b, s, th);
+    }),
+];
+
+fn choices() -> Vec<String> {
+    alloc::vec![String::from("Dark"), String::from("Light")]
+}
+
+fn items() -> Vec<MenuItem> {
+    alloc::vec![MenuItem::new("Open"), MenuItem::new("Close")]
+}
+
+fn active_furniture() -> WindowFurnitureState {
+    WindowFurnitureState {
+        activation: WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: true,
+    }
+}
+
+/// A surface big enough to hold `seat` with the margin its origin states all
+/// round, so a stray pixel on any side lands somewhere it can be seen.
+fn canvas(seat: Rect) -> Surface {
+    Surface::new(seat.width + 48, seat.height + 40).expect("a small surface")
+}
+
+/// Every pixel of `surface` compared against what `expected` says belongs
+/// there, reported by the family that painted it.
+fn assert_pixels(name: &str, surface: &Surface, what: &str, expected: impl Fn(u32, u32) -> Pixel) {
+    for y in 0..surface.height() {
+        for x in 0..surface.width() {
+            assert_eq!(
+                surface.get(x, y),
+                Some(expected(x, y)),
+                "{name}: ({x}, {y}) {what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_family_paints_outside_its_own_bounds() {
+    let theme = Theme::dark();
+    for (name, seat, paint) in EVERY_FAMILY {
+        let seat = *seat;
+        let mut painted = canvas(seat);
+        paint(&mut painted, seat, Scale::ONE, &theme);
+        assert_pixels(
+            name,
+            &painted,
+            "was painted outside the bounds given",
+            |x, y| {
+                if seat.contains(point(x, y)) {
+                    painted.get(x, y).expect("in bounds")
+                } else {
+                    Pixel::TRANSPARENT
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn a_clip_that_admits_none_of_a_family_leaves_the_surface_untouched() {
+    let theme = Theme::dark();
+    // A corner well clear of every seat, so the gate — not the clip — is what
+    // withholds the paint.
+    for (name, seat, paint) in EVERY_FAMILY {
+        let seat = *seat;
+        let mut elsewhere = canvas(seat);
+        elsewhere.with_clip(0, 0, 8, 8, |surface| {
+            paint(surface, seat, Scale::ONE, &theme);
+        });
+        assert_pixels(
+            name,
+            &elsewhere,
+            "was painted for a clip admitting none of it",
+            |_, _| Pixel::TRANSPARENT,
+        );
+    }
+}
+
+#[test]
+fn a_family_clipped_to_a_band_lands_what_a_whole_paint_lands_there() {
+    let theme = Theme::dark();
+    for (name, seat, paint) in EVERY_FAMILY {
+        let seat = *seat;
+        // A stripe across the middle of the seat, so the comparison covers
+        // rows the paint reaches and rows it does not.
+        let mid = i32::try_from(seat.height / 2).expect("inside the canvas");
+        let band = Rect::new(seat.left(), seat.top() + mid, seat.width, 8);
+        let mut whole = canvas(seat);
+        paint(&mut whole, seat, Scale::ONE, &theme);
+
+        let mut scoped = canvas(seat);
+        scoped.with_clip(
+            u32::try_from(band.left()).expect("inside the canvas"),
+            u32::try_from(band.top()).expect("inside the canvas"),
+            band.width,
+            band.height,
+            |surface| paint(surface, seat, Scale::ONE, &theme),
+        );
+        assert_pixels(
+            name,
+            &scoped,
+            "is not what a whole paint left there",
+            |x, y| {
+                if band.contains(point(x, y)) {
+                    whole.get(x, y).expect("in bounds")
+                } else {
+                    Pixel::TRANSPARENT
+                }
+            },
+        );
+    }
+}
+
+fn point(x: u32, y: u32) -> Point {
+    Point::new(
+        i32::try_from(x).expect("inside the canvas"),
+        i32::try_from(y).expect("inside the canvas"),
+    )
 }

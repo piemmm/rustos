@@ -50,7 +50,7 @@ lie about.
 | **X4** | Rewrite `docs/src/desktop/switchboard.md` — it describes the section set | V1–V10 | S10 | done |
 | **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | done |
 | **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | done |
-| **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | planned |
+| **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
 | — | The section frame resolver, the fixed drop order, `primary_floor` and the row-command arithmetic | — | S3 | done |
@@ -1020,7 +1020,7 @@ code that cites them is rewritten.
   per-device health and budget machinery that plan already defines; the
   counters are folded there, not invented here.
 
-## S12 — Responsiveness obligations — planned
+## S12 — Responsiveness obligations — done
 
 The Switchboard is an interactive surface, so the desktop responsiveness rules
 bind it directly, and a monitor is the easiest surface in the system to get
@@ -1040,23 +1040,37 @@ this wrong on.
   instruments whose readings moved and the rows whose cells moved — not the
   whole client. Re-deriving the pane because *a* sample landed is the defect,
   and it is worst exactly where the machine is slowest and the rail longest.
-  - **`SectionView::adopt` becomes a damage-reporting entry point.** It takes
-    only the model today, so it has no geometry to damage *in*; the
-    layout inputs `on_pointer`/`on_key` already carry (bounds, scale, theme,
-    font) have to reach it, and each of the three concrete `adopt` impls
-    (`resources`, `tasks`, `recovery`) compares its old reading against the new
-    one to damage just the instruments and cells that moved.
-  - **`Panel::refresh`'s `repaint_whole()` is what this replaces**, and
-    `Panel`'s `Presented` record — a deep compare *and* deep clone of the whole
+  - **`SectionView::adopt` is a damage-reporting entry point.** It carries the
+    layout inputs `on_pointer`/`on_key` already carry, as one `Sweep` (the
+    frame the round holds, or none, plus the sink) shared with the focus marks
+    — so the section on show reports against the frame it will next be drawn
+    in and the two that are not on show report nothing, which is unrepresentable
+    rather than merely avoided. Each concrete `adopt` compares what it derived
+    against what it held: `tasks` in `arrange`, which is also the one place a
+    filter, a search, a sort and a grouping re-derive the table (each of which
+    previously reported only the control the reader touched and left the table
+    on screen showing the old arrangement — a live defect this closed);
+    `recovery` from the slots `resettle_cards` already found changed; and
+    `resources` from a `Rebuilt` record naming its rail, its command column and
+    the pane items that moved.
+  - **`Panel::refresh`'s `repaint_whole()` is replaced**, and `Panel`'s
+    `Presented` record — a deep compare *and* deep clone of the whole
     composition on every `flush`, purely to decide whether a present would draw
-    anything — is what it **deletes**: with damage authoritative, an empty
-    damage region is that same answer for free. The stall-trace facility
-    measured the cost of not having this: 250 ms and 739 syscalls spent
-    *dropping* the previous `PanelModel` on one 2 s sample.
-  - **The risk this moves.** Today an unreported change can only ever
-    over-cover. Making damage authoritative puts that correctness burden on
-    every section's `adopt`, so each needs a test that a moved reading damages
-    its instrument and an unmoved one damages nothing.
+    anything — is **deleted**, along with `RenderInputs` and
+    `invalidate_presented`: with damage authoritative an empty region is that
+    answer for free, and every geometry/theme/scale change already reaches the
+    panel as a window event answered with `repaint_whole`.
+  - **The risk this moves, and what holds it.** An unreported change now leaves
+    a stale pixel rather than over-covering, so the burden is on every
+    section's `adopt`. The proof is `unreported_change`, already the crate's
+    soundness helper: over all three sections, a refresh's reported region must
+    contain every pixel a whole re-render moved. Beside it, a refresh reports
+    less than the client, and an unmoved reading reports nothing.
+  - **Measured.** Tasks 916 µs → 185 µs per refresh-and-repaint, Resources
+    569 → 32, Recovery 448 → 31, and the presented rectangle 442×144 rather
+    than 760×560 — which is what the session's serve thread decodes.
+    `lib/controls`' shared `paint::withheld` gate is what makes a scoped render
+    actually cheap: before it, three fifths of a whole render survived any clip.
 - **Auto-refresh holds the sample the reader is reading**, and toggling it
   changes only that: it does not re-query, reset a history or resize anything.
 - **The frame report never measures this window.** The suppression rule in S4

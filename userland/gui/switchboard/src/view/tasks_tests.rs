@@ -18,15 +18,17 @@ use super::{
     TaskAuthority, TaskControl, TaskOwner, TaskSummary, COLUMN_WEIGHTS, COL_ACTIVITY, COL_CORE,
     COL_CPU, COL_MEMORY, COL_NETWORK,
 };
+use tairix_controls::damage;
 use tairix_controls::testkit::high_contrast;
 
 use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
 use crate::view::tasks::TasksSection;
 use crate::view::test_support::{
-    centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, select_task_row,
-    task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
+    centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, refresh,
+    select_task_row, task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
 };
+use crate::view::Sweep;
 use crate::view::{
     ActionVerdict, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
     UNMEASURED_READING,
@@ -229,11 +231,11 @@ fn the_selection_follows_the_task_when_a_re_sort_moves_it() {
     sb.tasks
         .header
         .adopt_sort(Some((0, super::SortOrder::Ascending)));
-    sb.tasks.arrange();
+    sb.tasks.arrange(&mut Sweep::adopting(&mut damage::sink()));
     sb.tasks
         .header
         .adopt_sort(Some((0, super::SortOrder::Descending)));
-    sb.tasks.arrange();
+    sb.tasks.arrange(&mut Sweep::adopting(&mut damage::sink()));
 
     assert_eq!(
         sb.tasks.selected,
@@ -252,7 +254,7 @@ fn hiding_the_selected_task_drops_the_selection_and_its_commands() {
     assert!(sb.tasks.selected.is_some());
 
     sb.tasks.search.set_text("nothing matches this");
-    sb.tasks.arrange();
+    sb.tasks.arrange(&mut Sweep::adopting(&mut damage::sink()));
 
     assert_eq!(sb.tasks.selected, None);
     assert!(
@@ -812,7 +814,8 @@ fn grouping_by_activity_puts_the_working_rows_first() {
     m.tasks[4].activity = ActivityState::Working;
     let mut sb = Switchboard::new(&m);
     sb.tasks.grouping.set_selected(2);
-    sb.tasks.adopt(&m);
+    sb.tasks
+        .adopt(&m, &mut Sweep::adopting(&mut damage::sink()));
     assert_eq!(
         shown(&sb).first().map(alloc::string::String::as_str),
         Some("epsilon"),
@@ -830,12 +833,14 @@ fn auto_refresh_off_holds_the_rows_the_reader_was_reading() {
 
     let mut later = mixed_model();
     later.tasks.truncate(1);
-    sb.tasks.adopt(&later);
+    sb.tasks
+        .adopt(&later, &mut Sweep::adopting(&mut damage::sink()));
     assert_eq!(sb.tasks.entries.len(), 5, "a paused table holds its rows");
 
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     assert!(sb.tasks.auto_refresh.is_on());
-    sb.tasks.adopt(&later);
+    sb.tasks
+        .adopt(&later, &mut Sweep::adopting(&mut damage::sink()));
     assert_eq!(sb.tasks.entries.len(), 1, "resuming takes the new sample");
 }
 
@@ -916,7 +921,7 @@ fn a_refresh_keeps_the_hover_on_the_row_under_the_pointer() {
     hover_row(&mut sb, b, &theme, 2);
     assert_eq!(row_pointer(&sb, 2), PointerState::Hover);
 
-    sb.set_model(&m);
+    let _ = refresh(&mut sb, &m);
 
     assert_eq!(
         row_pointer(&sb, 2),
@@ -934,7 +939,7 @@ fn a_refresh_drops_a_press_begun_on_a_row() {
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
     assert_eq!(row_pointer(&sb, 2), PointerState::Pressed);
 
-    sb.set_model(&m);
+    let _ = refresh(&mut sb, &m);
 
     assert_eq!(
         row_pointer(&sb, 2),
@@ -957,7 +962,7 @@ fn a_refresh_that_drops_the_slot_carries_no_hover() {
 
     let mut shorter = m.clone();
     shorter.tasks.truncate(1);
-    sb.set_model(&shorter);
+    let _ = refresh(&mut sb, &shorter);
 
     assert_eq!(sb.tasks.entries.len(), 1);
     assert_eq!(
@@ -1003,7 +1008,7 @@ fn a_refresh_keeps_the_filter_tab_under_the_pointer_lit() {
     let lit = sb.tasks.filters.clone();
     assert_ne!(lit, untouched, "the pointer resting on a tab lifts it");
 
-    sb.set_model(&m);
+    let _ = refresh(&mut sb, &m);
 
     assert_eq!(
         sb.tasks.filters, lit,
@@ -1020,7 +1025,7 @@ fn a_refresh_does_not_swallow_a_click_begun_on_a_filter_tab() {
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
 
-    sb.set_model(&m);
+    let _ = refresh(&mut sb, &m);
 
     assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE), None);
     assert_eq!(
@@ -1030,20 +1035,20 @@ fn a_refresh_does_not_swallow_a_click_begun_on_a_filter_tab() {
     );
 }
 
-/// Press rail command `index`, publishing `refresh` before the release when
+/// Press rail command `index`, publishing `published` before the release when
 /// one is given, and report what the release produced.
 fn press_rail_command(
     sb: &mut Switchboard,
     b: Rect,
     theme: &Theme,
     index: usize,
-    refresh: Option<&SwitchboardModel>,
+    published: Option<&SwitchboardModel>,
 ) -> Option<SwitchboardAction> {
     let (x, y) = centre(task_rail_rects(sb, b, Scale::ONE, theme)[index]);
     assert_eq!(pointer(sb, b, Scale::ONE, theme, &moved(x, y)), None);
     assert_eq!(pointer(sb, b, Scale::ONE, theme, &PRESS), None);
-    if let Some(model) = refresh {
-        sb.set_model(model);
+    if let Some(model) = published {
+        let _ = refresh(sb, model);
     }
     pointer(sb, b, Scale::ONE, theme, &RELEASE)
 }

@@ -44,7 +44,7 @@ use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, paint_bead, plate_border, role_font, seam_thickness, seam_width,
-    surface_rect, text_plate_height, to_i32, BeadShape,
+    surface_rect, text_plate_height, to_i32, withheld, BeadShape,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -750,6 +750,9 @@ impl Tabs {
 
     /// Paint the strip into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         for band in self.layout(bounds, scale, theme) {
             let Some(rect) = surface_rect(band.rect) else {

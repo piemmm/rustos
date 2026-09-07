@@ -16,12 +16,14 @@ use tairix_abi::sysinfo::{
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
 };
-use tairix_geometry::Region;
+use tairix_font::BitmapFont;
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_procinfo::Transport;
+use tairix_theme::Theme;
 use tairix_window::{present_damage, Repaint};
 
 use crate::sample::{DegradedField, ProcessSummary, Sample};
-use crate::service::{RenderInputs, ServiceHost};
+use crate::service::{PanelLayout, ServiceHost};
 use crate::view::Switchboard;
 use crate::wait::{required_members, WaitToken};
 
@@ -259,12 +261,15 @@ pub(crate) struct RecordingHost {
     /// `(left, top, width, height)`. Tests mutate this directly to
     /// simulate a resize.
     pub(crate) bounds: (i32, i32, u32, u32),
-    /// The active theme's identity a present would use. Tests mutate this
-    /// directly to simulate a theme change.
-    pub(crate) theme_id: u32,
-    /// The active render scale, as its whole-percent value, a present
-    /// would use. Tests mutate this directly to simulate a scale change.
-    pub(crate) scale_percent: u32,
+    /// The theme a paint would use. Tests replace it to stand in for a
+    /// desktop appearance change.
+    pub(crate) theme: Theme,
+    /// The scale a paint would use. Tests replace it to stand in for a
+    /// density change.
+    pub(crate) scale: Scale,
+    /// Whether the window's frame region still holds its pixels. A test sets
+    /// this to stand in for a session that released them.
+    pub(crate) attached: bool,
 }
 
 impl RecordingHost {
@@ -291,8 +296,9 @@ impl RecordingHost {
             lower_refusal: None,
             power_refusal: None,
             bounds: (0, 0, 600, 400),
-            theme_id: 1,
-            scale_percent: 100,
+            theme: Theme::dark(),
+            scale: Scale::ONE,
+            attached: true,
         }
     }
 
@@ -388,17 +394,15 @@ impl ServiceHost for RecordingHost {
         self.refusals.push((action.to_string(), refusal));
     }
 
-    fn render_inputs(&self) -> Option<RenderInputs> {
-        if !self.armed.contains(&WaitToken::WindowEvent) {
+    fn layout(&self) -> Option<PanelLayout<'_>> {
+        if !self.armed.contains(&WaitToken::WindowEvent) || !self.attached {
             return None;
         }
-        Some(RenderInputs {
-            bounds_left: self.bounds.0,
-            bounds_top: self.bounds.1,
-            bounds_width: self.bounds.2,
-            bounds_height: self.bounds.3,
-            theme_id: self.theme_id,
-            scale_percent: self.scale_percent,
+        Some(PanelLayout {
+            bounds: Rect::new(self.bounds.0, self.bounds.1, self.bounds.2, self.bounds.3),
+            scale: self.scale,
+            theme: &self.theme,
+            font: BitmapFont::console(),
         })
     }
 

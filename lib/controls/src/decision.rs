@@ -22,7 +22,7 @@ use tairix_theme::{TextRole, Theme};
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::paint::{
     foreground, grab_after, inset, paint_plate, plate_border, role_font, route_pointer,
-    surface_rect, text_plate_height, to_i32, PlateStyle,
+    surface_rect, text_plate_height, to_i32, withheld, PlateStyle,
 };
 use crate::state::{ControlRole, RenderInvariant};
 
@@ -206,6 +206,9 @@ impl Dialog {
 
     /// Paint the dialog into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -402,6 +405,9 @@ impl Tooltip {
 
     /// Paint the tooltip into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
@@ -569,6 +575,9 @@ impl HelpTip {
 
     /// Paint the help tip into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;

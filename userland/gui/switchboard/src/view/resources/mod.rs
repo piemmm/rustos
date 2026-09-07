@@ -16,6 +16,7 @@
 //! for one.
 
 use alloc::vec::Vec;
+use core::mem;
 
 use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
@@ -30,7 +31,7 @@ use tairix_controls::{
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::restate_rail;
 use super::{
-    resolve_selection, FocusSweep, ListInfo, SectionCtx, SectionOutcome, SectionView, Switchboard,
+    resolve_selection, ListInfo, SectionCtx, SectionOutcome, SectionView, Sweep, Switchboard,
     SwitchboardAction, SwitchboardModel,
 };
 
@@ -76,6 +77,19 @@ enum Stop {
     Relief,
     /// A command in the trailing action rail, by its slot.
     Rail(usize),
+}
+
+/// What one [`ResourcesSection::rebuild`] changed, so its caller reports
+/// exactly the regions the screen now owes.
+struct Rebuilt {
+    /// The device rail's own entries moved: the sidebar owes a repaint.
+    rail: bool,
+    /// The selected device's commands moved: the action column owes one.
+    rail_column: bool,
+    /// The pane owes a repaint whole, rather than item by item.
+    pane: bool,
+    /// The flow the rebuild replaced, for the item-by-item comparison.
+    retired: Vec<PaneItem>,
 }
 
 /// The Resources section: the report it draws, the device rail, the selected
@@ -132,7 +146,7 @@ impl ResourcesSection {
             focus: 0,
             action: 0,
         };
-        section.rebuild();
+        let _ = section.rebuild();
         section
     }
 
@@ -150,26 +164,82 @@ impl ResourcesSection {
 
     /// Rebuild the rail, the chooser, the commands and the pane flow from
     /// the report and the current selection.
-    fn rebuild(&mut self) {
-        self.rail = build_rail(&self.report, self.rail_offset, self.selected);
+    fn rebuild(&mut self) -> Rebuilt {
+        let rail = build_rail(&self.report, self.rail_offset, self.selected);
+        let rail_moved = rail != self.rail;
+        self.rail = rail;
         self.band_combo = build_combo(&self.report.devices, self.selected_index());
         let commands = self
             .device()
             .map(|device| device.actions.iter().map(build_command).collect())
             .unwrap_or_default();
-        restate_rail(&mut self.actions, commands);
-        self.relief = self.device().and_then(|device| {
+        let mut rail_column = restate_rail(&mut self.actions, commands);
+        let relief = self.device().and_then(|device| {
             device
                 .banner
                 .as_ref()
                 .and_then(|banner| banner.relief.as_ref())
                 .map(build_command)
         });
+        // The relief command is drawn inside the banner at the head of the
+        // pane, so the pane is what owes it.
+        let mut pane_moved = relief != self.relief;
+        self.relief = relief;
         // The flow is recompiled for the width it will be drawn at, which
         // `relayout` supplies; until then it is compiled for the width it
         // last had, so the scroll range always describes the flow on screen.
         let (width, scale) = self.compiled_for;
+        let retired = mem::take(&mut self.items);
         self.compile(width, scale);
+        // A flow of a different length has moved every item below the change,
+        // and the commands beside a pane the reader is now on describe that
+        // device instead.
+        if retired.len() != self.items.len() {
+            pane_moved = true;
+            rail_column = true;
+        }
+        Rebuilt {
+            rail: rail_moved,
+            rail_column,
+            pane: pane_moved,
+            retired,
+        }
+    }
+
+    /// What one [`rebuild`](Self::rebuild) changed, so the caller can report
+    /// exactly those regions.
+    ///
+    /// `retired` is the flow the rebuild replaced, kept so an item-by-item
+    /// comparison costs the pane no clone of its own.
+    fn report_refresh(&self, rebuilt: &Rebuilt, sweep: &mut Sweep<'_, '_>) {
+        let Some(ctx) = sweep.ctx() else {
+            return;
+        };
+        if rebuilt.rail {
+            if let Some(sidebar) = ctx.frame.sidebar {
+                sweep.report(sidebar);
+            }
+        }
+        if rebuilt.rail_column {
+            if let Some(rail) = ctx.frame.rail {
+                sweep.report(rail);
+            }
+        }
+        let primary = Self::pane_rect(&ctx.frame);
+        if rebuilt.pane {
+            sweep.report(primary);
+            return;
+        }
+        let (pitch, gap) = pane::metrics(ctx.scale, ctx.theme);
+        let start = u32::try_from(ctx.start).unwrap_or(u32::MAX);
+        for (was, now) in rebuilt.retired.iter().zip(&self.items) {
+            if was == now {
+                continue;
+            }
+            if let Some(rect) = pane::item_rect(now, primary, start, pitch, gap) {
+                sweep.report(rect);
+            }
+        }
     }
 
     /// Compile the selected device's pane for a pane `width` at `scale`.
@@ -481,7 +551,7 @@ impl SectionView for ResourcesSection {
         }
     }
 
-    fn adopt(&mut self, model: &SwitchboardModel) {
+    fn adopt(&mut self, model: &SwitchboardModel, sweep: &mut Sweep<'_, '_>) {
         let previous = self.selected;
         let stop = self.stop_at(self.focus);
         self.report.clone_from(&model.resources);
@@ -490,7 +560,8 @@ impl SectionView for ResourcesSection {
         self.rail_offset = self
             .rail_offset
             .min(self.report.devices.len().saturating_sub(1));
-        self.rebuild();
+        let rebuilt = self.rebuild();
+        self.report_refresh(&rebuilt, sweep);
         // The cursor is put back on the same *kind* of stop, so a device
         // cursor follows the device it was on rather than staying on a
         // number that now names a different one.
@@ -570,7 +641,7 @@ impl SectionView for ResourcesSection {
         self.action
     }
 
-    fn set_row_action(&mut self, index: usize, _sweep: &mut FocusSweep<'_, '_>) {
+    fn set_row_action(&mut self, index: usize, _sweep: &mut Sweep<'_, '_>) {
         self.action = index;
     }
 
@@ -689,7 +760,7 @@ impl SectionView for ResourcesSection {
         }
     }
 
-    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>) {
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
         let slot = match stop {
             Some(Stop::Rail(slot)) => Some(slot),

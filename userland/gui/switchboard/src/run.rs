@@ -88,7 +88,7 @@ mod program {
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
-        RenderInputs, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken, PANEL_TITLE,
+        PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken, PANEL_TITLE,
         SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
@@ -480,16 +480,18 @@ mod program {
             client.present(window.id, 0, rect)
         }
 
-        fn render_inputs(&self) -> Option<RenderInputs> {
-            let bounds = self.bounds()?;
+        fn layout(&self) -> Option<PanelLayout<'_>> {
+            // A released region holds none of the pixels a partial present
+            // would leave standing, so it answers with no frame and the
+            // refresh draws the client whole.
+            let window = self.window.as_ref().filter(|w| !w.frames.is_released())?;
             let theme = self.themes.active();
-            Some(RenderInputs {
-                bounds_left: bounds.origin.x,
-                bounds_top: bounds.origin.y,
-                bounds_width: bounds.width,
-                bounds_height: bounds.height,
-                theme_id: theme.id().0,
-                scale_percent: self.desktop.scale().percent(),
+            let scale = self.desktop.scale();
+            Some(PanelLayout {
+                bounds: Rect::new(0, 0, window.mode.width_px, window.mode.height_px),
+                scale,
+                theme,
+                font: panel_font(theme, scale),
             })
         }
 
@@ -819,20 +821,18 @@ mod program {
             }
             WindowEvent::Pointer { x, y, action, .. } => route_pointer(service, host, x, y, action),
             WindowEvent::Scrolled { dx, dy, .. } => route_scroll(service, host, dx, dy),
-            // The session reclaimed the retained pixels. The composition is
-            // unchanged, so the end-of-wake difference test would suppress
-            // the present the blank window now needs: forget what was
-            // presented and let that one path draw it.
+            // The session reclaimed the retained pixels, so nothing partial
+            // can stand on them and the blank window owes every one.
             WindowEvent::RedrawRequested { .. } => {
-                service.panel_mut().invalidate_presented();
+                service.panel_mut().repaint_whole();
                 return;
             }
-            // The desktop switched appearance, density, or screen. Bringing
-            // the theme registry into step is all this needs: the panel is
-            // composed from the active theme at the desktop's scale, so the
-            // end-of-wake difference test sees the new composition and
-            // presents it. A refused change states its reason and leaves the
-            // last good desktop standing.
+            // The desktop switched appearance, density, or screen. The theme
+            // registry is brought into step and the client is drawn whole:
+            // every pixel is composed from the theme at the desktop's scale,
+            // so no control round could have described the change. A refused
+            // change states its reason and leaves the last good desktop
+            // standing.
             WindowEvent::DesktopChanged { .. } => {
                 match host.desktop.apply(event) {
                     Ok(true) => {

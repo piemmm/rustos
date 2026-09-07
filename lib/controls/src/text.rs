@@ -36,7 +36,7 @@ use tairix_util::secret::wipe;
 use crate::damage;
 use crate::paint::{
     paint_bead, paint_filled_circle, paint_plate, plate_border, resolve_bead, resolve_frame,
-    role_font, surface_rect, to_i32, PlateStyle,
+    role_font, surface_rect, to_i32, withheld, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
@@ -1273,6 +1273,9 @@ impl TextField {
 
     /// Paint the field into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         self.core.render(surface, bounds, scale, theme, font, 0);
     }
@@ -1487,6 +1490,9 @@ impl SearchField {
 
     /// Paint the search field into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let leading = Self::leading(bounds, scale, theme, font);
         self.core

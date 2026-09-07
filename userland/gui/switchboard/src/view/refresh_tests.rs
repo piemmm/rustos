@@ -147,12 +147,14 @@ fn cards_are_resettled_slot_for_slot() {
     ];
     let mut fresh = alloc::vec![card("first"), card("changed")];
 
-    resettle_cards(live, &mut fresh);
+    let mut changed = Vec::new();
+    resettle_cards(live, &mut fresh, &mut |slot| changed.push(slot));
 
     assert_eq!(
         fresh.iter().map(footer_pointer).collect::<Vec<_>>(),
         alloc::vec![Some(PointerState::Hover), Some(PointerState::None)]
     );
+    assert_eq!(changed, alloc::vec![1], "only the slot the refresh changed");
 }
 
 #[test]

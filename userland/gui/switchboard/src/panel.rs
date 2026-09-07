@@ -28,19 +28,8 @@ use tairix_theme::Theme;
 use tairix_window::Repaint;
 
 use crate::model::{apply_action, map_section, signal_pid, Effect, PanelModel, SessionReport};
-use crate::service::{RenderInputs, ServiceHost};
+use crate::service::ServiceHost;
 use crate::view::{Section, Switchboard, SwitchboardAction};
-
-/// Exactly what [`Panel::flush`] last presented: the composition value plus
-/// the [`RenderInputs`] snapshot of everything else that changes the
-/// pixels. Comparing a would-be present against this is what lets `flush`
-/// know, for a fact rather than a guess, whether presenting again would
-/// draw anything different.
-#[derive(Debug)]
-struct Presented {
-    composition: Switchboard,
-    inputs: RenderInputs,
-}
 
 /// The overview panel: the live model, the window when one is open, what
 /// the session has last reported about itself, and what the next present
@@ -51,8 +40,10 @@ pub struct Panel {
     session: SessionReport,
     model: PanelModel,
     view: Option<Switchboard>,
-    presented: Option<Presented>,
-    repaint: Repaint,
+    /// Whether the next present owes the whole client, for a change no
+    /// control round and no refresh could have described.
+    whole: bool,
+    /// The rectangles the rounds since the last present reported.
     damage: Region,
 }
 
@@ -66,8 +57,7 @@ impl Panel {
             session: SessionReport::HEALTHY,
             model,
             view: None,
-            presented: None,
-            repaint: Repaint::Whole,
+            whole: true,
             damage: damage::sink(),
         }
     }
@@ -140,7 +130,7 @@ impl Panel {
     /// accumulated report says nothing about, so the report is dropped and the
     /// window is drawn whole rather than left partly stale.
     pub fn repaint_whole(&mut self) {
-        self.repaint = Repaint::Whole;
+        self.whole = true;
         self.damage.clear();
     }
 
@@ -208,7 +198,15 @@ impl Panel {
     /// hover, and a half-finished press are dropped by the composition,
     /// because a row index names a position rather than a task and the
     /// rows are rebuilt from the new reading.
-    pub fn refresh(&mut self, model: PanelModel) {
+    ///
+    /// The composition adopts against the frame it will next be drawn in, so
+    /// the readings that moved are what the next present carries — a monitor
+    /// samples every couple of seconds, and re-presenting the whole client for
+    /// a handful of moved digits costs a render, a whole-window encode, and a
+    /// whole-frame decode on the session's own serve thread. A window with no
+    /// bounds to adopt against holds none of the pixels a partial present
+    /// would leave standing, so it is drawn whole instead.
+    pub fn refresh(&mut self, host: &dyn ServiceHost, model: PanelModel) {
         if model == self.model {
             return;
         }
@@ -216,10 +214,19 @@ impl Panel {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        view.set_model(&self.model.model);
-        // A fresh reading re-derives every row, card, and meter at once; no
-        // control round described that, so the window is drawn whole.
-        self.repaint_whole();
+        let Some(layout) = host.layout() else {
+            view.adopt_unshown(&self.model.model);
+            self.repaint_whole();
+            return;
+        };
+        view.set_model(
+            &self.model.model,
+            layout.bounds,
+            layout.scale,
+            layout.theme,
+            layout.font,
+            &mut self.damage,
+        );
     }
 
     /// Apply every effect `action` implies under `authority`, in order.
@@ -290,99 +297,53 @@ impl Panel {
         }
     }
 
-    /// Re-present the open composition iff what it would draw differs from
-    /// what was last presented, stating a refusal rather than ending the
-    /// session over it.
+    /// Present whatever the open composition still owes the screen, stating a
+    /// refusal rather than ending the session over it.
     ///
-    /// This replaces a hand-set dirty flag with proof: the composition
-    /// value plus every other input [`Switchboard::render`] reads (the
-    /// window's client bounds, the active theme, and the render scale —
-    /// see [`RenderInputs`]) are compared against what was last presented,
-    /// and a present happens only when at least one of them actually
-    /// differs. Reading those inputs and comparing them against the held
-    /// record costs a handful of field reads and, at most, one `Eq`
-    /// comparison of the composition; a present costs a full render plus
-    /// the desktop's compositing of the result, several thousand times
-    /// more. Unlike a flag some caller must remember to set on every path
-    /// that might matter, this can never miss a real change and never
-    /// re-draws an unchanged one: it is the exact thing about to be drawn
-    /// compared against the exact thing already on screen.
+    /// The account is authoritative: every round that moves a pixel — a
+    /// pointer or key routed into the controls, a fresh reading adopted into
+    /// the section on show — reports the rectangle it repaints, and a wake
+    /// that reports nothing presents nothing. A change no report could
+    /// describe (a resize onto a fresh surface, a re-theme, a released region,
+    /// a window just opened) marks the client whole through
+    /// [`repaint_whole`](Self::repaint_whole).
     ///
-    /// The record is updated whether or not the present is accepted: a
+    /// The account is cleared whether or not the present is accepted: a
     /// refusal is already reported once through
-    /// [`ServiceHost::report_refusal`], and re-attempting an unchanged
-    /// panel on every wake would storm the refusal path. The next genuine
-    /// change compares unequal again and presents.
+    /// [`ServiceHost::report_refusal`], and re-attempting it on every wake
+    /// would storm the refusal path. The next genuine change reports again.
     ///
-    /// What the present *covers* is the rectangles the wake's control rounds
-    /// reported, unless [`Panel::repaint_whole`] marked the wake as one no
-    /// report could describe. A round that moved pixels and reported nothing
-    /// leaves an empty region, which covers the window rather than nothing at
-    /// all, so an unreported change can only ever over-cover (see
-    /// [`present_damage`](tairix_window::present_damage)).
+    /// A round that moved pixels and reported *nothing* leaves them stale,
+    /// which is why reporting is each section's stated obligation; where the
+    /// two pull against each other a round over-reports, and an over-reported
+    /// rectangle costs one redundant repaint.
     pub fn flush(&mut self, host: &mut dyn ServiceHost) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let Some(inputs) = host.render_inputs() else {
+        let repaint = if self.whole {
+            Repaint::Whole
+        } else if self.damage.is_empty() {
             return;
+        } else {
+            Repaint::Reported
         };
-        let unchanged = self
-            .presented
-            .as_ref()
-            .is_some_and(|last| last.inputs == inputs && last.composition == *view);
-        if unchanged {
-            return;
-        }
-        match self.presented.as_mut() {
-            Some(last) => {
-                last.composition.clone_from(view);
-                last.inputs = inputs;
-            }
-            None => {
-                self.presented = Some(Presented {
-                    composition: view.clone(),
-                    inputs,
-                });
-            }
-        }
-        let repaint = self.repaint;
-        self.repaint = Repaint::Reported;
+        self.whole = false;
         if let Err(refusal) = host.present(view, repaint, &self.damage) {
             host.report_refusal("redraw the overview window", refusal);
         }
         self.damage.clear();
     }
 
-    /// Forget what was last presented, so the next [`Panel::flush`] draws
-    /// unconditionally.
-    ///
-    /// The held record is an assertion about what is *on screen*. When the
-    /// desktop discards a window's retained pixels to reclaim memory that
-    /// assertion stops being true — the composition is unchanged, so the
-    /// difference test would suppress the very present the screen now
-    /// needs. Dropping the record restores the invariant instead of adding
-    /// a second present path.
-    ///
-    /// The discarded pixels are the *whole* window's, so the present it
-    /// unblocks covers the whole window too.
-    pub fn invalidate_presented(&mut self) {
-        self.presented = None;
-        self.repaint_whole();
-    }
-
     /// Destroy the window and return to headless sampling. Closing an
     /// already-closed panel does nothing.
     ///
-    /// The last-presented record is dropped along with the window: a
-    /// reopened panel builds a fresh composition, and comparing it against
-    /// a record from before the close could otherwise skip that first
-    /// present by coincidence rather than by fact.
+    /// The account goes with the window: a reopened panel is a fresh surface
+    /// and owes every pixel of it, never the rectangles the last one left.
     pub fn close(&mut self, host: &mut dyn ServiceHost) {
         if self.view.take().is_none() {
             return;
         }
-        self.presented = None;
         self.repaint_whole();
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);

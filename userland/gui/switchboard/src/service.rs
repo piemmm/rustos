@@ -18,9 +18,11 @@
 
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
-use tairix_geometry::Region;
+use tairix_font::BitmapFont;
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_log::EventId;
 use tairix_procinfo::Transport;
+use tairix_theme::Theme;
 use tairix_window::Repaint;
 
 use crate::derive::{derive_summary, Hysteresis};
@@ -37,39 +39,25 @@ use crate::view::Switchboard;
 /// [`Service::cycle`].
 pub const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = 5;
 
-/// A cheap-to-compare snapshot of every render input besides the
-/// composition value itself: the window's client bounds, the active
-/// theme's identity, and the render scale.
+/// The layout inputs a paint would use right now: the window's client
+/// bounds, the render scale, the active theme, and the text font.
 ///
-/// [`crate::panel::Panel::flush`] keeps a record of the last one of these it
-/// presented alongside its own composition, and skips a present entirely
-/// when a fresh snapshot and the held composition both compare equal to
-/// what is already on screen — reading a handful of fields is orders of
-/// magnitude cheaper than the render-and-composite work a present performs.
-///
-/// The fields are plain integers rather than `tairix-geometry`'s
-/// `Rect`/`Scale` or `tairix-theme`'s `Theme`: this crate's
-/// sampler/derive/publish core links neither crate (only the freestanding
-/// `Run` binary and the host tests do), so the one comparison that needs
-/// them takes a value shape the host builds from its own real types rather
-/// than this crate naming them. A theme's stable identity stands in for its
-/// full value: a theme registry never mutates a registered theme in place
-/// and refuses to register a duplicate id, so two snapshots that agree on
-/// `theme_id` always agree on every pixel that theme would draw.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RenderInputs {
-    /// The window's client-area left edge.
-    pub bounds_left: i32,
-    /// The window's client-area top edge.
-    pub bounds_top: i32,
-    /// The window's client-area width, in pixels.
-    pub bounds_width: u32,
-    /// The window's client-area height, in pixels.
-    pub bounds_height: u32,
-    /// The active theme's stable identity.
-    pub theme_id: u32,
-    /// The active render scale, as its whole-percent value.
-    pub scale_percent: u32,
+/// A fresh reading is adopted into the composition against the very frame it
+/// will next be drawn in, so the sections can report the instruments and rows
+/// that moved rather than the client. Only the host holds these — the theme
+/// registry and the desktop are its — so they come back through the seam
+/// rather than being cached here, where a stale copy would resolve a
+/// rectangle against geometry the window no longer has.
+#[derive(Copy, Clone, Debug)]
+pub struct PanelLayout<'a> {
+    /// The window's client area.
+    pub bounds: Rect,
+    /// The active render scale.
+    pub scale: Scale,
+    /// The active theme.
+    pub theme: &'a Theme,
+    /// The text font the panel draws with.
+    pub font: BitmapFont,
 }
 
 /// Everything outside this process the service reaches for, in one seam.
@@ -116,15 +104,10 @@ pub trait ServiceHost {
         damage: &Region,
     ) -> Result<(), Errno>;
 
-    /// The render inputs a present would use right now — the window's
-    /// client bounds, the active theme, and the render scale — or `None`
-    /// while no window is open: with nothing to present there is nothing
-    /// to compare.
-    ///
-    /// [`Panel::flush`] queries this once per flush, before touching the
-    /// composition at all, so a wake that changed nothing a present would
-    /// draw never renders or presents.
-    fn render_inputs(&self) -> Option<RenderInputs>;
+    /// The layout inputs a paint would use right now, or `None` while no
+    /// window is open or its region holds no pixels: a refresh with no frame
+    /// to report against draws the client whole instead.
+    fn layout(&self) -> Option<PanelLayout<'_>>;
 
     /// Send one owner-directed request to the desktop session's Switchboard
     /// endpoint.
@@ -307,7 +290,7 @@ impl Service {
             .record(&sample, self.hysteresis, self.panel.session_report());
         // A process list that degraded to its honest empty form this cycle
         self.last_sample = sample;
-        self.rebuild(authority);
+        self.rebuild(host, authority);
 
         self.next_sample_ns = crate::schedule::advance_deadline(self.next_sample_ns, now_ns);
 
@@ -376,16 +359,16 @@ impl Service {
             // panel was closed is folded in, so a panel opening now shows
             // them rather than waiting for the next cycle.
             SwitchboardCommand::OpenPanel { section } => {
-                self.rebuild(authority);
+                self.rebuild(host, authority);
                 self.panel.open_section(host, section);
             }
             SwitchboardCommand::SeatReport { report } => {
                 self.panel.set_seat_report(report);
-                self.rebuild_if_shown(authority);
+                self.rebuild_if_shown(host, authority);
             }
             SwitchboardCommand::FrameReport { report } => {
                 self.panel.set_frame_report(report);
-                self.rebuild_if_shown(authority);
+                self.rebuild_if_shown(host, authority);
             }
             SwitchboardCommand::Power { action } => Self::power(host, action, authority),
         }
@@ -429,15 +412,15 @@ impl Service {
     /// through [`Service::command`]'s `OpenPanel` arm, which rebuilds first,
     /// so the first frame a user sees already carries every report that
     /// arrived while they were not looking.
-    fn rebuild_if_shown(&mut self, authority: &dyn CapabilityQuery) {
+    fn rebuild_if_shown(&mut self, host: &dyn ServiceHost, authority: &dyn CapabilityQuery) {
         if self.panel.is_open() {
-            self.rebuild(authority);
+            self.rebuild(host, authority);
         }
     }
 
     /// Rebuild the live model from the sample and meter state in hand and
     /// hand it to the panel, which re-renders only if it actually changed.
-    fn rebuild(&mut self, authority: &dyn CapabilityQuery) {
+    fn rebuild(&mut self, host: &dyn ServiceHost, authority: &dyn CapabilityQuery) {
         let session = *self.panel.session_report();
         let model = build_model(
             PANEL_TITLE,
@@ -446,7 +429,7 @@ impl Service {
             &mut self.meters,
             authority,
         );
-        self.panel.refresh(model);
+        self.panel.refresh(host, model);
     }
 }
 

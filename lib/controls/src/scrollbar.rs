@@ -26,8 +26,8 @@ use tairix_theme::Theme;
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32, ChevronDir,
-    ChromeLayer,
+    draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32, withheld,
+    ChevronDir, ChromeLayer,
 };
 use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
@@ -525,6 +525,9 @@ impl ScrollBar {
     /// animated — the thumb follows the offset immediately — so the bar is
     /// already reduced-motion correct (spec §11.28).
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some(layout) = self.layout(bounds, scale, theme) else {
             return;
         };

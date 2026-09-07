@@ -82,22 +82,29 @@ pub(super) fn carry_hover<'a, T: Pointed + 'a>(
 /// there, so the press must not complete against whatever took the slot. A card
 /// the refresh genuinely changed rests its footer and waits for the pointer's
 /// next motion, which the reader's own movement supplies.
-pub(super) fn resettle_card(mut live: Card, fresh: &mut Card) {
+///
+/// Answers whether the refresh genuinely changed what the slot draws, which is
+/// what the slot then owes the screen.
+pub(super) fn resettle_card(mut live: Card, fresh: &mut Card) -> bool {
     if latched(&live) {
-        return;
+        return false;
     }
     wear_screen_marks(&live, fresh);
     if *fresh == live {
         mem::swap(fresh, &mut live);
-        return;
+        return false;
     }
     strip_screen_marks(fresh);
+    true
 }
 
-/// Re-settle each refreshed card against the live one whose slot it took.
-pub(super) fn resettle_cards(live: Vec<Card>, fresh: &mut [Card]) {
-    for (live, fresh) in live.into_iter().zip(fresh.iter_mut()) {
-        resettle_card(live, fresh);
+/// Re-settle each refreshed card against the live one whose slot it took,
+/// naming each slot the refresh changed through `changed`.
+pub(super) fn resettle_cards(live: Vec<Card>, fresh: &mut [Card], changed: &mut impl FnMut(usize)) {
+    for (slot, (live, fresh)) in live.into_iter().zip(fresh.iter_mut()).enumerate() {
+        if resettle_card(live, fresh) {
+            changed(slot);
+        }
     }
 }
 
@@ -152,17 +159,25 @@ fn strip_screen_marks(fresh: &mut Card) {
 /// object is *selected*, and the selection is re-resolved by identity across a
 /// refresh, so the command completes against the object it was pressed for
 /// however far that object has moved in the list.
-pub(super) fn restate_rail(rail: &mut ActionRail, fresh: Vec<Button>) {
+///
+/// Answers whether the rail's drawn state moved, which is what decides whether
+/// the column it sits in owes a repaint.
+pub(super) fn restate_rail(rail: &mut ActionRail, fresh: Vec<Button>) -> bool {
     let focus = rail.focus();
+    let mut moved = false;
     if same_commands(rail.items(), &fresh) {
         for (live, derived) in rail.items_mut().iter_mut().zip(fresh) {
             let pointer = live.state().pointer;
-            live.set_state(derived.state().with_pointer(pointer));
+            let state = derived.state().with_pointer(pointer);
+            moved |= live.state() != state;
+            live.set_state(state);
         }
     } else {
         *rail = ActionRail::new(fresh);
+        moved = true;
     }
     rail.adopt_focus(focus);
+    moved
 }
 
 /// Whether two runs name the same commands in the same order — the identity

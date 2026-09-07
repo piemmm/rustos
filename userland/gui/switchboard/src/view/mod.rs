@@ -445,12 +445,21 @@ trait SectionView {
     /// The regions this section asks the frame to seat.
     fn anatomy(&self) -> SectionAnatomy;
 
-    /// Rebuild this section's controls from a fresh sample.
+    /// Rebuild this section's controls from a fresh sample, reporting the
+    /// rectangles the rebuild actually repaints into `sweep`.
     ///
     /// Each section takes what it needs from the one sample and keeps what is
     /// the user's — its cursor, clamped into the new content, and any overlay
     /// that survives a refresh.
-    fn adopt(&mut self, model: &SwitchboardModel);
+    ///
+    /// A section on show sweeps with the frame it will next be drawn in, so it
+    /// reports the instruments whose readings moved and the rows whose cells
+    /// moved; a section that is not on show has no frame, draws nothing, and
+    /// reports nothing. Reporting is what makes a fresh sample cost the
+    /// readings that changed instead of the whole client, so a reading that
+    /// moved and was not reported leaves a stale pixel: over-report where the
+    /// two pull against each other (a re-ordered list reports its whole list).
+    fn adopt(&mut self, model: &SwitchboardModel, sweep: &mut Sweep<'_, '_>);
 
     /// How many items the primary column's scrollable list holds. This is the
     /// scroll range's content extent.
@@ -514,7 +523,7 @@ trait SectionView {
 
     /// Move the within-row action cursor. The caller has already clamped it
     /// against [`focused_action_count`](Self::focused_action_count).
-    fn set_row_action(&mut self, index: usize, sweep: &mut FocusSweep<'_, '_>);
+    fn set_row_action(&mut self, index: usize, sweep: &mut Sweep<'_, '_>);
 
     /// Feed an activation key to the focused item's action-focused control,
     /// reporting every control whose drawn state the key changed into
@@ -566,7 +575,7 @@ trait SectionView {
     /// Every section is told, not just the one on show, so the rings of a
     /// section the reader has navigated away from are cleared rather than
     /// left lit under content nobody is looking at.
-    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut FocusSweep<'_, '_>);
+    fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>);
 
     /// Whether this section holds the keyboard: an open popup or an in-flight
     /// inline edit of its own takes every key before the Tab-cycled regions
@@ -621,20 +630,22 @@ trait SectionView {
     fn dismiss_overlay(&mut self) {}
 }
 
-/// What a focus change marks its controls against.
+/// What one pass over the composition marks its controls against: the frame
+/// the round holds, if it holds one, and the sink it reports into.
 ///
 /// An interactive path — a key, a pointer outcome — holds the frame it just
-/// laid out, so every mark reports the rectangle it repaints into that
-/// round's sink. A caller that is composing or rebuilding the composition —
-/// [`Switchboard::new`], a fresh sample, a section the host chose — has no
-/// frame and presents the whole surface, so it sweeps with no `ctx`: each
-/// mark is adopted and nothing is reported.
-struct FocusSweep<'a, 'b> {
+/// laid out, and so does a fresh sample adopted into the section on show, so
+/// every mark and every re-derived control reports the rectangle it repaints.
+/// A caller with no frame to resolve a rectangle against — [`Switchboard::new`]
+/// before a window exists, and the two sections that are *not* on show and
+/// therefore draw nothing — sweeps with no `ctx`: each mark is adopted and
+/// nothing is reported.
+struct Sweep<'a, 'b> {
     ctx: Option<SectionCtx<'a>>,
     damage: &'b mut Region,
 }
 
-impl<'a, 'b> FocusSweep<'a, 'b> {
+impl<'a, 'b> Sweep<'a, 'b> {
     /// A sweep from a path that holds the frame it laid out.
     fn reporting(ctx: SectionCtx<'a>, damage: &'b mut Region) -> Self {
         Self {
@@ -643,11 +654,26 @@ impl<'a, 'b> FocusSweep<'a, 'b> {
         }
     }
 
-    /// A sweep from a caller that presents the composition whole.
+    /// A sweep from a caller with no frame, whose marks are adopted in silence.
     fn adopting(sink: &'b mut Region) -> Self {
         Self {
             ctx: None,
             damage: sink,
+        }
+    }
+
+    /// The frame this sweep resolves rectangles against, or `None` when it
+    /// reports nothing.
+    const fn ctx(&self) -> Option<SectionCtx<'a>> {
+        self.ctx
+    }
+
+    /// Report `rect` as repainted. A sweep with no frame reports nothing, so a
+    /// section that resolved the rectangle from a frame it does not have
+    /// cannot report against a made-up one.
+    fn report(&mut self, rect: Rect) {
+        if self.ctx.is_some() {
+            self.damage.add(rect);
         }
     }
 
@@ -805,7 +831,7 @@ impl Switchboard {
             focus: FocusRegion::Content,
             pointer: RenderInvariant::new(Point::ORIGIN),
         };
-        switchboard.adopt(model);
+        switchboard.adopt(model, &mut Sweep::adopting(&mut damage::sink()));
         switchboard
     }
 
@@ -847,6 +873,18 @@ impl Switchboard {
         menu
     }
 
+    /// Adopt `model` with no frame to report against, for a window whose
+    /// pixels the session has released: nothing partial can stand on a region
+    /// that holds none of them, so the host draws the client whole instead of
+    /// resolving rectangles against geometry the window does not have.
+    pub fn adopt_unshown(&mut self, model: &SwitchboardModel) {
+        self.adopt(model, &mut Sweep::adopting(&mut damage::sink()));
+        self.set_scroll_range(
+            self.active().item_count(),
+            self.scroll.model().range().viewport_extent(),
+        );
+    }
+
     /// Show `model` in place of the one currently drawn, keeping the parts of
     /// the surface the *user* owns.
     ///
@@ -879,8 +917,27 @@ impl Switchboard {
     /// the same clamp a section switch uses, so a list that shrank leaves
     /// neither past its end. An emptied section leaves a valid, renderable
     /// state with nothing to activate.
-    pub fn set_model(&mut self, model: &SwitchboardModel) {
-        self.adopt(model);
+    ///
+    /// The reading is adopted against the frame the composition will next be
+    /// drawn in, so the section on show reports the instruments and cells that
+    /// actually moved into `damage` and the host presents those instead of the
+    /// client. The band's own summary is the host's to report, because the band
+    /// is shared chrome rather than any section's region.
+    pub fn set_model(
+        &mut self,
+        model: &SwitchboardModel,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
+    ) {
+        let layout = self.compute_layout(bounds, scale, theme);
+        let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+        if let Some(summary) = self.band(layout.location, theme, scale).summary {
+            damage.add(summary);
+        }
+        self.adopt(model, &mut Sweep::reporting(ctx, damage));
         self.set_scroll_range(
             self.active().item_count(),
             self.scroll.model().range().viewport_extent(),
@@ -904,11 +961,26 @@ impl Switchboard {
     /// so no sample can make it stale, and closing it would snatch a menu out
     /// from under the reader mid-gesture. What each section does with its own
     /// overlay is that section's own business.
-    fn adopt(&mut self, model: &SwitchboardModel) {
+    ///
+    /// Only the section on show is handed `sweep`'s frame: the other two draw
+    /// no pixel, so a rectangle resolved against a frame that is not theirs
+    /// would name someone else's region.
+    fn adopt(&mut self, model: &SwitchboardModel, sweep: &mut Sweep<'_, '_>) {
+        let shown = self.section;
         for section in Section::ALL {
-            self.section_mut(section).adopt(model);
+            match sweep.ctx().filter(|_| section == shown) {
+                Some(ctx) => self
+                    .section_mut(section)
+                    .adopt(model, &mut Sweep::reporting(ctx, sweep.damage)),
+                None => self
+                    .section_mut(section)
+                    .adopt(model, &mut Sweep::adopting(&mut damage::sink())),
+            }
         }
-        self.apply_focus_marks(&mut FocusSweep::adopting(&mut damage::sink()));
+        match sweep.ctx() {
+            Some(ctx) => self.apply_focus_marks(&mut Sweep::reporting(ctx, sweep.damage)),
+            None => self.apply_focus_marks(&mut Sweep::adopting(&mut damage::sink())),
+        }
     }
 
     /// The currently selected section.
@@ -955,10 +1027,7 @@ impl Switchboard {
     ///
     /// [`scroll_offset`]: Switchboard::scroll_offset
     pub fn select_section(&mut self, section: Section) -> Option<SwitchboardAction> {
-        self.select_section_index(
-            section.index(),
-            &mut FocusSweep::adopting(&mut damage::sink()),
-        )
+        self.select_section_index(section.index(), &mut Sweep::adopting(&mut damage::sink()))
     }
 
     /// The physical height of one list-row item (a control plus a gap).
@@ -1023,7 +1092,7 @@ struct SbLayout {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct ListInfo {
     /// The rectangle the item list occupies.
-    list_rect: Rect,
+    pub(super) list_rect: Rect,
     /// The physical height of one item.
     item_h: u32,
     /// The number of items in the list.
@@ -1459,7 +1528,7 @@ impl Switchboard {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
-        let mut sweep = FocusSweep::reporting(ctx, damage);
+        let mut sweep = Sweep::reporting(ctx, damage);
         let action = self.select_section_index(Section::Tasks.index(), &mut sweep);
         let focus = self.tasks.focus_index_for_row(0);
         self.tasks.set_content_focus(focus);
@@ -1575,7 +1644,7 @@ impl Switchboard {
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         self.close_section_menu(rect, damage);
-        self.select_section_index(index, &mut FocusSweep::reporting(ctx, damage))
+        self.select_section_index(index, &mut Sweep::reporting(ctx, damage))
     }
 
     /// Close the section list, reporting `rect` — the pixels it covered are
@@ -1621,7 +1690,7 @@ impl Switchboard {
         }
         if key == Key::Named(NamedKey::Tab) {
             self.focus = self.focus.next();
-            self.apply_focus_marks(&mut FocusSweep::reporting(ctx, damage));
+            self.apply_focus_marks(&mut Sweep::reporting(ctx, damage));
             return None;
         }
         match self.focus {
@@ -1695,7 +1764,7 @@ impl Switchboard {
     /// Put the within-row action cursor on `index` of the active section and
     /// re-apply the focus marks.
     fn move_row_action(&mut self, index: usize, ctx: SectionCtx<'_>, damage: &mut Region) {
-        let mut sweep = FocusSweep::reporting(ctx, damage);
+        let mut sweep = Sweep::reporting(ctx, damage);
         self.active_mut().set_row_action(index, &mut sweep);
         self.apply_focus_marks(&mut sweep);
     }
@@ -1708,7 +1777,7 @@ impl Switchboard {
     /// visible" is one definition rather than one per direction or per
     /// section.
     fn move_content_focus(&mut self, index: usize, ctx: SectionCtx<'_>, damage: &mut Region) {
-        let mut sweep = FocusSweep::reporting(ctx, damage);
+        let mut sweep = Sweep::reporting(ctx, damage);
         self.active_mut().set_content_focus(index);
         self.active_mut().set_row_action(0, &mut sweep);
         self.ensure_focus_visible(&mut sweep);
@@ -1729,7 +1798,7 @@ impl Switchboard {
     fn select_section_index(
         &mut self,
         index: usize,
-        sweep: &mut FocusSweep<'_, '_>,
+        sweep: &mut Sweep<'_, '_>,
     ) -> Option<SwitchboardAction> {
         let section = Section::from_index(index)?;
         if section == self.section {
@@ -1755,7 +1824,7 @@ impl Switchboard {
     /// visible, using the last-synced viewport extent, reporting the whole
     /// client through `sweep` when it moved: every item is then drawn
     /// somewhere new.
-    fn ensure_focus_visible(&mut self, sweep: &mut FocusSweep<'_, '_>) {
+    fn ensure_focus_visible(&mut self, sweep: &mut Sweep<'_, '_>) {
         let viewport = self.scroll.model().range().viewport_extent();
         if viewport == 0 {
             return;
@@ -1791,7 +1860,7 @@ impl Switchboard {
     /// what makes a row read as a related set rather than as one lit button
     /// beside some unrelated neighbours, and it is why membership is set from
     /// the same `focus_here` fact the ring is — the two can never disagree.
-    fn apply_focus_marks(&mut self, sweep: &mut FocusSweep<'_, '_>) {
+    fn apply_focus_marks(&mut self, sweep: &mut Sweep<'_, '_>) {
         // The trail's leading crumb is the band's one keyboard stop; the
         // trailing crumb is the current location a breadcrumb never focuses.
         let crumb = (self.focus == FocusRegion::Location).then_some(0);
@@ -1818,7 +1887,7 @@ impl Switchboard {
                 self.section_mut(section).apply_focus_marks(content, sweep);
             } else {
                 self.section_mut(section)
-                    .apply_focus_marks(false, &mut FocusSweep::adopting(&mut damage::sink()));
+                    .apply_focus_marks(false, &mut Sweep::adopting(&mut damage::sink()));
             }
         }
     }

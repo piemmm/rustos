@@ -329,6 +329,12 @@ A host that is *composing or rebuilding* a control is the case that proves the r
 
 Over-covering is safe and under-covering is not: a reported rectangle that did not change costs one redundant repaint, while an unreported change leaves a stale pixel on screen. Where the two are in tension — a disabled control that tracks hover it does not draw — the report stands.
 
+### Painting only what the surface will keep — done
+
+A report buys nothing if the render walks the surface regardless. A clip window withholds a control's *writes*, never its composition — measuring a label, eliding it, rasterising a glyph, all before the first write — so a scoped repaint used to pay for every control the damage excluded. Every `render` therefore opens with the shared gate (`paint::withheld`) and returns at once when the surface admits no pixel of its `bounds`. Measured over forty composed list rows, a repaint scoped to one row fell from 838 µs to 25 µs against 1.1 ms for the whole list (`cargo xtask bench --filter controls`): three fifths of a whole render is composition, and it survived any clip.
+
+The gate rests on one obligation, and it binds every family: **a family paints inside the `bounds` it is given and nowhere else.** `paint_tests` asserts that, and the byte-identity of a band-clipped paint against the same band of a whole one, over every family in one table — so a family added later joins both. A family drawn *below* a documented floor of its own is not held to it (a title band narrower than `TitleBar::min_band_width` deliberately abuts its clusters), so the table names the rectangle each family is contracted to be drawn in. Landing this found one real overhang: `Slider` seated its groove at the thumb-centre origin while giving it the whole control's width, so it reached half a thumb past its own right edge.
+
 
 ---
 

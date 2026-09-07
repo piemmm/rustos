@@ -17,10 +17,10 @@ use tairix_controls::{
 use super::{FaultImpact, FaultPage, RecoveryControl};
 use crate::view::test_support::{
     activate, bounds, card_body_centre, card_slot, centre, click, fault_crash, fault_id, font,
-    has_ink, key, model, recovery_item,
+    has_ink, key, model, recovery_item, refresh,
 };
 use crate::view::{
-    resolve_section_frame, FocusSweep, Reading, Section, SectionFrame, SectionView, Switchboard,
+    resolve_section_frame, Reading, Section, SectionFrame, SectionView, Sweep, Switchboard,
     SwitchboardAction, SwitchboardModel, Unmeasured, UNMEASURED_READING,
 };
 
@@ -262,7 +262,7 @@ fn one_card_per_fault_in_model_order() {
 fn selection_follows_the_fault_when_the_list_reorders() {
     let mut sb = Switchboard::new(&faults(&[0, 1]));
     assert_eq!(sb.recovery.selected, Some(fault_id(0)));
-    sb.set_model(&faults(&[1, 0]));
+    let _ = refresh(&mut sb, &faults(&[1, 0]));
     assert_eq!(
         sb.recovery.selected,
         Some(fault_id(0)),
@@ -274,13 +274,13 @@ fn selection_follows_the_fault_when_the_list_reorders() {
 #[test]
 fn selection_drops_only_when_the_fault_clears() {
     let mut sb = Switchboard::new(&faults(&[0, 1]));
-    sb.set_model(&faults(&[1]));
+    let _ = refresh(&mut sb, &faults(&[1]));
     assert_eq!(
         sb.recovery.selected,
         Some(fault_id(1)),
         "a cleared fault hands the selection to what is left"
     );
-    sb.set_model(&faults(&[]));
+    let _ = refresh(&mut sb, &faults(&[]));
     assert_eq!(
         sb.recovery.selected, None,
         "with nothing faulted there is nothing to select"
@@ -513,7 +513,7 @@ fn every_detail_page_paints() {
         let mut sb = Switchboard::new(&m);
         sb.select_section(Section::Recovery);
         sb.recovery
-            .select_page(page, &mut FocusSweep::adopting(&mut damage::sink()));
+            .select_page(page, &mut Sweep::adopting(&mut damage::sink()));
         let b = bounds();
         let mut surface = Surface::new(b.width, b.height).expect("surface");
         sb.render(&mut surface, b, Scale::ONE, &theme, font());

@@ -422,6 +422,33 @@ change costs one redundant repaint, while a change left unreported leaves a
 stale pixel on screen. Where the two pull against each other — a disabled
 control tracking a hover it does not draw — the report stands.
 
+## Painting only what the surface will keep
+
+A report is worth nothing if the render walks the whole surface anyway. A clip
+window withholds a control's *writes* but not its composition — measuring a
+label, eliding it, rasterising a glyph, all of which happen before the first
+write — so every `render` opens with the shared gate and returns at once when
+the surface admits no pixel of its `bounds`:
+
+```rust
+if withheld(surface, bounds) {
+    return;
+}
+```
+
+Measured over forty composed list rows: a repaint scoped to one row cost
+838 µs before the gate and 25 µs after, against 1.1 ms for the whole list
+(`cargo xtask bench --filter controls`). Three fifths of a whole render is
+composition, and it used to survive any clip.
+
+The gate rests on one obligation, which is the whole set's: **a family paints
+inside the `bounds` it is given and nowhere else.** `paint_tests` asserts it,
+and the byte-identity of a band-clipped paint against the same band of a whole
+one, over every family in one table — so a family added later joins both. A
+family drawn *below* a documented floor of its own is not held to it (a title
+band narrower than `TitleBar::min_band_width` abuts its clusters by design);
+the table names the rectangle each family is contracted to be drawn in.
+
 ## Where it sits
 
 `#![no_std]`. The `scroll` and `state` modules are pure logic with no

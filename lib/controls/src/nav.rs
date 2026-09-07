@@ -38,7 +38,7 @@ use tairix_theme::{TextRole, Theme};
 use crate::damage;
 use crate::paint::{
     draw_outline, heavy_contrast, key_activation, paint_bead, paint_chevron, plate_border,
-    resolve_bead, role_font, surface_rect, to_i32, ChevronDir,
+    resolve_bead, role_font, surface_rect, to_i32, withheld, ChevronDir,
 };
 use crate::state::{ControlState, FocusState, RenderInvariant};
 
@@ -526,6 +526,9 @@ impl Breadcrumb {
 
     /// Paint the trail into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let placements = self.plan(bounds, scale, theme, font);
         let last = placements.len().saturating_sub(1);

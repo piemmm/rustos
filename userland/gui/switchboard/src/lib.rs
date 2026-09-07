@@ -146,7 +146,7 @@ pub use sample::{
 };
 pub use schedule::{Cadence, INVENTORY_SAMPLE_DIVIDER, MEMORY_SAMPLE_DIVIDER, SAMPLE_PERIOD_NS};
 pub use service::{
-    CycleOutcome, RenderInputs, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES,
+    CycleOutcome, PanelLayout, Service, ServiceHost, MAX_CONSECUTIVE_PUBLISH_FAILURES,
     SESSION_REFUSED,
 };
 pub use view::{

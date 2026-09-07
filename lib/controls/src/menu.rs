@@ -34,7 +34,7 @@ use crate::damage;
 use crate::paint::{
     draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron,
     paint_surface_plate, plate_border, resolve_bead, role_font, surface_rect, text_plate_height,
-    to_i32, BeadShape, ChevronDir, ChromeLayer,
+    to_i32, withheld, BeadShape, ChevronDir, ChromeLayer,
 };
 use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
@@ -907,6 +907,9 @@ impl Menu {
     /// Paint the menu — its plate and then its rows — into `surface` at
     /// `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
@@ -939,6 +942,9 @@ impl Menu {
     /// plate already under them. The rows land exactly where
     /// [`row_rect`](Self::row_rect) reports them either way.
     pub fn render_rows(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some(inner) = Self::inner(bounds, scale, theme) else {
             return;
         };

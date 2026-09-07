@@ -21,7 +21,9 @@ use tairix_theme::Theme;
 
 use crate::button::{IconButton, SplitAction, SplitButton};
 use crate::damage;
-use crate::paint::{grab_after, heavy_contrast, plate_border, route_pointer, surface_rect, to_i32};
+use crate::paint::{
+    grab_after, heavy_contrast, plate_border, route_pointer, surface_rect, to_i32, withheld,
+};
 use crate::state::RenderInvariant;
 
 /// Which region of a tool an activation came from.
@@ -263,6 +265,9 @@ impl Toolbar {
         theme: &Theme,
         artwork: &mut dyn IconArtwork,
     ) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let palette = theme.palette();
         if let Some((x, y, w, h)) = surface_rect(bounds) {
             if w > 0 && h > 0 {

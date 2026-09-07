@@ -38,7 +38,7 @@ use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::Theme;
 
 use crate::paint::{
-    clamp_permille, plate_border, seam_thickness, signal_color, surface_rect, FULL,
+    clamp_permille, plate_border, seam_thickness, signal_color, surface_rect, withheld, FULL,
 };
 use crate::state::PressureKind;
 
@@ -144,6 +144,9 @@ impl Chart {
     /// box. A chart with an opposing series splits that height at its axis and
     /// each series claims one half, mirrored.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some(plot_box) = surface_rect(bounds) else {
             return;
         };

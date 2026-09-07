@@ -65,8 +65,14 @@ fn task_model(pid: u64) -> PanelModel {
 /// test can scroll it. The first row names `first_pid`, so which reading a
 /// row came from is observable through the request activating it produces.
 fn busy_model(first_pid: u64) -> PanelModel {
+    busy_at(first_pid, None)
+}
+
+/// Forty running tasks whose CPU column reads `permille`, so a refresh from
+/// one such model to another moves every row's drawn cells.
+fn busy_at(first_pid: u64, permille: Option<u16>) -> PanelModel {
     let processes = (0..40)
-        .map(|i| process_summary(first_pid + i, ProcessState::Running, b"task", None))
+        .map(|i| process_summary(first_pid + i, ProcessState::Running, b"task", permille))
         .collect();
     build_model(
         PANEL_TITLE,
@@ -223,7 +229,7 @@ fn closing_returns_to_headless_sampling() {
     // A later model change draws nothing: there is no window to draw into,
     // and the panel never re-opens one on its own.
     let presents = host.presents;
-    panel.refresh(task_model(10));
+    panel.refresh(&host, task_model(10));
     assert_eq!(host.presents, presents);
     assert!(!panel.is_open());
 }
@@ -257,7 +263,7 @@ fn refreshing_with_an_unchanged_model_draws_nothing() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(empty_model());
+    panel.refresh(&host, empty_model());
 
     assert_eq!(host.presents, presents);
 }
@@ -269,7 +275,7 @@ fn refreshing_with_a_changed_model_redraws_and_keeps_the_section() {
     open(&mut panel, &mut host, CommandSection::Recovery);
     let presents = host.presents;
 
-    panel.refresh(stopped_model(7, false));
+    panel.refresh(&host, stopped_model(7, false));
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);
@@ -284,7 +290,7 @@ fn refreshing_a_section_that_is_not_on_show_draws_nothing() {
     let presents = host.presents;
 
     // A task appears, which only the Tasks section draws.
-    panel.refresh(task_model(10));
+    panel.refresh(&host, task_model(10));
     panel.flush(&mut host);
 
     assert_eq!(
@@ -301,7 +307,7 @@ fn a_fresh_frame_reading_draws_nothing_while_tasks_is_on_show() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(frame_model(6_400));
+    panel.refresh(&host, frame_model(6_400));
     panel.flush(&mut host);
 
     assert_eq!(
@@ -318,7 +324,7 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     assert_eq!(wheel(&mut panel, 4), 4);
 
-    panel.refresh(busy_model(200));
+    panel.refresh(&host, busy_model(200));
     panel.flush(&mut host);
 
     assert_eq!(panel.section(), Some(Section::Tasks));
@@ -594,42 +600,28 @@ fn a_scroll_that_changes_the_composition_presents_exactly_once() {
 }
 
 #[test]
-fn a_window_resize_alone_presents_again() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, empty_model());
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
+fn a_change_no_round_could_describe_presents_the_whole_client() {
+    // A resize onto a fresh surface, a desktop appearance change and a
+    // density change all reach the panel as window events the run loop
+    // answers with `repaint_whole`; none of them is a control round, so none
+    // of them can report a rectangle.
+    for change in [
+        |host: &mut RecordingHost| host.bounds.2 += 100,
+        |host: &mut RecordingHost| host.theme = Theme::light(),
+        |host: &mut RecordingHost| host.scale = Scale::from_percent(150).expect("a real scale"),
+    ] {
+        let mut host = RecordingHost::new();
+        let mut panel = Panel::new(OWN_PID, empty_model());
+        open(&mut panel, &mut host, CommandSection::Tasks);
+        let presents = host.presents;
 
-    host.bounds.2 += 100;
-    panel.flush(&mut host);
+        change(&mut host);
+        panel.repaint_whole();
+        panel.flush(&mut host);
 
-    assert_eq!(host.presents, presents + 1);
-}
-
-#[test]
-fn a_theme_change_alone_presents_again() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, empty_model());
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
-
-    host.theme_id = 2;
-    panel.flush(&mut host);
-
-    assert_eq!(host.presents, presents + 1);
-}
-
-#[test]
-fn a_scale_change_alone_presents_again() {
-    let mut host = RecordingHost::new();
-    let mut panel = Panel::new(OWN_PID, empty_model());
-    open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
-
-    host.scale_percent = 150;
-    panel.flush(&mut host);
-
-    assert_eq!(host.presents, presents + 1);
+        assert_eq!(host.presents, presents + 1);
+        assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
+    }
 }
 
 #[test]
@@ -652,8 +644,8 @@ fn a_refused_present_is_reported_once_and_not_retried_by_an_unchanged_flush() {
         alloc::vec!["redraw the overview window"]
     );
 
-    // An actual change compares unequal again and retries.
-    host.theme_id = 2;
+    // An actual change owes the screen again and retries.
+    panel.repaint_whole();
     panel.flush(&mut host);
     assert_eq!(
         host.refused_actions(),
@@ -668,7 +660,7 @@ fn refreshing_with_an_unchanged_model_then_flushing_presents_nothing() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    panel.refresh(empty_model());
+    panel.refresh(&host, empty_model());
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents);
@@ -705,21 +697,60 @@ fn a_hover_presents_the_control_it_crossed_rather_than_the_window() {
 }
 
 #[test]
-fn a_fresh_reading_presents_the_whole_window() {
+fn a_fresh_reading_presents_what_moved_and_not_the_client() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, busy_model(100));
     open(&mut panel, &mut host, CommandSection::Tasks);
-    pointer_move(&mut panel, Point::new(40, 200));
+    let presents = host.presents;
+
+    // Every row's CPU cell moved — the widest a refresh of this section can
+    // honestly report — and that is still short of the client, which also
+    // carries the header, the footer and the action column beside the table.
+    panel.refresh(&host, busy_at(100, Some(640)));
     panel.flush(&mut host);
 
-    panel.refresh(busy_model(200));
+    assert_eq!(host.presents, presents + 1);
+    let rect = host.last_presented_rect().expect("a present");
+    assert_ne!(
+        rect,
+        whole_client(&host),
+        "a fresh reading costs the readings that moved, never the client"
+    );
+}
+
+#[test]
+fn a_reading_that_did_not_move_presents_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let presents = host.presents;
+
+    // A distinct model value that derives the very same rows — the task
+    // identities moved and no drawn cell did — so the refresh gate lets it
+    // through and every section then reports nothing.
+    panel.refresh(&host, busy_model(200));
     panel.flush(&mut host);
 
     assert_eq!(
-        host.last_presented_rect(),
-        Some(whole_client(&host)),
-        "every row is re-derived at once, which no control round described"
+        host.presents, presents,
+        "nothing on screen moved, so nothing is presented"
     );
+}
+
+#[test]
+fn a_reading_adopted_onto_released_pixels_draws_the_client_whole() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, busy_model(100));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    // The session gave the retained pixels back, so there is no frame to
+    // resolve a rectangle against and nothing partial could stand on them.
+    host.attached = false;
+
+    panel.refresh(&host, busy_at(100, Some(640)));
+    host.attached = true;
+    panel.flush(&mut host);
+
+    assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
 }
 
 #[test]
@@ -730,9 +761,9 @@ fn a_hover_report_does_not_survive_into_the_next_present() {
     pointer_move(&mut panel, Point::new(40, 200));
     panel.flush(&mut host);
 
-    // Nothing reported this time, so the fail-safe covers the window rather
-    // than re-presenting the last round's rectangle.
-    host.theme_id += 1;
+    // Nothing reported this time, so the account is clean and the only thing
+    // that presents again is a change that owes the client whole.
+    panel.repaint_whole();
     panel.flush(&mut host);
 
     assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
@@ -745,7 +776,7 @@ fn discarded_pixels_are_redrawn_whole() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     pointer_move(&mut panel, Point::new(40, 200));
 
-    panel.invalidate_presented();
+    panel.repaint_whole();
     panel.flush(&mut host);
 
     assert_eq!(

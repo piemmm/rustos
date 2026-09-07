@@ -30,7 +30,7 @@ use crate::damage;
 use crate::paint::{
     clamp_permille, inset, measured_thickness, paint_bead, paint_plate, plate_border,
     progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font,
-    surface_rect, to_i32, PlateStyle, FULL,
+    surface_rect, to_i32, withheld, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -269,6 +269,9 @@ impl Slider {
 
     /// Paint the slider into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let Some(layout) = slider_layout(bounds) else {
             return;
         };
@@ -276,11 +279,14 @@ impl Slider {
         let border = plate_border(theme, scale);
         let (groove_y, groove_h) = layout.groove(measured_thickness(theme, scale));
 
-        // The quiet groove the thumb runs along.
+        // The quiet groove the thumb runs along. It spans the control, not the
+        // thumb-centre travel: the thumb reaches both edges, so a groove seated
+        // at `track_x0` would carry the whole width from half a thumb in and
+        // overhang the control by that much.
         surface.fill_round_rect(
-            layout.track_x0,
+            layout.x,
             groove_y,
-            layout.travel + layout.thumb_d,
+            layout.w,
             groove_h,
             groove_h / 2,
             Color::from(palette.scroll_track),
@@ -536,6 +542,9 @@ impl Progress {
 
     /// Paint the trace into `surface` at `bounds` for the active theme.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
         let font = role_font(theme, scale, TextRole::Body);
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;

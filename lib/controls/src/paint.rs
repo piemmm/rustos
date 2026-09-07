@@ -148,6 +148,24 @@ pub(crate) fn surface_rect(bounds: Rect) -> Option<(u32, u32, u32, u32)> {
     Some((x, y, bounds.width, bounds.height))
 }
 
+/// Whether a paint into `bounds` can be skipped whole, because the surface
+/// would keep none of the pixels it writes.
+///
+/// A control composes before it writes — measuring a label, eliding it,
+/// rasterising a glyph — and the clip window withholds only the writes, so a
+/// repaint scoped to a damage rectangle otherwise pays for every control the
+/// rectangle excludes. Measured on a Switchboard client, that composition is
+/// three fifths of a whole render and survived any clip.
+///
+/// A rectangle that lies off the top-left cannot be stated in surface
+/// coordinates ([`surface_rect`]), so it is drawn rather than skipped: a
+/// control partly above or left of the surface still owes the part that is on
+/// it, and over-drawing costs pixels where skipping would lose them.
+#[must_use]
+pub(crate) fn withheld(surface: &Surface, bounds: Rect) -> bool {
+    surface_rect(bounds).is_some_and(|(x, y, w, h)| !surface.admits(x, y, w, h))
+}
+
 /// Inset a surface rectangle by `by` on every side, or `None` if it collapses.
 #[must_use]
 pub(crate) fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
