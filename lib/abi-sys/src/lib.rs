@@ -103,6 +103,12 @@ const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
 /// `latency_watch` syscall number (as above).
 const NUM_LATENCY_WATCH: u64 = SyscallNumber::LATENCY_WATCH.as_u16() as u64;
 
+/// `fs_lock` syscall number (as above).
+const NUM_FS_LOCK: u64 = SyscallNumber::FS_LOCK.as_u16() as u64;
+
+/// `fs_lock_query` syscall number (as above).
+const NUM_FS_LOCK_QUERY: u64 = SyscallNumber::FS_LOCK_QUERY.as_u16() as u64;
+
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -1195,6 +1201,95 @@ pub extern "C" fn sys_latency_watch(budget_ns: u64) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel clamps the budget and records it against the calling thread.
     unsafe { raw_syscall(NUM_LATENCY_WATCH, [budget_ns, 0, 0, 0, 0, 0]) }
+}
+
+/// `fs_lock`: take or release an advisory byte-range lock on the file behind
+/// the open descriptor `fd` (`SyscallNumber::FS_LOCK`,
+/// `plans/FILELOCK.md`). Returns a `TAIRIX_E_*` code.
+///
+/// `mode` is a `TAIRIX_LOCK_MODE_*` value, `flags` a `TAIRIX_LOCK_FLAG_*`
+/// bitmap, `(start, len)` the range — `len` of `TAIRIX_LOCK_LEN_TO_END`
+/// runs to the end of the file — and `timeout_ns` the wait bound, with
+/// `TAIRIX_LOCK_WAIT_FOREVER` to wait indefinitely.
+///
+/// The lock belongs to the descriptor's **open file description**, not to
+/// the process: a duplicated or spawn-inherited descriptor shares it, a
+/// second open of the same file is a separate owner that conflicts, and the
+/// lock releases when the last descriptor on the description closes — which
+/// a process exit does for all of them, so no stale lock can be left
+/// behind.
+///
+/// Locks are advisory: they coordinate participants who opt in and confer
+/// no access. Acquisition still requires the descriptor's own
+/// `TAIRIX_CAP_FS_ACCESS`, re-authorises the file under the caller's
+/// attested identity, and needs read access for a shared lock and write
+/// access for an exclusive one.
+#[must_use]
+#[export_name = "tairix_sys_fs_lock"]
+pub extern "C" fn sys_fs_lock(
+    fd: u32,
+    mode: u32,
+    flags: u32,
+    start: u64,
+    len: u64,
+    timeout_ns: u64,
+) -> u64 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
+    // kernel validates the mode, the flags and the range, resolves `fd`
+    // against the caller's own descriptor table, and re-authorises the file
+    // before touching any lock state.
+    unsafe {
+        raw_syscall(
+            NUM_FS_LOCK,
+            [
+                u64::from(fd),
+                u64::from(mode),
+                u64::from(flags),
+                start,
+                len,
+                timeout_ns,
+            ],
+        )
+    }
+}
+
+/// `fs_lock_query`: report the first advisory lock that would block `mode`
+/// over `(start, len)` on the file behind `fd`, writing a
+/// `tairix_lock_conflict_t` into `out` (`SyscallNumber::FS_LOCK_QUERY`,
+/// `plans/FILELOCK.md`).
+///
+/// Returns the bytes written, and `0` when the request would be granted —
+/// nothing in the way is an answer, not a failure. `mode` must name a lock
+/// a request could ask for, so `TAIRIX_LOCK_MODE_UNLOCK` is refused.
+///
+/// The report names holders only and reserves nothing: a queued waiter
+/// holds no lock, and only [`sys_fs_lock`] can acquire a range.
+#[must_use]
+#[export_name = "tairix_sys_fs_lock_query"]
+pub extern "C" fn sys_fs_lock_query(
+    fd: u32,
+    mode: u32,
+    start: u64,
+    len: u64,
+    out: *mut c_void,
+    out_cap: usize,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(out, out_cap)`
+    // against the caller's address space before writing the record, and
+    // refuses a buffer too small to hold the whole of it.
+    unsafe {
+        raw_syscall(
+            NUM_FS_LOCK_QUERY,
+            [
+                u64::from(fd),
+                u64::from(mode),
+                start,
+                len,
+                ptr_arg(out),
+                out_cap as u64,
+            ],
+        )
+    }
 }
 
 /// `sched_set_realtime`: set the calling task's scheduling class — enter
@@ -3165,6 +3260,8 @@ mod tests {
         (NUM_FUTEX_WAIT, "futex_wait", 3),
         (NUM_FUTEX_WAKE, "futex_wake", 2),
         (NUM_LATENCY_WATCH, "latency_watch", 1),
+        (NUM_FS_LOCK, "fs_lock", 6),
+        (NUM_FS_LOCK_QUERY, "fs_lock_query", 6),
     ];
 
     #[test]

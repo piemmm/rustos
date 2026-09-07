@@ -674,6 +674,34 @@ pub fn stream_wake(key: WakeKey) {
     }
 }
 
+/// The wait-queue holding tasks parked in `fs_lock` waiting for an advisory
+/// byte-range lock (`plans/FILELOCK.md`).
+///
+/// Every waiter is registered under the [`WakeKey`] of the *file* it is
+/// waiting on, so a release wakes only that file's waiters. Within a file,
+/// [`file_lock_wake`] is handed the exact task set whose blocked ranges the
+/// release freed, so a release of one range never disturbs a waiter queued
+/// on a disjoint one — the wake cost is the number of waiters a release can
+/// actually advance, which is what a busy multi-user server needs.
+///
+/// One queue for every file rather than a queue per file: a timed `fs_lock`
+/// then sits on the single deadline index the timed sweep and
+/// [`nearest_timed_deadline`] already fold over, and a file object that
+/// exists only while it is locked has nowhere to hang a queue of its own.
+pub static FILE_LOCK_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake exactly `tasks` — the waiters a release just made able to progress —
+/// on the file whose wait key is `key`. Each re-tests its request and either
+/// takes the lock or parks again. A fail-safe no-op before the arch hook is
+/// installed.
+pub fn file_lock_wake(key: WakeKey, tasks: &[TaskId]) {
+    if let Some(arch) = wait_arch() {
+        for &task in tasks {
+            let _ = FILE_LOCK_WAITQ.wake_waiter(arch, key, task);
+        }
+    }
+}
+
 /// The wait-queue holding `waitset_wait` callers whose set observes their
 /// own **signal intake** (`plans/STRESSTEST.md` ST3 — the
 /// `WaitSourceKind::Signal` member). A process that opted into signal
@@ -982,6 +1010,22 @@ pub fn timed_wake_sweep() {
     TIMED_SWEEP_PENDING.store(true, Ordering::Release);
 }
 
+/// The absolute monotonic deadline a relative `timeout_ns` names, or
+/// [`NO_DEADLINE`] when the caller asked for none.
+///
+/// [`u64::MAX`] is the ABI's "no timeout" spelling. Every other value is
+/// added to `now_ns` and clamped one nanosecond short of that sentinel, so a
+/// span long enough to saturate still names a *deadline* the sweep fires
+/// rather than silently becoming an indefinite wait. One definition, shared
+/// by every timed park site.
+#[must_use]
+pub fn deadline_for(now_ns: u64, timeout_ns: u64) -> u64 {
+    if timeout_ns == u64::MAX {
+        return NO_DEADLINE;
+    }
+    now_ns.saturating_add(timeout_ns).min(NO_DEADLINE - 1)
+}
+
 /// Perform the actual deadline sweep across every timed wait-queue and
 /// re-arm the one-shot to the next pending deadline. Runs only in
 /// dispatcher context, out of [`drain_pending_wakes`].
@@ -1003,6 +1047,9 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     // open transaction ages out, so the sweep is what turns the batching
     // window into a real bound on how stale a quiet volume may be.
     WRITEBACK_WAITQ.sweep(arch, now);
+    // A timed `fs_lock` whose deadline passed leaves the wait and reports
+    // the timeout rather than holding its task past the bound it asked for.
+    FILE_LOCK_WAITQ.sweep(arch, now);
     // The futex queues are per-key and created on demand, so they are swept
     // through their own module rather than named here (`plans/THREADS.md`
     // decision 5): a timed `futex_wait` is released exactly like any other
@@ -1145,8 +1192,8 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
 
 /// The soonest finite deadline pending across **every** timed wait-queue
 /// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `STREAM_WAITQ`, `CALL_WAITQ`, `WRITEBACK_WAITQ`, and the per-key futex
-/// queues), or [`None`] if none has one. A park site arms the one-shot to
+/// `STREAM_WAITQ`, `CALL_WAITQ`, `WRITEBACK_WAITQ`, `FILE_LOCK_WAITQ`, and
+/// the per-key futex queues), or [`None`] if none has one. A park site arms the one-shot to
 /// this so registering a *later* deadline never delays an already-pending
 /// earlier wake.
 #[must_use]
@@ -1165,6 +1212,8 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         crate::futex::earliest_deadline(),
         // The soonest write-back deadline any mounted volume published.
         WRITEBACK_WAITQ.earliest_deadline(),
+        // A bounded wait for an advisory byte-range lock.
+        FILE_LOCK_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()

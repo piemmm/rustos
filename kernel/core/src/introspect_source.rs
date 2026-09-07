@@ -639,6 +639,9 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // The thread count is the `Threads` limit's live usage, read from the
         // authoritative thread-group table rather than counted anywhere else.
         let thread_usage = self.state.caps.read().thread_count(ProcessId(task_id.0)) as u64;
+        // The live advisory-lock record count, read from the lock registry
+        // that charges it rather than recounted here.
+        let lock_usage = crate::filelock::usage(ProcessId(task_id.0));
         let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
             let process = ProcessId(task_id.0);
@@ -664,6 +667,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 LimitKind::StackBytes => stack_usage,
                 LimitKind::PinnedMemoryBytes => pinned_usage,
                 LimitKind::Threads => thread_usage,
+                LimitKind::FileLocks => lock_usage,
                 _ => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);

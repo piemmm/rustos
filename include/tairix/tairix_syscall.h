@@ -143,6 +143,8 @@ extern "C" {
 #define TAIRIX_SYS_PORT_READ 117u
 #define TAIRIX_SYS_PORT_WRITE 118u
 #define TAIRIX_SYS_LATENCY_WATCH 119u
+#define TAIRIX_SYS_FS_LOCK 120u
+#define TAIRIX_SYS_FS_LOCK_QUERY 121u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -254,6 +256,41 @@ typedef struct tairix_spawn_attach {
 * attributes answers every fs_attr_*() call with TAIRIX_E_NOT_SUPPORTED. */
 #define TAIRIX_FS_ATTR_KEY_MAX 255u
 #define TAIRIX_FS_ATTR_VALUE_MAX 3072u
+
+/* fs_lock() / fs_lock_query() — advisory byte-range locks (AGENTS.md sec.9).
+* A lock is owned by the OPEN FILE DESCRIPTION behind the descriptor, not by
+* the process: a duplicated or spawn-inherited descriptor shares it, a second
+* open of the same file is a separate owner that conflicts, and the lock
+* releases when the last descriptor on the description closes — which a
+* process exit does for all of them, so no stale lock survives a crash.
+* Locks are ADVISORY: they coordinate participants who opt in and confer no
+* access. Access control remains the file's owner/mode/ACL. Acquisition needs
+* TAIRIX_CAP_FS_ACCESS, read access for a shared lock and write access for an
+* exclusive one. */
+#define TAIRIX_LOCK_MODE_SHARED 0u
+#define TAIRIX_LOCK_MODE_EXCLUSIVE 1u
+#define TAIRIX_LOCK_MODE_UNLOCK 2u
+/* Behaviour flags (uint32_t). Every undefined bit is reserved and rejected
+* with TAIRIX_E_OUT_OF_RANGE. NONBLOCK reports TAIRIX_E_WOULD_BLOCK instead of
+* waiting. */
+#define TAIRIX_LOCK_FLAG_NONBLOCK 0x1u
+/* A `len` of TAIRIX_LOCK_LEN_TO_END runs from `start` to the end of the
+* address space, so a lock over a growing file needs no relocking. A
+* `timeout_ns` of TAIRIX_LOCK_WAIT_FOREVER waits indefinitely. */
+#define TAIRIX_LOCK_LEN_TO_END 0ull
+#define TAIRIX_LOCK_WAIT_FOREVER 18446744073709551615ull
+/* The record fs_lock_query() writes: the first lock that would block the
+* request. Writing 0 bytes is the answer "the request would be granted", not
+* an error. `pid` is the process whose request established the record. The
+* report names holders only and reserves nothing. */
+#define TAIRIX_LOCK_CONFLICT_LEN 32u
+typedef struct tairix_lock_conflict {
+	uint32_t mode;      /* TAIRIX_LOCK_MODE_SHARED or _EXCLUSIVE */
+	uint32_t reserved;  /* zero */
+	uint64_t start;
+	uint64_t len;       /* TAIRIX_LOCK_LEN_TO_END when unbounded */
+	uint64_t pid;
+} tairix_lock_conflict_t;
 
 /* signal() control signals (the `signal` argument, uint32_t). 0 is reserved and
 * never valid; a value outside this set is rejected with TAIRIX_E_OUT_OF_RANGE. */
@@ -441,6 +478,8 @@ uint64_t tairix_sys_fs_realpath(void * a0, uintptr_t a1, void * a2, uintptr_t a3
 uint64_t tairix_sys_port_read(uint64_t a0, uintptr_t a1, uint32_t a2);
 uint64_t tairix_sys_port_write(uint64_t a0, uintptr_t a1, uint32_t a2, uintptr_t a3);
 uint64_t tairix_sys_latency_watch(uint64_t a0);
+int32_t tairix_sys_fs_lock(uint32_t a0, uint32_t a1, uint32_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
+uint64_t tairix_sys_fs_lock_query(uint32_t a0, uint32_t a1, uint64_t a2, uint64_t a3, void * a4, uintptr_t a5);
 
 #ifdef __cplusplus
 } /* extern "C" */

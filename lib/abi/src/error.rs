@@ -406,6 +406,20 @@ pub enum Errno {
     /// restore it — the `tairix-window` client library re-attaches on the next
     /// paint.
     NotAttached = 45,
+
+    /// Granting the blocking request would complete a cycle of waiters, so
+    /// it is refused instead of joining a wait none of them could leave.
+    ///
+    /// Reported by a blocking `fs_lock` whose grant would deadlock: the
+    /// owner it would wait on is itself waiting, directly or through further
+    /// owners, on a range this caller already holds. Refusing is the only
+    /// answer that leaves the caller able to act — drop its own locks and
+    /// retry, or take them in a fixed order — where waiting would strand
+    /// every participant. Distinct from [`WouldBlock`](Self::WouldBlock),
+    /// which says only that waiting *would* have been necessary, and from
+    /// [`Busy`](Self::Busy), which says a resource is in use by someone who
+    /// will finish with it.
+    Deadlock = 46,
 }
 
 impl Errno {
@@ -518,6 +532,7 @@ impl Errno {
             43 => Some(Self::IsADirectory),
             44 => Some(Self::TooManyLinks),
             45 => Some(Self::NotAttached),
+            46 => Some(Self::Deadlock),
             _ => None,
         }
     }
@@ -571,6 +586,7 @@ impl fmt::Display for Errno {
             Self::IsADirectory => "is a directory",
             Self::TooManyLinks => "too many links",
             Self::NotAttached => "resource released; re-attach and retry",
+            Self::Deadlock => "waiting would deadlock",
         };
         f.write_str(message)
     }
@@ -679,11 +695,12 @@ mod tests {
             Errno::IsADirectory,
             Errno::TooManyLinks,
             Errno::NotAttached,
+            Errno::Deadlock,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(46), None);
+        assert_eq!(Errno::from_i32(47), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

@@ -28,10 +28,10 @@
 use core::cell::RefCell;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth,
-    PowerAction, RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags,
-    ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, SYSCALLS,
-    SYSCALL_MAX_ARGS,
+    spec_for, AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
+    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SyscallNumber,
+    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, SYSCALLS, SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -767,6 +767,30 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn fs_lock(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _flags: LockFlags,
+        _range: LockRange,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn fs_lock_query(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _range: LockRange,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn fs_realpath(
         &self,
         _c: &CallerContext<'_>,
@@ -960,6 +984,44 @@ fn would_accept(spec_idx: usize, raw_number: u64, args: &[u64; SYSCALL_MAX_ARGS]
     operand_semantics_accept(spec, args)
 }
 
+/// Whether the dispatcher's advisory-lock operand decodes accept `args`.
+///
+/// Split out of [`operand_semantics_accept`] so neither grows past the
+/// per-function length bound; the mirroring rule is the same — run the raw
+/// word through the very decode the dispatcher uses.
+fn filelock_operands_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) -> bool {
+    // `fs_lock`'s mode, flags and range words run through the same decodes
+    // the dispatcher uses: a mode outside the closed set, a reserved flag
+    // bit, or a `start`/`len` pair that would end past the address space is
+    // refused before the handler sees it. `fs_lock_query` shares the range
+    // decode and additionally refuses `Unlock`, which names no request that
+    // could be blocked.
+    if spec.number == SyscallNumber::FS_LOCK {
+        let mode = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if LockMode::from_u32(mode).is_err() {
+            return false;
+        }
+        let flags = u32::try_from(args[2] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        if LockFlags::from_bits(flags).is_err() {
+            return false;
+        }
+        if LockRange::new(args[3], args[4]).is_err() {
+            return false;
+        }
+    }
+    if spec.number == SyscallNumber::FS_LOCK_QUERY {
+        let mode = u32::try_from(args[1] & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+        match LockMode::from_u32(mode) {
+            Ok(LockMode::Unlock) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        if LockRange::new(args[2], args[3]).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Whether the dispatcher's **per-operand** decodes accept `args`.
 ///
 /// [`would_accept`] answers the shape question — the number is in range, the
@@ -1074,6 +1136,9 @@ fn operand_semantics_accept(spec: &SyscallSpec, args: &[u64; SYSCALL_MAX_ARGS]) 
         if OpenFlags::from_bits(raw).is_err() {
             return false;
         }
+    }
+    if !filelock_operands_accept(spec, args) {
+        return false;
     }
     // A filesystem flags word runs through its own type's `from_bits`, which
     // rejects any reserved bit; `fs_realpath`'s mode word runs through

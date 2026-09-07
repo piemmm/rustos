@@ -2990,6 +2990,50 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // the overrun report is the record worth keeping, not the arming.
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_LOCK,
+        name: "fs_lock",
+        arg_count: 6,
+        args: [
+            // The descriptor, then the `LockMode` and `LockFlags` words, the
+            // `start`/`len` range spelling, and the wait deadline.
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::U64,
+        ],
+        ret: AbiType::Errno,
+        // The same coarse gate the descriptor's own `fs_open` required; the
+        // per-inode read/write check is then re-run under the caller's
+        // identity, since an exclusive lock asserts a writer's right.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A lock grants no authority and withholds none — it coordinates
+        // participants who opt in — so it decides no security question. A
+        // database taking a lock per record would drown the log.
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_LOCK_QUERY,
+        name: "fs_lock_query",
+        arg_count: 6,
+        args: [
+            // The descriptor, the `LockMode` being tested, the `start`/`len`
+            // range, then the caller's `LockConflict` buffer.
+            AbiType::U32,
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+        ],
+        // Bytes written, and `0` for "the request would be granted".
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        // A pure read of coordination state, like `fs_stat`.
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

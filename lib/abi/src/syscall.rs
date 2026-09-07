@@ -2395,6 +2395,46 @@ impl SyscallNumber {
     /// branching on the image it runs in.
     pub const LATENCY_WATCH: Self = Self(119);
 
+    /// Take or release an advisory byte-range lock on the file behind an
+    /// open descriptor (`plans/FILELOCK.md`).
+    ///
+    /// Arguments are `(fd: u32, mode: u32, flags: u32, start: u64, len: u64,
+    /// timeout_ns: u64)`: a [`crate::LockMode`], [`crate::LockFlags`], the
+    /// [`crate::LockRange`] spelling (`len` of [`crate::LOCK_LEN_TO_END`]
+    /// runs to the end of the file), and a deadline
+    /// ([`crate::LOCK_WAIT_FOREVER`] to wait indefinitely).
+    ///
+    /// The lock belongs to the descriptor's **open file description**, so
+    /// duplicated and spawn-inherited descriptors share it while a second
+    /// `fs_open` of the same file is a distinct owner that conflicts. It is
+    /// released explicitly, when the last descriptor on the description
+    /// closes, or when the process exits.
+    ///
+    /// Requires the same `CAP_FS_ACCESS` the descriptor's own open needed,
+    /// and re-authorises the file under the caller's identity: a shared lock
+    /// needs read access, an exclusive one write access.
+    ///
+    /// Returns `0`, or `-errno`: [`Errno::WouldBlock`] for a
+    /// [`crate::LockFlags::NONBLOCK`] request that would have waited,
+    /// [`Errno::Deadlock`] when waiting would close a cycle of waiters,
+    /// [`Errno::TimedOut`] when the deadline passed first,
+    /// [`Errno::Interrupted`] when a signal unwound the wait, and
+    /// [`Errno::LimitExceeded`] at the process's `file-locks` bound.
+    pub const FS_LOCK: Self = Self(120);
+
+    /// Report the first advisory lock that would block a given request on
+    /// the file behind an open descriptor (`plans/FILELOCK.md`).
+    ///
+    /// Arguments are `(fd: u32, mode: u32, start: u64, len: u64, out:
+    /// UserPtr, out_cap: Len)`, and the answer is a
+    /// [`crate::LockConflict`] naming the holder's mode, range, and pid.
+    ///
+    /// Returns the bytes written — `0` when the request would be granted, so
+    /// "nothing in the way" is an answer rather than an error — or `-errno`.
+    /// A conflict report is a snapshot: nothing reserves the range, and only
+    /// [`Self::FS_LOCK`] can acquire it.
+    pub const FS_LOCK_QUERY: Self = Self(121);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

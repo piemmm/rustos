@@ -11,10 +11,10 @@
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
     i32_from_register, i32_register_is_canonical, i64_from_register, spec_for, AbiType,
-    CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, MapFlags, OpenFlags, PortWidth,
-    PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal, SignalIntakeOp, SyscallNumber,
-    SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
+    CallRecvFlags, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange,
+    MapFlags, OpenFlags, PortWidth, PowerAction, RandomFlags, RealpathMode, SchedPriority, Signal,
+    SignalIntakeOp, SyscallNumber, SyscallSpec, UnlinkFlags, WaitFlags, ENCODED_TABLE,
+    FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK, PROC_ID_HEX_LEN, SYSCALL_MAX_ARGS,
 };
 use tairix_crypto::{sha256, Sha256Digest};
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId};
@@ -2442,6 +2442,58 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Take or release an advisory byte-range lock on the file behind the
+    /// open descriptor `fd` (`plans/FILELOCK.md`).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::FS_ACCESS`] and decoded `mode`, `flags` and the
+    /// `start`/`len` range spelling, so the range is representable before
+    /// the handler sees it. The lock belongs to the descriptor's open file
+    /// description, not to the process, and the handler re-authorises the
+    /// file under the caller's identity: a shared lock needs read access, an
+    /// exclusive one write access.
+    ///
+    /// `timeout_ns` bounds a blocking request
+    /// ([`LOCK_WAIT_FOREVER`](tairix_abi::LOCK_WAIT_FOREVER) to wait
+    /// indefinitely) and is ignored by a
+    /// [`LockFlags::NONBLOCK`](tairix_abi::LockFlags::NONBLOCK) one.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`].
+    fn fs_lock(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _flags: LockFlags,
+        _range: LockRange,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Report the first advisory lock that would block `mode` over `range`
+    /// on the file behind the open descriptor `fd`, writing a
+    /// [`LockConflict`](tairix_abi::LockConflict) into `out`.
+    ///
+    /// Returns the bytes written, and `0` when the request would be granted
+    /// — "nothing in the way" is an answer, not an error. The report is a
+    /// snapshot: it reserves nothing.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`].
+    fn fs_lock_query(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _range: LockRange,
+        _out: u64,
+        _out_cap: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Set the permission bits of the file or directory at the absolute
     /// path `path` (`path_len` bytes) to `mode` (the `chmod(2)` shape).
     ///
@@ -3463,6 +3515,37 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let path_len = decode_len(args.0[1])?;
                 let flags = OpenFlags::from_bits(decode_u32(args.0[2]))?;
                 self.handlers.fs_open(caller, args.0[0], path_len, flags)
+            }
+            SyscallNumber::FS_LOCK => {
+                // args[0] fd; args[1] `LockMode`; args[2] `LockFlags`;
+                // args[3]/[4] the `start`/`len` range spelling; args[5] the
+                // wait deadline. Every word is validated here, so an
+                // unrepresentable range never reaches the manager.
+                let mode = LockMode::from_u32(decode_u32(args.0[1]))?;
+                let flags = LockFlags::from_bits(decode_u32(args.0[2]))?;
+                let range = LockRange::new(args.0[3], args.0[4])?;
+                self.handlers
+                    .fs_lock(caller, decode_u32(args.0[0]), mode, flags, range, args.0[5])
+            }
+            SyscallNumber::FS_LOCK_QUERY => {
+                // args[0] fd; args[1] the `LockMode` being tested;
+                // args[2]/[3] the range; args[4] the non-null `out` UserPtr
+                // (dispatcher-checked); args[5] its capacity. `Unlock` names
+                // no request that could be blocked, so it is refused here.
+                let mode = LockMode::from_u32(decode_u32(args.0[1]))?;
+                if matches!(mode, LockMode::Unlock) {
+                    return Err(Errno::OutOfRange);
+                }
+                let range = LockRange::new(args.0[2], args.0[3])?;
+                let out_cap = decode_len(args.0[5])?;
+                self.handlers.fs_lock_query(
+                    caller,
+                    decode_u32(args.0[0]),
+                    mode,
+                    range,
+                    args.0[4],
+                    out_cap,
+                )
             }
             SyscallNumber::FS_CLOSE => self.handlers.fs_close(caller, decode_u32(args.0[0])),
             SyscallNumber::FS_READ => {
@@ -5041,6 +5124,30 @@ mod tests {
             Ok(0)
         }
 
+        fn fs_lock(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _mode: LockMode,
+            _flags: LockFlags,
+            _range: LockRange,
+            _timeout_ns: u64,
+        ) -> SyscallResult {
+            self.record("fs_lock");
+            Ok(0)
+        }
+        fn fs_lock_query(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _mode: LockMode,
+            _range: LockRange,
+            _out: u64,
+            _out_cap: usize,
+        ) -> SyscallResult {
+            self.record("fs_lock_query");
+            Ok(0)
+        }
         fn fs_realpath(
             &self,
             _c: &CallerContext<'_>,

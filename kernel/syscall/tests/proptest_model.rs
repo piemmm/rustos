@@ -33,8 +33,9 @@ use core::cell::RefCell;
 use proptest::prelude::*;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
-    AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, OpenFlags, PowerAction, RandomFlags,
-    RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, SYSCALLS, SYSCALL_MAX_ARGS,
+    AbiType, CapabilityId, Errno, IrqHandle, LinkFlags, LockFlags, LockMode, LockRange, OpenFlags,
+    PowerAction, RandomFlags, RealpathMode, SyscallNumber, SyscallSpec, UnlinkFlags, SYSCALLS,
+    SYSCALL_MAX_ARGS,
 };
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
@@ -786,6 +787,30 @@ impl SyscallHandlers for CountingHandlers {
         _link: u64,
         _link_len: usize,
         _flags: LinkFlags,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_lock(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _flags: LockFlags,
+        _range: LockRange,
+        _timeout_ns: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_lock_query(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _mode: LockMode,
+        _range: LockRange,
+        _out: u64,
+        _out_cap: usize,
     ) -> SyscallResult {
         self.bump();
         Ok(0)

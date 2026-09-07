@@ -87,6 +87,7 @@ pub mod crash;
 pub mod devres;
 pub mod dispatch_slot;
 pub mod driver_store;
+pub mod filelock;
 pub mod filemap;
 pub mod foreground;
 pub mod fs;

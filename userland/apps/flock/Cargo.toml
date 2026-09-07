@@ -1,0 +1,51 @@
+[package]
+name = "tairix-flock"
+description = "TAIRiX `flock` CLI: run a command holding an advisory file lock (`plans/FILELOCK.md`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime (`tairix-rt`) is an
+# optional, on-by-default build feature, mirroring `tairix-unlink`. `cargo
+# build -p tairix-flock` builds the tool program with it; host tooling builds
+# only the pure *library*, so the host test build never pulls the userland
+# runtime's `_start` / `#[global_allocator]` / panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-cmdres"]
+
+# The package is both the `tairix-flock` library (the pure parse-and-run
+# engine below) and the `Run` entry-point binary of the `flock` tool. The
+# binary is a freestanding pure-Rust program on the native Tier-1 targets and
+# an inert host stub elsewhere (see `src/run.rs`).
+[[bin]]
+name = "tairix-flock-run"
+path = "src/run.rs"
+
+[dependencies]
+# The frozen user/kernel vocabulary: `Errno` for the cause of every refusal
+# and the `LockMode`/`LockFlags`/`LockRange` lock words, so this tool invents
+# no parallel error set or flag word.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one help engine: locale fallback, the bounded structured-Markdown
+# parser, and the shared own-bundle short-help render the `-?`/`--help`
+# switches use (plans/APPS.md).
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime `tairix-rt`
+# (`_start`, canary, panic handler, `mem_map` allocator, the standard-stream
+# I/O, and the `File` lock methods), plus the shared command-word resolution
+# policy so the command operand is looked up through the one definition every
+# other consumer reads rather than a private path walk.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-cmdres = { path = "../../../lib/cmdres", version = "=0.0.0", optional = true }
+# The freestanding `Run` binary also enables the help engine's syscall-backed
+# own-bundle `HelpSource` (`BundleHelp`), shared by every command app.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }

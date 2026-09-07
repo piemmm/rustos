@@ -64,10 +64,11 @@ pub use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
-    InputMode, LimitKind, MapFlags, OpenFlags, Origin, PortWidth, PowerAction, ProcId, RandomFlags,
-    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SyscallNumber, TerminalSize, Time64,
-    WaitFlags, WaitStatus, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
-    ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN, TERMINAL_SIZE_WIRE_LEN,
+    InputMode, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
+    Origin, PortWidth, PowerAction, ProcId, RandomFlags, ResourceLimit, SchedPriority, Signal,
+    SignalIntakeOp, SyscallNumber, TerminalSize, Time64, WaitFlags, WaitStatus, WallClockReading,
+    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, ORIGIN_WIRE_LEN, SPAWN_UID_INHERIT, STDIN,
+    TERMINAL_SIZE_WIRE_LEN,
 };
 use tairix_abi_trap::raw_syscall;
 use tairix_util::secret::Wiped;
@@ -338,6 +339,12 @@ const NUM_FS_OPEN: u64 = SyscallNumber::FS_OPEN.as_u16() as u64;
 
 /// `fs_close` syscall number (as above).
 const NUM_FS_CLOSE: u64 = SyscallNumber::FS_CLOSE.as_u16() as u64;
+
+/// `fs_lock` syscall number (as above).
+const NUM_FS_LOCK: u64 = SyscallNumber::FS_LOCK.as_u16() as u64;
+
+/// `fs_lock_query` syscall number (as above).
+const NUM_FS_LOCK_QUERY: u64 = SyscallNumber::FS_LOCK_QUERY.as_u16() as u64;
 
 /// `fs_read` syscall number (as above).
 const NUM_FS_READ: u64 = SyscallNumber::FS_READ.as_u16() as u64;
@@ -4781,6 +4788,105 @@ pub fn fs_getcwd(buf: &mut [u8]) -> Result<usize, i64> {
     count_result(ret, buf.len())
 }
 
+/// Take or release an advisory byte-range lock on the file behind `fd`
+/// ([`SyscallNumber::FS_LOCK`]).
+///
+/// The lock belongs to the descriptor's *open file description*: a
+/// duplicated or spawn-inherited descriptor shares it, a second
+/// [`fs_open`] of the same file is a separate owner that conflicts, and it
+/// releases when the last descriptor on the description closes — which a
+/// process exit does for all of them.
+///
+/// Prefer the [`File`] methods; this is the raw form for a caller holding a
+/// bare descriptor number.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): `WouldBlock` for a
+/// [`LockFlags::NONBLOCK`] request that would have waited, `Deadlock` when
+/// waiting would close a cycle of waiters, `TimedOut` at the deadline,
+/// `Interrupted` when a signal unwound the wait, `LimitExceeded` at the
+/// process's `file-locks` bound, `PermissionDenied` when the descriptor was
+/// not opened for the access the mode asserts, and `NotSupported` for a
+/// descriptor with no file to lock.
+pub fn fs_lock(
+    fd: u32,
+    mode: LockMode,
+    flags: LockFlags,
+    range: LockRange,
+    timeout_ns: u64,
+) -> Result<(), i64> {
+    // SAFETY: `raw_syscall` is always safe to invoke; every argument is a
+    // scalar the kernel re-validates, and no pointer is passed.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_LOCK,
+            [
+                u64::from(fd),
+                u64::from(mode.as_u32()),
+                u64::from(flags.bits()),
+                range.start(),
+                range.wire_len(),
+                timeout_ns,
+            ],
+        )
+    };
+    // A syscall result is a register: the ABI reads its bit pattern as a
+    // signed value, so a negative one is `-errno`.
+    let ret = i64::from_ne_bytes(ret.to_ne_bytes());
+    if ret < 0 {
+        return Err(ret);
+    }
+    Ok(())
+}
+
+/// Report the first advisory lock that would block `mode` over `range` on
+/// the file behind `fd` ([`SyscallNumber::FS_LOCK_QUERY`]), or `None` when
+/// the request would be granted.
+///
+/// The answer is a snapshot: it reserves nothing, and only [`fs_lock`] can
+/// acquire the range.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`), or `OutOfRange` for a report
+/// this build cannot decode.
+pub fn fs_lock_query(
+    fd: u32,
+    mode: LockMode,
+    range: LockRange,
+) -> Result<Option<LockConflict>, i64> {
+    let mut raw = [0u8; LockConflict::WIRE_LEN];
+    let ptr = raw.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(out, out_cap)` pair against the caller's address space before
+    // writing it, and `raw` is a live exclusive local for the whole call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_LOCK_QUERY,
+            [
+                u64::from(fd),
+                u64::from(mode.as_u32()),
+                range.start(),
+                range.wire_len(),
+                ptr,
+                raw.len() as u64,
+            ],
+        )
+    };
+    let ret = i64::from_ne_bytes(ret.to_ne_bytes());
+    if ret < 0 {
+        return Err(ret);
+    }
+    // Zero bytes is the kernel's "nothing in the way", not a short write.
+    if ret == 0 {
+        return Ok(None);
+    }
+    LockConflict::from_le_bytes(&raw)
+        .map(Some)
+        .map_err(|err| -i64::from(err.as_i32()))
+}
+
 /// An open file or directory handle: an owned descriptor that issues
 /// [`fs_close`] when dropped, so a handle is never leaked.
 ///
@@ -4890,6 +4996,101 @@ impl File {
     #[must_use]
     pub fn fd(&self) -> u32 {
         self.fd
+    }
+
+    /// Take an advisory lock of `mode` over `range`, waiting indefinitely
+    /// for a conflicting holder to release it.
+    ///
+    /// The lock belongs to this handle's open file description, so it
+    /// releases on the handle's [`Drop`] — and on the process exiting —
+    /// without the caller having to unwind it on every error path.
+    /// Re-locking a range this handle already holds converts it, so an
+    /// upgrade from shared to exclusive (or back) is this same call.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) from [`fs_lock`]:
+    /// `Deadlock` when waiting would close a cycle of waiters,
+    /// `Interrupted` when a signal unwound the wait, `PermissionDenied` when
+    /// the handle was not opened for the access the mode asserts.
+    pub fn lock(&self, mode: LockMode, range: LockRange) -> Result<(), i64> {
+        fs_lock(
+            self.fd,
+            mode,
+            LockFlags::empty(),
+            range,
+            tairix_abi::LOCK_WAIT_FOREVER,
+        )
+    }
+
+    /// Take an advisory lock of `mode` over `range` only if it is free now,
+    /// reporting `WouldBlock` rather than waiting.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) from [`fs_lock`];
+    /// `WouldBlock` when a conflicting holder has the range.
+    pub fn try_lock(&self, mode: LockMode, range: LockRange) -> Result<(), i64> {
+        fs_lock(
+            self.fd,
+            mode,
+            LockFlags::NONBLOCK,
+            range,
+            tairix_abi::LOCK_WAIT_FOREVER,
+        )
+    }
+
+    /// Take an advisory lock of `mode` over `range`, waiting at most
+    /// `timeout_ns` nanoseconds.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) from [`fs_lock`];
+    /// `TimedOut` when the deadline passed with the range still held.
+    pub fn lock_timeout(
+        &self,
+        mode: LockMode,
+        range: LockRange,
+        timeout_ns: u64,
+    ) -> Result<(), i64> {
+        fs_lock(self.fd, mode, LockFlags::empty(), range, timeout_ns)
+    }
+
+    /// Release whatever this handle holds over `range`, whole or in part.
+    ///
+    /// Releasing a range nothing holds is not an error. Releasing the middle
+    /// of a held range splits it, which costs a record and so is bounded by
+    /// the process's `file-locks` limit; releasing the whole of a held range
+    /// never is.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) from [`fs_lock`].
+    pub fn unlock(&self, range: LockRange) -> Result<(), i64> {
+        fs_lock(
+            self.fd,
+            LockMode::Unlock,
+            LockFlags::empty(),
+            range,
+            tairix_abi::LOCK_WAIT_FOREVER,
+        )
+    }
+
+    /// The first advisory lock that would block `mode` over `range`, or
+    /// `None` when the request would be granted.
+    ///
+    /// A snapshot for diagnosis — "waiting on pid 412" — that reserves
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) from [`fs_lock_query`].
+    pub fn lock_conflict(
+        &self,
+        mode: LockMode,
+        range: LockRange,
+    ) -> Result<Option<LockConflict>, i64> {
+        fs_lock_query(self.fd, mode, range)
     }
 
     /// Read into the whole of `buf` starting at byte `offset`, splitting the

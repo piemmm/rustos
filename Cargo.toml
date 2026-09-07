@@ -209,6 +209,7 @@ members = [
     "userland/apps/edit",
     "userland/apps/false",
     "userland/apps/files",
+    "userland/apps/flock",
     "userland/apps/fstree",
     "userland/apps/getcap",
     "userland/apps/groupadd",

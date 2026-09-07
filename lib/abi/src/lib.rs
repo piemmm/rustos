@@ -30,6 +30,7 @@ pub mod driver_store;
 pub mod elevate;
 pub mod error;
 pub mod field;
+pub mod filelock;
 pub mod font_ipc;
 pub mod fs;
 pub mod hwtree;
@@ -108,6 +109,9 @@ pub use field::{
     FieldListIter, FieldName, FieldValue, IpAddr, MacAddr, ScalarType, ToFieldValue, Uuid,
     FIELD_BYTES_MAX, FIELD_LIST_MAX, FIELD_NAME_MAX, FIELD_STR_MAX, IPV4_LEN, IPV6_LEN, MAC_LEN,
     NAMED_FIELD_KEY_PREFIX_LEN, RESERVED_PREFIXES, UUID_LEN,
+};
+pub use filelock::{
+    LockConflict, LockFlags, LockMode, LockRange, LOCK_LEN_TO_END, LOCK_WAIT_FOREVER,
 };
 pub use fs::{
     DirEntry, FileId, FileKind, FileStat, LinkFlags, OpenFlags, RealpathMode, UnlinkFlags,

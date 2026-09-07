@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>flock</title>
+  <!-- A padlock closed over a document. The shackle is a filled octagonal
+       arch with the tile colour punched through its middle, because the
+       desktop's SVG subset has no curves, no strokes and no transforms. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#2F6F5E" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#3C8A74" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The document behind the lock, its corner folded -->
+  <polygon fill="#F2F5F3" points="62,54 150,54 190,94 190,214 62,214"/>
+  <polygon fill="#B9C7C1" points="150,54 190,94 150,94"/>
+
+  <!-- Shackle: outer arch -->
+  <polygon fill="#1E4A3E" points="96,150 96,116 100,102 110,92 124,88 140,88 154,92 164,102 168,116 168,150 148,150 148,118 146,110 140,106 124,106 118,110 116,118 116,150"/>
+  <!-- Shackle: inner cut, in the document colour it stands on -->
+  <polygon fill="#F2F5F3" points="116,150 116,118 118,110 124,106 140,106 146,110 148,118 148,150 140,150 140,122 137,117 127,117 124,122 124,150"/>
+
+  <!-- Lock body -->
+  <polygon fill="#1E4A3E" points="84,150 180,150 180,206 84,206"/>
+  <!-- Keyway -->
+  <polygon fill="#F5C542" points="126,164 138,164 138,180 142,192 122,192 126,180"/>
+</svg>

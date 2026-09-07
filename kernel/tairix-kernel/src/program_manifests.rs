@@ -1085,6 +1085,16 @@ mod tests {
     // the seam's containment record — a worker crashed and was replaced —
     // reaches the log instead of being refused into an audited denial that
     // hides the crash.
+    // `flock`'s expected request: console write for its short help and
+    // diagnostics, filesystem reach to open and lock the file, and
+    // `CAP_PROC_SPAWN` to run the command while the lock is held — which
+    // *is* its job. It never prompts, so it asks for no console read.
+    const LOCK_RUNNER_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::PROC_SPAWN,
+    ];
+
     const SANDBOXED_FILE_TOOL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::CONSOLE_READ,
@@ -1441,6 +1451,7 @@ mod tests {
             ("elsh", ProgramKind::Command, SHELL_MANIFEST),
             ("false", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
+            ("flock", ProgramKind::Command, LOCK_RUNNER_REQUEST),
             ("fontd", ProgramKind::Service, FONTD_MANIFEST),
             ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
             ("greeter", ProgramKind::Service, GREETER_REQUEST),

@@ -1957,7 +1957,10 @@ fn unit_for_limit(kind: LimitKind) -> Unit {
         LimitKind::AddressSpaceBytes | LimitKind::StackBytes | LimitKind::PinnedMemoryBytes => {
             Unit::Bytes
         }
-        LimitKind::OpenStreams | LimitKind::Processes | LimitKind::Threads => Unit::Count,
+        LimitKind::OpenStreams
+        | LimitKind::Processes
+        | LimitKind::Threads
+        | LimitKind::FileLocks => Unit::Count,
     }
 }
 
@@ -2303,6 +2306,11 @@ mod tests {
                         LimitKind::Threads,
                         ResourceLimit::new(16, 64).expect("well-formed"),
                         1,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::FileLocks,
+                        ResourceLimit::new(64, 256).expect("well-formed"),
+                        7,
                     ),
                 ],
                 pressure: fixture_pressure(),

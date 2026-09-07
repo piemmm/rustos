@@ -48,7 +48,7 @@ use crate::bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch};
 use crate::dispatch_slot::AlreadyInstalledError;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
-use crate::rlimit::{default_pinned_limit_bytes, LimitSet};
+use crate::rlimit::{default_file_lock_records, default_pinned_limit_bytes, LimitSet};
 use crate::spawn::InitSpawnCtx;
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
@@ -2093,9 +2093,10 @@ fn run_phases<A: KernelArch>(
         state
             .aspaces
             .write()
-            .set_default_limits(LimitSet::with_pinned_default(default_pinned_limit_bytes(
-                installed_memory_bytes,
-            )));
+            .set_default_limits(LimitSet::with_derived_defaults(
+                default_pinned_limit_bytes(installed_memory_bytes),
+                default_file_lock_records(installed_memory_bytes),
+            ));
     }
 
     // Hand the arch port a `'static` reference to the freshly

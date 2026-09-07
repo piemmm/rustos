@@ -1,0 +1,17 @@
+# Signed-AppInfo manifest source for the `flock` command app
+# (plans/FILELOCK.md). Discovered by the build's app-bundle composer; the
+# capability list is the bundle's request, intersected with the launching
+# user's grants. CAP_CONSOLE_WRITE covers the short help and the stderr
+# diagnostics; CAP_FS_ACCESS covers opening and locking the lock file and
+# the short-help read of the bundle's own Help/ documents through the
+# secured VFS; CAP_PROC_SPAWN covers launching the command that runs
+# while the lock is held. The tool reads no input, so it requests no
+# CAP_CONSOLE_READ.
+id = "os.tairix.flock"
+name = "flock"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_PROC_SPAWN"]
+# This bundle's own square icon master in its Resources/ (plans/ICONS.md):
+# vector, the preferred form, so a slot rasterises it at the side it draws.
+library-icon = "flock.svg"

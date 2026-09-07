@@ -145,6 +145,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("IS_A_DIRECTORY", Errno::IsADirectory),
     ("TOO_MANY_LINKS", Errno::TooManyLinks),
     ("NOT_ATTACHED", Errno::NotAttached),
+    ("DEADLOCK", Errno::Deadlock),
 ];
 
 /// The `abi-v1` driver-ABI error codes, paired with the
@@ -2405,6 +2406,7 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_filelock_contract(&mut out);
     emit_signal_contract(&mut out);
     emit_power_contract(&mut out);
     emit_waitset_contract(&mut out);
@@ -2419,6 +2421,88 @@ fn generate_syscall() -> String {
     out.push_str("#ifdef __cplusplus\n} /* extern \"C\" */\n#endif\n\n");
     out.push_str("#endif /* TAIRIX_SYSCALL_H */\n");
     out
+}
+
+/// Emit the advisory byte-range lock contract into `tairix_syscall.h`: the
+/// `fs_lock()` modes and flags, the two range/wait sentinels, and the
+/// `tairix_lock_conflict_t` record `fs_lock_query()` writes — every value
+/// read from `lib/abi` and never re-typed.
+fn emit_filelock_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::filelock;
+    out.push_str(
+        "/* fs_lock() / fs_lock_query() — advisory byte-range locks (AGENTS.md sec.9).\n\
+         * A lock is owned by the OPEN FILE DESCRIPTION behind the descriptor, not by\n\
+         * the process: a duplicated or spawn-inherited descriptor shares it, a second\n\
+         * open of the same file is a separate owner that conflicts, and the lock\n\
+         * releases when the last descriptor on the description closes — which a\n\
+         * process exit does for all of them, so no stale lock survives a crash.\n\
+         * Locks are ADVISORY: they coordinate participants who opt in and confer no\n\
+         * access. Access control remains the file's owner/mode/ACL. Acquisition needs\n\
+         * TAIRIX_CAP_FS_ACCESS, read access for a shared lock and write access for an\n\
+         * exclusive one. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_MODE_SHARED {}u",
+        filelock::LockMode::Shared.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_MODE_EXCLUSIVE {}u",
+        filelock::LockMode::Exclusive.as_u32()
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_MODE_UNLOCK {}u",
+        filelock::LockMode::Unlock.as_u32()
+    );
+    out.push_str(
+        "/* Behaviour flags (uint32_t). Every undefined bit is reserved and rejected\n\
+         * with TAIRIX_E_OUT_OF_RANGE. NONBLOCK reports TAIRIX_E_WOULD_BLOCK instead of\n\
+         * waiting. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_FLAG_NONBLOCK {:#x}u",
+        filelock::LockFlags::NONBLOCK.bits()
+    );
+    out.push_str(
+        "/* A `len` of TAIRIX_LOCK_LEN_TO_END runs from `start` to the end of the\n\
+         * address space, so a lock over a growing file needs no relocking. A\n\
+         * `timeout_ns` of TAIRIX_LOCK_WAIT_FOREVER waits indefinitely. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_LEN_TO_END {}ull",
+        filelock::LOCK_LEN_TO_END
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_WAIT_FOREVER {}ull",
+        filelock::LOCK_WAIT_FOREVER
+    );
+    out.push_str(
+        "/* The record fs_lock_query() writes: the first lock that would block the\n\
+         * request. Writing 0 bytes is the answer \"the request would be granted\", not\n\
+         * an error. `pid` is the process whose request established the record. The\n\
+         * report names holders only and reserves nothing. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_LOCK_CONFLICT_LEN {}u",
+        filelock::LockConflict::WIRE_LEN
+    );
+    out.push_str(
+        "typedef struct tairix_lock_conflict {\n\
+         \tuint32_t mode;      /* TAIRIX_LOCK_MODE_SHARED or _EXCLUSIVE */\n\
+         \tuint32_t reserved;  /* zero */\n\
+         \tuint64_t start;\n\
+         \tuint64_t len;       /* TAIRIX_LOCK_LEN_TO_END when unbounded */\n\
+         \tuint64_t pid;\n\
+         } tairix_lock_conflict_t;\n",
+    );
+    out.push('\n');
 }
 
 /// Emit the `latency_watch()` contract into `tairix_syscall.h`: the default

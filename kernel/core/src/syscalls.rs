@@ -92,14 +92,15 @@ use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
-    IrqHandle, LimitKind, MapFlags, OpenFlags, PortName, PortWidth, PowerAction, ProcId,
-    ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach,
-    StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp,
-    WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
+    PortName, PortWidth, PowerAction, ProcId, ProcessStart, RandomFlags, ResourceLimit,
+    SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber, TerminalSize,
+    Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
+    BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX,
+    FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
+    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
+    RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
+    WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -142,6 +143,7 @@ use crate::devres::{
     NULL_SHARED_MEM_FACILITY,
 };
 use crate::dispatch_slot::{DispatchHook, DispatchOutcome, RescheduleAction, UserFaultOutcome};
+use crate::filelock::{Held, OwnerId, Refusal, Request as LockRequest, Wakes};
 use crate::filemap::{FileMap, NULL_FILE_MAP};
 use crate::fs::{
     FilesystemService, LateIdentity, VolumeForest, VolumeService, NULL_FILESYSTEM,
@@ -163,6 +165,7 @@ use crate::spawn::{
 use crate::spawn_services::installed_spawn_services;
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
 use crate::users::{UsersDbSource, NULL_USERS_DB};
+use crate::waitq::WakeKey;
 use crate::wallclock::{WallClockSource, NULL_WALL_CLOCK};
 
 /// Resolve a wait-set `Child` member `id` into the `wait`-syscall pid
@@ -1620,6 +1623,81 @@ where
     /// returns `Ok(0)` and the caller re-tests its own condition, which is the
     /// contract `futex_wait` publishes. Looping here instead would hide a
     /// genuine wake from the userland lock that has to see it.
+    /// Resolve `fd` to its advisory-lock owner and the identity of the file
+    /// it names, authorising the request under the caller's own credentials.
+    ///
+    /// Fails closed on a descriptor whose backing has no file to lock, on
+    /// access the descriptor was not opened for, and on a backing with no
+    /// stable identity — locking one would let two unrelated nodes share an
+    /// owner's records.
+    fn resolve_lock_target(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        mode: LockMode,
+    ) -> Result<(OwnerId, FileId), Errno> {
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        // A pipe, pty, or resource has no file two participants could agree
+        // on, and a delegation is a bounded one-shot byte access under
+        // someone else's captured identity — not a coordination role.
+        let path = handle.own_path().ok_or(Errno::NotSupported)?;
+        let permitted = match mode {
+            LockMode::Shared => handle.flags.is_read(),
+            LockMode::Exclusive => handle.flags.is_write(),
+            // Releasing needs no more access than holding did.
+            LockMode::Unlock => handle.flags.is_read() || handle.flags.is_write(),
+        };
+        if !permitted {
+            return Err(Errno::PermissionDenied);
+        }
+        // Re-resolve and re-authorise the path under the caller's attested
+        // identity on every call, exactly as a read or a write does: the
+        // descriptor caches no authority.
+        let stat = self.filesystem.stat(
+            caller.caps.owner().0,
+            caller.caps.effective(),
+            path,
+            crate::fs::FinalLink::for_open(handle.flags),
+        )?;
+        if stat.id.is_none() {
+            return Err(Errno::NotSupported);
+        }
+        Ok((handle.lock_owner(), stat.id))
+    }
+
+    /// Release `owner`'s locks over `range`, waking whoever the freed bytes
+    /// let through.
+    fn release_file_lock(
+        &self,
+        caller: &CallerContext<'_>,
+        owner: OwnerId,
+        file: FileId,
+        range: LockRange,
+    ) -> SyscallResult {
+        let limit = self
+            .aspaces
+            .read()
+            .limits(caller.process())
+            .get(LimitKind::FileLocks)
+            .soft;
+        let wakes = crate::filelock::release(file, owner, range, limit)
+            .map_err(crate::filelock::Refusal::to_errno)?;
+        Self::wake_lock_waiters(&wakes);
+        Ok(0)
+    }
+
+    /// Unpark the waiters a lock change freed, after the registry's lock has
+    /// been released.
+    fn wake_lock_waiters(wakes: &Wakes) {
+        if let Some(key) = wakes.key {
+            crate::waitq::file_lock_wake(WakeKey::new(key), &wakes.tasks);
+        }
+    }
+
     fn futex_park(
         &self,
         caller: &CallerContext<'_>,
@@ -5193,7 +5271,7 @@ where
         let key = crate::futex::FutexKey { process, uaddr };
         let cpu = SchedulerArch::current_cpu(self.arch);
         let task = caller.task_id.0;
-        let deadline_ns = crate::futex::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
+        let deadline_ns = crate::waitq::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
 
         // Register *before* reading the word, so a wake landing in the window
         // between the read and the park is not lost: the waker then unparks a
@@ -9744,6 +9822,132 @@ where
             .write()
             .open_resource(caller.process(), backing, flags)?;
         Ok(u64::from(fd))
+    }
+
+    fn fs_lock(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        mode: LockMode,
+        flags: LockFlags,
+        range: LockRange,
+        timeout_ns: u64,
+    ) -> SyscallResult {
+        // The dispatcher checked `CAP_FS_ACCESS` and decoded the mode, flags
+        // and range, so the span is representable before anything is read.
+        let (owner, file) = self.resolve_lock_target(caller, fd, mode)?;
+        let Some(held) = Held::from_mode(mode) else {
+            return self.release_file_lock(caller, owner, file, range);
+        };
+        let limit = self
+            .aspaces
+            .read()
+            .limits(caller.process())
+            .get(LimitKind::FileLocks)
+            .soft;
+        let pid = caller.process();
+        let task = caller.task_id.0;
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let nonblock = flags.is_nonblock();
+        let deadline_ns = crate::waitq::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
+        let mut queued: Option<WakeKey> = None;
+
+        let outcome = loop {
+            match crate::filelock::acquire(&LockRequest {
+                file,
+                owner,
+                pid,
+                task,
+                range,
+                held,
+                limit,
+                waiting: !nonblock,
+            }) {
+                Ok(wakes) => {
+                    Self::wake_lock_waiters(&wakes);
+                    break Ok(0);
+                }
+                Err(Refusal::Deadlock) => break Err(Errno::Deadlock),
+                Err(Refusal::LimitExceeded) => break Err(Errno::LimitExceeded),
+                Err(Refusal::Held(_) | Refusal::Queued) => {
+                    if nonblock {
+                        break Err(Errno::WouldBlock);
+                    }
+                    if queued.is_none() {
+                        // Register on the queue and the wait queue, then
+                        // loop to re-test before parking: a release landing
+                        // in the window between the refusal above and the
+                        // park would otherwise be lost and strand the task.
+                        let key =
+                            WakeKey::new(crate::filelock::enqueue(file, owner, task, range, held));
+                        crate::waitq::FILE_LOCK_WAITQ.register_keyed(key, task, deadline_ns);
+                        if deadline_ns != crate::waitq::NO_DEADLINE {
+                            crate::waitq::rearm_timed_wakeup();
+                        }
+                        queued = Some(key);
+                        continue;
+                    }
+                    if !reschedule_current(cpu, RescheduleAction::Park) {
+                        // Not a resumable task, so it cannot be parked. Fail
+                        // closed rather than return a "granted" the caller
+                        // would act on.
+                        break Err(Errno::NotImplemented);
+                    }
+                    // A termination deferred against this thread unwinds the
+                    // wait; the kill lands at the syscall boundary and this
+                    // errno never reaches user space.
+                    if crate::procsignal::kill_pending(task) {
+                        break Err(Errno::Interrupted);
+                    }
+                    if deadline_ns != crate::waitq::NO_DEADLINE
+                        && self.arch.monotonic_ns(cpu) >= deadline_ns
+                    {
+                        break Err(Errno::TimedOut);
+                    }
+                }
+            }
+        };
+
+        if let Some(key) = queued {
+            crate::waitq::FILE_LOCK_WAITQ.deregister_keyed(key, task);
+            crate::filelock::dequeue(task);
+            if deadline_ns != crate::waitq::NO_DEADLINE {
+                crate::waitq::rearm_timed_wakeup();
+            }
+        }
+        outcome
+    }
+
+    fn fs_lock_query(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        mode: LockMode,
+        range: LockRange,
+        out: u64,
+        out_cap: usize,
+    ) -> SyscallResult {
+        // The whole record or nothing: a short buffer fails closed rather
+        // than reporting a partial conflict.
+        if out_cap < LockConflict::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let (owner, file) = self.resolve_lock_target(caller, fd, mode)?;
+        // The dispatcher already refused `Unlock`, which names no request
+        // that could be blocked.
+        let held = Held::from_mode(mode).ok_or(Errno::OutOfRange)?;
+        let Some(conflict) = crate::filelock::query(file, owner, range, held) else {
+            // Nothing in the way is an answer, not an error.
+            return Ok(0);
+        };
+        let bytes = conflict.to_abi().to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(out), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     fn fs_close(&self, caller: &CallerContext<'_>, fd: u32) -> SyscallResult {
@@ -23121,6 +23325,383 @@ mod tests {
     /// Build the shared file-mapping fixture: a task with `/big` staged in
     /// its user page (so `fs_open` can read the path), a recording
     /// filesystem serving `read_data`, and a recording file-map producer.
+    /// The identity the lock fixture's filesystem reports, so a lock keys on
+    /// a real node rather than the fail-closed placeholder.
+    const LOCK_FILE_ID: tairix_abi::FileId = tairix_abi::FileId {
+        volume: [3u8; 16],
+        node: 42,
+    };
+
+    /// A handler over a filesystem that reports one regular file at `/big`
+    /// with a real identity, ready for the lock calls.
+    fn lock_fixture() -> (
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+        CallerContext<'static>,
+    ) {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let caps = Box::leak(Box::new(make_caps_record(
+            2,
+            &[CapabilityId::FS_ACCESS],
+            sink,
+        )));
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.stat.id = LOCK_FILE_ID;
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_filesystem(fs);
+        (aspaces, h, ctx)
+    }
+
+    /// Open `/big` with `flags`, returning the descriptor.
+    fn lock_open(
+        h: &KernelSyscallHandlers<'static, TestArch>,
+        ctx: &CallerContext<'_>,
+        flags: OpenFlags,
+    ) -> u32 {
+        u32::try_from(h.fs_open(ctx, 0x1000, "/big".len(), flags).expect("open"))
+            .expect("a descriptor fits a u32")
+    }
+
+    /// A whole-file request, the shape most of the cases use.
+    fn whole() -> (u64, u64) {
+        (0, tairix_abi::LOCK_LEN_TO_END)
+    }
+
+    #[test]
+    fn a_lock_is_granted_and_a_second_description_of_the_same_file_conflicts() {
+        let (_aspaces, h, ctx) = lock_fixture();
+        let (start, len) = whole();
+        let first = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let second = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                first,
+                LockMode::Exclusive,
+                LockFlags::empty(),
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        // Same process, same thread: a second `fs_open` is a distinct owner,
+        // so it is excluded exactly as another process would be.
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                second,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Err(Errno::WouldBlock)
+        );
+        // Releasing lets the second owner in.
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                first,
+                LockMode::Unlock,
+                LockFlags::empty(),
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                second,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        // Tidy up so the process-global registry does not carry this case's
+        // records into another test's file.
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                second,
+                LockMode::Unlock,
+                LockFlags::empty(),
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn closing_the_last_descriptor_releases_the_locks_it_held() {
+        let (_aspaces, h, ctx) = lock_fixture();
+        let (start, len) = whole();
+        let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let other = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                holder,
+                LockMode::Exclusive,
+                LockFlags::empty(),
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        assert_eq!(h.fs_close(&ctx, holder), Ok(0));
+        // The close dropped the description, and with it the lock: no
+        // explicit unlock, and nothing a process could leave behind by
+        // exiting.
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                other,
+                LockMode::Exclusive,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        assert_eq!(h.fs_close(&ctx, other), Ok(0));
+    }
+
+    #[test]
+    fn the_mode_must_match_the_access_the_descriptor_was_opened_for() {
+        let (_aspaces, h, ctx) = lock_fixture();
+        let (start, len) = whole();
+        let reader = lock_open(&h, &ctx, OpenFlags::READ);
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                reader,
+                LockMode::Exclusive,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Err(Errno::PermissionDenied),
+            "an exclusive lock asserts a writer's right, so it needs a \
+             writer's access"
+        );
+        let writer = lock_open(&h, &ctx, OpenFlags::WRITE);
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                writer,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Err(Errno::PermissionDenied),
+            "and a shared lock needs read access"
+        );
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                reader,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        assert_eq!(h.fs_close(&ctx, reader), Ok(0));
+    }
+
+    #[test]
+    fn a_descriptor_with_no_file_to_lock_fails_closed() {
+        let (aspaces, h, ctx) = lock_fixture();
+        let (start, len) = whole();
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                7,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Err(Errno::NotFound),
+            "an unopened descriptor is refused without naming why"
+        );
+        let (read_fd, write_fd) = {
+            let mut reg = aspaces.write();
+            reg.open_pipe(ProcessId(2)).expect("a pipe")
+        };
+        for fd in [read_fd, write_fd] {
+            assert_eq!(
+                h.fs_lock(
+                    &ctx,
+                    fd,
+                    LockMode::Shared,
+                    LockFlags::NONBLOCK,
+                    LockRange::new(start, len).expect("range"),
+                    tairix_abi::LOCK_WAIT_FOREVER,
+                ),
+                Err(Errno::NotSupported),
+                "a pipe names no file two participants could agree on"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backing_with_no_stable_identity_is_refused_rather_than_aliased() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = Box::leak(Box::new(make_sched(arch.clone())));
+        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = Box::leak(Box::new(unseeded_rng()));
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        let irq = Box::leak(Box::new(IrqTable::new(31)));
+        let ctl = Box::leak(Box::new(UnsupportedController));
+        let caps = Box::leak(Box::new(make_caps_record(
+            2,
+            &[CapabilityId::FS_ACCESS],
+            sink,
+        )));
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps,
+        };
+        // The default mock reports `FileId::NONE`: no identity to key a lock
+        // on, so two unrelated nodes would share one owner's records.
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
+            .with_filesystem(fs);
+        let fd = lock_open(&h, &ctx, OpenFlags::READ);
+        let (start, len) = whole();
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                fd,
+                LockMode::Shared,
+                LockFlags::NONBLOCK,
+                LockRange::new(start, len).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Err(Errno::NotSupported)
+        );
+    }
+
+    #[test]
+    fn the_query_reports_the_holder_and_says_nothing_when_the_range_is_free() {
+        let (_aspaces, h, ctx) = lock_fixture();
+        let (start, len) = whole();
+        let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let asker = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let out = 0x1100;
+
+        assert_eq!(
+            h.fs_lock_query(
+                &ctx,
+                asker,
+                LockMode::Exclusive,
+                LockRange::new(start, len).expect("range"),
+                out,
+                LockConflict::WIRE_LEN,
+            ),
+            Ok(0),
+            "nothing in the way is an answer, not an error"
+        );
+        assert_eq!(
+            h.fs_lock(
+                &ctx,
+                holder,
+                LockMode::Exclusive,
+                LockFlags::empty(),
+                LockRange::new(16, 32).expect("range"),
+                tairix_abi::LOCK_WAIT_FOREVER,
+            ),
+            Ok(0)
+        );
+        assert_eq!(
+            h.fs_lock_query(
+                &ctx,
+                asker,
+                LockMode::Shared,
+                LockRange::new(24, 8).expect("range"),
+                out,
+                LockConflict::WIRE_LEN,
+            ),
+            Ok(LockConflict::WIRE_LEN as u64)
+        );
+        let raw = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; LockConflict::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(out), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let reported = LockConflict::from_le_bytes(&raw).expect("a well-formed report");
+        assert_eq!(reported.mode, LockMode::Exclusive);
+        assert_eq!(reported.start, 16);
+        assert_eq!(reported.len, 32);
+        assert_eq!(reported.pid, 2);
+        // A range the holder does not cover is free.
+        assert_eq!(
+            h.fs_lock_query(
+                &ctx,
+                asker,
+                LockMode::Exclusive,
+                LockRange::new(64, 8).expect("range"),
+                out,
+                LockConflict::WIRE_LEN,
+            ),
+            Ok(0)
+        );
+        // A buffer too small to hold the whole record fails closed rather
+        // than reporting part of it.
+        assert_eq!(
+            h.fs_lock_query(
+                &ctx,
+                asker,
+                LockMode::Shared,
+                LockRange::new(24, 8).expect("range"),
+                out,
+                LockConflict::WIRE_LEN - 1,
+            ),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(h.fs_close(&ctx, holder), Ok(0));
+    }
+
     fn file_map_fixture(
         read_data: Vec<u8>,
     ) -> (

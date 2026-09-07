@@ -1547,6 +1547,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-flock"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-cmdres",
+ "tairix-help",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-font"
 version = "0.0.0"
 dependencies = [

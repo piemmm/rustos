@@ -80,6 +80,16 @@ pub enum LimitKind {
     /// kernel-stack arena for everyone else; live usage is the process's
     /// current thread count.
     Threads = 5,
+    /// Maximum number of advisory byte-range file-lock records the process
+    /// may hold live across every file (`plans/FILELOCK.md`).
+    ///
+    /// A lock is kernel memory a process can ask for in unbounded quantity:
+    /// each partial unlock of a held range splits one record into two, so a
+    /// loop can manufacture records without ever locking a new byte. The
+    /// bound is what stops one process's coordination state exhausting the
+    /// kernel heap for every other principal; live usage is its current
+    /// record count.
+    FileLocks = 6,
 }
 
 impl LimitKind {
@@ -87,7 +97,7 @@ impl LimitKind {
     ///
     /// Equals one past the largest discriminant; a per-task limit array is
     /// sized by this constant so adding a variant grows the storage in step.
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
 
     /// Every [`LimitKind`] in discriminant order.
     ///
@@ -101,6 +111,7 @@ impl LimitKind {
         Self::StackBytes,
         Self::PinnedMemoryBytes,
         Self::Threads,
+        Self::FileLocks,
     ];
 
     /// Every [`LimitKind`] in discriminant order, paired with its canonical
@@ -117,6 +128,7 @@ impl LimitKind {
         (Self::StackBytes, "stack-bytes"),
         (Self::PinnedMemoryBytes, "pinned-memory-bytes"),
         (Self::Threads, "threads"),
+        (Self::FileLocks, "file-locks"),
     ];
 
     /// Raw on-wire discriminant.
@@ -140,6 +152,7 @@ impl LimitKind {
             3 => Ok(Self::StackBytes),
             4 => Ok(Self::PinnedMemoryBytes),
             5 => Ok(Self::Threads),
+            6 => Ok(Self::FileLocks),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -288,7 +301,8 @@ mod tests {
         assert_eq!(LimitKind::StackBytes.as_u32(), 3);
         assert_eq!(LimitKind::PinnedMemoryBytes.as_u32(), 4);
         assert_eq!(LimitKind::Threads.as_u32(), 5);
-        assert_eq!(LimitKind::COUNT, 6);
+        assert_eq!(LimitKind::FileLocks.as_u32(), 6);
+        assert_eq!(LimitKind::COUNT, 7);
     }
 
     #[test]

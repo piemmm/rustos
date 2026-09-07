@@ -60,13 +60,48 @@ pub const DEFAULT_STACK_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 /// than a fraction of the machine from pressure management — the
 /// capability gates *who* may pin, this bounds *how much*. The boot path
 /// installs the derived bound as the per-boot default limit set
-/// ([`LimitSet::with_pinned_default`]), so every task inherits it through
+/// ([`LimitSet::with_derived_defaults`]), so every task inherits it through
 /// the ordinary never-widen intersection and `ulimit`/`rlimit_get`
 /// report it honestly; raising it past the derived hard bound takes
 /// `CAP_RLIMIT_RAISE` like any other hard raise.
 #[must_use]
 pub const fn default_pinned_limit_bytes(installed_memory_bytes: u64) -> u64 {
     installed_memory_bytes / 8
+}
+
+/// The smallest `LimitKind::FileLocks` bound the derived policy will hand
+/// out, so even the smallest board leaves room for real coordination
+/// between a handful of participants rather than a bound nothing fits in.
+const MIN_FILE_LOCK_RECORDS: u64 = 256;
+
+/// The default `LimitKind::FileLocks` policy: how many advisory byte-range
+/// lock records one process may hold on a machine with
+/// `installed_memory_bytes` of discovered RAM.
+///
+/// A lock record is kernel heap a process asks for, and it can ask without
+/// locking a new byte — unlocking the middle of a held range splits one
+/// record into two — so an unbounded default is how one process exhausts
+/// the kernel heap for every other principal. Sized from the discovered
+/// hardware rather than a hard-wired ceiling: one record per 64 KiB of RAM
+/// keeps the worst-case per-process footprint near a thousandth of memory
+/// while still admitting the thousands of row-granularity locks a database
+/// legitimately holds (16384 on a 1 GiB board), and a small board scales
+/// down to a documented floor (256 records) instead of inheriting a figure
+/// it cannot afford.
+///
+/// The boot path installs the derived bound as the per-boot default
+/// ([`LimitSet::with_derived_defaults`]), so every task inherits it through
+/// the ordinary never-widen intersection, `ulimit` reports it honestly, and
+/// raising it past the derived hard bound takes `CAP_RLIMIT_RAISE` like any
+/// other hard raise.
+#[must_use]
+pub const fn default_file_lock_records(installed_memory_bytes: u64) -> u64 {
+    let derived = installed_memory_bytes / (64 * 1024);
+    if derived < MIN_FILE_LOCK_RECORDS {
+        MIN_FILE_LOCK_RECORDS
+    } else {
+        derived
+    }
 }
 
 /// One task's effective resource limits: a [`ResourceLimit`] for every
@@ -88,9 +123,9 @@ impl LimitSet {
     ///
     /// The *operative* per-boot default is the registry-held set
     /// ([`crate::aspace::AddressSpaceRegistry::default_limits`]), which the
-    /// boot path derives from discovered hardware (today: the pinned-memory
-    /// bound via [`Self::with_pinned_default`]) and which falls back to
-    /// this constant wherever no derivation applies.
+    /// boot path derives from discovered hardware (the pinned-memory and
+    /// file-lock bounds via [`Self::with_derived_defaults`]) and which falls
+    /// back to this constant wherever no derivation applies.
     ///
     /// Every resource except the stack is [`ResourceLimit::UNLIMITED`]: L2
     /// imposes no `rlimit` ceiling of its own there, leaving each capacity
@@ -109,20 +144,23 @@ impl LimitSet {
         Self { limits }
     };
 
-    /// The per-boot default set: [`Self::DEFAULT`] with the
-    /// `PinnedMemoryBytes` bound set to `pinned_bytes` (soft and hard).
+    /// The per-boot default set: [`Self::DEFAULT`] with every bound the boot
+    /// path derives from discovered hardware written in (soft and hard).
     ///
-    /// Built once at boot from the discovered installed-memory total
-    /// ([`default_pinned_limit_bytes`]) and installed as the registry
-    /// default, so every task — including inheritance's never-widen
-    /// intersection — runs under the derived bound without a second code
-    /// path.
+    /// Built once at boot ([`default_pinned_limit_bytes`],
+    /// [`default_file_lock_records`]) and installed as the registry default,
+    /// so every task — including inheritance's never-widen intersection —
+    /// runs under the derived bounds without a second code path.
     #[must_use]
-    pub const fn with_pinned_default(pinned_bytes: u64) -> Self {
+    pub const fn with_derived_defaults(pinned_bytes: u64, file_lock_records: u64) -> Self {
         let mut out = Self::DEFAULT;
         out.limits[LimitKind::PinnedMemoryBytes.as_u32() as usize] = ResourceLimit {
             soft: pinned_bytes,
             hard: pinned_bytes,
+        };
+        out.limits[LimitKind::FileLocks.as_u32() as usize] = ResourceLimit {
+            soft: file_lock_records,
+            hard: file_lock_records,
         };
         out
     }
@@ -204,11 +242,14 @@ pub fn authorize_set(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize_set, default_pinned_limit_bytes, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
+    use super::{
+        authorize_set, default_file_lock_records, default_pinned_limit_bytes, LimitSet,
+        DEFAULT_STACK_LIMIT_BYTES, MIN_FILE_LOCK_RECORDS,
+    };
     use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
     #[test]
-    fn pinned_default_policy_scales_with_discovered_memory() {
+    fn the_derived_default_policies_scale_with_discovered_memory() {
         // One eighth of installed RAM, derived, never a hard-wired scalar:
         // a small board still fits a monitor-scale pin, a large machine
         // scales up, and zero (unknown) RAM derives a zero bound the boot
@@ -217,11 +258,21 @@ mod tests {
         assert_eq!(default_pinned_limit_bytes(64 << 30), 8 << 30);
         assert_eq!(default_pinned_limit_bytes(0), 0);
 
-        let set = LimitSet::with_pinned_default(128 << 20);
+        // One record per 64 KiB of RAM, with a floor so the smallest board
+        // still leaves room for real coordination.
+        assert_eq!(default_file_lock_records(1 << 30), 16 << 10);
+        assert_eq!(default_file_lock_records(16 << 20), MIN_FILE_LOCK_RECORDS);
+        assert_eq!(default_file_lock_records(0), MIN_FILE_LOCK_RECORDS);
+
+        let set = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
         let pinned = set.get(LimitKind::PinnedMemoryBytes);
         assert_eq!(pinned.soft, 128 << 20);
         assert_eq!(pinned.hard, 128 << 20);
         assert!(pinned.is_well_formed());
+        let locks = set.get(LimitKind::FileLocks);
+        assert_eq!(locks.soft, 16 << 10);
+        assert_eq!(locks.hard, 16 << 10);
+        assert!(locks.is_well_formed());
         // Every other kind keeps the compile-time floor.
         assert_eq!(
             set.get(LimitKind::StackBytes),
@@ -304,7 +355,7 @@ mod tests {
         // A parent with no pinned bound of its own is capped by the
         // per-boot derived default; a parent already tighter keeps its
         // tighter bound — inheritance never widens either way.
-        let boot_default = LimitSet::with_pinned_default(128 << 20);
+        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
         let child = LimitSet::inherit(&LimitSet::DEFAULT, &boot_default);
         assert_eq!(
             child.get(LimitKind::PinnedMemoryBytes),

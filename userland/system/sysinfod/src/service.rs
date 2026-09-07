@@ -1709,6 +1709,11 @@ mod tests {
                     ResourceLimit::new(16, 64).unwrap(),
                     1,
                 ),
+                ResourceLimitRecord::new(
+                    LimitKind::FileLocks,
+                    ResourceLimit::new(32, 128).unwrap(),
+                    5,
+                ),
             ])
         }
     }

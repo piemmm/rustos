@@ -74,6 +74,7 @@ use tairix_collections::{RangeError, RangeKey, RangeMap};
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
 use tairix_kernel_sec::{ProcessId, TaskId};
 
+use crate::filelock::OwnerId;
 use crate::pipe::PipeEnd;
 use crate::pty::{PtyMasterEnd, PtySlaveEnd};
 use crate::resource::ResourceBacking;
@@ -616,35 +617,69 @@ enum ReadStreamEnd<'a> {
     PtySlave(&'a PtySlaveEnd),
 }
 
+/// The state shared by every descriptor on one *open file description*: the
+/// sequential-stream position and the advisory-lock owner identity.
+///
+/// Held behind an `Arc`, so a descriptor cloned from another (a
+/// `stream_read`/`stream_write` caller's snapshot, a spawn wiring a child
+/// onto a parent descriptor) shares one of these rather than copying it.
+/// That is what makes two wired sinks interleave at one position instead of
+/// overwriting each other, and what makes a duplicated or inherited handle
+/// share its locks rather than fight them.
+#[derive(Debug)]
+pub struct Description {
+    /// Bytes from the start, advanced by the sequential stream operations
+    /// for a path-backed entry. Positional `fs_read`/`fs_write` never touch
+    /// it; pipe and resource backings have no position and ignore it.
+    cursor: AtomicU64,
+    /// This description's advisory-lock identity. Minted eagerly so a lock
+    /// request needs no allocation and a conflict report can name the
+    /// owner, and never reused, so a reclaimed description cannot inherit a
+    /// dead one's locks.
+    lock_owner: OwnerId,
+}
+
+/// Releasing the last descriptor on a description releases the locks it
+/// held — the guarantee that a process cannot leave a file locked by
+/// exiting, however it exits.
+///
+/// The registry collects the waiters under its own lock and releases it
+/// before this wakes them, so the scheduler's locks are never taken while
+/// the lock registry's is held. Waking from a drop that runs under the
+/// address-space registry's write lock is the discipline a closing pipe end
+/// already follows.
+impl Drop for Description {
+    fn drop(&mut self) {
+        if !crate::filelock::locks_present() {
+            return;
+        }
+        for wakes in crate::filelock::release_owner(self.lock_owner) {
+            if let Some(key) = wakes.key {
+                crate::waitq::file_lock_wake(WakeKey::new(key), &wakes.tasks);
+            }
+        }
+    }
+}
+
 /// One open descriptor: what it resolves to and the [`OpenFlags`] it was
 /// opened with.
 ///
 /// The flags fix the access the handle permits — a read against a handle
 /// opened without [`OpenFlags::READ`], or a write without
 /// [`OpenFlags::WRITE`], fails closed without ever reaching the backing.
-///
-/// Entries cloned from one another (a `stream_read`/`stream_write` caller's
-/// snapshot, or a spawn wiring a child onto a parent descriptor) share one
-/// *open-file description*: the [`Self::cursor`] the sequential stream
-/// operations advance is one `Arc`'d counter, so two wired sinks on the
-/// same description interleave their output at one position (the POSIX
-/// dup semantics) instead of silently overwriting each other.
 #[derive(Clone, Debug)]
 pub struct OpenFile {
     /// What the descriptor resolves to.
     pub backing: OpenBacking,
     /// The access/behaviour flags the descriptor was opened with.
     pub flags: OpenFlags,
-    /// The shared sequential-stream position (bytes from the start) the
-    /// `stream_read`/`stream_write` handlers advance for a path-backed
-    /// entry. Positional `fs_read`/`fs_write` never touch it; pipe and
-    /// resource backings have no position and ignore it.
-    cursor: Arc<AtomicU64>,
+    /// The open file description this descriptor is one handle on.
+    description: Arc<Description>,
 }
 
 /// Two entries are equal when they name the same backing with the same
-/// flags. The cursor is deliberately not part of equality: it is mutable
-/// per-description state, not part of what the descriptor *is*.
+/// flags. The description is deliberately not part of equality: it is
+/// mutable per-description state, not part of what the descriptor *is*.
 impl PartialEq for OpenFile {
     fn eq(&self, other: &Self) -> bool {
         self.backing == other.backing && self.flags == other.flags
@@ -654,14 +689,17 @@ impl PartialEq for OpenFile {
 impl Eq for OpenFile {}
 
 impl OpenFile {
-    /// A fresh entry over `backing` with `flags`, its stream cursor at the
-    /// start.
+    /// A fresh entry over `backing` with `flags`: a new open file
+    /// description, its stream cursor at the start and its own lock owner.
     #[must_use]
     pub fn new(backing: OpenBacking, flags: OpenFlags) -> Self {
         Self {
             backing,
             flags,
-            cursor: Arc::new(AtomicU64::new(0)),
+            description: Arc::new(Description {
+                cursor: AtomicU64::new(0),
+                lock_owner: crate::filelock::mint_owner(),
+            }),
         }
     }
 
@@ -696,14 +734,21 @@ impl OpenFile {
     /// The description's current sequential-stream position.
     #[must_use]
     pub fn cursor(&self) -> u64 {
-        self.cursor.load(Ordering::Acquire)
+        self.description.cursor.load(Ordering::Acquire)
     }
 
     /// Advance the description's stream position by `n` bytes. Shared by
     /// every clone of the description, so dup'd sinks append at one
     /// position.
     pub fn advance_cursor(&self, n: u64) {
-        self.cursor.fetch_add(n, Ordering::AcqRel);
+        self.description.cursor.fetch_add(n, Ordering::AcqRel);
+    }
+
+    /// This descriptor's advisory-lock owner: the identity its locks belong
+    /// to, shared with every other descriptor on the same description.
+    #[must_use]
+    pub fn lock_owner(&self) -> OwnerId {
+        self.description.lock_owner
     }
 
     /// The absolute filesystem path this descriptor resolves to **under the
@@ -2732,7 +2777,7 @@ mod tests {
     #[test]
     fn set_default_limits_feeds_the_fallback_and_set_limit_base() {
         let mut reg = AddressSpaceRegistry::new();
-        let boot_default = LimitSet::with_pinned_default(128 << 20);
+        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
         reg.set_default_limits(boot_default);
         // An unestablished task resolves to the per-boot default …
         assert_eq!(reg.limits(ProcessId(9)), boot_default);
@@ -3311,6 +3356,24 @@ mod tests {
         let fresh = OpenFile::new(OpenBacking::Path(String::from("/log")), OpenFlags::WRITE);
         assert_eq!(fresh.cursor(), 0);
         assert_eq!(fresh, entry, "equality names the backing, not the cursor");
+    }
+
+    #[test]
+    fn cloned_entries_share_one_lock_owner_and_a_fresh_open_does_not() {
+        let entry = OpenFile::new(OpenBacking::Path(String::from("/db")), OpenFlags::WRITE);
+        let dup = entry.clone();
+        assert_eq!(
+            entry.lock_owner(),
+            dup.lock_owner(),
+            "a duplicated or spawn-inherited handle shares the description's \
+             locks rather than fighting them"
+        );
+        let fresh = OpenFile::new(OpenBacking::Path(String::from("/db")), OpenFlags::WRITE);
+        assert_ne!(
+            entry.lock_owner(),
+            fresh.lock_owner(),
+            "a second open of the same file is a distinct owner that conflicts"
+        );
     }
 
     // --- mapped anonymous-memory accounting (the AddressSpaceBytes limit) --

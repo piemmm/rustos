@@ -911,6 +911,7 @@ mod tests {
                 "elsh",
                 "false",
                 "files",
+                "flock",
                 "fontd",
                 "fstree",
                 "greeter",

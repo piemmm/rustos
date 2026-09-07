@@ -1320,17 +1320,27 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   slow guest also keeps emitting; 210 s of *total silence* with the PC in the
   dispatch loop is no forward progress at all. `soak.sh`'s `nice` split
   already keeps the timed matrix off the throughput soaks' CPU.
-  **Likely class: a lost wake-up**, i.e. D84's signature (every core idle in
-  the dispatch loop) rather than D13's (an IRQ-masked spin on a
-  non-interrupt-safe lock, which would show a *hard lockup*, not idleness).
-  Unproven either way.
-  **Blocked on the all-core state dump** the harness writes beside the serial
-  log and names in its failure message. It landed in `CARGO_TARGET_DIR`,
-  which no workflow uploaded and the next run's clean wiped — so the one
-  artefact that distinguishes "idle" from "wedged" was discarded before
-  anyone read the failure. `ci_collect_qemu_artefacts` (`tools/ci/lib.sh`,
-  called from `soak.sh` and `ci.yml`) now retains it; the next occurrence is
-  diagnosable. Read `plans/WATCHDOG.md` and D13/D84 first.
+  **The all-core dump now exists, and it argues against a lost wake-up.** A
+  `cargo xtask ci` occurrence (8 QEMU jobs in flight, 4-vcpu guest, guest
+  silent for its whole 300 s inactivity budget) dumped **all four cores in
+  `EL0t`** at one `PC`, floating-point state live — user code running, not
+  idle. That is the opposite of D84's signature (every core idle in the
+  dispatch loop), which the earlier `run_dispatch_loop` sample had suggested,
+  and it is not D13's either (an IRQ-masked spin on a non-interrupt-safe lock
+  shows a hard lockup). The serial stops after the `stress --cpu 10` workers
+  are spawned and before the scripted `sysmon` can render.
+  **So the live hypothesis is starvation of the controller/shell, not a lost
+  wake-up**: 10 CPU-bound workers issuing no syscalls occupy all 4 vcpus, and
+  under host oversubscription the guest gets too little real CPU for the
+  preemption tick to hand the shell enough slices to answer. That makes it
+  kin to D113's suspicion that the QEMU admission control weights jobs by
+  vcpu alone, with no memory or host-load term, while a full fan-out
+  over-commits the host.
+  **Not yet proven, and not to be closed as load.** The run completes in
+  132.2 s alone (against the 133 s baseline above), so per-guest cost has not
+  regressed; what is missing is a measurement of the guest's *actual* CPU
+  share during a failing fan-out, which would separate "starved" from
+  "wedged" outright. Read `plans/WATCHDOG.md` and D13/D84 first.
 - **D113 — `netstack-bond-qemu-aarch64` guest exits before its readiness
   marker.** Same nightly run: `qemu status -1` with "monitor command script
   incomplete: a command's readiness marker was not seen before the guest
