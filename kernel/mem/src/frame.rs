@@ -22,14 +22,14 @@
 //! # No dependency on the kernel heap
 //!
 //! The per-order free lists are **intrusive**: their links live in the
-//! `links`/`blk_order` arrays this allocator owns, both sized once from
+//! `links`/`tags` arrays this allocator owns, both sized once from
 //! the frame count at construction. Allocation and freeing therefore
 //! touch no other allocator — critically, they never call the global
 //! kernel heap. This is what lets the kernel heap grow by drawing frames
 //! from here without re-entering itself (a heap that fed itself through
 //! a page allocator whose free lists allocated *from that heap* would
 //! deadlock under its own lock). The only heap use is the one-time
-//! `links`/`blk_order`/`bitmap` construction, before the heap is under
+//! `links`/`tags`/`bitmap` construction, before the heap is under
 //! load. Each free block occupies at most one node (its start frame),
 //! so the per-frame overhead is a fixed `2 * usize + 1` byte — far
 //! leaner than a per-frame descriptor, and proportional to the RAM the
@@ -57,6 +57,10 @@ use tairix_sync::SpinLock;
 
 use crate::bootinfo::{BootMemoryMap, RegionKind};
 use crate::error::AllocError;
+
+/// The one physical-RAM class vocabulary, shared with the reporting ABI so a
+/// charged class and a reported class can never be spelled differently.
+pub use tairix_abi::{MemoryClass, MEMORY_CLASS_COUNT};
 
 /// Page-frame size in bytes and its bit-shift: the one system granule, shared
 /// with the mapping ABI and both heaps.
@@ -144,10 +148,73 @@ impl Frame {
 // State (private)
 // ---------------------------------------------------------------------------
 
-/// Sentinel for "this frame is not a registered free-block head" in
-/// [`FrameAllocatorState::blk_order`]. A real order is `0..=MAX_ORDER`
-/// (≤ 13), so `0xFF` never collides.
-const NOT_A_HEAD: u8 = 0xFF;
+/// Nibble sentinel for "absent": not a registered free-block head in the low
+/// nibble, no charged class in the high one. A real order is `0..=MAX_ORDER`
+/// (≤ 13) and a real class `0..6`, so `0xF` collides with neither.
+const NIBBLE_NONE: u8 = 0xF;
+
+/// One frame's bookkeeping byte: the free-list order it heads while free, and
+/// the [`MemoryClass`] it is charged to while allocated.
+///
+/// The two never coexist — a frame is either part of a free block or handed
+/// out — so they share the byte the allocator already loads and stores on
+/// every allocate and free. Packing them costs no extra memory, where a
+/// parallel per-frame class array would.
+///
+/// The order is meaningful only on a free block's *head*; the class is stamped
+/// on **every** frame of an allocated block, because that is the granularity a
+/// free happens at: the kernel window releases a multi-frame region one page
+/// at a time as its page tables give the frames back, so a head-only charge
+/// could not tell which class an interior frame belonged to. Carrying it per
+/// frame is what makes a free self-describing — no caller names a class to
+/// give memory back, so none can mis-attribute one.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct FrameTag(u8);
+
+impl FrameTag {
+    /// Neither a registered free head nor a charged allocation: an interior
+    /// frame of a block, or one not yet populated.
+    const UNTRACKED: Self = Self(NIBBLE_NONE << 4 | NIBBLE_NONE);
+
+    /// The head of a free block registered at `order`.
+    ///
+    /// `order` is `0..=MAX_ORDER` by construction at every call site; a value
+    /// past the nibble would alias the sentinel, so it is masked rather than
+    /// truncated into a different order.
+    fn free_head(order: u32) -> Self {
+        let low = u8::try_from(order).unwrap_or(NIBBLE_NONE) & NIBBLE_NONE;
+        Self(NIBBLE_NONE << 4 | low)
+    }
+
+    /// An allocated block's head, charged to `class`.
+    fn allocated(class: MemoryClass) -> Self {
+        // `MEMORY_CLASS_COUNT` is 6, so every discriminant fits the nibble
+        // below the sentinel.
+        let high = u8::try_from(class.index()).unwrap_or(NIBBLE_NONE) & NIBBLE_NONE;
+        Self(high << 4 | NIBBLE_NONE)
+    }
+
+    /// The order this frame heads a free block at, or `None` when it heads
+    /// none.
+    fn free_order(self) -> Option<u32> {
+        let low = self.0 & NIBBLE_NONE;
+        (low != NIBBLE_NONE).then_some(u32::from(low))
+    }
+
+    /// The class this frame's block is charged to, or `None` when it is not a
+    /// charged allocation head.
+    fn class(self) -> Option<MemoryClass> {
+        let high = usize::from(self.0 >> 4);
+        MemoryClass::ALL.get(high).copied()
+    }
+}
+
+// The largest order must stay clear of the nibble sentinel, or a free head at
+// `MAX_ORDER` would read back as "not a head".
+const _: () = assert!(MAX_ORDER < NIBBLE_NONE as u32);
+// Likewise every class discriminant, or the last class would read back as
+// "uncharged" and its free would find no counter to discharge.
+const _: () = assert!(MEMORY_CLASS_COUNT < NIBBLE_NONE as usize);
 
 /// Internal, lock-free state of the frame allocator.
 ///
@@ -157,7 +224,7 @@ const NOT_A_HEAD: u8 = 0xFF;
 ///
 /// The per-order free lists are intrusive (see the module docs): a heap
 /// allocation never occurs on the allocate/free paths, only on the
-/// one-time construction of `bitmap`/`links`/`blk_order`.
+/// one-time construction of `bitmap`/`links`/`tags`.
 struct FrameAllocatorState {
     /// Address-space extent, in frames: the frame count from physical zero
     /// to the highest mapped address. Reported by [`FrameAllocator::total_frames`]
@@ -166,7 +233,7 @@ struct FrameAllocatorState {
     /// (`span`) and indexed from `base_frame`.
     total_frames: usize,
     /// Lowest usable frame index — the base every per-frame array
-    /// (`bitmap`, `links`, `blk_order`) is indexed from. A frame `f` maps to
+    /// (`bitmap`, `links`, `tags`) is indexed from. A frame `f` maps to
     /// slot `f - base_frame`. Sizing the arrays to the *usable* frame span
     /// rather than to the whole address-space extent keeps the per-frame
     /// bookkeeping proportional to the RAM the machine actually has, so a
@@ -185,12 +252,11 @@ struct FrameAllocatorState {
     /// by `frame - base_frame`). Only a free block's start frame holds live
     /// links; every other frame's link reads back unlinked.
     links: Vec<Link>,
-    /// The order a free block starting at this frame is registered at, or
-    /// [`NOT_A_HEAD`] (indexed by `frame - base_frame`). One store carries
-    /// every order's list, so it is this that says *which* list a registered
-    /// head is on — and so lets an arbitrary buddy be found and unlinked in
-    /// O(1) without scanning.
-    blk_order: Vec<u8>,
+    /// Per-frame bookkeeping byte, indexed by `frame - base_frame`: which
+    /// free list a registered head is on (so an arbitrary buddy is found and
+    /// unlinked in O(1) without scanning), or which [`MemoryClass`] an
+    /// allocated block's head is charged to.
+    tags: Vec<FrameTag>,
     /// Free blocks of each order, keyed by slot (`frame - base_frame`).
     free_lists: [IntrusiveList; MAX_ORDER as usize + 1],
     /// Cached count of free frames (sum over the free lists of 2^order).
@@ -223,6 +289,14 @@ struct FrameAllocatorState {
     /// ([`FrameAllocator::alloc_user_committed`]) or its reservation is
     /// released ([`FrameAllocator::uncommit`]).
     committed_frames: usize,
+    /// Frames charged to each [`MemoryClass`], indexed by discriminant.
+    ///
+    /// Maintained inside the lock the allocate/free paths already hold, so
+    /// the partition costs one `usize` add per call and no second lock — and
+    /// a snapshot reads the whole and its parts from one instant, which is
+    /// what makes `usable == free + Σ class` true of the figures a reader
+    /// sees rather than only of the allocator's internals.
+    class_frames: [FrameCount; MEMORY_CLASS_COUNT],
 }
 
 impl FrameAllocatorState {
@@ -309,11 +383,7 @@ impl FrameAllocatorState {
             .ok_or(AllocError::SizeUnsupported)?
             .push_front(&mut self.links[..], slot)
             .map_err(|_| AllocError::InvariantViolation)?;
-        // `order <= MAX_ORDER` (13) by construction, so it fits a `u8`.
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            self.blk_order[slot] = order as u8;
-        }
+        self.tags[slot] = FrameTag::free_head(order);
         self.free_frames += 1usize << order;
         Ok(())
     }
@@ -336,7 +406,7 @@ impl FrameAllocatorState {
         let Some(slot) = start.checked_sub(self.base_frame) else {
             return Ok(false);
         };
-        if self.blk_order.get(slot).copied().map(u32::from) != Some(order) {
+        if self.tags.get(slot).copied().and_then(FrameTag::free_order) != Some(order) {
             return Ok(false);
         }
         self.free_lists
@@ -344,7 +414,7 @@ impl FrameAllocatorState {
             .ok_or(AllocError::SizeUnsupported)?
             .unlink(&mut self.links[..], slot)
             .map_err(|_| AllocError::InvariantViolation)?;
-        self.blk_order[slot] = NOT_A_HEAD;
+        self.tags[slot] = FrameTag::UNTRACKED;
         self.free_frames -= 1usize << order;
         Ok(true)
     }
@@ -375,7 +445,7 @@ impl FrameAllocatorState {
         Ok(())
     }
 
-    fn alloc_order(&mut self, order: u32) -> Result<usize, AllocError> {
+    fn alloc_order(&mut self, class: MemoryClass, order: u32) -> Result<usize, AllocError> {
         if order > MAX_ORDER {
             return Err(AllocError::SizeUnsupported);
         }
@@ -406,7 +476,14 @@ impl FrameAllocatorState {
             self.add_free_block(buddy, cur)?;
         }
 
-        self.mark_range_used(start, 1usize << order);
+        let n = 1usize << order;
+        self.mark_range_used(start, n);
+        // Charge every frame of the block, so a free of any part of it reads
+        // its own charge back rather than trusting a caller to restate one.
+        // A contiguous fill, on the same frames `mark_range_used` just walked.
+        let rel = start - self.base_frame;
+        self.tags[rel..rel + n].fill(FrameTag::allocated(class));
+        self.class_frames[class.index()] += n;
         Ok(start)
     }
 
@@ -428,15 +505,26 @@ impl FrameAllocatorState {
         if start & (n - 1) != 0 {
             return Err(AllocError::InvariantViolation);
         }
-        // Every frame in the block must currently be allocated (bit=1)
-        // *and* must not be reserved. We can't tell the two apart from
-        // the bitmap alone, but our public free path only sees frames
-        // returned by a prior alloc, which is necessarily not reserved.
+        // Every frame must be allocated (bit=1) and charged to the same
+        // class, which an allocated block's frames always are. The bitmap
+        // cannot tell an allocated frame from a reserved one, but the public
+        // free path only ever sees frames a prior alloc handed out. Both
+        // checks run over the whole range before anything is mutated, so an
+        // untagged or mixed-class range — bookkeeping that has diverged — is
+        // refused like a double-free rather than drifting the class totals.
+        let Some(class) = self.tags[rel].class() else {
+            return Err(AllocError::InvariantViolation);
+        };
         for i in start..start + n {
             if !self.bit(i) {
                 return Err(AllocError::InvariantViolation);
             }
+            if self.tags[i - self.base_frame].class() != Some(class) {
+                return Err(AllocError::InvariantViolation);
+            }
         }
+        self.class_frames[class.index()] = self.class_frames[class.index()].saturating_sub(n);
+        self.tags[rel..rel + n].fill(FrameTag::UNTRACKED);
         for i in start..start + n {
             self.clear_bit(i);
         }
@@ -478,6 +566,31 @@ impl FrameAllocatorState {
 // ---------------------------------------------------------------------------
 // Public FrameAllocator
 // ---------------------------------------------------------------------------
+
+/// Every physical-RAM figure the allocator accounts, taken at one instant.
+///
+/// `usable == free + Σ class` holds of a snapshot by construction, which is
+/// what a reader needs to draw where the RAM went as a partition rather than
+/// as four independently-sampled numbers that need not add up.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct FrameSnapshot {
+    /// Frames of usable RAM the allocator manages, free or handed out.
+    pub usable: FrameCount,
+    /// Frames still available.
+    pub free: FrameCount,
+    /// Frames promised to committed-but-unbacked user pages.
+    pub committed: FrameCount,
+    /// Frames charged to each [`MemoryClass`], indexed by discriminant.
+    pub class: [FrameCount; MEMORY_CLASS_COUNT],
+}
+
+impl FrameSnapshot {
+    /// Frames charged across every class — the RAM genuinely handed out.
+    #[must_use]
+    pub fn charged(&self) -> FrameCount {
+        self.class.iter().sum()
+    }
+}
 
 /// Buddy + bitmap physical frame allocator.
 ///
@@ -612,19 +725,20 @@ impl FrameAllocator {
         let words = span.div_ceil(64);
         let bitmap = vec![u64::MAX; words];
         let links = vec![Link::UNLINKED; span];
-        let blk_order = vec![NOT_A_HEAD; span];
+        let tags = vec![FrameTag::UNTRACKED; span];
         let mut state = FrameAllocatorState {
             total_frames,
             base_frame,
             span,
             bitmap,
             links,
-            blk_order,
+            tags,
             free_lists: [const { IntrusiveList::new() }; MAX_ORDER as usize + 1],
             free_frames: 0,
             usable_frames: 0,
             reserve_frames: 0,
             committed_frames: 0,
+            class_frames: [0; MEMORY_CLASS_COUNT],
         };
 
         // 5. Build per-frame state from the collected runs: clear the
@@ -649,16 +763,17 @@ impl FrameAllocator {
         })
     }
 
-    /// Allocate a single frame.
+    /// Allocate a single frame, charged to `class`.
     ///
     /// # Errors
     ///
     /// [`AllocError::OutOfMemory`] if no frame is available.
-    pub fn alloc(&self) -> Result<Frame, AllocError> {
-        self.alloc_order(0)
+    pub fn alloc(&self, class: MemoryClass) -> Result<Frame, AllocError> {
+        self.alloc_order(class, 0)
     }
 
-    /// Allocate `2^order` contiguous frames, aligned to that boundary.
+    /// Allocate `2^order` contiguous frames, aligned to that boundary and
+    /// charged to `class`.
     ///
     /// This is the **kernel-internal** path: it draws the whole free pool,
     /// including the reserve, so the kernel can always make progress (grow
@@ -670,24 +785,25 @@ impl FrameAllocator {
     /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
     /// - [`AllocError::OutOfMemory`] if no block of any order ≥ `order`
     ///   is available.
-    pub fn alloc_order(&self, order: u32) -> Result<Frame, AllocError> {
+    pub fn alloc_order(&self, class: MemoryClass, order: u32) -> Result<Frame, AllocError> {
         let mut g = self.inner.lock();
-        g.alloc_order(order).map(Frame)
+        g.alloc_order(class, order).map(Frame)
     }
 
-    /// Allocate a single frame on behalf of **userland** (reserve-gated).
+    /// Allocate a single frame on behalf of **userland** (reserve-gated),
+    /// charged to `class`.
     ///
     /// # Errors
     ///
     /// [`AllocError::OutOfMemory`] if satisfying it would drop the free
     /// pool to or below the kernel reserve, or if no frame is available.
-    pub fn alloc_user(&self) -> Result<Frame, AllocError> {
-        self.alloc_order_user(0)
+    pub fn alloc_user(&self, class: MemoryClass) -> Result<Frame, AllocError> {
+        self.alloc_order_user(class, 0)
     }
 
     /// Allocate `2^order` contiguous frames on behalf of **userland**,
-    /// refusing when the draw would drop the free pool to or below the
-    /// kernel reserve ([`RESERVE_DIVISOR`]).
+    /// charged to `class`, refusing when the draw would drop the free pool
+    /// to or below the kernel reserve ([`RESERVE_DIVISOR`]).
     ///
     /// A greedy user process therefore fails closed with
     /// [`AllocError::OutOfMemory`] while the kernel still has reserved
@@ -701,7 +817,7 @@ impl FrameAllocator {
     /// - [`AllocError::SizeUnsupported`] if `order > MAX_ORDER`.
     /// - [`AllocError::OutOfMemory`] if the draw would breach the reserve,
     ///   or if no block of any order ≥ `order` is available.
-    pub fn alloc_order_user(&self, order: u32) -> Result<Frame, AllocError> {
+    pub fn alloc_order_user(&self, class: MemoryClass, order: u32) -> Result<Frame, AllocError> {
         if order > MAX_ORDER {
             return Err(AllocError::SizeUnsupported);
         }
@@ -719,7 +835,7 @@ impl FrameAllocator {
         if g.free_frames < n || g.free_frames - n <= floor {
             return Err(AllocError::OutOfMemory);
         }
-        g.alloc_order(order).map(Frame)
+        g.alloc_order(class, order).map(Frame)
     }
 
     /// Reserve physical headroom for `pages` frames of anonymous/stack user
@@ -789,6 +905,10 @@ impl FrameAllocator {
     /// commitment guarantees a frame is available, so this fails only on a
     /// genuine invariant breach.
     ///
+    /// The frame is charged to [`MemoryClass::UserAnon`] with no parameter:
+    /// the no-overcommit commitment budget covers anonymous and stack memory
+    /// only, so there is no other class a committed page could belong to.
+    ///
     /// # Errors
     ///
     /// [`AllocError::OutOfMemory`] if no frame is available — which, given a
@@ -796,7 +916,7 @@ impl FrameAllocator {
     /// violated rather than ordinary pressure; the caller still fails closed.
     pub fn alloc_user_committed(&self) -> Result<Frame, AllocError> {
         let mut g = self.inner.lock();
-        let frame = g.alloc_order(0).map(Frame)?;
+        let frame = g.alloc_order(MemoryClass::UserAnon, 0).map(Frame)?;
         g.committed_frames = g.committed_frames.saturating_sub(1);
         Ok(frame)
     }
@@ -830,7 +950,11 @@ impl FrameAllocator {
         self.inner.lock().committed_frames
     }
 
-    /// Free a frame previously returned by [`Self::alloc`].
+    /// Free a frame previously returned by [`Self::alloc`], discharging the
+    /// class it was charged to.
+    ///
+    /// The class is read from the block's own head, so no caller restates it
+    /// and none can mis-attribute one.
     ///
     /// # Errors
     ///
@@ -879,7 +1003,13 @@ impl FrameAllocator {
     /// - [`AllocError::OutOfMemory`] if the request cannot be satisfied even
     ///   after stepping down to single frames, or if the chunk-list
     ///   bookkeeping cannot be grown.
-    pub fn alloc_chunks(&self, pages: u64) -> Result<Vec<(Frame, u32)>, AllocError> {
+    ///
+    /// Every chunk is charged to `class`.
+    pub fn alloc_chunks(
+        &self,
+        class: MemoryClass,
+        pages: u64,
+    ) -> Result<Vec<(Frame, u32)>, AllocError> {
         if pages == 0 {
             return Err(AllocError::SizeUnsupported);
         }
@@ -892,7 +1022,7 @@ impl FrameAllocator {
             let fit = remaining.ilog2();
             let mut order = core::cmp::min(fit, MAX_ORDER);
             let (frame, taken) = loop {
-                match self.alloc_order(order) {
+                match self.alloc_order(class, order) {
                     Ok(frame) => break (frame, order),
                     // No block of this order is free; the pool may be
                     // fragmented, so step down one size and retry before
@@ -920,6 +1050,24 @@ impl FrameAllocator {
             remaining -= 1u64 << taken;
         }
         Ok(out)
+    }
+
+    /// Every accounting figure, read under **one** lock acquisition.
+    ///
+    /// A reporter that asked separately for the whole, the free pool and each
+    /// class would get figures from different instants, and the partition
+    /// `usable == free + Σ class` would not hold of what it printed even
+    /// though it holds of the allocator. One acquisition is what makes the
+    /// reported composition a genuine whole.
+    #[must_use]
+    pub fn snapshot(&self) -> FrameSnapshot {
+        let g = self.inner.lock();
+        FrameSnapshot {
+            usable: g.usable_frames,
+            free: g.free_frames,
+            committed: g.committed_frames,
+            class: g.class_frames,
+        }
     }
 
     /// Number of frames the allocator can still hand out.
@@ -1106,7 +1254,7 @@ mod tests {
     fn alloc_then_free_returns_same_frame() {
         let m = small_map(8);
         let a = FrameAllocator::new(&m).unwrap();
-        let f = a.alloc().unwrap();
+        let f = a.alloc(MemoryClass::Kernel).unwrap();
         assert!(a.free_frames() < 8);
         a.free(f).unwrap();
         assert_eq!(a.free_frames(), 8);
@@ -1120,8 +1268,9 @@ mod tests {
 
         // Slot 0 is the region's first frame, so the populate pass registered
         // it as a free-block head at whatever order it could place there.
-        let order = u32::from(state.blk_order[0]);
-        assert_ne!(state.blk_order[0], NOT_A_HEAD);
+        let order = state.tags[0]
+            .free_order()
+            .expect("populated as a free head");
         assert!(state.links[0].is_linked());
         let free = state.free_frames;
         let base = state.base_frame;
@@ -1143,7 +1292,7 @@ mod tests {
         // links disagree exactly as a stray write would leave them.
         let victim = state.span - 1;
         assert!(!state.links[victim].is_linked());
-        state.blk_order[victim] = 0;
+        state.tags[victim] = FrameTag::free_head(0);
         let frame = state.base_frame + victim;
         let free = state.free_frames;
 
@@ -1164,15 +1313,15 @@ mod tests {
             // now claims a different order, so no order can pop it. Before the
             // free lists refused this, the mismatch was a release-mode
             // `debug_assert` and the frame was handed out anyway.
-            let wrong = u32::from(state.blk_order[0]) + 1;
+            let wrong = state.tags[0].free_order().expect("a free head") + 1;
             assert!(wrong <= MAX_ORDER);
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                state.blk_order[0] = wrong as u8;
-            }
+            state.tags[0] = FrameTag::free_head(wrong);
         }
 
-        assert_eq!(a.alloc().err(), Some(AllocError::InvariantViolation));
+        assert_eq!(
+            a.alloc(MemoryClass::Kernel).err(),
+            Some(AllocError::InvariantViolation)
+        );
     }
 
     #[test]
@@ -1190,7 +1339,9 @@ mod tests {
         // Hand out every frame, then return two non-adjacent ones (by address)
         // so the free set is two isolated single-frame runs and everything
         // handed out is excluded.
-        let f: Vec<_> = (0..8).map(|_| a.alloc().unwrap()).collect();
+        let f: Vec<_> = (0..8)
+            .map(|_| a.alloc(MemoryClass::Kernel).unwrap())
+            .collect();
         for &k in &[1u64, 5] {
             let target = base + k * p;
             let fr = *f.iter().find(|fr| fr.start().as_u64() == target).unwrap();
@@ -1205,7 +1356,7 @@ mod tests {
     fn alloc_order_returns_aligned_block() {
         let m = small_map(16);
         let a = FrameAllocator::new(&m).unwrap();
-        let blk = a.alloc_order(3).unwrap(); // 8 frames
+        let blk = a.alloc_order(MemoryClass::Kernel, 3).unwrap(); // 8 frames
         assert_eq!(blk.0 & 7, 0);
         a.free_order(blk, 3).unwrap();
     }
@@ -1215,11 +1366,14 @@ mod tests {
         let m = small_map(4);
         let a = FrameAllocator::new(&m).unwrap();
         let mut held = Vec::new();
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             held.push(f);
         }
         assert_eq!(held.len(), 4);
-        assert_eq!(a.alloc().err(), Some(AllocError::OutOfMemory));
+        assert_eq!(
+            a.alloc(MemoryClass::Kernel).err(),
+            Some(AllocError::OutOfMemory)
+        );
         for f in held {
             a.free(f).unwrap();
         }
@@ -1231,7 +1385,7 @@ mod tests {
         let m = small_map(4);
         let a = FrameAllocator::new(&m).unwrap();
         assert_eq!(
-            a.alloc_order(MAX_ORDER + 1).err(),
+            a.alloc_order(MemoryClass::Kernel, MAX_ORDER + 1).err(),
             Some(AllocError::SizeUnsupported)
         );
     }
@@ -1245,7 +1399,10 @@ mod tests {
     fn alloc_chunks_rejects_zero() {
         let m = small_map(4);
         let a = FrameAllocator::new(&m).unwrap();
-        assert_eq!(a.alloc_chunks(0).err(), Some(AllocError::SizeUnsupported));
+        assert_eq!(
+            a.alloc_chunks(MemoryClass::Kernel, 0).err(),
+            Some(AllocError::SizeUnsupported)
+        );
     }
 
     #[test]
@@ -1254,7 +1411,7 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Four frames is one order-2 block: the common small case stays a
         // single chunk (so the USB URB-buffer path is unaffected).
-        let chunks = a.alloc_chunks(4).unwrap();
+        let chunks = a.alloc_chunks(MemoryClass::Kernel, 4).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].1, 2);
         assert_eq!(a.free_frames(), 16 - 4);
@@ -1270,7 +1427,7 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Six frames = one order-2 block (4) + one order-1 block (2), largest
         // first.
-        let chunks = a.alloc_chunks(6).unwrap();
+        let chunks = a.alloc_chunks(MemoryClass::Kernel, 6).unwrap();
         assert_eq!(chunk_frames(&chunks), 6);
         assert_eq!(chunks.iter().map(|&(_, o)| o).collect::<Vec<_>>(), [2, 1]);
         assert_eq!(a.free_frames(), 16 - 6);
@@ -1293,7 +1450,7 @@ mod tests {
         let m = small_map(total);
         let a = FrameAllocator::new(&m).unwrap();
         let want = want_pages as u64;
-        let chunks = a.alloc_chunks(want).unwrap();
+        let chunks = a.alloc_chunks(MemoryClass::Kernel, want).unwrap();
         assert!(chunks.len() >= 2, "must span multiple blocks");
         assert!(chunks.iter().all(|&(_, o)| o <= MAX_ORDER));
         assert_eq!(chunk_frames(&chunks), want);
@@ -1311,7 +1468,10 @@ mod tests {
         // Nine frames cannot be satisfied by four: the partial progress (an
         // order-2 block over the whole pool) is returned and the call fails
         // closed, leaving the pool exactly as it was found.
-        assert_eq!(a.alloc_chunks(9).err(), Some(AllocError::OutOfMemory));
+        assert_eq!(
+            a.alloc_chunks(MemoryClass::Kernel, 9).err(),
+            Some(AllocError::OutOfMemory)
+        );
         assert_eq!(a.free_frames(), 4);
     }
 
@@ -1319,7 +1479,7 @@ mod tests {
     fn double_free_detected() {
         let m = small_map(4);
         let a = FrameAllocator::new(&m).unwrap();
-        let f = a.alloc().unwrap();
+        let f = a.alloc(MemoryClass::Kernel).unwrap();
         a.free(f).unwrap();
         assert_eq!(a.free(f).err(), Some(AllocError::InvariantViolation));
     }
@@ -1363,7 +1523,7 @@ mod tests {
         });
         let a = FrameAllocator::new(&m).unwrap();
         let mut handed = Vec::new();
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             // No frame in [4,8) — nor the reserved zero page — may ever be
             // handed out.
             assert!(!(4..8).contains(&f.0), "reserved frame {} handed out", f.0);
@@ -1391,7 +1551,7 @@ mod tests {
         assert_eq!(a.usable_frames(), 7, "the zero page is not usable RAM");
         assert_eq!(a.free_frames(), 7);
         let mut handed = Vec::new();
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             assert_ne!(f.0, 0, "the zero page must never be handed out");
             handed.push(f);
         }
@@ -1432,7 +1592,7 @@ mod tests {
         assert_eq!(a.total_frames(), 1044);
         assert_eq!(a.usable_frames(), 16);
         assert_eq!(a.free_frames(), 16);
-        let f = a.alloc().unwrap();
+        let f = a.alloc(MemoryClass::Kernel).unwrap();
         assert_eq!(a.usable_frames(), 16);
         assert_eq!(a.free_frames(), 15);
         a.free(f).unwrap();
@@ -1460,8 +1620,8 @@ mod tests {
         assert_eq!(a.free_frames(), 32);
 
         // Order-2 blocks split from the population, then merge back.
-        let b0 = a.alloc_order(2).unwrap();
-        let b1 = a.alloc_order(2).unwrap();
+        let b0 = a.alloc_order(MemoryClass::Kernel, 2).unwrap();
+        let b1 = a.alloc_order(MemoryClass::Kernel, 2).unwrap();
         assert!(
             b0.0 >= base && b1.0 >= base,
             "blocks lie in the high window"
@@ -1474,7 +1634,7 @@ mod tests {
         // Drain to single frames (exercises the slot offset per frame),
         // then free them all back and coalesce to the largest block.
         let mut held = Vec::new();
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             assert!(f.0 >= base && f.0 < base + 32);
             held.push(f);
         }
@@ -1483,7 +1643,7 @@ mod tests {
             a.free(f).unwrap();
         }
         assert_eq!(a.free_frames(), 32);
-        let big = a.alloc_order(5).unwrap(); // 32 frames
+        let big = a.alloc_order(MemoryClass::Kernel, 5).unwrap(); // 32 frames
         assert_eq!(big.0, base, "the whole window coalesced back");
         a.free_order(big, 5).unwrap();
         assert_eq!(a.free_frames(), 32);
@@ -1504,15 +1664,18 @@ mod tests {
         // User commits succeed until one more would drop the free pool to or
         // below the reserve; the last success leaves exactly `reserve + 1`.
         let mut held = Vec::new();
-        while let Ok(f) = a.alloc_user() {
+        while let Ok(f) = a.alloc_user(MemoryClass::UserAnon) {
             held.push(f);
         }
         assert_eq!(a.free_frames(), reserve + 1);
-        assert_eq!(a.alloc_user().err(), Some(AllocError::OutOfMemory));
+        assert_eq!(
+            a.alloc_user(MemoryClass::UserAnon).err(),
+            Some(AllocError::OutOfMemory)
+        );
 
         // The kernel-internal path may draw into the reserve, all the way to
         // exhaustion — the kernel always keeps the ability to make progress.
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             held.push(f);
         }
         assert_eq!(a.free_frames(), 0);
@@ -1573,7 +1736,7 @@ mod tests {
         // An eager user allocation must now be refused outright: every
         // non-reserve frame is promised to a committed page.
         assert_eq!(
-            a.alloc_user().err(),
+            a.alloc_user(MemoryClass::UserAnon).err(),
             Some(AllocError::OutOfMemory),
             "an eager draw cannot dip into committed headroom"
         );
@@ -1644,11 +1807,11 @@ mod tests {
         assert!(a.total_frames() >= base);
 
         // Alloc/free still works correctly in the high window.
-        let f = a.alloc().unwrap();
+        let f = a.alloc(MemoryClass::Kernel).unwrap();
         assert!(f.0 >= base && f.0 < base + frames);
         a.free(f).unwrap();
         assert_eq!(a.free_frames(), frames);
-        let big = a.alloc_order(6).unwrap(); // 64 frames
+        let big = a.alloc_order(MemoryClass::Kernel, 6).unwrap(); // 64 frames
         assert_eq!(big.0, base, "the whole window coalesced back");
         a.free_order(big, 6).unwrap();
         assert_eq!(a.free_frames(), frames);
@@ -1667,7 +1830,7 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Drain to individual frames so every order-0 block is on the list.
         let mut frames = Vec::new();
-        while let Ok(f) = a.alloc() {
+        while let Ok(f) = a.alloc(MemoryClass::Kernel) {
             frames.push(f);
         }
         assert_eq!(frames.len(), 16);
@@ -1684,7 +1847,7 @@ mod tests {
         assert_eq!(a.free_frames(), 16);
         // Fully coalesced: the largest single block the map allows is
         // available again.
-        let big = a.alloc_order(4).unwrap();
+        let big = a.alloc_order(MemoryClass::Kernel, 4).unwrap();
         assert_eq!(big.0 & 15, 0, "order-4 block is 16-frame aligned");
         a.free_order(big, 4).unwrap();
         assert_eq!(a.free_frames(), 16);
@@ -1696,13 +1859,13 @@ mod tests {
         let a = FrameAllocator::new(&m).unwrap();
         // Take an order-2 block (4 frames). This forces a split if the
         // initial population coalesced higher.
-        let b0 = a.alloc_order(2).unwrap();
-        let b1 = a.alloc_order(2).unwrap();
+        let b0 = a.alloc_order(MemoryClass::Kernel, 2).unwrap();
+        let b1 = a.alloc_order(MemoryClass::Kernel, 2).unwrap();
         a.free_order(b0, 2).unwrap();
         a.free_order(b1, 2).unwrap();
         // Everything must merge back; we should once again be able to
         // satisfy the largest single allocation the map allows.
-        let big = a.alloc_order(4).unwrap(); // 16 frames
+        let big = a.alloc_order(MemoryClass::Kernel, 4).unwrap(); // 16 frames
         a.free_order(big, 4).unwrap();
         assert_eq!(a.free_frames(), 16);
     }
@@ -1728,7 +1891,7 @@ mod tests {
                     std::collections::HashSet::default();
                 for op in ops {
                     if op % 2 == 0 || held.is_empty() {
-                        if let Ok(f) = a.alloc() {
+                        if let Ok(f) = a.alloc(MemoryClass::Kernel) {
                             prop_assert!(seen.insert(f.0), "double alloc {}", f.0);
                             held.push(f);
                         }
@@ -1746,5 +1909,149 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+    /// Every snapshot partitions the RAM: the whole is the free pool plus the
+    /// per-class charges, at every point of an alloc/free/split/merge mix.
+    fn assert_partitions(a: &FrameAllocator, usable: FrameCount) {
+        let snap = a.snapshot();
+        assert_eq!(snap.usable, usable);
+        assert_eq!(
+            snap.free + snap.charged(),
+            snap.usable,
+            "usable must be free plus the sum of the class charges"
+        );
+    }
+
+    #[test]
+    fn the_class_partition_holds_across_alloc_free_split_and_merge() {
+        let m = small_map(32);
+        let a = FrameAllocator::new(&m).unwrap();
+        assert_partitions(&a, 32);
+
+        // An order-2 draw splits a larger block; the whole block is charged.
+        let block = a.alloc_order(MemoryClass::Dma, 2).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::Dma.index()], 4);
+        assert_partitions(&a, 32);
+
+        // Single frames of two further classes, so several counters are live
+        // at once and no class can be reading another's frames.
+        let anon = a.alloc(MemoryClass::UserAnon).unwrap();
+        let table = a.alloc(MemoryClass::PageTable).unwrap();
+        let snap = a.snapshot();
+        assert_eq!(snap.class[MemoryClass::UserAnon.index()], 1);
+        assert_eq!(snap.class[MemoryClass::PageTable.index()], 1);
+        assert_eq!(snap.class[MemoryClass::Dma.index()], 4);
+        assert_partitions(&a, 32);
+
+        // Freeing merges buddies back up; each free discharges its own class.
+        a.free(anon).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::UserAnon.index()], 0);
+        assert_partitions(&a, 32);
+        a.free_order(block, 2).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::Dma.index()], 0);
+        assert_partitions(&a, 32);
+        a.free(table).unwrap();
+        let snap = a.snapshot();
+        assert_eq!(snap.free, 32);
+        assert_eq!(snap.charged(), 0);
+    }
+
+    #[test]
+    fn a_multi_frame_block_may_be_freed_one_frame_at_a_time() {
+        // The kernel window releases a region page by page as its page tables
+        // give the frames back, so a block drawn at order 2 comes back as four
+        // order-0 frees. Each must discharge the class the block was charged
+        // to, or the partition drifts by the interior frames.
+        let m = small_map(32);
+        let a = FrameAllocator::new(&m).unwrap();
+        let block = a.alloc_order(MemoryClass::Kernel, 2).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::Kernel.index()], 4);
+        for offset in 0..4 {
+            a.free(Frame(block.0 + offset)).expect("each frame frees");
+            assert_partitions(&a, 32);
+        }
+        let snap = a.snapshot();
+        assert_eq!(snap.class[MemoryClass::Kernel.index()], 0);
+        assert_eq!(snap.free, 32);
+    }
+
+    #[test]
+    fn a_free_discharges_the_class_its_alloc_charged() {
+        // The caller names no class to give memory back, so the only thing
+        // that can decide which counter falls is the block's own tag.
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        let frame = a.alloc(MemoryClass::Compressed).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::Compressed.index()], 1);
+        a.free(frame).unwrap();
+        let snap = a.snapshot();
+        assert_eq!(snap.class[MemoryClass::Compressed.index()], 0);
+        for class in MemoryClass::ALL {
+            assert_eq!(snap.class[class.index()], 0, "{}", class.name());
+        }
+    }
+
+    #[test]
+    fn freeing_a_block_this_allocator_never_charged_is_refused() {
+        // An untagged head means the bookkeeping has diverged; discharging a
+        // guessed class would drift the partition, so the free fails closed
+        // with nothing mutated.
+        let m = small_map(8);
+        let a = FrameAllocator::new(&m).unwrap();
+        let frame = a.alloc(MemoryClass::Kernel).unwrap();
+        {
+            let mut state = a.inner.lock();
+            let slot = frame.0 - state.base_frame;
+            state.tags[slot] = FrameTag::UNTRACKED;
+        }
+        assert_eq!(a.free(frame), Err(AllocError::InvariantViolation));
+        assert_eq!(a.snapshot().class[MemoryClass::Kernel.index()], 1);
+    }
+
+    #[test]
+    fn a_chunked_draw_charges_every_chunk_to_its_class() {
+        let m = small_map(32);
+        let a = FrameAllocator::new(&m).unwrap();
+        // Not a power of two, so the draw is several blocks of descending
+        // order rather than one.
+        let chunks = a.alloc_chunks(MemoryClass::UserAnon, 7).unwrap();
+        assert!(chunks.len() > 1);
+        assert_eq!(a.snapshot().class[MemoryClass::UserAnon.index()], 7);
+        assert_partitions(&a, 32);
+        for (frame, order) in chunks {
+            a.free_order(frame, order).unwrap();
+        }
+        assert_eq!(a.snapshot().charged(), 0);
+    }
+
+    #[test]
+    fn a_committed_fault_in_is_charged_as_anonymous_user_memory() {
+        let m = small_map(64);
+        let a = FrameAllocator::new(&m).unwrap();
+        a.commit(1).unwrap();
+        let frame = a.alloc_user_committed().unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::UserAnon.index()], 1);
+        assert_partitions(&a, 64);
+        // The unwind path returns the frame to its reservation, so the class
+        // is discharged and the commitment re-charged.
+        a.free_committed(frame).unwrap();
+        assert_eq!(a.snapshot().class[MemoryClass::UserAnon.index()], 0);
+        assert_eq!(a.committed_frames(), 1);
+    }
+
+    #[test]
+    fn the_packed_tag_round_trips_every_order_and_class() {
+        for order in 0..=MAX_ORDER {
+            let tag = FrameTag::free_head(order);
+            assert_eq!(tag.free_order(), Some(order));
+            assert_eq!(tag.class(), None, "a free block carries no class");
+        }
+        for class in MemoryClass::ALL {
+            let tag = FrameTag::allocated(class);
+            assert_eq!(tag.class(), Some(class));
+            assert_eq!(tag.free_order(), None, "an allocation heads no list");
+        }
+        assert_eq!(FrameTag::UNTRACKED.free_order(), None);
+        assert_eq!(FrameTag::UNTRACKED.class(), None);
     }
 }

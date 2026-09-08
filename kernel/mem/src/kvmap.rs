@@ -36,7 +36,7 @@ use tairix_arch_api::CrossCpuTlbShootdown;
 use tairix_sync::{InterruptControl, IrqSafeSpinLock, NopInterruptControl};
 
 use crate::error::AllocError;
-use crate::frame::{Frame, FrameAllocator, PhysAddr, MAX_ORDER, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, MemoryClass, PhysAddr, MAX_ORDER, PAGE_SIZE};
 use crate::vmm::PageTable;
 
 /// Leaf permissions every remapped page carries: readable and writable,
@@ -128,7 +128,7 @@ pub fn back_run(map: &dyn KernelVirtMap, frames: &FrameAllocator, base: u64, pag
         let frame = loop {
             // The kernel commit path, so an assembly may draw the reserve
             // and keeps making progress under user memory pressure.
-            match frames.alloc_order(order) {
+            match frames.alloc_order(MemoryClass::Kernel, order) {
                 Ok(frame) => break frame,
                 // No block of this order is free; the pool may be
                 // fragmented, so step down one size and retry before

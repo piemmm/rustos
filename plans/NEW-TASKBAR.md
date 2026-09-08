@@ -993,8 +993,9 @@ What now stands:
   previous task (an MRU-of-two the task list keeps), hover previews via the
   capsule's instrument readout, and a primary press resolves as a **tap or
   a hold** — a quick release reports
-  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Tasks }` (the
-  panel's NOW column), a press held past `input::LONG_PRESS_AFTER_NS`
+  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Resources }`
+  (what the machine is doing, which is what a reader arriving at a system
+  monitor came for), a press held past `input::LONG_PRESS_AFTER_NS`
   (500 ms) reports it with `CommandSection::Recovery`, and the readout's one
   safe action, "Open Switchboard", reports the tap's response. One press reports
   exactly one response: the threshold is measured against the monotonic
@@ -1149,7 +1150,7 @@ tests it rides on. Docs: `userland/gui/switchboard/README.md`,
   stays in T12 with the scheduler surface it needs (§4).
 - The T9 gestures now have a target. The **taskbar side stands**: the
   capsule's tap reports
-  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Tasks }`, a
+  `TaskbarResponse::OpenSwitchboard { section: CommandSection::Resources }`, a
   hold past `LONG_PRESS_AFTER_NS` reports `CommandSection::Recovery`, and the
   readout's "Open Switchboard" safe action reports the tap's response. The
   session consumes that response by asking the service to open/raise its window at
@@ -1263,8 +1264,9 @@ complete against its replacement.
 
 **Status — the taskbar side (`userland/gui/taskbar`): done.** The capsule's
 primary press resolves as a **tap or a hold** into
-`TaskbarResponse::OpenSwitchboard { section }` — tap → `CommandSection::Tasks`,
-hold past `LONG_PRESS_AFTER_NS` (500 ms) → `CommandSection::Recovery` — and
+`TaskbarResponse::OpenSwitchboard { section }` — tap →
+`CommandSection::Resources`, hold past `LONG_PRESS_AFTER_NS` (500 ms) →
+`CommandSection::Recovery` — and
 the readout's new "Open Switchboard" safe action reports the tap through that
 same one route. The hold is resolved from the `now_ns` the embedder passes in (the
 next motion sample or the release), never a spin or sleep; a fired hold never

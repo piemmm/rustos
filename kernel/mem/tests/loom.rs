@@ -21,7 +21,7 @@ use loom::sync::Arc;
 use loom::thread;
 
 use tairix_kernel_mem::{
-    BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
+    BootMemoryMap, FrameAllocator, MemoryClass, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
 
 fn small_map(pages: usize) -> BootMemoryMap {
@@ -40,8 +40,8 @@ fn concurrent_alloc_does_not_double_hand_out() {
         let a = Arc::new(FrameAllocator::new(&small_map(4)).unwrap());
         let a1 = a.clone();
 
-        let t1 = thread::spawn(move || a1.alloc().ok());
-        let f0 = a.alloc().ok();
+        let t1 = thread::spawn(move || a1.alloc(MemoryClass::Kernel).ok());
+        let f0 = a.alloc(MemoryClass::Kernel).ok();
         let f1 = t1.join().unwrap();
 
         match (f0, f1) {
@@ -60,11 +60,11 @@ fn alloc_then_free_round_trip_concurrent() {
         let a = Arc::new(FrameAllocator::new(&small_map(2)).unwrap());
         let a1 = a.clone();
         let t1 = thread::spawn(move || {
-            if let Ok(f) = a1.alloc() {
+            if let Ok(f) = a1.alloc(MemoryClass::Kernel) {
                 a1.free(f).unwrap();
             }
         });
-        if let Ok(f) = a.alloc() {
+        if let Ok(f) = a.alloc(MemoryClass::Kernel) {
             a.free(f).unwrap();
         }
         t1.join().unwrap();

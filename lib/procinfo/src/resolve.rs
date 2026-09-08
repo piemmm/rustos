@@ -2047,7 +2047,7 @@ mod tests {
         SysinfoRequestHeader, SystemIdentity, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
     };
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
+    use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit, MEMORY_CLASS_COUNT};
     use tairix_resref::parse;
 
     use super::{for_each_net_bond_member, for_each_net_interface};
@@ -2247,6 +2247,7 @@ mod tests {
                     user_resident_bytes: 4096,
                     page_size: 4096,
                     reserved: 0,
+                    class_bytes: [0; MEMORY_CLASS_COUNT],
                 },
                 origin: Origin::new(
                     TrustDomain::User,

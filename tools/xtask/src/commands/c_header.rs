@@ -71,17 +71,18 @@ use tairix_abi::{
     LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
     LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
     LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
-    MANIFEST_MAX_CAPABILITIES, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT, MOD_CTRL, MOD_MASK,
-    MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, MOUNT_VOLUME_ID_LEN,
-    NANOS_PER_SEC, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN,
-    PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-    PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RANDOM_RESERVE_DEFAULT_BYTES, RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY,
-    RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD,
-    STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS,
-    SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-    SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
-    SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT, USER_DIRECTORY_NAME_MAX,
+    MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
+    MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+    MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS, POINTER_INPUT_MAGIC,
+    PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX, PROCESS_START_MAGIC,
+    PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES, RELEASE_EPOCH_SECS,
+    RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC, SEG_FLAG_READ,
+    SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT, STDINFO_VERSION_V1,
+    SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+    SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
+    USER_DIRECTORY_NAME_MAX,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1695,6 +1696,10 @@ fn sysinfo_emit_record_sizes(out: &mut String) {
         out,
         "#define TAIRIX_MOUNT_VOLUME_ID_LEN {MOUNT_VOLUME_ID_LEN}u"
     );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_MEMORY_CLASS_COUNT {MEMORY_CLASS_COUNT}u"
+    );
     out.push_str("/* Mount availability carried in a mount record (uint8_t). */\n");
     let mount_availabilities = [
         ("TAIRIX_MOUNT_AVAILABLE", MountAvailability::Available),
@@ -1830,6 +1835,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint64_t user_resident_bytes;\n\
          \x20   uint32_t page_size;\n\
          \x20   uint32_t reserved;\n\
+         \x20   uint64_t class_bytes[TAIRIX_MEMORY_CLASS_COUNT];\n\
          } tairix_kernel_memory_stats_t;\n\n",
     "/* Uptime response: monotonic span since boot + wall-clock boot instant. */\n\
          typedef struct tairix_uptime {\n\
@@ -4159,10 +4165,10 @@ mod tests {
             KernelMemoryStats, MountListRequest, MountRecord, ProcessListRequest, ProcessRecord,
             ProcessState, ResourceLimitRecord, SysinfoQueryId, SysinfoRequestHeader,
             SystemIdentity, Uptime, ENCODED_QUERY_TABLE_LEN, HOSTNAME_MAX, MACHINE_ID_LEN,
-            MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX, PROCESS_NAME_MAX,
-            RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
-            SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
-            SYSINFO_VERSION_V1,
+            MEMORY_CLASS_COUNT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
+            PROCESS_NAME_MAX, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_MAX_PAYLOAD_LEN,
+            SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN, SYSINFO_REQUEST_MAGIC,
+            SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
         };
         let h = body("tairix_sysinfo.h");
         assert!(h.contains("#ifndef TAIRIX_SYSINFO_H"), "guard present");
@@ -4210,6 +4216,7 @@ mod tests {
             format!("#define TAIRIX_MOUNT_SOURCE_MAX {MOUNT_SOURCE_MAX}u"),
             format!("#define TAIRIX_MOUNT_TARGET_MAX {MOUNT_TARGET_MAX}u"),
             format!("#define TAIRIX_MOUNT_FSTYPE_MAX {MOUNT_FSTYPE_MAX}u"),
+            format!("#define TAIRIX_MEMORY_CLASS_COUNT {MEMORY_CLASS_COUNT}u"),
             format!(
                 "#define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN {}u",
                 SysinfoRequestHeader::WIRE_LEN
@@ -4352,7 +4359,7 @@ mod tests {
             (
                 "KernelMemoryStats",
                 core::mem::size_of::<KernelMemoryStats>(),
-                40,
+                88,
                 core::mem::align_of::<KernelMemoryStats>(),
                 8,
             ),
@@ -4641,7 +4648,7 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_sysinfo_request_header_t;", size_of::<SysinfoRequestHeader>(), 24, align_of::<SysinfoRequestHeader>(), 8),
             ("tairix_sysinfo.h", "} tairix_process_list_request_t;", size_of::<ProcessListRequest>(), 8, align_of::<ProcessListRequest>(), 4),
             ("tairix_sysinfo.h", "} tairix_process_record_t;", size_of::<ProcessRecord>(), 136, align_of::<ProcessRecord>(), 8),
-            ("tairix_sysinfo.h", "} tairix_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 40, align_of::<KernelMemoryStats>(), 8),
+            ("tairix_sysinfo.h", "} tairix_kernel_memory_stats_t;", size_of::<KernelMemoryStats>(), 88, align_of::<KernelMemoryStats>(), 8),
             ("tairix_sysinfo.h", "} tairix_uptime_t;", size_of::<Uptime>(), 32, align_of::<Uptime>(), 8),
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),

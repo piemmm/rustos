@@ -34,6 +34,7 @@ use tairix_controls::{
 };
 use tairix_font::BitmapFont;
 
+use super::device::Trace;
 use crate::view::reading::{reading_text, HealthSeverity, Reading, ReadingFact, Unmeasured};
 
 /// The pane's headline reading and the instrument that gives it shape.
@@ -91,13 +92,9 @@ impl PaneHero {
 /// absence of both is what says the reading is a fact.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct HeroInstrument {
-    /// A rate's recent history, in permille, oldest first. Empty draws no
-    /// trace.
-    pub samples: Vec<u16>,
-    /// The opposing direction, mirrored below the axis. [`None`] leaves the
-    /// trace a single series over the whole box rather than showing an empty
-    /// half.
-    pub opposing: Option<Vec<u16>>,
+    /// A rate's recent history and how it is tinted.
+    /// [`Trace::Absent`] draws no trace.
+    pub trace: Trace,
     /// A proportional bar at this permille fraction, or `Some(None)` for an
     /// unmeasured track — never a bar at nought, which would read as "idle"
     /// when the truth is "unknown". `None` draws no bar.
@@ -105,11 +102,11 @@ pub struct HeroInstrument {
 }
 
 impl HeroInstrument {
-    /// A trace over `samples` and no bar.
+    /// A trace and no bar.
     #[must_use]
-    pub fn trend(samples: Vec<u16>) -> Self {
+    pub fn trend(trace: Trace) -> Self {
         Self {
-            samples,
+            trace,
             ..Self::default()
         }
     }
@@ -128,13 +125,6 @@ impl HeroInstrument {
     #[must_use]
     pub fn with_track(mut self, fraction: Option<u16>) -> Self {
         self.track = Some(fraction);
-        self
-    }
-
-    /// This instrument set with `opposing` mirrored under its trace.
-    #[must_use]
-    pub fn with_opposing(mut self, opposing: Vec<u16>) -> Self {
-        self.opposing = Some(opposing);
         self
     }
 }
@@ -492,13 +482,7 @@ fn hero_body(hero: &PaneHero, kind: PressureKind) -> ItemBody {
             None => MeterValue::Unmeasured,
         }));
     }
-    let chart = (!instrument.samples.is_empty()).then(|| {
-        let mut chart = Chart::new(kind).with_samples(instrument.samples.iter().copied());
-        if let Some(opposing) = &instrument.opposing {
-            chart = chart.with_opposing(kind, opposing.iter().copied());
-        }
-        chart
-    });
+    let chart = instrument.trace.chart();
     ItemBody::Hero {
         tile,
         chart,
@@ -662,7 +646,7 @@ fn cell_view(cell: &CoreCell, kind: PressureKind) -> CellView {
         label: cell.label.clone(),
         busy: reading_text(&cell.busy),
         clock: reading_text(&cell.clock),
-        trend: Chart::new(kind).with_samples(cell.trend.iter().copied()),
+        trend: Chart::new(kind.signal_role()).with_samples(cell.trend.iter().copied()),
         badge: class_badge(cell.class),
     }
 }

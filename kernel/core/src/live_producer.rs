@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use tairix_abi::{Errno, MapFlags};
 use tairix_kernel_mem::{
     page_count_for, AllocError, AnonError, DmaError, Frame, FrameAllocator, LiveSpaceError,
-    MmioError, PhysAddr, PhysMap, PAGE_SIZE,
+    MemoryClass, MmioError, PhysAddr, PhysMap, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::SchedulerArch;
 
@@ -406,7 +406,7 @@ where
         // single-block ceiling), so the region size is bounded by RAM.
         let blocks = self
             .frames
-            .alloc_chunks(pages)
+            .alloc_chunks(MemoryClass::UserAnon, pages)
             .map_err(AllocError::as_errno)?;
         let mut chunks: Vec<SharedChunk> = Vec::new();
         if chunks.try_reserve_exact(blocks.len()).is_err() {

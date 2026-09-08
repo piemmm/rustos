@@ -27,7 +27,9 @@ bundles, under a stable `ThemeId`:
   control roles
   (`surface_hover`, `surface_pressed`, `rim`, `rim_active`, `danger`), the
   signal roles the boards' legend fixes (the `*_pressure` set,
-  `network_activity`, `recovery`, `success`, `warning`, `denied`), the
+  `network_activity`, `recovery`, `success`, `warning`, `denied`,
+  `workload`, and the four transfer directions `disk_read`, `disk_write`,
+  `net_receive`, `net_send`), the
   scroll and window-frame roles
   (`scroll_track`, `scroll_thumb`, `frame`), the window-command highlight
   roles (`window_close`, `window_minimize`, `window_maximize`,
@@ -38,6 +40,15 @@ bundles, under a stable `ThemeId`:
   signal becomes a colour. The window manager, the taskbar, and the apps all
   read these same roles, which is what makes a theme switch apply
   consistently everywhere.
+  - Not every signal is a resource pressure. `workload` is what the machine is
+    *running* — a task census — which drawn in the compute hue reads as a
+    second CPU trace beside the real one; and a *direction* of transfer is a
+    signal in its own right, so `disk_read`/`disk_write` and
+    `net_receive`/`net_send` let a duplex instrument say which way the bytes
+    went instead of drawing both halves in one hue. The two greens
+    (`workload`, `disk_read`) are one step apart and never share an
+    instrument; the network pair stays in the blue/violet family so a network
+    reading still reads as network while its directions separate.
   - `surface_hover` and `surface_pressed` are the pointer plates, and they are
     what makes a **bar-seated** control legible: an icon in the taskbar wears
     no perimeter of its own, so its plate is the only thing that can report
@@ -121,7 +132,8 @@ bundles, under a stable `ThemeId`:
   `control_inset`, `control_gap`, `control_corner_radius`,
   `selection_backdrop_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
-  `chart_height`, `selector_extent`, `toggle_track_length`); the desktop's
+  `composition_thickness`, `chart_height`, `selector_extent`,
+  `toggle_track_length`); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
@@ -167,6 +179,11 @@ bundles, under a stable `ThemeId`:
     row the owner lays them out in, which is how the boards draw them. The
     trace is the broader of the two: a slider's thumb marks its value, while a
     read-only fill has to stay legible across a long run on its own.
+  - `composition_thickness` is broader still, because a composition band is
+    *categorical*: the eye has to match each coloured run to a name in the key
+    beneath it, and a run a few pixels tall is a colour a reader cannot
+    identify. It stays under `control_height`, so the band still reads as an
+    instrument rather than a plate.
   - `selector_extent` (a checkbox box, a radio circle, a toggle track's
     breadth) and `toggle_track_length` size a boolean selector's *mark*
     smaller than the row that carries it, so the glyph stays compact while the

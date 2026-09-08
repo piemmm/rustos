@@ -17,7 +17,7 @@ use crate::format::{percent, whole_percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
-use crate::view::resources::{BlockBody, CoreCell, HeroInstrument, PaneBlock, PaneHero};
+use crate::view::resources::{BlockBody, CoreCell, HeroInstrument, PaneBlock, PaneHero, Trace};
 use crate::view::resources::{
     DeviceAction, DeviceId, RailGroup, ResourceControl, ResourceDevice, TaskCostColumn,
 };
@@ -41,7 +41,7 @@ pub(super) fn device(
         name: String::from("CPU"),
         kind: PressureKind::Cpu,
         reading: busy.clone(),
-        trend: history.clone(),
+        trend: Trace::single(PressureKind::Cpu.signal_role(), history.clone()),
         hero: PaneHero {
             // The figure carries no unit of its own: the hero draws "% busy"
             // beside it, and a spelled-out percentage would read "18% % busy".
@@ -55,7 +55,11 @@ pub(super) fn device(
             context: context(sample),
             // Both instruments, as the boards draw them: the trace beside the
             // figure, and the busy share as a bar under the context lines.
-            instrument: HeroInstrument::trend(history).with_track(sample.cpu_busy_permille),
+            instrument: HeroInstrument::trend(Trace::single(
+                PressureKind::Cpu.signal_role(),
+                history,
+            ))
+            .with_track(sample.cpu_busy_permille),
             caption: String::from("busy share, all cores"),
         },
         blocks: blocks(sample, meters, bundles),

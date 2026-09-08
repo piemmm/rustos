@@ -12,7 +12,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_abi::sysinfo::MOUNT_VOLUME_ID_LEN;
-use tairix_controls::{ControlRole, PressureKind};
+use tairix_controls::{Chart, ControlRole, PressureKind, FULL_PERMILLE};
+use tairix_theme::SignalRole;
 
 use super::pane::{PaneBlock, PaneHero};
 use crate::view::reading::Unmeasured;
@@ -225,6 +226,111 @@ pub struct PressureBanner {
     pub relief: Option<DeviceAction>,
 }
 
+/// A rate's history and how it is tinted, as one value.
+///
+/// The tinting *is* the type, so a caller cannot state an opposing series
+/// without stating the role it reads as — the shape that let storage and
+/// network draw both of their directions in the device's own hue and say
+/// nothing about which way the bytes went. [`chart`](Self::chart) is the one
+/// definition of the colouring, so the rail entry and the pane hero cannot
+/// drift apart either.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Trace {
+    /// No history: a fact, not a rate.
+    #[default]
+    Absent,
+    /// One series, read against `full_scale` and tinted by one role — the
+    /// resource's own identity for a device, or the signal a count means.
+    Single {
+        /// What the series reads as.
+        role: SignalRole,
+        /// The readings, oldest first.
+        samples: Vec<u16>,
+        /// The ceiling the box's top edge means. A permille reading states
+        /// [`FULL_PERMILLE`]; a count states its own.
+        full_scale: u16,
+    },
+    /// Two opposing directions of one reading: inbound above the axis,
+    /// outbound mirrored below, each tinted by its own direction.
+    Duplex {
+        /// What the series above the axis reads as.
+        inbound: SignalRole,
+        /// What the mirrored series below it reads as.
+        outbound: SignalRole,
+        /// Inbound readings, oldest first.
+        into: Vec<u16>,
+        /// Outbound readings, oldest first.
+        out: Vec<u16>,
+    },
+}
+
+impl Trace {
+    /// A permille series tinted by one role.
+    #[must_use]
+    pub fn single(role: SignalRole, samples: Vec<u16>) -> Self {
+        Self::Single {
+            role,
+            samples,
+            full_scale: FULL_PERMILLE,
+        }
+    }
+
+    /// A count series tinted by one role, read against `full_scale`.
+    #[must_use]
+    pub fn counted(role: SignalRole, samples: Vec<u16>, full_scale: u16) -> Self {
+        Self::Single {
+            role,
+            samples,
+            full_scale,
+        }
+    }
+
+    /// Whether the trace holds no readings, and so draws nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::Single { samples, .. } => samples.is_empty(),
+            Self::Duplex { into, out, .. } => into.is_empty() && out.is_empty(),
+        }
+    }
+
+    /// The chart that draws this trace, or [`None`] when there is nothing to
+    /// draw.
+    ///
+    /// The single definition of how a trace is tinted: both the rail entry and
+    /// the pane hero build their chart here, so a direction's colour cannot
+    /// differ between the two.
+    #[must_use]
+    pub fn chart(&self) -> Option<Chart> {
+        if self.is_empty() {
+            return None;
+        }
+        match self {
+            Self::Absent => None,
+            Self::Single {
+                role,
+                samples,
+                full_scale,
+            } => Some(
+                Chart::new(*role)
+                    .with_samples(samples.iter().copied())
+                    .with_full_scale(*full_scale),
+            ),
+            Self::Duplex {
+                inbound,
+                outbound,
+                into,
+                out,
+            } => Some(
+                Chart::new(*inbound)
+                    .with_samples(into.iter().copied())
+                    .with_opposing(*outbound, out.iter().copied()),
+            ),
+        }
+    }
+}
+
 /// One device: its rail entry, its pane, and its commands.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResourceDevice {
@@ -238,11 +344,11 @@ pub struct ResourceDevice {
     pub kind: PressureKind,
     /// The rail entry's trailing reading.
     pub reading: super::super::reading::Reading,
-    /// The rail entry's own bounded trace, oldest first, in permille.
+    /// The rail entry's own bounded trace.
     ///
-    /// Empty for a `Machine` entry: those are facts, not rates, and the
-    /// absence of an instrument is what says so.
-    pub trend: Vec<u16>,
+    /// [`Trace::Absent`] for a `Machine` entry: those are facts, not rates,
+    /// and the absence of an instrument is what says so.
+    pub trend: Trace,
     /// The pane's headline reading and its instrument.
     pub hero: PaneHero,
     /// The pane's own blocks, in reading order.

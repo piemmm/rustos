@@ -20,11 +20,11 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{Rgba, SignalRole, TextRole, Theme};
 
 use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::damage::sink;
-use crate::state::{ActivityState, ControlState, PressureKind, SelectionState, ValidationState};
+use crate::state::{ActivityState, ControlState, SelectionState, ValidationState};
 use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 use crate::testkit::high_contrast;
 
@@ -1319,10 +1319,10 @@ fn device_rail() -> Tabs {
         Tab::new("CPU")
             .with_group("Resources")
             .with_reading("18%")
-            .with_trend(Chart::new(PressureKind::Cpu).with_samples(sweep(200, 600))),
+            .with_trend(Chart::new(SignalRole::Cpu).with_samples(sweep(200, 600))),
         Tab::new("Memory")
             .with_reading("53%")
-            .with_trend(Chart::new(PressureKind::Memory).with_samples(sweep(500, 900))),
+            .with_trend(Chart::new(SignalRole::Memory).with_samples(sweep(500, 900))),
         Tab::new("Identity & uptime")
             .with_group("Machine")
             .with_reading("2h 12m"),
@@ -1565,7 +1565,7 @@ fn a_live_reading_and_trend_are_re_stated_in_place() {
 
     rail.tabs_mut()[0].set_reading(Some(String::from("94%")));
     rail.tabs_mut()[0].set_trend(Some(
-        Chart::new(PressureKind::Cpu).with_samples([900, 940, 960]),
+        Chart::new(SignalRole::Cpu).with_samples([900, 940, 960]),
     ));
     assert_eq!(rail.tabs()[0].reading(), Some("94%"));
 
@@ -1592,7 +1592,7 @@ fn a_horizontal_strip_draws_neither_a_reading_a_trend_nor_a_heading() {
         Tab::new("All")
             .with_group("Filters")
             .with_reading("12")
-            .with_trend(Chart::new(PressureKind::Cpu).with_samples([500])),
+            .with_trend(Chart::new(SignalRole::Cpu).with_samples([500])),
         Tab::new("Mine").with_reading("3"),
     ]);
     assert_eq!(

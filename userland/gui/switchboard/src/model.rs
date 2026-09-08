@@ -22,16 +22,17 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, Signal};
 use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
+use tairix_theme::SignalRole;
 
 use crate::derive::{memory_pressured, Hysteresis};
 use crate::format::{format_bytes, format_duration, format_rate, percent};
 use crate::resource_report::{build_resource_report, reading};
 use crate::sample::{permille_of, DegradedField, ProcessSummary, Sample};
-use crate::view::resources::DeviceId;
+use crate::view::resources::{DeviceId, Trace};
 use crate::view::{
-    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, RailTrace, Reading, RecoveryControl,
-    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl,
-    TaskOwner, TaskSummary, Unmeasured,
+    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem,
+    Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskOwner,
+    TaskSummary, Unmeasured,
 };
 
 /// Convert a wire [`CommandSection`] into the shared control's own
@@ -1264,14 +1265,21 @@ pub fn build_model(
     model.tasks = tasks;
     model.recovery = recovery;
     model.recovery_resolved = meters.faults.resolved();
-    model.tasks_trend = RailTrace {
-        points: meters.system.process_history().to_vec(),
-        full_scale: meters.system.process_peak(),
-    };
-    model.recovery_trend = RailTrace {
-        points: meters.system.stopped_history().to_vec(),
-        full_scale: 0,
-    };
+    // A count of tasks is what the machine is *running*, not compute
+    // saturation: drawn in the compute hue it read as a second CPU trace
+    // beside the real one. A count has no capacity of its own, so it carries
+    // the denominator its box is read against.
+    model.tasks_trend = Trace::counted(
+        SignalRole::Workload,
+        meters.system.process_history().to_vec(),
+        meters.system.process_peak(),
+    );
+    // The stopped share is a permille of the population, and what it signals
+    // is recovery — not the thermal hue it borrowed.
+    model.recovery_trend = Trace::single(
+        SignalRole::Recovery,
+        meters.system.stopped_history().to_vec(),
+    );
     model.resources = resources;
 
     PanelModel {

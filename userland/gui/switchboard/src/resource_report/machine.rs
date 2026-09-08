@@ -20,7 +20,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, PaneBlock, PaneHero, RailGroup, ResourceControl,
-    ResourceDevice,
+    ResourceDevice, Trace,
 };
 
 /// The machine's identity and how long it has been up.
@@ -34,7 +34,7 @@ pub(super) fn identity(sample: &Sample) -> ResourceDevice {
         name: String::from("Identity & uptime"),
         kind: PressureKind::Cpu,
         reading: uptime.clone(),
-        trend: Vec::new(),
+        trend: Trace::Absent,
         hero: PaneHero::facts(hostname(sample), "")
             .with_context(alloc::vec![crate::view::reading::reading_text(&uptime)]),
         blocks: alloc::vec![PaneBlock::full(
@@ -65,7 +65,7 @@ pub(super) fn sessions(sample: &Sample) -> ResourceDevice {
         name: String::from("Sessions & seats"),
         kind: PressureKind::Network,
         reading: seats.clone(),
-        trend: Vec::new(),
+        trend: Trace::Absent,
         hero: PaneHero::facts(seats, seat_unit(sample)),
         blocks: alloc::vec![
             PaneBlock::half("SEATS", seat_block(sample)),
@@ -184,7 +184,7 @@ pub(super) fn authority(sample: &Sample, caps: &dyn CapabilityQuery) -> Resource
         name: String::from("Permissions & limits"),
         kind: PressureKind::Memory,
         reading: Reading::measured(held.to_string()),
-        trend: Vec::new(),
+        trend: Trace::Absent,
         hero: PaneHero::facts(Reading::measured(held.to_string()), "of 4 held"),
         blocks: alloc::vec![
             PaneBlock::half("AUTHORITY", BlockBody::Facts(authority_facts(sample, caps))),

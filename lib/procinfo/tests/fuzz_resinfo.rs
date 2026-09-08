@@ -33,6 +33,7 @@ use tairix_abi::sysinfo::{
     Uptime, RECLAIM_CLASS_COUNT,
 };
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::MEMORY_CLASS_COUNT;
 use tairix_abi::{Errno, LimitKind, ResourceLimit};
 use tairix_procinfo::{
     read_value, resolve, Producer, ResponsePayload, Transport, MAX_INFO_VALUE_LEN,
@@ -152,6 +153,7 @@ impl HostileBroker {
                     user_resident_bytes: 8192,
                     page_size: 4096,
                     reserved: 0,
+                    class_bytes: [0; MEMORY_CLASS_COUNT],
                 }
                 .to_le_bytes()
                 .to_vec(),

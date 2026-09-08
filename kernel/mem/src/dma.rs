@@ -79,7 +79,9 @@ use tairix_hash::BuildFastHash;
 use zeroize::Zeroize;
 
 use crate::error::AllocError;
-use crate::frame::{Frame, FrameAllocator, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
+use crate::frame::{
+    Frame, FrameAllocator, MemoryClass, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE,
+};
 use crate::phys::PhysMap;
 use crate::ptr::slice_within;
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
@@ -541,7 +543,7 @@ impl DmaWindowMap {
 
         // Reserve frames *before* mutating the slot bitmap so a frame
         // OOM leaves the pool's state untouched.
-        let start_frame = frames.alloc_order(order)?;
+        let start_frame = frames.alloc_order(MemoryClass::Dma, order)?;
 
         // Enforce the granted device addressing limit: the whole contiguous block must lie below `addr_limit`
         // (when one is declared), or the device could be handed a buffer

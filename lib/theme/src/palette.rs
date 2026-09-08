@@ -110,6 +110,21 @@ pub struct Palette {
     pub warning: Rgba,
     /// Missing authority or blocked action.
     pub denied: Rgba,
+    /// What the machine is running: the task census, a process count.
+    ///
+    /// Deliberately its own role rather than a borrowed
+    /// [`cpu_pressure`](Self::cpu_pressure): a count of tasks is not compute
+    /// saturation, and drawing it in the compute hue makes a task trace read
+    /// as a second CPU trace beside the real one.
+    pub workload: Rgba,
+    /// Data read from a storage device.
+    pub disk_read: Rgba,
+    /// Data written to a storage device.
+    pub disk_write: Rgba,
+    /// Data received on a network interface.
+    pub net_receive: Rgba,
+    /// Data sent on a network interface.
+    pub net_send: Rgba,
 
     // --- Scroll and window-frame roles ----------------------------------
     /// The quiet Scroll Channel (track) behind a scrollbar thumb.
@@ -184,6 +199,11 @@ impl Palette {
             SignalRole::Success => self.success,
             SignalRole::Warning => self.warning,
             SignalRole::Denied => self.denied,
+            SignalRole::Workload => self.workload,
+            SignalRole::DiskRead => self.disk_read,
+            SignalRole::DiskWrite => self.disk_write,
+            SignalRole::NetReceive => self.net_receive,
+            SignalRole::NetSend => self.net_send,
         }
     }
 }
@@ -195,6 +215,12 @@ impl Palette {
 /// resource-pressure subset lines up one-to-one with `lib/controls`'
 /// `PressureKind`; a renderer maps its typed state to a `SignalRole` and asks
 /// the palette for the colour, so the mapping lives in exactly one place.
+///
+/// The vocabulary is wider than that subset, because not every signal a
+/// control shows is a resource pressure: an outcome (recovery, success), and a
+/// *direction* of transfer — read against write, receive against send — are
+/// signals a reader must be able to tell apart on one instrument, and neither
+/// is a resource under load.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum SignalRole {
     /// Compute saturation.
@@ -221,4 +247,14 @@ pub enum SignalRole {
     Warning,
     /// Missing authority.
     Denied,
+    /// What the machine is running: a task census.
+    Workload,
+    /// Data read from a storage device.
+    DiskRead,
+    /// Data written to a storage device.
+    DiskWrite,
+    /// Data received on a network interface.
+    NetReceive,
+    /// Data sent on a network interface.
+    NetSend,
 }

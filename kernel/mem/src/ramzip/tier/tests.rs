@@ -10,7 +10,7 @@ extern crate std;
 use std::vec::Vec;
 
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use crate::frame::Frame;
+use crate::frame::{Frame, MemoryClass};
 use crate::phys::SimPhysMap;
 use crate::ramzip::PageKind;
 use crate::vmm::{HostPageTable, VirtAddr};
@@ -84,7 +84,11 @@ impl Env {
         let total_frames = FreeMemorySource::total_bytes(self.frames) / PAGE_SIZE;
         let mut guard = 0;
         while self.pressure.sample() != band {
-            self.held.push(self.frames.alloc().expect("pressure frame"));
+            self.held.push(
+                self.frames
+                    .alloc(MemoryClass::Compressed)
+                    .expect("pressure frame"),
+            );
             guard += 1;
             assert!(guard <= total_frames, "band {band:?} never reached");
         }
@@ -106,7 +110,10 @@ impl Env {
     /// Map an anonymous test page at `page_number` filled with a
     /// compressible pattern derived from `seed`.
     fn map_page(&mut self, page_number: u64, seed: u8) -> Page {
-        let frame = self.frames.alloc().expect("page frame");
+        let frame = self
+            .frames
+            .alloc(MemoryClass::Compressed)
+            .expect("page frame");
         let page = page_at(page_number);
         self.write_frame(frame, seed);
         self.space.map(page, frame, user_rw()).expect("map");
@@ -365,7 +372,7 @@ fn unmapped_page_is_refused() {
 fn device_flagged_mapping_is_refused_in_depth() {
     let mut env = Env::new();
     let mut ramzip = tier(&env);
-    let frame = env.frames.alloc().expect("frame");
+    let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(14);
     env.space
         .map(
@@ -385,7 +392,7 @@ fn device_flagged_mapping_is_refused_in_depth() {
 fn incompressible_page_is_refused_and_stays_mapped() {
     let mut env = Env::new();
     let mut ramzip = tier(&env);
-    let frame = env.frames.alloc().expect("frame");
+    let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(15);
     // PRNG noise: incompressible by construction.
     let bytes = env.frame_bytes_mut(frame);
@@ -423,7 +430,8 @@ fn band_cap_is_enforced_and_escalation_is_deterministic() {
                 // Re-hold the frame each acceptance frees, so the
                 // pressure band stays pinned at moderate while the
                 // tier's footprint grows toward the cap.
-                env.held.push(env.frames.alloc().expect("re-hold"));
+                env.held
+                    .push(env.frames.alloc(MemoryClass::Compressed).expect("re-hold"));
             }
             Err(e) => {
                 refusal = Some(e);
@@ -486,7 +494,8 @@ fn reserve_floor_refuses_compression_but_not_restore() {
     let floor = decompression_floor(env.pressure.thresholds().reserve());
     let late = env.map_page(31, 6);
     while FreeMemorySource::free_bytes(env.frames).saturating_sub(PAGE_SIZE) > floor {
-        env.held.push(env.frames.alloc().expect("hold"));
+        env.held
+            .push(env.frames.alloc(MemoryClass::Compressed).expect("hold"));
     }
     assert_eq!(
         try_compress(&mut env, &mut ramzip, late, TASK),
@@ -765,7 +774,11 @@ fn compress_run(env: &mut Env, ramzip: &mut Ramzip, pages: &[Page]) -> usize {
         match try_compress(env, ramzip, page, TASK) {
             Ok(()) => {
                 accepted += 1;
-                env.held.push(env.frames.alloc().expect("re-hold frame"));
+                env.held.push(
+                    env.frames
+                        .alloc(MemoryClass::Compressed)
+                        .expect("re-hold frame"),
+                );
             }
             Err(_) => break,
         }
@@ -776,7 +789,7 @@ fn compress_run(env: &mut Env, ramzip: &mut Ramzip, pages: &[Page]) -> usize {
 /// Map an anonymous page filled with PRNG noise (incompressible by
 /// construction), so a benchmark can measure the worst-case refusal cost.
 fn map_incompressible_page(env: &mut Env, page_number: u64) -> Page {
-    let frame = env.frames.alloc().expect("frame");
+    let frame = env.frames.alloc(MemoryClass::Compressed).expect("frame");
     let page = page_at(page_number);
     let bytes = env.frame_bytes_mut(frame);
     let mut state = 0x1234_5678_9ABC_DEF0_u64 ^ page_number;

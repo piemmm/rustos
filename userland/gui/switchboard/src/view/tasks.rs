@@ -1,13 +1,11 @@
 //! The Tasks section: the live task/application table
 //! (`plans/NEW-SWITCHBOARD.md` S3, S4).
 //!
-//! Owns the caller's task view model ([`TaskSummary`]), the census
-//! [`MetricTile`]s the location band seats, the header band (the filter
-//! [`Tabs`] over its own row and the [`SearchField`] over the next), the
-//! sortable [`TableHeader`] and its [`TableRow`]s, the selected task's
-//! command [`ActionRail`], the footer band (the shown/total count, the
-//! auto-refresh [`Toggle`] and the grouping [`ComboBox`]), and the section's
-//! layout, painting and input.
+//! Owns the caller's task view model ([`TaskSummary`]), the sortable
+//! [`TableHeader`] and its [`TableRow`]s, the selected task's command
+//! [`ActionRail`], the footer band (the shown/total count, the auto-refresh
+//! [`Toggle`] and the grouping [`ComboBox`]), and the section's layout,
+//! painting and input.
 //!
 //! # The commands act on the selection, not on a row
 //!
@@ -20,11 +18,11 @@
 //!
 //! # Arrangement, not a second query
 //!
-//! Filtering, searching, sorting and grouping are pure *arrangements* of the
-//! one set of rows the sample produced: the section's own `arrange` step is
-//! the only place the shown order is decided, and it re-derives that order
-//! from the adopted [`TaskSummary`]s rather than asking the system for a
-//! different answer. Nothing here reads a figure the service did not measure.
+//! Sorting and grouping are pure *arrangements* of the one set of rows the
+//! sample produced: the section's own `arrange` step is the only place the
+//! shown order is decided, and it re-derives that order from the adopted
+//! [`TaskSummary`]s rather than asking the system for a different answer.
+//! Nothing here reads a figure the service did not measure.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -35,18 +33,17 @@ use core::mem;
 use tairix_abi::origin::ProcId;
 use tairix_abi::sysinfo::ProcessState;
 use tairix_geometry::{to_i32, Rect, Region, Scale};
-use tairix_icon::{IconArtwork, IconKind, IconRequest};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_icon::{IconArtwork, IconKind};
+use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::damage;
 use tairix_controls::{
     ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
-    ControlRole, ControlState, HeaderAction, HeaderColumn, MetricLayout, MetricTile, PressureKind,
-    PressureState, RailAction, RecoveryState, RowAction, SearchField, SelectionState,
-    SelectorAction, SortOrder, StatusPill, Tab, TableCell, TableHeader, TableRow, Tabs, TabsAction,
-    Toggle,
+    ControlRole, ControlState, HeaderAction, HeaderColumn, PressureKind, PressureState, RailAction,
+    RecoveryState, RowAction, SelectionState, SelectorAction, SortOrder, StatusPill, TableCell,
+    TableHeader, TableRow, Toggle,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
@@ -62,8 +59,8 @@ use crate::format::{format_bytes, format_rate, percent};
 /// Which principal owns a task, as the row's Owner column.
 ///
 /// Carried as the uid the process record reports plus the one classification
-/// the surface makes of it, so the column states a reading and the owner
-/// filters partition the rows by that same reading rather than by a guess.
+/// the surface makes of it, so the column states a reading rather than a
+/// guess.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct TaskOwner {
     /// The owning uid, exactly as the process record reports it.
@@ -77,8 +74,7 @@ impl TaskOwner {
     ///
     /// `uid = 0` is merely the system user in this system — its powers come
     /// from capabilities, never from the number — so this is a *display*
-    /// classification for the Owner column and its two filters, never an
-    /// authority decision.
+    /// classification for the Owner column, never an authority decision.
     pub const SYSTEM_UID: u32 = 0;
 
     /// The owner of a task running as `uid`.
@@ -201,9 +197,9 @@ pub struct TaskSummary {
     /// The task's stable, never-reused instance identity.
     ///
     /// What the selection and the rail's subject are keyed by, so neither
-    /// silently re-points at a different task when a refresh, a re-sort or a
-    /// re-filter moves the rows around it. A numeric pid would be no better
-    /// — the kernel reuses it.
+    /// silently re-points at a different task when a refresh or a re-sort
+    /// moves the rows around it. A numeric pid would be no better — the
+    /// kernel reuses it.
     pub proc_id: ProcId,
     /// The task's display name.
     pub name: String,
@@ -277,11 +273,6 @@ impl TaskSummary {
             Some(ProcessState::Stopped) => "Stopped",
             None => UNMEASURED_READING,
         }
-    }
-
-    /// Whether this task is in a condition the Recovery list would name.
-    fn is_faulted(&self) -> bool {
-        self.recovery != RecoveryState::None
     }
 }
 
@@ -407,59 +398,6 @@ const fn column_weights() -> [u32; COLUMNS.len()] {
     weights
 }
 
-/// Which rows the filter strip is showing.
-///
-/// Only filters something real backs are offered. A "background" filter
-/// would need a foreground/background distinction the process list does not
-/// report, and a "recent" filter a last-active time nothing measures, so
-/// neither exists here rather than each showing a guess.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-pub(super) enum TaskFilter {
-    /// Every row.
-    #[default]
-    All,
-    /// Rows owned by the reader's own principal.
-    Mine,
-    /// Rows owned by the system principal.
-    System,
-    /// Rows in a condition the Recovery list would name — stopped, or
-    /// reported unresponsive.
-    Faults,
-}
-
-impl TaskFilter {
-    /// The filters the strip offers, in tab order.
-    ///
-    /// `Jobs` and `Services` are deliberately absent: with no job registry
-    /// and no service manager, every row is a process, and a tab that can
-    /// only ever read `(0)` is chrome. They return with their registries.
-    const ALL: [Self; 4] = [Self::All, Self::Mine, Self::System, Self::Faults];
-
-    /// This filter's tab label, without its count.
-    const fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Mine => "Mine",
-            Self::System => "System",
-            Self::Faults => "Faults",
-        }
-    }
-
-    /// Whether `task` belongs in this filter — the one predicate the tab's
-    /// count and the shown rows are both derived from, so a tab can never
-    /// promise a count its rows do not deliver.
-    fn admits(self, task: &TaskSummary) -> bool {
-        match self {
-            Self::All => true,
-            // Ownership comes off the process record, so the two owner
-            // filters partition the rows by a reading rather than a guess.
-            Self::Mine => !task.owner.is_system,
-            Self::System => task.owner.is_system,
-            Self::Faults => task.is_faulted(),
-        }
-    }
-}
-
 /// How the footer's grouping control arranges the shown rows.
 ///
 /// Grouping is an arrangement of the same rows, applied as the primary
@@ -517,15 +455,11 @@ enum FocusBand {
     Footer(usize),
 }
 
-/// The header band's own keyboard stops, ahead of the rows: the filter
-/// strip, the search field, then the sortable column headings.
-const HEADER_STOPS: usize = 3;
-/// The filter strip's stop.
-const STOP_FILTERS: usize = 0;
-/// The search field's stop.
-const STOP_SEARCH: usize = 1;
+/// The header band's own keyboard stops, ahead of the rows: the sortable
+/// column headings alone.
+const HEADER_STOPS: usize = 1;
 /// The column headings' stop.
-const STOP_SORT: usize = 2;
+const STOP_SORT: usize = 0;
 /// The footer band's own keyboard stops, after the rows: the grouping
 /// control, then the auto-refresh toggle.
 const FOOTER_STOPS: usize = 2;
@@ -534,17 +468,6 @@ const STOP_GROUPING: usize = 0;
 /// The auto-refresh toggle's offset within the footer's stops.
 const STOP_REFRESH: usize = 1;
 
-/// The census tiles' logical height, which is the height the location band
-/// grows to in order to seat them: a stacked tile shows its label above its
-/// reading, so it needs more than a single line.
-const CENSUS_HEIGHT: u32 = 52;
-/// One census tile's logical width: enough at the reference density for the
-/// longest label ("Services") beside its icon.
-const CENSUS_TILE_WIDTH: u32 = 104;
-/// The filter strip's own logical row height.
-const FILTER_HEIGHT: u32 = 28;
-/// The search field's own logical row height, beneath the filter strip.
-const SEARCH_HEIGHT: u32 = 30;
 /// The footer band's logical height.
 const FOOTER_HEIGHT: u32 = 28;
 
@@ -560,64 +483,6 @@ const RAIL_TITLE: &str = "ACTIONS";
 enum TaskCommand {
     /// Invoke a control on the selected task.
     Control(TaskControl),
-}
-
-/// One census tile: what it counts, what it says, and the glyph and identity
-/// tint it wears.
-struct CensusSpec {
-    label: &'static str,
-    /// What this tile counts.
-    count: Census,
-    icon: IconKind,
-    /// What tints the tile's glyph. An identity colour per kind of thing
-    /// counted, not a claim that a resource is under strain.
-    tint: PressureKind,
-}
-
-/// The census tiles, in reading order (`plans/switchboard/01-tasks.png`).
-///
-/// The one declaration: the tiles are built from it and the room the location
-/// band is asked for is measured from it, so the band can never seat a
-/// different number of tiles than the section draws.
-const CENSUS: [CensusSpec; 4] = [
-    CensusSpec {
-        label: "Processes",
-        count: Census::Rows(TaskFilter::All),
-        icon: IconKind::Executable,
-        tint: PressureKind::Cpu,
-    },
-    CensusSpec {
-        label: "Users",
-        count: Census::Owners,
-        icon: IconKind::User,
-        tint: PressureKind::Network,
-    },
-    CensusSpec {
-        label: "Mine",
-        count: Census::Rows(TaskFilter::Mine),
-        icon: IconKind::ServiceBundle,
-        tint: PressureKind::Disk,
-    },
-    CensusSpec {
-        label: "Alerts",
-        count: Census::Rows(TaskFilter::Faults),
-        icon: IconKind::Bell,
-        tint: PressureKind::Thermal,
-    },
-];
-
-/// What one census tile counts.
-///
-/// Every tile counts adopted rows through a *reading*: either the same
-/// predicate the matching filter tab counts through — so a tile and its tab
-/// can never state different numbers — or the distinct owners those rows
-/// name.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Census {
-    /// The rows one filter admits.
-    Rows(TaskFilter),
-    /// The distinct principals owning at least one row.
-    Owners,
 }
 
 /// One rail command's presentation: what it does, what it says, the glyph
@@ -717,8 +582,8 @@ struct FooterLayout {
 /// popup, and the keyboard's place among all of it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct TasksSection {
-    /// Every adopted task, in model order — what the filter, search, sort
-    /// and grouping arrange, and what a reported action's index names.
+    /// Every adopted task, in model order — what the sort and the grouping
+    /// arrange, and what a reported action's index names.
     pub(super) tasks: Vec<TaskSummary>,
     /// The session's own account root, which resolves the icon of a task
     /// loaded from this user's own program store.
@@ -728,18 +593,11 @@ pub(super) struct TasksSection {
     /// `order[i]` is the model index of shown row `i`, so a row the reader
     /// points at resolves back to the task rather than to a position.
     pub(super) order: Vec<usize>,
-    /// The four census tiles the location band seats, in reading order.
-    pub(super) census: Vec<MetricTile>,
-    /// The selected task's own identity, so the selection survives a
-    /// refresh, a re-filter and a re-sort rather than following whichever
-    /// row slid into its place.
+    /// The selected task's own identity, so the selection survives a refresh
+    /// and a re-sort rather than following whichever row slid into its place.
     pub(super) selected: Option<ProcId>,
     /// The selected task's commands.
     pub(super) rail: ActionRail,
-    /// The filter strip, each tab labelled with its own real count.
-    pub(super) filters: Tabs,
-    /// The name search over the shown rows.
-    pub(super) search: SearchField,
     /// The sortable column headings.
     pub(super) header: TableHeader,
     /// The footer's shown/total readout, rebuilt whenever the arrangement
@@ -758,19 +616,16 @@ pub(super) struct TasksSection {
 }
 
 impl TasksSection {
-    /// An empty Tasks section: no tasks, no selection, cursor on the
-    /// filters.
+    /// An empty Tasks section: no tasks, no selection, cursor on the column
+    /// headings.
     pub(super) fn new() -> Self {
-        let mut section = Self {
+        Self {
             home: None,
             tasks: Vec::new(),
             entries: Vec::new(),
             order: Vec::new(),
-            census: Vec::new(),
             selected: None,
             rail: ActionRail::new(Vec::new()),
-            filters: filter_tabs(),
-            search: SearchField::new().with_placeholder("Search tasks"),
             count: StatusPill::new(count_line(0, 0)),
             header: TableHeader::new(
                 COLUMNS
@@ -795,19 +650,7 @@ impl TasksSection {
             auto_refresh: Toggle::new("Auto-refresh", true),
             focus: 0,
             action: 0,
-        };
-        section.census = section.build_census();
-        section
-    }
-
-    /// The filter the strip currently shows, or [`TaskFilter::All`] when
-    /// the selection is somehow out of range (fail closed to showing
-    /// everything rather than hiding rows nobody asked to hide).
-    fn filter(&self) -> TaskFilter {
-        self.filters
-            .selected()
-            .and_then(|index| TaskFilter::ALL.get(index).copied())
-            .unwrap_or(TaskFilter::All)
+        }
     }
 
     /// The grouping the footer currently shows, or
@@ -819,40 +662,22 @@ impl TasksSection {
             .unwrap_or(TaskGrouping::Ungrouped)
     }
 
-    /// Whether `task` survives the active filter *and* the active search —
-    /// the one predicate deciding which rows are shown, so the footer's
-    /// count and the rows themselves can never disagree.
+    /// Re-derive the shown rows from the adopted tasks: group, sort, then
+    /// build one entry per row.
     ///
-    /// The search matches on the task's name, case-insensitively, so a
-    /// reader who types what they see finds it whatever its capitalisation.
-    fn shows(&self, task: &TaskSummary) -> bool {
-        if !self.filter().admits(task) {
-            return false;
-        }
-        let query = self.search.text();
-        query.is_empty() || contains_ignore_case(&task.name, query)
-    }
-
-    /// Re-derive the shown rows from the adopted tasks: filter, search,
-    /// group, sort, then build one entry per surviving row.
-    ///
-    /// The one place the shown order is decided. The sort is stable and is
-    /// applied over the *filtered* rows, so re-filtering never reshuffles
-    /// rows the reader was already looking at, and rows the active sort
-    /// cannot separate keep the order the sample reported them in.
+    /// The one place the shown order is decided. The sort is stable, so rows
+    /// it cannot separate keep the order the sample reported them in.
     ///
     /// It is also the one place the rows' *pixels* change, so it reports them:
-    /// a fresh sample, a filter, a search keystroke, a sort and a grouping all
-    /// re-derive the table here, and each would otherwise leave the reported
-    /// damage naming only the control the reader touched while the table on
-    /// screen still showed the previous arrangement.
+    /// a fresh sample, a sort and a grouping all re-derive the table here, and
+    /// each would otherwise leave the reported damage naming only the control
+    /// the reader touched while the table on screen still showed the previous
+    /// arrangement.
     fn arrange(&mut self, sweep: &mut Sweep<'_, '_>) {
         let band = self.focus_band();
         let grouping = self.grouping();
         let sort = self.header.sort();
-        let mut order: Vec<usize> = (0..self.tasks.len())
-            .filter(|index| self.tasks.get(*index).is_some_and(|task| self.shows(task)))
-            .collect();
+        let mut order: Vec<usize> = (0..self.tasks.len()).collect();
         order.sort_by(|a, b| {
             let (Some(left), Some(right)) = (self.tasks.get(*a), self.tasks.get(*b)) else {
                 return Ordering::Equal;
@@ -875,8 +700,8 @@ impl TasksSection {
         });
         self.order = order;
         // The selection is re-resolved against the rows now on show, so a
-        // task the filter or the search has hidden stops being the subject
-        // of commands the reader can no longer see it for.
+        // task a fresh sample no longer reports stops being the subject of
+        // commands the reader can no longer see it for.
         self.selected = resolve_selection(
             self.selected,
             self.order
@@ -1037,9 +862,8 @@ impl TasksSection {
     /// Put the cursor back in `band` against the arrangement now on show.
     ///
     /// A row the arrangement no longer has falls back to the last row it
-    /// does have, and a table filtered down to nothing puts the cursor on
-    /// the header — where the reader's next act, changing the filter or the
-    /// search, actually lives — rather than stranding it on the footer.
+    /// does have, and a table with no rows at all puts the cursor on the
+    /// column headings rather than stranding it on the footer.
     fn restore_band(&mut self, band: FocusBand) {
         self.focus = match band {
             FocusBand::Header(stop) => stop.min(HEADER_STOPS.saturating_sub(1)),
@@ -1133,100 +957,11 @@ impl TasksSection {
 
         TaskEntry {
             row: TableRow::new(cells).with_state(state),
-            spark: Chart::new(PressureKind::Cpu).with_samples(task.cpu_history.iter().copied()),
+            spark: Chart::new(PressureKind::Cpu.signal_role())
+                .with_samples(task.cpu_history.iter().copied()),
             bundle: task.bundle.clone(),
             name: task.name.clone(),
         }
-    }
-
-    /// The four census tiles, each counting something the model genuinely
-    /// carries.
-    ///
-    /// Processes counts the rows the process list produced; Jobs and
-    /// Services count the rows a job registry and the service manager
-    /// produced, which is honestly zero while neither exists; Alerts counts
-    /// the tasks in a condition the Recovery list would name.
-    ///
-    /// Every tile counts adopted rows through the same filter predicate the
-    /// tabs count through, so the Alerts tile and the Faults tab can never
-    /// state different numbers for the same tasks.
-    ///
-    /// Each tile is plated and carries the glyph of the thing it counts, so
-    /// the census reads as four distinct readings on the band rather than as
-    /// four numbers running into the location trail beside them. The tile's
-    /// [`PressureKind`] is what tints that glyph, so each kind of thing keeps
-    /// its own identity colour; it is a tint, not a pressure verdict, and no
-    /// tile claims a resource is under strain.
-    fn build_census(&self) -> Vec<MetricTile> {
-        CENSUS
-            .iter()
-            .map(|spec| {
-                MetricTile::new(
-                    spec.label,
-                    count_text(self.census_of(spec.count)),
-                    spec.tint,
-                )
-                .with_layout(MetricLayout::Stacked)
-                .with_icon(spec.icon)
-                // The band draws the shared block plate around each tile, so
-                // a census tile is the same plate a pane block is rather than
-                // the control's own.
-                .unplated()
-            })
-            .collect()
-    }
-
-    /// How many adopted tasks `filter` admits — the count a tab shows and
-    /// the count its rows deliver, from the one predicate.
-    fn count_of(&self, filter: TaskFilter) -> usize {
-        self.tasks.iter().filter(|task| filter.admits(task)).count()
-    }
-
-    /// What one census tile counts, over the adopted rows.
-    fn census_of(&self, census: Census) -> usize {
-        match census {
-            Census::Rows(filter) => self.count_of(filter),
-            Census::Owners => {
-                let mut seen: Vec<u32> = Vec::new();
-                for task in &self.tasks {
-                    if !seen.contains(&task.owner.uid) {
-                        seen.push(task.owner.uid);
-                    }
-                }
-                seen.len()
-            }
-        }
-    }
-
-    /// Re-label every filter tab with its own live count, in place.
-    ///
-    /// The strip holds one tab per filter for the life of the section, so a
-    /// refresh has only labels to say. Building a fresh strip instead would
-    /// drop what the *screen* holds — which tab the pointer rests on, which
-    /// one the keyboard cursor is on, and any press waiting for its release
-    /// — so a count moving under a resting pointer would blink the highlight
-    /// off and swallow a click in flight.
-    ///
-    /// Answers whether any label actually moved, which is what decides whether
-    /// the strip owes a repaint.
-    fn relabel_filters(&mut self) -> bool {
-        let counts: Vec<usize> = TaskFilter::ALL
-            .iter()
-            .map(|filter| self.count_of(*filter))
-            .collect();
-        let mut moved = false;
-        for ((tab, filter), count) in self
-            .filters
-            .tabs_mut()
-            .iter_mut()
-            .zip(TaskFilter::ALL.iter())
-            .zip(counts)
-        {
-            let label = tab_label(*filter, count);
-            moved |= tab.label() != label;
-            tab.set_label(label);
-        }
-        moved
     }
 
     /// The content-cursor stop that focuses shown row `row`, for a caller
@@ -1241,60 +976,6 @@ impl TasksSection {
         HEADER_STOPS
             .saturating_add(self.entries.len())
             .saturating_add(slot.min(self.rail.len().saturating_sub(1)))
-    }
-
-    /// The rectangles of the header band's three rows: the census, then the
-    /// filter strip, then the search field beneath it.
-    ///
-    /// The census leads because it describes the whole list the two rows
-    /// below it narrow. The search reads over the whole table it searches
-    /// rather than being squeezed into the end of the filter row: the two are
-    /// separate questions — *which kind* of task, and *which* task — so each
-    /// gets its own row and its own full width. Each row is clipped before
-    /// the one beneath it, so a header too short for all three still shows
-    /// the census.
-    pub(super) fn header_rows(frame: &SectionFrame, scale: Scale) -> (Rect, Rect, Rect) {
-        let band = frame.header;
-        let census_h = scale.scale_length(CENSUS_HEIGHT).min(band.height);
-        let census = Rect::new(band.left(), band.top(), band.width, census_h);
-        let below_top = band.top() + to_i32(census_h);
-        let below_h = band.height.saturating_sub(census_h);
-        let filters_h = scale.scale_length(FILTER_HEIGHT).min(below_h);
-        let filters = Rect::new(band.left(), below_top, band.width, filters_h);
-        let search = Rect::new(
-            band.left(),
-            below_top + to_i32(filters_h),
-            band.width,
-            below_h.saturating_sub(filters_h),
-        );
-        (census, filters, search)
-    }
-
-    /// The census tiles' own rectangles within the header's census row, laid
-    /// out in reading order with the theme's control gap between them.
-    ///
-    /// The one layout the paint reads, so a tile can never be drawn outside
-    /// the row the header resolved for the whole census.
-    fn census_rects(&self, row: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
-        let count = u32::try_from(self.census.len()).unwrap_or(0);
-        if count == 0 {
-            return Vec::new();
-        }
-        let gap = scale.scale_length(theme.metrics().control_gap);
-        // A tile keeps its own width rather than sharing the row out: four
-        // counts stretched across a wide header would read as four panels.
-        let each = scale.scale_length(CENSUS_TILE_WIDTH);
-        (0..count)
-            .map(|i| {
-                Rect::new(
-                    row.left() + to_i32(each.saturating_add(gap).saturating_mul(i)),
-                    row.top(),
-                    each,
-                    row.height,
-                )
-            })
-            .filter(|tile| tile.right() <= row.right())
-            .collect()
     }
 
     /// The footer's rectangles: the shown/total count and the auto-refresh
@@ -1382,19 +1063,6 @@ impl TasksSection {
         }
     }
 
-    /// Mark the filter strip's keyboard cursor, against the strip rectangle
-    /// the paint and the hit test share.
-    fn mark_filters(&mut self, index: Option<usize>, sweep: &mut Sweep<'_, '_>) {
-        match sweep.ctx {
-            Some(ctx) => {
-                let (_, filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
-                self.filters
-                    .set_current(index, filters, ctx.scale, ctx.theme, sweep.damage);
-            }
-            None => self.filters.adopt_current(index),
-        }
-    }
-
     /// The grouping control's own field rectangle.
     ///
     /// A frame too narrow to seat the rail has no footer slot for it, so it
@@ -1449,9 +1117,9 @@ impl TasksSection {
     /// rail command, then the footer's.
     ///
     /// The header and footer are always reachable, so the cursor still has
-    /// somewhere to be when the filter, the search, or an empty sample
-    /// leaves no rows at all — and an empty rail simply contributes no stops
-    /// rather than a stop that does nothing.
+    /// somewhere to be when an empty sample leaves no rows at all — and an
+    /// empty rail simply contributes no stops rather than a stop that does
+    /// nothing.
     fn focus_count(&self) -> usize {
         HEADER_STOPS
             .saturating_add(self.entries.len())
@@ -1522,29 +1190,7 @@ impl TasksSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        let (_, filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         match self.focus {
-            STOP_FILTERS => {
-                if let Some(TabsAction::Selected { index }) = self
-                    .filters
-                    .on_key(key, filters, ctx.scale, ctx.theme, damage)
-                {
-                    self.filters
-                        .set_selected(index, filters, ctx.scale, ctx.theme, damage);
-                    self.arrange(&mut Sweep::reporting(ctx, damage));
-                }
-                None
-            }
-            STOP_SEARCH => {
-                if self
-                    .search
-                    .on_key(key, Modifiers::default(), search, damage)
-                    .is_some()
-                {
-                    self.arrange(&mut Sweep::reporting(ctx, damage));
-                }
-                None
-            }
             STOP_SORT => {
                 if let Some(HeaderAction::Sort { column, order }) = self.header.on_key(
                     key,
@@ -1648,41 +1294,9 @@ impl TaskEntry {
     }
 }
 
-/// A filter tab's label: its name and its own live count.
-fn tab_label(filter: TaskFilter, count: usize) -> String {
-    format!("{} {count}", filter.label())
-}
-
-/// The filter strip a fresh section opens with: one tab per filter, showing
-/// the filter the section starts on and a zero count until the first sample
-/// lands.
-///
-/// This is the only strip a section ever holds; a refresh re-labels these tabs
-/// rather than replacing them.
-fn filter_tabs() -> Tabs {
-    let mut tabs = Tabs::new(
-        TaskFilter::ALL
-            .iter()
-            .map(|filter| Tab::new(tab_label(*filter, 0)))
-            .collect(),
-    );
-    tabs.adopt_selected(
-        TaskFilter::ALL
-            .iter()
-            .position(|filter| *filter == TaskFilter::default())
-            .unwrap_or(0),
-    );
-    tabs
-}
-
 /// The footer's shown/total readout.
 fn count_line(shown: usize, total: usize) -> String {
     format!("{shown} of {total} shown")
-}
-
-/// A count as tile text.
-fn count_text(count: usize) -> String {
-    format!("{count}")
 }
 
 /// One rail command's [`Button`], carrying the verdict `authority` reached
@@ -1703,21 +1317,6 @@ fn command_button(spec: &CommandSpec, authority: TaskAuthority) -> Button {
     let TaskCommand::Control(control) = spec.command;
     button.set_state(authority.verdict(control).to_state());
     button
-}
-
-/// Whether `haystack` contains `needle`, ignoring ASCII case.
-///
-/// A task's name is arbitrary bytes rendered as display text, so the search
-/// folds only ASCII case: anything beyond it is matched exactly rather than
-/// by a locale rule this surface has no business inventing.
-fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    let hay: Vec<u8> = haystack.bytes().map(|b| b.to_ascii_lowercase()).collect();
-    let pin: Vec<u8> = needle.bytes().map(|b| b.to_ascii_lowercase()).collect();
-    hay.windows(pin.len())
-        .any(|window| window == pin.as_slice())
 }
 
 /// Order two tasks by one sortable column.
@@ -1750,46 +1349,15 @@ fn compare_reading<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
     }
 }
 
-impl TasksSection {
-    /// Paint the census tiles across the header's own census row.
-    fn render_census(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        artwork: &mut dyn IconArtwork,
-    ) {
-        for (tile, rect) in self
-            .census
-            .iter()
-            .zip(self.census_rects(rect, scale, theme))
-        {
-            let Some(inner) = crate::view::block::plate(surface, rect, scale, theme) else {
-                continue;
-            };
-            // A census tile counts a class of thing, so its picture is that
-            // class's — resolved through the cache like every other icon so
-            // the header rasterises nothing per frame.
-            let picture = tile.icon().and_then(|kind| {
-                artwork.artwork(IconRequest::kind(kind), tile.icon_side(inner, scale, theme))
-            });
-            tile.render(surface, inner, scale, theme, picture);
-        }
-    }
-}
-
 impl SectionView for TasksSection {
-    /// The header band carries the census, the filter strip and the search
-    /// field, one row each; the rail carries the selected task's commands;
-    /// and the footer carries the count, the refresh toggle and the grouping
-    /// choice.
+    /// The header band carries nothing of its own — the table's pinned
+    /// column headings sit inside the table itself; the rail carries the
+    /// selected task's commands; and the footer carries the count, the
+    /// refresh toggle and the grouping choice.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
             sidebar_width: 0,
-            header_height: CENSUS_HEIGHT
-                .saturating_add(FILTER_HEIGHT)
-                .saturating_add(SEARCH_HEIGHT),
+            header_height: 0,
             detail_width: 0,
             impact_width: 0,
             rail_width: ACTION_RAIL_WIDTH,
@@ -1807,14 +1375,7 @@ impl SectionView for TasksSection {
         }
         self.tasks.clone_from(&model.tasks);
         self.home.clone_from(&model.home);
-        let filters = self.relabel_filters();
-        self.census = self.build_census();
         self.arrange(sweep);
-        if filters {
-            if let Some(ctx) = sweep.ctx() {
-                sweep.report(Self::header_rows(&ctx.frame, ctx.scale).0);
-            }
-        }
         self.action = 0;
     }
 
@@ -1839,12 +1400,11 @@ impl SectionView for TasksSection {
         0
     }
 
-    /// One per filter tab or sortable heading where the cursor traverses a
-    /// strip; one everywhere else, since a row carries no controls of its own
-    /// and a rail command is its own cursor stop.
+    /// One per sortable heading where the cursor traverses the headings; one
+    /// everywhere else, since a row carries no controls of its own and a rail
+    /// command is its own cursor stop.
     fn focused_action_count(&self) -> usize {
         match self.focus {
-            STOP_FILTERS => self.filters.len().max(1),
             STOP_SORT => self.header.columns().len().max(1),
             _ => 1,
         }
@@ -1873,13 +1433,11 @@ impl SectionView for TasksSection {
 
     fn set_row_action(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
         self.action = index;
-        // The filter strip and the column headings hold their own internal
-        // cursor, so the shared action cursor is mirrored onto them rather
-        // than kept as a second, separately-moving idea of the same thing.
-        match self.focus {
-            STOP_FILTERS => self.mark_filters(Some(index), sweep),
-            STOP_SORT => self.mark_header(Some(index), sweep),
-            _ => {}
+        // The column headings hold their own internal cursor, so the shared
+        // action cursor is mirrored onto them rather than kept as a second,
+        // separately-moving idea of the same thing.
+        if self.focus == STOP_SORT {
+            self.mark_header(Some(index), sweep);
         }
     }
 
@@ -1908,11 +1466,6 @@ impl SectionView for TasksSection {
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
-        let (census, filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
-        self.render_census(surface, census, ctx.scale, ctx.theme, artwork);
-        self.filters.render(surface, filters, ctx.scale, ctx.theme);
-        self.search.render(surface, search, ctx.scale, ctx.theme);
-
         self.header.render(
             surface,
             Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
@@ -1976,24 +1529,6 @@ impl SectionView for TasksSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        let (_, tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
-        if let Some(TabsAction::Selected { index }) = self
-            .filters
-            .on_pointer(event, tabs, ctx.scale, ctx.theme, damage)
-        {
-            self.filters
-                .set_selected(index, tabs, ctx.scale, ctx.theme, damage);
-            self.arrange(&mut Sweep::reporting(ctx, damage));
-            return None;
-        }
-        if self
-            .search
-            .on_pointer(event, search, ctx.scale, ctx.theme, damage)
-            .is_some()
-        {
-            self.arrange(&mut Sweep::reporting(ctx, damage));
-            return None;
-        }
         if let Some(HeaderAction::Sort { column, order }) = self.header.on_pointer(
             event,
             Self::header_rect(&ctx.frame, ctx.scale, ctx.theme),
@@ -2057,9 +1592,9 @@ impl SectionView for TasksSection {
         }
         if let Some(id) = pressed {
             // Selection names the task, not the position it happens to
-            // occupy: a re-sort or re-filter must not move the highlight to
-            // whatever row slid into that slot. Choosing a task is also what
-            // gives the rail its subject, so the commands are rebuilt for it.
+            // occupy: a re-sort must not move the highlight to whatever row
+            // slid into that slot. Choosing a task is also what gives the rail
+            // its subject, so the commands are rebuilt for it.
             self.select(id, ctx, damage);
         }
         None
@@ -2071,8 +1606,6 @@ impl SectionView for TasksSection {
         let rail_focus = self.focused_rail();
         let footer_focus = self.focused_footer();
 
-        self.mark_filters((focused && stop == STOP_FILTERS).then_some(action), sweep);
-        self.search.set_focused(focused && stop == STOP_SEARCH);
         self.mark_header((focused && stop == STOP_SORT).then_some(action), sweep);
         self.grouping
             .set_focused(focused && footer_focus == Some(STOP_GROUPING));

@@ -11,7 +11,7 @@ use tairix_abi::sysinfo::{
     CpuTimeListRequest, CpuTimeRecord, KernelMemoryStats, LoadAverage, ProcessListRequest,
     ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader, Uptime,
 };
-use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
+use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, MEMORY_CLASS_COUNT};
 use tairix_curses::{Event, Screen, Size, Tty};
 use tairix_procinfo::Transport;
 use tairix_termcap::TermType;
@@ -522,6 +522,7 @@ fn summary_carries_load_and_memory_when_served() {
         user_resident_bytes: 0,
         page_size: 4096,
         reserved: 0,
+        class_bytes: [0; MEMORY_CLASS_COUNT],
     });
     let mut model = Model::new(Scope::Own);
     model.refresh(&service).expect("ok");

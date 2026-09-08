@@ -97,6 +97,7 @@
 #define TAIRIX_MOUNT_TARGET_MAX 64u
 #define TAIRIX_MOUNT_FSTYPE_MAX 16u
 #define TAIRIX_MOUNT_VOLUME_ID_LEN 16u
+#define TAIRIX_MEMORY_CLASS_COUNT 6u
 /* Mount availability carried in a mount record (uint8_t). */
 #define TAIRIX_MOUNT_AVAILABLE ((uint8_t)0u)
 #define TAIRIX_MOUNT_UNAVAILABLE_DIRTY ((uint8_t)1u)
@@ -118,7 +119,7 @@
 #define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
 #define TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN 8u
 #define TAIRIX_PROCESS_RECORD_WIRE_LEN 124u
-#define TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN 40u
+#define TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN 88u
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
@@ -187,6 +188,7 @@ typedef struct tairix_kernel_memory_stats {
     uint64_t user_resident_bytes;
     uint32_t page_size;
     uint32_t reserved;
+    uint64_t class_bytes[TAIRIX_MEMORY_CLASS_COUNT];
 } tairix_kernel_memory_stats_t;
 
 /* Uptime response: monotonic span since boot + wall-clock boot instant. */

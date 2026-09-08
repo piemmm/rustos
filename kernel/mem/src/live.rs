@@ -46,7 +46,7 @@ use crate::anon_window::AnonWindowMap;
 use crate::coldscan::{ColdPageScanner, ColdScanError};
 use crate::dma::{DmaError, DmaWindowMap};
 use crate::filemap::{map_file_page, unmap_file_region};
-use crate::frame::{Frame, FrameAllocator, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::mmio::{MmioError, MmioWindowMap};
 use crate::phys::PhysMap;
 use crate::ramzip::{
@@ -781,7 +781,7 @@ where
             base_va,
             page_count,
             // Reserve-gated user commit (see `map_anonymous`).
-            || frames.alloc_user().ok(),
+            || frames.alloc_user(MemoryClass::UserAnon).ok(),
             |frame| {
                 let _ = frames.free(frame);
             },
@@ -957,7 +957,7 @@ where
             &self.physmap,
             va,
             contents,
-            || frames.alloc().ok(),
+            || frames.alloc(MemoryClass::UserFile).ok(),
             |frame| {
                 // The frame never became user-visible; returning it to the
                 // allocator cannot fail meaningfully (best-effort, never a
@@ -1325,7 +1325,7 @@ mod tests {
     use crate::anon::AnonError;
     use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
     use crate::dma::DmaError;
-    use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
+    use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
     use crate::phys::SimPhysMap;
     use crate::uaccess::{copy_in, copy_out};
     use crate::vmm::{AddressSpace, HostPageTable, VirtAddr};
@@ -1933,7 +1933,7 @@ mod tests {
 
         // A stand-in shared-region frame owned by "the registry", mapped
         // into the space but never owned by it.
-        let region_frame = frames.alloc().expect("region frame");
+        let region_frame = frames.alloc(MemoryClass::UserAnon).expect("region frame");
         let after_region = before - 1;
 
         let fixed_base: u64 = 0x4000;
@@ -2258,7 +2258,7 @@ mod tests {
     mod ramzip {
         use super::{SharedSim, ANON_WINDOW_BASE};
         use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-        use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
+        use crate::frame::{FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
         use crate::live::{LiveSpace, LiveUserSpace};
         use crate::phys::SimPhysMap;
         use crate::ramzip::{PageCandidate, Ramzip, RamzipCaps, RamzipFaultOutcome};
@@ -2344,7 +2344,7 @@ mod tests {
             let mut held = alloc::vec::Vec::new();
             let mut guard = 0;
             while pressure.sample() != band {
-                held.push(frames.alloc().expect("pressure frame"));
+                held.push(frames.alloc(MemoryClass::UserAnon).expect("pressure frame"));
                 guard += 1;
                 assert!(guard <= FRAMES, "band {band:?} never reached");
             }
@@ -2551,7 +2551,7 @@ mod tests {
             let mut held = alloc::vec::Vec::new();
             let mut guard = 0;
             while pressure.sample() != band {
-                held.push(frames.alloc().expect("pressure frame"));
+                held.push(frames.alloc(MemoryClass::UserAnon).expect("pressure frame"));
                 guard += 1;
                 assert!(guard <= FRAMES, "band {band:?} never reached");
             }

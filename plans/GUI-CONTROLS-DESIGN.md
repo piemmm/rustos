@@ -1437,9 +1437,14 @@ that plots one bounded oldest-to-newest series of readings as a line.
   the surface's ordered dither, because a ramp over a few dozen rows holds
   fewer output levels than input ones and rounding every row the same way is
   what turns it into visible flat bands.
-- The trace is tinted by the resource's own semantic rail colour, exactly as a
-  MetricTile's track is (§11.33) — the resource's fixed identity, never the
-  accent and never a transient severity.
+- **The trace is tinted by a `SignalRole`, not by a resource pressure.** A
+  resource-identity trace passes `PressureKind::signal_role()` and reads as
+  that resource's rail colour exactly as a MetricTile's track does (§11.33) —
+  a fixed identity, never the accent and never a transient severity. But not
+  every signal a chart carries *is* a resource under load: a task census is
+  what the machine is running, and a *direction* of transfer is a signal in
+  its own right. Those name their own role, so the vocabulary the theme
+  already has for semantic signals is the one the chart takes.
 - **The box is a fixed window and the newest reading is pinned to its trailing
   edge**, one slot per sample whatever the series holds. A series shorter than
   the window reaches back only as far as its readings genuinely go, and each new
@@ -1475,9 +1480,12 @@ two stacked charts loses the comparison the reader is there for.
 - The box splits at a drawn **axis** — the zero line both series read against —
   the primary series rising above it and the opposing one **mirrored** below,
   so a rising reading in either direction grows *away* from the axis.
-- The opposing series is tinted by its own resource, through the same rail
-  colour every trace uses, and is bounded and clamped by the same rule as the
-  primary one. There is one chart control and one plot path: a second
+- **Each direction is tinted by its own role**, through the same lookup every
+  trace uses, and is bounded and clamped by the same rule as the primary one.
+  A caller passes the *direction* each half measures — read against write,
+  receive against send — because giving both halves the device's own hue draws
+  one reading in one colour and says nothing about which way the bytes went.
+  There is one chart control and one plot path: a second
   duplex control beside this one is forbidden.
 - **Adding an opposing series asserts that the direction is measured.** A
   direction with no reading behind it is left off, so the chart stays a
@@ -1729,11 +1737,22 @@ the parts it is made of. The bar is a read-only instrument, like both of them.
   composition that does not account for everything is not a composition. An
   out-of-range share is clamped fail closed first, so the excess can never
   draw past the bar's own end and surfaces as the sum not adding up.
-- **One proportional row, through the one measured-track geometry.** The
-  groove, its thickness, its rounding and its proportional arithmetic are the
-  ones a MetricTile's track draws with (§11.33); the parts are filled to their
-  *cumulative* shares so the bar's two ends round and the parts butt cleanly
-  without a second segment recipe.
+- **One proportional band, through the one measured-track geometry.** The
+  groove, its rounding and its proportional arithmetic are the ones a
+  MetricTile's track draws with (§11.33); the parts are filled to their
+  *cumulative* shares, back to front, so the parts butt cleanly without a
+  second segment recipe.
+- **The band is broader than a progress line** — its own
+  `composition_thickness` metric, several times `progress_thickness` — because
+  a composition is *categorical*: the eye has to match each coloured run to a
+  name in the key beneath it, and a run a few pixels tall is a colour a reader
+  cannot identify. It stays under `control_height`, so the band still reads as
+  an instrument rather than a plate.
+- **Only the band's two outer ends are rounded.** A part that meets another
+  ends at a straight edge. A rounded cap there lets the *next* part's colour
+  through the corner notches above and below the join — as deep as the band's
+  radius, so it grows with the band's breadth — and the boundary reads as a
+  curved wedge instead of a division.
 - **The parts separate by hue, because they are categories rather than
   degrees.** The sequence is the theme's own resource hues in a fixed rotation
   that keeps neighbours far apart on the wheel, led by the bar's own resource

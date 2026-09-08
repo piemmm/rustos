@@ -5554,11 +5554,11 @@ fn capsule_gestures_ask_the_session_to_open_switchboard() {
         "the press begins the gesture and acts on nothing yet"
     );
 
-    // Released promptly, it asks for the running-task section.
+    // Released promptly, it asks for what the machine is doing.
     assert_eq!(
         shell.handle(PRIMARY_RELEASE, &mut comp, QUICK_PRESS_NS),
         ShellOutcome::Taskbar(TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks,
+            section: CommandSection::Resources,
         })
     );
 

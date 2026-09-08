@@ -54,7 +54,11 @@ decode are each dropped with a stated reason and never touch the model.
 
 `OpenPanel` shows this application's own `Switchboard` screen composition
 (`src/view/`, one module per section around a shared skeleton) on the
-requested section, through `Switchboard::select_section`. The screen is
+requested section, through `Switchboard::select_section`. An ordinary tap on
+the taskbar's tray capsule asks for **Resources**, so the window opens on the
+processor — what the machine is doing, which is what a reader arriving at a
+system monitor came for; a long press still asks for `Recovery`, which is an
+explicit destination. The screen is
 assembled entirely from the shared `lib/controls` controls and paints no
 chrome of its own; it lives in the application rather than in `lib/controls`
 because it arranges those controls into one particular window
@@ -145,7 +149,7 @@ what is this machine doing, what broke.
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list, as a filterable, searchable, sortable table with the selected task's commands beside it — see below |
+| Tasks | the sampled process list, as a sortable, groupable table with the selected task's commands beside it — see below |
 | Resources | one pane per resource *device* the sample names: the processor, the machine's memory, each storage device, each managed interface, the display path, and the machine's own identity, seats and authority — see below |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
 
@@ -185,31 +189,13 @@ the same reason.
 
 ### The Tasks table
 
-Tasks is a census, a filter strip, a search field, the rows, the selected
-task's commands beside them, and a footer band
+Tasks is the rows, the selected task's commands beside them, and a footer band
 (`plans/NEW-SWITCHBOARD.md` S4).
 
-The **census** is the header's own first row: four `MetricTile`s — Processes,
-Users, Mine, Alerts — each with the glyph of the thing it counts and each on
-the surface's shared block plate (below). A tile keeps its own width rather
-than sharing the row out, so four counts do not stretch across a wide header,
-and a header too narrow for all four draws the ones that fit.
-
-The **header** carries a filter `Tabs` strip (All, Processes, Jobs, Services,
-Faults) whose labels carry each filter's own count, and beneath it a
-full-width `SearchField` that matches on the task's name, case-insensitively —
-*which kind* of task and *which* task are separate questions, so each gets its
-own row. Every tile and every tab counts the adopted rows through the *same*
-predicate the filter itself applies, so a tile, its tab and the rows it shows
-can never state different numbers. Filtering, searching, grouping and sorting
-are arrangements of the rows already sampled; none of them issues a new query.
-
-A sample changing a count re-labels those tabs **in place**. The strip is built
-once and holds one tab per filter for the life of the section, because it — not
-the section — is what remembers which tab the pointer rests on, which one the
-keyboard cursor is on, and which one a press is waiting to complete on. A
-fresh strip each sample would know none of the three, so a count moving under a
-resting pointer would blink the highlight off and swallow a click in flight.
+The section claims **no header band of its own**: the table's column headings
+are pinned inside the table, so every pixel above the rows belongs to the
+rows. Grouping and sorting are arrangements of the rows already sampled;
+neither issues a new query.
 
 The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
 name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. A row's
@@ -246,9 +232,9 @@ memory back on the memory-pressure band wake.
 Only a *window owner* has a bundle to draw, because the session is what
 reports it. A non-windowed process keeps its class glyph: matching a process
 *name* against a bundle would be guessing. Every
-column is a *reading* about the task. The sort is the header's own, applied
-over the filtered rows and stable — rows a column cannot separate keep the
-order the sample reported them in. *Activity* is the task's own CPU sparkline,
+column is a *reading* about the task. The sort is the header's own and
+stable — rows a column cannot separate keep the order the sample reported them
+in. *Activity* is the task's own CPU sparkline,
 drawn into that column's rect; the column geometry has one definition, which
 the heading, the cells and the sparkline all read. A working task draws no line
 under its row: the trend belongs in the column whose heading promises it.
@@ -272,19 +258,16 @@ is reading rather than letting it move under them — and the grouping `ComboBox
 (ungrouped, by type, by activity) beneath the commands, so each control sits
 under what it governs.
 
-The content cursor spans the header controls, then the rows, then the commands,
+The content cursor spans the column headings, then the rows, then the commands,
 then the footer controls, so every control is reachable from the keyboard
-whatever the filter leaves showing — including nothing.
+whatever the sample leaves showing — including nothing.
 
-Type names what a row *is*, not what it is for: a row from the process list is
-a `Process`. `Job` and `Service` are the kinds a job registry and a service
-manager will contribute, so their tiles and tabs read a genuine zero today
-rather than a guess. Three filters the concept boards sketch are deliberately
-absent, because no reading backs them: *Background* (the process list carries
-no foreground/background signal), *Recent* (there is no last-active interface),
-and *Hung*, which is folded into *Faults* — one filter over the same classifier
-the Recovery section uses, so the two can never disagree about which tasks are
-faulted.
+The census tiles, the filter strip and the search field the concept boards
+sketch above the table are **retired**: the readings they carried are the
+Resources section's subject, the strip's kinds needed a job registry and a
+service manager that do not exist, and the surface is worth more to a reader
+as rows than as chrome. The boards therefore draw a header band the section no
+longer claims.
 
 #### What the table measures, and what it cannot
 
@@ -358,6 +341,20 @@ committed share's own bounded history, recorded beside the CPU's through one
 series definition, so a refused reading on either side never shortens the
 other. Only the `Machine` entries have no instrument.
 
+**A trace is tinted by what it means, and a two-directional one by which way
+the bytes went.** Most entries read as their own resource, so the trace wears
+that resource's rail hue. The two subjects that are not devices carry their
+own signals instead — the task census is *what the machine is running*, which
+is not compute saturation, and the recovery entry is recovery — because a task
+count drawn in the compute hue read as a second CPU trace beside the real one.
+A storage device and an interface are *duplex*: reads rise above the axis in
+the read hue and writes mirror below in the write hue, receive against send
+likewise in the network pair, so a read-heavy and a write-heavy device never
+look alike. That colouring has exactly one definition, which the rail entry
+and the pane's own hero both draw through, so the sidebar and the pane it
+opens can never tint the same reading differently — and the rail therefore
+shows a storage device's writes, which plotting only its reads did not.
+
 **The rail's length is discovered, never declared.** Twelve cores, four disks
 and three interfaces is the design case; a hundred-core machine with a dozen
 disks gets a scrolling rail, not a truncated one, and no entry count is a
@@ -392,8 +389,8 @@ pill the health buckets resolve to, or genuine facts. Rendering a resource as
 key/value text is the defect this section exists to fix.
 
 **One block anatomy, shared by all three sections.** A block — the hero, a
-pane's detail block, a census tile, a per-core cell, a fault card, a fault's
-fact and timeline blocks, and each section's action column — is a
+pane's detail block, a per-core cell, a fault card, a fault's fact and
+timeline blocks, and each section's action column — is a
 hairline-rimmed plate a step lighter than the section behind it, under a
 small-caps accent title with a hairline rule. It is composition over the
 shared plate primitives rather than a control, because `Panel` is a different

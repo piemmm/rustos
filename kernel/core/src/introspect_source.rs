@@ -30,7 +30,7 @@ use tairix_abi::sysinfo::{
     CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT, PROCESS_CPU_NONE,
     RESOURCE_LIMITS_REPORT_LEN,
 };
-use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64};
+use tairix_abi::{Duration64, Errno, LimitKind, ProcId, Time64, MEMORY_CLASS_COUNT};
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_mem::PAGE_SIZE;
 use tairix_kernel_sched_api::{Priority, SchedulerPolicy, TaskId, TaskState};
@@ -286,8 +286,12 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     }
 
     fn kernel_memory(&self) -> Result<Vec<u8>, Errno> {
-        let free_frames = self.state.frame_allocator.free_frames() as u64;
+        // One acquisition for the whole, the free pool and every class, so
+        // the parts and the whole describe the same instant and
+        // `free + Σ class == total` holds of what the caller reads.
+        let frames = self.state.frame_allocator.snapshot();
         let page = PAGE_SIZE as u64;
+        let bytes_of = |count: usize| (count as u64).saturating_mul(page);
         // Summed over the same records and through the same derivation the
         // per-process view reports, so the aggregate and the rows can never
         // disagree. It reveals nothing `total_bytes - free_bytes` does not
@@ -299,13 +303,18 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 sum.saturating_add(resident_bytes(&aspaces, record.process()))
             })
         };
+        let mut class_bytes = [0u64; MEMORY_CLASS_COUNT];
+        for (slot, count) in class_bytes.iter_mut().zip(frames.class) {
+            *slot = bytes_of(count);
+        }
         let stats = KernelMemoryStats {
-            total_bytes: usable_ram_bytes(self.usable_frames()),
-            free_bytes: free_frames.saturating_mul(page),
+            total_bytes: bytes_of(frames.usable),
+            free_bytes: bytes_of(frames.free),
             kernel_heap_bytes: self.heap.capacity() as u64,
             user_resident_bytes,
             page_size: u32::try_from(PAGE_SIZE).unwrap_or(u32::MAX),
             reserved: 0,
+            class_bytes,
         };
         Ok(stats.to_le_bytes().to_vec())
     }
@@ -887,6 +896,7 @@ mod tests {
 
     use super::{usable_ram_bytes, PAGE_SIZE};
     use tairix_abi::sysinfo::{KernelMemoryStats, MemoryTotal};
+    use tairix_abi::MEMORY_CLASS_COUNT;
 
     /// The ungated total and the gated kernel-memory view report one
     /// number for one machine: both scale the same usable-frame census
@@ -903,6 +913,7 @@ mod tests {
                 user_resident_bytes: 0,
                 page_size: u32::try_from(PAGE_SIZE).unwrap_or(u32::MAX),
                 reserved: 0,
+                class_bytes: [0; MEMORY_CLASS_COUNT],
             };
             let ungated = MemoryTotal { total_bytes: bytes };
             let gated =

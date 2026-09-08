@@ -21,7 +21,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
-    ResourceControl, ResourceDevice,
+    ResourceControl, ResourceDevice, Trace,
 };
 
 /// The display path's rail entry and pane.
@@ -46,7 +46,7 @@ pub(super) fn device(
             || Reading::Absent(Unmeasured::Unavailable),
             |px| Reading::measured(format_pixels(px)),
         ),
-        trend: history.to_vec(),
+        trend: Trace::single(PressureKind::Gpu.signal_role(), history.to_vec()),
         hero: hero(frame, history),
         blocks: blocks(sample, frame, stats, busy_permille),
         banner: None,
@@ -81,7 +81,10 @@ fn hero(frame: Option<FrameReport>, history: &[u16]) -> PaneHero {
             ),
             overdraw_line(&frame),
         ],
-        instrument: HeroInstrument::trend(history.to_vec()),
+        instrument: HeroInstrument::trend(Trace::single(
+            PressureKind::Gpu.signal_role(),
+            history.to_vec(),
+        )),
         caption: String::from("damaged pixels per frame"),
     }
 }

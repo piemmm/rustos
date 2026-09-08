@@ -18,7 +18,7 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Rgba, Theme};
+use tairix_theme::{Appearance, Rgba, SignalRole, Theme};
 
 use crate::button::{Button, ButtonContent, IconButton, SplitButton};
 use crate::chart::Chart;
@@ -901,7 +901,7 @@ const EVERY_FAMILY: &[Family] = &[
         .render(sf, b, s, th);
     }),
     ("Chart", SEAT, |sf, b, s, th| {
-        Chart::new(PressureKind::Cpu)
+        Chart::new(SignalRole::Cpu)
             .with_samples([10_u16, 400, 900, 250])
             .render(sf, b, s, th);
     }),

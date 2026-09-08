@@ -490,7 +490,7 @@ impl TaskbarInput {
                 self.capsule_press = None;
                 return match taskbar.tray_pointer(&event, scale) {
                     Some(TraySignalAction::Activated) => TaskbarResponse::OpenSwitchboard {
-                        section: CommandSection::Tasks,
+                        section: CommandSection::Resources,
                     },
                     None => TaskbarResponse::Ignored,
                 };
@@ -617,7 +617,7 @@ impl TaskbarInput {
             };
         }
         TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks,
+            section: CommandSection::Resources,
         }
     }
 

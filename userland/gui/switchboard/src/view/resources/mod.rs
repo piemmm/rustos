@@ -38,7 +38,7 @@ mod pane;
 
 pub use device::{
     DeviceAction, DeviceId, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
-    ResourceReport, StorageId, TaskCostColumn,
+    ResourceReport, StorageId, TaskCostColumn, Trace,
 };
 pub use pane::{
     BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, HeroInstrument, PaneBlock,

@@ -973,6 +973,7 @@ pub fn sweep_pattern<M>(
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use crate::frame::MemoryClass;
     use crate::phys::SimPhysMap;
 
     extern crate std;
@@ -1554,7 +1555,7 @@ mod tests {
         // Hand out four frames, then return all but one so a single in-use
         // frame sits amid otherwise-free RAM, exactly like a DMA buffer.
         let f: Vec<_> = (0..4)
-            .map(|_| frames.alloc().expect("free frame"))
+            .map(|_| frames.alloc(MemoryClass::Kernel).expect("free frame"))
             .collect();
         frames.free(f[0]).expect("free");
         frames.free(f[1]).expect("free");
@@ -1707,7 +1708,7 @@ mod tests {
         // by address, not allocation order) so the free set is four isolated
         // single-frame runs.
         let f: Vec<_> = (0..8)
-            .map(|_| frames.alloc().expect("free frame"))
+            .map(|_| frames.alloc(MemoryClass::Kernel).expect("free frame"))
             .collect();
         for &k in &[0u64, 2, 4, 6] {
             let target = base + k * p;

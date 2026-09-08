@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::sysinfo::{MountRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN};
 use tairix_controls::PressureKind;
+use tairix_theme::SignalRole;
 
 use super::{
     availability_name, health_state, health_text, medium_name, used_permille, volume_bytes,
@@ -34,7 +35,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, HealthSeverity, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
-    ResourceControl, ResourceDevice, StorageId, TaskCostColumn,
+    ResourceControl, ResourceDevice, StorageId, TaskCostColumn, Trace,
 };
 
 /// The nil volume identity: what the mount table reports for a mount with no
@@ -245,7 +246,7 @@ pub(super) fn device(
         ),
         name: subject.name(sample),
         kind: PressureKind::Disk,
-        trend: meters.devices.primary_history(id).to_vec(),
+        trend: io_trace(meters, id),
         hero: hero(sample, meters, id, &service),
         blocks: blocks(sample, meters, subject, &service, bundles),
         banner: None,
@@ -270,9 +271,22 @@ fn hero(
         value: super::reading(sample, DegradedField::VolumeIoStats, total, format_rate),
         unit: String::new(),
         context: context(service),
-        instrument: HeroInstrument::trend(meters.devices.primary_history(id).to_vec())
-            .with_opposing(meters.devices.opposing_history(id).to_vec()),
+        instrument: HeroInstrument::trend(io_trace(meters, id)),
         caption: String::from("read above the line, write below"),
+    }
+}
+
+/// This device's throughput as one duplex trace: reads above the axis in the
+/// read colour, writes mirrored below in the write colour.
+///
+/// The rail entry and the pane hero draw the same trace, so the sidebar shows
+/// a device's writes rather than only its reads.
+fn io_trace(meters: &RollingMeters, id: DeviceId) -> Trace {
+    Trace::Duplex {
+        inbound: SignalRole::DiskRead,
+        outbound: SignalRole::DiskWrite,
+        into: meters.devices.primary_history(id).to_vec(),
+        out: meters.devices.opposing_history(id).to_vec(),
     }
 }
 

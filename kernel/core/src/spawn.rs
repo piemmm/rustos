@@ -1074,8 +1074,8 @@ mod tests {
     use tairix_abi::rxe::{LoadHeader, RxePermission, Segment, LOAD_FLAG_PIE};
     use tairix_abi::{ABI_VERSION_CURRENT, LOAD_MAGIC, SYSCALL_TABLE_HASH_LEN};
     use tairix_kernel_mem::{
-        AddressSpace, BootMemoryMap, HostPageTable, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
-        UserStack, PAGE_SIZE,
+        AddressSpace, BootMemoryMap, HostPageTable, MemoryClass, MemoryRegion, PhysAddr,
+        RegionKind, SimPhysMap, UserStack, PAGE_SIZE,
     };
     use tairix_log::{set_max_level, Level};
 
@@ -1211,7 +1211,7 @@ mod tests {
                     &mut space,
                     simmap,
                     &req,
-                    || frames.alloc().ok(),
+                    || frames.alloc(MemoryClass::UserAnon).ok(),
                 )
             }
             .expect("image builds");
@@ -1337,7 +1337,7 @@ mod tests {
                     &mut space,
                     &simmap,
                     &req,
-                    || frames.alloc().ok(),
+                    || frames.alloc(MemoryClass::UserAnon).ok(),
                 )
             };
             assert!(entry.is_ok(), "the sandbox spawn is admitted");
@@ -1373,7 +1373,7 @@ mod tests {
                 &mut space,
                 &simmap,
                 &req,
-                || frames.alloc().ok(),
+                || frames.alloc(MemoryClass::UserAnon).ok(),
             )
         };
         assert_eq!(result.err(), Some(SpawnCallerError::Denied));

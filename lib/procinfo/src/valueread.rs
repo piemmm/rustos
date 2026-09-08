@@ -78,7 +78,7 @@ mod tests {
         KernelMemoryStats, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
     };
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::{CapabilityId, Errno};
+    use tairix_abi::{CapabilityId, Errno, MEMORY_CLASS_COUNT};
     use tairix_resref::parse;
 
     use super::{read_value, MAX_VALUE_LEN};
@@ -124,6 +124,7 @@ mod tests {
                     user_resident_bytes: 4096,
                     page_size: 4096,
                     reserved: 0,
+                    class_bytes: [0; MEMORY_CLASS_COUNT],
                 }
                 .to_le_bytes()
                 .to_vec()),

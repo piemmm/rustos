@@ -6,14 +6,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::cache_class_name;
-use tairix_controls::{ControlRole, PressureKind};
+use tairix_abi::MemoryClass;
+use tairix_controls::{ControlRole, PressureKind, MAX_COMPOSITION_SEGMENTS};
 
 use super::{consumers, reading as reading_of};
 use crate::format::{byte_parts, format_bytes, format_duration, percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
-use crate::view::resources::{BlockBody, CompositionPart, HeroInstrument, PaneBlock, PaneHero};
+use crate::view::resources::{
+    BlockBody, CompositionPart, HeroInstrument, PaneBlock, PaneHero, Trace,
+};
 use crate::view::resources::{
     DeviceAction, DeviceId, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
     TaskCostColumn,
@@ -37,7 +40,10 @@ pub(super) fn device(
         name: String::from("Memory"),
         kind: PressureKind::Memory,
         reading: committed.clone(),
-        trend: meters.system.memory_history().to_vec(),
+        trend: Trace::single(
+            PressureKind::Memory.signal_role(),
+            meters.system.memory_history().to_vec(),
+        ),
         hero: PaneHero {
             // The figure alone; its unit trails it at body size beside the
             // whole it is a share of, both scaled to that whole's unit.
@@ -54,8 +60,11 @@ pub(super) fn device(
             // The committed share both ways, as the boards draw it: the trace
             // for what memory has been doing, the bar for how much is in use
             // now. The history is already measured for the rail's own entry.
-            instrument: HeroInstrument::trend(meters.system.memory_history().to_vec())
-                .with_track(sample.memory_pressure.map(|m| m.used_permille)),
+            instrument: HeroInstrument::trend(Trace::single(
+                PressureKind::Memory.signal_role(),
+                meters.system.memory_history().to_vec(),
+            ))
+            .with_track(sample.memory_pressure.map(|m| m.used_permille)),
             caption: String::from("committed share"),
         },
         blocks: blocks(sample, bundles),
@@ -122,7 +131,7 @@ fn band_age(sample: &Sample, meters: &RollingMeters) -> Option<String> {
 /// most, and the bounded caches' own ledger.
 fn blocks(sample: &Sample, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     alloc::vec![
-        PaneBlock::full("COMPOSITION — WHERE THE RAM IS", composition(sample)),
+        PaneBlock::full("COMPOSITION", composition(sample)),
         PaneBlock::half("MEMORY", BlockBody::Facts(memory_facts(sample))),
         PaneBlock::half(
             "TOP CONSUMERS — MEMORY",
@@ -132,13 +141,20 @@ fn blocks(sample: &Sample, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     ]
 }
 
-/// Where the RAM went, in the parts the kernel genuinely accounts.
+/// Where the RAM went: one part per memory class the kernel charges frames
+/// to, and the free remainder.
 ///
-/// The parts are the readings that exist — what user address spaces hold,
-/// what the kernel's own heaps hold, what the reclaimable caches hold, and
-/// what the compressed tier holds — plus the share those named parts do not
-/// account for, and the free remainder. A share the kernel does not measure
-/// is not invented: the block states its absence instead.
+/// The kernel charges every frame to exactly one class at allocation and
+/// discharges it from the same one at free, so the parts partition the RAM in
+/// use and the bar is valid by construction: the floored shares can never
+/// exceed the whole, and `1000 - Σ named` closes it exactly.
+///
+/// That is why the classes are read rather than the per-process figure beside
+/// them. `user_resident_bytes` counts *mappings*, so a frame shared between
+/// address spaces counts once per space and a user driver's MMIO window counts
+/// although it is not RAM — the named shares then summed past the whole, the
+/// bar refused construction, and this block stated an absence under exactly
+/// the load a reader most wants it.
 fn composition(sample: &Sample) -> BlockBody {
     let Some(kernel) = sample.kernel_memory else {
         return BlockBody::Absence(crate::view::reading::absence_statement(
@@ -153,25 +169,14 @@ fn composition(sample: &Sample) -> BlockBody {
             Unmeasured::Unavailable,
         ));
     }
-    let reclaimable = reclaimable_bytes(sample).unwrap_or(0);
-    let compressed = sample.ramzip.map_or(0, |stats| stats.stored_bytes);
-    let named = [
-        ("Processes", kernel.user_resident_bytes),
-        ("Kernel heap", kernel.kernel_heap_bytes),
-        ("Reclaimable", reclaimable),
-        ("Compressed", compressed),
-    ];
-    let accounted: u64 = named.iter().map(|(_, bytes)| *bytes).sum();
-    let in_use = total.saturating_sub(kernel.free_bytes);
-    let unaccounted = in_use.saturating_sub(accounted);
-    let mut parts: Vec<CompositionPart> = named
+    // A class holding nothing is dropped rather than drawn as a nameable run
+    // of no width, so a quiet machine shows the parts it genuinely has.
+    let mut parts: Vec<CompositionPart> = MemoryClass::ALL
         .iter()
+        .map(|class| (class_label(*class), kernel.class_bytes[class.index()]))
         .filter(|(_, bytes)| *bytes > 0)
-        .map(|(label, bytes)| part(label, *bytes, total, false))
+        .map(|(label, bytes)| part(label, bytes, total))
         .collect();
-    if unaccounted > 0 {
-        parts.push(part("Other in use", unaccounted, total, false));
-    }
     // The remainder closes the whole exactly, so the bar can never
     // under-report where the memory went: the shares of the named parts are
     // rounded down, and whatever that leaves is free.
@@ -186,13 +191,33 @@ fn composition(sample: &Sample) -> BlockBody {
     BlockBody::Composition(parts)
 }
 
-/// One named part of the composition.
-fn part(label: &str, bytes: u64, total: u64, remainder: bool) -> CompositionPart {
+// Every class must be able to wear a hue of its own, or a part would be drawn
+// in another part's colour and the bar would refuse construction outright. A
+// class added past the ladder's length is therefore a compile error here
+// rather than a composition that silently states an absence.
+const _: () = assert!(tairix_abi::MEMORY_CLASS_COUNT <= MAX_COMPOSITION_SEGMENTS);
+
+/// How a memory class reads to someone looking at their own machine, rather
+/// than by the kernel's own charging vocabulary.
+const fn class_label(class: MemoryClass) -> &'static str {
+    match class {
+        MemoryClass::UserAnon => "Processes",
+        MemoryClass::UserFile => "File cache",
+        MemoryClass::PageTable => "Page tables",
+        MemoryClass::Kernel => "Kernel",
+        MemoryClass::Dma => "Device buffers",
+        MemoryClass::Compressed => "Compressed",
+    }
+}
+
+/// One named part of the composition. The free remainder is built beside the
+/// named parts, so this is never one.
+fn part(label: &str, bytes: u64, total: u64) -> CompositionPart {
     CompositionPart {
         label: String::from(label),
         amount: format_bytes(bytes),
         share: u16::try_from(bytes.saturating_mul(1_000) / total.max(1)).unwrap_or(1_000),
-        remainder,
+        remainder: false,
     }
 }
 

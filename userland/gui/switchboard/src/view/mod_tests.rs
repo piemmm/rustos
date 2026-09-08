@@ -745,8 +745,9 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
 fn action_focus_clamps_and_resets_with_the_row_focus() {
     let mut sb = on_tasks(&model());
     // The Tasks table's rows carry no controls of their own, so the sideways
-    // cursor has nowhere to go within a row; the filter strip, whose tabs it
-    // does traverse, is where the clamp is worth proving.
+    // cursor has nowhere to go within a row; the column headings, whose
+    // sortable columns it does traverse, are where the clamp is worth
+    // proving.
     focus_task_row(&mut sb, 0);
     for sideways in [NamedKey::Left, NamedKey::Right] {
         assert_eq!(key(&mut sb, Key::Named(sideways)), None);
@@ -757,15 +758,15 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
         );
     }
 
-    // A fresh screen rests on the filter strip, whose tabs the sideways
-    // cursor does traverse.
+    // A fresh screen rests on the column headings, which the sideways cursor
+    // does traverse.
     let mut sb = on_tasks(&model());
-    let stops = sb.tasks.filters.len();
+    let stops = sb.tasks.header.columns().len();
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Left)), None);
     assert_eq!(
         sb.active().row_action(),
         0,
-        "Left at the first tab stays put"
+        "Left at the first heading stays put"
     );
     for _ in 0..stops + 2 {
         assert_eq!(key(&mut sb, Key::Named(NamedKey::Right)), None);
@@ -773,7 +774,7 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
     assert_eq!(
         sb.active().row_action(),
         stops - 1,
-        "Right clamps at the last tab"
+        "Right clamps at the last heading"
     );
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     assert_eq!(
@@ -1212,45 +1213,4 @@ fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
             damage.rects()
         );
     }
-}
-
-/// The Tasks census tiles wear the surface's shared block plate — bordered
-/// and a step lighter than the band behind them — rather than the control's
-/// own, so a census tile, a pane block and a fault card are all one anatomy
-/// (`plans/switchboard/01-tasks.png`).
-#[test]
-fn the_census_tiles_wear_the_shared_block_plate() {
-    let theme = Theme::dark();
-    // Wider than the shared fixture: a band too narrow to seat the census
-    // drops it, and this is a test about how a seated tile is drawn.
-    let b = Rect::new(0, 0, 1000, 500);
-    let mut sb = on_tasks(&model());
-    sb.select_section(Section::Tasks);
-    let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
-
-    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
-    let frame = super::resolve_section_frame(
-        layout.content,
-        super::SectionView::anatomy(&sb.tasks),
-        Scale::ONE,
-        &theme,
-    );
-    let (summary, _, _) = super::tasks::TasksSection::header_rows(&frame, Scale::ONE);
-    let raised = Color::from(theme.palette().surface_raised).premultiply();
-    let rim = Color::from(theme.palette().rim).premultiply();
-    let mut grounds = 0usize;
-    let mut rims = 0usize;
-    for y in summary.top()..summary.bottom() {
-        for x in summary.left()..summary.right() {
-            let (xu, yu) = (u32::try_from(x).unwrap_or(0), u32::try_from(y).unwrap_or(0));
-            match surface.get(xu, yu) {
-                Some(p) if p == raised => grounds += 1,
-                Some(p) if p == rim => rims += 1,
-                _ => {}
-            }
-        }
-    }
-    assert!(grounds > 0, "a census tile draws no raised ground");
-    assert!(rims > 0, "a census tile draws no rim");
 }

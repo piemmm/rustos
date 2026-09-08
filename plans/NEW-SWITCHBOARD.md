@@ -42,7 +42,7 @@ lie about.
 | **V6** | Graphics pane — the frame-work breakdown, the compositing path, the device; self-report suppression preserved | V1, P1, Q3 | S4 | done |
 | **V7** | Accelerator pane — reports what discovery knows (node, class, match keys, unbound); readings fill from Q4. Also brings the virtio-MMIO/PCI **accelerator probe** and the driver-store bundle: D1's classifiers put a real PCI or device-tree accelerator in the tree, but a virtio accelerator's type is only visible to a runtime slot probe, and the rail is that probe's only consumer | V1, P1, D1, Q4 | S4 | planned |
 | **V8** | Machine group panes — identity and uptime, seats and census, authority with limits and live usage | V1 | S4 | done |
-| **V9** | Tasks amendments — Owner and Core columns, the owner + fault filters, the census tiles | A1 | S4 | done |
+| **V9** | Tasks amendments — Owner and Core columns | A1 | S4 | done |
 | **V10** | Top-consumers block on the CPU, Memory and storage panes, stating that a sum of tasks is not the device's total | V2, V3, V4 | S4 | done |
 | **X1** | Delete `view/{background,pressure,activities}.rs` and their tests; `PressureClock` and the cause model move to V3's banner, the group model to V9's grouping | V3, V9 | S10 | done |
 | **X2** | Delete `view/{system,system_data}.rs`, the `PageLine` vocabulary and `SystemReport`'s `cores`/`memory`/`compositor` fact vectors | V2, V3, V4, V5, V6, V8 | S10 | done |
@@ -136,10 +136,13 @@ states what every subject is doing whichever one is on show.
 **The location band is retired**, and with it the `Breadcrumb` trail, the
 `ListMenu` `IconButton`, the section `Menu`, `BandSummary`/`BandLayout`/
 `resolve_band`/`band_height`, and the Resources `band_combo` that existed only
-to survive a shed rail. Tasks' four census tiles moved into that section's own
-header, where they lead the filter strip and the search field. The retired
-footer's "Sampling every 1.0 s" is gone too — it was false as well as
-redundant, since the cadence is 2 s.
+to survive a shed rail. The retired footer's "Sampling every 1.0 s" is gone
+too — it was false as well as redundant, since the cadence is 2 s.
+
+**The surface opens on Resources, showing the processor.** `Switchboard::new`
+already starts on `Section::Resources`, whose first device is the CPU; the
+taskbar's ordinary tray tap asks for `CommandSection::Resources` to match. A
+long press still asks for `Recovery`, which is an explicit destination.
 
 ## S3 — The section frame — done, Resources anatomy added
 
@@ -238,24 +241,15 @@ view never interprets an identity; it only compares.
 
 ### Tasks (`01-tasks.png`)
 
-- **band summary** — four census `MetricTile`s (Processes, Users, Cores busy,
-  Alerts), each plated and carrying the glyph of the thing it counts, tinted
-  by a `PressureKind` used as an identity colour rather than as a claim that a
-  resource is strained. `CENSUS` is their one declaration: the tiles are built
-  from it and the room the band asks for is measured from it, so the band can
-  never seat a different number of tiles than the section draws.
-- **header** — the filter `Tabs` strip on its own row, whose labels carry each
-  filter's count, then a `SearchField` matching on task name,
-  case-insensitively, over its own full-width row. *Which kind* of task and
-  *which* task are separate questions, so each gets a row. Every tile and
-  every tab counts adopted rows through the *same* predicate, so a tile and
-  its tab can never state different numbers.
+- **header** — none. The section claims `header_height: 0`: the table's own
+  column headings are pinned inside the table, so every pixel above the rows
+  belongs to the rows.
 - **primary** — a sortable `TableHeader` over `TableRow`s: Task (its
   `IconKind` and name), Owner, State, Activity (a per-task CPU `Chart`
   sparkline), CPU, Core, Memory, Disk, Network. Every column is a *reading*
   about the task; what may be done to it is the rail's business. Sorting is
-  the header's, applied over the filtered rows and stable, so rows it cannot
-  separate keep the order the sample reported. `COLUMN_WEIGHTS` is the one
+  the header's and stable, so rows it cannot separate keep the order the
+  sample reported. `COLUMN_WEIGHTS` is the one
   definition of the column geometry: the heading, the cells and the
   sparkline's own rect (`TableRow::cell_rects`) all read it.
 - **rail** — `ACTIONS` for the *selected* task in a trailing `ActionRail`
@@ -272,31 +266,31 @@ view never interprets an identity; it only compares.
   table, and the grouping `ComboBox` beneath the rail, so each control sits
   under what it governs. Auto-refresh holds the table on the sample the reader
   is reading rather than moving it under them.
-- **cursor** — the content cursor spans header stops, then rows, then the
-  rail's commands, then footer stops, so every control is keyboard-reachable
-  without hanging off a row a filter could remove. `SectionView::focus_row`
-  maps a cursor stop back to the row it names (`None` for the chrome bands and
-  the anchored rail), keeping the scroll-into-view arithmetic in `view/mod.rs`
-  as the one definition; `item_count`/`list_info` mean the filtered, sorted
-  rows alone.
+- **cursor** — the content cursor spans the one header stop (the column
+  headings), then rows, then the rail's commands, then footer stops, so every
+  control is keyboard-reachable. `SectionView::focus_row` maps a cursor stop
+  back to the row it names (`None` for the headings, the footer and the
+  anchored rail), keeping the scroll-into-view arithmetic in `view/mod.rs` as
+  the one definition; `item_count`/`list_info` mean the sorted rows alone.
 
-**The filters are the ones a reading backs.** All, Mine, System and Faults:
-owner comes off `ProcessRecord::uid`, and Faults is the shared
-`process_recovery` classifier that already resolves both stopped and
-seat-reported-unresponsive tasks, so the tab, the rows' Signal Beads and the
-Recovery section can never disagree about which tasks are faulted. `Jobs` and
-`Services` are *not* spelled as tabs: with no job registry and no service
-manager, every row is a process, and a tab that can only ever read `(0)` is
-chrome. They return with their registries, alongside the `Type` column.
+**The census tiles, the filter strip and the search field are retired.** The
+four tiles (`CENSUS`/`CensusSpec`/`Census`), the `All / Mine / System /
+Faults` strip (`TaskFilter` and its whole tab machinery) and the `Search
+tasks` field are gone, with the three header rows they occupied: the readings
+they carried are the Resources section's subject, the strip's absent kinds
+needed a job registry and a service manager that do not exist, and the
+surface is worth more to a reader as rows than as chrome. Every adopted row is
+shown, so `arrange` sorts and groups the whole set and the footer's readout
+always states the whole table.
 
-**Owner and Core are the columns this replaces them with, and both are real.**
+**Owner and Core are real columns, and stay.**
 `ProcessRecord` carries `uid`, `gid` and the CPU the task is dispatched on, so
 a busy core in the CPU pane can be traced to the task sitting on it, and
 per-principal accounting is visible on a machine with many users.
 
 **The commands act on the selection, not on a row.** A `ProcId` — the task's
 stable, never-reused instance identity — is what the selection remembers, so
-it survives a refresh, a re-filter and a re-sort rather than following
+it survives a refresh and a re-sort rather than following
 whichever row slid into its place, and it drops only when the task genuinely
 goes. A table with rows always has one selected, so the commands always have a
 subject. This is what lets the rail state a task's whole repertoire instead of
@@ -464,7 +458,7 @@ boards draw every framed thing the same way, so it is defined once: a
 hairline-rimmed plate a step lighter than the section behind it
 (`surface_raised` as a `ChromeLayer::Plate`), under a small-caps accent title
 at `TextRole::SectionHeader` with a hairline rule. The hero, every pane detail
-block, a Tasks census tile, a per-core cell, a fault card and the fault's fact
+block, a per-core cell, a fault card and the fault's fact
 and timeline blocks are all that one block; so are the action columns' titled
 plates, which is what retired the `Panel` they used to sit in — a header band
 at control height with a dominant rail and a signal bead is a different
@@ -622,13 +616,22 @@ consequences:
   times its neighbours' width, which defeats the comparison the grid exists
   for.
 
-**The memory composition's parts are the ones the kernel accounts.** The board
-sketches a Linux-shaped anonymous / file-cache / slab split; no reading behind
-it exists. The honest segments are what user address spaces hold, what the
-kernel's own heaps hold, what the reclaimable classes hold, what the
-compressed tier holds, whatever those named parts do not account for, and the
-free remainder — which closes the whole exactly, so the bar cannot
-under-report where the memory went.
+**The memory composition's parts are the kernel's own memory classes.** One
+part per non-zero `MemoryClass` — `Processes` (`UserAnon`), `File cache`,
+`Page tables`, `Kernel`, `Device buffers` (`Dma`), `Compressed` — plus the
+free remainder, which closes the whole exactly. `Σ class ≤ usable` holds in
+the frame allocator, so the floored shares can never exceed the whole and the
+bar is valid *by construction*: it cannot fail to draw.
+
+Built from `KernelMemoryStats::user_resident_bytes` instead, it did fail. That
+figure is a per-space count of *mappings*, so a shared frame counts once per
+space and a user driver's MMIO window counts although it is no RAM; the named
+shares summed past the whole under load, `CompositionBar::new` refused, and
+the block stated an absence exactly when a reader most wanted it. The class
+partition is the fix, and `MEMORY_CLASS_COUNT <= MAX_COMPOSITION_SEGMENTS` is
+asserted at compile time, so a seventh class is a build error rather than a
+composition that silently states an absence. A class holding nothing is
+dropped rather than drawn as a nameable run of no width.
 
 **A device command is labelled, not glyphed, and almost none has an
 endpoint.** The vocabulary these rails need — scrub, trim, renew a lease, drop
@@ -656,6 +659,25 @@ Memory's trace is its committed share's own bounded history, recorded beside
 the CPU's through one series definition, so a refused reading on either side
 never shortens the other. Only the `Machine` group has no instrument, and
 that absence is what says its readings are facts.
+
+**A trace carries how it is tinted, and there is one definition of that.**
+`Trace` is the type: `Absent`, `Single { role, samples, full_scale }`, or
+`Duplex { inbound, outbound, into, out }` — so "opposing samples with no
+opposing role" is unrepresentable — and `Trace::chart()` is the *only* place a
+trace becomes a `Chart`. The rail entry (`build_rail`) and the pane hero
+(`hero_body`) both call it, so storage and network cannot drift apart, and the
+rail draws a storage device's writes where it previously plotted only its
+reads. The rail's trailing reading stays `% full`.
+
+Most devices read as their own resource, so their trace takes
+`kind.signal_role()`. The exceptions carry what they actually mean: the Tasks
+entry is `Workload` (a task census is what the machine is *running*, not
+compute saturation — drawn in the compute hue it read as a second CPU trace
+beside the real one), the Recovery entry is `Recovery` (it had borrowed the
+thermal hue), storage is `Duplex(DiskRead, DiskWrite)` and an interface is
+`Duplex(NetReceive, NetSend)` — its own pair, so a network pane still reads as
+network while its directions separate. `RailTrace` is gone: it carried the
+same points-plus-ceiling a `Trace::Single` does, so the two were one type.
 
 **Both `06-graphics.png` mismatches are closed, and the trace's reference is
 the frame's own screen.** The rail entry reads `damaged_px` — what changed on
@@ -889,7 +911,8 @@ obligations in `plans/GUI-CONTROLS-DESIGN.md` (§11.35, §11.40, §11.12).
 - **`chart::Chart` has an opposing series.** A read/write or receive/send rate
   is one reading with two directions, and drawing it as two stacked charts
   loses the comparison that matters. `with_opposing` takes a second series,
-  plotted mirrored below a drawn axis and tinted by its own `PressureKind`.
+  plotted mirrored below a drawn axis and tinted by its own `SignalRole` — the
+  *direction*, not the device, so a glance says which way the bytes went.
   One chart control and one plot path, not a second `DuplexChart` beside the
   first — the bounded `MAX_CHART_SAMPLES` window, the empty-series groove and
   the area treatment are reused whole. Adding a series *asserts the direction
@@ -901,6 +924,11 @@ obligations in `plans/GUI-CONTROLS-DESIGN.md` (§11.35, §11.40, §11.12).
   with a key naming each part and its amount. Answers *where did it go* for
   memory composition and for capacity by class. Shares that do not sum to the
   whole are a `CompositionError` at construction, not a silently short bar.
+  The band is `composition_thickness` — several times a progress line's
+  breadth — because a categorical run has to be identifiable against the key
+  beneath it. Only its two *outer* ends are rounded: a part that meets another
+  ends at a straight edge, since a rounded cap there lets the next part's
+  colour through above and below the join, as deep as the band's radius.
   The parts separate by *hue* — a fixed rotation of the theme's own resource
   colours, led by the bar's own resource — because they are categories rather
   than degrees, and the joins are ruled so they stay countable on the
@@ -1137,8 +1165,8 @@ misleads every later reader.
 `docs/src/desktop/switchboard.md` is rewritten in the same change: it
 describes the section set, so it cannot survive the section set changing.
 
-`view/tasks.rs`'s three rustdoc references to `plans/switchboard1.png` (the
-column order, the census tiles, and the rail commands) re-point at
+`view/tasks.rs`'s rustdoc references to `plans/switchboard1.png` (the column
+order and the rail commands) re-point at
 `plans/switchboard/01-tasks.png`, which is what now fixes those declarations.
 The older `plans/switchboard[1-4].png` boards stay until then: they are still
 the live reference those declarations cite, and are superseded only when the
@@ -1193,9 +1221,9 @@ this wrong on.
     in and the two that are not on show report nothing, which is unrepresentable
     rather than merely avoided. Each concrete `adopt` compares what it derived
     against what it held: `tasks` in `arrange`, which is also the one place a
-    filter, a search, a sort and a grouping re-derive the table (each of which
-    previously reported only the control the reader touched and left the table
-    on screen showing the old arrangement — a live defect this closed);
+    sort and a grouping re-derive the table (each of which previously reported
+    only the control the reader touched and left the table on screen showing
+    the old arrangement — a live defect this closed);
     `recovery` from the slots `resettle_cards` already found changed; and
     `resources` from a `Rebuilt` record naming its rail, its command column and
     the pane items that moved.
@@ -1274,10 +1302,16 @@ does not yet say.
 - **The band's shed route is built but never drawn.** The narrow-window
   `ComboBox` (`09-theme-and-shed.png`'s "▼ CPU") is constructed on every
   sample and neither rendered nor hit-tested.
-- **Not yet audited against the boards at all:** the filter pills (equal-width
-  across the strip where the boards size each to its own label), the task row's
-  leading pressure gutter, the faulted-task Signal Bead, and the
-  composition-bar legend.
+- **The boards draw a Tasks header the section no longer has.** The four
+  census pills, the `All / Mine / System / Faults` strip and the `Search
+  tasks` field on `01-tasks.png` are retired; the rows now occupy that band.
+- **The boards draw one hue for both halves of a duplex trace.** Storage and
+  network traces separate their directions instead — reads green against
+  writes red, receive blue against send violet — so a read-heavy and a
+  write-heavy device do not look alike.
+- **Not yet audited against the boards at all:** the task row's leading
+  pressure gutter, the faulted-task Signal Bead, and the composition-bar
+  legend.
 - **Still divergent, deliberately:** the processor block states one `Model` row
   joined with `·` where the boards give the performance and efficiency parts a
   row each and add a `Scheduler policy` row. No reading behind it is wrong — it

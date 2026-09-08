@@ -10,11 +10,12 @@ use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_theme::Theme;
 
-use tairix_controls::{damage, PressureKind};
+use tairix_controls::{damage, Chart, PressureKind};
+use tairix_theme::SignalRole;
 
 use crate::view::reading::{Reading, Unmeasured};
 use crate::view::resources::{
-    DeviceId, PaneHero, RailGroup, ResourceDevice, ResourceReport, StorageId,
+    DeviceId, PaneHero, RailGroup, ResourceDevice, ResourceReport, StorageId, Trace,
 };
 use crate::view::test_support::{
     bounds, centre, click, font, model, moved, refresh, shot, unreported_change, PRESS, RELEASE,
@@ -30,7 +31,7 @@ fn entry(id: DeviceId, group: RailGroup, name: &str) -> ResourceDevice {
         name: String::from(name),
         kind: PressureKind::Disk,
         reading: Reading::measured("41%"),
-        trend: Vec::new(),
+        trend: Trace::Absent,
         hero: PaneHero::facts(Reading::measured("41%"), "%"),
         blocks: Vec::new(),
         banner: None,
@@ -57,6 +58,13 @@ fn resources() -> Vec<ResourceDevice> {
         entry(DeviceId::Cpu, RailGroup::Resources, "CPU"),
         entry(DeviceId::Memory, RailGroup::Resources, "Memory"),
     ]
+}
+
+/// The processor, the machine's memory, and `device` beside them.
+fn resources_with(device: ResourceDevice) -> Vec<ResourceDevice> {
+    let mut devices = resources();
+    devices.push(device);
+    devices
 }
 
 /// One storage device on the rail.
@@ -434,4 +442,77 @@ fn a_rebuilt_rail_leaves_the_readers_cursor_alone() {
         None,
         "a fresh sample claimed a keyboard cursor of its own"
     );
+}
+
+/// The rail draws every entry's trace through the one definition the pane
+/// hero also draws through, so a direction's colour cannot differ between the
+/// sidebar and the pane it opens.
+#[test]
+fn a_rail_entry_draws_its_devices_own_trace() {
+    let read = alloc::vec![100u16, 400, 900];
+    let write = alloc::vec![50u16, 80, 120];
+    let mut disk = disk();
+    disk.trend = Trace::Duplex {
+        inbound: SignalRole::DiskRead,
+        outbound: SignalRole::DiskWrite,
+        into: read.clone(),
+        out: write.clone(),
+    };
+    let report = report(resources_with(disk.clone()), None, None);
+    let rail = rail_for(&report, disk.id);
+    let entry = rail
+        .tabs()
+        .iter()
+        .find(|tab| tab.label() == disk.name)
+        .expect("the disk has a rail entry");
+    assert_eq!(
+        entry.trend(),
+        disk.trend.chart().as_ref(),
+        "the rail's chart is the trace's own"
+    );
+    // Reads and writes are separate directions, so the sidebar shows both.
+    assert_eq!(
+        disk.trend.chart(),
+        Some(
+            Chart::new(SignalRole::DiskRead)
+                .with_samples(read)
+                .with_opposing(SignalRole::DiskWrite, write)
+        )
+    );
+}
+
+/// A `Machine` entry states facts, not rates, and the absence of an
+/// instrument is what says so.
+#[test]
+fn a_rail_entry_with_no_readings_draws_no_trace() {
+    let report = report(resources(), None, None);
+    let rail = rail_for(&report, DeviceId::Cpu);
+    for tab in rail.tabs() {
+        assert!(tab.trend().is_none(), "{} plots nothing", tab.label());
+    }
+}
+
+/// The two subjects that are not devices carry their own signals: what the
+/// machine is running, and what needs recovering. Neither borrows a
+/// resource's hue — a task count drawn in the compute colour read as a second
+/// CPU trace beside the real one, and the stopped share drew in the thermal
+/// one.
+#[test]
+fn the_task_and_recovery_entries_carry_their_own_signals() {
+    let mut model = model();
+    model.tasks_trend = Trace::counted(SignalRole::Workload, alloc::vec![3, 5, 4], 8);
+    model.recovery_trend = Trace::single(SignalRole::Recovery, alloc::vec![120, 240]);
+    let mut screen = Switchboard::new(&model);
+    screen.select_section(Section::Tasks);
+    let rail = screen.build_rail(&model);
+    let trend_of = |label: &str| {
+        rail.tabs()
+            .iter()
+            .find(|tab| tab.label() == label)
+            .and_then(|tab| tab.trend())
+            .cloned()
+    };
+    assert_eq!(trend_of("Tasks"), model.tasks_trend.chart());
+    assert_eq!(trend_of("Recovery"), model.recovery_trend.chart());
+    assert_ne!(model.tasks_trend.chart(), model.recovery_trend.chart());
 }

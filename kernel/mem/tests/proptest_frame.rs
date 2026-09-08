@@ -21,7 +21,8 @@ use proptest::prelude::*;
 use proptest::test_runner::Config;
 
 use tairix_kernel_mem::{
-    BootMemoryMap, Frame, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
+    BootMemoryMap, Frame, FrameAllocator, MemoryClass, MemoryRegion, PhysAddr, RegionKind,
+    PAGE_SIZE,
 };
 
 /// Build a memory map with a small reserved hole carved out of an
@@ -67,7 +68,7 @@ proptest! {
 
         for op in ops {
             if op % 2 == 0 || held.is_empty() {
-                if let Ok(f) = a.alloc() {
+                if let Ok(f) = a.alloc(MemoryClass::Kernel) {
                     prop_assert!(seen.insert(f.0), "double alloc {}", f.0);
                     held.push(f);
                 }
@@ -95,7 +96,7 @@ proptest! {
         // Use `seed` to vary the operation count.
         let target = 1 + (seed as usize) % 32;
         for _ in 0..target {
-            match a.alloc() {
+            match a.alloc(MemoryClass::Kernel) {
                 Ok(f) => {
                     prop_assert!(
                         !(16..24).contains(&f.0),
@@ -125,7 +126,7 @@ proptest! {
         let initial = a.free_frames();
         let mut held: Vec<(Frame, u32)> = Vec::new();
         for o in orders {
-            if let Ok(f) = a.alloc_order(o) {
+            if let Ok(f) = a.alloc_order(MemoryClass::Kernel, o) {
                 held.push((f, o));
             }
         }

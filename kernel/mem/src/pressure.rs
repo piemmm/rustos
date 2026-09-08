@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn the_frame_allocator_is_an_honest_source() {
         use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-        use crate::frame::PhysAddr;
+        use crate::frame::{MemoryClass, PhysAddr};
 
         // Based at frame 1: the zero page is permanently reserved, so a
         // base-0 region would enroll one frame fewer than it spans.
@@ -286,7 +286,7 @@ mod tests {
         let before = FreeMemorySource::free_bytes(&allocator);
         assert_eq!(total, 64 * PAGE_SIZE);
         assert!(before <= total);
-        let frame = allocator.alloc().expect("one frame");
+        let frame = allocator.alloc(MemoryClass::Kernel).expect("one frame");
         let after = FreeMemorySource::free_bytes(&allocator);
         assert_eq!(after + PAGE_SIZE, before);
         allocator.free(frame).expect("free the frame");

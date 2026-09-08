@@ -36,7 +36,7 @@
 
 use core::ptr::NonNull;
 
-use crate::frame::{Frame, FrameAllocator, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::phys::PhysMap;
 
 /// Why a slot reservation or release was refused.
@@ -154,7 +154,7 @@ impl RecordArena {
         // memory pressure.
         let frame = self
             .frames
-            .alloc()
+            .alloc(MemoryClass::PageTable)
             .map_err(|_| SlotError::RecordsExhausted)?;
         let Some(ptr) = self.phys.translate(frame.start(), PAGE_SIZE) else {
             // Outside the direct map: hand it straight back rather than
@@ -742,7 +742,7 @@ mod tests {
     /// physical RAM drained so the arena cannot draw another frame.
     fn exhaust_records(w: &mut SlotWindow, frames: &'static FrameAllocator) {
         w.allocate(4).expect("the first run draws the record frame");
-        while frames.alloc().is_ok() {}
+        while frames.alloc(MemoryClass::PageTable).is_ok() {}
         for _ in 0..=RECORDS_PER_FRAME {
             if w.allocate(4).is_err() {
                 return;

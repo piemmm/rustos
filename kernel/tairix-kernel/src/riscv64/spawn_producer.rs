@@ -226,7 +226,7 @@ impl ArchImageBuilder for RiscvProcessSpawn {
                 &mut space,
                 &physmap,
                 &request,
-                move || frames.alloc_user().ok(),
+                move || frames.alloc_user(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
             )
         }
         .map_err(spawn_caller_errno)?;

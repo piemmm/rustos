@@ -46,6 +46,8 @@
 
 use core::ops::{Deref, DerefMut};
 
+use tairix_theme::SignalRole;
+
 /// What a control fundamentally is.
 ///
 /// The kind selects a control's anatomy and default behaviour; its live
@@ -350,6 +352,29 @@ pub enum PressureKind {
     Gpu,
     /// General-purpose accelerator utilisation.
     Accelerator,
+}
+
+impl PressureKind {
+    /// This resource's own theme signal role.
+    ///
+    /// The one mapping from a resource identity to a palette role, so no
+    /// renderer restates it. A control tinted by a resource's identity — a
+    /// track, a resource-identity chart — resolves its colour through this;
+    /// a control tinted by something that is *not* a resource pressure, such
+    /// as a transfer direction, names its [`SignalRole`] directly.
+    #[must_use]
+    pub const fn signal_role(self) -> SignalRole {
+        match self {
+            Self::Cpu => SignalRole::Cpu,
+            Self::Memory => SignalRole::Memory,
+            Self::Disk => SignalRole::Disk,
+            Self::Network => SignalRole::Network,
+            Self::Power => SignalRole::Power,
+            Self::Thermal => SignalRole::Thermal,
+            Self::Gpu => SignalRole::Gpu,
+            Self::Accelerator => SignalRole::Accelerator,
+        }
+    }
 }
 
 /// Whether a control is under a resource pressure, and which.

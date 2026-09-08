@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetServerAddr, IF_NAME_LEN};
 use tairix_controls::PressureKind;
+use tairix_theme::SignalRole;
 
 use super::{format_addr, kind_name, mac, reading, server_address, trim_nul};
 use crate::format::{format_bytes, format_duration, format_rate};
@@ -20,7 +21,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
-    ResourceControl, ResourceDevice,
+    ResourceControl, ResourceDevice, Trace,
 };
 
 /// One interface's rail entry and pane.
@@ -42,7 +43,7 @@ pub(super) fn device(
         name: display_name(trim_nul(&iface.name)),
         kind: PressureKind::Network,
         reading: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
-        trend: meters.devices.primary_history(id).to_vec(),
+        trend: rate_trace(meters, id),
         hero: PaneHero {
             value: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
             unit: String::new(),
@@ -50,13 +51,26 @@ pub(super) fn device(
             // A rate has no fixed ceiling to fill a bar against, so it
             // trends: the interface's own counters deltaed over this
             // sample's interval, received above the line and sent below.
-            instrument: HeroInstrument::trend(meters.devices.primary_history(id).to_vec())
-                .with_opposing(meters.devices.opposing_history(id).to_vec()),
+            instrument: HeroInstrument::trend(rate_trace(meters, id)),
             caption: String::from("received above the line, sent below"),
         },
         blocks: blocks(sample, iface),
         banner: None,
         actions: actions(),
+    }
+}
+
+/// This interface's throughput as one duplex trace: received above the axis in
+/// the receive colour, sent mirrored below in the send colour.
+///
+/// Its own pair of roles rather than storage's: a network pane still reads as
+/// network while its two directions separate.
+fn rate_trace(meters: &RollingMeters, id: DeviceId) -> Trace {
+    Trace::Duplex {
+        inbound: SignalRole::NetReceive,
+        outbound: SignalRole::NetSend,
+        into: meters.devices.primary_history(id).to_vec(),
+        out: meters.devices.opposing_history(id).to_vec(),
     }
 }
 

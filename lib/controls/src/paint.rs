@@ -89,22 +89,6 @@ pub(crate) fn text_plate_height(theme: &Theme, scale: Scale, role: TextRole) -> 
         .max(1)
 }
 
-/// Map a resource pressure to its theme signal role, in one place so no
-/// renderer restates the mapping.
-#[must_use]
-pub(crate) const fn pressure_role(kind: PressureKind) -> SignalRole {
-    match kind {
-        PressureKind::Cpu => SignalRole::Cpu,
-        PressureKind::Memory => SignalRole::Memory,
-        PressureKind::Disk => SignalRole::Disk,
-        PressureKind::Network => SignalRole::Network,
-        PressureKind::Power => SignalRole::Power,
-        PressureKind::Thermal => SignalRole::Thermal,
-        PressureKind::Gpu => SignalRole::Gpu,
-        PressureKind::Accelerator => SignalRole::Accelerator,
-    }
-}
-
 /// The theme's signal colour for a resource `kind` — the Pressure Rail hue
 /// every family shares, whether the rail is conditional (a row or card shows
 /// it only while genuinely under pressure, see [`resolve_rail`]) or a
@@ -113,11 +97,24 @@ pub(crate) const fn pressure_role(kind: PressureKind) -> SignalRole {
 /// loaded it is).
 #[must_use]
 pub(crate) fn signal_color(theme: &Theme, kind: PressureKind) -> Color {
-    Color::from(theme.palette().signal(pressure_role(kind)))
+    role_color(theme, kind.signal_role())
+}
+
+/// The palette colour for a semantic signal role.
+///
+/// The one lookup every signal-tinted drawable goes through, so a resource
+/// identity and a transfer direction resolve their colour the same way.
+#[must_use]
+pub(crate) fn role_color(theme: &Theme, role: SignalRole) -> Color {
+    Color::from(theme.palette().signal(role))
 }
 
 /// The full-scale value of a measured control, in permille.
-pub(crate) const FULL: u16 = 1000;
+///
+/// Public through the crate root as `FULL_PERMILLE`: a consumer stating a
+/// [`Chart`](crate::Chart)'s own ceiling for a permille series names this
+/// rather than restating the number.
+pub const FULL: u16 = 1000;
 
 /// Clamp a permille value into `0..=1000` (fail closed on an out-of-range
 /// request).
@@ -215,6 +212,16 @@ pub(crate) fn progress_thickness(theme: &Theme, scale: Scale) -> u32 {
     track_thickness(theme, scale, theme.metrics().progress_thickness)
 }
 
+/// The physical breadth of a composition band from the theme metric.
+///
+/// A composition is a categorical band with a key beneath it, not a progress
+/// line: each run has to be identifiable against its name, which a progress
+/// bar's breadth cannot carry.
+#[must_use]
+pub(crate) fn composition_thickness(theme: &Theme, scale: Scale) -> u32 {
+    track_thickness(theme, scale, theme.metrics().composition_thickness)
+}
+
 /// One logical track breadth in physical pixels: at least a hairline, and one
 /// pixel broader under heavy contrast so the line stays visible.
 #[must_use]
@@ -242,20 +249,22 @@ pub(crate) struct TrackBand {
 }
 
 impl TrackBand {
-    /// Resolve the band within `slot` (`(x, y, w, avail_h)`) and paint its
-    /// quiet groove, or `None` when the slot cannot seat one.
+    /// Resolve the band within `slot` (`(x, y, w, avail_h)`) at breadth
+    /// `thickness` and paint its quiet groove, or `None` when the slot cannot
+    /// seat one.
     ///
-    /// The band's own thickness is the theme's progress thickness capped by
-    /// `avail_h`, never the whole of it, so a tall slot still draws an
-    /// instrument line rather than a block.
+    /// The breadth is capped by `avail_h`, never the whole of it, so a tall
+    /// slot still draws an instrument line rather than a block. The caller
+    /// passes its own instrument's metric — a progress line and a composition
+    /// band are read differently and are not the same breadth.
     pub(crate) fn groove(
         surface: &mut Surface,
         slot: (u32, u32, u32, u32),
-        scale: Scale,
+        thickness: u32,
         theme: &Theme,
     ) -> Option<Self> {
         let (x, y, w, avail_h) = slot;
-        let h = progress_thickness(theme, scale).min(avail_h);
+        let h = thickness.min(avail_h);
         if h == 0 || w == 0 {
             return None;
         }
@@ -306,6 +315,33 @@ impl TrackBand {
         );
     }
 
+    /// Fill the band from its leading edge to `permille` in `tint`, ending in
+    /// a **straight** edge rather than the rounded cap
+    /// [`fill`](Self::fill) leaves — the shape of a composition part that
+    /// meets another part rather than the band's own end.
+    ///
+    /// A rounded cap here is not merely cosmetic: the parts are painted
+    /// back-to-front, so the cap's corner notches let the *next* part's colour
+    /// through above and below the join, and the boundary reads as a curved
+    /// wedge instead of a straight division. The notch is as deep as the
+    /// band's radius, so it grows with the band's breadth.
+    pub(crate) fn fill_to_join(self, surface: &mut Surface, permille: u16, tint: Color) {
+        let width = proportional(self.w, permille)
+            .max(self.h.min(self.w))
+            .min(self.w);
+        self.fill_to(surface, width, tint);
+        let squared = self.radius.min(width);
+        if squared > 0 {
+            surface.fill_rect(
+                self.x.saturating_add(width - squared),
+                self.y,
+                squared,
+                self.h,
+                tint,
+            );
+        }
+    }
+
     /// Rule a `thickness`-wide line across the band at `permille` of its
     /// width, for a join between two parts of a composition.
     ///
@@ -346,7 +382,8 @@ pub(crate) fn paint_measured_track(
     scale: Scale,
     theme: &Theme,
 ) {
-    let Some(band) = TrackBand::groove(surface, band, scale, theme) else {
+    let Some(band) = TrackBand::groove(surface, band, progress_thickness(theme, scale), theme)
+    else {
         return;
     };
     let Some(permille) = fill else {

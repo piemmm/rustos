@@ -6389,7 +6389,7 @@ fn middle_press_fails_closed_without_a_previous_task() {
 }
 
 #[test]
-fn a_quick_press_on_the_capsule_opens_the_task_section() {
+fn a_quick_press_on_the_capsule_opens_the_resources_section() {
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();
     let capsule = hover_switchboard(&mut input, &mut bar);
@@ -6403,7 +6403,7 @@ fn a_quick_press_on_the_capsule_opens_the_task_section() {
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks
+            section: CommandSection::Resources
         }
     );
     // The gesture is spent: a stray second release opens nothing.
@@ -6515,7 +6515,7 @@ fn the_readout_safe_action_opens_switchboard() {
     assert_eq!(
         release_at(&mut input, &mut bar, NOW_NS),
         TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks
+            section: CommandSection::Resources
         }
     );
     assert!(
@@ -7379,7 +7379,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
             section: CommandSection::Resources,
         }),
         Some(TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks,
+            section: CommandSection::Resources,
         }),
         Some(TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.terminal").expect("id"),

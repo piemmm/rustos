@@ -2,7 +2,7 @@
 //! the group popup that files a task into an activity.
 
 use tairix_abi::ProcessState;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{Rect, Scale};
 use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
@@ -10,8 +10,7 @@ use tairix_theme::Theme;
 
 use tairix_controls::{
     ActivityState, ButtonContent, CellAlign, ControlDisposition, ControlRole, ControlState,
-    MetricLayout, MetricTile, PointerState, PressureKind, RecoveryState, StatusPill, Tab,
-    TableCell,
+    PointerState, RecoveryState, StatusPill, TableCell,
 };
 
 use super::{
@@ -23,7 +22,6 @@ use tairix_controls::testkit::high_contrast;
 
 use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
-use crate::view::tasks::TasksSection;
 use crate::view::test_support::{
     centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, refresh,
     select_task_row, task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
@@ -257,15 +255,16 @@ fn the_selection_follows_the_task_when_a_re_sort_moves_it() {
 }
 
 #[test]
-fn hiding_the_selected_task_drops_the_selection_and_its_commands() {
+fn a_sample_that_drops_the_selected_task_drops_its_commands_too() {
     let theme = Theme::dark();
     let mut sb = on_tasks(&model());
     let b = bounds();
     select_task_row(&mut sb, b, Scale::ONE, &theme, 0);
     assert!(sb.tasks.selected.is_some());
 
-    sb.tasks.search.set_text("nothing matches this");
-    sb.tasks.arrange(&mut Sweep::adopting(&mut damage::sink()));
+    // The task has gone, so nothing is left for the commands to act on.
+    sb.tasks
+        .adopt(&table_model(&[]), &mut Sweep::adopting(&mut damage::sink()));
 
     assert_eq!(sb.tasks.selected, None);
     assert!(
@@ -426,156 +425,10 @@ fn walk_action_to(sb: &mut Switchboard, index: usize) {
     assert_eq!(sb.active().row_action(), index);
 }
 
-/// The census tiles a section showing these counts must have composed.
-///
-/// A tile states no value back, so the test asserts the whole composed
-/// instrument: the count is checked together with the label it is filed
-/// under, the glyph that identifies it, the tint that glyph wears, and the
-/// plated stacked layout it is drawn in — which is stronger than reading a
-/// figure out of it would be.
-fn expected_census(counts: [usize; 4]) -> alloc::vec::Vec<MetricTile> {
-    [
-        ("Processes", IconKind::Executable, PressureKind::Cpu),
-        ("Users", IconKind::User, PressureKind::Network),
-        ("Mine", IconKind::ServiceBundle, PressureKind::Disk),
-        ("Alerts", IconKind::Bell, PressureKind::Thermal),
-    ]
-    .iter()
-    .zip(counts)
-    .map(|((label, icon, tint), count)| {
-        MetricTile::new(*label, alloc::format!("{count}"), *tint)
-            .with_layout(MetricLayout::Stacked)
-            .with_icon(*icon)
-            // The band draws the shared block plate around it, so the tile
-            // itself carries none.
-            .unplated()
-    })
-    .collect()
-}
-
-#[test]
-fn each_census_tile_counts_what_the_model_carries() {
-    let sb = on_tasks(&mixed_model());
-    assert_eq!(
-        sb.tasks.census,
-        expected_census([5, 2, 3, 1]),
-        "each tile counts rows the model genuinely carries"
-    );
-}
-
-#[test]
-fn a_census_tile_with_nothing_to_count_reads_zero_not_blank() {
-    let sb = on_tasks(&table_model(&[row(
-        "solo",
-        1000,
-        RecoveryState::None,
-        None,
-        None,
-    )]));
-    assert_eq!(
-        sb.tasks.census,
-        expected_census([1, 1, 1, 0]),
-        "a source with nothing to report counts zero, never nothing"
-    );
-}
-
-#[test]
-fn every_filter_tab_carries_its_own_real_count() {
-    let sb = on_tasks(&mixed_model());
-    let labels: alloc::vec::Vec<&str> = sb.tasks.filters.tabs().iter().map(Tab::label).collect();
-    assert_eq!(
-        labels,
-        alloc::vec!["All 5", "Mine 3", "System 2", "Faults 1"],
-        "a tab states the count its rows will deliver"
-    );
-}
-
-#[test]
-fn choosing_a_filter_shows_exactly_the_rows_it_counted() {
-    for (stop, expected) in [
-        (
-            0usize,
-            alloc::vec!["alpha", "Beta", "gamma", "delta", "epsilon"],
-        ),
-        (1, alloc::vec!["alpha", "Beta", "gamma"]),
-        (2, alloc::vec!["delta", "epsilon"]),
-        (3, alloc::vec!["gamma"]),
-    ] {
-        let mut sb = on_tasks(&mixed_model());
-        focus_header_stop(&mut sb, 0);
-        walk_action_to(&mut sb, stop);
-        assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-        assert_eq!(shown(&sb), expected, "filter {stop} shows what it counted");
-        assert_eq!(
-            sb.tasks.entries.len(),
-            expected.len(),
-            "and builds one row per shown task"
-        );
-    }
-}
-
-#[test]
-fn a_filter_that_admits_nothing_shows_no_rows_and_strands_no_cursor() {
-    let mut sb = on_tasks(&table_model(&[row(
-        "solo",
-        1000,
-        RecoveryState::None,
-        None,
-        None,
-    )]));
-    focus_header_stop(&mut sb, 0);
-    walk_action_to(&mut sb, 2);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert!(sb.tasks.entries.is_empty(), "no job rows to show");
-    assert!(
-        sb.active().content_focus() < 3,
-        "the cursor rests in the header, where the reader's next act is"
-    );
-}
-
-#[test]
-fn search_matches_on_the_task_name_ignoring_case() {
-    let mut sb = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 1);
-    for ch in "BET".chars() {
-        assert_eq!(key(&mut sb, Key::Char(ch)), None);
-    }
-    assert_eq!(shown(&sb), alloc::vec!["Beta"], "case is folded both ways");
-    assert_eq!(sb.tasks.entries.len(), 1);
-}
-
-#[test]
-fn search_matching_nothing_shows_nothing_rather_than_everything() {
-    let mut sb = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 1);
-    for ch in "zzz".chars() {
-        assert_eq!(key(&mut sb, Key::Char(ch)), None);
-    }
-    assert!(
-        sb.tasks.entries.is_empty(),
-        "an unmatched search fails closed"
-    );
-}
-
-#[test]
-fn clearing_the_search_restores_every_row() {
-    let mut sb = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 1);
-    for ch in "bet".chars() {
-        assert_eq!(key(&mut sb, Key::Char(ch)), None);
-    }
-    assert_eq!(sb.tasks.entries.len(), 1);
-    for _ in 0..3 {
-        assert_eq!(key(&mut sb, Key::Named(NamedKey::Backspace)), None);
-    }
-    assert!(sb.tasks.search.text().is_empty());
-    assert_eq!(sb.tasks.entries.len(), 5, "clearing restores every row");
-}
-
 /// Sort by the column at `column`, returning the shown names.
 fn sorted_by(model: &SwitchboardModel, column: usize) -> alloc::vec::Vec<alloc::string::String> {
     let mut sb = on_tasks(model);
-    focus_header_stop(&mut sb, 2);
+    focus_header_stop(&mut sb, 0);
     walk_action_to(&mut sb, column);
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     shown(&sb)
@@ -632,7 +485,7 @@ fn the_state_and_disk_columns_sort_by_their_own_readings() {
 #[test]
 fn a_second_press_reverses_the_sort_and_the_unmeasured_rows_stay_last() {
     let mut sb = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 2);
+    focus_header_stop(&mut sb, 0);
     walk_action_to(&mut sb, 4);
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     let ascending = shown(&sb);
@@ -795,14 +648,13 @@ fn an_unmeasured_figure_never_renders_as_a_zero() {
 fn the_footer_counts_the_shown_rows_against_the_total() {
     let mut sb = on_tasks(&mixed_model());
     assert_eq!(sb.tasks.count, StatusPill::new("5 of 5 shown"));
-    focus_header_stop(&mut sb, 0);
-    walk_action_to(&mut sb, 1);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert_eq!(
-        sb.tasks.count,
-        StatusPill::new("3 of 5 shown"),
-        "a filter changes what is shown, never the total"
+    // The readout is re-derived with the rows, so a smaller sample restates
+    // both figures rather than quoting a count the table is not showing.
+    sb.tasks.adopt(
+        &table_model(&[row("solo", 1000, RecoveryState::None, None, None)]),
+        &mut Sweep::adopting(&mut damage::sink()),
     );
+    assert_eq!(sb.tasks.count, StatusPill::new("1 of 1 shown"));
 }
 
 #[test]
@@ -864,8 +716,8 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
     let span = sb.active().focus_span();
     assert_eq!(
         span,
-        3 + 5 + 7 + 2,
-        "three header stops, five rows, seven commands, two footer"
+        1 + 5 + 7 + 2,
+        "one header stop, five rows, seven commands, two footer"
     );
 
     let mut rows = alloc::vec::Vec::new();
@@ -879,7 +731,7 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
     // Only the row band names a row to scroll to: the header's stops, the
     // rail's anchored commands and the footer's controls all sit outside the
     // scrolling list.
-    let mut expected = alloc::vec![None, None, None];
+    let mut expected = alloc::vec![None];
     expected.extend((0..5).map(Some));
     expected.extend(core::iter::repeat_n(None, 7 + 2));
     assert_eq!(rows, expected);
@@ -889,19 +741,14 @@ fn the_cursor_reaches_every_header_rail_and_footer_control() {
 fn each_header_and_footer_control_takes_the_focus_ring_in_turn() {
     let mut sb = on_tasks(&mixed_model());
     let resting = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 1);
-    assert_ne!(
-        sb.tasks.search, resting.tasks.search,
-        "the search field takes the ring"
-    );
+    // Step onto a row, then back: the ring lands where the cursor is and
+    // leaves what it left.
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-    assert_eq!(
-        sb.tasks.search, resting.tasks.search,
-        "and gives it up again"
-    );
+    let on_row = sb.tasks.header.clone();
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Up)), None);
     assert_ne!(
-        sb.tasks.header, resting.tasks.header,
-        "the column headings take it next"
+        sb.tasks.header, on_row,
+        "the column headings take the ring back from the row"
     );
 
     let mut sb = on_tasks(&mixed_model());
@@ -986,69 +833,6 @@ fn a_refresh_that_drops_the_slot_carries_no_hover() {
     );
 }
 
-/// The window point that hits filter tab `tab`.
-///
-/// Aimed through the strip's own hit-test, so a layout change cannot leave a
-/// test quietly pointing at a different tab than it names.
-fn filter_tab_point(sb: &Switchboard, b: Rect, theme: &Theme, tab: usize) -> (i32, i32) {
-    let layout = Switchboard::compute_layout(b, Scale::ONE, theme);
-    let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, theme);
-    let (_, strip, _) = TasksSection::header_rows(&frame, Scale::ONE);
-    let each = strip.width / u32::try_from(sb.tasks.filters.len()).unwrap_or(1).max(1);
-    let x = strip.left() + to_i32(each * u32::try_from(tab).unwrap_or(0) + each / 2);
-    let y = strip.top() + to_i32(strip.height / 2);
-    assert_eq!(
-        sb.tasks
-            .filters
-            .tab_at(strip, Scale::ONE, theme, Point::new(x, y)),
-        Some(tab),
-        "the point aims at the tab the strip drew there"
-    );
-    (x, y)
-}
-
-#[test]
-fn a_refresh_keeps_the_filter_tab_under_the_pointer_lit() {
-    let m = model();
-    let mut sb = on_tasks(&m);
-    let (b, theme) = (bounds(), Theme::dark());
-    let untouched = sb.tasks.filters.clone();
-    let (x, y) = filter_tab_point(&sb, b, &theme, 1);
-    assert_eq!(
-        pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)),
-        None,
-        "moving onto a filter tab asks for nothing"
-    );
-    let lit = sb.tasks.filters.clone();
-    assert_ne!(lit, untouched, "the pointer resting on a tab lifts it");
-
-    let _ = refresh(&mut sb, &m);
-
-    assert_eq!(
-        sb.tasks.filters, lit,
-        "a refresh moves neither the pointer nor the tab it rests on"
-    );
-}
-
-#[test]
-fn a_refresh_does_not_swallow_a_click_begun_on_a_filter_tab() {
-    let m = model();
-    let mut sb = on_tasks(&m);
-    let (b, theme) = (bounds(), Theme::dark());
-    let (x, y) = filter_tab_point(&sb, b, &theme, 1);
-    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
-    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &PRESS), None);
-
-    let _ = refresh(&mut sb, &m);
-
-    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &RELEASE), None);
-    assert_eq!(
-        sb.tasks.filters.selected(),
-        Some(1),
-        "the click completes on the tab it began on"
-    );
-}
-
 /// Press rail command `index`, publishing `published` before the release when
 /// one is given, and report what the release produced.
 fn press_rail_command(
@@ -1102,8 +886,10 @@ fn the_table_renders_in_both_themes_and_under_heavier_contrast() {
         let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
         let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, &theme);
         assert!(has_ink(&surface, layout.content), "the table draws");
-        assert!(has_ink(&surface, frame.header), "so does its header band");
-        assert!(has_ink(&surface, frame.footer), "and its footer band");
+        // The section claims no header band of its own — the column headings
+        // are pinned inside the table — so the band has no height to draw in.
+        assert_eq!(frame.header.height, 0, "the header band claims no room");
+        assert!(has_ink(&surface, frame.footer), "and its footer band draws");
     }
 }
 
@@ -1213,15 +999,6 @@ fn every_drawn_row_asks_the_cache_for_its_own_picture() {
     assert!(
         artwork.asked.contains(&(IconKind::AppBundle, side)),
         "the row must ask for its own picture at the side it draws at: {:?}",
-        artwork.asked
-    );
-    // The census tiles ask too, each for the class it counts.
-    assert!(
-        artwork
-            .asked
-            .iter()
-            .any(|&(kind, _)| kind == IconKind::User),
-        "the census band must ask as well: {:?}",
         artwork.asked
     );
 }

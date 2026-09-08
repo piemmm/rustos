@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 91 closed, 114 total.
+table normalises all three to **closed**. 23 open, 93 closed, 116 total.
 
 ### Open (23)
 
@@ -51,7 +51,7 @@ table normalises all three to **closed**. 23 open, 91 closed, 114 total.
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
-### Closed (90)
+### Closed (92)
 
 | ID | Subject |
 |---|---|
@@ -146,6 +146,8 @@ table normalises all three to **closed**. 23 open, 91 closed, 114 total.
 | D110 | the pressure banner drew its text past the pane, into the gap and over the action column |
 | D112 | `stress-qemu-aarch64` never completes: a child's deferred load parks and never returns |
 | D114 | `mem_unmap` refused every release a shrinking heap arena asked for, so the switchboard spent whole frames re-asking |
+| D115 | the Switchboard memory composition read "unknown" under load, because it was built from a count of *mappings* rather than of RAM |
+| D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
 
 ## Scope
 
@@ -6614,3 +6616,95 @@ the handler's containment rule is proven host-side rather than on hardware; no
 vertical drives the `lib/rt` heap through the real `kernel/core` handler. The
 full-image desktop boot is what exercises that path, which is where this defect
 was found and not where it was caught.
+
+---
+
+## D115 — the memory composition read "unknown" under load, because it was built from a count of *mappings* rather than of RAM (FIXED)
+
+**What it was.** The Switchboard memory pane's `COMPOSITION` block stated an
+absence, intermittently and worst under load, where a reader most wants it.
+The parts did not partition the RAM, so `CompositionBar::new` refused
+construction and the pane rendered the refusal as "unknown".
+
+**Where the over-count came from.** `KernelMemoryStats::user_resident_bytes`
+was `Σ_processes AddressSpace::mapped_pages() * PAGE_SIZE` — a count of live
+*mappings*, so a frame shared between two address spaces counted once per
+space and a user driver's MMIO window counted although it is not RAM at all.
+`Reclaimable` and `Compressed` overlapped the kernel heap besides. The pane
+floored each part's share independently and closed the whole with
+`1000 - Σ named`; once the over-count pushed `Σ named` past 1000 the shares no
+longer summed to the whole. A big-RAM task quitting dropped the sum back under
+it, which is why the block "sometimes started showing".
+
+**The fix is at the source: the kernel accounts physical RAM by disjoint
+class.** A frame is charged at allocation to exactly one `MemoryClass`
+(`lib/abi/src/memory.rs`) and the frame's own bookkeeping byte remembers it, so
+a free reads the charge back and no caller can mis-attribute one. Sharing then
+costs nothing — a shared frame is allocated once, so it is charged once — and
+an MMIO mapping draws no frame and is charged nothing. `usable == free + Σ
+class` therefore holds by construction, and `FrameAllocator::snapshot` reads
+the whole and its parts under **one** lock acquisition, so it holds of the
+reported figures too (the producer previously took three separate locks, so the
+whole and its parts came from different instants — the same class of
+inconsistency).
+
+The class rides the high nibble of the byte that already held the free-list
+order in its low nibble; the two never coexist on one frame, so the accounting
+costs no extra memory and no extra memory traffic, plus one `usize` add inside
+the lock the allocator already holds. It is stamped on every frame of a block
+rather than on its head, because the kernel window releases a multi-page region
+one page at a time as its page tables give the frames back.
+
+`user_resident_bytes` stays — `top` and `sysmon` read it and it honestly
+answers a different question — with its rustdoc corrected to say it counts
+mappings and is not a share of physical memory.
+
+**Coverage.** `kernel/mem/src/frame.rs`: the partition holds across alloc,
+free, split and merge; a free discharges the class its alloc charged; a
+multi-frame block freed one frame at a time discharges every frame (the shape
+that first broke the fix); an uncharged head is refused with nothing mutated;
+the packed tag round-trips every order and class.
+`tests/integration/memsoak_program` checks the invariant end-to-end from the
+guest on every sample, so a live kernel whose books do not balance fails the
+soak with its reason rather than being measured against.
+`resource_report_tests` drives the exact over-count shape — a mapping count
+three times the machine's RAM — and asserts the bar constructs; it fails
+against the old derivation.
+
+---
+
+## D116 — a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads (FIXED)
+
+**What it was.** `Chart::with_opposing` took a `PressureKind`, and both hero
+call sites passed the device's *own* kind for both series, so reads and writes
+(and receive and send) drew in one hue: the instrument said a rate had two
+directions and nothing about which way the bytes went. The storage rail entry
+plotted `primary_history` alone, so the sidebar never showed writes at all.
+Two rail entries also borrowed hues that were not theirs: the Tasks entry
+plotted its process count in `PressureKind::Cpu`, reading as a second CPU trace
+beside the real one, and the Recovery entry plotted its stopped share in
+`PressureKind::Thermal`.
+
+**The fix.** A chart's trace is tinted by a `SignalRole` — the theme's complete
+semantic-signal vocabulary — not by a resource pressure, because a *direction*
+is not a resource under load. `PressureKind::signal_role()` keeps a
+resource-identity chart one call. Five roles were added: `workload` and the two
+direction pairs `disk_read`/`disk_write` and `net_receive`/`net_send`.
+
+The switchboard's `Trace` type carries the tinting with the readings —
+`Absent`, `Single { role, samples, full_scale }`, `Duplex { inbound, outbound,
+into, out }` — so "opposing samples with no opposing role" is unrepresentable,
+and `Trace::chart()` is the single definition of the colouring that both the
+rail entry and the pane hero draw through. Storage and network therefore cannot
+drift apart, and the storage rail now shows reads against writes while its
+trailing reading stays `% full`. `RailTrace` was deleted: it carried the same
+points-plus-ceiling a `Trace::Single` does.
+
+**Coverage.** `chart_tests`: each role traces in its own colour, and a duplex
+trace draws its two directions in different ones. `rail_tests`: a rail entry's
+chart *is* its trace's own, and the two non-device subjects carry their own
+signals. `resource_report_tests`: a storage device's trace is
+`Duplex(DiskRead, DiskWrite)` and an interface's `Duplex(NetReceive, NetSend)`,
+on both the rail entry and the hero. `model_tests`: the task and recovery
+traces carry `Workload` and `Recovery`.
+

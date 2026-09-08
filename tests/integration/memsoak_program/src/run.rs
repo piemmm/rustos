@@ -52,8 +52,8 @@ mod program {
     use tairix_procinfo::{call, for_each_process, IpcTransport, Transport, WalkStep};
     use tairix_rt::io::{write_stderr_line, Stdin, Stdout, Write};
     use tairix_test_memsoak::{
-        report_line, sample_bytes, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS, MEASURED_CYCLES,
-        WARMUP_CYCLES,
+        partitions, report_line, sample_bytes, verdict, Verdict, CHILD_PATH, CYCLE_PARK_NANOS,
+        MEASURED_CYCLES, WARMUP_CYCLES,
     };
 
     /// Take one soak sample through the System Information API: one
@@ -61,12 +61,19 @@ mod program {
     /// `sysinfo-v1` wire type and reduced by `sample_bytes` (which documents
     /// why free memory alone is not the quantity to judge). Fails closed on
     /// a refusal or a malformed reply — the soak never fabricates a sample.
+    ///
+    /// The record's per-class figures must partition the RAM they describe
+    /// before any of it is judged: a live kernel whose own books do not
+    /// balance is a defect the soak reports rather than measures against.
     fn sample(transport: &dyn Transport) -> Result<u64, &'static str> {
         let bytes = call(transport, SysinfoQueryId::KERNEL_MEMORY_STATS, &[])
             .map_err(|_| "memsoak: KERNEL_MEMORY_STATS query refused")?;
-        KernelMemoryStats::from_bytes(&bytes)
-            .map(|stats| sample_bytes(&stats))
-            .map_err(|_| "memsoak: KERNEL_MEMORY_STATS reply malformed")
+        let stats = KernelMemoryStats::from_bytes(&bytes)
+            .map_err(|_| "memsoak: KERNEL_MEMORY_STATS reply malformed")?;
+        if !partitions(&stats) {
+            return Err("memsoak: kernel memory classes do not partition the RAM");
+        }
+        Ok(sample_bytes(&stats))
     }
 
     /// One soak cycle: spawn and reap a `true.app` child (the full

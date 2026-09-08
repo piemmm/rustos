@@ -170,7 +170,7 @@ impl InitSpawn for RiscvInitSpawn {
                 &mut space,
                 &physmap,
                 &request,
-                move || frames.alloc().ok(),
+                move || frames.alloc(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
             )
         }) else {
             return;

@@ -36,7 +36,7 @@ use crate::input::TaskbarResponse;
 pub enum SystemAction {
     /// Show what this machine is, in the Switchboard's overview.
     About,
-    /// Show what the machine is doing, in the Switchboard's task list.
+    /// Show what the machine is doing, in the Switchboard's resource panes.
     SystemMonitor,
     /// Launch the terminal.
     TaskShell,
@@ -288,11 +288,11 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<(usize, MenuItem)>
 #[must_use]
 pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
     Some(match ROWS.get(index)?.action {
-        SystemAction::About => TaskbarResponse::OpenSwitchboard {
+        // Both rows land on the same section: the wire vocabulary names a
+        // *section*, and what the machine is and what it is doing are two
+        // panes within Resources rather than two sections.
+        SystemAction::About | SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
             section: CommandSection::Resources,
-        },
-        SystemAction::SystemMonitor => TaskbarResponse::OpenSwitchboard {
-            section: CommandSection::Tasks,
         },
         // The row is only actionable when this identifier resolved against
         // the catalog, so a refusal here cannot happen through the menu;

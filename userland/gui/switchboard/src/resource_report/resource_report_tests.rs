@@ -23,13 +23,39 @@ use tairix_abi::sysinfo::{
     MountVolumeState, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
     MOUNT_VOLUME_ID_LEN,
 };
-use tairix_abi::{CapabilityId, CapabilityQuery};
+use tairix_abi::{CapabilityId, CapabilityQuery, MemoryClass, MEMORY_CLASS_COUNT};
+use tairix_controls::{CompositionBar, CompositionError, CompositionSegment, PressureKind};
+use tairix_theme::SignalRole;
+
+/// One trace's series lengths: the inbound count, and the outbound count for a
+/// duplex trace.
+fn series_lengths(trace: &Trace) -> (usize, Option<usize>) {
+    match trace {
+        Trace::Absent => (0, None),
+        Trace::Single { samples, .. } => (samples.len(), None),
+        Trace::Duplex { into, out, .. } => (into.len(), Some(out.len())),
+    }
+}
+
+/// The roles a trace tints with: the inbound role, and the outbound role for a
+/// duplex trace.
+fn series_roles(trace: &Trace) -> (Option<SignalRole>, Option<SignalRole>) {
+    match trace {
+        Trace::Absent => (None, None),
+        Trace::Single { role, .. } => (Some(*role), None),
+        Trace::Duplex {
+            inbound, outbound, ..
+        } => (Some(*inbound), Some(*outbound)),
+    }
+}
 
 use super::{build_resource_report, used_permille};
 use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{OwnerBundles, RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
-use crate::view::resources::{BlockBody, DeviceId, HeroInstrument, RailGroup, StorageId};
+use crate::view::resources::{
+    BlockBody, CompositionPart, DeviceId, HeroInstrument, RailGroup, StorageId, Trace,
+};
 use crate::view::{
     HealthSeverity, Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured,
 };
@@ -524,7 +550,7 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
     let device = device(&report, SERVED);
     assert_eq!(device.hero.value, Reading::measured("5.0 MiB/s"));
     // One interval, one trace point — not one per projection.
-    assert_eq!(device.trend.len(), 1);
+    assert_eq!(series_lengths(&device.trend), (1, Some(1)));
     assert_eq!(meters.devices.primary_history(SERVED).len(), 1);
 }
 
@@ -602,14 +628,11 @@ fn the_resource_panes_carry_both_a_trace_and_a_share_bar() {
     // these panes: the trace says what the resource has been doing, the bar
     // how much of it is in use now.
     let cpu = &device(&report, DeviceId::Cpu).hero.instrument;
-    assert!(
-        !cpu.samples.is_empty(),
-        "the processor plots its own history"
-    );
+    assert!(!cpu.trace.is_empty(), "the processor plots its own history");
     assert_eq!(cpu.track, Some(Some(180)));
     let memory = &device(&report, DeviceId::Memory).hero.instrument;
     assert!(
-        !memory.samples.is_empty(),
+        !memory.trace.is_empty(),
         "memory plots its committed-share history too"
     );
     assert_eq!(memory.track, Some(Some(530)));
@@ -819,11 +842,21 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         .iter()
         .any(|line| line.contains("640 IOPS") && line.contains("50% utilised")));
     let instrument = &volume.hero.instrument;
-    assert_eq!(instrument.samples.len(), 1);
-    assert_eq!(instrument.opposing.as_ref().map(Vec::len), Some(1));
-    // The rail states how full the volume is; its trace carries the rate.
+    assert_eq!(series_lengths(&instrument.trace), (1, Some(1)));
+    // Reads and writes are separate directions, each in its own colour: one
+    // hue for both said nothing about which way the bytes went.
+    assert_eq!(
+        series_roles(&instrument.trace),
+        (Some(SignalRole::DiskRead), Some(SignalRole::DiskWrite))
+    );
+    // The rail states how full the volume is; its trace carries the rate, and
+    // carries both directions so the sidebar shows writes too.
     assert_eq!(volume.reading, Reading::measured("60%"));
-    assert_eq!(volume.trend.len(), 1);
+    assert_eq!(series_lengths(&volume.trend), (1, Some(1)));
+    assert_eq!(
+        series_roles(&volume.trend),
+        (Some(SignalRole::DiskRead), Some(SignalRole::DiskWrite))
+    );
 }
 
 #[test]
@@ -1022,10 +1055,17 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
         &SessionReport::HEALTHY,
     );
     let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
-    assert_eq!(eth0.trend.len(), 1);
+    assert_eq!(series_lengths(&eth0.trend), (1, Some(1)));
     let instrument = &eth0.hero.instrument;
-    assert_eq!(instrument.samples.len(), 1);
-    assert_eq!(instrument.opposing.as_ref().map(Vec::len), Some(1));
+    assert_eq!(series_lengths(&instrument.trace), (1, Some(1)));
+    // Its own direction pair, not file I/O's, so a network pane still reads
+    // as network while receive and send separate.
+    for trace in [&eth0.trend, &instrument.trace] {
+        assert_eq!(
+            series_roles(trace),
+            (Some(SignalRole::NetReceive), Some(SignalRole::NetSend))
+        );
+    }
 }
 
 #[test]
@@ -1058,7 +1098,7 @@ fn the_memory_entry_carries_its_own_committed_share_trace() {
     );
     assert_eq!(
         device(&report, DeviceId::Memory).trend,
-        alloc::vec![530, 530]
+        Trace::single(SignalRole::Memory, alloc::vec![530, 530])
     );
 }
 
@@ -1100,7 +1140,7 @@ fn rebuilding_a_report_never_advances_a_trace() {
             DeviceId::Graphics,
         )
         .trend
-        .len(),
+        .clone(),
         meters.system.cpu_history().len(),
         meters.system.memory_history().len(),
     );
@@ -1114,7 +1154,7 @@ fn rebuilding_a_report_never_advances_a_trace() {
         );
         assert_eq!(
             (
-                device(&report, DeviceId::Graphics).trend.len(),
+                device(&report, DeviceId::Graphics).trend.clone(),
                 meters.system.cpu_history().len(),
                 meters.system.memory_history().len(),
             ),
@@ -1139,33 +1179,121 @@ fn the_interface_pane_states_that_per_task_attribution_has_no_interface() {
     )));
 }
 
-#[test]
-fn the_memory_composition_closes_on_the_whole_it_measures() {
-    let sample = Sample {
-        kernel_memory: Some(KernelMemoryStats {
-            total_bytes: 16_000_000_000,
-            free_bytes: 7_400_000_000,
-            kernel_heap_bytes: 900_000_000,
-            user_resident_bytes: 4_100_000_000,
-            page_size: 4_096,
-            reserved: 0,
-        }),
-        ..permitted()
-    };
-    let report = report_of(&sample);
-    let parts = device(&report, DeviceId::Memory)
+/// A kernel reading whose classes charge `charged` bytes of a `total`,
+/// spread across every class, and whose mapping count `user_resident_bytes`
+/// is the figure the composition used to be built from.
+fn kernel_memory(total: u64, charged: u64, user_resident_bytes: u64) -> KernelMemoryStats {
+    let mut class_bytes = [0u64; MEMORY_CLASS_COUNT];
+    let each = charged / MEMORY_CLASS_COUNT as u64;
+    class_bytes.fill(each);
+    // The rounding remainder joins the first class, so the figures partition
+    // exactly as the kernel's own do.
+    class_bytes[MemoryClass::UserAnon.index()] += charged - each * MEMORY_CLASS_COUNT as u64;
+    KernelMemoryStats {
+        total_bytes: total,
+        free_bytes: total.saturating_sub(charged),
+        kernel_heap_bytes: 900_000_000,
+        user_resident_bytes,
+        page_size: 4_096,
+        reserved: 0,
+        class_bytes,
+    }
+}
+
+/// The memory pane's composition parts, or `None` where it states an absence.
+fn composition_parts(sample: &Sample) -> Option<alloc::vec::Vec<CompositionPart>> {
+    device(&report_of(sample), DeviceId::Memory)
         .blocks
         .iter()
         .find_map(|block| match &block.body {
-            BlockBody::Composition(parts) => Some(parts),
+            BlockBody::Composition(parts) => Some(parts.clone()),
             _ => None,
         })
-        .expect("the memory pane must carry its composition");
+}
+
+#[test]
+fn the_memory_composition_closes_on_the_whole_it_measures() {
+    let sample = Sample {
+        kernel_memory: Some(kernel_memory(16_000_000_000, 8_600_000_000, 4_100_000_000)),
+        ..permitted()
+    };
+    let parts = composition_parts(&sample).expect("the memory pane must carry its composition");
     // The shares must account for the whole exactly, or the bar would
     // under-report where the memory went.
     let total: u32 = parts.iter().map(|part| u32::from(part.share)).sum();
     assert_eq!(total, 1_000);
     assert!(parts.last().expect("a remainder").remainder);
+    // One part per class that holds anything, plus the free remainder.
+    assert_eq!(parts.len(), MEMORY_CLASS_COUNT + 1);
+    assert!(bar_of(&parts).is_ok(), "the bar must construct");
+}
+
+#[test]
+fn a_mapping_count_larger_than_the_ram_in_use_still_draws_the_composition() {
+    // The shape that read "unknown" under load: the per-space mapping count
+    // exceeds the RAM in use, because a shared frame counts once per space and
+    // a user driver's MMIO window counts although it is no RAM at all. Built
+    // from that figure the named shares summed past the whole and the bar
+    // refused construction; built from the class partition it cannot.
+    let total = 16_000_000_000u64;
+    let charged = 4_000_000_000u64;
+    let sample = Sample {
+        kernel_memory: Some(kernel_memory(total, charged, total * 3)),
+        ..permitted()
+    };
+    let stats = sample.kernel_memory.expect("the fixture sets it");
+    assert!(
+        stats.user_resident_bytes > stats.total_bytes - stats.free_bytes,
+        "the fixture must be the over-counting shape"
+    );
+    let parts = composition_parts(&sample).expect("the composition must still draw");
+    let named: u32 = parts
+        .iter()
+        .filter(|part| !part.remainder)
+        .map(|part| u32::from(part.share))
+        .sum();
+    assert!(named <= 1_000, "the named shares fitted the whole");
+    // The bar the pane draws from them must construct, which is the thing
+    // that failed: a refused construction is what the pane rendered as an
+    // absence.
+    assert!(bar_of(&parts).is_ok(), "the bar must construct");
+}
+
+/// The bar the pane builds from `parts` — the construction that refused when
+/// the shares did not partition the whole.
+fn bar_of(parts: &[CompositionPart]) -> Result<CompositionBar, CompositionError> {
+    let segments = parts
+        .iter()
+        .map(|part| {
+            if part.remainder {
+                CompositionSegment::remainder(part.label.clone(), part.amount.clone(), part.share)
+            } else {
+                CompositionSegment::new(part.label.clone(), part.amount.clone(), part.share)
+            }
+        })
+        .collect();
+    CompositionBar::new(PressureKind::Memory, segments)
+}
+
+#[test]
+fn a_class_holding_nothing_is_dropped_rather_than_drawn_nameless() {
+    // A run of no width the key still names is a part a reader cannot find,
+    // so a quiet machine shows only the classes it genuinely has.
+    let mut stats = kernel_memory(16_000_000_000, 4_000_000_000, 1_000_000_000);
+    let dropped = stats.class_bytes[MemoryClass::Dma.index()];
+    stats.class_bytes[MemoryClass::UserAnon.index()] += dropped;
+    stats.class_bytes[MemoryClass::Dma.index()] = 0;
+    let sample = Sample {
+        kernel_memory: Some(stats),
+        ..permitted()
+    };
+    let parts = composition_parts(&sample).expect("the composition draws");
+    assert!(!parts.iter().any(|part| part.label == "Device buffers"));
+    assert_eq!(parts.len(), MEMORY_CLASS_COUNT);
+    assert_eq!(
+        parts.iter().map(|part| u32::from(part.share)).sum::<u32>(),
+        1_000
+    );
 }
 
 #[test]
@@ -1219,7 +1347,10 @@ fn the_graphics_rail_entry_reads_the_frames_damage_not_the_hero_figure() {
     assert_eq!(graphics.hero.unit, "M px blended");
     // And the trace now has a series behind it: the frame's damage as a
     // permille of its own screen.
-    assert_eq!(graphics.trend, alloc::vec![1]);
+    assert_eq!(
+        graphics.trend,
+        Trace::single(SignalRole::Gpu, alloc::vec![1])
+    );
 }
 
 #[test]

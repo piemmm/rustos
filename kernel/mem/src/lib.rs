@@ -88,7 +88,10 @@ pub use coldscan::{ColdPageScanner, ColdScanError};
 pub use dma::{DmaBuffer, DmaError, DmaPool, DmaWindowMap};
 pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};
-pub use frame::{Frame, FrameAllocator, FrameCount, PhysAddr, MAX_ORDER, PAGE_SHIFT, PAGE_SIZE};
+pub use frame::{
+    Frame, FrameAllocator, FrameCount, FrameSnapshot, MemoryClass, PhysAddr, MAX_ORDER,
+    MEMORY_CLASS_COUNT, PAGE_SHIFT, PAGE_SIZE,
+};
 pub use framepages::FramePages;
 pub use kvmap::{back_run, release_run, KernelRemap, KernelVirtMap, RemapError};
 pub use kvslots::{SlotError, SlotWindow};

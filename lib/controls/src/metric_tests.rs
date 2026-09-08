@@ -222,7 +222,7 @@ fn pressure_emphasis_changes_the_track_instrument_render() {
 fn instrument_trend_delegates_to_the_chart() {
     let theme = Theme::dark();
     let with_history = MetricTile::new("MEM", "8.6 GB", PressureKind::Memory).with_instrument(
-        MetricInstrument::Trend(Chart::new(PressureKind::Memory).with_samples([200, 800, 400])),
+        MetricInstrument::Trend(Chart::new(SignalRole::Memory).with_samples([200, 800, 400])),
     );
     let surface = tile_surface(&with_history, &theme, Scale::ONE);
     assert!(has_pixel(&surface, premul(theme.palette().memory_pressure)));
@@ -232,7 +232,7 @@ fn instrument_trend_delegates_to_the_chart() {
 fn instrument_trend_with_an_empty_series_plots_nothing() {
     let theme = Theme::dark();
     let empty_trend = MetricTile::new("MEM", "— GB", PressureKind::Memory)
-        .with_instrument(MetricInstrument::Trend(Chart::new(PressureKind::Memory)));
+        .with_instrument(MetricInstrument::Trend(Chart::new(SignalRole::Memory)));
     let surface = tile_surface(&empty_trend, &theme, Scale::ONE);
     // The tile itself is still drawn — its label proves the trend's absence is
     // what left the instrument slot empty, not a tile that drew nothing.
@@ -800,7 +800,7 @@ fn inline_layout_supports_every_instrument_variant() {
     let trend = MetricTile::new("MEM", "8.6 GB", PressureKind::Memory)
         .with_layout(MetricLayout::Inline)
         .with_instrument(MetricInstrument::Trend(
-            Chart::new(PressureKind::Memory).with_samples([200, 800, 400]),
+            Chart::new(SignalRole::Memory).with_samples([200, 800, 400]),
         ));
     let trend_surface = tile_surface(&trend, &theme, scale);
     assert!(has_pixel(
@@ -1166,7 +1166,7 @@ fn bar_surface(bar: &CompositionBar, theme: &Theme) -> Surface {
 }
 
 fn band_h(theme: &Theme) -> u32 {
-    crate::paint::progress_thickness(theme, Scale::ONE)
+    crate::paint::composition_thickness(theme, Scale::ONE)
 }
 
 /// The columns, within the bar's own band rows, that carry `want`.
@@ -1183,6 +1183,36 @@ fn hue(theme: &Theme, index: usize) -> Pixel {
 
 fn remainder_ink(theme: &Theme) -> Pixel {
     crate::paint::composition_remainder_tint(theme).premultiply()
+}
+
+#[test]
+fn an_internal_join_is_a_straight_edge_across_the_whole_band() {
+    // A rounded cap on a part that meets another notches the next part's
+    // colour in above and below the join, as deep as the band's radius — so
+    // the boundary reads as a curved wedge and the notch grows with the
+    // band's breadth. Every row of the band must divide at the same column.
+    let theme = Theme::dark();
+    let composition = bar(&[500, 500]);
+    let surface = bar_surface(&composition, &theme);
+    let rows = band_h(&theme).min(surface.height());
+    let leading = hue(&theme, 0);
+    let divide = |y: u32| {
+        (0..surface.width())
+            .filter(|&x| surface.get(x, y) == Some(leading))
+            .max()
+    };
+
+    // The join lies far from either end cap, so the caps' own rounding cannot
+    // excuse a row dividing elsewhere.
+    let columns: alloc::vec::Vec<Option<u32>> = (0..rows).map(divide).collect();
+    let first = *columns.first().expect("the band has rows");
+    assert!(first.is_some(), "the leading part must draw");
+    for (row, column) in columns.iter().enumerate() {
+        assert_eq!(
+            *column, first,
+            "row {row} divides at {column:?}, not {first:?}"
+        );
+    }
 }
 
 #[test]

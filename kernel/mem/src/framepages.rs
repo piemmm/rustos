@@ -15,7 +15,7 @@
 
 use core::ptr::NonNull;
 
-use crate::frame::{Frame, FrameAllocator, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, MemoryClass, PAGE_SIZE};
 use crate::phys::PhysMap;
 
 /// A supply of single frames, addressed through the kernel's direct physical
@@ -45,7 +45,7 @@ impl FramePages {
     /// the frame allocator's other kernel-side consumers do.
     #[must_use]
     pub fn alloc(&self) -> Option<NonNull<u8>> {
-        let frame = self.frames.alloc().ok()?;
+        let frame = self.frames.alloc(MemoryClass::Kernel).ok()?;
         let phys = frame.start();
         let Some(page) = self.phys.translate(phys, PAGE_SIZE) else {
             // Outside the direct map: hand it back rather than fabricate a

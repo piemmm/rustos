@@ -1302,6 +1302,7 @@ mod tests {
         CPU_INFO_FLAG_FREQ_MEASURED, SEAT_FLAG_OWNED,
     };
     use tairix_abi::time::{Duration64, Time64};
+    use tairix_abi::MEMORY_CLASS_COUNT;
     use tairix_abi::{Errno, LimitKind, ProcId, ResourceLimit, SchedPriority, RLIMIT_INFINITY};
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::{Output, Transport};
@@ -1521,6 +1522,7 @@ mod tests {
                     user_resident_bytes: 256,
                     page_size: 4096,
                     reserved: 0,
+                    class_bytes: [0; MEMORY_CLASS_COUNT],
                 },
                 identity: SystemIdentity::new([0xAB; 16], 1, 2, 3, b"rustbox").unwrap(),
                 uptime: Uptime {

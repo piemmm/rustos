@@ -13,6 +13,7 @@ use super::{
     FORBIDDEN_FLAG_BITS, MAX_COMPRESSED_LEN, PAGE_SIZE, RECENT_FAULTS, WARM_BATCH_PAGES,
     WARM_RADIUS,
 };
+use crate::frame::MemoryClass;
 use crate::vmm::MapFlags;
 
 /// Whether opportunistic restores may run at all: normal pressure
@@ -440,7 +441,7 @@ impl Ramzip {
             return Err(FaultError::AlreadyMapped);
         }
 
-        let Ok(frame) = ctx.frames.alloc() else {
+        let Ok(frame) = ctx.frames.alloc(MemoryClass::Compressed) else {
             return Err(FaultError::OutOfMemory);
         };
         let Some(out) = frame_page(ctx, frame) else {

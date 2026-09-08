@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{SignalRole, Theme};
 
 use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::state::PressureKind;
@@ -91,7 +91,7 @@ fn the_area_fill_fades_toward_the_zero_line() {
     // A saturated series, so the fill spans the whole band and every row is
     // under the trace rather than under the plate alone.
     let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
+        &Chart::new(SignalRole::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
         &theme,
     );
 
@@ -117,7 +117,7 @@ fn the_area_fill_is_not_the_flat_slab_it_replaced() {
     let theme = Theme::dark();
     let plate = Pixel::TRANSPARENT;
     let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
+        &Chart::new(SignalRole::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
         &theme,
     );
     // A flat fill weighs the same at every height under the trace. Two rows a
@@ -134,9 +134,9 @@ fn a_mirrored_band_ramps_the_other_way() {
     // Half-scale in both directions, so each band's trace sits mid-band and
     // the rows sampled below carry fill alone rather than the trace's own ink.
     let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu)
+        &Chart::new(SignalRole::Cpu)
             .with_samples([500; 16])
-            .with_opposing(PressureKind::Cpu, [500; 16]),
+            .with_opposing(SignalRole::Cpu, [500; 16]),
         &theme,
     );
     let weight = |y| fill_weight(&surface, y, 0, W, plate);
@@ -167,16 +167,13 @@ fn a_full_scale_series_reaches_the_ceiling_and_a_zero_series_the_floor() {
     let theme = Theme::dark();
     let ink = cpu(&theme);
 
-    let full = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; 8]),
-        &theme,
-    );
+    let full = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([1000; 8]), &theme);
     assert!(
         row_has(&full, 0, ink),
         "a saturated series must reach the top"
     );
 
-    let empty = chart_surface(&Chart::new(PressureKind::Cpu).with_samples([0; 8]), &theme);
+    let empty = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([0; 8]), &theme);
     assert!(
         !row_has(&empty, 0, ink),
         "a zero series must not reach the top"
@@ -195,7 +192,7 @@ fn the_plot_scales_to_the_height_it_is_given() {
     let ink = cpu(&theme);
     for height in [24_u32, 40, 100, 160] {
         let surface = chart_surface_of(
-            &Chart::new(PressureKind::Cpu).with_samples([500; 8]),
+            &Chart::new(SignalRole::Cpu).with_samples([500; 8]),
             &theme,
             W,
             height,
@@ -220,7 +217,7 @@ fn readings_run_oldest_to_newest_left_to_right() {
     for (i, slot) in samples.iter_mut().enumerate() {
         *slot = u16::try_from(i * 1000 / (MAX_CHART_SAMPLES - 1)).unwrap_or(1000);
     }
-    let surface = chart_surface(&Chart::new(PressureKind::Cpu).with_samples(samples), &theme);
+    let surface = chart_surface(&Chart::new(SignalRole::Cpu).with_samples(samples), &theme);
     let mid = W / 2;
     let left = topmost_in(&surface, 0, mid, ink).expect("the trace crosses the left half");
     let right = topmost_in(&surface, mid, W, ink).expect("the trace crosses the right half");
@@ -236,7 +233,7 @@ fn readings_run_oldest_to_newest_left_to_right() {
 #[test]
 fn an_empty_chart_plots_nothing_at_all() {
     let theme = Theme::dark();
-    let chart = Chart::new(PressureKind::Cpu);
+    let chart = Chart::new(SignalRole::Cpu);
     assert!(chart.is_empty());
     let surface = chart_surface(&chart, &theme);
     // Nothing whatever: the chart lays down no ground, so a reading with no
@@ -253,8 +250,8 @@ fn no_reading_and_a_measured_nought_do_not_look_alike() {
     // nobody could measure draws nothing. Rendering them the same would let a
     // missing reading pass for an idle one.
     let theme = Theme::dark();
-    let nothing = chart_surface(&Chart::new(PressureKind::Cpu), &theme);
-    let nought = chart_surface(&Chart::new(PressureKind::Cpu).with_samples([0, 0]), &theme);
+    let nothing = chart_surface(&Chart::new(SignalRole::Cpu), &theme);
+    let nought = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([0, 0]), &theme);
     assert_ne!(nothing.pixels(), nought.pixels());
     assert!(
         has_pixel(&nought, cpu(&theme)),
@@ -273,7 +270,7 @@ fn a_single_reading_holds_its_own_slot_at_the_newest_edge() {
     // whole box would claim a minute of history for a single reading.
     let theme = Theme::dark();
     let ink = cpu(&theme);
-    let surface = chart_surface(&Chart::new(PressureKind::Cpu).with_samples([1000]), &theme);
+    let surface = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([1000]), &theme);
     let marked: Vec<u32> = (0..W).filter(|&x| surface.get(x, 1) == Some(ink)).collect();
     let first = *marked.first().expect("the lone reading is drawn");
     let last = *marked.last().expect("the lone reading is drawn");
@@ -296,8 +293,8 @@ fn a_series_is_capped_and_keeps_the_most_recent() {
     let tail: Vec<u16> = (10..MAX_CHART_SAMPLES + 10)
         .map(|i| u16::try_from(i).expect("test index fits in u16"))
         .collect();
-    let capped = Chart::new(PressureKind::Cpu).with_samples(long);
-    let bounded = Chart::new(PressureKind::Cpu).with_samples(tail);
+    let capped = Chart::new(SignalRole::Cpu).with_samples(long);
+    let bounded = Chart::new(SignalRole::Cpu).with_samples(tail);
     assert_eq!(
         chart_surface(&capped, &theme).pixels(),
         chart_surface(&bounded, &theme).pixels()
@@ -307,8 +304,8 @@ fn a_series_is_capped_and_keeps_the_most_recent() {
 #[test]
 fn out_of_range_readings_are_clamped_fail_closed() {
     let theme = Theme::dark();
-    let over = Chart::new(PressureKind::Cpu).with_samples([5000, 5000]);
-    let clamped = Chart::new(PressureKind::Cpu).with_samples([1000, 1000]);
+    let over = Chart::new(SignalRole::Cpu).with_samples([5000, 5000]);
+    let clamped = Chart::new(SignalRole::Cpu).with_samples([1000, 1000]);
     assert_eq!(
         chart_surface(&over, &theme).pixels(),
         chart_surface(&clamped, &theme).pixels()
@@ -319,6 +316,8 @@ fn out_of_range_readings_are_clamped_fail_closed() {
 
 #[test]
 fn each_pressure_kind_traces_in_its_own_rail_colour() {
+    // A resource-identity chart resolves its role through the resource, so a
+    // CPU trace stays the compute colour after the tint became a role.
     let theme = Theme::dark();
     let p = theme.palette();
     let cases = [
@@ -332,17 +331,60 @@ fn each_pressure_kind_traces_in_its_own_rail_colour() {
         (PressureKind::Accelerator, p.accelerator_pressure),
     ];
     for (kind, expected) in cases {
-        let surface = chart_surface(&Chart::new(kind).with_samples([600; 6]), &theme);
+        let chart = Chart::new(kind.signal_role()).with_samples([600; 6]);
         assert!(
-            has_pixel(&surface, premul(expected)),
+            has_pixel(&chart_surface(&chart, &theme), premul(expected)),
             "{kind:?} must trace in its own rail colour"
         );
     }
 }
 
 #[test]
+fn a_role_that_is_not_a_resource_pressure_traces_in_its_own_colour() {
+    // The signals a chart carries that no `PressureKind` names: what the
+    // machine is running, and the four transfer directions.
+    let theme = Theme::dark();
+    let p = theme.palette();
+    let cases = [
+        (SignalRole::Workload, p.workload),
+        (SignalRole::DiskRead, p.disk_read),
+        (SignalRole::DiskWrite, p.disk_write),
+        (SignalRole::NetReceive, p.net_receive),
+        (SignalRole::NetSend, p.net_send),
+        (SignalRole::Recovery, p.recovery),
+    ];
+    for (role, expected) in cases {
+        let chart = Chart::new(role).with_samples([600; 6]);
+        assert!(
+            has_pixel(&chart_surface(&chart, &theme), premul(expected)),
+            "{role:?} must trace in its own colour"
+        );
+    }
+}
+
+#[test]
+fn a_duplex_trace_draws_its_two_directions_in_different_colours() {
+    // The defect the direction roles exist for: both halves tinted by the
+    // device's own hue drew one reading in one colour and said nothing about
+    // which way the bytes went.
+    let theme = Theme::dark();
+    let p = theme.palette();
+    let chart = Chart::new(SignalRole::DiskRead)
+        .with_samples([700; 6])
+        .with_opposing(SignalRole::DiskWrite, [700; 6]);
+    let surface = chart_surface(&chart, &theme);
+    assert!(has_pixel(&surface, premul(p.disk_read)), "reads are read");
+    assert!(
+        has_pixel(&surface, premul(p.disk_write)),
+        "writes are write"
+    );
+    assert_ne!(p.disk_read, p.disk_write);
+    assert_ne!(p.net_receive, p.net_send);
+}
+
+#[test]
 fn a_chart_renders_in_both_themes() {
-    let chart = Chart::new(PressureKind::Memory).with_samples([200, 800, 400, 900]);
+    let chart = Chart::new(SignalRole::Memory).with_samples([200, 800, 400, 900]);
     assert_ne!(
         chart_surface(&chart, &Theme::dark()).pixels(),
         chart_surface(&chart, &Theme::light()).pixels()
@@ -365,7 +407,7 @@ fn every_reading_plots_at_every_width() {
     for width in 9..=20 {
         for reading in 0..=1000_u16 {
             let surface = chart_surface_of(
-                &Chart::new(PressureKind::Cpu).with_samples([reading, 0]),
+                &Chart::new(SignalRole::Cpu).with_samples([reading, 0]),
                 &theme,
                 width,
                 H,
@@ -396,9 +438,9 @@ fn each_direction_keeps_to_its_own_half_of_the_box() {
     // The comparison the control exists for: receive above the axis, send
     // below it, so one glance says which way the traffic is going.
     let theme = Theme::dark();
-    let duplex = Chart::new(PressureKind::Network)
+    let duplex = Chart::new(SignalRole::Network)
         .with_samples([1000; 8])
-        .with_opposing(PressureKind::Disk, [1000; 8]);
+        .with_opposing(SignalRole::Disk, [1000; 8]);
     let surface = chart_surface(&duplex, &theme);
 
     let up = network(&theme);
@@ -417,12 +459,12 @@ fn the_opposing_series_grows_the_other_way() {
     // the surface, away from the axis.
     let theme = Theme::dark();
     let ink = premul(theme.palette().disk_pressure);
-    let quiet = Chart::new(PressureKind::Network)
+    let quiet = Chart::new(SignalRole::Network)
         .with_samples([0; 6])
-        .with_opposing(PressureKind::Disk, [100; 6]);
-    let busy = Chart::new(PressureKind::Network)
+        .with_opposing(SignalRole::Disk, [100; 6]);
+    let busy = Chart::new(SignalRole::Network)
         .with_samples([0; 6])
-        .with_opposing(PressureKind::Disk, [1000; 6]);
+        .with_opposing(SignalRole::Disk, [1000; 6]);
 
     let quiet_reach = bottommost(&chart_surface(&quiet, &theme), ink).expect("quiet plots");
     let busy_reach = bottommost(&chart_surface(&busy, &theme), ink).expect("busy plots");
@@ -436,15 +478,15 @@ fn the_opposing_series_grows_the_other_way() {
 fn a_duplex_chart_draws_its_axis() {
     let theme = Theme::dark();
     let rim = premul(theme.palette().rim);
-    let duplex = Chart::new(PressureKind::Network)
+    let duplex = Chart::new(SignalRole::Network)
         .with_samples([400; 4])
-        .with_opposing(PressureKind::Disk, [400; 4]);
+        .with_opposing(SignalRole::Disk, [400; 4]);
     assert!(
         has_pixel(&chart_surface(&duplex, &theme), rim),
         "the zero line both series read against must be drawn"
     );
     // A single-series chart has no second direction, so no axis.
-    let single = Chart::new(PressureKind::Network).with_samples([400; 4]);
+    let single = Chart::new(SignalRole::Network).with_samples([400; 4]);
     assert!(!has_pixel(&chart_surface(&single, &theme), rim));
 }
 
@@ -453,7 +495,7 @@ fn an_axis_is_never_drawn_where_there_is_no_reading() {
     // An empty duplex chart draws nothing: a rule across the middle
     // of an empty box would read as a measured nought.
     let theme = Theme::dark();
-    let empty = Chart::new(PressureKind::Network).with_opposing(PressureKind::Disk, []);
+    let empty = Chart::new(SignalRole::Network).with_opposing(SignalRole::Disk, []);
     assert!(empty.is_empty());
     assert!(!has_pixel(
         &chart_surface(&empty, &theme),
@@ -466,9 +508,9 @@ fn one_measured_direction_still_plots_and_states_its_axis() {
     // An interface that receives and never sends has a measured zero send,
     // which is a reading: the axis and the primary trace both draw.
     let theme = Theme::dark();
-    let half = Chart::new(PressureKind::Network)
+    let half = Chart::new(SignalRole::Network)
         .with_samples([700; 5])
-        .with_opposing(PressureKind::Disk, []);
+        .with_opposing(SignalRole::Disk, []);
     assert!(!half.is_empty());
     let surface = chart_surface(&half, &theme);
     assert!(has_pixel(&surface, network(&theme)));
@@ -479,27 +521,27 @@ fn one_measured_direction_still_plots_and_states_its_axis() {
 #[test]
 fn the_opposing_series_is_bounded_and_clamped_like_the_primary() {
     let theme = Theme::dark();
-    let over = Chart::new(PressureKind::Network)
+    let over = Chart::new(SignalRole::Network)
         .with_samples([500])
-        .with_opposing(PressureKind::Disk, [5000, 5000]);
-    let clamped = Chart::new(PressureKind::Network)
+        .with_opposing(SignalRole::Disk, [5000, 5000]);
+    let clamped = Chart::new(SignalRole::Network)
         .with_samples([500])
-        .with_opposing(PressureKind::Disk, [1000, 1000]);
+        .with_opposing(SignalRole::Disk, [1000, 1000]);
     assert_eq!(
         chart_surface(&over, &theme).pixels(),
         chart_surface(&clamped, &theme).pixels()
     );
 
-    let capped = Chart::new(PressureKind::Network)
+    let capped = Chart::new(SignalRole::Network)
         .with_samples([500])
         .with_opposing(
-            PressureKind::Disk,
+            SignalRole::Disk,
             (0..MAX_CHART_SAMPLES + 4).map(|i| u16::try_from(i % 1000).unwrap_or(0)),
         );
-    let recent = Chart::new(PressureKind::Network)
+    let recent = Chart::new(SignalRole::Network)
         .with_samples([500])
         .with_opposing(
-            PressureKind::Disk,
+            SignalRole::Disk,
             (4..MAX_CHART_SAMPLES + 4).map(|i| u16::try_from(i % 1000).unwrap_or(0)),
         );
     assert_eq!(
@@ -513,9 +555,9 @@ fn a_box_too_short_to_seat_both_halves_draws_nothing() {
     // Fail closed: half a duplex reading is worse than none, so a box that
     // cannot hold an axis and two bands draws no trace at all.
     let theme = Theme::dark();
-    let duplex = Chart::new(PressureKind::Network)
+    let duplex = Chart::new(SignalRole::Network)
         .with_samples([1000; 4])
-        .with_opposing(PressureKind::Disk, [1000; 4]);
+        .with_opposing(SignalRole::Disk, [1000; 4]);
     let surface = chart_surface_of(&duplex, &theme, W, 2);
     assert!(!has_pixel(&surface, network(&theme)));
     assert!(!has_pixel(&surface, premul(theme.palette().disk_pressure)));
@@ -527,9 +569,9 @@ fn a_box_too_short_to_seat_both_halves_draws_nothing() {
 
 #[test]
 fn a_duplex_chart_renders_in_both_themes() {
-    let duplex = Chart::new(PressureKind::Network)
+    let duplex = Chart::new(SignalRole::Network)
         .with_samples([200, 800, 400])
-        .with_opposing(PressureKind::Disk, [600, 100, 900]);
+        .with_opposing(SignalRole::Disk, [600, 100, 900]);
     assert_ne!(
         chart_surface(&duplex, &Theme::dark()).pixels(),
         chart_surface(&duplex, &Theme::light()).pixels()
@@ -538,9 +580,9 @@ fn a_duplex_chart_renders_in_both_themes() {
 
 #[test]
 fn a_duplex_chart_draws_a_heavier_axis_under_heavy_contrast() {
-    let duplex = Chart::new(PressureKind::Network)
+    let duplex = Chart::new(SignalRole::Network)
         .with_samples([300; 4])
-        .with_opposing(PressureKind::Disk, [300; 4]);
+        .with_opposing(SignalRole::Disk, [300; 4]);
     let normal = chart_surface(&duplex, &Theme::dark());
     let heavy = chart_surface(&duplex, &crate::testkit::high_contrast());
     let rim = premul(Theme::dark().palette().rim);
@@ -560,15 +602,12 @@ fn a_duplex_chart_draws_a_heavier_axis_under_heavy_contrast() {
 fn a_stated_full_scale_reads_a_count_against_itself() {
     let theme = Theme::dark();
     let counted = chart_surface(
-        &Chart::new(PressureKind::Cpu)
+        &Chart::new(SignalRole::Cpu)
             .with_samples([50; 8])
             .with_full_scale(100),
         &theme,
     );
-    let permille = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([500; 8]),
-        &theme,
-    );
+    let permille = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([500; 8]), &theme);
     assert_eq!(
         topmost(&counted, cpu(&theme)),
         topmost(&permille, cpu(&theme)),
@@ -581,14 +620,8 @@ fn a_stated_full_scale_reads_a_count_against_itself() {
 #[test]
 fn the_default_scale_still_clamps_at_permille_full() {
     let theme = Theme::dark();
-    let over = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([2000; 8]),
-        &theme,
-    );
-    let full = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; 8]),
-        &theme,
-    );
+    let over = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([2000; 8]), &theme);
+    let full = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([1000; 8]), &theme);
     assert_eq!(
         topmost(&over, cpu(&theme)),
         topmost(&full, cpu(&theme)),
@@ -602,15 +635,12 @@ fn the_default_scale_still_clamps_at_permille_full() {
 fn a_zero_full_scale_falls_back_to_permille() {
     let theme = Theme::dark();
     let zeroed = chart_surface(
-        &Chart::new(PressureKind::Cpu)
+        &Chart::new(SignalRole::Cpu)
             .with_samples([500; 8])
             .with_full_scale(0),
         &theme,
     );
-    let default = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([500; 8]),
-        &theme,
-    );
+    let default = chart_surface(&Chart::new(SignalRole::Cpu).with_samples([500; 8]), &theme);
     assert_eq!(
         topmost(&zeroed, cpu(&theme)),
         topmost(&default, cpu(&theme))
@@ -623,7 +653,7 @@ fn a_zero_full_scale_falls_back_to_permille() {
 #[test]
 fn a_degenerate_box_draws_nothing_outside_itself() {
     let theme = Theme::dark();
-    let chart = Chart::new(PressureKind::Cpu).with_samples([100, 900, 500]);
+    let chart = Chart::new(SignalRole::Cpu).with_samples([100, 900, 500]);
     let mut surface = Surface::new(1, 1).expect("surface");
     chart.render(&mut surface, Rect::new(0, 0, 1, 1), Scale::ONE, &theme);
     assert_eq!(surface.pixels().len(), 1);

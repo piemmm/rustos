@@ -66,10 +66,10 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::paint::{
-    clamp_permille, composition_remainder_tint, composition_tint, heavy_contrast, inset,
-    paint_icon_slot, paint_measured_track, paint_plate, paint_text_line, plate_border,
-    progress_thickness, role_font, signal_color, surface_rect, to_i32, withheld, PlateStyle,
-    TrackBand, COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
+    clamp_permille, composition_remainder_tint, composition_thickness, composition_tint,
+    heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_text_line,
+    plate_border, progress_thickness, role_font, signal_color, surface_rect, to_i32, withheld,
+    PlateStyle, TrackBand, COMPOSITION_HUE_COUNT, FULL, FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -1095,7 +1095,7 @@ impl CompositionBar {
         let key = rows
             .saturating_mul(font.line_height())
             .saturating_add(rows.saturating_sub(1).saturating_mul(gap));
-        progress_thickness(theme, scale)
+        composition_thickness(theme, scale)
             .saturating_add(gap)
             .saturating_add(key)
     }
@@ -1121,7 +1121,12 @@ impl CompositionBar {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return;
         };
-        let Some(band) = TrackBand::groove(surface, (x, y, w, h), scale, theme) else {
+        let Some(band) = TrackBand::groove(
+            surface,
+            (x, y, w, h),
+            composition_thickness(theme, scale),
+            theme,
+        ) else {
             return;
         };
         self.paint_segments(surface, band, scale, theme);
@@ -1153,8 +1158,17 @@ impl CompositionBar {
             running = running.saturating_add(segment.share);
             ends.push(clamp_permille(running));
         }
+        // Back to front, so each part is overdrawn from the left by the parts
+        // before it. Only the trailing part keeps the band's own rounded cap;
+        // every other ends at a straight join.
+        let last = ends.len().saturating_sub(1);
         for (index, end) in ends.iter().enumerate().rev() {
-            band.fill(surface, *end, self.tint(index, theme));
+            let tint = self.tint(index, theme);
+            if index == last {
+                band.fill(surface, *end, tint);
+            } else {
+                band.fill_to_join(surface, *end, tint);
+            }
         }
         let rule = plate_border(theme, scale);
         for end in ends.iter().take(ends.len().saturating_sub(1)) {

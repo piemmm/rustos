@@ -204,6 +204,47 @@ fn pointer_plates_step_away_from_the_bar_fill_in_the_appearance_direction() {
     }
 }
 
+/// Every signal role a theme offers, so a test over the whole vocabulary
+/// cannot silently miss one added later.
+const EVERY_SIGNAL_ROLE: [SignalRole; 17] = [
+    SignalRole::Cpu,
+    SignalRole::Memory,
+    SignalRole::Disk,
+    SignalRole::Network,
+    SignalRole::Power,
+    SignalRole::Thermal,
+    SignalRole::Gpu,
+    SignalRole::Accelerator,
+    SignalRole::Recovery,
+    SignalRole::Success,
+    SignalRole::Warning,
+    SignalRole::Denied,
+    SignalRole::Workload,
+    SignalRole::DiskRead,
+    SignalRole::DiskWrite,
+    SignalRole::NetReceive,
+    SignalRole::NetSend,
+];
+
+/// Two roles resolving to one colour are two signals a reader cannot tell
+/// apart — which is the whole purpose of a role. Checked for both built-ins,
+/// because a light theme's tuning is authored separately.
+#[test]
+fn no_two_signal_roles_resolve_to_the_same_colour() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        for (index, role) in EVERY_SIGNAL_ROLE.iter().enumerate() {
+            for other in &EVERY_SIGNAL_ROLE[index + 1..] {
+                assert_ne!(
+                    palette.signal(*role),
+                    palette.signal(*other),
+                    "{role:?} and {other:?} are indistinguishable"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn signal_resolves_each_semantic_role_to_its_field() {
     let p = *Theme::dark().palette();
@@ -215,6 +256,11 @@ fn signal_resolves_each_semantic_role_to_its_field() {
     assert_eq!(p.signal(SignalRole::Thermal), p.thermal_pressure);
     assert_eq!(p.signal(SignalRole::Gpu), p.gpu_pressure);
     assert_eq!(p.signal(SignalRole::Accelerator), p.accelerator_pressure);
+    assert_eq!(p.signal(SignalRole::Workload), p.workload);
+    assert_eq!(p.signal(SignalRole::DiskRead), p.disk_read);
+    assert_eq!(p.signal(SignalRole::DiskWrite), p.disk_write);
+    assert_eq!(p.signal(SignalRole::NetReceive), p.net_receive);
+    assert_eq!(p.signal(SignalRole::NetSend), p.net_send);
     assert_eq!(p.signal(SignalRole::Recovery), p.recovery);
     assert_eq!(p.signal(SignalRole::Success), p.success);
     assert_eq!(p.signal(SignalRole::Warning), p.warning);
@@ -533,6 +579,11 @@ fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
     // an instrument line, nowhere near a plate.
     assert!(m.progress_thickness < m.selector_extent);
     assert!(m.selector_extent < m.control_height);
+    // A composition band is broader still: each of its runs has to be
+    // identifiable against the key under it, which a progress line's breadth
+    // cannot carry. It stays below a plate.
+    assert!(m.progress_thickness < m.composition_thickness);
+    assert!(m.composition_thickness < m.control_height);
     // Every track survives the thinnest sensible rounding.
     assert!(m.measured_thickness >= 1);
 }
@@ -870,6 +921,11 @@ fn sample_theme(id: ThemeId) -> Theme {
             success: Rgba::rgb(76, 208, 122),
             warning: Rgba::rgb(245, 197, 66),
             denied: Rgba::rgb(200, 90, 90),
+            workload: Rgba::rgb(63, 185, 80),
+            disk_read: Rgba::rgb(98, 207, 122),
+            disk_write: Rgba::rgb(219, 74, 58),
+            net_receive: Rgba::rgb(47, 159, 224),
+            net_send: Rgba::rgb(123, 108, 232),
             scroll_track: Rgba::rgb(35, 40, 48),
             scroll_thumb: Rgba::rgb(74, 81, 92),
             frame: Rgba::rgb(60, 60, 60),
@@ -897,6 +953,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             bead_size: 6,
             measured_thickness: 4,
             progress_thickness: 6,
+            composition_thickness: 16,
             chart_height: 40,
             selector_extent: 14,
             toggle_track_length: 24,

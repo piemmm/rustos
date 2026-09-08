@@ -145,6 +145,33 @@ definition of "how much RAM this machine has". Only the total is exposed
 here — the gated, audited `MEMORY_PRESSURE` view (free bytes, watermarks,
 the reserve, transition history) is untouched and stays gated.
 
+### Where the RAM went: the memory-class partition
+
+`KernelMemoryStats` carries `class_bytes`, one figure per `MemoryClass`
+(`lib/abi/src/memory.rs`), and those figures are a genuine **partition** of
+the RAM in use: `free_bytes + Σ class_bytes == total_bytes` holds. The frame
+allocator charges every frame to exactly one class at allocation and
+discharges it from the same one at free — the class rides the block's own
+per-frame bookkeeping byte, so a free is self-describing and no caller can
+mis-attribute one — and the producer takes the whole record from a *single*
+allocator snapshot, so the invariant holds of the figures a caller reads and
+not merely of the allocator's internals.
+
+The six classes are `UserAnon` (anonymous, stack and shared-region pages of
+user spaces), `UserFile` (file-backed resident pages), `PageTable` (paging
+structures and kernel address-space bookkeeping), `Kernel` (the kernel's own
+heaps, slabs and per-task kernel stacks), `Dma` (device DMA buffers) and
+`Compressed` (the compressed tier's store).
+
+`user_resident_bytes` sits beside them and answers a different question: the
+sum over live processes of the pages each one *maps*. It is a count of
+mappings, not of RAM — a frame shared between two address spaces counts once
+per space, and a user driver's MMIO window counts although it is no RAM at
+all ��� so it can exceed `total_bytes` and is **not** a share of physical
+memory. A consumer drawing where the RAM went reads `class_bytes`; one
+answering "how much address space does this process hold" reads the per-process
+figure.
+
 The kernel-statistics queries (`plans/STRESSTEST.md` ST1; storage health
 `plans/FIX-IO.md` IO5) share `KERNEL_MEMORY_STATS`'s security boundary —
 gated on `CAP_SYSINFO_KERNEL` and audited — because each exposes

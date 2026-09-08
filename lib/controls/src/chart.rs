@@ -18,13 +18,17 @@
 //! a chart takes an optional opposing series
 //! ([`with_opposing`](Chart::with_opposing)): the box splits at a drawn axis,
 //! the primary series rises above it and the opposing one mirrors below,
-//! tinted by its own resource. Two stacked charts would lose the comparison
-//! that matters.
+//! tinted by its own role. Two stacked charts would lose the comparison that
+//! matters.
 //!
-//! Like a track, the trace is tinted by the resource's own semantic rail
-//! colour rather than the accent, so a CPU trace reads as the compute colour
-//! whether it is showing 5% or 95%, and the accent stays reserved for a
-//! chosen action.
+//! A series is tinted by a [`SignalRole`] rather than the accent, so a CPU
+//! trace reads as the compute colour whether it is showing 5% or 95%, and the
+//! accent stays reserved for a chosen action. The role — not a resource
+//! pressure — is what a series carries, because the two halves of a duplex
+//! trace are *directions*: reads against writes, receive against send. Giving
+//! both the device's own hue drew one reading in one colour and said nothing
+//! about which way the bytes went. A resource-identity chart names
+//! `kind.signal_role()` and reads exactly as before.
 //!
 //! Every colour, radius, and thickness resolves from the active [`Theme`] and
 //! [`Scale`] through the shared accessors (`crate::paint`), and the line itself
@@ -35,10 +39,9 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface, SUBPIXEL};
-use tairix_theme::Theme;
+use tairix_theme::{SignalRole, Theme};
 
-use crate::paint::{plate_border, seam_thickness, signal_color, surface_rect, withheld, FULL};
-use crate::state::PressureKind;
+use crate::paint::{plate_border, role_color, seam_thickness, surface_rect, withheld, FULL};
 
 /// The most samples a [`Chart`] may hold.
 ///
@@ -68,41 +71,46 @@ const AREA_ALPHA: u8 = 128;
 /// Full strength of the area fill's vertical ramp.
 const AREA_RAMP_FULL: u32 = 255;
 
-/// A chart's second, mirrored series and the resource it reads.
+/// A chart's second, mirrored series and the role it reads as.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Opposing {
-    kind: PressureKind,
+    role: SignalRole,
     samples: Vec<u16>,
 }
 
 /// One bounded, oldest-to-newest history series, plotted as a line with a
-/// quiet filled area beneath it, tinted by its resource's semantic rail colour
+/// quiet filled area beneath it, tinted by its semantic signal colour
 /// (spec §11.35).
 ///
 /// Readings are permille of the resource's capacity by default; a series with
 /// no such ceiling — a count — states its own with
 /// [`with_full_scale`](Self::with_full_scale).
 ///
-/// The owner supplies every visible fact — the resource kind and the series —
+/// The owner supplies every visible fact — the signal role and the series —
 /// and re-renders when either changes. A chart with no samples draws *nothing*:
 /// an honest "nothing recorded yet" leaving the plate it sits on untouched,
 /// never a fabricated flat line along the floor, which would read as a measured
 /// idle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chart {
-    kind: PressureKind,
+    role: SignalRole,
     samples: Vec<u16>,
     opposing: Option<Opposing>,
     full_scale: u16,
 }
 
 impl Chart {
-    /// An empty chart for the resource `kind`. Add readings with
+    /// An empty chart whose series reads as `role`. Add readings with
     /// [`with_samples`](Self::with_samples).
+    ///
+    /// A chart of a resource's own activity passes
+    /// [`PressureKind::signal_role`](crate::PressureKind::signal_role); one of
+    /// something that is not a resource pressure — a task census, a transfer
+    /// direction — names its role directly.
     #[must_use]
-    pub fn new(kind: PressureKind) -> Self {
+    pub fn new(role: SignalRole) -> Self {
         Self {
-            kind,
+            role,
             samples: Vec::new(),
             opposing: None,
             full_scale: FULL,
@@ -135,9 +143,14 @@ impl Chart {
         self
     }
 
-    /// This chart with a second series for resource `kind`, plotted mirrored
-    /// below a drawn axis and tinted by that resource's own rail colour; the
-    /// primary series then rises above the axis instead of filling the box.
+    /// This chart with a second series reading as `role`, plotted mirrored
+    /// below a drawn axis and tinted by that role's own colour; the primary
+    /// series then rises above the axis instead of filling the box.
+    ///
+    /// The two roles are what make a duplex trace readable: pass the
+    /// *direction* each half measures — read against write, receive against
+    /// send — so a glance says which way the bytes went. Passing one role
+    /// twice draws one reading in one colour and says nothing.
     ///
     /// The series is bounded and clamped exactly as
     /// [`with_samples`](Self::with_samples)'s is. Adding one asserts that the
@@ -147,11 +160,11 @@ impl Chart {
     #[must_use]
     pub fn with_opposing(
         mut self,
-        kind: PressureKind,
+        role: SignalRole,
         samples: impl IntoIterator<Item = u16>,
     ) -> Self {
         self.opposing = Some(Opposing {
-            kind,
+            role,
             samples: bounded(samples),
         });
         self
@@ -205,7 +218,7 @@ impl Chart {
                 &self.samples,
                 &band,
                 weight,
-                self.kind,
+                self.role,
                 theme,
                 self.full_scale,
             );
@@ -227,7 +240,7 @@ impl Chart {
             &self.samples,
             &split.upper,
             split.weight,
-            self.kind,
+            self.role,
             theme,
             self.full_scale,
         );
@@ -236,7 +249,7 @@ impl Chart {
             &opposing.samples,
             &split.lower,
             split.weight,
-            opposing.kind,
+            opposing.role,
             theme,
             self.full_scale,
         );
@@ -310,13 +323,13 @@ impl Split {
 }
 
 /// Plot `samples` into `band` — the filled area first, then the line over its
-/// own body — tinted by `kind`'s rail colour. An empty series draws nothing.
+/// own body — tinted by `role`'s colour. An empty series draws nothing.
 fn paint_series(
     surface: &mut Surface,
     samples: &[u16],
     band: &Band,
     weight: i32,
-    kind: PressureKind,
+    role: SignalRole,
     theme: &Theme,
     full_scale: u16,
 ) {
@@ -328,7 +341,7 @@ fn paint_series(
     let Some(trace) = poly.len().checked_sub(1).and_then(|end| poly.get(1..end)) else {
         return;
     };
-    let color = signal_color(theme, kind);
+    let color = role_color(theme, role);
     let (_, top, _, height) = band.box_px;
     let rising_up = band.rising_up;
     surface.wash_polygon_subpixel(

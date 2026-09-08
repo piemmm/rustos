@@ -98,6 +98,26 @@ pub fn sample_bytes(stats: &KernelMemoryStats) -> u64 {
         .saturating_add(stats.kernel_heap_bytes)
 }
 
+/// Whether the record's per-class figures partition the RAM they describe:
+/// `free_bytes + Σ class_bytes == total_bytes`.
+///
+/// The kernel charges every frame to exactly one class at allocation and
+/// discharges it from the same one at free, so this holds by construction —
+/// and the producer takes the whole record from one allocator snapshot, so it
+/// holds of these figures and not merely of the allocator's internals. A
+/// record that fails it is a live kernel whose accounting has drifted (a
+/// mis-charged class, a discharge that clamped), which is a defect in its own
+/// right and one no leak verdict could be read against. The soak therefore
+/// checks it on every sample rather than trusting it.
+#[must_use]
+pub fn partitions(stats: &KernelMemoryStats) -> bool {
+    let charged = stats
+        .class_bytes
+        .iter()
+        .try_fold(0u64, |sum, bytes| sum.checked_add(*bytes));
+    charged.and_then(|charged| charged.checked_add(stats.free_bytes)) == Some(stats.total_bytes)
+}
+
 /// The soak's outcome: the strict comparison of the final sample against the
 /// baseline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +169,33 @@ pub fn report_line(verdict: Verdict, baseline_free_bytes: u64, final_free_bytes:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::{MemoryClass, MEMORY_CLASS_COUNT};
+
+    #[test]
+    fn a_partitioning_record_is_accepted_and_a_drifted_one_refused() {
+        // Free plus the class charges is the whole: the property the kernel's
+        // charge-at-alloc / discharge-at-free accounting guarantees.
+        assert!(partitions(&stats(4096, 0)));
+        assert!(partitions(&heap_stats(1 << 20, 1 << 20, 4096)));
+
+        // One frame charged to no class — the shape a mis-charge leaves —
+        // and one charged twice. Both are refused rather than judged.
+        let mut short = stats(4096, 0);
+        short.class_bytes[MemoryClass::UserAnon.index()] -= 4096;
+        assert!(!partitions(&short));
+        let mut over = stats(4096, 0);
+        over.class_bytes[MemoryClass::Kernel.index()] += 4096;
+        assert!(!partitions(&over));
+    }
+
+    #[test]
+    fn the_partition_check_cannot_be_wrapped_into_agreement() {
+        // A malformed reply must never sum into the total by overflowing.
+        let mut wrapped = stats(4096, 0);
+        wrapped.class_bytes[MemoryClass::Kernel.index()] = u64::MAX;
+        wrapped.class_bytes[MemoryClass::Dma.index()] = 1;
+        assert!(!partitions(&wrapped));
+    }
 
     fn stats(free_bytes: u64, user_resident_bytes: u64) -> KernelMemoryStats {
         heap_stats(free_bytes, user_resident_bytes, 0)
@@ -159,13 +206,19 @@ mod tests {
         user_resident_bytes: u64,
         kernel_heap_bytes: u64,
     ) -> KernelMemoryStats {
+        let total_bytes = 1u64 << 30;
+        // Charge whatever is not free to one class, so the fixture's records
+        // partition exactly as a live kernel's do.
+        let mut class_bytes = [0u64; MEMORY_CLASS_COUNT];
+        class_bytes[MemoryClass::UserAnon.index()] = total_bytes.saturating_sub(free_bytes);
         KernelMemoryStats {
-            total_bytes: 1 << 30,
+            total_bytes,
             free_bytes,
             kernel_heap_bytes,
             user_resident_bytes,
             page_size: 4096,
             reserved: 0,
+            class_bytes,
         }
     }
 

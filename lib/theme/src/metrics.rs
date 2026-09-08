@@ -113,6 +113,16 @@ pub struct Metrics {
     /// glance across a long run without a thumb to mark it. It stays an
     /// instrument line well under [`control_height`](Self::control_height).
     pub progress_thickness: u32,
+    /// The breadth (short dimension) of a composition band — a measured whole
+    /// split into named parts — in logical pixels.
+    ///
+    /// Several times [`progress_thickness`](Self::progress_thickness), because
+    /// a composition is a *categorical* band with a key beneath it rather than
+    /// a progress line: the eye has to match each coloured run to its name, and
+    /// a run only a few pixels tall is a colour the reader cannot identify. It
+    /// still stays under [`control_height`](Self::control_height), so the band
+    /// reads as an instrument and not a plate.
+    pub composition_thickness: u32,
     /// The height of a history chart's plot box, in logical pixels.
     ///
     /// A chart is the one measured instrument that is a *box* rather than a

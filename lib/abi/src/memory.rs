@@ -55,6 +55,94 @@
 
 use crate::Errno;
 
+/// The disjoint classes physical RAM is accounted by.
+///
+/// Every frame the allocator hands out is charged to exactly one of these at
+/// allocation and discharged from the same one at free, so the class totals
+/// partition the RAM in use: `usable == free + Σ class` holds at every
+/// instant. That is what lets a reader of
+/// [`KernelMemoryStats`](crate::sysinfo::KernelMemoryStats) draw where the
+/// memory went as a genuine whole. A per-address-space count of *mappings*
+/// cannot: a frame shared between spaces counts once per space and a device
+/// MMIO window counts although it is not RAM.
+///
+/// The vocabulary lives here, beside the mapping ABI, because the frame
+/// allocator charges with it and the ABI record reports it — one definition,
+/// so the two can never drift.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum MemoryClass {
+    /// Anonymous, stack and shared-region pages of user address spaces.
+    UserAnon,
+    /// File-backed pages resident in a user address space.
+    UserFile,
+    /// Paging structures and kernel address-space bookkeeping.
+    PageTable,
+    /// The kernel's own heaps, slabs and per-task kernel stacks.
+    Kernel,
+    /// Device DMA buffers.
+    Dma,
+    /// The compressed memory tier's store.
+    Compressed,
+}
+
+/// Number of [`MemoryClass`] variants.
+pub const MEMORY_CLASS_COUNT: usize = 6;
+
+/// Stable names of the memory classes, indexed by
+/// [`MemoryClass`] discriminant.
+pub const MEMORY_CLASS_NAMES: [&str; MEMORY_CLASS_COUNT] = [
+    "user-anon",
+    "user-file",
+    "page-table",
+    "kernel",
+    "dma",
+    "compressed",
+];
+
+impl MemoryClass {
+    /// Every class, in discriminant order — the order the ABI's per-class
+    /// array is indexed in.
+    pub const ALL: [Self; MEMORY_CLASS_COUNT] = [
+        Self::UserAnon,
+        Self::UserFile,
+        Self::PageTable,
+        Self::Kernel,
+        Self::Dma,
+        Self::Compressed,
+    ];
+
+    /// This class's index into a per-class array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// This class's stable name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        MEMORY_CLASS_NAMES[self as usize]
+    }
+}
+
+/// Look up a memory class by its stable name. Fails closed: an unknown name
+/// is `None`, never a guessed class.
+#[must_use]
+pub fn memory_class_from_name(name: &str) -> Option<MemoryClass> {
+    let mut index = 0;
+    while index < MEMORY_CLASS_COUNT {
+        if MEMORY_CLASS_NAMES[index] == name {
+            return Some(MemoryClass::ALL[index]);
+        }
+        index += 1;
+    }
+    None
+}
+
+// The names array and the variant list are indexed by the same discriminant,
+// so a class added to one and not the other is a compile error.
+const _: () = assert!(MEMORY_CLASS_NAMES.len() == MemoryClass::ALL.len());
+
 /// The system page granule, in bytes: the unit `mem_map` rounds a length up
 /// to, every Tier-1 target's smallest translation granule, and the quantum
 /// the physical frame allocator and both heaps work in.
@@ -138,8 +226,29 @@ impl MapFlags {
 
 #[cfg(test)]
 mod tests {
-    use super::MapFlags;
+    use super::{
+        memory_class_from_name, MapFlags, MemoryClass, MEMORY_CLASS_COUNT, MEMORY_CLASS_NAMES,
+    };
     use crate::Errno;
+
+    #[test]
+    fn memory_class_names_are_a_closed_bijection() {
+        for (index, name) in MEMORY_CLASS_NAMES.iter().enumerate() {
+            let class = memory_class_from_name(name).expect("every name resolves");
+            assert_eq!(class.index(), index);
+            assert_eq!(class.name(), *name);
+        }
+        assert_eq!(MEMORY_CLASS_NAMES.len(), MEMORY_CLASS_COUNT);
+        assert_eq!(memory_class_from_name("slab"), None);
+        assert_eq!(memory_class_from_name(""), None);
+    }
+
+    #[test]
+    fn memory_class_all_is_in_discriminant_order() {
+        for (index, class) in MemoryClass::ALL.iter().enumerate() {
+            assert_eq!(class.index(), index);
+        }
+    }
 
     #[test]
     fn empty_is_advisory() {

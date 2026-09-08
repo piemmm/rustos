@@ -122,14 +122,19 @@ it, or frame the content that does:
   states. A *count* has no capacity to be a share of, so a caller plotting one
   says what the top of the box means rather than leaving a reader to assume.
   A `Chart` claims the whole box it is given, because a series confined to a
-  track's thickness cannot rise more than a pixel or two whatever it reads. A
-  rate with two *directions* — read/write, receive/send — is one reading, so it
-  takes an optional opposing series: the box splits at a drawn axis, the primary
-  series rising above it and the opposing one mirrored below in its own
-  resource's tint. Adding one asserts that direction is measured; a direction
-  with no reading behind it is left off, so the chart stays a single-series
-  trend over the whole box rather than showing an empty half as a quiet
-  nothing.
+  track's thickness cannot rise more than a pixel or two whatever it reads.
+  A chart's series is tinted by a **`SignalRole`**, not by a resource pressure:
+  a resource-identity trace passes `PressureKind::signal_role()` and reads
+  exactly as its rail hue, while a signal that is *not* a resource under load —
+  a task census, a direction of transfer — names its own role. A rate with two
+  *directions* — read/write, receive/send — is one reading, so it takes an
+  optional opposing series: the box splits at a drawn axis, the primary series
+  rising above it and the opposing one mirrored below **in that direction's own
+  tint**, so a glance says which way the bytes went. Giving both halves one
+  role draws one reading in one colour and says nothing. Adding an opposing
+  series asserts that direction is measured; a direction with no reading behind
+  it is left off, so the chart stays a single-series trend over the whole box
+  rather than showing an empty half as a quiet nothing.
   A chart's filled area fades out at the zero line it is read against: a flat
   fill draws the floor as a second hard edge, which reads as a measurement the
   chart never took. The ramp is the *band's* rather than the trace's, so the
@@ -149,12 +154,17 @@ it, or frame the content that does:
   of its cell — where the wash alone is a few levels off the plate behind it
   and reads as nothing.
 - `CompositionBar` splits a measured whole into its named parts: one
-  proportional row through the very same measured-track geometry a tile's
-  `Track` draws with, then a key naming each part and its amount. The parts
-  separate by *hue* — a fixed rotation of the theme's resource colours led by
-  the bar's own resource — because they are categories rather than degrees, and
-  the joins between them are ruled so they stay countable where hue carries
-  nothing. Shares that do not account for the whole are a `CompositionError` at
+  proportional band through the very same measured-track geometry a tile's
+  `Track` draws with — at `composition_thickness`, broader than a progress
+  line, because each run has to be identifiable against the key under it —
+  then a key naming each part and its amount. The parts separate by *hue* — a
+  fixed rotation of the theme's resource colours led by the bar's own
+  resource — because they are categories rather than degrees, and the joins
+  between them are ruled so they stay countable where hue carries nothing.
+  Only the band's two **outer** ends are rounded: a part that meets another
+  ends at a straight edge, because a rounded cap there lets the next part's
+  colour through above and below the join and reads as a curved wedge rather
+  than a division. Shares that do not account for the whole are a `CompositionError` at
   construction rather than a silently short bar, and the part that is *not* in
   use is declared as the composition's `remainder`: drawn in the track's quiet
   neutral as the unfilled tail, last, and still named in the key. The key wraps

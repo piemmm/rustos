@@ -29,7 +29,7 @@
 
 use tairix_arch_api::frames::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
 
-use crate::frame::{Frame, FrameAllocator, PhysAddr, PAGE_SIZE};
+use crate::frame::{Frame, FrameAllocator, MemoryClass, PhysAddr, PAGE_SIZE};
 use crate::phys::PhysMap;
 
 /// A [`PageTableFrames`] source backed by the kernel [`FrameAllocator`].
@@ -70,7 +70,7 @@ impl PageTableFrames for FrameTableSource {
     fn alloc_table(&self) -> Option<TableFrame> {
         // Deterministic OOM: a full allocator returns `None`, never a
         // panic.
-        let frame = self.frames.alloc().ok()?;
+        let frame = self.frames.alloc(MemoryClass::PageTable).ok()?;
         let phys = frame.start().as_u64();
 
         let Some(ptr) = self.phys.translate(PhysAddr::new(phys), PAGE_SIZE) else {

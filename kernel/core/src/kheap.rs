@@ -208,7 +208,7 @@ mod tests {
     use tairix_arch_api::CrossCpuTlbShootdown;
     use tairix_kernel_mem::MAX_ORDER;
     use tairix_kernel_mem::{
-        BootMemoryMap, KernelRemap, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
+        BootMemoryMap, KernelRemap, MemoryClass, MemoryRegion, PhysAddr, RegionKind, SimPhysMap,
     };
 
     /// Base of the window the host tests remap into. Far from every
@@ -369,7 +369,7 @@ mod tests {
     /// the test.
     fn fragment_pool(frames: &'static FrameAllocator) {
         let mut drawn = Vec::new();
-        while let Ok(frame) = frames.alloc() {
+        while let Ok(frame) = frames.alloc(MemoryClass::Kernel) {
             drawn.push(frame);
         }
         for frame in drawn {
@@ -417,7 +417,7 @@ mod tests {
         fragment_pool(h.frames);
         let free_before = h.frames.free_frames();
         assert!(
-            h.frames.alloc_order(2).is_err(),
+            h.frames.alloc_order(MemoryClass::Kernel, 2).is_err(),
             "no four-frame contiguous block survives the fragmentation"
         );
 

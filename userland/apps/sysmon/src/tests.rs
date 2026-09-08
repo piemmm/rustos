@@ -15,7 +15,7 @@ use tairix_abi::sysinfo::{
     ProcessRecord, ProcessState, RamzipStats, ReclaimClassRecord, ReclaimListRequest,
     SysinfoQueryId, SysinfoRequestHeader, Uptime, IRQ_FLAG_QUARANTINED, RECLAIM_CLASS_COUNT,
 };
-use tairix_abi::{Duration64, Errno, ProcId, SchedPriority};
+use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, MEMORY_CLASS_COUNT};
 use tairix_curses::{Event, Screen, Size, Tty};
 use tairix_procinfo::Transport;
 use tairix_termcap::TermType;
@@ -62,6 +62,7 @@ impl FakeService {
                 user_resident_bytes: 128 * 1024 * 1024,
                 page_size: 4096,
                 reserved: 0,
+                class_bytes: [0; MEMORY_CLASS_COUNT],
             }),
             pressure: RefCell::new(Some(MemoryPressureStats {
                 band: 2,
@@ -1731,6 +1732,7 @@ fn large_figures_are_not_truncated_at_eighty_columns() {
         user_resident_bytes: 512 * 1024 * 1024 * 1024,
         page_size: 4096,
         reserved: 0,
+        class_bytes: [0; MEMORY_CLASS_COUNT],
     });
     service.ramzip = Some(RamzipStats {
         stored_bytes: 100 * 1024 * 1024 * 1024,

@@ -1026,6 +1026,7 @@ mod tests {
         DeviceStatsRequest, NetInterfaceListRequest, NetInterfaceRatesRequest,
     };
     use tairix_abi::time::{Duration64, Time64};
+    use tairix_abi::MEMORY_CLASS_COUNT;
     use tairix_abi::{
         CapabilityId, Errno, LimitKind, Origin, ProcId, ResourceLimit, SchedPriority, TrustDomain,
         ORIGIN_WIRE_LEN,
@@ -1366,6 +1367,7 @@ mod tests {
                 user_resident_bytes: 1 << 20,
                 page_size: 4096,
                 reserved: 0,
+                class_bytes: [0; MEMORY_CLASS_COUNT],
             })
         }
         fn hardware_tree(&self, _caller: &Caller) -> Result<alloc::vec::Vec<u8>, Errno> {
@@ -1931,7 +1933,9 @@ mod tests {
         let caps = Caps(&[CapabilityId::SYSINFO_KERNEL]);
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::KERNEL_MEMORY_STATS, &[]);
-        let mut resp = [0u8; 64];
+        // Sized from the record, so widening it cannot leave the fixture
+        // silently short.
+        let mut resp = [0u8; KernelMemoryStats::WIRE_LEN];
         let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, KernelMemoryStats::WIRE_LEN);
         let stats = KernelMemoryStats::from_bytes(&resp).unwrap();

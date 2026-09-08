@@ -23,8 +23,8 @@
 
 use tairix_kernel_mem::{
     AddressSpace, BootMemoryMap, CompressRefusal, EntropySource, FaultError, FrameAllocator,
-    HostPageTable, MapFlags, MemoryRegion, Page, PageCandidate, PhysAddr, PhysMap, Ramzip,
-    RamzipCaps, RegionKind, SealError, SimPhysMap, VirtAddr, VmContext, PAGE_SIZE,
+    HostPageTable, MapFlags, MemoryClass, MemoryRegion, Page, PageCandidate, PhysAddr, PhysMap,
+    Ramzip, RamzipCaps, RegionKind, SealError, SimPhysMap, VirtAddr, VmContext, PAGE_SIZE,
 };
 use tairix_reclaim::{FreeMemorySource, MemoryPressure, PressureBand};
 
@@ -69,6 +69,14 @@ impl tairix_log::Sink for NullSink {
 }
 static NULL_SINK: NullSink = NullSink;
 
+/// Draw one frame to hold against the pressure gauge. The one definition of
+/// the class the harness charges its held frames to.
+fn pressure_frame(frames: &'static FrameAllocator) -> tairix_kernel_mem::Frame {
+    frames
+        .alloc(MemoryClass::Compressed)
+        .expect("pressure frame")
+}
+
 /// Hold or release frames until the gauge reads exactly `Moderate`:
 /// compression frees a frame each cycle and a failed restore does not
 /// re-take it, so the pinned band drifts without this rebalance.
@@ -78,7 +86,7 @@ fn rebalance_to_moderate(
     held: &mut Vec<tairix_kernel_mem::Frame>,
 ) {
     while pressure.sample() == PressureBand::Normal || pressure.sample() == PressureBand::Mild {
-        held.push(frames.alloc().expect("pressure frame"));
+        held.push(pressure_frame(frames));
     }
     while pressure.sample() != PressureBand::Moderate {
         frames
@@ -98,7 +106,7 @@ fn map_patterned_page(
 ) -> (Page, Vec<u8>) {
     let number = 16 + rng.next_u64() % 64;
     let page = Page::from_addr(VirtAddr::new(number * PAGE_SIZE as u64)).expect("page");
-    let frame = frames.alloc().expect("page frame");
+    let frame = frames.alloc(MemoryClass::Compressed).expect("page frame");
     let run = 32 + usize::try_from(rng.next_u64() % 224).expect("run");
     let seed = rng.byte();
     {
@@ -165,7 +173,7 @@ fn fuzz_ramzip_restore_is_fail_closed() {
     // open; the harness rebalances the held frames each cycle.
     let mut held = Vec::new();
     while pressure.sample() != PressureBand::Moderate {
-        held.push(frames.alloc().expect("pressure frame"));
+        held.push(pressure_frame(frames));
     }
 
     let flags = MapFlags::READ | MapFlags::WRITE | MapFlags::USER;

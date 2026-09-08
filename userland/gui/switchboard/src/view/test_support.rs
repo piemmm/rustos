@@ -10,7 +10,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
-use tairix_theme::Theme;
+use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
     damage, ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState,
@@ -20,7 +20,7 @@ use tairix_icon::NoArtwork;
 use super::resources::{
     BlockBody, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceId, HeroInstrument,
     PaneBlock, PaneHero, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
-    ResourceReport, StorageId, TaskCostColumn,
+    ResourceReport, StorageId, TaskCostColumn, Trace,
 };
 use super::{
     ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, HealthSeverity, Reading, ReadingFact,
@@ -111,13 +111,16 @@ fn cpu_device() -> ResourceDevice {
         name: alloc::string::String::from("CPU"),
         kind: PressureKind::Cpu,
         reading: Reading::measured("18%"),
-        trend: (0..24).map(|i| i * 40).collect(),
+        trend: Trace::single(SignalRole::Cpu, (0..24).map(|i| i * 40).collect()),
         hero: PaneHero {
             value: Reading::measured("18"),
             unit: alloc::string::String::from("% busy"),
             context: alloc::vec![alloc::string::String::from("2.2 of 12 cores-equivalent")],
-            instrument: HeroInstrument::trend((0..24).map(|i| i * 40).collect())
-                .with_track(Some(180)),
+            instrument: HeroInstrument::trend(Trace::single(
+                SignalRole::Cpu,
+                (0..24).map(|i| i * 40).collect(),
+            ))
+            .with_track(Some(180)),
             caption: alloc::string::String::from("busy share, all cores"),
         },
         blocks: alloc::vec![
@@ -165,13 +168,16 @@ fn memory_device() -> ResourceDevice {
         name: alloc::string::String::from("Memory"),
         kind: PressureKind::Memory,
         reading: Reading::measured("53%"),
-        trend: alloc::vec![],
+        trend: Trace::Absent,
         hero: PaneHero {
             value: Reading::measured("8.6"),
             unit: alloc::string::String::from("of 16 GB"),
             context: alloc::vec![alloc::string::String::from("53% committed")],
-            instrument: HeroInstrument::trend((0..24).map(|i| 400 + i * 6).collect())
-                .with_track(Some(530)),
+            instrument: HeroInstrument::trend(Trace::single(
+                SignalRole::Memory,
+                (0..24).map(|i| 400 + i * 6).collect(),
+            ))
+            .with_track(Some(530)),
             caption: alloc::string::String::new(),
         },
         blocks: alloc::vec![PaneBlock::full(
@@ -216,7 +222,7 @@ fn storage_device() -> ResourceDevice {
         name: alloc::string::String::from("nvme0"),
         kind: PressureKind::Disk,
         reading: Reading::measured("72%"),
-        trend: alloc::vec![],
+        trend: Trace::Absent,
         hero: PaneHero {
             value: Reading::measured("812 GB"),
             unit: alloc::string::String::from("of 1.10 TB"),
@@ -254,7 +260,7 @@ fn machine_device() -> ResourceDevice {
         name: alloc::string::String::from("Identity & uptime"),
         kind: PressureKind::Cpu,
         reading: Reading::measured("2h 12m"),
-        trend: alloc::vec![],
+        trend: Trace::Absent,
         hero: PaneHero::facts(Reading::measured("tairix"), ""),
         blocks: alloc::vec![PaneBlock::full(
             "MACHINE",

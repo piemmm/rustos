@@ -20,7 +20,9 @@ use crate::test_host::{
     process_summary as process, sample_with, DEFAULT_UID, NO_AUTHORITY as NONE,
     PROC_CONTROL_AUTHORITY as PROC_CONTROL,
 };
+use crate::view::resources::Trace;
 use crate::view::{Reading, RecoveryControl, SwitchboardAction, TaskControl, Unmeasured};
+use tairix_theme::SignalRole;
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test
 /// data so the expected pressure-card text is computed from the same
@@ -1041,6 +1043,36 @@ fn the_tasks_trace_records_the_population_and_its_high_water() {
         9,
         "the ceiling is the largest seen, not the latest"
     );
+}
+
+/// The two subjects that are not devices carry their own signals, not a
+/// resource's. A task count drawn in the compute hue read as a second CPU
+/// trace beside the real one, and the stopped share borrowed the thermal hue.
+#[test]
+fn the_task_and_recovery_traces_carry_their_own_signal_roles() {
+    let sample = population(4, 1);
+    let mut meters = meters_for(&sample);
+    let panel = model(&sample, &SessionReport::HEALTHY, &mut meters, &NONE);
+    assert!(matches!(
+        panel.model.tasks_trend,
+        Trace::Single {
+            role: SignalRole::Workload,
+            ..
+        }
+    ));
+    assert!(matches!(
+        panel.model.recovery_trend,
+        Trace::Single {
+            role: SignalRole::Recovery,
+            ..
+        }
+    ));
+    // A count has no capacity of its own, so its box carries the denominator
+    // it is read against; a permille share needs none.
+    let Trace::Single { full_scale, .. } = panel.model.tasks_trend else {
+        panic!("the task trace is a single series");
+    };
+    assert_eq!(full_scale, meters.system.process_peak());
 }
 
 /// The box must mean the same thing from one sample to the next, so the

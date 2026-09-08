@@ -52,6 +52,30 @@ The allocator never panics on OOM: `alloc` / `alloc_order` return
 `AllocError::OutOfMemory`. The constructor refuses overlapping or
 malformed boot maps.
 
+**Every frame is charged to exactly one memory class.** A draw names its
+[`MemoryClass`](../abi/sysinfo.md) — `UserAnon`, `UserFile`, `PageTable`,
+`Kernel`, `Dma`, `Compressed` — and the allocator keeps a frame count per
+class, so `usable_frames == free_frames + Σ class` holds at every instant and
+`FrameAllocator::snapshot` reads the whole and its parts under **one** lock
+acquisition. That is what makes the reported memory composition a genuine
+partition rather than several independently-sampled numbers that need not add
+up. Sharing costs nothing: a shared frame is allocated once, so it is charged
+once, and an MMIO mapping draws no frame and is charged nothing.
+
+The class is *not* a second per-frame array. Each frame already carries one
+bookkeeping byte, whose low nibble holds the free-list order a free block's
+head is registered at; the high nibble holds the owning class while the frame
+is handed out, and the two never coexist on one frame. So the accounting costs
+no extra memory and no extra memory traffic — the byte is already loaded and
+stored on every allocate and free — plus one `usize` add inside the lock the
+allocator already holds. The class is stamped on *every* frame of an allocated
+block rather than on its head alone, because that is the granularity a free
+happens at: the kernel window releases a multi-page region one page at a time
+as its page tables give the frames back. A free therefore names no class — it
+reads the charge back from the frames it is returning, so no caller can
+mis-attribute one, and an untagged or mixed-class range is refused as an
+invariant violation with nothing mutated.
+
 **Bootloader handoff.** The arch crates synthesise a
 [`BootMemoryMap`] from whatever protocol the platform uses (multiboot2,
 PVH, UEFI, DTB, WASM) and hand it to `FrameAllocator::new`. Reserved

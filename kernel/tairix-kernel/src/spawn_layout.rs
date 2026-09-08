@@ -25,7 +25,7 @@
 //! glue) are the deliberate trait carve-out and stay beside each port;
 //! the values they *consume* live here once.
 
-use tairix_abi::{CapabilityId, CapabilityQuery, LoadImage};
+use tairix_abi::{CapabilityId, CapabilityQuery, LoadImage, MemoryClass};
 use tairix_caps::CapabilitySet;
 #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
 use tairix_kernel_core::EmbeddedProgram;
@@ -332,6 +332,14 @@ pub fn init_caps() -> CapabilitySet {
     }
     caps
 }
+
+/// The memory class a spawn image's frames are charged to.
+///
+/// A spawn image is the process's own code, data, bss and stack copied into
+/// fresh frames — anonymous user memory, whatever the port. Equal across every
+/// port by definition, so it lives here once rather than in each
+/// `init_spawn` / `spawn_producer` sibling.
+pub const SPAWN_IMAGE_CLASS: MemoryClass = MemoryClass::UserAnon;
 
 /// Reserved user stack span in pages (8 MiB — 2048 pages). The span is
 /// the structural bound the stack may ever occupy: its bottom guard page

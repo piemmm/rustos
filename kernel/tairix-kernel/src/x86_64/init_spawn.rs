@@ -187,7 +187,7 @@ impl InitSpawn for X86_64InitSpawn {
                 &mut space,
                 &physmap,
                 &request,
-                move || frames.alloc().ok(),
+                move || frames.alloc(spawn_layout::SPAWN_IMAGE_CLASS).ok(),
             )
         }) else {
             return;

@@ -379,7 +379,7 @@ mod tests {
     /// Locks the `reserve_range` ↔ `FrameAllocator` contract (one reservation mechanism).
     #[test]
     fn reserve_range_frames_are_not_allocatable() {
-        use crate::frame::{FrameAllocator, PAGE_SIZE};
+        use crate::frame::{FrameAllocator, MemoryClass, PAGE_SIZE};
         let mut m = BootMemoryMap::new();
         m.push(MemoryRegion {
             start: PhysAddr::new(0),
@@ -392,7 +392,9 @@ mod tests {
         let alloc = FrameAllocator::new(&m).expect("allocator builds");
         // Every frame the allocator hands out must lie outside the carve.
         for _ in 0..2048 {
-            let Ok(frame) = alloc.alloc() else { break };
+            let Ok(frame) = alloc.alloc(MemoryClass::Kernel) else {
+                break;
+            };
             let pa = frame.0 as u64 * PAGE_SIZE as u64;
             assert!(
                 pa < kstart || pa >= kend,

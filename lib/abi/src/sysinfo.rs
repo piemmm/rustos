@@ -28,7 +28,7 @@ use crate::origin::ProcId;
 use crate::process::SchedPriority;
 use crate::rlimit::{LimitKind, ResourceLimit};
 use crate::time::{Duration64, Time64};
-use crate::{CapabilityId, Errno};
+use crate::{CapabilityId, Errno, MEMORY_CLASS_COUNT};
 
 /// Version tag for the frozen `sysinfo-v1` request/response surface.
 ///
@@ -1705,17 +1705,37 @@ pub struct KernelMemoryStats {
     pub free_bytes: u64,
     /// Memory committed to the kernel's own heaps and slabs, in bytes.
     pub kernel_heap_bytes: u64,
-    /// Memory resident in user address spaces, in bytes.
+    /// Memory *mapped* by user address spaces, in bytes — the sum over live
+    /// processes of the pages each one maps.
+    ///
+    /// A count of mappings, not of RAM: a frame shared between two address
+    /// spaces counts once per space, and a user driver's MMIO window counts
+    /// although it is no RAM at all. It can therefore exceed
+    /// [`total_bytes`](Self::total_bytes) and is **not** a share of physical
+    /// memory. For where the RAM genuinely went, read
+    /// [`class_bytes`](Self::class_bytes), which partitions it.
     pub user_resident_bytes: u64,
     /// Page size in bytes for the reporting architecture.
     pub page_size: u32,
     /// Reserved; must be zero in `sysinfo-v1`.
     pub reserved: u32,
+    /// Physical RAM charged to each [`MemoryClass`], in bytes, indexed by
+    /// that class's discriminant.
+    ///
+    /// A genuine partition of the memory in use: the frame allocator charges
+    /// every frame to exactly one class at allocation and discharges it from
+    /// the same one at free, so
+    /// `free_bytes + Σ class_bytes == total_bytes` holds — and holds of
+    /// *these* figures, because the producer takes the whole record from one
+    /// snapshot rather than sampling the parts separately.
+    ///
+    /// [`MemoryClass`]: crate::MemoryClass
+    pub class_bytes: [u64; MEMORY_CLASS_COUNT],
 }
 
 impl KernelMemoryStats {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 40;
+    pub const WIRE_LEN: usize = 40 + 8 * MEMORY_CLASS_COUNT;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -1727,6 +1747,9 @@ impl KernelMemoryStats {
         put_u64(&mut out, 24, self.user_resident_bytes);
         put_u32(&mut out, 32, self.page_size);
         put_u32(&mut out, 36, self.reserved);
+        for (index, bytes) in self.class_bytes.iter().enumerate() {
+            put_u64(&mut out, 40 + 8 * index, *bytes);
+        }
         out
     }
 
@@ -1742,6 +1765,10 @@ impl KernelMemoryStats {
         if reserved != 0 {
             return Err(Errno::BadMagic);
         }
+        let mut class_bytes = [0u64; MEMORY_CLASS_COUNT];
+        for (index, slot) in class_bytes.iter_mut().enumerate() {
+            *slot = read_u64(bytes, 40 + 8 * index);
+        }
         Ok(Self {
             total_bytes: read_u64(bytes, 0),
             free_bytes: read_u64(bytes, 8),
@@ -1749,6 +1776,7 @@ impl KernelMemoryStats {
             user_resident_bytes: read_u64(bytes, 24),
             page_size: read_u32(bytes, 32),
             reserved,
+            class_bytes,
         })
     }
 }
@@ -7415,8 +7443,11 @@ mod tests {
             user_resident_bytes: 1 << 20,
             page_size: 4096,
             reserved: 0,
+            // One distinct figure per class, so a mis-indexed encode or
+            // decode cannot round-trip by coincidence.
+            class_bytes: [1 << 20, 1 << 21, 1 << 22, 1 << 23, 1 << 24, 1 << 25],
         };
-        assert_eq!(KernelMemoryStats::WIRE_LEN, 40);
+        assert_eq!(KernelMemoryStats::WIRE_LEN, 88);
         assert_eq!(
             KernelMemoryStats::from_bytes(&stats.to_le_bytes()),
             Ok(stats)
@@ -7424,6 +7455,39 @@ mod tests {
         let mut bytes = stats.to_le_bytes();
         bytes[36] = 1; // reserved non-zero
         assert_eq!(KernelMemoryStats::from_bytes(&bytes), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn the_kernel_memory_class_figures_partition_the_whole() {
+        // The property the composition is drawn from: free plus the class
+        // charges is the total, so a reader never has to close the whole
+        // with a guessed remainder.
+        use crate::{MemoryClass, MEMORY_CLASS_COUNT};
+        let mut class_bytes = [0u64; MEMORY_CLASS_COUNT];
+        class_bytes[MemoryClass::UserAnon.index()] = 3 << 20;
+        class_bytes[MemoryClass::Kernel.index()] = 1 << 20;
+        class_bytes[MemoryClass::PageTable.index()] = 1 << 19;
+        let charged: u64 = class_bytes.iter().sum();
+        let free = 8 << 20;
+        let stats = KernelMemoryStats {
+            total_bytes: charged + free,
+            free_bytes: free,
+            kernel_heap_bytes: 1 << 20,
+            user_resident_bytes: 9 << 20,
+            page_size: 4096,
+            reserved: 0,
+            class_bytes,
+        };
+        let decoded =
+            KernelMemoryStats::from_bytes(&stats.to_le_bytes()).expect("record round trips");
+        assert_eq!(
+            decoded.free_bytes + decoded.class_bytes.iter().sum::<u64>(),
+            decoded.total_bytes
+        );
+        // The mapping count is deliberately larger than the RAM in use: it
+        // counts a shared frame once per space, so it is not a share of the
+        // whole and the composition must not be built from it.
+        assert!(decoded.user_resident_bytes > decoded.total_bytes - decoded.free_bytes);
     }
 
     #[test]

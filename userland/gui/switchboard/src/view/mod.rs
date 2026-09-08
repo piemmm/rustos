@@ -81,9 +81,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActionRail, AuthorityState, CardAction, Chart, ControlState, PressureKind,
-    RenderInvariant, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Tab,
-    TabGroupAbsence, Tabs, TabsAction, TabsOrientation,
+    damage, ActionRail, AuthorityState, CardAction, ControlState, RenderInvariant, ScrollAction,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Tab, TabGroupAbsence, Tabs, TabsAction,
+    TabsOrientation,
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 
@@ -103,7 +103,7 @@ pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, Recov
 pub use resources::{
     BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceId,
     HeroInstrument, PaneBlock, PaneHero, PressureBanner, RailGroup, ResourceControl,
-    ResourceDevice, ResourceReport, TaskCostColumn,
+    ResourceDevice, ResourceReport, TaskCostColumn, Trace,
 };
 pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskSummary};
 
@@ -265,27 +265,13 @@ pub struct SwitchboardModel {
     pub recovery_resolved: usize,
     /// The Tasks rail entry's own trace: the process population over the
     /// window, read against the largest this session has seen.
-    pub tasks_trend: RailTrace,
+    pub tasks_trend: Trace,
     /// The Recovery rail entry's own trace: the share of the population that
     /// was stopped.
-    pub recovery_trend: RailTrace,
+    pub recovery_trend: Trace,
     /// Everything the Resources section shows: one device per pane, in rail
     /// order.
     pub resources: ResourceReport,
-}
-
-/// One rail entry's trace: the readings, and what the top of their box means.
-///
-/// A device's trace is a permille share of that device's own capacity, so its
-/// box needs no stated ceiling. The two subjects that are not devices count
-/// things instead, and a count has no capacity — so it carries the denominator
-/// its trace is drawn against rather than leaving the reader to assume one.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RailTrace {
-    /// The readings, oldest first.
-    pub points: Vec<u16>,
-    /// What the top of the box means. Zero leaves the permille default.
-    pub full_scale: u16,
 }
 
 impl SwitchboardModel {
@@ -298,8 +284,8 @@ impl SwitchboardModel {
             tasks: Vec::new(),
             recovery: Vec::new(),
             recovery_resolved: 0,
-            tasks_trend: RailTrace::default(),
-            recovery_trend: RailTrace::default(),
+            tasks_trend: Trace::default(),
+            recovery_trend: Trace::default(),
             resources: ResourceReport::default(),
         }
     }
@@ -1121,40 +1107,29 @@ impl Switchboard {
         let mut tabs = Vec::new();
         let mut previous: Option<RailGroup> = None;
         for (index, subject) in Self::subjects(model).into_iter().enumerate() {
-            let (name, group, reading, trace, kind) = match subject {
+            let (name, group, reading, trace) = match subject {
                 RailSubject::Tasks => (
                     String::from("Tasks"),
                     RailGroup::Tasks,
                     alloc::format!("{}", model.tasks.len()),
                     &model.tasks_trend,
-                    PressureKind::Cpu,
                 ),
                 RailSubject::Recovery => (
                     String::from("Recovery"),
                     RailGroup::Recovery,
                     alloc::format!("{}", model.recovery.len()),
                     &model.recovery_trend,
-                    PressureKind::Thermal,
                 ),
                 RailSubject::Device(id) => {
                     let Some(device) = model.resources.devices.iter().find(|d| d.id == id) else {
                         continue;
                     };
-                    let mut tab = Tab::new(device.name.clone())
-                        .with_reading(reading::reading_text(&device.reading));
-                    if previous != Some(device.group) {
-                        tab = tab.with_group(device.group.heading());
-                    }
-                    previous = Some(device.group);
-                    if !device.trend.is_empty() {
-                        tab = tab.with_trend(
-                            Chart::new(device.kind).with_samples(device.trend.iter().copied()),
-                        );
-                    }
-                    if index >= self.rail_offset {
-                        tabs.push(tab);
-                    }
-                    continue;
+                    (
+                        device.name.clone(),
+                        device.group,
+                        reading::reading_text(&device.reading),
+                        &device.trend,
+                    )
                 }
             };
             let mut tab = Tab::new(name).with_reading(reading);
@@ -1162,12 +1137,11 @@ impl Switchboard {
                 tab = tab.with_group(group.heading());
             }
             previous = Some(group);
-            if !trace.points.is_empty() {
-                tab = tab.with_trend(
-                    Chart::new(kind)
-                        .with_samples(trace.points.iter().copied())
-                        .with_full_scale(trace.full_scale),
-                );
+            // The one definition of how a trace is tinted, shared with the
+            // pane hero, so a direction's colour cannot differ between the
+            // sidebar and the pane it opens.
+            if let Some(chart) = trace.chart() {
+                tab = tab.with_trend(chart);
             }
             if index >= self.rail_offset {
                 tabs.push(tab);
