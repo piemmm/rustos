@@ -377,7 +377,6 @@ pub fn retire(
 ) -> usize {
     crate::procsignal::clear_intake(thread.0);
     crate::procsignal::clear_kill_gate(thread.0);
-    crate::procsignal::clear_running_kill(thread.0);
     aspaces.write().withdraw_thread(thread);
     caps.write()
         .remove_thread(thread)

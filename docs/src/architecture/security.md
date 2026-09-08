@@ -25,7 +25,7 @@ the address space, standard streams, resource limits, device-resource grants
 shared-memory mappings, wait-sets, console foreground ownership, the working
 directory, and signal targets. Thread-scoped: the schedulable identity itself
 (park, unpark, wake), the user-stack span, and the in-kernel kill gate that
-lands a deferred termination when a *thread* leaves its syscall.
+lands a deferred termination when a *thread* leaves the kernel.
 
 Two consequences of that split are load-bearing security properties, both
 detailed on the [threads page](./threads.md). A futex wait key is

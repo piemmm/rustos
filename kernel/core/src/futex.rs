@@ -309,8 +309,9 @@ mod tests {
     unsafe impl Sync for MockArch {}
 
     impl WaitQueueArch for MockArch {
-        fn unpark(&self, task: TaskId) {
+        fn unpark(&self, task: TaskId) -> bool {
             self.unparked.borrow_mut().push(task);
+            true
         }
 
         fn now_ns(&self) -> u64 {

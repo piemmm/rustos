@@ -1266,27 +1266,41 @@ first-party Rust wrapper is
 `TAIRIX_SIGNAL_CONTINUE` / `TAIRIX_SIGNAL_TERMINATE` / `TAIRIX_SIGNAL_KILL` /
 `TAIRIX_SIGNAL_INTERRUPT` / `TAIRIX_SIGNAL_STOP`.
 
-A termination never lands **inside** a syscall. A child currently between
-syscall entry and return may hold kernel state only its own unwind can
-release — a mount's per-volume `SleepLock`, an in-flight block-I/O
-descriptor the device is still writing, heap owned by handler stack
-frames — so destroying it mid-handler would leak that state (the
-motivating defect: a killed writer left its volume's lock held forever,
-deadlocking every later filesystem call on that mount). The signal
-producer therefore consults the **kill gate**
-(`kernel/core::procsignal`): a victim inside a syscall has the signal
+A termination never lands **inside the kernel**. A child executing a kernel
+body on its own stack may hold state only its own unwind can release — a
+mount's per-volume `SleepLock`, an in-flight block-I/O descriptor the device
+is still writing, heap owned by its stack frames — so destroying it
+mid-flight would leak that state (the motivating defect: a killed writer left
+its volume's lock held forever, deadlocking every later filesystem call on
+that mount). A syscall handler is such a body, and so is the deferred-load
+body a launching child materialises its own image in: a *parked* one looks
+quiescent to the scheduler, whose per-task body lock is free the moment it
+suspends, so nothing but the gate stops the terminate path reclaiming a
+half-unwound stack.
+
+The signal producer therefore consults the **kill gate**
+(`kernel/core::procsignal`): a victim inside the kernel has the signal
 recorded *pending*, is woken out of any park (every in-kernel park loop
 re-tests after a wake and unwinds with `Errno::Interrupted` when a kill
 is pending, so an indefinite wait — a console read, `waitset_wait`, a
 blocking `wait`, a pipe park, `irq_wait` — never leaves a task
-unkillable), and dies at the **syscall dispatch boundary** once the
-handler has unwound: the boundary records the `128 + n` status, runs the
-one shared resource reclaim, and suspends the task with an `Exit` action.
-The completed syscall's result (including that `Errno::Interrupted`)
-never reaches user space. A victim in user mode is terminated immediately,
-exactly as before; the deferral is invisible to the signalling parent —
+unkillable), and dies at that body's **own boundary** once it has unwound:
+the boundary records the `128 + n` status, runs the one shared resource
+reclaim, and suspends the task with an `Exit` action. The completed
+syscall's result (including that `Errno::Interrupted`) never reaches user
+space, and a killed loading child never enters user mode. A victim in user
+mode holds no kernel state and is terminated immediately, its teardown
+deferred only until the dispatch loop retires it — and withheld there too
+while it is inside the kernel, because a dispatch retires on a park as well
+as on a return. The deferral is invisible to the signalling parent —
 `signal` answers `0` and `wait` reaps the child when the exit is
 recorded, typically a few block-I/O milliseconds later at worst.
+
+Which of the two deferral registers a death lands in is decided under the
+gate's one lock, concurrently with the victim's own entry into the kernel.
+Split across two locks, a kill arriving exactly as the victim enters could be
+recorded as a user-mode teardown against a thread that is by then inside a
+body, and the dispatch loop would free that body's stack at its next park.
 
 `signal_intake` (no. 94) operates on the calling process's own **signal
 intake** — the fail-closed signal-observation opt-in (`plans/STRESSTEST.md`

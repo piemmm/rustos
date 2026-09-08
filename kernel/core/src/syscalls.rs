@@ -2537,15 +2537,16 @@ where
     /// recorded and the process reclaimed only when this was the group's last
     /// thread — and suspends the thread with an `Exit` action so the scheduler
     /// reaps it; the completed syscall's result never reaches user space.
+    /// `status` is [`None`] for a death nobody reaps (an unloaded driver).
     pub(crate) fn land_pending_kill(
         &self,
         process: ProcessId,
         thread: SecTaskId,
-        status: i32,
+        status: Option<i32>,
         result: SyscallResult,
         cpu: CpuId,
     ) -> DispatchOutcome {
-        self.land_thread_down(process, thread, Some(status));
+        self.land_thread_down(process, thread, status);
         DispatchOutcome::Reschedule {
             result,
             action: RescheduleAction::Exit,
@@ -10838,13 +10839,11 @@ fn reclaim_process_bookkeeping(
         crate::procsignal::clear_intake(thread);
         // Drop the kill-gate state for the same reason — and so a thread
         // that exits on its own while a termination was deferred against it
-        // (both raced) leaves no pending kill behind.
-        crate::procsignal::clear_kill_gate(thread);
-        // Drop any termination deferred against the thread while it ran in
-        // user mode: a self-exit or fault teardown running here means the
-        // process is already being reclaimed, so the dispatch loop's later
+        // (both raced) leaves no pending kill behind. That includes a
+        // teardown deferred while the thread ran in user mode: the process is
+        // already being reclaimed here, so the dispatch loop's later
         // `land_running_kill` must find nothing and never reclaim twice.
-        crate::procsignal::clear_running_kill(thread);
+        crate::procsignal::clear_kill_gate(thread);
         // Its per-thread registry records (the user-stack span) go with it.
         aspaces.write().withdraw_thread(SecTaskId(thread));
     }
@@ -11614,37 +11613,83 @@ fn build_child_image(
     }
 }
 
-/// Upgrade the loading child into a user task and enter it, never returning.
+/// Deposit the loading child's user-space upgrade and yield, returning the
+/// entry its next slice drops into user mode with.
 ///
 /// Its effective capability record and frozen address space were installed by
 /// the build, so it is never dispatchable as a user task under the admit-time
 /// placeholder authority. Its first thread carries the process's switch-in hook
 /// bound to that thread's own thread pointer.
-fn enter_built_child<C: tairix_arch_api::ContextSwitch + Copy>(
+///
+/// The yield inside is a suspension point like any other in the body, which is
+/// why the caller keeps the kill gate open across it: retiring the child here
+/// would free a kernel stack still holding the built image.
+fn upgrade_built_child<C: tairix_arch_api::ContextSwitch + Copy>(
     yielder: &mut Yielder<C>,
     ready: ReadyToEnter,
-) {
+) -> crate::spawn::UserThreadEntry {
     let pre_resume = crate::spawn::thread_pre_resume(&ready.pre_resume, ready.entry.regs.tls_base);
     yielder.become_user(pre_resume, ready.live);
-    // SAFETY: the upgrade above installed this thread's switch-in hook and
-    // process address space, and the dispatch step that resumes us runs the
-    // hook, so the child's own root is active and the trap path installed.
-    unsafe { ready.entry.enter() }
+    ready.entry
 }
 
-/// Fail a loading child closed: audit the refusal, record the reserved
-/// load-failure exit status its parent reaps, and release the admit-time
-/// bookkeeping it holds (it never reached user mode, so it acquired nothing
-/// beyond that subset). Returning from the body makes the task terminal.
+/// Fail a loading child closed: audit the refusal and retire it with the
+/// reserved load-failure exit status its parent reaps.
 fn refuse_built_child(
     services: &'static crate::spawn_services::SpawnServices,
     sec_id: ProcessId,
     errno: Errno,
 ) {
     emit_load_refusal(services.audit(), sec_id, errno);
-    services
-        .process_wait()
-        .record_exit(sec_id, tairix_abi::load_failure_status(errno));
+    retire_loading_child(
+        services,
+        sec_id,
+        Some(tairix_abi::load_failure_status(errno)),
+    );
+}
+
+/// Settle a finished deferred load, returning the user entry to diverge into
+/// when the child still lives.
+///
+/// A termination deferred while the body ran supersedes **both** outcomes: a
+/// killed child neither enters user mode nor reports a load failure, it
+/// retires carrying the signal's own status. Generic in the entry because the
+/// decision is about the child's fate, not about what entering costs.
+fn dispose_finished_load<E>(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: ProcessId,
+    pending_kill: Option<crate::procsignal::DeferredTeardown>,
+    built: Result<E, Errno>,
+) -> Option<E> {
+    match (pending_kill, built) {
+        (Some(teardown), _) => {
+            retire_loading_child(services, sec_id, teardown.reaped_status());
+            None
+        }
+        (None, Ok(entry)) => Some(entry),
+        (None, Err(errno)) => {
+            refuse_built_child(services, sec_id, errno);
+            None
+        }
+    }
+}
+
+/// Record `status` for the parent's `wait` and release the admit-time
+/// bookkeeping a loading child holds — it never reached user mode, so it
+/// acquired nothing beyond that subset. Returning from the body then makes the
+/// task terminal.
+///
+/// The one retirement both ends of a load take: a refusal's reserved
+/// load-failure status, and a termination the child's body boundary landed
+/// (whose status is [`None`] when nobody reaps it — an unloaded driver).
+fn retire_loading_child(
+    services: &'static crate::spawn_services::SpawnServices,
+    sec_id: ProcessId,
+    status: Option<i32>,
+) {
+    if let Some(status) = status {
+        services.process_wait().record_exit(sec_id, status);
+    }
     reclaim_process_bookkeeping(
         services.caps(),
         services.aspaces(),
@@ -11780,11 +11825,30 @@ where
             let sec_id = ProcessId(task);
             let arg_refs: Vec<&[u8]> = args.iter().map(Vec::as_slice).collect();
             let env_refs: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
-            match build_child_image(
+            // This body is a kernel body on the child's own stack, and it
+            // parks inside one — on the store latch, on the mount's
+            // `SleepLock`, on a block completion — so it needs the same kill
+            // gate a syscall handler gets. Without it the terminate path sees
+            // a parked kthread whose scheduler body lock is free, retires it
+            // on the spot, and frees a stack whose frames still hold the mount
+            // lock and its wait-queue registration: the lock is then closed
+            // for ever and every later load on that volume parks behind a
+            // holder that no longer exists (`plans/OPEN-DEFECTS.md` D112).
+            crate::procsignal::kernel_enter(task);
+            let built = build_child_image(
                 services, sec_id, task, &plan, &body_seed, &arg_refs, &env_refs,
-            ) {
-                Ok(ready) => enter_built_child(yielder, ready),
-                Err(errno) => refuse_built_child(services, sec_id, errno),
+            )
+            .map(|ready| upgrade_built_child(yielder, ready));
+            // The gate closes only once the upgrade's own yield is behind us,
+            // so nothing between here and user mode can be reclaimed
+            // mid-flight.
+            let pending_kill = crate::procsignal::kernel_exit_take_kill(task);
+            if let Some(entry) = dispose_finished_load(services, sec_id, pending_kill, built) {
+                // SAFETY: the upgrade installed this thread's switch-in hook
+                // and process address space, and the dispatch step that
+                // resumed us ran the hook, so the child's own root is active
+                // and the trap path installed.
+                unsafe { entry.enter() }
             }
         };
 
@@ -12524,12 +12588,12 @@ where
         // down, not just the thread that was inside the handler.
         let caller_process = caller.process();
 
-        // Open the kill gate's in-syscall window: from here until the
+        // Open the kill gate's in-kernel window: from here until the
         // boundary check below, a termination aimed at this task is
         // deferred instead of destroying it mid-handler (the handler may
         // hold kernel state only its own unwind can release). Both early
         // returns above sit before this point, so the window never leaks.
-        crate::procsignal::syscall_enter(sched_task_id);
+        crate::procsignal::kernel_enter(sched_task_id);
 
         // Frame-budget boundary (entry): record which call this watched
         // thread is entering, together with the user frame the port
@@ -12580,13 +12644,14 @@ where
                 .report_latency_overrun(caller_process, task_id, &over);
         }
 
-        // The kill boundary: a termination deferred while this task was
-        // inside the handler lands now, after the unwind released
-        // everything the handler held. The task never returns to user
-        // space. A completing `exit` syscall already recorded its own
-        // death and reclaimed — the taken (and cleared) pending kill is
+        // The kill boundary: a teardown deferred while this task was inside
+        // the handler lands now, after the unwind released everything the
+        // handler held. The task never returns to user space. A signalled
+        // death carries the status the parent's `wait` reaps; a driver
+        // unload's carries none. A completing `exit` syscall already recorded
+        // its own death and reclaimed — the taken (and cleared) teardown is
         // then simply superseded by the exit in flight.
-        if let Some(status) = crate::procsignal::syscall_exit_take_kill(sched_task_id) {
+        if let Some(teardown) = crate::procsignal::kernel_exit_take_kill(sched_task_id) {
             // A completing `exit` — or a `thread_exit` — already retired this
             // thread through the shared landing rule, so the taken pending kill
             // is superseded by the exit in flight.
@@ -12597,7 +12662,7 @@ where
                 return self.handlers.land_pending_kill(
                     caller_process,
                     SecTaskId(sched_task_id),
-                    status,
+                    teardown.reaped_status(),
                     result,
                     completion_cpu,
                 );
@@ -17564,6 +17629,80 @@ mod tests {
         }
     }
 
+    /// A termination that arrived while the child's load body ran supersedes
+    /// the finished load: the child retires with the signal's own status and
+    /// is **never** handed back an entry to diverge into, so a task told to
+    /// die cannot reach user mode. It is not a load *refusal* either — the
+    /// load succeeded — so nothing is audited as one.
+    #[test]
+    fn a_kill_taken_at_the_body_boundary_supersedes_a_finished_load() {
+        install_trace_filter();
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(
+            frames,
+            audit,
+            &crate::fs::NULL_FILESYSTEM,
+            None,
+            aspaces,
+            caps,
+            builder,
+        );
+        let child = ProcessId(0x00d1_1201);
+        caps.write().insert(make_caps_record(child.0, &[], audit));
+
+        let status = Signal::Terminate
+            .termination_status()
+            .expect("Terminate carries a 128 + n status");
+        assert!(
+            dispose_finished_load(
+                services,
+                child,
+                Some(crate::procsignal::DeferredTeardown::Exit {
+                    process: child,
+                    status,
+                }),
+                Ok(())
+            )
+            .is_none(),
+            "a killed child is never handed its entry"
+        );
+        assert!(
+            caps.read().caps_for(SecTaskId(child.0)).is_none(),
+            "the child's admit-time bookkeeping is released"
+        );
+        assert!(
+            !audit
+                .snapshot()
+                .iter()
+                .any(|e| e.id == AuditEvent::ProcessSpawnDenied.id()),
+            "a killed child is not a refused load"
+        );
+
+        // The two live outcomes are unchanged: an unkilled child gets its
+        // entry, and a failed load is audited as the refusal it is.
+        let live = ProcessId(0x00d1_1202);
+        caps.write().insert(make_caps_record(live.0, &[], audit));
+        assert_eq!(
+            dispose_finished_load(services, live, None, Ok(7u32)),
+            Some(7),
+            "an unkilled child enters user mode"
+        );
+        let refused = ProcessId(0x00d1_1203);
+        caps.write().insert(make_caps_record(refused.0, &[], audit));
+        assert!(
+            dispose_finished_load::<u32>(services, refused, None, Err(Errno::BadMagic)).is_none()
+        );
+        assert!(audit
+            .snapshot()
+            .iter()
+            .any(|e| e.id == AuditEvent::ProcessSpawnDenied.id()));
+    }
+
     /// A deferred load refusal is audited against the *failing child*, not the
     /// spawning caller: a `ProcessSpawnDenied` event carrying the
     /// `deferred_load_failed` cause, the child's task id, and the reserved
@@ -18945,7 +19084,9 @@ mod tests {
         /// `wake_task`'s registered/not-registered answer, not the unpark.
         struct Inert;
         impl crate::waitq::WaitQueueArch for Inert {
-            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
+            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) -> bool {
+                true
+            }
             fn now_ns(&self) -> u64 {
                 0
             }
@@ -19010,7 +19151,9 @@ mod tests {
         /// `wake_waiter`'s registered/not-registered answer, not the unpark.
         struct Inert;
         impl crate::waitq::WaitQueueArch for Inert {
-            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) {}
+            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) -> bool {
+                true
+            }
             fn now_ns(&self) -> u64 {
                 0
             }
@@ -20670,7 +20813,7 @@ mod tests {
         let status = Signal::Terminate
             .termination_status()
             .expect("Terminate carries a 128 + n status");
-        let outcome = h.land_pending_kill(ProcessId(9), SecTaskId(9), status, Ok(0), 0);
+        let outcome = h.land_pending_kill(ProcessId(9), SecTaskId(9), Some(status), Ok(0), 0);
 
         // The task is suspended with an `Exit` action on its own CPU; the
         // completed syscall's result rides along but never reaches user
@@ -23327,14 +23470,25 @@ mod tests {
     /// filesystem serving `read_data`, and a recording file-map producer.
     /// The identity the lock fixture's filesystem reports, so a lock keys on
     /// a real node rather than the fail-closed placeholder.
-    const LOCK_FILE_ID: tairix_abi::FileId = tairix_abi::FileId {
-        volume: [3u8; 16],
-        node: 42,
-    };
+    ///
+    /// The lock registry is one process-global table keyed by [`FileId`], so
+    /// every test names its **own** node: sharing one made a lock taken in one
+    /// test visible to a query in another running beside it, which is a flaky
+    /// test rather than a lock defect.
+    ///
+    /// [`FileId`]: tairix_abi::FileId
+    const fn lock_file_id(node: u64) -> tairix_abi::FileId {
+        tairix_abi::FileId {
+            volume: [3u8; 16],
+            node,
+        }
+    }
 
     /// A handler over a filesystem that reports one regular file at `/big`
     /// with a real identity, ready for the lock calls.
-    fn lock_fixture() -> (
+    fn lock_fixture(
+        node: u64,
+    ) -> (
         &'static RwLock<AddressSpaceRegistry>,
         KernelSyscallHandlers<'static, TestArch>,
         CallerContext<'static>,
@@ -23366,7 +23520,7 @@ mod tests {
             caps,
         };
         let mut mock = RecordingFs::new();
-        mock.stat.id = LOCK_FILE_ID;
+        mock.stat.id = lock_file_id(node);
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs);
@@ -23390,7 +23544,7 @@ mod tests {
 
     #[test]
     fn a_lock_is_granted_and_a_second_description_of_the_same_file_conflicts() {
-        let (_aspaces, h, ctx) = lock_fixture();
+        let (_aspaces, h, ctx) = lock_fixture(42);
         let (start, len) = whole();
         let first = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let second = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
@@ -23458,7 +23612,7 @@ mod tests {
 
     #[test]
     fn closing_the_last_descriptor_releases_the_locks_it_held() {
-        let (_aspaces, h, ctx) = lock_fixture();
+        let (_aspaces, h, ctx) = lock_fixture(43);
         let (start, len) = whole();
         let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let other = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
@@ -23493,7 +23647,7 @@ mod tests {
 
     #[test]
     fn the_mode_must_match_the_access_the_descriptor_was_opened_for() {
-        let (_aspaces, h, ctx) = lock_fixture();
+        let (_aspaces, h, ctx) = lock_fixture(44);
         let (start, len) = whole();
         let reader = lock_open(&h, &ctx, OpenFlags::READ);
         assert_eq!(
@@ -23538,7 +23692,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_with_no_file_to_lock_fails_closed() {
-        let (aspaces, h, ctx) = lock_fixture();
+        let (aspaces, h, ctx) = lock_fixture(45);
         let (start, len) = whole();
         assert_eq!(
             h.fs_lock(
@@ -23622,7 +23776,7 @@ mod tests {
 
     #[test]
     fn the_query_reports_the_holder_and_says_nothing_when_the_range_is_free() {
-        let (_aspaces, h, ctx) = lock_fixture();
+        let (_aspaces, h, ctx) = lock_fixture(46);
         let (start, len) = whole();
         let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let asker = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));

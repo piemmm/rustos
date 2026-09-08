@@ -56,7 +56,15 @@ pub trait WaitQueueArch: Sync {
     /// cancellation-safe `Scheduler::unpark`, which records a
     /// wake-pending token if the task has not committed to park yet, so no
     /// wake is lost.
-    fn unpark(&self, id: TaskId);
+    ///
+    /// Returns whether the wake landed. `false` means the task can never run
+    /// again (terminal, or an id the scheduler does not know), so a caller
+    /// that was *transferring* something to it — a [`SleepLock`] ownership
+    /// handoff — must pick another target instead of waiting on a resume that
+    /// will not come.
+    ///
+    /// [`SleepLock`]: crate::SleepLock
+    fn unpark(&self, id: TaskId) -> bool;
 
     /// Monotonic nanoseconds on the calling CPU (the same clock the
     /// `clock_get` syscall and the wait deadlines use).
@@ -408,31 +416,32 @@ impl WaitQueue {
             .map(|&(_, task)| task)
     }
 
-    /// Wake exactly `task`'s unkeyed registration ([`WakeKey::NONE`]) if it is
-    /// currently waiting, returning whether it was.
+    /// Wake exactly `task`'s unkeyed registration ([`WakeKey::NONE`]), returning
+    /// whether the wake landed (see [`Self::wake_waiter`]).
     pub fn wake_task(&self, arch: &dyn WaitQueueArch, task: TaskId) -> bool {
         self.wake_waiter(arch, WakeKey::NONE, task)
     }
 
-    /// Wake exactly the waiter `(key, task)` if it is currently registered,
-    /// returning whether it was (the wake-one discipline — an addressed event
-    /// such as a posted request or a ticket's reply wakes its one target,
-    /// never the whole queue; a wake-all there is a thundering herd that
-    /// keeps unrelated tasks runnable and distorts the load census).
-    /// O(log n).
+    /// Wake exactly the waiter `(key, task)`, returning whether the wake
+    /// landed (the wake-one discipline — an addressed event such as a posted
+    /// request or a ticket's reply wakes its one target, never the whole
+    /// queue; a wake-all there is a thundering herd that keeps unrelated
+    /// tasks runnable and distorts the load census). O(log n).
     ///
     /// An unregistered target is a benign no-op returning `false`: by the
     /// register-before-poll discipline every waiter registers *before* its
     /// first poll and stays registered until it is done, so a target absent
     /// from the queue is running and will observe the event on its own next
-    /// poll. The `unpark` runs after the lock is released, exactly as
+    /// poll. A registered target the scheduler can no longer run — it was
+    /// retired while still on the queue — reports `false` too: the answer is
+    /// "the wake landed", not "a row existed", because a caller *transferring*
+    /// ownership to the target ([`SleepLock`](crate::SleepLock)'s FIFO
+    /// handoff) would otherwise wait for ever on a resume that cannot come.
+    /// The `unpark` runs after the lock is released, exactly as
     /// [`Self::wake_all`].
     pub fn wake_waiter(&self, arch: &dyn WaitQueueArch, key: WakeKey, task: TaskId) -> bool {
         let registered = self.waiters.lock().by_waiter.contains_key(&(key, task));
-        if registered {
-            arch.unpark(task);
-        }
-        registered
+        registered && arch.unpark(task)
     }
 
     /// Wake every waiter whose finite deadline is at or before `now_ns`
@@ -1224,7 +1233,7 @@ pub fn nearest_timed_deadline() -> Option<u64> {
 mod tests {
     use super::*;
 
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
 
     /// A mock [`WaitQueueArch`] recording every `unpark` and `set_wakeup`,
     /// with a settable monotonic clock, so the wait-queue logic is testable
@@ -1238,6 +1247,9 @@ mod tests {
         wakeup_calls: RefCell<u32>,
         last_wakeup: RefCell<Option<u64>>,
         now: RefCell<u64>,
+        /// What the scheduler answers: `false` models a task it can no longer
+        /// run (retired while still registered).
+        wakeable: Cell<bool>,
     }
 
     impl MockArch {
@@ -1247,6 +1259,7 @@ mod tests {
                 wakeup_calls: RefCell::new(0),
                 last_wakeup: RefCell::new(None),
                 now: RefCell::new(0),
+                wakeable: Cell::new(true),
             }
         }
     }
@@ -1257,8 +1270,9 @@ mod tests {
     unsafe impl Sync for MockArch {}
 
     impl WaitQueueArch for MockArch {
-        fn unpark(&self, id: TaskId) {
+        fn unpark(&self, id: TaskId) -> bool {
             self.unparked.borrow_mut().push(id);
+            self.wakeable.get()
         }
         fn now_ns(&self) -> u64 {
             *self.now.borrow()
@@ -1330,6 +1344,28 @@ mod tests {
     /// The keyed wake is what keeps one shared queue from being a
     /// machine-wide broadcast: an event on one object releases that object's
     /// waiters and leaves every other object's parked.
+    #[test]
+    fn an_addressed_wake_reports_the_landing_not_the_registration() {
+        // A registered waiter the scheduler can no longer run is not a woken
+        // waiter. Reading the row's existence as the answer is what let a
+        // `SleepLock` hand ownership to a retired task and close the lock for
+        // good (`plans/OPEN-DEFECTS.md` D112).
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        q.register(3, NO_DEADLINE);
+        assert!(q.wake_task(&arch, 3));
+
+        arch.wakeable.set(false);
+        assert!(
+            !q.wake_task(&arch, 3),
+            "the row is still there, but the wake did not land"
+        );
+        assert!(
+            !q.wake_task(&arch, 4),
+            "and an absent waiter is still false"
+        );
+    }
+
     #[test]
     fn wake_key_releases_one_conditions_waiters_and_no_others() {
         let arch = MockArch::new();

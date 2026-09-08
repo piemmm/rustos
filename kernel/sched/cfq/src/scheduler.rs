@@ -504,6 +504,12 @@ impl<A: SchedulerArch> Scheduler<A> {
         // owes nothing, so reclaim runs exactly once even under a burst of
         // kills against the same task.
         if task.doomed.swap(true, Ordering::AcqRel) {
+            // The repeat owns no teardown, but an escalation must still be
+            // able to escalate: re-nudge a victim that is *still executing*
+            // so it reaches its stopping point now rather than running on
+            // until its next quantum. Silently issuing nothing is what makes
+            // the `Kill` a grace window escalates to a no-op.
+            self.nudge_if_executing(id);
             return Ok(ExitDisposition::AlreadyExited);
         }
         // Already terminal (a self-exit, or a prior dispatch retired it):
@@ -527,11 +533,8 @@ impl<A: SchedulerArch> Scheduler<A> {
                 // itself, so the killer must not reclaim yet. Nudge the
                 // running CPU into the scheduler so a CPU-bound victim alone
                 // on a tickless core (no quantum armed) is preempted
-                // promptly rather than running on after it was told to die;
-                // to the calling CPU the IPI is a documented no-op.
-                if let Some(cpu) = self.running_cpu_of(id) {
-                    self.arch.send_ipi(cpu);
-                }
+                // promptly rather than running on after it was told to die.
+                self.nudge_running_cpu(id);
                 return Ok(ExitDisposition::Deferred);
             };
             *body = None;
@@ -546,6 +549,26 @@ impl<A: SchedulerArch> Scheduler<A> {
         // `step` picks it and `dispatch` observes `Exited`.
         self.clear_current_matching(id);
         Ok(ExitDisposition::Quiesced)
+    }
+
+    /// Preempt the CPU running `id` so a victim that was told to die reaches
+    /// its stopping point now instead of at its next quantum. To the calling
+    /// CPU the IPI is a documented no-op.
+    fn nudge_running_cpu(&self, id: TaskId) {
+        if let Some(cpu) = self.running_cpu_of(id) {
+            self.arch.send_ipi(cpu);
+        }
+    }
+
+    /// Nudge `id` only if a dispatch still owns its body. Used by a repeat
+    /// termination request, which owes no teardown but must not leave a
+    /// still-running victim un-nudged.
+    fn nudge_if_executing(&self, id: TaskId) {
+        if let Ok(task) = self.lookup(id) {
+            if task.body.try_lock().is_none() {
+                self.nudge_running_cpu(id);
+            }
+        }
     }
 
     /// The CPU whose current-task slot equals `id`, or `None` when the task
@@ -1332,6 +1355,45 @@ mod tests {
         assert_eq!(ran.load(Ordering::Relaxed), 1);
         assert_eq!(sched.state_of(id), TaskState::Exited);
         assert!(arch.ipi_count(0) >= 1, "spawn notifies the home CPU");
+    }
+
+    /// A repeat termination request against a victim that is **still
+    /// executing** owes no teardown, but must still nudge it. Short-circuiting
+    /// on the `doomed` claim before looking at whether the victim is on-CPU
+    /// makes the `Kill` a grace window escalates to issue nothing at all, so
+    /// an unresponsive task runs on until its next quantum.
+    #[test]
+    fn a_repeat_exit_still_nudges_a_still_executing_victim() {
+        let (arch, sched) = mk(4);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("spawn");
+        let task = sched.lookup(id).expect("task present");
+        // Simulate a live dispatch of this task on CPU 3.
+        let body_guard = task.body.lock();
+        sched.set_current(3, id);
+        assert_eq!(sched.exit(id).expect("exit"), ExitDisposition::Deferred);
+        let after_first = arch.ipi_count(3);
+
+        assert_eq!(
+            sched.exit(id).expect("repeat exit"),
+            ExitDisposition::AlreadyExited,
+            "the repeat owes no teardown"
+        );
+        assert_eq!(
+            arch.ipi_count(3),
+            after_first + 1,
+            "but it still nudges the CPU running the victim"
+        );
+        drop(body_guard);
+
+        // Once no dispatch owns the body, a repeat nudges nobody.
+        let quiet = arch.ipi_count(3);
+        assert_eq!(
+            sched.exit(id).expect("repeat exit"),
+            ExitDisposition::AlreadyExited
+        );
+        assert_eq!(arch.ipi_count(3), quiet, "a quiescent victim needs no IPI");
     }
 
     /// Killing a task that is **executing its body** on a remote CPU must

@@ -54,16 +54,15 @@ use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAW
 use tairix_kernel_core::fs::{FinalLink, ReaddirEntry};
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, FilesystemService,
-    InitSpawnCtx, KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
-    ProcessWait, ProgramRegistry, RandomReserve, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
-    NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
+    InitSpawnCtx, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap,
+    ProcessWait, ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqTable, UnsupportedController};
 use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
-use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{CapTable, ProcessId};
 use tairix_log::{log, Event, EventId, Level};
@@ -443,43 +442,6 @@ impl FilesystemService for FixtureFs {
 /// The single installed filesystem double.
 static FIXTURE_FS: FixtureFs = FixtureFs;
 
-/// The wait-queue arch adapter over the live scheduler + arch handle — the
-/// chassis twin of the boot path's adapter — so `PROCWAIT_WAITQ` wakes (a
-/// child's `exit` unparking the parent blocked in the production `wait`)
-/// reach the live scheduler. Without it every wake is a fail-safe no-op
-/// and the parent parks forever.
-struct ChassisWaitArch {
-    scheduler: &'static Scheduler<RiscvBinArch>,
-    arch: &'static RiscvBinArch,
-}
-
-impl tairix_kernel_core::waitq::WaitQueueArch for ChassisWaitArch {
-    fn unpark(&self, id: tairix_kernel_sched_api::TaskId) {
-        // Cancellation-safe: an unpark racing the park records a
-        // wake-pending token, so a wake is never lost.
-        let _ = self.scheduler.unpark(id);
-    }
-
-    fn now_ns(&self) -> u64 {
-        KernelArch::monotonic_ns(self.arch, SchedulerArch::current_cpu(self.arch))
-    }
-
-    fn set_wakeup(&self, deadline_ns: Option<u64>) {
-        SchedulerArch::set_wakeup(self.arch, deadline_ns);
-    }
-
-    fn current_task(
-        &self,
-        cpu: tairix_kernel_sched_api::CpuId,
-    ) -> Option<tairix_kernel_sched_api::TaskId> {
-        self.scheduler.current_task(cpu)
-    }
-
-    fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
-        Some(SchedulerArch::current_cpu(self.arch))
-    }
-}
-
 /// The capability set the fixture programs run under: `FS_ACCESS` for the
 /// children's `fs_open`/`file_map`, and `PROC_SPAWN` for the parent's
 /// `spawn`. The parent's set doubles as the inherited ceiling the
@@ -634,10 +596,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // Publish the wait-queue arch hook so parked waiters (the parent in
     // `wait`) are genuinely unparked by their wake events — the same
     // adapter the production boot path installs.
-    let wait_arch: &'static ChassisWaitArch = Box::leak(Box::new(ChassisWaitArch {
-        scheduler: sys.sched,
-        arch: sys.arch,
-    }));
+    let wait_arch = SchedWaitQueueArch::leak(sys.sched, sys.arch);
     if tairix_kernel_core::waitq::install_wait_arch(wait_arch).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }

@@ -138,94 +138,117 @@ pub fn clear_intake(task: u64) {
     SIGNAL_INTAKE.lock().remove(&task);
 }
 
-/// The kill gate: which tasks are currently inside a syscall dispatch,
-/// and the termination signal deferred against each of them.
+/// The kill gate: which threads are currently executing **inside the kernel
+/// on their own stack**, and the terminations deferred against threads that
+/// cannot yet be destroyed.
 ///
-/// A task inside a syscall may hold kernel state only its own unwind can
-/// release — a mount's `SleepLock`, an in-flight block-I/O descriptor the
-/// device is still writing, heap allocations owned by handler stack
-/// frames. Destroying it mid-flight leaks that state: the observed shape
-/// is a killed writer leaving its volume's lock held forever, deadlocking
-/// every later filesystem call on that mount. The terminate path
-/// therefore never ends an in-syscall task directly; it records the
-/// signal here and wakes the task, and the syscall dispatch boundary
-/// lands the kill once the handler has unwound and released everything
-/// it held. Both maps grow with live tasks, never a fixed ceiling; the
-/// shared task reclaim clears a dead task's entries.
+/// A thread inside a kernel body holds state only its own unwind can release
+/// — a mount's `SleepLock`, an in-flight block-I/O descriptor the device is
+/// still writing, heap allocations owned by its stack frames. Destroying it
+/// mid-flight leaks that state: the observed shape is a killed writer leaving
+/// its volume's lock held forever, deadlocking every later filesystem call on
+/// that mount. A syscall handler is such a body, and so is the deferred-load
+/// body a spawned child materialises its own image in
+/// (`plans/FIX-DESKTOP.md` §2.6.5) — a parked one looks quiescent to the
+/// scheduler, whose body lock is free the moment it suspends, so nothing but
+/// this gate stops the terminate path reclaiming a half-unwound stack
+/// (`plans/OPEN-DEFECTS.md` D112). The terminate path therefore never ends a
+/// thread that is inside the kernel; it records the status here and wakes the
+/// thread, and the body's own boundary lands the kill.
+///
+/// A thread executing in **user mode** is the opposite case: it holds no
+/// kernel state, but it is still physically running, so reclaiming its
+/// address space would turn its own accesses into wild faults. Its teardown
+/// is deferred too, to the point the dispatch loop retires it.
+///
+/// The two deferral registers share this one lock because choosing between
+/// them is a single decision on [`in_kernel`](Self::in_kernel), taken
+/// concurrently with the victim's own entry into the kernel. Split across two
+/// locks, a kill landing exactly as the victim enters could be recorded as a
+/// user-mode teardown against a thread that is by then inside a body, and the
+/// dispatch loop would free that body's stack at its next park. Every map
+/// grows with live tasks, never a fixed ceiling; the shared task reclaim
+/// clears a dead thread's entries.
 struct KillGate {
-    /// Tasks currently between [`syscall_enter`] and
-    /// [`syscall_exit_take_kill`] — i.e. inside a syscall dispatch,
-    /// parked or running.
-    in_syscall: BTreeSet<u64>,
-    /// The terminal status the first death deferred against each in-syscall
-    /// thread will record for its process. First request wins: a later `Kill`
+    /// Threads currently between [`kernel_enter`] and
+    /// [`kernel_exit_take_kill`] — inside a syscall handler or a kernel
+    /// body, parked or running.
+    in_kernel: BTreeSet<u64>,
+    /// The teardown the first death deferred against each in-kernel thread
+    /// owes at that thread's own boundary. First request wins: a later `Kill`
     /// against an already-doomed thread changes nothing (it is already dying at
     /// the same boundary), matching the immediate path where a second signal
     /// finds the child already gone.
     ///
-    /// A *status*, not a signal, because the three deaths that defer here carry
-    /// different ones and none may overwrite another: a signalled kill's
-    /// `128 + n`, a group `exit(code)`'s own code, and a fault kill's crash
-    /// status.
-    pending: BTreeMap<u64, i32>,
+    /// A [`DeferredTeardown`], not a bare status, because the deaths that
+    /// defer here carry different ones and none may overwrite another: a
+    /// signalled kill's `128 + n`, a group `exit(code)`'s own code, a fault
+    /// kill's crash status, and a driver unload's *no* status at all.
+    pending: BTreeMap<u64, DeferredTeardown>,
+    /// The teardown each thread the scheduler reported still *executing* owes
+    /// once its owning dispatch retires it, landed by [`land_running_kill`].
+    running: BTreeMap<u64, DeferredTeardown>,
 }
 
-/// The one kill-gate instance shared by the signal producer and the
-/// syscall dispatch boundary.
+/// The one kill-gate instance shared by the signal producer, the syscall
+/// dispatch boundary, the kernel bodies, and the dispatch loop.
 static KILL_GATE: SpinLock<KillGate> = SpinLock::new(KillGate {
-    in_syscall: BTreeSet::new(),
+    in_kernel: BTreeSet::new(),
     pending: BTreeMap::new(),
+    running: BTreeMap::new(),
 });
 
-/// Mark `task` as inside a syscall dispatch. Paired with
-/// [`syscall_exit_take_kill`] by the dispatch hook around every syscall.
+/// Mark `task` as executing inside the kernel on its own stack. Paired with
+/// [`kernel_exit_take_kill`] by the dispatch hook around every syscall and by
+/// the deferred-load body around its whole build.
 ///
-/// If a termination was deferred against this task while it was running in
-/// user mode ([`defer_running_kill`]) and it has now entered a syscall, the
-/// kill is migrated into the in-syscall gate here so the syscall boundary
-/// lands it after the handler unwinds — the handler may take locks the
-/// running-kill (dispatch-loop) path must never reclaim under. Taken before
-/// the gate lock so the two maps are never locked nested.
-pub fn syscall_enter(task: u64) {
-    let migrated = take_running_kill(task);
-    match migrated {
-        Some(DeferredTeardown::Exit { status, .. }) => {
-            let mut gate = KILL_GATE.lock();
-            gate.in_syscall.insert(task);
-            gate.pending.entry(task).or_insert(status);
-        }
-        // A plain (driver-unload) teardown records no status for the kill
-        // gate; leave it deferred for the dispatch loop, which reclaims once
-        // the driver's dispatch retires it (honouring any `Park` in between
-        // so handler state is never reclaimed under).
-        Some(plain @ DeferredTeardown::Plain { .. }) => {
-            insert_deferred(task, plain);
-            KILL_GATE.lock().in_syscall.insert(task);
-        }
-        None => {
-            KILL_GATE.lock().in_syscall.insert(task);
-        }
+/// A teardown deferred while the thread was running in user mode
+/// ([`defer_running_kill`], [`defer_plain_reclaim`]) is migrated into the gate
+/// here, so the body's boundary lands it after the unwind: the body may take
+/// locks the dispatch-loop reclaim must never run under, and leaving it in the
+/// user-mode register would instead reclaim the address space *underneath* a
+/// thread that had just returned to user code.
+pub fn kernel_enter(task: u64) {
+    let mut gate = KILL_GATE.lock();
+    gate.in_kernel.insert(task);
+    if let Some(teardown) = take_running_locked(&mut gate, task) {
+        gate.pending.entry(task).or_insert(teardown);
     }
 }
 
-/// Mark `task` as leaving its syscall dispatch and take any termination
-/// deferred against it while it was inside.
+/// Mark `task` as leaving the kernel and take any termination deferred
+/// against it while it was inside.
 ///
-/// `Some(status)` obliges the caller to land the death now, recording that
-/// status for the process: the handler has unwound (every lock and buffer it
-/// held is released), so this is the first safe point the thread can die at.
+/// `Some(teardown)` obliges the caller to land the death now: the body has
+/// unwound (every lock and buffer it held is released), so this is the first
+/// safe point the thread can die at. The thread never returns to user mode.
 #[must_use]
-pub fn syscall_exit_take_kill(task: u64) -> Option<i32> {
+pub fn kernel_exit_take_kill(task: u64) -> Option<DeferredTeardown> {
     let mut gate = KILL_GATE.lock();
-    gate.in_syscall.remove(&task);
+    gate.in_kernel.remove(&task);
     gate.pending.remove(&task)
+}
+
+/// Record `teardown` against `thread` if it is inside a kernel body, reporting
+/// whether it was.
+///
+/// `true` obliges the caller to leave the thread running and merely wake it:
+/// the death is owed at the body's own boundary, and retiring the thread here
+/// would free a stack whose frames still own kernel state. First request wins.
+pub fn defer_kill_in_kernel(thread: u64, teardown: DeferredTeardown) -> bool {
+    let mut gate = KILL_GATE.lock();
+    if !gate.in_kernel.contains(&thread) {
+        return false;
+    }
+    gate.pending.entry(thread).or_insert(teardown);
+    true
 }
 
 /// Whether a termination is deferred against `task`.
 ///
 /// The in-kernel park loops consult this after every wake and unwind
 /// with `Errno::Interrupted` instead of re-parking, so a doomed task
-/// reaches its syscall boundary promptly rather than sleeping on as an
+/// reaches its boundary promptly rather than sleeping on as an
 /// unkillable waiter. The errno never reaches user space — the boundary
 /// lands the kill first.
 #[must_use]
@@ -233,32 +256,21 @@ pub fn kill_pending(task: u64) -> bool {
     KILL_GATE.lock().pending.contains_key(&task)
 }
 
-/// Drop `task`'s kill-gate state on teardown. Idempotent; driven by the
-/// one shared task-reclaim path exactly like [`clear_intake`], so a task
-/// that exits on its own while a kill is deferred against it leaves no
-/// stale entry a later holder of its id could be killed by.
+/// Drop every trace of `task` from the gate on teardown — its in-kernel
+/// window, its deferred status, and any teardown deferred against it while it
+/// ran. Idempotent; driven by the one shared task-reclaim path exactly like
+/// [`clear_intake`], so a thread that exits on its own while a termination was
+/// deferred against it leaves nothing a later holder of its id could be killed
+/// by, and the dispatch loop's later [`land_running_kill`] finds nothing and
+/// never reclaims twice.
 pub fn clear_kill_gate(task: u64) {
     let mut gate = KILL_GATE.lock();
-    gate.in_syscall.remove(&task);
+    gate.in_kernel.remove(&task);
     gate.pending.remove(&task);
+    take_running_locked(&mut gate, task);
 }
 
-/// Terminations deferred against tasks that were **executing in user mode**
-/// (not inside a syscall) when the kill was requested.
-///
-/// The kill gate above covers a task inside a syscall handler. A task
-/// running in EL0/user mode is a *different* deferral case: it holds no
-/// handler state, but it is still physically executing on another CPU, so
-/// reclaiming its address space now would turn its own legitimate accesses
-/// into wild faults. The scheduler reports such a victim
-/// [`ExitDisposition::Deferred`]; the signal producer records the pending
-/// termination here and the dispatch loop lands it
-/// ([`land_running_kill`]) once the owning dispatch has retired the task
-/// (the scheduler already IPI'd that CPU). Grows with live tasks, never a
-/// fixed ceiling; the shared task reclaim clears a dead task's entry.
-static RUNNING_KILLS: SpinLock<BTreeMap<u64, DeferredTeardown>> = SpinLock::new(BTreeMap::new());
-
-/// Count of entries in [`RUNNING_KILLS`], so the dispatch loop's
+/// Count of entries in [`KillGate::running`], so the dispatch loop's
 /// per-dispatch [`land_running_kill`] check is a single relaxed atomic read
 /// on the hot path and only takes the lock when a teardown is actually
 /// pending (deferrals are rare — only during teardown).
@@ -294,52 +306,94 @@ pub enum DeferredTeardown {
     },
 }
 
-/// Record a death of `process` carrying `status`, deferred against its
-/// still-executing thread `task`. First request wins: a later signal against an
-/// already-doomed task changes nothing (it is already dying at the same
-/// rendezvous), matching the immediate and in-syscall paths.
+impl DeferredTeardown {
+    /// The status a parent's `wait` reports, or [`None`] when nobody reaps
+    /// this death (an unloaded driver is not a waited-for child).
+    #[must_use]
+    pub const fn reaped_status(self) -> Option<i32> {
+        match self {
+            Self::Exit { status, .. } => Some(status),
+            Self::Plain { .. } => None,
+        }
+    }
+}
+
+/// Record a death of `process` carrying `status`, deferred against its thread
+/// `task` that the scheduler reported still executing.
+///
+/// *Where* it is owed is decided here, under the gate lock, so a thread that
+/// entered the kernel concurrently cannot be left with a user-mode teardown
+/// the dispatch loop would land at its next park while its body still holds a
+/// mount lock: inside a kernel body the status joins the gate's pending set
+/// and the body's own boundary lands it; in user mode the teardown waits for
+/// the dispatch loop. First request wins in both, so a repeat kill against an
+/// already-doomed task changes nothing.
 pub fn defer_running_kill(task: u64, process: ProcessId, status: i32) {
-    insert_deferred(task, DeferredTeardown::Exit { process, status });
+    defer_teardown(task, DeferredTeardown::Exit { process, status });
 }
 
 /// Record a non-signal teardown of `process` deferred against its
 /// still-executing thread `task` (an unloaded driver still executing on
-/// another CPU): the dispatch loop reclaims its kernel resources once the
-/// owning dispatch retires it, without a `wait` reap.
+/// another CPU): its kernel resources are reclaimed once the thread stops,
+/// without a `wait` reap.
 pub fn defer_plain_reclaim(task: u64, process: ProcessId) {
-    insert_deferred(task, DeferredTeardown::Plain { process });
+    defer_teardown(task, DeferredTeardown::Plain { process });
+}
+
+/// Record `teardown` against a thread the scheduler reported still executing,
+/// in whichever register matches where it is executing.
+fn defer_teardown(task: u64, teardown: DeferredTeardown) {
+    let mut gate = KILL_GATE.lock();
+    if gate.in_kernel.contains(&task) {
+        gate.pending.entry(task).or_insert(teardown);
+        return;
+    }
+    insert_running_locked(&mut gate, task, teardown);
 }
 
 /// Insert a deferred teardown, first-request-wins, keeping the pending
 /// counter in step.
-fn insert_deferred(task: u64, teardown: DeferredTeardown) {
+fn insert_running_locked(gate: &mut KillGate, task: u64, teardown: DeferredTeardown) {
     // First request wins: an existing deferral is never overwritten, so a
     // later kill against an already-doomed task changes neither the recorded
     // teardown nor the count.
-    if let alloc::collections::btree_map::Entry::Vacant(slot) = RUNNING_KILLS.lock().entry(task) {
+    if let alloc::collections::btree_map::Entry::Vacant(slot) = gate.running.entry(task) {
         slot.insert(teardown);
         PENDING_RUNNING_KILLS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// Take (remove) any teardown deferred against `task`, returning it if
-/// present.
-fn take_running_kill(task: u64) -> Option<DeferredTeardown> {
-    let mut map = RUNNING_KILLS.lock();
-    let taken = map.remove(&task);
+/// Take (remove) any teardown deferred against `task`, keeping the pending
+/// counter in step.
+fn take_running_locked(gate: &mut KillGate, task: u64) -> Option<DeferredTeardown> {
+    let taken = gate.running.remove(&task);
     if taken.is_some() {
         PENDING_RUNNING_KILLS.fetch_sub(1, Ordering::Relaxed);
     }
     taken
 }
 
-/// Drop `task`'s deferred running-kill on teardown. Idempotent; driven by
-/// the one shared task-reclaim path exactly like [`clear_kill_gate`], so a
-/// task that exits on its own (or faults) while a user-mode kill was
-/// deferred against it leaves no stale entry the dispatch loop could act on
-/// twice.
-pub fn clear_running_kill(task: u64) {
-    let _ = take_running_kill(task);
+/// Take (remove) any teardown deferred against `task`, whatever it is
+/// executing. Test-only: production always goes through the in-kernel guard
+/// below or the whole-thread [`clear_kill_gate`].
+#[cfg(test)]
+fn take_running_kill(task: u64) -> Option<DeferredTeardown> {
+    take_running_locked(&mut KILL_GATE.lock(), task)
+}
+
+/// Take the teardown deferred against `task` only once it is out of the
+/// kernel.
+///
+/// A thread suspended *inside* a kernel body has stack frames that still own
+/// kernel state, so freeing them at its next park is the leak the gate exists
+/// to prevent; the teardown stays recorded and the next retire after the body
+/// returns takes it.
+fn take_running_kill_out_of_kernel(task: u64) -> Option<DeferredTeardown> {
+    let mut gate = KILL_GATE.lock();
+    if gate.in_kernel.contains(&task) {
+        return None;
+    }
+    take_running_locked(&mut gate, task)
 }
 
 /// The seam through which the dispatch loop lands a deferred running-kill:
@@ -381,15 +435,28 @@ pub fn install_deferred_kill_lander(
 }
 
 /// Land any termination deferred against `task` now that its owning
-/// dispatch has retired it (the task ran once and returned to the dispatch
-/// loop, so it is executing nowhere and holds no handler state). Called
-/// from the dispatch loop after every dispatched task.
+/// dispatch has retired it. Called from the dispatch loop after every
+/// dispatched task.
+///
+/// A retire proves only that the task is executing nowhere. It does **not**
+/// prove the task is done with the kernel: a dispatch also retires when the
+/// task *parks*, and a thread parked inside a kernel body still owns
+/// everything its stack frames hold. The teardown is therefore withheld while
+/// the thread is in the gate's in-kernel set.
+///
+/// A teardown recorded against a thread already inside the kernel is owed at
+/// that thread's own boundary instead, and [`kernel_enter`] moves one recorded
+/// just before, so in practice only a thread in user mode is landed here. The
+/// check stays because the two answer different questions — where a death is
+/// *owed* versus when it is *safe to free a kernel stack* — and a kernel body
+/// that ever went unbracketed would otherwise have its stack freed under it
+/// rather than merely waiting for its boundary.
 ///
 /// The common case — a task that was not killed while running — is a single
 /// relaxed atomic read of the pending-teardown counter and no lock, so the
-/// hot path pays almost nothing. Idempotent: the pending signal is taken
-/// exactly once, and a self-exit/fault teardown already cleared the entry
-/// ([`clear_running_kill`]), so a normal exit lands nothing.
+/// hot path pays almost nothing. Idempotent: the teardown is taken exactly
+/// once, and a self-exit/fault reclaim already cleared the entry
+/// ([`clear_kill_gate`]), so a normal exit lands nothing.
 pub fn land_running_kill(task: u64) {
     if PENDING_RUNNING_KILLS.load(Ordering::Relaxed) == 0 {
         return;
@@ -399,7 +466,7 @@ pub fn land_running_kill(task: u64) {
     let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() else {
         return;
     };
-    if let Some(teardown) = take_running_kill(task) {
+    if let Some(teardown) = take_running_kill_out_of_kernel(task) {
         lander.land_deferred_teardown(TaskId(task), teardown);
     }
 }
@@ -931,12 +998,14 @@ where
     /// mid-flight; the reap+reclaim is deferred to the point the child
     /// reaches safely:
     ///
-    /// * A child currently **inside a syscall** may hold kernel state only
-    ///   its own unwind can release (a mount's `SleepLock`, an in-flight
-    ///   block-I/O descriptor), so the kill is deferred through the kill
-    ///   gate — recorded pending, the child woken out of any park so an
-    ///   indefinite wait unwinds (`Errno::Interrupted`) — and the syscall
-    ///   dispatch boundary lands it once the handler has unwound.
+    /// * A child currently **inside the kernel** — a syscall handler, or the
+    ///   deferred-load body a launching child builds its image in — may hold
+    ///   kernel state only its own unwind can release (a mount's
+    ///   `SleepLock`, an in-flight block-I/O descriptor), so the kill is
+    ///   deferred through the kill gate — recorded pending, the child woken
+    ///   out of any park so an indefinite wait unwinds
+    ///   (`Errno::Interrupted`) — and that body's own boundary lands it once
+    ///   it has unwound.
     /// * A child currently **executing in user mode on another CPU** holds
     ///   no handler state, but reclaiming its address space while its own
     ///   code still runs would turn a legitimate access into a wild fault.
@@ -981,25 +1050,26 @@ where
     /// changes with a group is *when* the shared teardown runs, which the
     /// installed landing seam decides.
     fn terminate_thread(&self, child: ProcessId, thread: u64, status: i32) -> Result<(), Errno> {
-        {
-            let mut gate = KILL_GATE.lock();
-            if gate.in_syscall.contains(&thread) {
-                gate.pending.entry(thread).or_insert(status);
-                drop(gate);
-                // A stopped thread must still die: lift its overlay entry so
-                // the wake below runs it to its boundary instead of the
-                // dispatch shim re-parking it forever.
-                STOPPED_TASKS.lock().remove(&thread);
-                // Wake it out of any in-kernel park. Every park loop
-                // re-tests its condition after a wake and consults the kill
-                // gate, so a spurious wake is harmless and a doomed waiter
-                // unwinds promptly. `InvalidState` means the thread is
-                // runnable or running — it reaches its boundary by itself.
-                match self.scheduler.unpark(thread) {
-                    Ok(()) | Err(SchedError::InvalidState) => return Ok(()),
-                    Err(_) => return Err(Errno::NotFound),
-                }
-            }
+        if defer_kill_in_kernel(
+            thread,
+            DeferredTeardown::Exit {
+                process: child,
+                status,
+            },
+        ) {
+            // A stopped thread must still die: lift its overlay entry so
+            // the wake below runs it to its boundary instead of the
+            // dispatch shim re-parking it forever.
+            STOPPED_TASKS.lock().remove(&thread);
+            // Wake it out of any in-kernel park. Every park loop
+            // re-tests its condition after a wake and consults the kill
+            // gate, so a spurious wake is harmless and a doomed waiter
+            // unwinds promptly. `InvalidState` means the thread is
+            // runnable or running — it reaches its boundary by itself.
+            return match self.scheduler.unpark(thread) {
+                Ok(()) | Err(SchedError::InvalidState) => Ok(()),
+                Err(_) => Err(Errno::NotFound),
+            };
         }
         // A stopped thread can be killed: lift its overlay entry so the set
         // never accumulates entries for dead tasks, whichever disposition
@@ -1037,22 +1107,17 @@ where
     /// Drive one sibling `thread` of a dying process to its stopping point, the
     /// process to carry `status`.
     ///
-    /// A sibling caught mid-syscall is gated exactly as a signalled kill gates
-    /// it (its own unwind must release what only it can), and one still
+    /// A sibling caught inside the kernel is gated exactly as a signalled kill
+    /// gates it (its own unwind must release what only it can), and one still
     /// executing in user mode has the death deferred against it. Both deferrals
     /// carry `status` — the dying thread's own, never a synthesised `128 + n`
     /// that would overwrite it — because whichever thread of the group lands
     /// last is the one that records it.
     fn stop_sibling(&self, process: ProcessId, thread: u64, status: i32) {
-        {
-            let mut gate = KILL_GATE.lock();
-            if gate.in_syscall.contains(&thread) {
-                gate.pending.entry(thread).or_insert(status);
-                drop(gate);
-                STOPPED_TASKS.lock().remove(&thread);
-                let _ = self.scheduler.unpark(thread);
-                return;
-            }
+        if defer_kill_in_kernel(thread, DeferredTeardown::Exit { process, status }) {
+            STOPPED_TASKS.lock().remove(&thread);
+            let _ = self.scheduler.unpark(thread);
+            return;
         }
         match self.scheduler.exit(thread) {
             Ok(ExitDisposition::Quiesced | ExitDisposition::AlreadyExited) => {
@@ -1233,7 +1298,7 @@ pub(crate) fn stopped_overlay_test_lock() -> std::sync::MutexGuard<'static, ()> 
 }
 
 /// Serialises host tests that touch the process-global deferred-teardown
-/// state ([`RUNNING_KILLS`], [`PENDING_RUNNING_KILLS`], and the once-set
+/// state (the gate's running set, [`PENDING_RUNNING_KILLS`], and the once-set
 /// [`DEFERRED_KILL_LANDER`]): they are keyed by numeric task id and share
 /// one lander, so two tests deferring/landing "their" task in parallel
 /// would race each other's entries.
@@ -1443,13 +1508,13 @@ mod tests {
     #[test]
     fn the_kill_gate_round_trips_enter_take_and_clear() {
         // Pure gate bookkeeping, on raw ids no scheduler-backed test uses.
-        syscall_enter(0x00de_ad01);
+        kernel_enter(0x00de_ad01);
         assert!(!kill_pending(0x00de_ad01));
-        assert_eq!(syscall_exit_take_kill(0x00de_ad01), None);
+        assert_eq!(kernel_exit_take_kill(0x00de_ad01), None);
         // Clearing an open window leaves nothing behind.
-        syscall_enter(0x00de_ad02);
+        kernel_enter(0x00de_ad02);
         clear_kill_gate(0x00de_ad02);
-        assert_eq!(syscall_exit_take_kill(0x00de_ad02), None);
+        assert_eq!(kernel_exit_take_kill(0x00de_ad02), None);
     }
 
     #[test]
@@ -1465,7 +1530,7 @@ mod tests {
         // block-I/O descriptor), so the kill must not land here — the
         // regression this pins down is a killed writer leaving its volume's
         // lock held forever, deadlocking every later filesystem call.
-        syscall_enter(child);
+        kernel_enter(child);
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Ok(())
@@ -1481,10 +1546,10 @@ mod tests {
         );
         // The syscall boundary takes the deferred kill exactly once.
         assert_eq!(
-            syscall_exit_take_kill(child),
+            kernel_exit_take_kill(child).and_then(DeferredTeardown::reaped_status),
             Signal::Kill.termination_status()
         );
-        assert_eq!(syscall_exit_take_kill(child), None);
+        assert_eq!(kernel_exit_take_kill(child), None);
     }
 
     #[test]
@@ -1495,7 +1560,7 @@ mod tests {
         wait.register_child(ProcessId(7), ProcessId(child));
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
-        syscall_enter(child);
+        kernel_enter(child);
         assert_eq!(
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Terminate),
             Ok(())
@@ -1509,7 +1574,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            syscall_exit_take_kill(child),
+            kernel_exit_take_kill(child).and_then(DeferredTeardown::reaped_status),
             Signal::Terminate.termination_status()
         );
         assert_eq!(scheduler.live_task_count(), 1);
@@ -1570,50 +1635,55 @@ mod tests {
         assert_eq!(take_running_kill(a), None, "taken exactly once");
         assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
 
-        // `clear_running_kill` drops an entry without landing it (the
+        // `clear_kill_gate` drops an entry without landing it (the
         // self-exit/fault teardown path, so the dispatch loop never lands a
         // kill for an already-reclaimed task).
         defer_running_kill(b, ProcessId(b), 137);
-        clear_running_kill(b);
+        clear_kill_gate(b);
         assert_eq!(take_running_kill(b), None);
         assert_eq!(PENDING_RUNNING_KILLS.load(Ordering::Relaxed), before);
     }
 
-    /// A user-mode kill that later enters a syscall is migrated into the
-    /// in-syscall kill gate at `syscall_enter`, so the syscall boundary
-    /// lands it after the handler unwinds — a signalled kill goes to the
-    /// gate, a plain (driver-unload) teardown stays for the dispatch loop.
+    /// A teardown deferred while its thread ran in user mode is migrated into
+    /// the gate at `kernel_enter`, so the body's boundary lands it after the
+    /// unwind rather than the dispatch loop reclaiming the address space
+    /// underneath a thread that had just returned to user code. A signalled
+    /// kill carries its status; a driver unload carries none.
     #[test]
-    fn syscall_enter_migrates_a_signalled_kill_but_keeps_a_plain_reclaim() {
+    fn kernel_enter_migrates_a_deferred_teardown_of_either_kind() {
         let _g = running_kill_test_lock();
         let (sig_id, plain_id) = (0x00c0_ffe3, 0x00c0_ffe4);
         let _ = take_running_kill(sig_id);
         let _ = take_running_kill(plain_id);
 
-        // A signalled kill migrates into the gate and out of RUNNING_KILLS.
+        // A signalled kill migrates into the gate.
         defer_running_kill(sig_id, ProcessId(sig_id), 143);
-        syscall_enter(sig_id);
+        kernel_enter(sig_id);
         assert_eq!(
             take_running_kill(sig_id),
             None,
-            "migrated out of RUNNING_KILLS"
+            "migrated out of the running-teardown set"
         );
-        assert!(kill_pending(sig_id), "now owed at the syscall boundary");
-        assert_eq!(syscall_exit_take_kill(sig_id), Some(143));
-
-        // A plain reclaim carries no signal for the gate; it stays deferred
-        // for the dispatch loop.
-        defer_plain_reclaim(plain_id, ProcessId(plain_id));
-        syscall_enter(plain_id);
-        assert!(!kill_pending(plain_id), "no signal handed to the gate");
+        assert!(kill_pending(sig_id), "now owed at the body boundary");
         assert_eq!(
-            take_running_kill(plain_id),
+            kernel_exit_take_kill(sig_id).and_then(DeferredTeardown::reaped_status),
+            Some(143)
+        );
+
+        // A plain (driver-unload) reclaim migrates too: leaving it in the
+        // user-mode register would return the thread to user code and then
+        // reclaim its address space out from under it.
+        defer_plain_reclaim(plain_id, ProcessId(plain_id));
+        kernel_enter(plain_id);
+        assert!(kill_pending(plain_id), "the body boundary owes the reclaim");
+        assert_eq!(take_running_kill(plain_id), None, "migrated out");
+        assert_eq!(
+            kernel_exit_take_kill(plain_id),
             Some(DeferredTeardown::Plain {
                 process: ProcessId(plain_id)
             }),
-            "still deferred for the dispatch loop"
+            "and carries no status, since a driver is not a waited-for child"
         );
-        clear_kill_gate(plain_id);
     }
 
     /// Tasks the deterministic test lander reclaimed, and the signalled
@@ -1699,7 +1769,7 @@ mod tests {
         assert!(!LAND_RECLAIMED.lock().contains(&child));
     }
 
-    /// A self-exit/fault teardown that ran [`clear_running_kill`] leaves the
+    /// A self-exit/fault teardown that ran [`clear_kill_gate`] leaves the
     /// dispatch loop nothing to land, so a deferred kill is never applied
     /// twice against an already-reclaimed task.
     #[test]
@@ -1711,7 +1781,7 @@ mod tests {
         LAND_RECLAIMED.lock().remove(&child);
 
         defer_running_kill(child, ProcessId(child), 137);
-        clear_running_kill(child);
+        clear_kill_gate(child);
         land_running_kill(child);
         assert_eq!(take_running_kill(child), None, "nothing left to land");
         if ours {
@@ -1720,6 +1790,71 @@ mod tests {
                 "a cleared deferral is never landed"
             );
         }
+    }
+
+    /// The `plans/OPEN-DEFECTS.md` D112 root cause, gate half: a thread that
+    /// entered the kernel between the terminate path's gate check and its
+    /// deferral must not end up with a user-mode teardown the dispatch loop
+    /// lands at its next park — that frees a body's stack while its frames
+    /// still hold a mount lock.
+    /// The decision is taken under the gate lock, so the death is owed at the
+    /// body's boundary instead.
+    #[test]
+    fn a_kill_deferred_against_a_thread_in_the_kernel_is_owed_at_its_boundary() {
+        let _g = running_kill_test_lock();
+        let task = 0x00c0_ffe8;
+        clear_kill_gate(task);
+
+        kernel_enter(task);
+        defer_running_kill(task, ProcessId(task), 137);
+
+        assert_eq!(
+            take_running_kill(task),
+            None,
+            "no user-mode teardown for a thread inside a kernel body"
+        );
+        assert!(kill_pending(task), "the body boundary owes the death");
+        assert_eq!(
+            kernel_exit_take_kill(task).and_then(DeferredTeardown::reaped_status),
+            Some(137)
+        );
+    }
+
+    /// The same invariant at the landing end. A dispatch retires when its task
+    /// *parks*, not only when it returns, so a teardown must never be landed
+    /// on the strength of a retire alone: a thread parked inside a kernel body
+    /// still owns its stack. A driver unload of a thread blocked in
+    /// `irq_wait` is the live case.
+    #[test]
+    fn a_teardown_is_withheld_while_its_thread_is_inside_a_kernel_body() {
+        let _g = running_kill_test_lock();
+        let ours = ensure_test_lander();
+        let driver = 0x00c0_ffe9;
+        clear_kill_gate(driver);
+        LAND_RECLAIMED.lock().remove(&driver);
+
+        defer_plain_reclaim(driver, ProcessId(driver));
+        kernel_enter(driver);
+
+        // The body parked, so its dispatch retired — but it still owns its
+        // stack, so nothing may be reclaimed yet.
+        land_running_kill(driver);
+        if ours {
+            assert!(
+                !LAND_RECLAIMED.lock().contains(&driver),
+                "a parked kernel body is not a quiescent task"
+            );
+        }
+
+        // The gate owes it instead, and the body's own boundary hands it over.
+        assert!(kill_pending(driver), "the park loop must unwind");
+        assert_eq!(
+            kernel_exit_take_kill(driver),
+            Some(DeferredTeardown::Plain {
+                process: ProcessId(driver)
+            })
+        );
+        assert_eq!(take_running_kill(driver), None, "owed in one place only");
     }
 
     /// A plain (driver-unload) deferral lands as a reclaim only — no reap,

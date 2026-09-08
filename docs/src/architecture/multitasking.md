@@ -346,6 +346,16 @@ via `Yielder::become_user`. No unverified byte is ever mapped, and the
 child is never dispatchable under the placeholder authority: the effective
 record and the frozen space are installed strictly before `become_user`.
 
+That whole body runs inside the **kill gate**, from its first instruction to
+just before it enters user mode. It is a kernel body on the child's own stack
+and it parks inside one — on the store latch, on the mount's `SleepLock`, on a
+block completion — and the scheduler's per-task body lock is free the moment a
+task parks, so without the gate a termination would find the child "quiescent"
+and free a stack whose frames still hold that mount lock, closing the volume
+for the rest of the boot (`plans/OPEN-DEFECTS.md` D112). A death taken at the
+body's boundary supersedes both outcomes: the child neither enters user mode
+nor reports a load failure, and retires carrying the signal's own status.
+
 **Failure is loud, never silent (`AGENTS.md` §24).** A load that fails on
 the child's own slice does not surface as a `spawn` errno — the caller
 already has the PID. Instead the child audits the refusal

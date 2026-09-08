@@ -1120,14 +1120,18 @@ These hold at every API boundary:
      dispatch loop (`land_running_kill`) once the task is quiescent.
    * The task was already terminal (or a prior termination owns its
      teardown) → `ExitDisposition::AlreadyExited`; reclaim runs exactly
-     once no matter how many kills arrive.
+     once no matter how many kills arrive. A repeat that finds the victim
+     *still executing* re-sends the nudge before reporting: it owes no
+     teardown, but the `Kill` a grace window escalates to must still be
+     able to escalate rather than issue nothing at all.
 
-   A `doomed` task that returns `Park` (it blocked mid-handler holding
-   kernel state) is **not** force-exited: its kill is landed at the
-   syscall boundary once the handler unwinds, so handler state is never
-   reclaimed under. `kernel/core` (`procsignal`) drives the caller side —
-   the signal-terminate path and the driver-unload path both branch on the
-   disposition; see the kernel signals doc.
+   A `doomed` task that returns `Park` (it blocked mid-body holding kernel
+   state) is **not** force-exited: its kill is landed at that body's own
+   boundary once it unwinds, so the state a half-unwound kernel stack owns
+   is never reclaimed under. `kernel/core` (`procsignal`) drives the caller
+   side — the signal-terminate path and the driver-unload path both consult
+   the kill gate first and only then branch on the disposition; see the
+   kernel signals doc.
 
 6. **Task identity is drawn, not counted.** A `TaskId` comes from one
    process-wide random generator (`choose_task_id`), never a per-policy

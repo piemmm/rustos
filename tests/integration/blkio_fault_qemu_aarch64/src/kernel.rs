@@ -49,15 +49,14 @@ use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_use
 use tairix_kernel_core::{
     AddressSpaceRegistry, BootReserve, DispatchCallbackSlot, EmbeddedProgram, InitSpawnCtx,
     KernelArch, KernelDispatchHook, KernelInitSpawner, KernelProcessWait, LiveMemMap, ProcessWait,
-    ProgramRegistry, RandomReserve, NULL_DMA_ALLOC_FACILITY, NULL_MMIO_MAP_FACILITY,
-    NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
+    ProgramRegistry, RandomReserve, SchedWaitQueueArch, NULL_DMA_ALLOC_FACILITY,
+    NULL_MMIO_MAP_FACILITY, NULL_SEAT_REGISTRY, NULL_SHARED_MEM_FACILITY,
 };
 use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqTable, UnsupportedController};
 use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
-use tairix_kernel_sched_api::SchedulerArch;
 use tairix_kernel_sched_cfq::{Scheduler, SchedulerConfig};
 use tairix_kernel_sec::{CapTable, ProcessId};
 use tairix_log::{log, Event, EventId, Level};
@@ -225,43 +224,6 @@ extern "C" fn blkio_fault_user_fault(
     unsafe { resolve_user_fault_via_slot(&DISPATCH_SLOT, far, write, regs) }
 }
 
-/// The wait-queue arch adapter over the live scheduler + arch handle — the
-/// chassis twin of the boot path's adapter — so the wakes the fixture depends
-/// on (its reply wait-set, and the timed sweep that fires an elapsed
-/// per-request deadline) reach the live scheduler. Without it every wake is a
-/// fail-safe no-op and the fixture parks forever.
-struct ChassisWaitArch {
-    scheduler: &'static Scheduler<Aarch64BinArch>,
-    arch: &'static Aarch64BinArch,
-}
-
-impl tairix_kernel_core::waitq::WaitQueueArch for ChassisWaitArch {
-    fn unpark(&self, id: tairix_kernel_sched_api::TaskId) {
-        // Cancellation-safe: an unpark racing the park records a
-        // wake-pending token, so a wake is never lost.
-        let _ = self.scheduler.unpark(id);
-    }
-
-    fn now_ns(&self) -> u64 {
-        KernelArch::monotonic_ns(self.arch, SchedulerArch::current_cpu(self.arch))
-    }
-
-    fn set_wakeup(&self, deadline_ns: Option<u64>) {
-        SchedulerArch::set_wakeup(self.arch, deadline_ns);
-    }
-
-    fn current_task(
-        &self,
-        cpu: tairix_kernel_sched_api::CpuId,
-    ) -> Option<tairix_kernel_sched_api::TaskId> {
-        self.scheduler.current_task(cpu)
-    }
-
-    fn current_cpu(&self) -> Option<tairix_kernel_sched_api::CpuId> {
-        Some(SchedulerArch::current_cpu(self.arch))
-    }
-}
-
 /// The capability set the fixture runs under: `CAP_IPC_ENDPOINT` alone, the
 /// authority a serving block driver needs to bind the endpoints it publishes.
 /// Everything else the fixture calls — the ticketed post/reap/cancel trio, the
@@ -423,10 +385,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // Publish the wait-queue arch hook so parked waiters are genuinely
     // unparked by their wake events — the same adapter the production boot
     // path installs.
-    let wait_arch: &'static ChassisWaitArch = Box::leak(Box::new(ChassisWaitArch {
-        scheduler: sys.sched,
-        arch: sys.arch,
-    }));
+    let wait_arch = SchedWaitQueueArch::leak(sys.sched, sys.arch);
     if tairix_kernel_core::waitq::install_wait_arch(wait_arch).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }

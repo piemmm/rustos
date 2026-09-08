@@ -201,9 +201,10 @@ That gate is load-bearing, not tidiness. A process's address space, capability
 record, endpoints, and open files may be released only when no thread of it is
 executing any longer — reclaiming while a sibling still runs on another CPU
 would free its page-table root from under it. A thread that cannot stop
-immediately (one inside a syscall, whose own unwind must release a mount lock or
-an in-flight block-I/O descriptor; or one still executing in user mode on another
-CPU) therefore has the death *deferred* against it, carrying the terminal status
+immediately (one inside the kernel on its own stack, whose own unwind must
+release a mount lock or an in-flight block-I/O descriptor; or one still
+executing in user mode on another CPU) therefore has the death *deferred*
+against it, carrying the terminal status
 the first dying thread declared, and whichever thread lands last performs the
 teardown. Carrying the status through the deferral is what stops a sibling's
 synthesised `128 + n` from overwriting a real `exit` code.

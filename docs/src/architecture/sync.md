@@ -76,10 +76,21 @@ unaffected; only when the second look is also empty is `CONTENDED` dropped.
 
 Release keeps its FIFO discipline: ownership is published directly to the
 oldest waiter with `LOCKED` still set, so a fresh contender cannot barge ahead
-of it. A waiter that has vanished between observation and wake is passed over
-for the next-oldest rather than unlocking with the queue still occupied —
-doing that would clear the word with it, so no later release would owe the
-remaining contenders a wake and they would park for good.
+of it. A waiter that cannot take the handoff is passed over for the
+next-oldest rather than unlocking with the queue still occupied — doing that
+would clear the word with it, so no later release would owe the remaining
+contenders a wake and they would park for good.
+
+"Cannot take it" is the wake **landing**, not a row existing in the queue.
+Reading the row was a wedge: a task retired while still registered was handed
+ownership it could never claim, `LOCKED` stayed set, and every later acquirer
+parked for ever on a lock nobody held — a mount closed for the rest of the
+boot (`plans/OPEN-DEFECTS.md` D112). `WaitQueueArch::unpark` therefore reports
+whether the wake landed, the pass-over drops the dead registration so the scan
+reaches a live successor, and the publication is withdrawn with a
+compare-exchange: an unrelated wake can resume the designated waiter between
+the publication and the wake, and it claims on its way past, so overwriting
+the slot would name a second successor and hand two tasks the same lock.
 
 ## What a spin round does — the port's spin service
 

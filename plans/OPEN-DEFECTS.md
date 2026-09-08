@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 24 open, 89 closed, 113 total.
+table normalises all three to **closed**. 23 open, 90 closed, 113 total.
 
-### Open (24)
+### Open (23)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -49,10 +49,9 @@ table normalises all three to **closed**. 24 open, 89 closed, 113 total.
 | D99 | `lib/browse`'s `render::manager_tool_rect` has no caller outside its own tests | speculative surface kept deliberately; resolves with D98 or is deleted with the gesture |
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
-| D112 | `stress-qemu-aarch64` never completes: a child's deferred load parks and never returns | diagnosed from the failing transcript — the load run completes; `sysmon`'s child load never does, and the machine then idles. Three contributing defects fixed; the park site not yet localised |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
-### Closed (89)
+### Closed (90)
 
 | ID | Subject |
 |---|---|
@@ -145,6 +144,7 @@ table normalises all three to **closed**. 24 open, 89 closed, 113 total.
 | D108 | a rail press selected a device and reported none of the pane it now drew |
 | D109 | a sample rebuilt the device rail, swallowing the click a reader was resting to make |
 | D110 | the pressure banner drew its text past the pane, into the gap and over the action column |
+| D112 | `stress-qemu-aarch64` never completes: a child's deferred load parks and never returns |
 
 ## Scope
 
@@ -1308,80 +1308,76 @@ per-operation mapping read `EWOULDBLOCK` where `EEXIST` was meant.
   ceiling). Read `plans/FIX-RANDOMNESS.md` and
   `tests/integration/rng_soak/README.md` first.
 - **D112 — `stress-qemu-aarch64` never completes: a child's deferred load
-  parks and never returns.** The load run itself is **not** the failure. In
-  the retained failing transcript the guest does everything the vertical asks
-  of it: the detached controller's 120-second deadline fires on time (at
-  129.73 s, 120 s after it started), it signals all ten workers, reaps all ten,
-  reports `wait` `ECHILD`, and exits — so **both** `comm=stress` witnesses land.
-  The run dies on the **third** witness: the shell never exits, because the
-  `sysmon` the script typed never renders a frame.
-  **`sysmon` never starts.** `elsh` admits it at 9.748 s and hands it the
-  console foreground at 9.752 s, and its child-side deferred load then produces
-  nothing at all for the remaining 590 seconds — no `11001` bundle-load record,
-  no effective-capability derivation, no `4030 process spawned`. Three of the
-  ten workers are in the same state; they leave it only when the controller's
-  `Terminate` unparks them out of it, and are reaped without ever reaching user
-  mode. A fourth completes its load at 129.94 s, the moment the teardown frees
-  CPU.
-  **So the mechanism is a lost wake in the deferred child load**, not slowness
-  and not CPU starvation: for the last 470 seconds the machine is *idle* — the
-  guest CPU dump has all four cores in `EL1h` inside `run_dispatch_loop`'s
-  masked idle park with `WatchdogActivity::Idle`, so nothing holds a lock,
-  nothing is runnable, and the parked child is waiting on something that will
-  never be signalled.
-  **The record's two earlier "signatures" were an artefact, now removed.** The
-  harness deleted a stale `serial.log` before each run but not a stale
-  `hang.txt`, so a *passing* run published the previous failure's CPU dump: the
-  "all four cores in `EL0t`" reading belonged to a different event than the
-  transcript it was read beside. `run_one` now drops every sidecar a run may
-  write (`remove_stale_sidecar`), so a dump and a transcript always describe
-  the same run.
-  **Fixed here, on the paths the earlier reading implicated.** (1) A delivered
-  reschedule IPI took the *competitor-gated* tick latch, so a lone runnable
-  task on the target swallowed it — dropping exactly the case its senders send
-  it for, a CPU-bound victim the kill path had just nudged, whose death then
-  waited on the watchdog's monopoly guard. It now takes the un-gated
-  forced-yield latch, which is what the SGI-wake preemption vertical already
-  asserts for a sole EL0 spinner. (2) A fired quantum disarmed the hardware
-  one-shot and left the CPU's recorded *blocking-wait* deadline unarmed; under
-  a tickless policy a tick that owes no switch reprograms nothing, so the
-  timeout waited on the monopoly guard too. Every port's fire now consumes the
-  quantum *and* a wakeup at or before the counter value it fired at, then
-  arms only the remainder (`consume_fired_quantum`). Re-arming an elapsed
-  wakeup instead interrupt-livelocks the core — the per-CPU slot is a cache
-  of a workspace-wide nearest deadline, so it routinely holds one another
-  CPU's sweep already retired, and the compare then re-traps without ever
-  reaching the dispatch loop that would retire it. That form wedged 41
-  full-boot verticals before it was corrected; the host test pins both
-  directions.
-  **What remains: localise the park.** Bounded waits are excluded — the
-  in-kernel block-completion wait carries a per-request deadline and fails
-  closed as `TimedOut` — so it is one of the *unbounded* parks the load path
-  takes: the mount `SleepLock` (`NO_DEADLINE`) or `APP_STORE_WAITQ`. Two
-  hazards to audit there. `SleepLock::hand_off_oldest` grants the handoff and
-  keeps `LOCKED` set on the strength of the waiter being *registered*,
-  discarding `unpark`'s error, so a handoff to a task that can no longer run
-  leaves the lock held by nobody; and a task retired by
-  `SchedulerPolicy::exit` while parked in `SleepLock::lock` never deregisters,
-  because that path is reached only for a thread the kill gate does not hold —
-  which is exactly a loading child, whose body is a kthread and not a syscall.
-  Separately, `IRQ_WAITQ` carries one unkeyed registration per task and is
-  shared by the in-kernel device wait and every `waitset_wait`/`irq_wait`
-  caller, so a nested use by one task would have the inner park's `deregister`
-  destroy the outer registration.
-  Sixty-plus targeted reproductions (fresh boot, cold bundle cache, ten to
-  forty concurrent worker loads racing a cold foreground load; and the whole
-  vertical under a soak-shaped `nice`-19 host load and under vCPU
-  oversubscription) did not reproduce it, so closing it needs either a longer
-  soak against the retained transcript or a guest-side diagnostic that dumps
-  each parked task's wait identity. Read `plans/WATCHDOG.md` and
-  `plans/SPAWN.md` first.
-  **Also noticed, not fixed:** `SchedulerPolicy::exit` short-circuits on its
-  `doomed` claim before it looks at whether the victim is still executing, so
-  a repeat request — the `Kill` a grace window escalates to — reports
-  `AlreadyExited` and issues no nudge at all. It is unreachable as a hang now
-  that the first nudge is un-gated (a doomed task is retired at its next body
-  return), but an escalation that cannot escalate is a §27 completeness gap.
+  parks and never returns — DONE.** The mount's `SleepLock` was left closed
+  on a holder that no longer existed, so every later filesystem call on that
+  volume parked for ever and the machine idled with all four cores in
+  `run_dispatch_loop`'s masked park.
+  **The chain.** A launching child materialises its own image in a *kernel
+  body* on its own kernel stack, and parks inside it — on the mount lock, on a
+  block completion. The scheduler's per-task body lock is free the moment such
+  a task parks, so `SchedulerPolicy::exit` reported the child **quiesced** and
+  dropped its control block: its stack frames never unwound, so its wait-queue
+  registration (and, had it been the holder, its `SleepGuard`) outlived it.
+  The kill gate exists to stop exactly that, but keyed on "inside a *syscall*",
+  which a kernel body is not. The release side then completed the wedge:
+  `SleepLock::hand_off_oldest` read `wake_task`'s "a row exists" as "the
+  successor took it", published ownership to a task that could never claim,
+  and left `LOCKED` set. That accounts for the retained transcript exactly —
+  `sysmon` and three workers queued behind a fourth that held the lock while
+  starved of CPU; the controller's 120-second teardown terminated the queued
+  ones, the fourth finished at 129.94 s and handed off to a dead registration,
+  and nothing ran again.
+  **Closed on both sides.**
+  1. *A thread is never destroyed while it is inside the kernel.* The kill
+     gate's predicate is now "executing a kernel body on its own stack", not
+     "inside a syscall" (`kernel_enter` / `kernel_exit_take_kill`), and the
+     deferred-load body brackets itself with it across the build **and** the
+     `become_user` yield. A termination taken at that boundary supersedes both
+     outcomes: the child neither enters user mode nor reports a load failure.
+  2. *The two deferral registers share one lock.* Which one a death lands in
+     is a single decision on the in-kernel set, so a kill arriving exactly as
+     the victim entered the kernel can no longer be recorded as a user-mode
+     teardown the dispatch loop lands at the victim's next park. A dispatch
+     retires on a park as well as on a return, so `land_running_kill`
+     additionally withholds a teardown while its thread is in the kernel.
+  3. *The driver-unload path went through the gate too.* It called
+     `SchedulerPolicy::exit` directly, so unloading a driver parked in
+     `irq_wait` or mid-filesystem-call hit the same defect. It now records a
+     `Plain` teardown in the gate and wakes the thread; the gate's pending
+     register carries a `DeferredTeardown` rather than a bare status so a
+     death nobody reaps is expressible there.
+  4. *An ownership handoff is confirmed, not assumed.* `WaitQueueArch::unpark`
+     reports whether the wake landed and `wake_waiter` answers that rather
+     than "a row existed"; `hand_off_oldest` drops a registration it could not
+     wake and moves to the next-oldest, and withdraws its publication with a
+     compare-exchange so a waiter that claimed on an unrelated wake is not
+     superseded by a second successor.
+  Also fixed here: `SchedulerPolicy::exit`'s repeat request short-circuited on
+  its `doomed` claim before looking at whether the victim was still executing,
+  so the `Kill` a grace window escalates to issued no nudge at all — all three
+  policies now re-nudge a still-executing victim. And the five `fs_lock`
+  syscall tests shared one `FileId` against the process-global lock registry,
+  which made a lock taken in one visible to a query in another beside it
+  (2 failures in 40 whole-crate runs; 0 in 40 once each names its own node).
+  **Audited and left alone:** `IRQ_WAITQ`'s one unkeyed registration per task
+  is shared by the in-kernel block-completion wait, `irq_wait` and
+  `waitset_wait`, so a *nested* use would have the inner park's `deregister`
+  destroy the outer registration. It is unreachable: the two syscall handlers
+  perform no block I/O (their readiness scans are non-consuming registry
+  peeks) and the block wait is not reached from inside either, so no call
+  stack holds two at once. Keying it would be speculative surface; the
+  constraint belongs in review, not in a second mechanism.
+  `SleepLock::lock` likewise stays uninterruptible: a doomed contender waits
+  for the holder rather than unwinding, exactly as a doomed syscall caller on
+  the same lock already did, and the wait is bounded because every device wait
+  inside a holder's critical section carries a deadline and fails closed. A
+  killable acquire would have to return a `Result` to every `fs_*` caller with
+  no caller needing one today.
+  **What corroboration remains.** The original failure never reproduced on
+  demand (sixty-plus targeted attempts before the fix), so the vertical's own
+  green runs and the nightly soak corroborate rather than prove. Every link in
+  the chain above carries a host reproducer that fails before the fix and
+  passes after.
 - **D113 — `netstack-bond-qemu-aarch64` guest exits before its readiness
   marker.** Same nightly run: `qemu status -1` with "monitor command script
   incomplete: a command's readiness marker was not seen before the guest

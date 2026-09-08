@@ -416,18 +416,37 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
 /// the nearest-deadline one-shot is armed through the arch port's
 /// `set_wakeup`. Holds only `'static` borrows into the leaked
 /// `KernelState`, so it is itself leaked and installed once at boot.
-struct SchedWaitQueueArch<A: KernelArch + 'static> {
+///
+/// Public because a QEMU vertical's kernel chassis installs the **same**
+/// adapter the boot path does: a vertical whose wake path is a private copy
+/// proves nothing about the one that ships, and the copies drift the moment
+/// this one changes.
+pub struct SchedWaitQueueArch<A: KernelArch + 'static> {
     scheduler: &'static Scheduler<A>,
     arch: &'static A,
 }
 
+impl<A: KernelArch + 'static> SchedWaitQueueArch<A> {
+    /// Leak an adapter over the `'static` `scheduler` and `arch`.
+    ///
+    /// Leaked rather than returned by value because the global wait-queue
+    /// hook, the runaway-interrupt clock, and the preempt competitor gate all
+    /// hold it for the life of the kernel.
+    #[must_use]
+    pub fn leak(scheduler: &'static Scheduler<A>, arch: &'static A) -> &'static Self {
+        Box::leak(Box::new(Self { scheduler, arch }))
+    }
+}
+
 impl<A: KernelArch + 'static> crate::waitq::WaitQueueArch for SchedWaitQueueArch<A> {
-    fn unpark(&self, id: tairix_kernel_sched_api::TaskId) {
+    fn unpark(&self, id: tairix_kernel_sched_api::TaskId) -> bool {
         // Cancellation-safe: `unpark` of a not-yet-parked task records a
         // wake-pending token rather than erroring, so a wake racing the
-        // park is never lost. A vanished task is a
-        // benign no-op for a wake.
-        let _ = self.scheduler.unpark(id);
+        // park is never lost. An error means the task can never run again —
+        // it is terminal, or the id names none — which a broadcast treats as
+        // nothing to do and an ownership handoff must not mistake for a
+        // successor.
+        self.scheduler.unpark(id).is_ok()
     }
 
     fn now_ns(&self) -> u64 {
@@ -510,10 +529,7 @@ impl<A: KernelArch + 'static> crate::preempt::PreemptCompetitor for SchedWaitQue
 /// the only caller). Factored out of `run_phases` to
 /// keep that function within its line budget.
 fn publish_wait_queue_arch<A: KernelArch + 'static>(state: &'static KernelState<A>) {
-    let wait_arch: &'static SchedWaitQueueArch<A> = Box::leak(Box::new(SchedWaitQueueArch {
-        scheduler: &state.scheduler,
-        arch: state.arch.as_ref(),
-    }));
+    let wait_arch = SchedWaitQueueArch::leak(&state.scheduler, state.arch.as_ref());
     let _ = crate::waitq::install_wait_arch(wait_arch);
     // The same leaked adapter is the runaway-interrupt safety net's
     // monotonic clock: installing it lets `IrqTable::fire` rate-account
@@ -1767,14 +1783,24 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // with no path left to stop it. A build that registered no capability
         // record still has the leader task to stop.
         //
-        // A thread that is *still executing* on another CPU cannot be reclaimed
-        // here: withdrawing the address space while its own code still runs
-        // would turn a legitimate access into a wild fault (the same defect the
-        // signal-terminate path fixes). The scheduler reports such a thread
-        // `Deferred`; defer the whole teardown to the dispatch loop, which
-        // reclaims the process through the one shared landing rule once the last
-        // of them retires (the scheduler already IPI'd that CPU). The unload is
-        // committed either way — audit it now.
+        // A thread that cannot be reclaimed *here* is never destroyed
+        // mid-flight; the teardown follows it to the point it reaches safely,
+        // exactly as a signalled termination does. Two cases, and neither may
+        // be retired on the spot:
+        //
+        // * Inside the kernel on its own stack — a driver blocked in
+        //   `irq_wait`, or one part-way through a filesystem call holding a
+        //   mount's `SleepLock`. The scheduler's per-task body lock is free
+        //   the moment such a thread parks, so `exit` would report it
+        //   quiescent and drop a stack whose frames still own that lock,
+        //   closing the mount for the rest of the boot. The gate records the
+        //   teardown instead and the wake below runs the thread to its own
+        //   boundary, which lands it.
+        // * Still executing in user mode on another CPU. Withdrawing the
+        //   address space under its own code turns a legitimate access into a
+        //   wild fault, so the dispatch loop reclaims once it retires.
+        //
+        // The unload is committed either way — audit it now.
         let mut threads: alloc::vec::Vec<u64> =
             self.caps.read().threads_of(sec_id).map(|t| t.0).collect();
         if threads.is_empty() {
@@ -1782,7 +1808,15 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         }
         let mut deferred = false;
         for thread in threads {
-            if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(thread) {
+            let teardown = crate::procsignal::DeferredTeardown::Plain { process: sec_id };
+            if crate::procsignal::defer_kill_in_kernel(thread, teardown) {
+                // Every in-kernel park loop re-tests after a wake and unwinds
+                // when the gate holds a teardown for it, so even an unbounded
+                // `irq_wait` reaches its boundary rather than sleeping on as
+                // an unstoppable driver.
+                let _ = self.scheduler.unpark(thread);
+                deferred = true;
+            } else if let Ok(ExitDisposition::Deferred) = self.scheduler.exit(thread) {
                 crate::procsignal::defer_plain_reclaim(thread, sec_id);
                 deferred = true;
             } else {

@@ -781,15 +781,16 @@ Split into two increments, exactly as SP6 was (surface+seam, then producer):
   records the signal's POSIX-familiar termination status (the shared
   `Signal::termination_status` in `lib/abi`, so kernel and program agree —
   since SP9: `Interrupt` → 130, `Kill` → 137, `Terminate` → 143) so the
-  parent's `wait` reaps it. A termination never lands *inside* a syscall:
-  a victim between syscall entry and return may hold kernel state only its
-  own unwind can release (a mount's `SleepLock`, an in-flight block-I/O
-  descriptor), so the `procsignal` kill gate records the kill pending,
-  wakes the victim (every in-kernel park loop unwinds with
+  parent's `wait` reaps it. A termination never lands *inside the kernel*:
+  a victim executing a kernel body on its own stack — a syscall handler, or
+  the deferred-load body a launching child builds its image in — may hold
+  state only its own unwind can release (a mount's `SleepLock`, an in-flight
+  block-I/O descriptor), so the `procsignal` kill gate records the kill
+  pending, wakes the victim (every in-kernel park loop unwinds with
   `Errno::Interrupted` when a kill is pending, so no wait is unkillable),
-  and the syscall dispatch boundary lands it — recording the same
-  `128 + n` status and running the one shared reclaim — once the handler
-  has unwound. A victim in user mode is terminated immediately.
+  and that body's own boundary lands it — recording the same `128 + n`
+  status and running the one shared reclaim — once it has unwound. A victim
+  in user mode is terminated immediately.
   Installed in `init.rs::run_phases` over the concrete wait producer +
   `state.scheduler` and threaded through a hook-level `with_process_signal`
   forwarder. Six host tests cover it over a real `Scheduler<TestArch>`

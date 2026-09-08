@@ -132,7 +132,9 @@ pub(crate) fn advance_clock(ns: u64) {
 }
 
 impl WaitQueueArch for HostWaitArch {
-    fn unpark(&self, _id: TaskId) {}
+    fn unpark(&self, _id: TaskId) -> bool {
+        true
+    }
 
     fn now_ns(&self) -> u64 {
         CLOCK.with(Cell::get)
