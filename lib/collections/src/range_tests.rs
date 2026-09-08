@@ -245,3 +245,44 @@ fn an_error_states_which_refusal_it_was() {
         "the range overlaps one already held"
     );
 }
+
+#[test]
+fn first_gap_reports_containment_across_ranges_recorded_separately() {
+    let mut map: RangeMap<u64, char> = RangeMap::new();
+    map.insert(0..10, 'a').expect("fits");
+    map.insert(10..20, 'b').expect("fits");
+    map.insert(30..40, 'c').expect("fits");
+    // Two abutting identities hold a query that straddles them, which is how
+    // a caller checks it owns every element of a range it grew a piece at a
+    // time.
+    assert!(map.first_gap(5..15).is_none());
+    assert!(map.first_gap(0..20).is_none());
+    assert_eq!(map.first_gap(0..21), Some(20..21));
+    assert_eq!(map.first_gap(25..35), Some(25..30));
+    assert_eq!(map.first_gap(20..30), Some(20..30));
+    assert!(
+        map.first_gap(7..7).is_none(),
+        "an empty query holds nothing"
+    );
+}
+
+#[test]
+fn remove_range_splits_the_identities_it_cuts_and_reports_what_it_dropped() {
+    let mut map: RangeMap<u64, ()> = RangeMap::new();
+    map.insert(0..10, ()).expect("fits");
+    map.insert(10..20, ()).expect("fits");
+
+    // A cut through the middle of one range leaves both ends.
+    assert_eq!(map.remove_range(2..5), 3);
+    assert_eq!(ranges(&map), [(0, 2), (5, 10), (10, 20)]);
+
+    // A cut spanning two abutting ranges takes part of each.
+    assert_eq!(map.remove_range(8..12), 4);
+    assert_eq!(ranges(&map), [(0, 2), (5, 8), (12, 20)]);
+
+    // Elements the map does not hold are not counted as dropped, and an
+    // empty cut drops nothing.
+    assert_eq!(map.remove_range(2..6), 1);
+    assert_eq!(map.remove_range(3..3), 0);
+    assert_eq!(ranges(&map), [(0, 2), (6, 8), (12, 20)]);
+}

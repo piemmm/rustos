@@ -187,6 +187,46 @@ impl<K: RangeKey, V> RangeMap<K, V> {
             .find(|range| range.end <= point)
     }
 
+    /// The lowest part of `query` the map does **not** hold.
+    ///
+    /// `None` means `query` is wholly held, which is how a caller tests
+    /// containment across ranges it did not record one at a time.
+    #[must_use]
+    pub fn first_gap(&self, query: Range<K>) -> Option<Range<K>> {
+        self.gaps(query).next()
+    }
+
+    /// The parts of `query` the map does not hold, in ascending order.
+    ///
+    /// The gaps between what a map has handed out *are* its free space, so
+    /// this is the one walk both the containment test and the first-fit
+    /// placement search read. Abutting ranges are stepped over rather than
+    /// reported as an empty gap between them, so the answer describes what the
+    /// map covers rather than how its entries were recorded.
+    fn gaps(&self, query: Range<K>) -> impl Iterator<Item = Range<K>> + '_ {
+        let mut cursor = query.start;
+        let end = query.end;
+        let mut held = self.overlapping(query);
+        core::iter::from_fn(move || {
+            if cursor >= end {
+                return None;
+            }
+            for (range, _) in held.by_ref() {
+                let gap = cursor..range.start;
+                cursor = cursor.max(range.end);
+                if gap.start < gap.end {
+                    return Some(gap);
+                }
+                if cursor >= end {
+                    return None;
+                }
+            }
+            let tail = cursor..end;
+            cursor = end;
+            Some(tail)
+        })
+    }
+
     /// Every held range intersecting `query`, in ascending order, each with
     /// its value. An empty `query` intersects nothing.
     pub fn overlapping(&self, query: Range<K>) -> impl Iterator<Item = (Range<K>, &V)> + '_ {
@@ -239,17 +279,12 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     /// placement scales with what it has handed out rather than with how
     /// large the window is.
     fn first_free(&self, within: Range<K>, count: u64) -> Option<K> {
-        if count == 0 || within.start >= within.end {
+        if count == 0 {
             return None;
         }
-        let mut cursor = within.start;
-        for (held, _) in self.overlapping(within.clone()) {
-            if held.start.distance_from(cursor) >= count {
-                return Some(cursor);
-            }
-            cursor = cursor.max(held.end);
-        }
-        (within.end.distance_from(cursor) >= count).then_some(cursor)
+        self.gaps(within)
+            .find(|gap| gap.end.distance_from(gap.start) >= count)
+            .map(|gap| gap.start)
     }
 
     /// Every held range and its value, in ascending order.
@@ -265,6 +300,42 @@ impl<K: RangeKey, V> RangeMap<K, V> {
     /// form, and the coalescing set needs the unfiltered one.
     pub(crate) fn entry_at_or_below(&self, point: K) -> Option<(Range<K>, &V)> {
         self.entries.range(..=point).next_back().map(entry_pair)
+    }
+}
+
+impl<K: RangeKey> RangeMap<K, ()> {
+    /// Drop `range`, splitting the held ranges it cuts, and report the
+    /// elements dropped.
+    ///
+    /// Only for a valueless map: splitting a held range has to give each
+    /// surviving part a value, and a value that describes the range's own
+    /// position (a file offset, a device base) would be wrong in both. Where
+    /// the value is nothing there is nothing to be wrong, so the split is the
+    /// map's own business — which is what lets a set of pages, and a window of
+    /// pages handed out, share this one definition.
+    pub fn remove_range(&mut self, range: Range<K>) -> u64 {
+        if range.start >= range.end {
+            return 0;
+        }
+        let mut dropped = 0u64;
+        // Each pass takes one intersecting range and puts back only the parts
+        // outside the cut, which intersect the cut no longer.
+        loop {
+            let cut = self
+                .overlapping(range.clone())
+                .next()
+                .map(|(held, ())| held);
+            let Some(cut) = cut else { break };
+            self.entries.remove(&cut.start);
+            let overlap = range
+                .end
+                .min(cut.end)
+                .distance_from(range.start.max(cut.start));
+            dropped = dropped.saturating_add(overlap);
+            let _ = self.insert(cut.start..range.start, ());
+            let _ = self.insert(range.end..cut.end, ());
+        }
+        dropped
     }
 }
 

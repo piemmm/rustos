@@ -52,8 +52,10 @@ pub struct AnonWindowMap {
     window: Range<u64>,
     capacity_pages: usize,
     /// Live allocations, keyed by their user-virtual byte extent. Adjacent
-    /// allocations stay distinct entries, so a release names exactly the
-    /// range it was handed and can never take a neighbour's with it.
+    /// allocations stay distinct entries, so [`Self::validate`] can still
+    /// name one placement exactly — the unit a whole-region release
+    /// ([`Self::release`]) works in — while [`Self::release_pages`] cuts the
+    /// pages a caller names out of however many placements they span.
     regions: RangeMap<u64, ()>,
 }
 
@@ -122,7 +124,9 @@ impl AnonWindowMap {
     /// `page_count` must equal the count the range was allocated with: a
     /// mismatch (or an unknown base) is rejected fail-closed and frees
     /// nothing (the range is not one this allocator
-    /// handed out, so it never tears down a neighbour's slots).
+    /// handed out, so it never tears down a neighbour's slots). This is the
+    /// whole-placement release the file window's ABI is defined in terms of;
+    /// [`Self::release_pages`] is the page-range form.
     ///
     /// # Errors
     ///
@@ -136,6 +140,51 @@ impl AnonWindowMap {
         self.validate(base_va, page_count)?;
         self.regions.remove(base_va);
         Ok(())
+    }
+
+    /// Release the `page_count` pages from `base_va`, splitting the
+    /// placements the range cuts through and making exactly those pages
+    /// available again.
+    ///
+    /// The anonymous ABI releases *pages*, not the extents a caller happened
+    /// to obtain them in, so a program that grew a region over several calls
+    /// can hand back the part of it that came free. Containment is what keeps
+    /// the fail-closed property [`Self::release`] gets from an exact match: a
+    /// range holding one page this window has not handed out is refused
+    /// whole, so a release still reaches only the caller's own pages.
+    ///
+    /// # Errors
+    ///
+    /// [`AnonError::NotMapped`] if any page of the range is not live in this
+    /// window, and [`AnonError::Overflow`] if the count's byte span does not
+    /// fit the address space.
+    pub fn release_pages(&mut self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
+        let extent = self.held_extent(base_va, page_count)?;
+        self.regions.remove_range(extent);
+        Ok(())
+    }
+
+    /// Confirm every page of the `page_count` pages from `base_va` is live in
+    /// this window, **without** mutating any state — the non-mutating half of
+    /// [`Self::release_pages`], so the live space can refuse before it tears
+    /// any page down.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::release_pages`].
+    pub fn validate_pages(&self, base_va: u64, page_count: u64) -> Result<(), AnonError> {
+        self.held_extent(base_va, page_count).map(|_| ())
+    }
+
+    /// The byte extent of `page_count` pages from `base_va`, once every page
+    /// of it is known live in this window.
+    fn held_extent(&self, base_va: u64, page_count: u64) -> Result<Range<u64>, AnonError> {
+        let bytes = Self::bytes_of(page_count)?;
+        let extent = base_va.span(bytes).ok_or(AnonError::NotMapped)?;
+        if self.regions.first_gap(extent.clone()).is_some() {
+            return Err(AnonError::NotMapped);
+        }
+        Ok(extent)
     }
 
     /// Confirm `base_va` is a live allocation of this window of exactly
@@ -326,6 +375,40 @@ mod tests {
         assert!(w.covers(b), "the neighbour region is untouched");
         // An address below the window is never covered.
         assert!(!w.covers(WINDOW_BASE - 1));
+    }
+
+    #[test]
+    fn a_page_range_release_cuts_only_the_pages_it_names() {
+        let mut w = window();
+        let a = w.allocate(4).expect("fits");
+        let b = w.allocate(4).expect("fits");
+
+        // A cut through the middle of one placement leaves both ends live,
+        // and frees exactly the pages named for reuse.
+        w.release_pages(a + PAGE, 2).expect("held pages release");
+        assert!(w.covers(a));
+        assert!(!w.covers(a + PAGE));
+        assert!(w.covers(a + 3 * PAGE));
+        assert_eq!(w.allocate(2), Ok(a + PAGE), "the cut is free space again");
+
+        // A range spanning two abutting placements is all the caller's own
+        // pages, so it releases; a range with one page the window never
+        // handed out is refused whole, cutting nothing.
+        w.release_pages(a + 3 * PAGE, 2).expect("spans both");
+        assert!(!w.covers(a + 3 * PAGE));
+        assert!(!w.covers(b));
+        assert!(w.covers(b + PAGE), "the rest of the neighbour is untouched");
+        assert_eq!(
+            w.release_pages(b + 3 * PAGE, 2),
+            Err(AnonError::NotMapped),
+            "one unheld page refuses the whole release"
+        );
+        assert!(w.covers(b + 3 * PAGE), "nothing was cut");
+        assert_eq!(w.validate_pages(b + PAGE, 3), Ok(()));
+        assert_eq!(w.validate_pages(b + PAGE, 4), Err(AnonError::NotMapped));
+        // A zero count spans nothing, so it names no live page — the same
+        // fail-closed answer `validate` gives it.
+        assert_eq!(w.validate_pages(b, 0), Err(AnonError::NotMapped));
     }
 
     #[test]

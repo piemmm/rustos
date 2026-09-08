@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 90 closed, 113 total.
+table normalises all three to **closed**. 23 open, 91 closed, 114 total.
 
 ### Open (23)
 
@@ -145,6 +145,7 @@ table normalises all three to **closed**. 23 open, 90 closed, 113 total.
 | D109 | a sample rebuilt the device rail, swallowing the click a reader was resting to make |
 | D110 | the pressure banner drew its text past the pane, into the gap and over the action column |
 | D112 | `stress-qemu-aarch64` never completes: a child's deferred load parks and never returns |
+| D114 | `mem_unmap` refused every release a shrinking heap arena asked for, so the switchboard spent whole frames re-asking |
 
 ## Scope
 
@@ -6499,6 +6500,12 @@ The same teardown now costs 64 unmaps at every band, and its growth 116 maps
 where the band permits a pad
 (`a_bulk_teardown_resizes_the_arena_in_granules_not_a_page_at_a_time`).
 
+That bounds the calls a **successful** teardown makes, and it is what the
+granule can bound. The signature returned on a later Pi 4B run at ~3700
+`mem_unmap`s per 250 ms frame, because those calls were being *refused* and
+re-asked — a second, independent cause the count could not distinguish from
+this one. It is D114.
+
 ## D105 — the pool's fork-join barrier waited on a worker that had registered before it knew whether any work was left (FIXED)
 
 A Pi 4B debug run reported the desktop overrunning its 250 ms budget by
@@ -6540,3 +6547,70 @@ was about — a dispatcher that drew every piece itself has no holder to wait fo
 (`a_dispatch_the_dispatcher_drew_has_nothing_to_wait_for`). Racing the word on
 two CPUs at once remains the open coverage gap D103, which the rewrite does not
 change.
+
+## D114 — `mem_unmap` refused every release a shrinking heap arena asked for, so the switchboard spent whole frames re-asking (FIXED)
+
+A Pi 4B debug run reported the switchboard overrunning its 250 ms budget for
+minutes on end with the frame spent almost entirely in syscalls:
+`top_calls=mem_unmap=3670,ipc_call=16` of `calls=3701`, `blocked_ms=16`,
+`sampled=running` — the D104 signature, on a build that already had the resize
+granule. A granule that had cut a teardown to 64 calls could not be producing
+3700, so the calls were not the ones it bounds.
+
+**Cause.** `mem_unmap` demanded that `(base, len)` name a region the caller had
+reserved **exactly** (`anon_region_exact` against the per-`mem_map` records),
+and a shrinking arena never names one. The `lib/rt` heap grows one contiguous
+arena by `mem_map(FIXED)` at its current top, so the records are a run of
+abutting extents, while what it releases is the free top above its retention —
+a boundary that falls wherever the free bytes fell. Every such release answered
+`NotFound`, which changed nothing: `mapped_end` stayed put, the free top stayed
+above the granule, and the next `dealloc` found the same release still due and
+asked again. One refused syscall per free, each taking the global
+address-space registry's read lock, for as long as the panel kept allocating.
+Reproduced host-side at **3799** refused calls for one descending teardown of a
+4096-page arena — the field counts to within 3%.
+
+Both halves are defects, and both are fixed.
+
+**The ABI releases pages, not mappings.** `mem_unmap` now confirms every page
+of the range is one the caller holds (`anon_region_holds` — containment) and
+releases exactly those, splitting the holding where the range cuts through, so
+the surviving pages stay recorded and a first touch of them is still a
+legitimate fault. Containment is what preserves the whole security property the
+exact match was there for: a range holding one page the caller does not hold is
+refused whole, touching nothing, so a task still reaches only its own memory.
+The registry's anonymous records became a `RangeSet` of *pages* rather than a
+map of extents — nothing needed to know which call placed a page — which also
+means a heap that grew its arena over ten thousand calls costs one entry.
+
+Uniform across placements, so no program need know which window its base came
+from: the producer's placement window gained the same page-range release
+(`AnonWindowMap::release_pages`, containment-checked), and the live space's
+anonymous unmap uses it. The file window keeps its whole-placement release,
+which is the `file_unmap` ABI.
+
+**A refused release is asked once per arena extent.** Nothing about the arena's
+top changes when a release is refused, so there is no new question to ask; the
+heap remembers the `mapped_end` it was refused at and asks again only once the
+extent moves. The pages stay mapped and recorded free — allocatable, nothing
+lost — so a kernel that will not take them costs one syscall, not one per free.
+
+**Coverage.** `mem_unmap_releases_a_sub_range_of_the_pages_the_caller_holds`
+drives the heap's own release shape through the handler (two abutting `FIXED`
+mappings, a free top straddling them) and asserts the refusals either side:
+a range past the arena, a range over a hole already released, another task's
+range. It fails with `Err(NotFound)` against the exact-match rule.
+`a_refused_release_is_not_asked_again_until_the_arena_moves` is the storm
+itself: 1 attempt where the unguarded heap makes 3799.
+`a_page_range_release_cuts_only_the_pages_it_names` and
+`unmap_of_a_placed_range_releases_its_pages_and_no_others` cover the placement
+window and the live space. `heap_qemu_aarch64` now fails the run if a release
+the heap asked for was *refused*, not only if none arrived — a refusal is an
+arena that silently never shrinks, and the fixture's own value checks cannot
+see it.
+
+**Coverage boundary.** That vertical routes `mem_unmap` to its own producer, so
+the handler's containment rule is proven host-side rather than on hardware; no
+vertical drives the `lib/rt` heap through the real `kernel/core` handler. The
+full-image desktop boot is what exercises that path, which is where this defect
+was found and not where it was caught.

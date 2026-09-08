@@ -807,14 +807,17 @@ where
         if self.file.as_ref().is_some_and(|file| file.owns(base_va)) {
             return Err(LiveSpaceError::Anon(AnonError::NotMapped));
         }
-        // A base inside the heap window is a non-`FIXED` placement: it must
-        // match a live record exactly before any teardown, so a bad
-        // (base, len) for an in-window address fails closed without unmapping
-        // a neighbour's pages. A `FIXED` base (outside the
-        // window) skips this and is torn down by extent as before.
+        // A base inside the heap window is a non-`FIXED` placement: every
+        // page of the range must be live in the window before any teardown,
+        // so a bad (base, len) for an in-window address fails closed without
+        // unmapping a neighbour's pages. Pages rather than a whole placement,
+        // because the anonymous ABI releases what the caller names — a
+        // program that grew a region over several calls hands back the part
+        // of it that came free. A `FIXED` base (outside the window) has no
+        // placement record and is torn down by extent.
         let placed = self.anon.owns(base_va);
         if placed {
-            self.anon.validate(base_va, page_count)?;
+            self.anon.validate_pages(base_va, page_count)?;
         }
         let frames = self.frames;
         // Count the frames actually reclaimed: a demand-paged region is
@@ -853,8 +856,8 @@ where
             self.committed_unbacked = self.committed_unbacked.saturating_sub(unbacked);
         }
         if placed {
-            // Validated above, so the release matches; ignore its result.
-            let _ = self.anon.release(base_va, page_count);
+            // Validated above, so the pages are held; ignore the result.
+            let _ = self.anon.release_pages(base_va, page_count);
         }
         Ok(())
     }
@@ -1550,20 +1553,34 @@ mod tests {
     }
 
     #[test]
-    fn unmap_of_a_placed_base_with_a_wrong_extent_fails_closed() {
+    fn unmap_of_a_placed_range_releases_its_pages_and_no_others() {
         let mut live = live();
         let a = live.map_anonymous_placed(3).expect("room");
-        // A wrong page count for an in-window (placed) base is refused before
-        // any teardown — no partial unmap, region intact.
+        // Part of a placement releases just those pages: the anonymous ABI
+        // releases what the caller names, so a region grown over several
+        // calls can hand back the part that came free.
+        live.unmap_anonymous(a, 2).expect("a held range releases");
+        assert_eq!(live.space().mapped_pages(), 1, "only the named pages went");
+
+        // A range running past what the window holds is refused whole,
+        // before any teardown — the page it does not hold makes the whole
+        // release fail closed.
         assert_eq!(
-            live.unmap_anonymous(a, 2),
+            live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 2),
             Err(LiveSpaceError::Anon(AnonError::NotMapped))
         );
-        assert_eq!(live.space().mapped_pages(), 3, "no partial teardown");
-        // The matching unmap still succeeds afterwards.
-        live.unmap_anonymous(a, 3)
-            .expect("the matching unmap succeeds");
+        assert_eq!(live.space().mapped_pages(), 1, "no partial teardown");
+
+        // The remaining page releases, and the whole placement's space is
+        // then available again.
+        live.unmap_anonymous(a + 2 * PAGE_SIZE as u64, 1)
+            .expect("the last held page releases");
         assert_eq!(live.space().mapped_pages(), 0);
+        assert_eq!(
+            live.map_anonymous_placed(3).expect("room"),
+            a,
+            "the released placement base is reused"
+        );
     }
 
     #[test]

@@ -16,8 +16,10 @@
 //!   pages) of fresh **anonymous** memory into the **caller's own**
 //!   hardware-isolated address space and returns the base address of the
 //!   new region, or an [`Errno`].
-//! * `mem_unmap(base, len)` releases a region previously returned by
-//!   `mem_map`.
+//! * `mem_unmap(base, len)` releases `len` bytes (rounded up to whole
+//!   pages) from `base`. Every page must be one the caller holds
+//!   anonymously; a range holding one page it does not is refused whole
+//!   (`Errno::NotFound`), touching nothing.
 //!
 //! The binding invariants (`plans/SPAWN.md` SP5, settled in the SP5-0 design
 //! note):
@@ -30,6 +32,12 @@
 //!   into the caller's own address space; there is no global user heap and no
 //!   cross-process mapping (shared memory stays the capability-checked IPC
 //!   object).
+//! * **Released by the page, not by the mapping.** The release unit is the
+//!   page a caller names, whichever `mem_map` obtained it: a growable arena
+//!   is mapped a piece at a time and shrinks by whatever came free at its
+//!   top, which is not a piece. What bounds a release is ownership — the
+//!   kernel refuses one holding a page the caller does not hold, so a task
+//!   still reaches only its own memory.
 //! * **Unprivileged (precedent).** Growing one's *own*
 //!   address space with anonymous `RW` memory requires no capability, exactly
 //!   as "list my own processes" does. The kernel still validates every

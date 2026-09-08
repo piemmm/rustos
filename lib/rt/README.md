@@ -157,6 +157,24 @@ in one call, so a process told the machine is critical still surrenders the lot.
 The teardown above now costs 64 unmaps at every band, and its growth 116 maps
 where the band permits a pad.
 
+### A refused release is asked once, not once per free
+
+The granule bounds the calls a *successful* teardown makes. It cannot bound a
+*refused* one: what the arena wants released is decided by its top and its
+retention, neither of which a refusal moves, so the next free finds the same
+release still due and asks the identical question again. That is how the same
+switchboard frame report survived the granule — around 3800 refused
+`mem_unmap`s inside one 250 ms frame, one per `dealloc`, on an interactive
+surface. (The refusals were the kernel demanding a release name a whole
+`mem_map`, which a shrinking arena never does; `mem_unmap` now releases the
+pages a caller holds, `plans/OPEN-DEFECTS.md` D114.)
+
+So a refusal is remembered against the `mapped_end` it happened at, and no
+further release is asked until the arena's extent moves — the only thing that
+can change the answer. Nothing is lost when one is refused: the pages stay
+mapped and recorded as free, so they still serve the next allocation, and the
+process simply keeps memory it could not give back.
+
 ## I/O abstraction (`io` module)
 
 `tairix_rt::io` is the ergonomic `std::io`-style layer a program programs

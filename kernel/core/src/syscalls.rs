@@ -6921,12 +6921,25 @@ where
         if len == 0 {
             return Err(Errno::LengthOutOfRange);
         }
+        // The release is page-granular, so a base that is not a page boundary
+        // names no page at all — refuse it here rather than leaving the
+        // producer to fold it, so every argument is checked before any state
+        // is read.
+        if !base.is_multiple_of(PAGE_SIZE as u64) {
+            return Err(Errno::OutOfRange);
+        }
         // A demand-paged region is sparsely resident, so the producer's
         // teardown can no longer use "is it mapped?" as its validation.
-        // Validate here instead: `(base, page_count)` must name a region the
-        // caller actually reserved with `mem_map`, or the call fails closed
+        // Validate here instead: every page of `[base, base + len)` must be
+        // one the caller holds anonymously, or the call fails closed
         // (`NotFound`) touching nothing — a caller can never free a
         // neighbour's pages or address space it never mapped.
+        //
+        // Containment, not a match against one `mem_map` call. A caller that
+        // placed its own arena grew it over many calls and releases the part
+        // of it that has come free, which lies wherever the free bytes fell;
+        // demanding it name a whole reservation left a heap unable to shrink
+        // at all — and, being refused, asking again on every free.
         let page_count = (len as u64)
             .div_ceil(PAGE_SIZE as u64)
             .checked_mul(PAGE_SIZE as u64)
@@ -6935,7 +6948,7 @@ where
         if !self
             .aspaces
             .read()
-            .anon_region_exact(caller.process(), base, page_count)
+            .anon_region_holds(caller.process(), base, page_count)
         {
             return Err(Errno::NotFound);
         }
@@ -6945,8 +6958,8 @@ where
         // `NotImplemented`. Success reports `Ok(0)` — the `Errno`-return ABI
         // shape (`mem_unmap` returns an error code, not a value).
         let result = self.mem_map.unmap(base, len).map(|()| 0);
-        // The unmap shrank the caller's live space; drop the region record,
-        // credit the page-rounded size back to the task's address-space
+        // The unmap shrank the caller's live space; drop the released pages
+        // from the record, credit the page-rounded size back to the task's address-space
         // accounting (the same figure `mem_map` charged), and drop the freed
         // pages from the registry snapshot too — leaving them in a stale
         // snapshot would let the copy path read or write memory the task no
@@ -6964,7 +6977,7 @@ where
         if result.is_ok() {
             let credited = page_count * PAGE_SIZE as u64;
             let mut aspaces = self.aspaces.write();
-            aspaces.remove_anon_region(caller.process(), base);
+            aspaces.remove_anon_range(caller.process(), base, page_count);
             aspaces.credit_aspace_bytes(caller.process(), credited);
             drop(aspaces);
             self.publish_region_teardown(caller.process(), base, page_count);
@@ -23242,13 +23255,14 @@ mod tests {
             0x2000,
             "the refused reservation is charged nothing"
         );
-        assert!(aspaces.read().anon_region_exact(ProcessId(2), base, 2));
+        assert!(aspaces.read().anon_region_holds(ProcessId(2), base, 2));
 
-        // An abutting reservation is a distinct record, which is what lets a
-        // heap grow its arena a mapping at a time.
+        // An abutting reservation joins the holding, which is what lets a
+        // heap grow its arena a mapping at a time and then release the part
+        // of it that came free, whichever mappings that part came from.
         let above = 0x5000_0000 | 0x10_2000;
         assert_eq!(h.mem_map(&ctx, 0x1000, flags, 0x10_2000), Ok(above));
-        assert!(aspaces.read().anon_region_exact(ProcessId(2), above, 1));
+        assert!(aspaces.read().anon_region_holds(ProcessId(2), base, 3));
         assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x3000);
     }
 
@@ -23377,6 +23391,101 @@ mod tests {
             .mem_map(&ctx, 0x2000, tairix_abi::MapFlags::empty(), 0)
             .is_ok());
         assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x2000);
+    }
+
+    /// A caller releases the *pages* it names, not the extents it obtained
+    /// them in: an arena grown over several `mem_map`s hands back a sub-range
+    /// spanning them, and a range holding one page the caller does not own is
+    /// refused whole.
+    ///
+    /// This is the switchboard frame-budget storm. The heap grows one
+    /// contiguous arena a mapping at a time and releases the free top above
+    /// its retention, which almost never coincides with a whole mapping; the
+    /// handler demanded an exact match and answered `NotFound`, so the arena
+    /// never shrank, the free top stayed above the release threshold, and
+    /// every subsequent `dealloc` asked again — thousands of refused
+    /// `mem_unmap`s inside one 250 ms frame, on an interactive surface.
+    #[test]
+    fn mem_unmap_releases_a_sub_range_of_the_pages_the_caller_holds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+
+        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mem_map(producer);
+
+        // Grow an arena the way the heap does: `FIXED` at the current top,
+        // four pages then four more. The recording producer echoes
+        // `0x5000_0000 | addr_hint` as the base.
+        let flags = tairix_abi::MapFlags::FIXED;
+        let arena = 0x5000_0000 | 0x20_0000;
+        assert_eq!(h.mem_map(&ctx, 0x4000, flags, 0x20_0000), Ok(arena));
+        assert_eq!(
+            h.mem_map(&ctx, 0x4000, flags, 0x20_4000),
+            Ok(arena + 0x4000)
+        );
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x8000);
+
+        // The free top is three pages that straddle the two mappings. It
+        // releases, the producer is handed exactly that range, and only those
+        // pages are credited back.
+        assert_eq!(h.mem_unmap(&ctx, arena + 0x3000, 0x3000), Ok(0));
+        assert_eq!(*producer.release.lock(), Some((arena + 0x3000, 0x3000)));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x5000);
+        // The pages either side are still held, so a first touch of them is
+        // still a legitimate fault rather than a wild access.
+        assert!(aspaces.read().anon_region_covers(ProcessId(2), arena));
+        assert!(aspaces
+            .read()
+            .anon_region_covers(ProcessId(2), arena + 0x7000));
+        assert!(!aspaces
+            .read()
+            .anon_region_covers(ProcessId(2), arena + 0x4000));
+
+        // A range reaching one page past the arena is refused whole: the
+        // producer is not reached and nothing is credited.
+        *producer.release.lock() = None;
+        assert_eq!(
+            h.mem_unmap(&ctx, arena + 0x6000, 0x3000),
+            Err(Errno::NotFound)
+        );
+        assert!(producer.release.lock().is_none());
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0x5000);
+        // As is a range over the hole just released, and one belonging to
+        // another task.
+        assert_eq!(
+            h.mem_unmap(&ctx, arena + 0x2000, 0x2000),
+            Err(Errno::NotFound)
+        );
+        let other = make_caps_record(3, &[], sink);
+        let other_ctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &other,
+        };
+        assert_eq!(h.mem_unmap(&other_ctx, arena, 0x1000), Err(Errno::NotFound));
+        assert!(producer.release.lock().is_none());
+
+        // The rest releases in the two pieces the hole left, leaving the
+        // task's accounting and its record clean.
+        assert_eq!(h.mem_unmap(&ctx, arena, 0x3000), Ok(0));
+        assert_eq!(h.mem_unmap(&ctx, arena + 0x6000, 0x2000), Ok(0));
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), 0);
+        assert_eq!(aspaces.read().stale_task_entry(ProcessId(2)), None);
     }
 
     /// A page-rounded request: a sub-page `len` is charged as a whole page,
@@ -25775,6 +25884,11 @@ mod tests {
         // An unreserved base fails closed (`NotFound`) without reaching the
         // producer — a caller cannot free address space it never mapped.
         assert_eq!(h.mem_unmap(&ctx, 0x20_0000, 0x1000), Err(Errno::NotFound));
+        assert!(producer.release.lock().is_none());
+
+        // A base that is not a page boundary names no page: refused on shape,
+        // before the holding is even read.
+        assert_eq!(h.mem_unmap(&ctx, 0x10_0800, 0x1000), Err(Errno::OutOfRange));
         assert!(producer.release.lock().is_none());
 
         // A well-formed range naming the reserved region reaches the

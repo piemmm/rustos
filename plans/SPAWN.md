@@ -468,6 +468,14 @@ a modern anonymous-memory **map/unmap** pair.
    **caller's own** isolated address space. No cross-process mapping;
    shared memory stays the capability-checked IPC object (§4). There is no
    global user heap.
+3a. **Released by the page, not by the mapping (§5.4).** `mem_unmap` releases
+   the pages a caller names, whichever `mem_map` obtained them: an arena
+   grown a piece at a time shrinks by whatever came free at its top, which is
+   never a piece. Ownership is what bounds a release — a range holding one
+   page the caller does not hold is refused whole — so a task still reaches
+   only its own memory. Uniform across placements: a caller-placed (`FIXED`)
+   and a kernel-placed region behave identically, so a program need not know
+   which window its base came from (`plans/OPEN-DEFECTS.md` D114).
 4. **Deterministic OOM, no artificial limit (§4 / §2.9).** A frame- or
    page-table-allocation failure returns a stable `Errno` (`OutOfMemory`),
    never a panic. Consistent with the standing position, SP5 adds **no**

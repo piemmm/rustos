@@ -7449,12 +7449,14 @@ can see *why* a rule exists without diffing the charter's history.
   §25 said the retention "reaches zero from moderate pressure onward", which is
   right for what a process may *keep* and useless against a teardown: a level
   slides down with the free span it bounds, so a descending teardown paid one
-  `mem_unmap` per page — measured at 3840 calls for a 16 MiB arena, and observed
-  as 4254 in one switchboard frame — each taking the global address-space
-  registry's write lock and shooting down every other CPU's TLB. The granule is
-  stated as explicitly *not* derived from the machine, process or band, because
-  the obvious reading of §24.1/§24.2 would have made it proportional, which
-  holds 64 MiB of a gibibyte arena back from a machine already asking for it.
+  `mem_unmap` per page — measured at 3840 calls for a 16 MiB arena — each taking
+  the global address-space registry's write lock and shooting down every other
+  CPU's TLB. (The switchboard frame that prompted it was a *second* cause of the
+  same count, refused releases re-asked per free, `plans/OPEN-DEFECTS.md` D114.)
+  The granule is stated as explicitly *not* derived from the machine, process or
+  band, because the obvious reading of §24.1/§24.2 would have made it
+  proportional, which holds 64 MiB of a gibibyte arena back from a machine
+  already asking for it.
   The band keeps the last word through the exact `pressure::report` trim, so the
   residue is bounded and never outlives a band change.
 

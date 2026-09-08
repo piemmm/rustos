@@ -310,6 +310,15 @@ struct HeapState<S: SpanStore> {
     /// One-past-the-last byte currently mapped: the arena covers
     /// `[ARENA_BASE, mapped_end)`. Grows by whole pages.
     mapped_end: usize,
+    /// The `mapped_end` a release was last refused at, if one was.
+    ///
+    /// A refusal means the kernel does not agree these are the heap's pages
+    /// to hand back, and nothing about the arena's top has changed since, so
+    /// asking again is a syscall that can only be refused again — and a free
+    /// runs often enough that it would be one per `dealloc`, which is a
+    /// storm, not a retry. The arena's extent is the only thing that can
+    /// change the answer, so the next attempt waits for it to move.
+    release_refused_at: Option<usize>,
 }
 
 impl<S: SpanStore> HeapState<S> {
@@ -320,6 +329,7 @@ impl<S: SpanStore> HeapState<S> {
             store,
             count: 0,
             mapped_end: ARENA_BASE as usize,
+            release_refused_at: None,
         }
     }
 
@@ -613,8 +623,9 @@ impl<S: SpanStore> HeapState<S> {
 
     /// Release the whole pages the free span at the arena top covers *above*
     /// `retain_bytes`, lowering `mapped_end` to what is kept, once there are at
-    /// least the policy's granule to release. A failed unmap leaves the pages
-    /// mapped and tracked (no loss;).
+    /// least the policy's granule to release. A refused unmap leaves the pages
+    /// mapped and tracked (no loss) and is not asked again until the arena's
+    /// extent moves ([`HeapState::release_refused_at`]).
     ///
     /// The retained pages stay recorded as free, so they are the next
     /// allocation's first fit at the top — which is the whole point: they are
@@ -626,7 +637,7 @@ impl<S: SpanStore> HeapState<S> {
     /// paid a page at a time ([`ARENA_RESIZE_BYTES`]); the band-change trim
     /// passes zero to release on the spot.
     fn try_shrink_top(&mut self, pager: &dyn Pager, policy: ArenaPolicy) {
-        if self.count == 0 {
+        if self.count == 0 || self.release_refused_at == Some(self.mapped_end) {
             return;
         }
         let top = self.count - 1;
@@ -653,6 +664,7 @@ impl<S: SpanStore> HeapState<S> {
         }
         let page_count = bytes / PAGE_SIZE;
         if !pager.unmap(freeable_start as u64, page_count) {
+            self.release_refused_at = Some(self.mapped_end);
             return;
         }
         self.mapped_end = freeable_start;
@@ -979,6 +991,31 @@ mod tests {
         }
     }
 
+    /// A pager that maps but refuses every release, counting the attempts —
+    /// the shape of a kernel that will not release the range the heap asked
+    /// for, which must cost one refused syscall, not one per free.
+    struct RefusingPager {
+        attempts: core::cell::Cell<usize>,
+    }
+
+    impl RefusingPager {
+        fn new() -> Self {
+            Self {
+                attempts: core::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl Pager for RefusingPager {
+        fn map(&self, _base: u64, _pages: usize) -> bool {
+            true
+        }
+        fn unmap(&self, _base: u64, _pages: usize) -> bool {
+            self.attempts.set(self.attempts.get() + 1);
+            false
+        }
+    }
+
     /// A pager whose `map` always fails, to drive the deterministic-OOM path.
     struct DeadPager;
     impl Pager for DeadPager {
@@ -1203,6 +1240,67 @@ mod tests {
     /// switchboard's report implied so the assertion is about the case that was
     /// actually observed.
     const PAGES: usize = 4096;
+
+    /// A refused release is asked once per arena extent, never once per free.
+    ///
+    /// This is the other half of the switchboard's frame report, and the half
+    /// a granule cannot bound: the kernel refused the range, so `mapped_end`
+    /// did not move, so the next free found the same release still due and
+    /// asked again — thousands of refused syscalls in one frame. Nothing about
+    /// the arena's top has changed between two such frees, so there is no new
+    /// question to ask; only its extent moving can change the answer.
+    #[test]
+    fn a_refused_release_is_not_asked_again_until_the_arena_moves() {
+        let pager = RefusingPager::new();
+        let mut heap = heap_state();
+        let block = layout(PAGE_SIZE, 8);
+        let mut addrs = Vec::new();
+        for _ in 0..PAGES {
+            let policy = ArenaPolicy::new(heap.mapped_bytes(), PressureBand::Normal);
+            addrs.push(heap.alloc(block, &pager, policy).expect("the arena grows"));
+        }
+        let mapped = heap.mapped_bytes();
+
+        // Tear the whole arena down against a kernel that refuses: one ask.
+        addrs.sort_unstable();
+        for addr in addrs.iter().rev() {
+            let policy = ArenaPolicy::new(heap.mapped_bytes(), PressureBand::Normal);
+            heap.free(*addr, block, &pager, policy);
+        }
+        assert_eq!(
+            pager.attempts.get(),
+            1,
+            "a refused release must not cost a syscall per free"
+        );
+        assert_eq!(heap.mapped_bytes(), mapped, "a refused release keeps them");
+
+        // The pages are still the heap's own free arena, so they serve the
+        // next allocation without a fresh map.
+        let addr = heap
+            .alloc(block, &pager, NO_RETENTION)
+            .expect("retained pages are allocatable");
+        heap.free(addr, block, &pager, NO_RETENTION);
+        assert_eq!(pager.attempts.get(), 1, "still the same arena extent");
+
+        // Growing the arena is what can change the answer, so exactly one
+        // further ask is due.
+        let big = layout(mapped + PAGE_SIZE, 8);
+        let addr = heap
+            .alloc(big, &pager, NO_RETENTION)
+            .expect("the arena grows past its top");
+        heap.free(addr, big, &pager, NO_RETENTION);
+        assert_eq!(pager.attempts.get(), 2, "one ask per arena extent");
+
+        // The refusal is remembered against the extent it happened at, not
+        // latched: a kernel that does release is asked, and takes the whole
+        // arena back.
+        let ok = FakePager::new();
+        let bigger = layout(heap.mapped_bytes() + PAGE_SIZE, 8);
+        let addr = heap.alloc(bigger, &ok, NO_RETENTION).expect("grows again");
+        heap.free(addr, bigger, &ok, NO_RETENTION);
+        assert_eq!(ok.unmaps(), 1, "a kernel that releases is asked once");
+        assert_eq!(heap.mapped_bytes(), 0, "the whole arena went back");
+    }
 
     /// The growth pad is an optimisation, so a kernel that refuses it must not
     /// cost the caller an allocation it could have had.

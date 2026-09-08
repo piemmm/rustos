@@ -1464,9 +1464,11 @@ index-to-element erasure, the one split policy, and the fork-join pool over
   one taking the *global* address-space registry's write lock and shooting down
   the TLB on every other CPU. The userland heap's retention could not prevent
   it — a retention is a level, and a level slides down with the free span it
-  bounds — so the arena now also moves in a granule (`lib/rt/README.md`). A
-  process's own teardown is no longer able to serialise every other process's
-  frame.
+  bounds — so the arena moves in a granule (`lib/rt/README.md`). That bounded a
+  *successful* teardown; the calls in that log were being **refused** and
+  re-asked on every free, which is `plans/OPEN-DEFECTS.md` D114. With both
+  closed, a process's own teardown can no longer serialise every other
+  process's frame.
 - **Bit-identity, not near-identity.** Each scene is composed twice — once
   whole, once split into bands that run backwards — comparing the scan-out
   frame, the back buffer, and every counted pixel of `FrameStats`; the frost

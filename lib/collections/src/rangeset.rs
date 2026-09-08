@@ -113,22 +113,8 @@ impl<K: RangeKey> RangeSet<K> {
     ///
     /// A range covering nothing drops nothing.
     pub fn remove(&mut self, range: Range<K>) {
-        if range.start >= range.end {
-            return;
-        }
-        // Each pass takes one intersecting range and puts back only the parts
-        // outside the cut, which intersect the cut no longer.
-        loop {
-            let cut = self
-                .spans
-                .overlapping(range.clone())
-                .next()
-                .map(|(held, ())| held);
-            let Some(cut) = cut else { break };
-            self.take(cut.start);
-            self.put(cut.start..range.start);
-            self.put(range.end..cut.end);
-        }
+        let dropped = self.spans.remove_range(range);
+        self.covered = self.covered.saturating_sub(dropped);
     }
 
     /// Whether `point` lies in a held range.
@@ -157,21 +143,13 @@ impl<K: RangeKey> RangeSet<K> {
     /// The lowest part of `query` the set does **not** hold.
     #[must_use]
     pub fn first_gap(&self, query: Range<K>) -> Option<Range<K>> {
-        if query.start >= query.end {
-            return None;
-        }
-        let start = self
-            .covering(query.start)
-            .map_or(query.start, |held| held.end);
-        if start >= query.end {
-            return None;
-        }
-        let end = self
-            .spans
-            .overlapping(start..query.end)
-            .next()
-            .map_or(query.end, |(held, ())| held.start);
-        Some(start..end)
+        self.spans.first_gap(query)
+    }
+
+    /// The highest held range that *ends* at or below `point`.
+    #[must_use]
+    pub fn ending_at_or_below(&self, point: K) -> Option<Range<K>> {
+        self.spans.ending_at_or_below(point)
     }
 
     /// Remove and return the lowest held range.

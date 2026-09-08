@@ -70,7 +70,7 @@ use tairix_abi::{
     DescriptorTable, Errno, LimitKind, OpenFlags, ProcId, ResourceLimit, STD_STREAM_COUNT,
 };
 use tairix_caps::CapabilitySet;
-use tairix_collections::{RangeError, RangeKey, RangeMap};
+use tairix_collections::{RangeError, RangeKey, RangeMap, RangeSet};
 use tairix_kernel_mem::{Frame, MapFlags, Page, PhysMap, UserAddressSpace, PAGE_SIZE};
 use tairix_kernel_sec::{ProcessId, TaskId};
 
@@ -254,22 +254,27 @@ pub struct AddressSpaceRegistry {
     /// (fail closed). Dropped at [`withdraw`](Self::withdraw) so a reused
     /// id never inherits a dead task's mappings.
     file_regions: BTreeMap<ProcessId, RangeMap<u64, FileRegion>>,
-    /// Each live task's reserved demand-paged **anonymous** mappings (the
-    /// regions `mem_map` reserves and the anonymous fault path backs one
-    /// zeroed page at a time), keyed by region base and valued by the
-    /// page-rounded page count reserved. Co-located with the address space
-    /// for the same reason as [`Self::file_regions`]: a mapping shares the
-    /// exact per-process lifecycle — recorded on `mem_map`, removed on
-    /// `mem_unmap`, and dropped when the task exits — and is keyed by the
-    /// same kernel-trusted [`ProcessId`]. A task with no entry has reserved no
-    /// anonymous region, so a fault outside every record resolves to `None`
-    /// and the task is terminated rather than silently backed (fail
-    /// closed). The resident frames themselves are owned by the task's live
-    /// address space and reclaimed by its drop; this map is only the
-    /// fault-validation and accounting bookkeeping. Dropped at
-    /// [`withdraw`](Self::withdraw) so a reused id never inherits a dead
-    /// task's mappings.
-    anon_regions: BTreeMap<ProcessId, RangeMap<u64, ()>>,
+    /// The **pages** each live task holds anonymously (the regions `mem_map`
+    /// reserves and the anonymous fault path backs one zeroed page at a
+    /// time). Co-located with the address space for the same reason as
+    /// [`Self::file_regions`]: the holding shares the exact per-process
+    /// lifecycle — recorded on `mem_map`, cut back on `mem_unmap`, and
+    /// dropped when the task exits — and is keyed by the same kernel-trusted
+    /// [`ProcessId`]. A task with no entry holds no anonymous page, so a
+    /// fault outside every holding resolves to `None` and the task is
+    /// terminated rather than silently backed (fail closed). The resident
+    /// frames themselves are owned by the task's live address space and
+    /// reclaimed by its drop; this is only the fault-validation and
+    /// accounting bookkeeping. Dropped at [`withdraw`](Self::withdraw) so a
+    /// reused id never inherits a dead task's pages.
+    ///
+    /// A **set of pages**, not a map of per-`mem_map` extents, because
+    /// nothing here needs to know which call placed a page: the fault path
+    /// asks whether the task owns an address, and a release asks whether it
+    /// owns a range. So abutting reservations coalesce, and a heap that grew
+    /// one contiguous arena over ten thousand calls costs one entry and can
+    /// hand back any part of it.
+    anon_regions: BTreeMap<ProcessId, RangeSet<u64>>,
     /// Each live task's reserved user-stack span (the region the spawn
     /// layout placed and the stack-growth fault path backs on demand).
     /// Keyed by **thread**, not by process: every thread of a process has a
@@ -1763,8 +1768,8 @@ impl AddressSpaceRegistry {
         Some((file_offset, region.clone()))
     }
 
-    /// Record `task`'s live demand-paged anonymous mapping: `pages` pages
-    /// reserved at `base`.
+    /// Record `pages` pages of anonymous address space `task` now holds at
+    /// `base`.
     ///
     /// Called by the `mem_map` handler *after* the producer has reserved
     /// the address-space range, so every record names address space the
@@ -1777,8 +1782,9 @@ impl AddressSpaceRegistry {
     ///
     /// [`RangeError`], on the same terms as
     /// [`record_file_region`](Self::record_file_region): an extent covering
-    /// nothing, one past the address space, or one overlapping a live
-    /// reservation of this task is refused rather than recorded.
+    /// nothing, one past the address space, or one overlapping pages this
+    /// task already holds is refused rather than recorded — a `FIXED`
+    /// placement must never silently take over live memory.
     pub fn record_anon_region(
         &mut self,
         task: ProcessId,
@@ -1786,38 +1792,53 @@ impl AddressSpaceRegistry {
         pages: u64,
     ) -> Result<(), RangeError> {
         let extent = Self::page_extent(base, pages)?;
-        let refused = self
-            .anon_regions
-            .entry(task)
-            .or_default()
-            .insert(extent, ());
+        let regions = self.anon_regions.entry(task).or_default();
+        let refused = if regions.first_overlap(extent.clone()).is_some() {
+            Err(RangeError::Overlap)
+        } else {
+            regions.insert(extent);
+            Ok(())
+        };
         self.drop_empty_regions(task);
         refused
     }
 
-    /// Whether `task` holds an anonymous reservation of exactly `base` and
-    /// `page_count` pages.
+    /// Whether every page of `[base, base + page_count · PAGE_SIZE)` is one
+    /// `task` holds anonymously.
     ///
-    /// The `mem_unmap` handler validates the caller-named pair against this
-    /// before any teardown, so a mismatched or unknown pair fails closed
-    /// touching nothing.
+    /// The `mem_unmap` handler tests the caller-named range against this
+    /// before any teardown, so a range holding one page the caller does not
+    /// own fails closed touching nothing — which is the whole security
+    /// property: a task can release its own pages and nothing else. It is
+    /// *containment*, not an exact match against one `mem_map` call, because
+    /// a caller that placed its own arena releases the part of it that has
+    /// come free rather than the extents it grew.
     #[must_use]
-    pub fn anon_region_exact(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
-        Self::holds_pages(self.anon_regions.get(&task), base, page_count)
+    pub fn anon_region_holds(&self, task: ProcessId, base: u64, page_count: u64) -> bool {
+        let Ok(extent) = Self::page_extent(base, page_count) else {
+            return false;
+        };
+        self.anon_regions
+            .get(&task)
+            .is_some_and(|regions| regions.first_gap(extent).is_none())
     }
 
-    /// Remove `task`'s anonymous-mapping record based at `base`, returning
-    /// its page count.
+    /// Drop `page_count` pages from `base` out of `task`'s anonymous
+    /// holding, splitting it where the range cuts through.
     ///
     /// Called by the `mem_unmap` handler *after* the producer released the
-    /// region, so record and reservation leave together.
-    pub fn remove_anon_region(&mut self, task: ProcessId, base: u64) -> Option<u64> {
-        let regions = self.anon_regions.get_mut(&task)?;
-        let (extent, ()) = regions.remove(base)?;
+    /// range, so record and reservation leave together.
+    pub fn remove_anon_range(&mut self, task: ProcessId, base: u64, page_count: u64) {
+        let Ok(extent) = Self::page_extent(base, page_count) else {
+            return;
+        };
+        let Some(regions) = self.anon_regions.get_mut(&task) else {
+            return;
+        };
+        regions.remove(extent);
         if regions.is_empty() {
             self.anon_regions.remove(&task);
         }
-        Some(extent.end.distance_from(extent.start) / PAGE_SIZE as u64)
     }
 
     /// Whether the virtual address `va` lies inside one of `task`'s
@@ -1830,7 +1851,7 @@ impl AddressSpaceRegistry {
     pub fn anon_region_covers(&self, task: ProcessId, va: u64) -> bool {
         self.anon_regions
             .get(&task)
-            .is_some_and(|regions| regions.covering(va).is_some())
+            .is_some_and(|regions| regions.contains(va))
     }
 
     /// Drop either region map of `task`'s that a refused record left empty:
@@ -1840,7 +1861,7 @@ impl AddressSpaceRegistry {
         if self.file_regions.get(&task).is_some_and(RangeMap::is_empty) {
             self.file_regions.remove(&task);
         }
-        if self.anon_regions.get(&task).is_some_and(RangeMap::is_empty) {
+        if self.anon_regions.get(&task).is_some_and(RangeSet::is_empty) {
             self.anon_regions.remove(&task);
         }
     }
@@ -1860,15 +1881,6 @@ impl AddressSpaceRegistry {
         regions
             .and_then(|regions| regions.get(base))
             .is_some_and(|(held, _)| held.end.distance_from(held.start) == len)
-    }
-
-    /// Whether `regions` holds an extent of exactly `base` and `pages` pages.
-    /// A page count whose byte span does not fit the address space names no
-    /// extent, so it fails closed rather than saturating into a false match.
-    fn holds_pages<V>(regions: Option<&RangeMap<u64, V>>, base: u64, pages: u64) -> bool {
-        pages
-            .checked_mul(PAGE_SIZE as u64)
-            .is_some_and(|len| Self::holds_extent(regions, base, len))
     }
 
     /// Describe where the fatal `access` landed relative to `task`'s own
@@ -3588,15 +3600,20 @@ mod tests {
     }
 
     #[test]
-    fn anon_region_exact_matches_only_the_recorded_pair_of_the_owner() {
+    fn anon_region_holds_only_pages_the_owner_actually_has() {
         let mut reg = AddressSpaceRegistry::new();
         record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
-        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
-        // A wrong page count, a wrong base, or another task all fail closed.
-        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 3));
-        assert!(!reg.anon_region_exact(ProcessId(2), 0x21_0000, 4));
-        assert!(!reg.anon_region_exact(ProcessId(3), 0x20_0000, 4));
-        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 0));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 4));
+        // Any part of the holding, at any offset inside it: the release unit
+        // is the page, not the call that reserved it.
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 3));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_2000, 2));
+        // One page past the end, a range below the base, another task, and a
+        // range spanning nothing all fail closed.
+        assert!(!reg.anon_region_holds(ProcessId(2), 0x20_0000, 5));
+        assert!(!reg.anon_region_holds(ProcessId(2), 0x1F_F000, 2));
+        assert!(!reg.anon_region_holds(ProcessId(3), 0x20_0000, 4));
+        assert!(!reg.anon_region_holds(ProcessId(2), 0x20_0000, 0));
     }
 
     #[test]
@@ -3607,31 +3624,40 @@ mod tests {
             reg.record_anon_region(ProcessId(2), 0x20_1000, 4),
             Err(RangeError::Overlap)
         );
-        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 4));
         assert_eq!(
             reg.record_anon_region(ProcessId(2), 0x30_0000, 0),
             Err(RangeError::Empty)
         );
-        // An abutting reservation is its own record, which is what lets the
-        // userland heap grow its arena a mapping at a time and still release
-        // each by the extent it was given.
+        // Abutting reservations are one contiguous holding, which is what
+        // lets the userland heap grow its arena a mapping at a time and
+        // release the part of it that came free rather than those extents.
         record_anon(&mut reg, ProcessId(2), 0x20_4000, 2);
-        assert!(reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
-        assert!(reg.anon_region_exact(ProcessId(2), 0x20_4000, 2));
-        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), Some(4));
-        assert!(reg.anon_region_exact(ProcessId(2), 0x20_4000, 2));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 6));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_3000, 2));
     }
 
     #[test]
-    fn remove_anon_region_returns_the_page_count_and_only_once() {
+    fn removing_a_range_splits_the_holding_and_leaves_the_rest() {
         let mut reg = AddressSpaceRegistry::new();
         record_anon(&mut reg, ProcessId(2), 0x20_0000, 4);
-        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), Some(4));
-        // Gone: neither a covering lookup, an exact lookup, nor a second
-        // removal can see it.
+
+        // A cut through the middle leaves the pages either side held, so a
+        // fault in them is still a legitimate first touch.
+        reg.remove_anon_range(ProcessId(2), 0x20_1000, 2);
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_0000, 1));
+        assert!(reg.anon_region_holds(ProcessId(2), 0x20_3000, 1));
+        assert!(!reg.anon_region_holds(ProcessId(2), 0x20_1000, 1));
+        assert!(reg.anon_region_covers(ProcessId(2), 0x20_3000));
+        assert!(!reg.anon_region_covers(ProcessId(2), 0x20_2000));
+
+        // Releasing the remainder leaves nothing, and a second release of a
+        // range already gone is a no-op rather than an error.
+        reg.remove_anon_range(ProcessId(2), 0x20_0000, 1);
+        reg.remove_anon_range(ProcessId(2), 0x20_3000, 1);
+        reg.remove_anon_range(ProcessId(2), 0x20_3000, 1);
         assert!(!reg.anon_region_covers(ProcessId(2), 0x20_0000));
-        assert!(!reg.anon_region_exact(ProcessId(2), 0x20_0000, 4));
-        assert_eq!(reg.remove_anon_region(ProcessId(2), 0x20_0000), None);
+        assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
     }
 
     #[test]

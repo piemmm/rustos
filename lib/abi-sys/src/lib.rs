@@ -1114,9 +1114,14 @@ pub extern "C" fn sys_mem_map(len: usize, flags: u32, addr_hint: u64) -> u64 {
     }
 }
 
-/// `mem_unmap`: release the region of `len` bytes based at `base` previously
-/// returned by [`sys_mem_map`] from the calling process's own address space
-/// (`SyscallNumber::MEM_UNMAP`). Returns a `TAIRIX_E_*` code.
+/// `mem_unmap`: release the `len` bytes based at `base` from the calling
+/// process's own address space (`SyscallNumber::MEM_UNMAP`). Returns a
+/// `TAIRIX_E_*` code.
+///
+/// Page-granular: every page of the range must be one the caller holds
+/// anonymously, but it need not be a whole [`sys_mem_map`] region — an arena
+/// grown over several calls hands back the part of it that has come free. A
+/// range holding one page the caller does not hold is refused whole.
 #[must_use]
 #[export_name = "tairix_sys_mem_unmap"]
 pub extern "C" fn sys_mem_unmap(base: u64, len: usize) -> i32 {

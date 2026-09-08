@@ -229,8 +229,8 @@ where
 /// page at a time by the fault path, so a region is **sparsely resident**:
 /// this walks the range, reclaims every page that is resident, and skips
 /// the ones that never faulted in. It does *not* fail on an unbacked page —
-/// the caller validates that `(base_va, page_count)` names a region it
-/// reserved (the registry's `anon_region_exact` and, for a placed base, the
+/// the caller validates that every page of `(base_va, page_count)` is one it
+/// holds (the registry's `anon_region_holds` and, for a placed base, the
 /// per-task window record), so an unbacked page here is an untouched
 /// reservation page, not a bad range.
 ///

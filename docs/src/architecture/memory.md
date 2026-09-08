@@ -845,11 +845,16 @@ only as a fault-time task kill mislabelled a "wild" fault. Stack growth takes
 the same commitment one page at a time (`resolve_stack_fault` commits before
 it backs each growth page), and a reservation's still-unbacked pages are
 returned to the budget on `mem_unmap` and on task teardown, so a task that
-dies holding untouched reservations leaks no headroom. `mem_unmap` validates the caller-named `(base, page_count)` against
-the recorded reservation (fail closed with `NotFound` otherwise), then
-**sparsely** tears down the region — reclaiming and zeroing only the pages
-that actually faulted in and skipping the untouched reservation pages — and
-drops the record. The reservation's page-rounded size is what the
+dies holding untouched reservations leaks no headroom. `mem_unmap` confirms
+every page of the caller-named `(base, page_count)` is one the caller holds
+(fail closed with `NotFound` otherwise), then **sparsely** tears down the
+range — reclaiming and zeroing only the pages that actually faulted in and
+skipping the untouched reservation pages — and drops those pages from the
+record, splitting it where the range cut through. Containment, not a match
+against one `mem_map`: the release unit is the page, so a growable arena
+mapped a piece at a time hands back whatever came free at its top. Demanding
+a whole reservation left the userland heap unable to shrink at all, and —
+because a refusal changed nothing — asking again on every free (D114). The reservation's page-rounded size is what the
 `AddressSpaceBytes` ceiling and the pinned-memory budget are charged at map
 time, so those bounds are enforced up front and the fault path re-checks no
 limit. The copy path stays fault-aware: `copy_in_user` offers a staging
@@ -976,6 +981,14 @@ is the consumer the `mem_map` ABI exists for (§7c).
   because the trim `pressure::report` drives ignores the granule and releases
   everything above the retention at once (`lib/rt/README.md`,
   `plans/OPEN-DEFECTS.md` D104).
+- **A refused release is asked once per arena extent.** The release the arena
+  wants is decided by its top and its retention, so a kernel that refuses one
+  will refuse the identical question every subsequent free asks — thousands of
+  refused syscalls inside one frame, which is how the same switchboard report
+  survived the granule. The refusal is remembered against the `mapped_end` it
+  happened at and the pages stay the heap's own free arena, so nothing is lost
+  and the next ask waits for the only thing that can change the answer: the
+  arena's extent moving (`plans/OPEN-DEFECTS.md` D114).
 - **Deterministic OOM (`AGENTS.md` §4 / §2.9).** A failed `mem_map` or an
   overflowed span table returns a null pointer per the `GlobalAlloc` contract,
   never a panic.
@@ -1000,7 +1013,9 @@ to end — a pure-Rust EL0 fixture (`tests/integration/heap_program`)
 Box-allocates, grows a `Vec` across several pages, reallocates after freeing,
 verifies every value, and exits 0, with the program's allocator-issued
 `mem_map` / `mem_unmap` `svc`s routed through the live `MemMap` producer
-(`plans/PI.md` P6e-3b prerequisite).
+(`plans/PI.md` P6e-3b prerequisite). The vertical fails the run if a release
+the heap asked for was *refused* as well as if none arrived: a refusal is a
+silently unshrinking arena, and the fixture's own values cannot see it.
 
 ## 7e. The process address space (`ProcessSpace`) and the production producers
 

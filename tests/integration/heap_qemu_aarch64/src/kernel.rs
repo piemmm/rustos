@@ -96,6 +96,9 @@ const FAIL_FAULT: NonZeroU16 = fail_point!(10);
 /// The fixture verified every value and exited cleanly, but no range ever
 /// reached `mem_unmap` — the release path went untested.
 const FAIL_NO_UNMAP: NonZeroU16 = fail_point!(11);
+/// The fixture exited cleanly but a release it asked for was refused, so its
+/// arena never shrank.
+const FAIL_REFUSED_UNMAP: NonZeroU16 = fail_point!(12);
 /// Base finisher for a non-zero `exit` from the fixture (a verification
 /// failure); the program's exit code is added so the failing step is
 /// identifiable.
@@ -193,6 +196,12 @@ struct AnonProducer {
     /// fixture's pressure-band trim must, and a run where it never arrived has
     /// left `mem_unmap` untested rather than proved it.
     unmaps: AtomicUsize,
+    /// Releases the producer refused. A refusal is not a benign miss: the
+    /// heap keeps the pages and asks again when the arena next moves, so a
+    /// run that refuses is a run whose arena never shrinks. Counting them is
+    /// what makes the release *succeed* part of the assertion rather than
+    /// just arriving.
+    refusals: AtomicUsize,
 }
 
 // SAFETY: the test runs on a single CPU and the producer is reached only
@@ -208,12 +217,33 @@ impl AnonProducer {
         Self {
             inner: UnsafeCell::new(None),
             unmaps: AtomicUsize::new(0),
+            refusals: AtomicUsize::new(0),
         }
     }
 
     /// Ranges released through `mem_unmap` so far.
     fn unmaps(&self) -> usize {
         self.unmaps.load(Ordering::Relaxed)
+    }
+
+    /// Releases refused so far.
+    fn refusals(&self) -> usize {
+        self.refusals.load(Ordering::Relaxed)
+    }
+
+    /// Tear down the pages of `[base, base + len)`, whichever mappings the
+    /// heap obtained them in.
+    fn release(&self, base: u64, len: usize) -> Result<(), Errno> {
+        let page_count = page_count_for(len).map_err(anon_to_errno)?;
+        let live = self.live()?;
+        unmap_anonymous(
+            &mut live.space,
+            &live.physmap,
+            base,
+            page_count,
+            |_frame| {},
+        )
+        .map_err(anon_to_errno)
     }
 
     /// Install the retained live space. Called once at boot, before the
@@ -297,18 +327,14 @@ impl MemMap for AnonProducer {
     }
 
     fn unmap(&self, base: u64, len: usize) -> Result<(), Errno> {
-        let page_count = page_count_for(len).map_err(anon_to_errno)?;
-        let live = self.live()?;
-        unmap_anonymous(
-            &mut live.space,
-            &live.physmap,
-            base,
-            page_count,
-            |_frame| {},
-        )
-        .map_err(anon_to_errno)?;
-        self.unmaps.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        let result = self.release(base, len);
+        let counter = if result.is_ok() {
+            &self.unmaps
+        } else {
+            &self.refusals
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        result
     }
 }
 
@@ -363,6 +389,19 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
     } else if call == Some(SyscallNumber::EXIT) {
         let exit_code = i32_from_register(args[0]);
         if exit_code == 0 {
+            if PRODUCER.refusals() > 0 {
+                // The heap asked for a range the producer would not release.
+                // It keeps those pages and stops asking until the arena
+                // moves, so the arena silently never shrinks — and on the
+                // real syscall path, where the refusal came from the handler
+                // rather than the mechanism, that was a frame's worth of
+                // refused syscalls per teardown.
+                note(
+                    TEST_FAIL,
+                    "heap test: a release the heap asked for was refused",
+                );
+                qemu_exit::exit_failure(FAIL_REFUSED_UNMAP);
+            }
             if PRODUCER.unmaps() == 0 {
                 // The fixture verifies its own values, so a clean exit says
                 // nothing about the release path: without this a granule wide
