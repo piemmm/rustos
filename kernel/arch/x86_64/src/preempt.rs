@@ -393,12 +393,22 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     }
 
     // The LAPIC one-shot fired, so the quantum (if one was armed) is
-    // consumed: clear its recorded deadline before the tick callback runs,
-    // so the per-tick timed-wake sweep does not re-arm the one-shot against
-    // this already-expired quantum. A ring-3 tick
-    // re-arms a fresh quantum via the preempt callback's reschedule below;
-    // the wakeup deadline is owned by the sweep and left untouched.
+    // consumed: clear its recorded deadline, and clear a recorded wakeup that
+    // fired with it, then re-point the one-shot at whatever is still ahead.
+    // Re-arming a *future* wakeup is the point — it outlives the quantum, and
+    // nothing reprograms this CPU afterwards when the tick owes no context
+    // switch under a tickless policy. Re-arming an *elapsed* one is not: the
+    // count would expire immediately and re-trap forever, without ever
+    // reaching the dispatch loop whose sweep is what retires it. A ring-3
+    // tick re-arms a fresh quantum via the preempt callback's reschedule
+    // below.
     PREEMPT_QUANTUM_ABS_TSC.store(NO_DEADLINE, Ordering::Relaxed);
+    if slot_deadline(PREEMPT_WAKEUP_ABS_TSC.load(Ordering::Relaxed))
+        .is_some_and(|abs| abs <= read_tsc())
+    {
+        PREEMPT_WAKEUP_ABS_TSC.store(NO_DEADLINE, Ordering::Relaxed);
+    }
+    reprogram();
 
     let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
     if raw != 0 && cpu_id != u32::MAX {

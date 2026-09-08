@@ -410,7 +410,13 @@ progress, draining the deferred wakes and the console transmit — before
 re-dispatching the task. Crucially this arms **no new timer**: it rides an
 interrupt already firing on the CPU, so the tickless invariant is preserved.
 Latch: `CpuState::force_yield`, cleared by the dispatcher's
-`clear_preempt_pending` so the incoming task earns a fresh guard window.
+`clear_preempt_pending` so the incoming task earns a fresh guard window. The
+watchdog is not its only issuer: a delivered reschedule IPI takes the same
+latch, because its sender has already decided the target must re-enter its
+dispatcher (work placed on its queue, or the task running there told to die
+or to give up its slot), so a lone runnable task must not be able to swallow
+it. That is a correctness path in its own right, not a watchdog duty — the
+guard must never be what a kill's promptness rests on.
 Host-tested (the `progress_overdue`/`monopolises_cpu` predicates, including
 that a rotted `in_kernel` reading does not suppress the tick guard;
 `on_watchdog_tick` sets the latch for a monopolising user CPU only;

@@ -74,6 +74,15 @@
 //! without the tick path a core in exactly that state monopolises itself
 //! unopposed.
 //!
+//! A **delivered reschedule IPI** takes the same un-gated latch
+//! ([`crate::traps::on_reschedule_ipi`]), because it is not a quantum
+//! expiring but a decision another CPU has already taken about this one:
+//! work placed on its queue, or the task running on it told to die or to
+//! give up its slot. Judging it against "has this CPU a competitor" dropped
+//! precisely the case its senders send it for — a lone CPU-bound victim,
+//! whose death then waited on the monopoly guard above rather than on the
+//! nudge the kill path had already issued for it.
+//!
 //! # The in-kernel boundary (long in-kernel work)
 //!
 //! Both latches above are consumed on the way back to *user* mode, so they
@@ -229,11 +238,15 @@ pub fn take_preempt_pending(cpu: CpuId) -> bool {
 /// Request a **forced** yield-to-scheduler for the task currently running
 /// on `cpu`, even when it is the only runnable task there.
 ///
-/// The watchdog calls this for an `Active` CPU that has withheld itself
-/// from the scheduler past the monopoly-guard window, from both of the
-/// per-CPU interrupt paths that can still be running there (its
-/// non-maskable cadence sample and its maskable preemption tick). Unlike
-/// [`note_preempt_tick`], the yield this requests is **not** gated on a
+/// Two issuers. The watchdog calls it for an `Active` CPU that has withheld
+/// itself from the scheduler past the monopoly-guard window, from both of the
+/// per-CPU interrupt paths that can still be running there (its non-maskable
+/// cadence sample and its maskable preemption tick). A delivered reschedule
+/// IPI ([`crate::traps::on_reschedule_ipi`]) calls it because its sender has
+/// already decided this CPU must re-enter its dispatcher — new work on its
+/// queue, or the task running here told to die or to release its slot.
+///
+/// Unlike [`note_preempt_tick`], the yield this requests is **not** gated on a
 /// runnable competitor: its purpose is precisely to return a lone
 /// CPU-bound task to the dispatcher so the dispatch loop's housekeeping
 /// (deferred-wake drain, console-transmit drain) and its progress/liveness
@@ -604,6 +617,25 @@ mod tests {
         assert!(!preempt_current(CPU));
         assert!(!take_forced_yield(CPU));
         assert_eq!(preemption_count(CPU), 0);
+    }
+
+    /// A delivered reschedule IPI takes the **un-gated** latch, never the
+    /// competitor-gated tick: its sender has already decided this CPU must
+    /// re-enter its dispatcher, so a lone runnable task here must not be
+    /// allowed to swallow it. Latching it as a tick left a CPU-bound victim
+    /// the kill path had just nudged running until the monopoly guard fired.
+    #[test]
+    fn a_delivered_reschedule_ipi_requests_an_ungated_yield() {
+        const CPU: CpuId = 60;
+        crate::traps::on_reschedule_ipi(CPU);
+        assert!(
+            !take_preempt_pending(CPU),
+            "a directed IPI is not a quantum expiring"
+        );
+        assert!(
+            take_forced_yield(CPU),
+            "a directed IPI must request an un-gated yield"
+        );
     }
 
     /// The dispatcher's `clear_preempt_pending` supersedes a forced yield

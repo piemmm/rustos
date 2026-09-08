@@ -524,7 +524,19 @@ nearest waiter deadline, both as absolute ticks of the port's free-running
 counter (`CNTPCT_EL0` on aarch64, the `time` CSR on riscv64, the TSC on
 x86_64); a shared `reprogram` arms the single one-shot to the earlier of
 the two via the host-tested `tairix_arch_api::wakeup::earliest` helper, or
-disarms when neither is pending. The conversion from monotonic-ns deadline
+disarms when neither is pending. A **fired** one-shot re-points itself the
+same way (`consume_fired_quantum`), but only at deadlines still *ahead* of
+the counter value it fired at. It consumes the quantum, which is spent by
+definition, and a recorded wakeup at or before that value, which fired with
+it; then it arms the remainder. Arming the remainder is what keeps a future
+blocking-wait deadline alive, since it outlives the quantum and nothing else
+reprograms that CPU when the tick owes no context switch under a tickless
+policy. Never arming an *elapsed* one is equally load-bearing: the per-CPU
+wakeup slot is a cache of a workspace-wide nearest deadline (`set_wakeup`
+writes only the calling CPU's slot), so it routinely holds a deadline
+another CPU's sweep has already retired — and re-arming that satisfies the
+compare at once, re-traps forever, and so never reaches the dispatch loop
+whose sweep is the only thing that would retire it. The conversion from monotonic-ns deadline
 to counter ticks, and (on x86_64) the rebase of the chosen TSC duration
 onto the LAPIC count, use the same calibrated frequency `monotonic_ns`
 reads the other way (`AGENTS.md` §2.4). The per-tick timer callback is
@@ -541,7 +553,12 @@ wasm32 came to drive no deadline sweep at all
 (`plans/OPEN-DEFECTS.md` D96). Each port's return-to-user preempt point
 and reschedule IPI install the sibling `on_user_preempt_point` /
 `on_reschedule_ipi` for the same reason, and each port's wiring module
-carries a host test pinning what it installed. `set_wakeup` defaults to a
+carries a host test pinning what it installed. A delivered **reschedule
+IPI** is deliberately *not* a tick: its sender has already decided the
+target must re-enter its dispatcher — work placed on that CPU's queue, or
+the task running there told to die or to give up its slot — so it takes the
+un-gated forced-yield latch below rather than the competitor-gated tick,
+which would let a lone runnable task on the target swallow it. `set_wakeup` defaults to a
 no-op, so a non-preemptive port inherits the explicit-wake path only; the
 host `TestArch` records each call so the wait syscalls' re-arm epilogues
 are asserted directly.
@@ -604,7 +621,9 @@ never *force*-yielded — the kernel is non-preemptible, so it cannot be
 suspended at an arbitrary instruction; long in-kernel work instead gives the
 CPU up voluntarily, at its own safe boundary (the in-kernel boundary below).
 No new timer is armed — the guard rides the always-on watchdog cadence, so the
-tickless invariant holds.
+tickless invariant holds. The same un-gated latch carries a delivered
+reschedule IPI (above), so a CPU-bound victim the kill path nudged is returned
+to its dispatcher by that nudge rather than by this guard.
 
 The dispatch loop runs with **device interrupts enabled** — TAIRiX is a
 fully preemptive kernel (`AGENTS.md` §17.1). It calls

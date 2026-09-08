@@ -443,10 +443,8 @@ pub fn recorded_deadlines() -> (Option<u64>, Option<u64>) {
 /// `arm_oneshot` / `disarm` SBI programming are riscv64-specific. Off the
 /// freestanding target there is no SBI timer, so the arming is inert (the
 /// deadline bookkeeping above still runs for host tests).
-fn reprogram() {
-    let Some(idx) = per_cpu_index(current_hartid()) else {
-        return;
-    };
+fn reprogram() -> Option<u64> {
+    let idx = per_cpu_index(current_hartid())?;
     let quantum = slot_deadline(quantum_slot(idx).load(Ordering::Relaxed));
     let wakeup = slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed));
     let target = tairix_arch_api::wakeup::earliest(quantum, wakeup);
@@ -460,10 +458,42 @@ fn reprogram() {
             None => disarm(),
         }
     }
-    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-    {
-        let _ = target;
+    target
+}
+
+/// Consume the deadlines the one-shot fire at `time`-CSR value `now`
+/// satisfied on the calling hart, then re-point the one-shot at whatever is
+/// still in the future, returning that deadline (`None` when the timer is
+/// left disarmed).
+///
+/// The quantum is spent by definition. A recorded wakeup at or before `now`
+/// fired with it and is consumed too: the kernel's deadline sweep owns
+/// releasing that waiter and arming the next one, and re-arming an elapsed
+/// deadline here would fire immediately and re-trap forever — without ever
+/// reaching the dispatch loop that is what retires it.
+///
+/// Re-arming a *future* wakeup is the point: the fire disarms the timer, and
+/// nothing reprograms this hart afterwards when the tick owes no context
+/// switch and the live policy is tickless, so the timeout would otherwise
+/// wait on the lockup watchdog's monopoly guard instead of its own deadline.
+///
+/// Published beside this module's other one-shot primitives (the relative
+/// arm, the disarm, and [`record_quantum_deadline`]), so the arming decision
+/// is observable on the host, where the SBI programming is inert.
+#[must_use]
+pub fn consume_fired_quantum(now: u64) -> Option<u64> {
+    let Some(idx) = per_cpu_index(current_hartid()) else {
+        // No registered slot, so no deadline to combine; still clear the
+        // pending `sip.STIP` rather than leave the trap asserted.
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        disarm();
+        return None;
+    };
+    quantum_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
+    if slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed)).is_some_and(|abs| abs <= now) {
+        wakeup_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
     }
+    reprogram()
 }
 
 /// The calling hart's recorded tick interval in `time`-CSR ticks (`0`
@@ -616,18 +646,12 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn on_timer_interrupt() {
     use tairix_arch_api::Timer;
-    // Acknowledge + disarm: `set_timer(u64::MAX)` clears the pending
-    // `sip.STIP` so the trap deasserts; the scheduler re-arms a fresh
-    // one-shot on its next dispatch.
-    disarm();
-    // The quantum (if any) just expired, so clear its recorded deadline:
-    // the dispatch after the preempt point re-arms a fresh quantum, and the
-    // per-tick wakeup sweep (the timer callback below) must not re-arm the
-    // one-shot against this already-fired deadline. The
-    // wakeup deadline is owned by the sweep and left untouched.
-    if let Some(slot) = per_cpu_index(current_hartid()) {
-        quantum_slot(slot).store(NO_DEADLINE, Ordering::Relaxed);
-    }
+    // Acknowledge the fire and re-point the one-shot at whatever deadline is
+    // still pending — the recorded blocking-wait timeout outlives the quantum
+    // that fired, and re-arming it here also clears the pending `sip.STIP` so
+    // the trap deasserts. The scheduler arms the next *quantum* on its own
+    // next dispatch.
+    let _ = consume_fired_quantum(crate::kernel_arch::read_time());
     let Some(slot) = per_cpu_index(current_hartid()) else {
         // No registered per-hart slot for this hart: nothing to dispatch
         // (fail closed).

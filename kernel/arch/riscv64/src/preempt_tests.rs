@@ -158,6 +158,44 @@ fn per_hart_slots_track_the_registered_storage() {
     reset_preempt_storage_for_tests();
 }
 
+/// A fired quantum must leave the hart's *blocking-wait* deadline armed.
+/// The wakeup outlives the quantum, and after the fire nothing else
+/// reprograms this hart when the tick owes no context switch under a
+/// tickless policy — so dropping the arming here silently loses the timeout
+/// until the lockup watchdog forces a yield.
+#[test]
+fn a_fired_quantum_re_arms_a_still_pending_wakeup() {
+    static STORAGE: PreemptStorage<1> = PreemptStorage::new();
+
+    let _guard = lock_preempt_tests();
+    reset_preempt_storage_for_tests();
+    assert_eq!(STORAGE.register(), Ok(1));
+
+    // Fired at the quantum: the wakeup is still ahead and stays armed.
+    record_wakeup_deadline(Some(5_000));
+    record_quantum_deadline(Some(1_000));
+    assert_eq!(consume_fired_quantum(1_000), Some(5_000));
+    assert_eq!(recorded_deadlines(), (None, Some(5_000)));
+
+    // Fired past the wakeup: it fired too, so it is consumed and the timer
+    // is left disarmed. Re-arming an elapsed deadline would fire immediately
+    // and re-trap without ever reaching the dispatch loop that retires it —
+    // an interrupt livelock, not a late wakeup.
+    record_wakeup_deadline(Some(5_000));
+    record_quantum_deadline(Some(1_000));
+    assert_eq!(consume_fired_quantum(6_000), None);
+    assert_eq!(recorded_deadlines(), (None, None));
+
+    // With nothing else pending the fire leaves the timer disarmed.
+    record_wakeup_deadline(None);
+    record_quantum_deadline(Some(1_000));
+    assert_eq!(consume_fired_quantum(1_000), None);
+    assert_eq!(recorded_deadlines(), (None, None));
+
+    clear_for_tests();
+    reset_preempt_storage_for_tests();
+}
+
 #[test]
 fn software_interrupt_enable_bit_and_cause_match_privileged_spec() {
     assert_eq!(SIE_SSIE, 0x2);

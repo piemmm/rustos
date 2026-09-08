@@ -52,19 +52,23 @@ pub extern "C" fn on_timer_tick(cpu: CpuId) {
     crate::watchdog::check_stall(cpu);
 }
 
-/// Latch a delivered reschedule IPI as `cpu`'s pending preemption.
+/// Latch a delivered reschedule IPI as an **un-gated** yield of `cpu`.
 ///
-/// Installed as each port's reschedule-IPI callback. A user task on the
-/// targeted CPU then yields at its next preemption point, so cross-CPU
-/// placement is honoured promptly on a busy core too. Pure accounting —
-/// the context switch is [`on_user_preempt_point`]'s job.
+/// Installed as each port's reschedule-IPI callback. A directed IPI is a
+/// decision its sender has already taken — work placed on this CPU's queue,
+/// or the task running here told to die or to give up its slot — so unlike a
+/// quantum tick it is not re-judged against "has this CPU a competitor".
+/// Routing it through the tick latch dropped exactly the case the senders
+/// send it for: a lone runnable task on the target swallowed the IPI, and its
+/// kill or its stop then waited on the lockup watchdog's monopoly guard.
+/// Pure accounting — the context switch is [`on_user_preempt_point`]'s job.
 pub extern "C" fn on_reschedule_ipi(cpu: CpuId) {
-    crate::preempt::note_preempt_tick(cpu);
+    crate::preempt::request_forced_yield(cpu);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{on_reschedule_ipi, on_timer_tick, on_user_preempt_point};
+    use super::{on_timer_tick, on_user_preempt_point};
     use crate::preempt::{preemption_count, take_preempt_pending};
     use tairix_arch_api::CpuId;
 
@@ -77,16 +81,6 @@ mod tests {
         assert!(
             take_preempt_pending(CPU),
             "a fired tick must latch the CPU's pending preemption"
-        );
-    }
-
-    #[test]
-    fn the_reschedule_ipi_latches_the_pending_preemption() {
-        const CPU: CpuId = 37;
-        on_reschedule_ipi(CPU);
-        assert!(
-            take_preempt_pending(CPU),
-            "a delivered reschedule IPI must latch the CPU's pending preemption"
         );
     }
 

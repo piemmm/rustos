@@ -11996,12 +11996,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     let mut screendump_paths: Vec<(PathBuf, ScreendumpAssert)> = Vec::new();
     for plan in t.screendumps {
         let path = kernel.with_extension(format!("{}.screendump.ppm", plan.suffix));
-        std::fs::remove_file(&path)
-            .or_else(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => Ok(()),
-                _ => Err(e),
-            })
-            .map_err(|e| format!("test --qemu ({}): remove stale screendump: {e}", t.package))?;
+        remove_stale_sidecar(t.package, "screendump", &path)?;
         spec = spec.with_screendump(plan.marker, plan.occurrences, &path);
         screendump_paths.push((path, plan.assert));
     }
@@ -12016,18 +12011,13 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     }
 
     let serial_log = sidecar_path(kernel, t, replica, "serial.log");
-    std::fs::remove_file(&serial_log)
-        .or_else(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => Ok(()),
-            _ => Err(e),
-        })
-        .map_err(|e| {
-            format!(
-                "test --qemu ({}): remove stale serial log {}: {e}",
-                t.package,
-                serial_log.display()
-            )
-        })?;
+    remove_stale_sidecar(t.package, "serial log", &serial_log)?;
+    // The hang dump is removed too. It is written only when a run actually
+    // hangs, so leaving a stale one behind published the *previous* failure's
+    // guest CPU state beside this run's transcript — and the CI collector
+    // copies both. A reader then diagnosed two unrelated events as one.
+    let hang_state = sidecar_path(kernel, t, replica, "hang.txt");
+    remove_stale_sidecar(t.package, "hang dump", &hang_state)?;
 
     // Always collect the peer's verdict, even when the run itself failed,
     // so the thread never outlives the run unjoined.
@@ -12066,7 +12056,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             serial,
             cpu_state,
         } => {
-            let hang = persist_hang_state(t.package, &sidecar_path(kernel, t, replica, "hang.txt"), &cpu_state)?;
+            let hang = persist_hang_state(t.package, &hang_state, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
@@ -12085,7 +12075,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
             // service retrying on a timer), while a silence close to the
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
-            let hang = persist_hang_state(t.package, &sidecar_path(kernel, t, replica, "hang.txt"), &cpu_state)?;
+            let hang = persist_hang_state(t.package, &hang_state, &cpu_state)?;
             Err(format!(
                 "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{cpu_state}\n--- end ---",
                 t.package,
@@ -12131,6 +12121,28 @@ fn fold_peer_verdict(
 /// actually doing at the kill — every one halted (nothing runnable, so a wake
 /// was lost) versus one still executing with interrupts masked (a spin) — is
 /// what decides where to look, and it exists only for as long as QEMU does.
+/// Drop a sidecar an earlier run of the same enrolment left behind, so this
+/// run can never publish another run's bytes.
+///
+/// Every sidecar a run *may* write is removed here, including the ones only a
+/// failure writes: a file that survives a later pass is read beside that
+/// pass's transcript and describes a different event entirely. `kind` names
+/// the artefact in the error a genuine removal failure raises; an absent file
+/// is the normal case.
+fn remove_stale_sidecar(package: &str, kind: &str, path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path)
+        .or_else(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(e),
+        })
+        .map_err(|e| {
+            format!(
+                "test --qemu ({package}): remove stale {kind} {}: {e}",
+                path.display()
+            )
+        })
+}
+
 fn persist_hang_state(package: &str, path: &Path, cpu_state: &str) -> Result<String, String> {
     std::fs::write(path, cpu_state).map_err(|e| {
         format!(

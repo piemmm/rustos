@@ -436,17 +436,15 @@ pub fn recorded_deadlines(cpu: CpuId) -> (Option<u64>, Option<u64>) {
 /// Reprogram CPU `cpu`'s single physical one-shot to fire at the earlier
 /// of its recorded quantum and wakeup deadlines, or disarm it when
 /// neither is pending (the tickless one-shot is armed
-/// only for a real pending event).
+/// only for a real pending event). Returns the deadline it armed.
 ///
 /// The combining math is the shared, host-tested
 /// [`tairix_arch_api::wakeup`] helper; only the `CNTPCT_EL0` read and the
 /// `arm_oneshot` / `disarm` programming are aarch64-specific. Off the
 /// freestanding target there is no generic timer, so the arming is inert
 /// (the deadline bookkeeping above still runs for host tests).
-fn reprogram(cpu: CpuId) {
-    let Some(idx) = per_cpu_index(cpu) else {
-        return;
-    };
+fn reprogram(cpu: CpuId) -> Option<u64> {
+    let idx = per_cpu_index(cpu)?;
     let quantum = slot_deadline(quantum_slot(idx).load(Ordering::Relaxed));
     let wakeup = slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed));
     let target = tairix_arch_api::wakeup::earliest(quantum, wakeup);
@@ -462,10 +460,41 @@ fn reprogram(cpu: CpuId) {
             None => disarm(),
         }
     }
-    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-    {
-        let _ = target;
+    target
+}
+
+/// Consume the deadlines the one-shot fire at counter value `now` satisfied
+/// on `cpu`, then re-point the one-shot at whatever is still in the future,
+/// returning that deadline (`None` when the timer is left disarmed).
+///
+/// The quantum is spent by definition. A recorded wakeup at or before `now`
+/// fired with it and is consumed too: the kernel's deadline sweep owns
+/// releasing that waiter and arming the next one, and re-arming an elapsed
+/// compare here would satisfy it immediately and re-trap forever — without
+/// ever reaching the dispatch loop that is what retires it.
+///
+/// Re-arming a *future* wakeup is the point: the fire disarms the hardware,
+/// and nothing reprograms this CPU afterwards when the tick owes no context
+/// switch and the live policy is tickless, so the timeout would otherwise
+/// wait on the lockup watchdog's monopoly guard instead of its own deadline.
+///
+/// Published beside this module's other one-shot primitives (the absolute
+/// arm, the disarm, and [`record_quantum_deadline`]), so the arming decision
+/// is observable on the host, where the register programming is inert.
+#[must_use]
+pub fn consume_fired_quantum(cpu: CpuId, now: u64) -> Option<u64> {
+    let Some(idx) = per_cpu_index(cpu) else {
+        // No registered slot, so no deadline to combine; still clear the
+        // asserted timer condition rather than leave the line asserted.
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        disarm();
+        return None;
+    };
+    quantum_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
+    if slot_deadline(wakeup_slot(idx).load(Ordering::Relaxed)).is_some_and(|abs| abs <= now) {
+        wakeup_slot(idx).store(NO_DEADLINE, Ordering::Relaxed);
     }
+    reprogram(cpu)
 }
 
 /// The recorded tick interval for `cpu` in counter ticks (`0` if unset).
@@ -652,18 +681,19 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
     disarm();
 }
 
-/// Handle a generic-timer interrupt: clear the timer condition and
-/// dispatch the (observation-only) scheduler-tick callback.
+/// Handle a generic-timer interrupt: consume the fired quantum, re-point
+/// the one-shot at any deadline still pending, and dispatch the
+/// (observation-only) scheduler-tick callback.
 ///
-/// TAIRiX is tickless: the timer was armed **one-shot**
-/// by the scheduler, so this handler does **not** re-arm it — the next
-/// fire happens only when the scheduler arms another quantum via
-/// [`arm_oneshot`]. It disarms (clearing the now-asserted timer condition
-/// so the IRQ does not immediately re-trap) and then dispatches the tick
-/// callback. The *preemption* of the running EL0 task is driven separately
-/// by [`on_el0_preempt_point`], called from the IRQ path after the GIC
-/// end-of-interrupt handshake; the scheduler's next dispatch re-arms the
-/// one-shot for whichever task it runs next.
+/// TAIRiX is tickless: the timer was armed **one-shot** by the scheduler,
+/// so this handler never re-arms a *quantum* — the next one comes from the
+/// scheduler's next dispatch via [`arm_oneshot`]. It does re-point the
+/// one-shot at the CPU's recorded blocking-wait deadline, which outlives
+/// the quantum that fired and would otherwise be left unarmed
+/// ([`consume_fired_quantum`]); that also clears the now-asserted timer
+/// condition so the IRQ does not immediately re-trap. The *preemption* of
+/// the running EL0 task is driven separately by [`on_el0_preempt_point`],
+/// called from the IRQ path after the GIC end-of-interrupt handshake.
 ///
 /// Called only from [`crate::exceptions`]' IRQ path, with interrupts
 /// masked (the PE masked them on exception entry).
@@ -671,16 +701,7 @@ pub unsafe fn init_local_preempt(cpu: CpuId, interval_ticks: u64) {
 pub(crate) fn on_timer_interrupt(cpu: CpuId) {
     use tairix_arch_api::Timer;
 
-    // Clear the fired one-shot's timer condition so the line deasserts;
-    // the scheduler re-arms a fresh one-shot on its next dispatch.
-    disarm();
-    // The quantum (if any) just expired, so clear its recorded deadline:
-    // the dispatch that follows the preempt point re-arms a fresh quantum,
-    // and the per-tick wakeup sweep (the timer callback below) must not
-    // re-arm the one-shot against this already-fired deadline. The wakeup deadline is owned by the sweep and left untouched.
-    if let Some(slot) = per_cpu_index(cpu) {
-        quantum_slot(slot).store(NO_DEADLINE, Ordering::Relaxed);
-    }
+    let _ = consume_fired_quantum(cpu, crate::kernel_arch::read_cntpct());
     let Some(slot) = per_cpu_index(cpu) else {
         // No registered per-CPU slot for this core: nothing to dispatch
         // (fail closed).
@@ -908,6 +929,43 @@ mod tests {
         clear_for_tests();
         assert_eq!(timer_interval_ticks(2), 0);
         assert_eq!(timer_cpu_id(2), None);
+        reset_preempt_storage_for_tests();
+    }
+
+    /// A fired quantum must leave the CPU's *blocking-wait* deadline armed.
+    /// The wakeup outlives the quantum, and after the fire nothing else
+    /// reprograms this CPU when the tick owes no context switch under a
+    /// tickless policy — so dropping the arming here silently loses the
+    /// timeout until the lockup watchdog forces a yield.
+    #[test]
+    fn a_fired_quantum_re_arms_a_still_pending_wakeup() {
+        static STORAGE: PreemptStorage<2> = PreemptStorage::new();
+
+        let _guard = lock_global_state();
+        reset_preempt_storage_for_tests();
+        assert_eq!(STORAGE.register(), Ok(2));
+
+        // Fired at the quantum: the wakeup is still ahead and stays armed.
+        record_wakeup_deadline(0, Some(5_000));
+        record_quantum_deadline(0, Some(1_000));
+        assert_eq!(consume_fired_quantum(0, 1_000), Some(5_000));
+        assert_eq!(recorded_deadlines(0), (None, Some(5_000)));
+
+        // Fired past the wakeup: it fired too, so it is consumed and the
+        // timer is left disarmed. Re-arming an elapsed compare would satisfy
+        // it immediately and re-trap without ever reaching the dispatch loop
+        // that retires it — an interrupt livelock, not a late wakeup.
+        record_wakeup_deadline(0, Some(5_000));
+        record_quantum_deadline(0, Some(1_000));
+        assert_eq!(consume_fired_quantum(0, 6_000), None);
+        assert_eq!(recorded_deadlines(0), (None, None));
+
+        // With nothing else pending the fire leaves the timer disarmed.
+        record_quantum_deadline(1, Some(1_000));
+        assert_eq!(consume_fired_quantum(1, 1_000), None);
+        assert_eq!(recorded_deadlines(1), (None, None));
+
+        clear_for_tests();
         reset_preempt_storage_for_tests();
     }
 }
