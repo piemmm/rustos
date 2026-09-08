@@ -50,10 +50,8 @@ pub(super) fn device(
             // A rate has no fixed ceiling to fill a bar against, so it
             // trends: the interface's own counters deltaed over this
             // sample's interval, received above the line and sent below.
-            instrument: HeroInstrument::Trend {
-                samples: meters.devices.primary_history(id).to_vec(),
-                opposing: Some(meters.devices.opposing_history(id).to_vec()),
-            },
+            instrument: HeroInstrument::trend(meters.devices.primary_history(id).to_vec())
+                .with_opposing(meters.devices.opposing_history(id).to_vec()),
             caption: String::from("received above the line, sent below"),
         },
         blocks: blocks(sample, iface),

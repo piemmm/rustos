@@ -27,9 +27,10 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
 use tairix_controls::{
-    Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue, MetricInstrument,
-    MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
+    inset, plate_border, Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue,
+    MetricInstrument, MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
 };
+use tairix_font::BitmapFont;
 
 use crate::view::reading::{reading_text, HealthSeverity, Reading, ReadingFact, Unmeasured};
 
@@ -58,7 +59,7 @@ impl PaneHero {
             value,
             unit: String::from(unit),
             context: Vec::new(),
-            instrument: HeroInstrument::None,
+            instrument: HeroInstrument::default(),
             caption: String::new(),
         }
     }
@@ -79,30 +80,61 @@ impl PaneHero {
     }
 }
 
-/// Which instrument a pane's hero draws.
+/// Which instruments a pane's hero draws.
 ///
-/// A rate trends, because its shape over time *is* the reading and it has no
-/// fixed ceiling to fill a bar against; a fraction of a measured whole
-/// tracks. A fact pane has neither, and the absence of an instrument is what
-/// says the reading is a fact.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeroInstrument {
-    /// A rate's recent history, in permille, oldest first, with the
-    /// opposing direction where one is measured.
-    Trend {
-        /// The primary series.
-        samples: Vec<u16>,
-        /// The opposing direction, mirrored below the axis. [`None`] leaves
-        /// the trace a single series over the whole box rather than showing
-        /// an empty half.
-        opposing: Option<Vec<u16>>,
-    },
-    /// A proportional bar at this permille fraction, or an unmeasured track
-    /// where the fraction is not known — never a bar at nought, which would
-    /// read as "idle" when the truth is "unknown".
-    Track(Option<u16>),
-    /// No instrument.
-    None,
+/// The two answer different questions and a hero may want both, which is what
+/// the boards draw for the processor and for memory alike: the trace beside the
+/// reading says *what this has been doing*, and the bar under the context lines
+/// says *how much of it is in use now*. A fact pane has neither, and the
+/// absence of both is what says the reading is a fact.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HeroInstrument {
+    /// A rate's recent history, in permille, oldest first. Empty draws no
+    /// trace.
+    pub samples: Vec<u16>,
+    /// The opposing direction, mirrored below the axis. [`None`] leaves the
+    /// trace a single series over the whole box rather than showing an empty
+    /// half.
+    pub opposing: Option<Vec<u16>>,
+    /// A proportional bar at this permille fraction, or `Some(None)` for an
+    /// unmeasured track — never a bar at nought, which would read as "idle"
+    /// when the truth is "unknown". `None` draws no bar.
+    pub track: Option<Option<u16>>,
+}
+
+impl HeroInstrument {
+    /// A trace over `samples` and no bar.
+    #[must_use]
+    pub fn trend(samples: Vec<u16>) -> Self {
+        Self {
+            samples,
+            ..Self::default()
+        }
+    }
+
+    /// A bar at `fraction` and no trace.
+    #[must_use]
+    pub fn track(fraction: Option<u16>) -> Self {
+        Self {
+            track: Some(fraction),
+            ..Self::default()
+        }
+    }
+
+    /// This instrument set with a bar at `fraction` beside whatever trace it
+    /// already carries.
+    #[must_use]
+    pub fn with_track(mut self, fraction: Option<u16>) -> Self {
+        self.track = Some(fraction);
+        self
+    }
+
+    /// This instrument set with `opposing` mirrored under its trace.
+    #[must_use]
+    pub fn with_opposing(mut self, opposing: Vec<u16>) -> Self {
+        self.opposing = Some(opposing);
+        self
+    }
 }
 
 /// How wide a block sits in the pane's flow.
@@ -339,9 +371,12 @@ pub(in crate::view) enum ItemBody {
     Consumer {
         /// The reading itself.
         tile: MetricTile,
-        /// The bundle the task was launched from, so the row's icon is that
-        /// application's own picture rather than one generic glyph.
+        /// The bundle the task was launched from, where the session attested
+        /// one, so the row's icon is that application's own picture.
         bundle: Option<String>,
+        /// The task's kernel-attested name, which resolves the icon of every
+        /// process the desktop did not launch itself.
+        name: String,
     },
     /// A status pill.
     Pill(StatusPill),
@@ -350,14 +385,24 @@ pub(in crate::view) enum ItemBody {
 }
 
 /// One per-core cell, built.
+///
+/// Three rows the boards fix: the core's name with its class badge opposite,
+/// the trace between, then the busy share with its live clock opposite. Not a
+/// [`MetricTile`] — a tile stacks its label, reading and detail from the top,
+/// which left the trace drawn across the readings and a third of the cell
+/// empty beneath them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::view) struct CellView {
-    /// The core's name, its badge and its readings.
-    pub(in crate::view) tile: MetricTile,
+    /// The core's name.
+    pub(in crate::view) label: String,
+    /// Its busy share, the reading the cell leads its bottom row with.
+    pub(in crate::view) busy: String,
+    /// Its live clock, trailing that same row.
+    pub(in crate::view) clock: String,
     /// The core's own trace.
     pub(in crate::view) trend: Chart,
-    /// The performance-class badge.
-    pub(in crate::view) badge: StatusPill,
+    /// The performance-class badge: its letter and the tone it wears.
+    pub(in crate::view) badge: (&'static str, SignalRole),
 }
 
 /// Compile a pane's hero, banner and blocks into the flow the frame draws.
@@ -446,23 +491,23 @@ fn hero_body(hero: &PaneHero, kind: PressureKind) -> ItemBody {
     if let Some(first) = context.next() {
         tile = tile.with_detail(first.clone());
     }
-    let chart = match &hero.instrument {
-        HeroInstrument::Trend { samples, opposing } => {
-            let mut chart = Chart::new(kind).with_samples(samples.iter().copied());
-            if let Some(opposing) = opposing {
-                chart = chart.with_opposing(kind, opposing.iter().copied());
-            }
-            Some(chart)
+    // The two instruments are independent: the trace answers what the resource
+    // has been doing and the bar how much of it is in use, and the boards draw
+    // a hero carrying both.
+    let instrument = &hero.instrument;
+    if let Some(fraction) = instrument.track {
+        tile = tile.with_instrument(MetricInstrument::Track(match fraction {
+            Some(permille) => MeterValue::Measured(ProgressValue::new(permille)),
+            None => MeterValue::Unmeasured,
+        }));
+    }
+    let chart = (!instrument.samples.is_empty()).then(|| {
+        let mut chart = Chart::new(kind).with_samples(instrument.samples.iter().copied());
+        if let Some(opposing) = &instrument.opposing {
+            chart = chart.with_opposing(kind, opposing.iter().copied());
         }
-        HeroInstrument::Track(fraction) => {
-            tile = tile.with_instrument(MetricInstrument::Track(match fraction {
-                Some(permille) => MeterValue::Measured(ProgressValue::new(*permille)),
-                None => MeterValue::Unmeasured,
-            }));
-            None
-        }
-        HeroInstrument::None => None,
-    };
+        chart
+    });
     ItemBody::Hero {
         tile,
         chart,
@@ -556,6 +601,7 @@ fn push_block(
                         ItemBody::Consumer {
                             tile: consumer_row(consumer, kind),
                             bundle: consumer.bundle.clone(),
+                            name: consumer.name.clone(),
                         },
                     );
                 }
@@ -616,16 +662,12 @@ fn composition(kind: PressureKind, parts: &[CompositionPart]) -> Option<Composit
 
 /// One per-core cell, built.
 fn cell_view(cell: &CoreCell, kind: PressureKind) -> CellView {
-    let (letter, tone) = class_badge(cell.class);
     CellView {
-        tile: MetricTile::new(cell.label.clone(), reading_text(&cell.busy), kind)
-            .with_detail(reading_text(&cell.clock))
-            .with_layout(MetricLayout::Stacked)
-            .unplated(),
+        label: cell.label.clone(),
+        busy: reading_text(&cell.busy),
+        clock: reading_text(&cell.clock),
         trend: Chart::new(kind).with_samples(cell.trend.iter().copied()),
-        // Outlined because the badge is a few pixels in a dense grid's corner:
-        // its wash alone is indistinguishable from the cell behind it.
-        badge: StatusPill::new(letter).with_tone(tone).outlined(),
+        badge: class_badge(cell.class),
     }
 }
 
@@ -646,7 +688,7 @@ const fn class_badge(class: CpuCoreClass) -> (&'static str, SignalRole) {
 /// tinted by the resource it is about.
 fn consumer_row(consumer: &ConsumerRow, kind: PressureKind) -> MetricTile {
     MetricTile::new(consumer.name.clone(), consumer.amount.clone(), kind)
-        .with_icon(crate::view::task_icon(consumer.bundle.as_deref()).icon_kind())
+        .with_icon(crate::view::task_icon_kind(consumer.bundle.as_deref()))
         .with_layout(MetricLayout::Inline)
         .with_instrument(MetricInstrument::Track(MeterValue::Measured(
             ProgressValue::new(consumer.share),
@@ -703,24 +745,24 @@ fn grid_columns(count: usize, most: u32) -> u32 {
     u32::try_from(columns).unwrap_or(1)
 }
 
-/// One per-core cell's width in a grid `columns` wide across `width`, with
-/// `gap` between neighbours.
+/// One per-core cell's slot width in a grid `columns` wide across `width`.
 ///
-/// A function of the grid rather than of a row, so every cell of the grid is
-/// the same size — the last row's included.
-fn cell_width(width: u32, columns: u32, gap: u32) -> u32 {
-    let columns = columns.max(1);
-    width.saturating_sub(gap.saturating_mul(columns.saturating_sub(1))) / columns
+/// The slots abut and each cell's own plate margin makes the gap, so the
+/// spacing across a grid row is the same gap as the spacing down a pane. A
+/// function of the grid rather than of a row, so every cell of the grid is the
+/// same size — the last row's included.
+fn cell_width(width: u32, columns: u32) -> u32 {
+    width / columns.max(1)
 }
 
-/// The flow's row pitch and inter-column gap, so the paint and a refresh
-/// resolving the rectangle an item owes read one arithmetic.
+/// The flow's row pitch, so the paint and a refresh resolving the rectangle an
+/// item owes read one arithmetic.
+///
+/// There is no inter-column figure to carry: a slot's gap is its own plate's
+/// margin, so the columns and the grid divide their width evenly.
 #[must_use]
-pub(super) fn metrics(scale: Scale, theme: &Theme) -> (u32, u32) {
-    (
-        crate::view::Switchboard::row_item_height(scale, theme),
-        scale.scale_length(theme.metrics().control_gap).max(1),
-    )
+pub(super) fn pitch(scale: Scale, theme: &Theme) -> u32 {
+    crate::view::Switchboard::row_item_height(scale, theme)
 }
 
 /// Where one item draws within `primary`, given the first visible row.
@@ -736,7 +778,6 @@ pub(super) fn item_rect(
     primary: Rect,
     start: u32,
     pitch: u32,
-    gap: u32,
     pad: u32,
 ) -> Option<Rect> {
     let top =
@@ -747,7 +788,7 @@ pub(super) fn item_rect(
     if clipped_bottom <= clipped_top {
         return None;
     }
-    let (left, width) = column_bounds(item.column, primary, gap);
+    let (left, width) = column_bounds(item.column, primary);
     if width == 0 {
         return None;
     }
@@ -773,15 +814,15 @@ pub(super) fn item_rect(
 }
 
 /// The horizontal extent of one pane column within `primary`.
-fn column_bounds(column: PaneColumn, primary: Rect, gap: u32) -> (i32, u32) {
+fn column_bounds(column: PaneColumn, primary: Rect) -> (i32, u32) {
     match column {
         PaneColumn::Full => (primary.left(), primary.width),
         PaneColumn::Leading | PaneColumn::Trailing => {
-            let half = primary.width.saturating_sub(gap) / 2;
+            let half = primary.width / 2;
             match column {
                 PaneColumn::Trailing => (
-                    primary.left() + to_i32(half.saturating_add(gap)),
-                    primary.width.saturating_sub(half).saturating_sub(gap),
+                    primary.left() + to_i32(half),
+                    primary.width.saturating_sub(half),
                 ),
                 _ => (primary.left(), half),
             }
@@ -800,20 +841,13 @@ pub(super) fn render(
     window: PaneWindow<'_>,
     artwork: &mut dyn IconArtwork,
 ) {
-    let PaneWindow {
-        primary,
-        start,
-        scale,
-        theme,
-        font,
-    } = window;
-    let (pitch, gap) = metrics(scale, theme);
-    let pad = crate::view::block::content_inset(scale, theme);
+    let pitch = pitch(window.scale, window.theme);
+    let pad = crate::view::block::content_inset(window.scale, window.theme);
     for item in items {
-        let Some(rect) = item_rect(item, primary, start, pitch, gap, pad) else {
+        let Some(rect) = item_rect(item, window.primary, window.start, pitch, pad) else {
             continue;
         };
-        render_item(surface, &item.body, rect, scale, theme, font, artwork);
+        render_item(surface, &item.body, rect, window, artwork);
     }
 }
 
@@ -837,73 +871,48 @@ pub(super) struct PaneWindow<'a> {
     pub(super) theme: &'a Theme,
     /// The text face the flow's own prose is drawn in.
     pub(super) font: tairix_font::BitmapFont,
+    /// The session's own account root, which resolves the icon of a consumer
+    /// loaded from this user's own program store.
+    pub(super) home: Option<&'a str>,
 }
 
 /// Paint one item into the rectangle the flow resolved for it.
+///
+/// Takes the whole `window` rather than the pieces of it an item happens to
+/// need: it is one render context, and threading its parts one by one is what
+/// grouping them existed to stop.
 fn render_item(
     surface: &mut Surface,
     body: &ItemBody,
     rect: Rect,
-    scale: Scale,
-    theme: &Theme,
-    font: tairix_font::BitmapFont,
+    window: PaneWindow<'_>,
     artwork: &mut dyn IconArtwork,
 ) {
+    let PaneWindow {
+        scale,
+        theme,
+        font,
+        home,
+        ..
+    } = window;
     let palette = theme.palette();
-    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     match body {
         ItemBody::Hero {
             tile,
             chart,
             context,
             caption,
-        } => {
-            let reading_w = match chart {
-                // The trace takes the greater share: a rate's shape is the
-                // reading, and the figure beside it needs only its own width.
-                Some(_) => rect.width / 3,
-                None => rect.width,
-            };
-            let reading = Rect::new(rect.left(), rect.top(), reading_w, rect.height);
-            tile.render(surface, reading, scale, theme, None);
-            let mut y = rect
-                .top()
-                .saturating_add(to_i32(tile.measured_height(scale, theme)));
-            for line in context {
-                if y.saturating_add(to_i32(font.line_height())) > rect.bottom() {
-                    break;
-                }
-                font.draw_text(
-                    surface,
-                    reading.left(),
-                    y,
-                    font.truncate_to_width(line, reading.width),
-                    Color::from(palette.on_surface_muted),
-                );
-                y = y.saturating_add(to_i32(font.line_height()));
-            }
-            if let Some(chart) = chart {
-                let left = rect.left() + to_i32(reading_w.saturating_add(gap));
-                let width = rect.width.saturating_sub(reading_w).saturating_sub(gap);
-                let caption_h = font.line_height().min(rect.height);
-                let plot_h = rect.height.saturating_sub(caption_h);
-                chart.render(
-                    surface,
-                    Rect::new(left, rect.top(), width, plot_h),
-                    scale,
-                    theme,
-                );
-                if !caption.is_empty() {
-                    font.draw_text(
-                        surface,
-                        left,
-                        rect.top() + to_i32(plot_h),
-                        font.truncate_to_width(caption, width),
-                        Color::from(palette.on_surface_muted),
-                    );
-                }
-            }
-        }
+        } => render_hero(
+            surface,
+            HeroParts {
+                tile,
+                chart: chart.as_ref(),
+                context,
+                caption,
+            },
+            rect,
+            window,
+        ),
         ItemBody::Plate => {
             crate::view::block::plate(surface, rect, scale, theme);
         }
@@ -919,9 +928,10 @@ fn render_item(
         ItemBody::Cells { cells, columns } => {
             render_cells(surface, cells, *columns, rect, scale, theme);
         }
-        ItemBody::Consumer { tile, bundle } => {
+        ItemBody::Consumer { tile, bundle, name } => {
             let side = tile.icon_side(rect, scale, theme);
-            let picture = artwork.artwork(crate::view::task_icon(bundle.as_deref()), side);
+            let request = crate::view::task_icon(bundle.as_deref(), name, home);
+            let picture = artwork.artwork(request, side);
             tile.render(surface, rect, scale, theme, picture);
         }
         ItemBody::Pill(pill) => {
@@ -946,6 +956,81 @@ fn render_item(
     }
 }
 
+/// What a hero draws: its reading tile, its optional trace, the context lines
+/// under the reading, and what the trace's extent means.
+///
+/// Grouped so the hero's own painter takes one value rather than four
+/// positional arguments of similar shape. A bundle of borrows, so it copies
+/// like the [`PaneWindow`] beside it.
+#[derive(Copy, Clone)]
+struct HeroParts<'a> {
+    /// The headline figure and its unit.
+    tile: &'a MetricTile,
+    /// The trace beside it, where the reading has a history.
+    chart: Option<&'a Chart>,
+    /// The lines under the reading, in reading order.
+    context: &'a [String],
+    /// What the trace's horizontal extent means.
+    caption: &'a str,
+}
+
+/// Paint a pane's hero: the reading column, then the trace and its caption.
+fn render_hero(surface: &mut Surface, parts: HeroParts<'_>, rect: Rect, window: PaneWindow<'_>) {
+    let PaneWindow {
+        scale, theme, font, ..
+    } = window;
+    let muted = Color::from(theme.palette().on_surface_muted);
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let reading_w = match parts.chart {
+        // The trace takes the greater share: a rate's shape is the reading,
+        // and the figure beside it needs only its own width.
+        Some(_) => rect.width / 3,
+        None => rect.width,
+    };
+    let reading = Rect::new(rect.left(), rect.top(), reading_w, rect.height);
+    parts.tile.render(surface, reading, scale, theme, None);
+
+    let mut y = rect
+        .top()
+        .saturating_add(to_i32(parts.tile.measured_height(scale, theme)));
+    for line in parts.context {
+        if y.saturating_add(to_i32(font.line_height())) > rect.bottom() {
+            break;
+        }
+        font.draw_text(
+            surface,
+            reading.left(),
+            y,
+            font.truncate_to_width(line, reading.width),
+            muted,
+        );
+        y = y.saturating_add(to_i32(font.line_height()));
+    }
+
+    let Some(chart) = parts.chart else {
+        return;
+    };
+    let left = rect.left() + to_i32(reading_w.saturating_add(gap));
+    let width = rect.width.saturating_sub(reading_w).saturating_sub(gap);
+    let caption_h = font.line_height().min(rect.height);
+    let plot_h = rect.height.saturating_sub(caption_h);
+    chart.render(
+        surface,
+        Rect::new(left, rect.top(), width, plot_h),
+        scale,
+        theme,
+    );
+    if !parts.caption.is_empty() {
+        font.draw_text(
+            surface,
+            left,
+            rect.top() + to_i32(plot_h),
+            font.truncate_to_width(parts.caption, width),
+            muted,
+        );
+    }
+}
+
 /// Paint one grid row's cells side by side, each with its own trace under
 /// its name and its class badge in the corner.
 ///
@@ -960,15 +1045,12 @@ fn render_cells(
     scale: Scale,
     theme: &Theme,
 ) {
-    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-    let width = cell_width(rect.width, columns, gap);
+    let width = cell_width(rect.width, columns);
     if width == 0 {
         return;
     }
     for (index, cell) in cells.iter().enumerate() {
-        let step = width
-            .saturating_add(gap)
-            .saturating_mul(u32::try_from(index).unwrap_or(0));
+        let step = width.saturating_mul(u32::try_from(index).unwrap_or(0));
         let left = rect.left() + to_i32(step);
         // A cell is the same plate a block draws, and it is what separates
         // one core's figures from its neighbour's in a grid of a dozen; the
@@ -982,38 +1064,137 @@ fn render_cells(
         ) else {
             continue;
         };
-        // The trace sits between the cell's name and its readings, which is
-        // the whole point of a per-core cell: the shape, not just the figure.
-        let trend_h = inner.height / 3;
-        let head_h = inner.height.saturating_sub(trend_h);
+        render_cell(surface, cell, inner, scale, theme);
+    }
+}
+
+/// Paint one cell's three rows into the plate's interior: its name with the
+/// class badge opposite, its trace between, and its busy share with the live
+/// clock opposite.
+///
+/// The rows are measured from their own faces rather than by thirds, so the
+/// readings sit on the cell's bottom line and the trace takes whatever height
+/// is left between — the boards' anatomy, where dividing the interior in three
+/// left the figures floating above a third of empty plate.
+fn render_cell(surface: &mut Surface, cell: &CellView, inner: Rect, scale: Scale, theme: &Theme) {
+    let palette = theme.palette();
+    let name = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
+    let figure = BitmapFont::for_role(theme.fonts(), TextRole::Metric, scale);
+    let head_h = name.line_height().max(badge_side(scale, theme));
+    let foot_h = figure.line_height().max(name.line_height());
+    let Some(trend_h) = inner.height.checked_sub(head_h.saturating_add(foot_h)) else {
+        return;
+    };
+
+    name.draw_text(
+        surface,
+        inner.left(),
+        inner.top() + to_i32(head_h.saturating_sub(name.line_height()) / 2),
+        name.truncate_to_width(&cell.label, inner.width),
+        Color::from(palette.on_surface_muted),
+    );
+    render_badge(surface, cell.badge, inner, head_h, scale, theme);
+
+    if trend_h > 0 {
         cell.trend.render(
             surface,
             Rect::new(
                 inner.left(),
-                inner.top() + to_i32(head_h / 2),
+                inner.top() + to_i32(head_h),
                 inner.width,
                 trend_h,
             ),
             scale,
             theme,
         );
-        cell.tile.render(surface, inner, scale, theme, None);
-        let badge_w = cell.badge.measured_width(scale, theme);
-        let badge_h = StatusPill::measured_height(scale, theme);
-        if badge_w < inner.width && badge_h <= inner.height {
-            cell.badge.render(
-                surface,
-                Rect::new(
-                    inner.left() + to_i32(inner.width.saturating_sub(badge_w)),
-                    inner.top(),
-                    badge_w,
-                    badge_h,
-                ),
-                scale,
-                theme,
-            );
-        }
     }
+
+    let foot_y = inner.top() + to_i32(head_h.saturating_add(trend_h));
+    figure.draw_text(
+        surface,
+        inner.left(),
+        foot_y,
+        figure.truncate_to_width(&cell.busy, inner.width),
+        Color::from(palette.on_surface),
+    );
+    let clock = name.truncate_to_width(&cell.clock, inner.width);
+    let clock_w = name.text_width(clock).min(inner.width);
+    name.draw_text(
+        surface,
+        inner.left() + to_i32(inner.width.saturating_sub(clock_w)),
+        foot_y + to_i32(foot_h.saturating_sub(name.line_height()) / 2),
+        clock,
+        Color::from(palette.on_surface_muted),
+    );
+}
+
+/// The side of a class badge: the header role's line with a hairline of
+/// breathing room, so it reads as a compact mark in the cell's corner rather
+/// than as a control seated there.
+fn badge_side(scale: Scale, theme: &Theme) -> u32 {
+    BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale)
+        .line_height()
+        .saturating_add(plate_border(theme, scale).saturating_mul(2))
+}
+
+/// Paint one core's class badge in the trailing corner of `inner`'s head row:
+/// a small rounded box, its rim and letter in the class's tone.
+///
+/// Outlined rather than washed, and a box rather than a capsule: at badge size
+/// a wash is indistinguishable from the plate behind it, and a capsule reads as
+/// a pill of prose rather than as a mark. Its interior stays the plate's own
+/// ground, so the rim and the letter carry the whole of it.
+fn render_badge(
+    surface: &mut Surface,
+    badge: (&'static str, SignalRole),
+    inner: Rect,
+    head_h: u32,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let (letter, tone) = badge;
+    let side = badge_side(scale, theme);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale);
+    let width = side.max(font.text_width(letter).saturating_add(side / 2));
+    if width > inner.width || side > inner.height {
+        return;
+    }
+    let (Ok(x), Ok(y)) = (
+        u32::try_from(inner.left() + to_i32(inner.width.saturating_sub(width))),
+        u32::try_from(inner.top() + to_i32(head_h.saturating_sub(side) / 2)),
+    ) else {
+        return;
+    };
+    let border = plate_border(theme, scale);
+    // The theme's corner *proportion* rather than its length: a control's
+    // radius over a control's height, applied to a mark a fraction of that
+    // size. Taking the length itself made the radius half the badge's side,
+    // which is a capsule — the shape a pill of prose wears, not a badge.
+    let metrics = theme.metrics();
+    let radius = scale
+        .scale_length(metrics.control_corner_radius)
+        .saturating_mul(side)
+        / scale.scale_length(metrics.control_height).max(1);
+    let ink = Color::from(theme.palette().signal(tone));
+    surface.set_round_rect(x, y, width, side, radius, ink);
+    if let Some((ix, iy, iw, ih)) = inset(x, y, width, side, border) {
+        surface.set_round_rect(
+            ix,
+            iy,
+            iw,
+            ih,
+            radius.saturating_sub(border),
+            Color::from(theme.palette().surface_raised),
+        );
+    }
+    let text_w = font.text_width(letter).min(width);
+    font.draw_text(
+        surface,
+        to_i32(x + (width.saturating_sub(text_w) / 2)),
+        to_i32(y + (side.saturating_sub(font.line_height()) / 2)),
+        letter,
+        ink,
+    );
 }
 
 #[cfg(test)]

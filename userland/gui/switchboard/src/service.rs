@@ -212,6 +212,10 @@ pub struct Service {
     /// Which bundle each window owner was launched from, as the session has
     /// reported it — the one fact the process list cannot carry.
     bundles: OwnerBundles,
+    /// The account root this service runs as, read once from its own
+    /// environment: what lets a task loaded from this user's own program store
+    /// draw that bundle's icon.
+    home: Option<alloc::string::String>,
     panel: Panel,
     next_sample_ns: u64,
 }
@@ -221,12 +225,18 @@ impl Service {
     /// `scopes`, with a closed panel whose model already reflects what
     /// `authority` allows.
     #[must_use]
-    pub fn new(self_pid: u64, scopes: ScopeVerdicts, authority: &dyn CapabilityQuery) -> Self {
+    pub fn new(
+        self_pid: u64,
+        home: Option<alloc::string::String>,
+        scopes: ScopeVerdicts,
+        authority: &dyn CapabilityQuery,
+    ) -> Self {
         let last_sample = Sample::default();
         let mut meters = RollingMeters::new();
         let bundles = OwnerBundles::new();
         let model = build_model(
             PANEL_TITLE,
+            home.as_deref(),
             &last_sample,
             &SessionReport::HEALTHY,
             &bundles,
@@ -241,6 +251,7 @@ impl Service {
             meters,
             last_sample,
             bundles,
+            home,
             next_sample_ns: 0,
         }
     }
@@ -438,6 +449,7 @@ impl Service {
         self.bundles.retain_live(&self.last_sample.processes);
         let model = build_model(
             PANEL_TITLE,
+            self.home.as_deref(),
             &self.last_sample,
             &session,
             &self.bundles,

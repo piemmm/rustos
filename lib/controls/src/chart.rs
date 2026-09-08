@@ -82,9 +82,10 @@ struct Opposing {
 /// (spec §11.35).
 ///
 /// The owner supplies every visible fact — the resource kind and the series —
-/// and re-renders when either changes. A chart with no samples draws only its
-/// quiet plate: an honest "nothing recorded yet", never a fabricated flat line
-/// along the floor, which would read as a measured idle.
+/// and re-renders when either changes. A chart with no samples draws *nothing*:
+/// an honest "nothing recorded yet" leaving the plate it sits on untouched,
+/// never a fabricated flat line along the floor, which would read as a measured
+/// idle.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chart {
     kind: PressureKind,
@@ -154,6 +155,13 @@ impl Chart {
     /// both inset by half the line's weight so the stroke stays inside its own
     /// box. A chart with an opposing series splits that height at its axis and
     /// each series claims one half, mirrored.
+    ///
+    /// The chart lays down no ground of its own: it draws its trace onto
+    /// whatever surface it was given, so the box reads as part of the plate it
+    /// sits on rather than as a panel cut into it. An empty chart therefore
+    /// draws nothing at all, which is the honest picture of a reading with no
+    /// history behind it — an axis on a ground of its own would read as a
+    /// measured nought.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         if withheld(surface, bounds) {
             return;
@@ -161,19 +169,10 @@ impl Chart {
         let Some(plot_box) = surface_rect(bounds) else {
             return;
         };
-        let (left, top, width, height) = plot_box;
+        let (_, _, width, height) = plot_box;
         if width == 0 || height == 0 {
             return;
         }
-        // The plot's floor and ceiling are straight: a rounded plate would cut
-        // the corners off the very readings the chart exists to show.
-        surface.fill_rect(
-            left,
-            top,
-            width,
-            height,
-            Color::from(theme.palette().scroll_track),
-        );
 
         let Some(opposing) = &self.opposing else {
             let weight = trace_weight(theme, scale, height);
@@ -185,8 +184,8 @@ impl Chart {
             return;
         };
 
-        // Nothing recorded in either direction: the quiet plate alone, so an
-        // axis is never mistaken for a measured nought.
+        // Nothing recorded in either direction: no axis, so a rule across the
+        // box is never mistaken for a measured nought.
         if self.is_empty() {
             return;
         }
@@ -252,7 +251,7 @@ struct Split {
 impl Split {
     /// Split `box_px` into an upper band, an axis, and a lower band, or `None`
     /// when the box is too short to seat all three — where the honest outcome
-    /// is the quiet plate rather than a half-drawn pair.
+    /// is to draw nothing rather than a half-drawn pair.
     fn resolve(box_px: (u32, u32, u32, u32), scale: Scale, theme: &Theme) -> Option<Self> {
         let (left, top, width, height) = box_px;
         let axis_h = plate_border(theme, scale);
@@ -337,8 +336,14 @@ fn area_ramp(y: u32, band_top: u32, height: u32, rising_up: bool) -> u8 {
 /// vector serves both, because a chart draws the same shape twice.
 /// `None` when there is nothing to plot.
 ///
-/// A single reading is a real measurement, so it plots as a flat line across
-/// the band at its own height rather than as an invisible point.
+/// **The box is a fixed window and the newest reading is pinned to its
+/// trailing edge**, one slot per sample whatever the series holds. So a series
+/// shorter than the window draws a trace that reaches back as far as the
+/// readings genuinely go and no further, and each new sample slides the shape
+/// left by exactly one slot. Spreading `count` readings across the whole box
+/// instead made the trace rewrite its own shape on every sample — the same
+/// history redrawn at a different scale — and claimed a minute's span for
+/// three seconds of readings.
 fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<Vec<(i32, i32)>> {
     let count = samples.len();
     if count == 0 {
@@ -366,31 +371,41 @@ fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<Vec<(i32, i32)>> {
         (top, 1, sub(top_px))
     };
 
-    let last = count.saturating_sub(1);
-    // Closed at both ends in place: two extra vertices, one vector.
-    let mut points = Vec::with_capacity(count.max(2) + 2);
-    points.push((left, close));
-    for (i, &permille) in samples.iter().enumerate() {
-        let along = if last == 0 {
-            0
-        } else {
-            let i = i32::try_from(i).unwrap_or(i32::MAX);
-            let last = i32::try_from(last).unwrap_or(1);
-            span_x.saturating_mul(i) / last
-        };
+    // The window is `MAX_CHART_SAMPLES` slots wide however few readings there
+    // are, so `reach` is the share of the box this series genuinely covers and
+    // the newest reading sits at the trailing edge. One slot is the floor: a
+    // reading's mark is never thinner than the line drawing it, so a box too
+    // narrow to resolve one slot still shows its newest reading rather than
+    // collapsing it to a zero-width segment and dropping it.
+    let slots = i32::try_from(MAX_CHART_SAMPLES.saturating_sub(1))
+        .unwrap_or(1)
+        .max(1);
+    let covered = i32::try_from(count.saturating_sub(1)).unwrap_or(slots);
+    let reach = (span_x.saturating_mul(covered) / slots).max(weight.min(span_x));
+    let right = left.saturating_add(span_x);
+    let start = right.saturating_sub(reach);
+    let at = |i: i32| match covered {
+        0 => start,
+        span => start.saturating_add(reach.saturating_mul(i) / span),
+    };
+    let rise_at = |permille: u16| {
         let rise =
             span_y.saturating_mul(i32::from(clamp_permille(permille))) / i32::from(FULL).max(1);
-        points.push((
-            left.saturating_add(along),
-            zero.saturating_add(rise.saturating_mul(rise_sign)),
-        ));
+        zero.saturating_add(rise.saturating_mul(rise_sign))
+    };
+    // Closed at both ends in place, and a lone reading holds its slot flat:
+    // two vertices at the same height rather than an invisible point.
+    let mut points = Vec::with_capacity(count + 3);
+    points.push((start, close));
+    for (i, &permille) in samples.iter().enumerate() {
+        points.push((at(i32::try_from(i).unwrap_or(covered)), rise_at(permille)));
     }
-    if last == 0 {
-        // One reading: hold it across the whole band.
-        let only = points.last().map_or(zero, |&(_, y)| y);
-        points.push((left.saturating_add(span_x), only));
+    if covered == 0 {
+        if let Some(&only) = samples.first() {
+            points.push((right, rise_at(only)));
+        }
     }
-    points.push((left.saturating_add(span_x), close));
+    points.push((right, close));
     Some(points)
 }
 

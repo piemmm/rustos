@@ -27,17 +27,22 @@ use tairix_theme::{TextRole, Theme};
 /// the section it stands on. It counts as a raised plate rather than as part of
 /// the surface, so on a floating theme it reads as an object on the glass
 /// instead of dissolving into it.
+///
+/// The plate is inset from `bounds` by [`plate_margin`], so the band a flow
+/// hands it is the block's *slot* rather than its plate: two blocks in
+/// adjacent slots leave a gap between their rims instead of sharing an edge.
 pub(super) fn plate(
     surface: &mut Surface,
     bounds: Rect,
     scale: Scale,
     theme: &Theme,
 ) -> Option<Rect> {
+    let slot = plate_rect(bounds, scale, theme)?;
     let (x, y) = (
-        u32::try_from(bounds.left()).ok()?,
-        u32::try_from(bounds.top()).ok()?,
+        u32::try_from(slot.left()).ok()?,
+        u32::try_from(slot.top()).ok()?,
     );
-    let (w, h) = (bounds.width, bounds.height);
+    let (w, h) = (slot.width, slot.height);
     let radius = scale
         .scale_length(theme.metrics().control_corner_radius)
         .min(w / 2)
@@ -50,6 +55,34 @@ pub(super) fn plate(
         (theme.palette().surface_raised, ChromeLayer::Plate),
     )?;
     content_rect(bounds, scale, theme)
+}
+
+/// The margin a plate is inset from the slot the flow gave it.
+///
+/// Half the control gap on every side, so two plates in adjacent slots — the
+/// blocks down a pane, the cells across a per-core grid — leave one whole
+/// control gap between their rims. Deriving the gap from the plate rather than
+/// from each flow is what makes it the same gap in both directions and stops a
+/// caller laying out slots that abut and then wondering why the rims touch.
+pub(super) fn plate_margin(scale: Scale, theme: &Theme) -> u32 {
+    scale.scale_length(theme.metrics().control_gap).max(2) / 2
+}
+
+/// The rectangle a plate over `bounds` actually occupies: the slot less its
+/// margin.
+fn plate_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let (x, y) = (
+        u32::try_from(bounds.left()).ok()?,
+        u32::try_from(bounds.top()).ok()?,
+    );
+    let (ix, iy, iw, ih) = inset(
+        x,
+        y,
+        bounds.width,
+        bounds.height,
+        plate_margin(scale, theme),
+    )?;
+    Some(Rect::new(to_i32(ix), to_i32(iy), iw, ih))
 }
 
 /// The rectangle a block's content occupies inside a plate over `bounds`,
@@ -113,14 +146,15 @@ fn title_font(theme: &Theme, scale: Scale) -> BitmapFont {
     BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, scale)
 }
 
-/// How far a plate's content sits inside the bounds the plate was drawn over:
-/// its rim, then the theme's control padding.
+/// How far a plate's content sits inside the slot the plate was drawn over:
+/// the plate's own margin, then its rim, then the theme's control padding.
 ///
 /// The flow that lays a block's rows out reads the same figure as [`plate`],
 /// so the rows land inside the plate the same paint drew rather than at its
 /// edge.
 pub(super) fn content_inset(scale: Scale, theme: &Theme) -> u32 {
-    plate_border(theme, scale)
+    plate_margin(scale, theme)
+        .saturating_add(plate_border(theme, scale))
         .saturating_add(scale.scale_length(theme.metrics().control_inset).max(1))
 }
 

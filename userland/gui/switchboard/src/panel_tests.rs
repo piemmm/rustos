@@ -37,6 +37,7 @@ fn stopped_model(pid: u64, can_force: bool) -> PanelModel {
     };
     build_model(
         PANEL_TITLE,
+        None,
         &sample,
         &SessionReport::HEALTHY,
         &OwnerBundles::new(),
@@ -55,6 +56,7 @@ fn task_model(pid: u64) -> PanelModel {
     )]);
     build_model(
         PANEL_TITLE,
+        None,
         &sample,
         &SessionReport::HEALTHY,
         &OwnerBundles::new(),
@@ -78,6 +80,7 @@ fn busy_at(first_pid: u64, permille: Option<u16>) -> PanelModel {
         .collect();
     build_model(
         PANEL_TITLE,
+        None,
         &sample_with(processes),
         &SessionReport::HEALTHY,
         &OwnerBundles::new(),
@@ -105,6 +108,7 @@ fn frame_model(damaged_px: u64) -> PanelModel {
     };
     build_model(
         PANEL_TITLE,
+        None,
         &Sample::default(),
         &session,
         &OwnerBundles::new(),
@@ -117,6 +121,7 @@ fn frame_model(damaged_px: u64) -> PanelModel {
 fn empty_model() -> PanelModel {
     build_model(
         PANEL_TITLE,
+        None,
         &Sample::default(),
         &SessionReport::HEALTHY,
         &OwnerBundles::new(),

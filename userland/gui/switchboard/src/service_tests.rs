@@ -40,7 +40,7 @@ const GRANTED_SCOPES: ScopeVerdicts = ScopeVerdicts {
 };
 
 fn service() -> Service {
-    Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY)
+    Service::new(OWN_PID, None, NO_SCOPES, &NO_AUTHORITY)
 }
 
 fn test_proc_id(pid: u64) -> ProcId {
@@ -286,7 +286,7 @@ fn an_owner_bundle_report_reaches_the_task_rows_it_names() {
     let target_pid = 50;
     let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
     // A cycle first, so the service holds a real process list to key against.
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
     // The target row's own attested identity, as the fixture mints it.
@@ -338,7 +338,7 @@ fn an_owner_bundle_report_reaches_the_task_rows_it_names() {
 fn an_owner_bundle_for_a_process_that_is_not_running_names_no_row() {
     let transport = ProcessListTransport::new(two_row_records(OWN_PID, 50));
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
 
     // A stranger's identity: reported, then pruned against the live process
@@ -426,7 +426,7 @@ fn a_seat_report_does_not_rebuild_the_model_while_the_panel_is_closed() {
     let target_pid = 50;
     let transport = ProcessListTransport::new(two_row_records(OWN_PID, target_pid));
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
     let report = SeatReport::new(1, &[target_pid]).expect("valid report");
     let before = service.panel().model().clone();
@@ -488,7 +488,7 @@ fn a_cycle_before_the_deadline_is_a_no_op() {
         b"alpha"
     )]);
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
 
     // First cycle samples immediately (deadline is 0).
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
@@ -516,7 +516,7 @@ fn a_cycle_at_the_deadline_samples_exactly_once_and_advances_the_deadline() {
         b"alpha"
     )]);
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
 
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
     let requests_after_one = transport.request_count();
@@ -555,7 +555,7 @@ fn many_sub_deadline_cycles_produce_exactly_one_sample_once_the_deadline_passes(
         b"alpha"
     )]);
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
 
     service.cycle(&mut host, &transport, 0, &NO_AUTHORITY);
     let requests_after_one = transport.request_count();
@@ -600,7 +600,7 @@ fn an_unchanged_sample_one_period_later_presents_nothing_new() {
         b"alpha"
     )]);
     let mut host = RecordingHost::new();
-    let mut service = Service::new(OWN_PID, GRANTED_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, GRANTED_SCOPES, &NO_AUTHORITY);
     service.command(
         &mut host,
         SwitchboardCommand::OpenPanel {
@@ -781,7 +781,7 @@ fn a_derived_summary_never_claims_power_authority_on_its_own() {
 
 #[test]
 fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
-    let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, NO_SCOPES, &NO_AUTHORITY);
     let mut host = RecordingHost::new();
 
     // Deadline is 0, so it's already overdue.
@@ -797,7 +797,7 @@ fn wait_timeout_ns_shrinks_as_the_deadline_approaches() {
 
 #[test]
 fn a_cycle_that_costs_a_whole_period_still_parks_for_one() {
-    let mut service = Service::new(OWN_PID, NO_SCOPES, &NO_AUTHORITY);
+    let mut service = Service::new(OWN_PID, None, NO_SCOPES, &NO_AUTHORITY);
     let mut host = RecordingHost::new();
 
     let entered = 0;

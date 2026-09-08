@@ -9,7 +9,7 @@
 //! The opposing series has the same coverage on its own terms: the axis splits
 //! the box, each direction stays in its own half, the mirrored series grows the
 //! other way, the two carry their own tints, and a box too short to seat both
-//! halves degrades to the quiet plate.
+//! halves draws nothing at all.
 
 use alloc::vec::Vec;
 
@@ -41,6 +41,12 @@ fn has_pixel(surface: &Surface, want: Pixel) -> bool {
     surface.pixels().contains(&want)
 }
 
+/// Whether nothing at all was painted — every pixel still an untouched
+/// surface's.
+fn is_blank(surface: &Surface) -> bool {
+    surface.pixels().iter().all(|px| *px == Pixel::TRANSPARENT)
+}
+
 /// Whether row `y` carries `want` anywhere across its width.
 fn row_has(surface: &Surface, y: u32, want: Pixel) -> bool {
     (0..surface.width()).any(|x| surface.get(x, y) == Some(want))
@@ -65,13 +71,14 @@ fn cpu(theme: &Theme) -> Pixel {
 /// own hue, summed across the row so the ordered dither cannot swing one
 /// sample.
 ///
-/// Measured against the chart's own quiet plate rather than against an
-/// expected colour, because a ramp has no single expected pixel: what the
-/// assertion needs is *more ink here than there*.
-fn fill_weight(surface: &Surface, y: u32, from: u32, to: u32, plate: Pixel) -> u32 {
+/// Measured against the untouched surface rather than against an expected
+/// colour, because a ramp has no single expected pixel: what the assertion
+/// needs is *more ink here than there*. The chart lays down no ground of its
+/// own, so bare surface is what "no fill" looks like.
+fn fill_weight(surface: &Surface, y: u32, from: u32, to: u32, ground: Pixel) -> u32 {
     (from..to.min(surface.width()))
         .filter_map(|x| surface.get(x, y))
-        .map(|px| u32::from(px.r.abs_diff(plate.r)) + u32::from(px.b.abs_diff(plate.b)))
+        .map(|px| u32::from(px.r.abs_diff(ground.r)) + u32::from(px.b.abs_diff(ground.b)))
         .sum()
 }
 
@@ -80,11 +87,11 @@ fn fill_weight(surface: &Surface, y: u32, from: u32, to: u32, plate: Pixel) -> u
 #[test]
 fn the_area_fill_fades_toward_the_zero_line() {
     let theme = Theme::dark();
-    let plate = premul(theme.palette().scroll_track);
+    let plate = Pixel::TRANSPARENT;
     // A saturated series, so the fill spans the whole band and every row is
     // under the trace rather than under the plate alone.
     let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; 16]),
+        &Chart::new(PressureKind::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
         &theme,
     );
 
@@ -108,9 +115,9 @@ fn the_area_fill_fades_toward_the_zero_line() {
 #[test]
 fn the_area_fill_is_not_the_flat_slab_it_replaced() {
     let theme = Theme::dark();
-    let plate = premul(theme.palette().scroll_track);
+    let plate = Pixel::TRANSPARENT;
     let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([1000; 16]),
+        &Chart::new(PressureKind::Cpu).with_samples([1000; MAX_CHART_SAMPLES]),
         &theme,
     );
     // A flat fill weighs the same at every height under the trace. Two rows a
@@ -123,7 +130,7 @@ fn the_area_fill_is_not_the_flat_slab_it_replaced() {
 #[test]
 fn a_mirrored_band_ramps_the_other_way() {
     let theme = Theme::dark();
-    let plate = premul(theme.palette().scroll_track);
+    let plate = Pixel::TRANSPARENT;
     // Half-scale in both directions, so each band's trace sits mid-band and
     // the rows sampled below carry fill alone rather than the trace's own ink.
     let surface = chart_surface(
@@ -207,10 +214,13 @@ fn the_plot_scales_to_the_height_it_is_given() {
 fn readings_run_oldest_to_newest_left_to_right() {
     let theme = Theme::dark();
     let ink = cpu(&theme);
-    let surface = chart_surface(
-        &Chart::new(PressureKind::Cpu).with_samples([0, 1000]),
-        &theme,
-    );
+    // A full window, so the trace spans the box and the halves each carry
+    // readings: a short series now occupies only its own trailing slots.
+    let mut samples = [0u16; MAX_CHART_SAMPLES];
+    for (i, slot) in samples.iter_mut().enumerate() {
+        *slot = u16::try_from(i * 1000 / (MAX_CHART_SAMPLES - 1)).unwrap_or(1000);
+    }
+    let surface = chart_surface(&Chart::new(PressureKind::Cpu).with_samples(samples), &theme);
     let mid = W / 2;
     let left = topmost_in(&surface, 0, mid, ink).expect("the trace crosses the left half");
     let right = topmost_in(&surface, mid, W, ink).expect("the trace crosses the right half");
@@ -229,9 +239,10 @@ fn an_empty_chart_plots_nothing_at_all() {
     let chart = Chart::new(PressureKind::Cpu);
     assert!(chart.is_empty());
     let surface = chart_surface(&chart, &theme);
-    // The quiet plate alone: no fabricated floor line, which would read as a
-    // measured idle rather than as no history.
-    assert!(has_pixel(&surface, premul(theme.palette().scroll_track)));
+    // Nothing whatever: the chart lays down no ground, so a reading with no
+    // history behind it leaves the plate it sits on untouched. A floor line
+    // would read as a measured idle rather than as no history.
+    assert!(is_blank(&surface), "an empty chart drew something");
     assert!(!has_pixel(&surface, cpu(&theme)));
 }
 
@@ -256,18 +267,24 @@ fn no_reading_and_a_measured_nought_do_not_look_alike() {
 }
 
 #[test]
-fn a_single_reading_holds_across_the_whole_box() {
-    // One sample is a real measurement, so it draws as a flat line at its own
-    // height rather than as an invisible point.
+fn a_single_reading_holds_its_own_slot_at_the_newest_edge() {
+    // One sample is a real measurement, so it is drawn rather than dropped —
+    // but it is one slot of the window, not the window. Holding it across the
+    // whole box would claim a minute of history for a single reading.
     let theme = Theme::dark();
     let ink = cpu(&theme);
     let surface = chart_surface(&Chart::new(PressureKind::Cpu).with_samples([1000]), &theme);
     let marked: Vec<u32> = (0..W).filter(|&x| surface.get(x, 1) == Some(ink)).collect();
     let first = *marked.first().expect("the lone reading is drawn");
     let last = *marked.last().expect("the lone reading is drawn");
-    // Held right across, inset only by the room the stroke needs at each end.
-    assert!(first <= 2, "the trace starts at column {first}");
+    // Pinned to the trailing edge, one slot wide.
     assert!(last + 3 >= W, "the trace ends at column {last} of {W}");
+    let slot = W / u32::try_from(MAX_CHART_SAMPLES - 1).unwrap_or(1);
+    assert!(
+        first + slot + 4 >= W,
+        "a lone reading spread {} columns, wider than its own {slot}-column slot",
+        last - first
+    );
 }
 
 #[test]
@@ -433,7 +450,7 @@ fn a_duplex_chart_draws_its_axis() {
 
 #[test]
 fn an_axis_is_never_drawn_where_there_is_no_reading() {
-    // An empty duplex chart is the quiet plate alone: a rule across the middle
+    // An empty duplex chart draws nothing: a rule across the middle
     // of an empty box would read as a measured nought.
     let theme = Theme::dark();
     let empty = Chart::new(PressureKind::Network).with_opposing(PressureKind::Disk, []);
@@ -492,7 +509,7 @@ fn the_opposing_series_is_bounded_and_clamped_like_the_primary() {
 }
 
 #[test]
-fn a_box_too_short_to_seat_both_halves_keeps_the_quiet_plate() {
+fn a_box_too_short_to_seat_both_halves_draws_nothing() {
     // Fail closed: half a duplex reading is worse than none, so a box that
     // cannot hold an axis and two bands draws no trace at all.
     let theme = Theme::dark();
@@ -502,9 +519,10 @@ fn a_box_too_short_to_seat_both_halves_keeps_the_quiet_plate() {
     let surface = chart_surface_of(&duplex, &theme, W, 2);
     assert!(!has_pixel(&surface, network(&theme)));
     assert!(!has_pixel(&surface, premul(theme.palette().disk_pressure)));
-    // The groove is still there: the instrument is present, just unreadable
-    // at that height.
-    assert!(has_pixel(&surface, premul(theme.palette().scroll_track)));
+    // And nothing else either: the chart lays down no ground, so a box too
+    // short for the pair leaves the plate it sits on untouched rather than
+    // half-drawing an axis that would read as a measurement.
+    assert!(is_blank(&surface), "a box too short drew something");
 }
 
 #[test]

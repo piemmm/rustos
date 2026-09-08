@@ -49,10 +49,22 @@ fn a_plate_lifts_off_the_section_ground_and_draws_its_rim() {
         luma(palette.surface_raised) > luma(palette.surface),
         "the boards draw a block a step lighter than the section behind it"
     );
+    let margin = super::plate_margin(Scale::ONE, &theme);
+    assert!(
+        margin > 0,
+        "a plate with no margin shares its neighbour's edge"
+    );
     assert_eq!(
-        pixel(&surface, 60, 0),
+        pixel(&surface, 60, margin),
         palette.rim,
         "the plate draws no rim, so nothing separates one block from the next"
+    );
+    // The margin is what makes the gap: the slot's own edge is still the
+    // section behind it, so two blocks in adjacent slots cannot touch.
+    assert_eq!(
+        pixel(&surface, 60, 0),
+        palette.surface,
+        "the plate ran to the edge of its slot, leaving no gap for a neighbour"
     );
     assert!(
         content.width < bounds.width && content.height < bounds.height,

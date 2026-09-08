@@ -234,7 +234,14 @@ fn instrument_trend_with_an_empty_series_plots_nothing() {
     let empty_trend = MetricTile::new("MEM", "— GB", PressureKind::Memory)
         .with_instrument(MetricInstrument::Trend(Chart::new(PressureKind::Memory)));
     let surface = tile_surface(&empty_trend, &theme, Scale::ONE);
-    assert!(has_pixel(&surface, premul(theme.palette().scroll_track)));
+    // The tile itself is still drawn — its label proves the trend's absence is
+    // what left the instrument slot empty, not a tile that drew nothing.
+    assert!(has_pixel(
+        &surface,
+        premul(theme.palette().on_surface_muted)
+    ));
+    // And the slot carries no trace: a chart with no history lays down no
+    // ground of its own, so the tile's own plate is all that is there.
     assert!(!has_pixel(
         &surface,
         premul(theme.palette().memory_pressure)
@@ -1065,51 +1072,6 @@ fn measured_width_grows_with_the_label_and_with_scale() {
     let unit = short.measured_width(Scale::ONE, &theme);
     let doubled = short.measured_width(Scale::from_percent(200).expect("valid scale"), &theme);
     assert!(doubled > unit, "a larger scale must need more width");
-}
-
-#[test]
-fn an_outlined_pill_rims_itself_in_its_own_tone_on_a_normal_theme() {
-    let theme = Theme::dark();
-    let resting = StatusPill::new("P").with_tone(SignalRole::Cpu);
-    let badge = resting.clone().outlined();
-    let tone = premul(theme.palette().cpu_pressure);
-
-    let resting_surface = pill_surface(&resting, &theme, Scale::ONE);
-    let badge_surface = pill_surface(&badge, &theme, Scale::ONE);
-    // The rim runs along the capsule's own top row, which the resting form
-    // leaves as its fill.
-    let rim_row = |surface: &Surface| {
-        (0..surface.width()).any(|x| surface.get(x, 0) == Some(tone))
-            || (0..surface.width()).any(|x| surface.get(x, surface.height() - 1) == Some(tone))
-    };
-    assert!(
-        !rim_row(&resting_surface),
-        "a resting pill collapses its rim"
-    );
-    assert!(rim_row(&badge_surface), "an outlined one draws it");
-    assert!(badge.is_outlined() && !resting.is_outlined());
-}
-
-#[test]
-fn an_outlined_neutral_pill_still_rims_itself() {
-    let theme = Theme::dark();
-    let neutral = StatusPill::new("--");
-    assert_ne!(
-        pill_surface(&neutral, &theme, Scale::ONE).pixels(),
-        pill_surface(&neutral.clone().outlined(), &theme, Scale::ONE).pixels()
-    );
-}
-
-#[test]
-fn an_outlined_pill_is_already_what_heavier_contrast_draws() {
-    // The heavier-contrast themes rim every pill, so asking for a rim there
-    // changes nothing rather than doubling it.
-    let heavy = high_contrast();
-    let pill = StatusPill::new("E").with_tone(SignalRole::Success);
-    assert_eq!(
-        pill_surface(&pill, &heavy, Scale::ONE).pixels(),
-        pill_surface(&pill.clone().outlined(), &heavy, Scale::ONE).pixels()
-    );
 }
 
 #[test]

@@ -81,10 +81,7 @@ fn hero(frame: Option<FrameReport>, history: &[u16]) -> PaneHero {
             ),
             overdraw_line(&frame),
         ],
-        instrument: HeroInstrument::Trend {
-            samples: history.to_vec(),
-            opposing: None,
-        },
+        instrument: HeroInstrument::trend(history.to_vec()),
         caption: String::from("damaged pixels per frame"),
     }
 }

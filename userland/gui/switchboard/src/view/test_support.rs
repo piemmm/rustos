@@ -116,10 +116,8 @@ fn cpu_device() -> ResourceDevice {
             value: Reading::measured("18"),
             unit: alloc::string::String::from("% busy"),
             context: alloc::vec![alloc::string::String::from("2.2 of 12 cores-equivalent")],
-            instrument: HeroInstrument::Trend {
-                samples: (0..24).map(|i| i * 40).collect(),
-                opposing: None,
-            },
+            instrument: HeroInstrument::trend((0..24).map(|i| i * 40).collect())
+                .with_track(Some(180)),
             caption: alloc::string::String::from("busy share, all cores"),
         },
         blocks: alloc::vec![
@@ -173,7 +171,8 @@ fn memory_device() -> ResourceDevice {
             value: Reading::measured("8.6"),
             unit: alloc::string::String::from("of 16 GB"),
             context: alloc::vec![alloc::string::String::from("53% committed")],
-            instrument: HeroInstrument::Track(Some(530)),
+            instrument: HeroInstrument::trend((0..24).map(|i| 400 + i * 6).collect())
+                .with_track(Some(530)),
             caption: alloc::string::String::new(),
         },
         blocks: alloc::vec![PaneBlock::full(
@@ -223,7 +222,7 @@ fn storage_device() -> ResourceDevice {
             value: Reading::measured("812 GB"),
             unit: alloc::string::String::from("of 1.10 TB"),
             context: alloc::vec![],
-            instrument: HeroInstrument::Track(Some(720)),
+            instrument: HeroInstrument::track(Some(720)),
             caption: alloc::string::String::new(),
         },
         blocks: alloc::vec![

@@ -46,6 +46,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::appinfo::{
+    BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE,
+    SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE,
+};
 use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
@@ -258,6 +262,15 @@ enum OwnIcon<'a> {
     /// artwork layer reads and validates the manifest itself, so a draw site
     /// holding only a directory entry needs no manifest knowledge of its own.
     Bundle(&'a str),
+    /// The bundle of the program of this *name*, resolved through the
+    /// program-store order, with the asking session's own home root so its
+    /// user's stores are searched last.
+    Program {
+        /// The program's name.
+        name: &'a str,
+        /// The asking session's home root, if it has one.
+        home: Option<&'a str>,
+    },
 }
 
 /// What a draw site is asking for a picture of.
@@ -301,6 +314,24 @@ impl<'a> IconRequest<'a> {
         }
     }
 
+    /// A picture for the program called `name`, resolved to the first bundle of
+    /// that name in the fixed program-store order and then through that
+    /// bundle's own manifest; falling back to `kind` when no such bundle
+    /// declares an icon that will serve.
+    ///
+    /// What a surface listing *processes* asks for. The kernel attests a task's
+    /// name from the store path it loaded and carries no image path, so for a
+    /// task nobody has separately attested a bundle for, the name is the
+    /// identity there is — and it is not caller-supplied, so a task cannot
+    /// choose the picture it wears.
+    #[must_use]
+    pub const fn program(kind: IconKind, name: &'a str, home: Option<&'a str>) -> Self {
+        Self {
+            kind,
+            own: Some(OwnIcon::Program { name, home }),
+        }
+    }
+
     /// The kind that resolves when nothing of the thing's own does.
     #[must_use]
     pub const fn icon_kind(&self) -> IconKind {
@@ -339,6 +370,10 @@ impl Tier<'_> {
         match self {
             Self::Own(OwnIcon::Asset(path)) => ArtworkKey::Asset(String::from(path)),
             Self::Own(OwnIcon::Bundle(dir)) => ArtworkKey::Bundle(String::from(dir)),
+            Self::Own(OwnIcon::Program { name, home }) => ArtworkKey::Program {
+                name: String::from(name),
+                home: home.map(String::from),
+            },
             Self::Raster(kind) => ArtworkKey::Asset(icon_artwork_path(kind)),
             Self::Vector(kind) => ArtworkKey::Asset(icon_vector_path(kind)),
         }
@@ -523,6 +558,25 @@ pub enum ArtworkKey {
     Asset(String),
     /// An application-bundle directory, resolved through its own manifest.
     Bundle(String),
+    /// A program *name* and the asking session's home root, resolved to the
+    /// first bundle of that name in the program-store order and then through
+    /// that bundle's own manifest.
+    ///
+    /// What a surface listing *processes* has to work from: the kernel attests
+    /// a task's name from the store path it loaded, and carries no image path,
+    /// so the name is the only identity a monitor is given. Resolving it here
+    /// keeps the store order and the manifest read on the one resolver — and
+    /// keys the cache by the name, so a listing of a hundred tasks costs one
+    /// resolution per distinct program rather than a directory walk per row
+    /// per frame.
+    Program {
+        /// The program's name.
+        name: String,
+        /// The asking session's home root, if it has one. Part of the key
+        /// because it is part of the question: two sessions asking about the
+        /// same name may legitimately resolve different bundles.
+        home: Option<String>,
+    },
     /// A built-in glyph's *coverage mask*, rasterised in this process from the
     /// first-party vector art compiled into it — no read, no decode, no
     /// sandbox. Retained like any asset because resolving coverage is the
@@ -843,6 +897,10 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             let path = bundle_icon_path(reader, dir)?;
             render_icon(reader, rasteriser, &path, side)
         }
+        ArtworkKey::Program { name, home } => program_bundles(name, home.as_deref())
+            .into_iter()
+            .find_map(|dir| bundle_icon_path(reader, &dir))
+            .and_then(|path| render_icon(reader, rasteriser, &path, side)),
         // A glyph is first-party vector art compiled into this binary, so the
         // cache rasterises it in place and no resolver is ever handed one.
         ArtworkKey::Glyph(kind) => glyph_mask(*kind, side),
@@ -880,6 +938,53 @@ const MASK_COLOR: Color = Color::rgba(255, 255, 255, 255);
 /// bundle therefore cannot aim the desktop at a file outside its own
 /// `Resources/` — the name is resolved *inside* the directory it came from,
 /// never joined as a caller-supplied path.
+/// The bundle directories a program `name` could be installed in, in the order
+/// they are tried.
+///
+/// **Not the command-search order** (`lib/cmdres`), which answers a different
+/// question: what a bare *word a user typed* resolves to. That order carries
+/// `PATH` and omits both the service store and `/Apps`. A running process's
+/// image, by contrast, can have come from any store that holds a bundle — most
+/// of what a quiet machine runs is services, and omitting that store left the
+/// busiest rows on a monitor wearing the one generic mark — and never from a
+/// `PATH` entry, which holds bare programs rather than bundles.
+///
+/// The three system stores lead, then the machine-wide installed store, and the
+/// asking session's own two stores come **last**. That ordering is the security
+/// property: every read-only, system-signed store is tried before any
+/// user-writable one, so a user cannot make a system task wear a picture they
+/// chose by planting a bundle of the same name. What their own stores *can*
+/// supply is an icon for a name no system store holds — their own programs,
+/// which is exactly the gap they are there to close.
+///
+/// Only the *asking* session's home is searched. Enumerating `/Users` instead
+/// would let one account choose the picture another account's task wears.
+fn program_bundles(name: &str, home: Option<&str>) -> Vec<String> {
+    if name.is_empty() || name.contains('/') {
+        return Vec::new();
+    }
+    let bundle = format!("{name}{BUNDLE_SUFFIX}");
+    let mut dirs: Vec<String> = [
+        SYSTEM_COMMAND_STORE,
+        SYSTEM_APPLICATION_STORE,
+        SYSTEM_SERVICE_STORE,
+        INSTALLED_APP_STORE,
+    ]
+    .into_iter()
+    .map(|store| format!("{store}/{bundle}"))
+    .collect();
+    if let Some(home) = home.map(|home| home.trim_end_matches('/')).filter(|home| {
+        // A home that is not an absolute path, or that could climb out of one,
+        // is not a home: nothing is guessed in its place.
+        home.starts_with('/') && !home.contains("..")
+    }) {
+        for store in [HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR] {
+            dirs.push(format!("{home}/{store}/{bundle}"));
+        }
+    }
+    dirs
+}
+
 fn bundle_icon_path<R: ArtworkReader + ?Sized>(reader: &mut R, dir: &str) -> Option<String> {
     let manifest = reader.read(&format!("{dir}/{}", BundleEntry::AppInfo.as_str()))?;
     if manifest.len() > APPINFO_WIRE_MAX {

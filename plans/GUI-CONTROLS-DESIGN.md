@@ -1433,10 +1433,23 @@ that plots one bounded oldest-to-newest series of readings as a line.
 - The trace is tinted by the resource's own semantic rail colour, exactly as a
   MetricTile's track is (§11.33) — the resource's fixed identity, never the
   accent and never a transient severity.
-- **An empty series plots nothing at all**, leaving the quiet plate: an honest
+- **The box is a fixed window and the newest reading is pinned to its trailing
+  edge**, one slot per sample whatever the series holds. A series shorter than
+  the window reaches back only as far as its readings genuinely go, and each new
+  sample slides the shape one slot left. Spreading `count` readings across the
+  whole box instead made the trace rewrite its own shape on every sample — the
+  same history redrawn at a different scale — and claimed a minute's span for
+  three seconds of readings. A reading's mark is never thinner than the line
+  drawing it, so a box too narrow to resolve one slot still shows its newest
+  reading rather than dropping it.
+- **The chart lays down no ground of its own.** It draws its trace onto
+  whatever surface it was given, so the box reads as part of the plate it sits
+  on rather than as a panel cut into it.
+- **An empty series plots nothing at all**, leaving the plate it sits on: an honest
   "nothing recorded yet". A fabricated flat line along the floor would read as
-  a measured idle. A single reading *is* a measurement, so it holds across the
-  box at its own height.
+  a measured idle. A single reading *is* a measurement, so it holds the one slot
+  it is at its own height rather than the whole box — holding it across would
+  claim a window's history for one reading.
 - Readings run oldest to newest, left to right. The series is bounded and the
   oldest readings are dropped first, so a chart is a window on a history and
   never an unbounded log the render path must walk.
@@ -1459,9 +1472,9 @@ two stacked charts loses the comparison the reader is there for.
   single-series trend over the whole box rather than showing an empty half as a
   quiet nothing. A measured zero *is* a reading and plots flat on the axis.
 - An axis is drawn only where something is plotted: a duplex chart with no
-  readings in either direction is the quiet plate alone, so a rule across an
+  readings in either direction draws nothing, so a rule across an
   empty box can never read as a measured nought.
-- A box too short to seat an axis and both halves degrades to the quiet plate.
+- A box too short to seat an axis and both halves draws nothing at all.
   Half a duplex reading is worse than none, so it is not drawn.
 - **Damage and settle point.** A chart is read-only: it has no settle point,
   and its pixels are its owner's to report when the series it was handed

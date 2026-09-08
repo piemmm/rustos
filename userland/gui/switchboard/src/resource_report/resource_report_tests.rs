@@ -580,12 +580,12 @@ fn the_machine_group_carries_no_trace_because_its_readings_are_facts() {
             machine.trend.is_empty(),
             "a fact pane has no rate to plot, and the absent instrument says so"
         );
-        assert!(matches!(machine.hero.instrument, HeroInstrument::None));
+        assert_eq!(machine.hero.instrument, HeroInstrument::default());
     }
 }
 
 #[test]
-fn the_cpu_pane_leads_with_a_trend_and_the_memory_pane_with_a_track() {
+fn the_resource_panes_carry_both_a_trace_and_a_share_bar() {
     let sample = Sample {
         cpu_busy_permille: Some(180),
         memory_pressure: Some(MemoryPressureSample {
@@ -595,17 +595,36 @@ fn the_cpu_pane_leads_with_a_trend_and_the_memory_pane_with_a_track() {
         }),
         ..permitted()
     };
-    let report = report_of(&sample);
-    // The choice belongs to the reading: a rate has no ceiling to fill a bar
-    // against, and a fraction of a measured whole has nothing to trend.
-    assert!(matches!(
-        device(&report, DeviceId::Cpu).hero.instrument,
-        HeroInstrument::Trend { .. }
-    ));
-    assert!(matches!(
-        device(&report, DeviceId::Memory).hero.instrument,
-        HeroInstrument::Track(Some(530))
-    ));
+    // Recorded, because a trace is a history: a report built on fresh meters
+    // has nothing to plot and would prove nothing about the instrument.
+    let mut hysteresis = Hysteresis::new();
+    let mut meters = RollingMeters::new();
+    for _ in 0..2 {
+        let _ = derive_summary(&sample, &mut hysteresis);
+        meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
+    }
+    let report = build_resource_report(
+        &sample,
+        &mut meters,
+        &OwnerBundles::new(),
+        &SessionReport::HEALTHY,
+        &NoAuthority,
+    );
+    // The two answer different questions, and the boards draw both on each of
+    // these panes: the trace says what the resource has been doing, the bar
+    // how much of it is in use now.
+    let cpu = &device(&report, DeviceId::Cpu).hero.instrument;
+    assert!(
+        !cpu.samples.is_empty(),
+        "the processor plots its own history"
+    );
+    assert_eq!(cpu.track, Some(Some(180)));
+    let memory = &device(&report, DeviceId::Memory).hero.instrument;
+    assert!(
+        !memory.samples.is_empty(),
+        "memory plots its committed-share history too"
+    );
+    assert_eq!(memory.track, Some(Some(530)));
 }
 
 #[test]
@@ -823,13 +842,9 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         .context
         .iter()
         .any(|line| line.contains("640 IOPS") && line.contains("50% utilised")));
-    match &volume.hero.instrument {
-        HeroInstrument::Trend { samples, opposing } => {
-            assert_eq!(samples.len(), 1);
-            assert_eq!(opposing.as_ref().map(Vec::len), Some(1));
-        }
-        other => panic!("a rate's instrument is a duplex trend, not {other:?}"),
-    }
+    let instrument = &volume.hero.instrument;
+    assert_eq!(instrument.samples.len(), 1);
+    assert_eq!(instrument.opposing.as_ref().map(Vec::len), Some(1));
     // The rail states how full the volume is; its trace carries the rate.
     assert_eq!(volume.reading, Reading::measured("60%"));
     assert_eq!(volume.trend.len(), 1);
@@ -1078,13 +1093,9 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
     );
     let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
     assert_eq!(eth0.trend.len(), 1);
-    match &eth0.hero.instrument {
-        HeroInstrument::Trend { samples, opposing } => {
-            assert_eq!(samples.len(), 1);
-            assert_eq!(opposing.as_ref().map(Vec::len), Some(1));
-        }
-        other => panic!("a rate's instrument is a duplex trend, not {other:?}"),
-    }
+    let instrument = &eth0.hero.instrument;
+    assert_eq!(instrument.samples.len(), 1);
+    assert_eq!(instrument.opposing.as_ref().map(Vec::len), Some(1));
 }
 
 #[test]

@@ -691,9 +691,12 @@ pub(super) struct TaskEntry {
     pub(super) row: TableRow,
     /// The task's own CPU history, as the Activity column's sparkline.
     pub(super) spark: Chart,
-    /// The bundle the task was launched from, so the row's leading icon is
-    /// that application's own picture.
+    /// The bundle the task was launched from, where the session attested one,
+    /// so the row's leading icon is that application's own picture.
     pub(super) bundle: Option<String>,
+    /// The task's kernel-attested name, which resolves the leading icon of
+    /// every process the desktop did not launch itself.
+    pub(super) name: String,
 }
 
 /// Where the footer's controls sit: the shown/total count and the
@@ -717,6 +720,9 @@ pub(super) struct TasksSection {
     /// Every adopted task, in model order — what the filter, search, sort
     /// and grouping arrange, and what a reported action's index names.
     pub(super) tasks: Vec<TaskSummary>,
+    /// The session's own account root, which resolves the icon of a task
+    /// loaded from this user's own program store.
+    pub(super) home: Option<String>,
     /// One row per *shown* task, in shown order.
     pub(super) entries: Vec<TaskEntry>,
     /// `order[i]` is the model index of shown row `i`, so a row the reader
@@ -756,6 +762,7 @@ impl TasksSection {
     /// filters.
     pub(super) fn new() -> Self {
         let mut section = Self {
+            home: None,
             tasks: Vec::new(),
             entries: Vec::new(),
             order: Vec::new(),
@@ -1092,11 +1099,11 @@ impl TasksSection {
             state = state.with_selection(SelectionState::Selected);
         }
         let mut cells = Vec::with_capacity(COLUMNS.len());
-        // An application the desktop launched wears its own picture; a
-        // process nothing attests a bundle for takes the executable class.
+        // An application the desktop launched wears its own picture; every
+        // other process resolves one from its kernel-attested name.
         cells.push(
             TaskEntry::cell(COL_TASK, &task.name)
-                .with_icon(task_icon(task.bundle.as_deref()).icon_kind()),
+                .with_icon(crate::view::task_icon_kind(task.bundle.as_deref())),
         );
         cells.push(TaskEntry::cell(COL_OWNER, &task.owner.label()));
         cells.push(TaskEntry::cell(COL_STATE, task.state_text()));
@@ -1128,6 +1135,7 @@ impl TasksSection {
             row: TableRow::new(cells).with_state(state),
             spark: Chart::new(PressureKind::Cpu).with_samples(task.cpu_history.iter().copied()),
             bundle: task.bundle.clone(),
+            name: task.name.clone(),
         }
     }
 
@@ -1777,6 +1785,7 @@ impl SectionView for TasksSection {
             return;
         }
         self.tasks.clone_from(&model.tasks);
+        self.home.clone_from(&model.home);
         let filters = self.relabel_filters();
         self.census = self.build_census();
         self.arrange(sweep);
@@ -1927,7 +1936,8 @@ impl SectionView for TasksSection {
             // the desktop attests a bundle for the process, resolved at the
             // side the row will draw it at.
             let side = TableRow::icon_side(item, ctx.scale, ctx.theme);
-            let picture = artwork.artwork(task_icon(entry.bundle.as_deref()), side);
+            let request = task_icon(entry.bundle.as_deref(), &entry.name, self.home.as_deref());
+            let picture = artwork.artwork(request, side);
             entry.row.render(
                 surface,
                 item,

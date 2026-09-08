@@ -53,10 +53,9 @@ pub(super) fn device(
             ),
             unit: String::from("% busy"),
             context: context(sample),
-            instrument: HeroInstrument::Trend {
-                samples: history,
-                opposing: None,
-            },
+            // Both instruments, as the boards draw them: the trace beside the
+            // figure, and the busy share as a bar under the context lines.
+            instrument: HeroInstrument::trend(history).with_track(sample.cpu_busy_permille),
             caption: String::from("busy share, all cores"),
         },
         blocks: blocks(sample, meters, bundles),

@@ -428,6 +428,11 @@ fn proportional(extent: u32, permille: u16) -> u32 {
 /// reading, and detail lines all degrade through this one definition, so a
 /// tile too short for its content can never overlap a line onto the one
 /// below it.
+///
+/// **Empty text is no line**: it draws nothing and advances nothing, so an
+/// anatomy whose optional line is absent closes up rather than opening with a
+/// blank row and sitting a line lower than everything beside it. A caller that
+/// genuinely wants a reserved gap asks for one rather than passing "".
 pub(crate) fn paint_text_line(
     surface: &mut Surface,
     text: &str,
@@ -439,7 +444,7 @@ pub(crate) fn paint_text_line(
     let (x, y) = pos;
     let (bottom, w, gap) = limits;
     let line_h = font.line_height();
-    if w == 0 || y.saturating_add(line_h) > bottom {
+    if text.is_empty() || w == 0 || y.saturating_add(line_h) > bottom {
         return y;
     }
     let fitted = font.truncate_to_width(text, w);

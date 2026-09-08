@@ -209,6 +209,13 @@ impl ActionVerdict {
 pub struct SwitchboardModel {
     /// The window title.
     pub title: String,
+    /// The home root of the account this service runs as, if it has one.
+    ///
+    /// A run-scoped fact of the process rather than anything sampled, like the
+    /// title beside it: it is what lets a task loaded from this user's own
+    /// program store draw that bundle's icon. An absent home simply searches
+    /// the system stores, so nothing is guessed.
+    pub home: Option<String>,
     /// The live tasks.
     pub tasks: Vec<TaskSummary>,
     /// The hung/recoverable objects.
@@ -231,11 +238,19 @@ impl SwitchboardModel {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            home: None,
             tasks: Vec::new(),
             recovery: Vec::new(),
             recovery_resolved: 0,
             resources: ResourceReport::default(),
         }
+    }
+
+    /// This model with `home` as the session's own account root.
+    #[must_use]
+    pub fn with_home(mut self, home: Option<String>) -> Self {
+        self.home = home;
+        self
     }
 }
 
@@ -294,18 +309,42 @@ pub const UNMEASURED_READING: &str = "unknown";
 /// The picture one process's row draws.
 ///
 /// An application the desktop launched resolves its *own* icon from the bundle
-/// it was launched from, falling back to the application-bundle class artwork
-/// and then to its built-in glyph; a process nothing attests a bundle for —
-/// PID 1, a time service, a kernel thread — takes the executable class and is
-/// never handed an application's picture it has no claim to.
+/// it was launched from — the session attests that, so it is the better
+/// identity where it exists. Every other process resolves its icon from its
+/// **name**, which the kernel attests from the store path it loaded the image
+/// from and which no process can set for itself; the fixed program-store order
+/// turns that name into the one bundle it could have come from. So a service,
+/// a driver or a command draws its own picture too, not one generic mark for
+/// everything the desktop did not launch.
+///
+/// `home` is this session's own account root, whose two program stores are
+/// searched after every system one — so a user's own command app draws its own
+/// icon, and no user-writable store can shadow a system program's.
+///
+/// Either way the fall-back ladder is the shared one: the bundle's declared
+/// icon, then the class artwork, then the built-in glyph. A name that resolves
+/// to no bundle simply reaches the class tier, so nothing is ever handed a
+/// picture it has no claim to.
 ///
 /// The one statement of that rule, read by the task table and by every
 /// device's top-consumers block, so a process cannot be drawn as one thing in
 /// one place and another elsewhere.
-fn task_icon(bundle: Option<&str>) -> IconRequest<'_> {
+fn task_icon<'a>(bundle: Option<&'a str>, name: &'a str, home: Option<&'a str>) -> IconRequest<'a> {
     match bundle {
-        Some(dir) => IconRequest::bundle(IconKind::AppBundle, dir),
-        None => IconRequest::kind(IconKind::Executable),
+        Some(dir) => IconRequest::bundle(task_icon_kind(bundle), dir),
+        None => IconRequest::program(task_icon_kind(bundle), name, home),
+    }
+}
+
+/// The class a process's icon falls back to when nothing it names resolves.
+///
+/// Independent of where the picture is searched for, so a caller that needs
+/// only the class — reserving a tile's icon slot — asks for it without a home
+/// or a name it would have no use for.
+const fn task_icon_kind(bundle: Option<&str>) -> IconKind {
+    match bundle {
+        Some(_) => IconKind::AppBundle,
+        None => IconKind::Executable,
     }
 }
 

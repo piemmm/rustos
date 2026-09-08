@@ -1501,7 +1501,13 @@ mod program {
             alloc::sync::Arc::clone(&reads),
         );
         host.client = client;
-        let mut service = Service::new(pid, probe_scopes(&transport), &authority);
+        // The account this session runs as, read once: a task loaded from this
+        // user's own program store draws that bundle's icon, and the system
+        // stores are searched first so none of theirs can be shadowed.
+        let home = tairix_rt::env_var(b"HOME")
+            .and_then(|home| core::str::from_utf8(home).ok())
+            .map(alloc::string::String::from);
+        let mut service = Service::new(pid, home, probe_scopes(&transport), &authority);
 
         loop {
             let cycled = service.cycle(&mut host, &transport, tairix_rt::clock_get(), &authority);

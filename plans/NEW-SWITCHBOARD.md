@@ -392,12 +392,41 @@ reading; a fact list cannot carry it.
   headline reading is; it needs no new rung, and 250% seats its line plus both
   context lines inside the hero's four-row band.
 
+  **The hero carries both instruments, and its figure opens the plate.** The
+  boards draw a trace beside the reading *and* a share bar under the context
+  lines, on the processor pane and the memory pane alike, so `HeroInstrument`
+  carries a trend and a track together rather than choosing between them —
+  memory had a bar and no trace, which is why its pane read as the odd one out.
+  A tile with no label claims no line for one, so the figure starts at the top
+  of the plate instead of a line lower than the block it leads.
+
   **The figure therefore carries no unit of its own.** A value spelled `18%`
   against a `% busy` unit renders `18% % busy`, so a hero's figure comes from
   a formatter that yields digits alone (`whole_percent`, `pixel_parts`) while a
   reading that stands by itself — a rail entry, a per-core cell, a consumer
   row — keeps the spelled form. The magnitude prefix belongs to the unit for
   the same reason: `4.2` against `M px`, never `4.2M` against `px`.
+
+**Every plate carries a margin, and that margin is the only gap.**
+`block::plate` insets itself from the band the flow hands it
+(`block::plate_margin`, half a control gap a side), so two blocks in adjacent
+slots leave one whole control gap between their rims. The flow therefore
+divides its columns and its per-core grid *evenly*, with no gap arithmetic of
+its own: a slot's gap is its plate's margin, in both directions, from one
+definition. Slots that abut with plates drawn to their edges is what made the
+rims touch down the pane while the grid across it was correctly spaced.
+
+**A per-core cell is three rows, not a `MetricTile`.** The name with the class
+badge opposite, the trace between, then the busy share with the live clock
+opposite — measured from their own faces so the readings sit on the cell's
+bottom line and the trace takes what is left. A tile stacks label, reading and
+detail from the top, which drew the trace across the readings and left a third
+of the cell empty beneath them. The class badge is a compact rounded box, not a
+capsule: its rim and letter carry it in the class's tone over the plate's own
+ground, because at badge size a wash is indistinguishable from the plate and a
+capsule reads as a pill of prose. Its corner takes the theme's corner
+*proportion* — a control's radius over a control's height — since the length
+itself is half a badge's side, which is a capsule.
 
 **One block anatomy, shared by all three sections** (`view/block.rs`). The
 boards draw every framed thing the same way, so it is defined once: a
@@ -1199,14 +1228,22 @@ does not yet say.
   across the strip where the boards size each to its own label), the task row's
   leading pressure gutter, the faulted-task Signal Bead, and the
   composition-bar legend.
-- **Still divergent, deliberately:** the per-core cell stacks its busy figure
-  under its name and draws its trace across both, where the boards put the name
-  alone on top, the trace in the middle and the two readings on the bottom
-  line; the class badge is a capsule at control height where the boards draw a
-  compact rounded square; and the processor block states one `Model` row joined
-  with `·` where the boards give the performance and efficiency parts a row
-  each and add a `Scheduler policy` row. None has a reading behind it that is
-  wrong — each is a layout the boards spell differently.
+- **Still divergent, deliberately:** the processor block states one `Model` row
+  joined with `·` where the boards give the performance and efficiency parts a
+  row each and add a `Scheduler policy` row. No reading behind it is wrong — it
+  is a layout the boards spell differently.
+- **Every process is pictured, not just the ones the desktop launched.** A
+  session-attested bundle is the better identity where it exists, and every
+  other process resolves its icon from its **name** — which the kernel attests
+  from the store path it loaded and which no process can set for itself —
+  through the fixed store order (`IconRequest::program`, `plans/ICONS.md`). The
+  service store is on that list: most of what a quiet machine runs is services,
+  and leaving it off left the busiest rows on the surface wearing the one
+  generic mark. The asking session's own two stores are on it too, searched
+  **last** — so a user's own command app draws its own icon, while every
+  read-only system store is tried first and none of theirs can be shadowed.
+  Only that session's home is searched: enumerating `/Users` would let one
+  account choose the picture another account's task wears.
 - **The Recovery fault column carries no `FAULTS` heading**, where the boards
   do. The card list's geometry is the shared `ListInfo::cards` scroll range, so
   a heading means insetting that range rather than drawing above it, and the

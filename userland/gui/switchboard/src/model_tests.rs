@@ -50,6 +50,7 @@ fn model(
 ) -> super::PanelModel {
     build_model(
         "Switchboard",
+        None,
         sample,
         session,
         &OwnerBundles::new(),
@@ -1016,6 +1017,7 @@ fn a_reported_owner_reaches_its_task_row() {
 
     let panel = build_model(
         "Switchboard",
+        None,
         &sample,
         &SessionReport::HEALTHY,
         &bundles,

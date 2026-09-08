@@ -105,6 +105,9 @@ pub(super) struct ResourcesSection {
     pub(super) rail: Tabs,
     /// The first device the rail's window shows.
     pub(super) rail_offset: usize,
+    /// The session's own account root, which resolves the icon of a consumer
+    /// loaded from this user's own program store.
+    pub(super) home: Option<alloc::string::String>,
     /// The selected device's own identity, so the selection survives a
     /// refresh rather than following whichever entry slid into its place.
     pub(super) selected: Option<DeviceId>,
@@ -131,6 +134,7 @@ impl ResourcesSection {
     /// An empty section: no devices, nothing selected.
     pub(super) fn new() -> Self {
         let mut section = Self {
+            home: None,
             report: ResourceReport::default(),
             rail: Tabs::new(Vec::new()).with_orientation(TabsOrientation::Vertical),
             rail_offset: 0,
@@ -232,14 +236,14 @@ impl ResourcesSection {
             sweep.report(primary);
             return;
         }
-        let (pitch, gap) = pane::metrics(ctx.scale, ctx.theme);
+        let pitch = pane::pitch(ctx.scale, ctx.theme);
         let pad = crate::view::block::content_inset(ctx.scale, ctx.theme);
         let start = u32::try_from(ctx.start).unwrap_or(u32::MAX);
         for (was, now) in rebuilt.retired.iter().zip(&self.items) {
             if was == now {
                 continue;
             }
-            if let Some(rect) = pane::item_rect(now, primary, start, pitch, gap, pad) {
+            if let Some(rect) = pane::item_rect(now, primary, start, pitch, pad) {
                 sweep.report(rect);
             }
         }
@@ -568,6 +572,7 @@ impl SectionView for ResourcesSection {
         let previous = self.selected;
         let stop = self.stop_at(self.focus);
         self.report.clone_from(&model.resources);
+        self.home.clone_from(&model.home);
         self.selected =
             resolve_selection(previous, self.report.devices.iter().map(|device| device.id));
         self.rail_offset = self
@@ -721,6 +726,7 @@ impl SectionView for ResourcesSection {
                 scale: ctx.scale,
                 theme: ctx.theme,
                 font: ctx.font,
+                home: self.home.as_deref(),
             },
             artwork,
         );

@@ -1113,6 +1113,9 @@ impl PanelModel {
 /// Build the live [`PanelModel`] from this sample, the monitor's
 /// [`RollingMeters`] and what the session has reported ([`SessionReport`]).
 ///
+/// `home` is the account root this service runs as, if it has one: a task
+/// loaded from that user's own program store draws its bundle's icon from it.
+///
 /// `meters` must already have this sample folded in, so the rows carry this
 /// cycle's rates and histories rather than the previous cycle's; the
 /// Resources report folds each device's own counters in as it builds them,
@@ -1123,13 +1126,14 @@ impl PanelModel {
 #[must_use]
 pub fn build_model(
     title: &str,
+    home: Option<&str>,
     sample: &Sample,
     session: &SessionReport,
     bundles: &OwnerBundles,
     meters: &mut RollingMeters,
     authority: &dyn CapabilityQuery,
 ) -> PanelModel {
-    let mut model = SwitchboardModel::new(title);
+    let mut model = SwitchboardModel::new(title).with_home(home.map(alloc::string::String::from));
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
     let (tasks, task_owners, task_idents) = build_tasks(

@@ -116,6 +116,10 @@ different ways:
 - `IconRequest::bundle(kind, dir)` — the application bundle at `dir`, whose
   own manifest names its icon. The artwork layer reads that manifest itself,
   so a draw site holding only a directory entry needs no manifest knowledge.
+- `IconRequest::program(kind, name, home)` — the bundle the program of that
+  *name* resolves to, through the program-store order, with the asking
+  session's own home root. What a surface listing *processes* asks for (see
+  below).
 
 A bundle's manifest is authored by whoever built the bundle, so it is treated
 as untrusted input at that boundary: it is read under the ABI's own wire
@@ -195,6 +199,35 @@ a draw needs* and *producing it*:
   the pixels land.
 - Both produce the decode through `render_artwork`, so where it ran cannot
   change what it produced.
+- **A process is pictured from the name the kernel attested it.**
+  `IconRequest::program(kind, name, home)` resolves that name to the first
+  bundle of that name in the program-store order and then through that bundle's
+  own manifest, falling back to the class artwork and the built-in glyph as any
+  other request does. It exists because a surface listing *processes* has
+  nothing else to work from: the kernel attests a task's name from the store
+  path it loaded the image from and carries no image path, so the name is the
+  identity there is, and it is not caller-supplied — a task cannot choose the
+  picture it wears.
+
+  The order is **not** the command-search order (`lib/cmdres`), which answers a
+  different question — what a bare word a user *typed* resolves to — and so
+  carries `PATH` while omitting the service store and `/Apps`. A running
+  process's image can have come from any store that holds a bundle, and never
+  from a `PATH` entry, which holds bare programs. So: the three system stores,
+  then `/Apps`, then the asking session's own two stores **last**. That
+  ordering is the security property — every read-only, system-signed store is
+  tried before any user-writable one, so a user cannot make a system task wear
+  a picture they chose by planting a bundle of the same name; what their own
+  stores *can* supply is an icon for a name no system store holds, which is
+  their own programs. Only the *asking* session's home is searched: enumerating
+  `/Users` would let one account choose the picture another account's task
+  wears. A home that is not an absolute path, or that could climb out of one,
+  contributes no store rather than a guess.
+
+  The cache is keyed by the name *and* that home — two sessions asking about
+  the same name may legitimately resolve different bundles — so a listing of a
+  hundred tasks costs one resolution per distinct program rather than a
+  directory walk per row per frame.
 - **When a wake falls due is the desk's rule, not each producer's.**
   `ArtworkDesk::deliver` answers a `Delivered` carrying two independent facts:
   `kept()`, whether the answer was recorded, and `wake()`, whether the

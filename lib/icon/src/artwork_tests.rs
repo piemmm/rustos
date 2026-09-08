@@ -402,6 +402,164 @@ fn a_bundle_draws_the_icon_its_own_manifest_names() {
     assert_eq!(reader.reads, 2, "the manifest and the asset it names");
 }
 
+/// A process is named by the kernel, never by itself, so a monitor listing
+/// tasks resolves each one's picture from that name through the fixed store
+/// order — the system stores first, so a user-writable one cannot shadow them.
+/// The service store is on that list because most of what a quiet machine runs
+/// is services.
+#[test]
+fn a_program_name_resolves_to_the_first_store_bundle_of_that_name() {
+    let mut c = cache();
+    let mut reader = CountingReader::new()
+        .with(
+            "/System/Applications/terminal.app/AppInfo",
+            manifest("t.png"),
+        )
+        .with(
+            "/System/Applications/terminal.app/Resources/t.png",
+            vec![0u8; 10],
+        );
+    let mut ras = SquareRasteriser;
+    let surface = c
+        .artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            IconRequest::program(IconKind::Executable, "terminal", None),
+            8,
+        )
+        .expect("the program's own bundle icon")
+        .artwork()
+        .expect("shipped artwork, not a glyph mask");
+    assert_eq!(surface.width(), 8);
+    // The command store is tried first and holds no such bundle, so its
+    // manifest read is attempted and misses before the application store
+    // answers.
+    assert_eq!(reader.reads, 3, "one miss, then the manifest and its asset");
+}
+
+/// A name no store holds is not an error and not a guess: the request falls to
+/// the class tier exactly as a process with no bundle always did.
+#[test]
+fn a_program_name_no_store_holds_falls_back_to_its_kind() {
+    let mut c = cache();
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let picture = c.artwork(
+        &mut InlineArtwork::new(&mut reader, &mut ras),
+        IconRequest::program(IconKind::Executable, "kthread", None),
+        8,
+    );
+    assert!(
+        picture.is_some_and(|p| p.artwork().is_none()),
+        "an unresolved name draws its built-in glyph, never nothing"
+    );
+}
+
+/// A service resolves its own picture too: it is the shape of process a
+/// monitor's busiest rows actually are.
+#[test]
+fn a_service_name_resolves_through_the_service_store() {
+    let mut c = cache();
+    let mut reader = CountingReader::new()
+        .with("/System/Services/netstack.app/AppInfo", manifest("n.png"))
+        .with(
+            "/System/Services/netstack.app/Resources/n.png",
+            vec![0u8; 10],
+        );
+    let mut ras = SquareRasteriser;
+    assert!(c
+        .artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            IconRequest::program(IconKind::Executable, "netstack", None),
+            8,
+        )
+        .and_then(super::IconPicture::artwork)
+        .is_some());
+}
+
+/// A user's own program store resolves their own programs' icons — and comes
+/// *after* every system store, so planting a bundle of a system program's name
+/// cannot change the picture that program wears.
+#[test]
+fn a_users_own_store_resolves_their_own_programs_but_shadows_no_system_one() {
+    let home = "/Users/ian";
+    let dirs = super::program_bundles("foo", Some(home));
+    assert_eq!(dirs.len(), 6, "{dirs:?}");
+    let own: Vec<&String> = dirs.iter().filter(|d| d.starts_with(home)).collect();
+    assert_eq!(own.len(), 2, "the user's two stores: {dirs:?}");
+    let first_own = dirs
+        .iter()
+        .position(|d| d.starts_with(home))
+        .expect("the user's stores are searched");
+    let last_system = dirs
+        .iter()
+        .rposition(|d| d.starts_with("/System") || d.starts_with("/Apps"))
+        .expect("the system stores are searched");
+    assert!(
+        last_system < first_own,
+        "a user-writable store must not precede a system one: {dirs:?}"
+    );
+
+    // A system program's name resolves to the system bundle even when the
+    // user has planted one of their own under the same name.
+    let mut reader = CountingReader::new()
+        .with(
+            "/System/Services/netstack.app/AppInfo",
+            manifest("real.png"),
+        )
+        .with(
+            "/System/Services/netstack.app/Resources/real.png",
+            vec![0u8; 10],
+        )
+        .with(
+            "/Users/ian/Commands/netstack.app/AppInfo",
+            manifest("fake.png"),
+        )
+        .with(
+            "/Users/ian/Commands/netstack.app/Resources/fake.png",
+            vec![0u8; 10],
+        );
+    let mut ras = SquareRasteriser;
+    let mut c = cache();
+    assert!(c
+        .artwork(
+            &mut InlineArtwork::new(&mut reader, &mut ras),
+            IconRequest::program(IconKind::Executable, "netstack", Some(home)),
+            8,
+        )
+        .and_then(super::IconPicture::artwork)
+        .is_some());
+    assert!(
+        reader
+            .read_paths
+            .iter()
+            .all(|path| !path.contains("/Users/")),
+        "the user's store was consulted for a system program: {:?}",
+        reader.read_paths
+    );
+}
+
+/// A home that is not an absolute path, or that could climb out of one, is not
+/// a home: nothing is guessed in its place.
+#[test]
+fn a_home_that_is_not_an_absolute_path_contributes_no_store() {
+    for home in ["", "relative/path", "/Users/../System", "Users/ian"] {
+        assert_eq!(
+            super::program_bundles("foo", Some(home)).len(),
+            4,
+            "{home:?} was treated as a home"
+        );
+    }
+}
+
+/// A name that is not a plain file name names no bundle at all rather than
+/// being pasted into a store path.
+#[test]
+fn a_program_name_with_a_path_separator_names_no_bundle() {
+    assert!(super::program_bundles("../../etc/x", None).is_empty());
+    assert!(super::program_bundles("", None).is_empty());
+    assert_eq!(super::program_bundles("ls", None).len(), 4);
+}
+
 #[test]
 fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
     let mut c = cache();

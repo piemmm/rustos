@@ -22,7 +22,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Rgba, TextRole, Theme};
 
-use crate::chart::Chart;
+use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::damage::sink;
 use crate::state::{ActivityState, ControlState, PressureKind, SelectionState, ValidationState};
 use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
@@ -1303,15 +1303,26 @@ fn adopting_reports_nothing_and_admits_what_setting_admits() {
 
 /// A device-rail-shaped strip: two groups, each entry carrying a reading, and
 /// only the first group's entries carrying a trend.
+/// A full rolling window sweeping `from` to `to`, as a live entry's trend is.
+///
+/// A chart's box is a fixed window with the newest reading at its trailing
+/// edge, so a three-point fixture draws a stub there rather than spanning the
+/// entry — which is the truth about three readings, and no use for asserting
+/// where a *populated* trend draws.
+fn sweep(from: u16, to: u16) -> alloc::vec::Vec<u16> {
+    let last = u16::try_from(MAX_CHART_SAMPLES - 1).unwrap_or(1);
+    (0..=last).map(|i| from + (to - from) * i / last).collect()
+}
+
 fn device_rail() -> Tabs {
     Tabs::new(vec![
         Tab::new("CPU")
             .with_group("Resources")
             .with_reading("18%")
-            .with_trend(Chart::new(PressureKind::Cpu).with_samples([200, 600, 400])),
+            .with_trend(Chart::new(PressureKind::Cpu).with_samples(sweep(200, 600))),
         Tab::new("Memory")
             .with_reading("53%")
-            .with_trend(Chart::new(PressureKind::Memory).with_samples([500, 520, 530])),
+            .with_trend(Chart::new(PressureKind::Memory).with_samples(sweep(500, 900))),
         Tab::new("Identity & uptime")
             .with_group("Machine")
             .with_reading("2h 12m"),

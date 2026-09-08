@@ -286,9 +286,13 @@ impl MetricTile {
         }
     }
 
-    /// The height this tile's label/reading block claims: two lines for
-    /// [`MetricLayout::Stacked`] and one for [`MetricLayout::Inline`], the
-    /// reading line sized to whichever of its two faces is taller.
+    /// The height this tile's label/reading block claims: the reading line —
+    /// sized to whichever of its two faces is taller — under a label line
+    /// where [`MetricLayout::Stacked`] has a label to draw.
+    ///
+    /// A tile with no label claims no line for one. A hero whose whole content
+    /// is one figure and its unit would otherwise open with an empty row and
+    /// sit a line lower than the block it leads.
     ///
     /// The one definition [`reading_height`](Self::reading_height),
     /// [`icon_side`](Self::icon_side) and [`render`](Self::render) all read,
@@ -298,12 +302,12 @@ impl MetricTile {
         let fonts = self.reading_fonts(scale, theme);
         let (reading_h, _) = fonts.line_box();
         match self.layout {
-            MetricLayout::Stacked => fonts
+            MetricLayout::Stacked if !self.label.is_empty() => fonts
                 .unit
                 .line_height()
                 .saturating_add(scale.scale_length(theme.metrics().control_gap).max(1))
                 .saturating_add(reading_h),
-            MetricLayout::Inline => reading_h,
+            _ => reading_h,
         }
     }
 
@@ -806,7 +810,6 @@ fn paint_inline_reading_line(
 pub struct StatusPill {
     label: String,
     tone: Option<SignalRole>,
-    outlined: bool,
 }
 
 impl StatusPill {
@@ -817,7 +820,6 @@ impl StatusPill {
         Self {
             label: label.into(),
             tone: None,
-            outlined: false,
         }
     }
 
@@ -827,28 +829,6 @@ impl StatusPill {
     pub fn with_tone(mut self, tone: SignalRole) -> Self {
         self.tone = Some(tone);
         self
-    }
-
-    /// This pill with its capsule rim drawn in its own tone rather than
-    /// collapsed onto its fill.
-    ///
-    /// A resting pill states its condition with a wash and a label, which is
-    /// enough where it sits alone in a row of prose. A pill *badging* a
-    /// dense grid — a core's performance class in the corner of its cell —
-    /// has no such room: the wash is a few levels off the plate it sits on and
-    /// reads as nothing, so the rim is what makes the badge a badge. The
-    /// heavier-contrast themes already rim every pill, so this only affects
-    /// the normal ones.
-    #[must_use]
-    pub fn outlined(mut self) -> Self {
-        self.outlined = true;
-        self
-    }
-
-    /// Whether this pill draws a visible rim in its own tone.
-    #[must_use]
-    pub fn is_outlined(&self) -> bool {
-        self.outlined
     }
 
     /// The pill's label text.
@@ -911,7 +891,7 @@ impl StatusPill {
 
         let radius = h / 2;
         let border = plate_border(theme, scale);
-        let rim = if self.outlined || heavy_contrast(theme) {
+        let rim = if heavy_contrast(theme) {
             label_color
         } else {
             fill

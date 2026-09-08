@@ -47,8 +47,12 @@ pub(super) fn device(
             ),
             unit: total_unit(sample),
             context: context(sample, meters),
-            instrument: HeroInstrument::Track(sample.memory_pressure.map(|m| m.used_permille)),
-            caption: String::new(),
+            // The committed share both ways, as the boards draw it: the trace
+            // for what memory has been doing, the bar for how much is in use
+            // now. The history is already measured for the rail's own entry.
+            instrument: HeroInstrument::trend(meters.system.memory_history().to_vec())
+                .with_track(sample.memory_pressure.map(|m| m.used_permille)),
+            caption: String::from("committed share"),
         },
         blocks: blocks(sample, bundles),
         banner: banner(sample, meters),

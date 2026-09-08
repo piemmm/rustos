@@ -108,26 +108,23 @@ fn balancing_costs_no_extra_row_and_never_exceeds_the_width() {
 #[test]
 fn a_cells_width_comes_from_the_grid_rather_than_its_row() {
     // The width is a function of the pane and the grid's columns alone, so
-    // the final row of a wrapped grid cannot widen its cells. A grid's
-    // cells fit the pane with its gaps, and a narrower grid has wider
-    // cells.
-    let gap = 4;
-    let width = 600;
+    // the final row of a wrapped grid cannot widen its cells. The slots abut
+    // and each cell's own plate margin makes the gap, so they divide the pane
+    // between them and a narrower grid has wider cells.
+    let width = 600u32;
     for columns in 1..=6u32 {
-        let cell = cell_width(width, columns, gap);
-        let spanned = cell
-            .saturating_mul(columns)
-            .saturating_add(gap.saturating_mul(columns.saturating_sub(1)));
+        let cell = cell_width(width, columns);
+        let spanned = cell.saturating_mul(columns);
         assert!(spanned <= width, "{columns} columns overflow the pane");
         assert!(
             spanned.saturating_add(columns) > width,
             "{columns} columns leave a whole cell's slack"
         );
     }
-    assert!(cell_width(width, 3, gap) < cell_width(width, 2, gap));
+    assert!(cell_width(width, 3) < cell_width(width, 2));
     // A pane too narrow for its columns yields no cell at all, which the
     // paint reads as "draw nothing" rather than dividing by nought.
-    assert_eq!(cell_width(8, 6, gap), 0);
+    assert_eq!(cell_width(8, 6), 1);
 }
 
 // --- A drawn cell -----------------------------------------------------------
@@ -159,6 +156,7 @@ fn cell_surface(count: usize, class: CpuCoreClass, theme: &Theme) -> Surface {
             scale: Scale::ONE,
             theme,
             font: tairix_font::BitmapFont::console(),
+            home: None,
         },
         &mut NoArtwork,
     );
@@ -268,6 +266,7 @@ fn a_consumer_row_asks_the_cache_for_the_launching_applications_picture() {
             scale: Scale::ONE,
             theme: &theme,
             font: tairix_font::BitmapFont::console(),
+            home: None,
         },
         &mut artwork,
     );
@@ -344,7 +343,7 @@ fn the_display_hero_still_seats_both_context_lines() {
     // rest under it.
     assert_eq!(context.len(), 1);
     let font = tairix_font::BitmapFont::console();
-    let (pitch, _) = super::metrics(Scale::ONE, &theme);
+    let pitch = super::pitch(Scale::ONE, &theme);
     let needed = tile.measured_height(Scale::ONE, &theme) + font.line_height();
     assert!(
         needed <= hero_item.rows * pitch,

@@ -270,10 +270,8 @@ fn hero(
         value: super::reading(sample, DegradedField::VolumeIoStats, total, format_rate),
         unit: String::new(),
         context: context(service),
-        instrument: HeroInstrument::Trend {
-            samples: meters.devices.primary_history(id).to_vec(),
-            opposing: Some(meters.devices.opposing_history(id).to_vec()),
-        },
+        instrument: HeroInstrument::trend(meters.devices.primary_history(id).to_vec())
+            .with_opposing(meters.devices.opposing_history(id).to_vec()),
         caption: String::from("read above the line, write below"),
     }
 }
