@@ -9,7 +9,7 @@ use tairix_abi::sysinfo::cache_class_name;
 use tairix_controls::{ControlRole, PressureKind};
 
 use super::{consumers, reading as reading_of};
-use crate::format::{format_bytes, format_duration, percent};
+use crate::format::{byte_parts, format_bytes, format_duration, percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
@@ -39,13 +39,17 @@ pub(super) fn device(
         reading: committed.clone(),
         trend: meters.system.memory_history().to_vec(),
         hero: PaneHero {
+            // The figure alone; its unit trails it at body size beside the
+            // whole it is a share of, both scaled to that whole's unit.
             value: reading_of(
                 sample,
                 DegradedField::MemoryPressure,
                 in_use_bytes(sample),
-                format_bytes,
+                |bytes| hero_parts(sample, bytes).0,
             ),
-            unit: total_unit(sample),
+            unit: in_use_bytes(sample)
+                .map(|bytes| hero_parts(sample, bytes).1)
+                .unwrap_or_default(),
             context: context(sample, meters),
             // The committed share both ways, as the boards draw it: the trace
             // for what memory has been doing, the bar for how much is in use
@@ -67,11 +71,15 @@ fn in_use_bytes(sample: &Sample) -> Option<u64> {
     Some(memory.total_bytes.saturating_mul(used) / 1_000)
 }
 
-/// The hero's quiet unit: what the reading is a share *of*.
-fn total_unit(sample: &Sample) -> String {
+/// The hero's figure and the unit that trails it, both scaled to the machine's
+/// own total so the pair reads as one quantity.
+///
+/// A machine whose total is unreadable has no whole to be a share of, so the
+/// figure carries its own unit and nothing trails it.
+fn hero_parts(sample: &Sample, bytes: u64) -> (String, String) {
     match sample.memory_total {
-        Some(total) => format!("of {}", format_bytes(total.total_bytes)),
-        None => String::new(),
+        Some(total) => byte_parts(bytes, total.total_bytes),
+        None => (format_bytes(bytes), String::new()),
     }
 }
 
@@ -114,20 +122,13 @@ fn band_age(sample: &Sample, meters: &RollingMeters) -> Option<String> {
 /// most, and the bounded caches' own ledger.
 fn blocks(sample: &Sample, bundles: &OwnerBundles) -> Vec<PaneBlock> {
     alloc::vec![
-        PaneBlock::full("COMPOSITION — WHERE THE RAM IS", composition(sample)).with_note(
-            "Every part is a measured query; what the named parts do not account for is stated as its own share.",
-        ),
-        PaneBlock::half("MEMORY", BlockBody::Facts(memory_facts(sample))).with_note(
-            "Swap has no plaintext mode: it is keyed with an ephemeral per-boot key that is never persisted.",
-        ),
+        PaneBlock::full("COMPOSITION — WHERE THE RAM IS", composition(sample)),
+        PaneBlock::half("MEMORY", BlockBody::Facts(memory_facts(sample))),
         PaneBlock::half(
             "TOP CONSUMERS — MEMORY",
             BlockBody::Consumers(consumers::by_memory(sample, bundles)),
-        )
-        .with_note(consumers::NOT_A_TOTAL),
-        PaneBlock::full("BOUNDED CACHES — RECLAIM LEDGER", ledger(sample)).with_note(
-            "Every cache declares itself and is reclaimed under the pressure model, so this list is complete rather than a sample.",
         ),
+        PaneBlock::full("BOUNDED CACHES — RECLAIM LEDGER", ledger(sample)),
     ]
 }
 

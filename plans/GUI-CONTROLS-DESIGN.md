@@ -1442,6 +1442,11 @@ that plots one bounded oldest-to-newest series of readings as a line.
   three seconds of readings. A reading's mark is never thinner than the line
   drawing it, so a box too narrow to resolve one slot still shows its newest
   reading rather than dropping it.
+- **An owner may caption the box at both ends.** A trace is a *window*, so the
+  surface that owns one states how far back it reaches and that its trailing
+  edge is the present. The chart draws no such labels itself: the span depends
+  on the owner's own sampling cadence, which the control cannot know, and a
+  label claiming a span the points were not taken at is a fabricated reading.
 - **The chart lays down no ground of its own.** It draws its trace onto
   whatever surface it was given, so the box reads as part of the plate it sits
   on rather than as a panel cut into it.

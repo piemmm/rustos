@@ -1017,13 +1017,17 @@ impl RollingMeters {
         }
     }
 
-    /// Fold `sample` in on both sides at once, with `hysteresis` the
+    /// Fold `sample` in on every side at once, with `hysteresis` the
     /// pressure verdict latched for that very reading.
     ///
+    /// The one fold, once per sample, so every trace's x-axis is time — which
+    /// is what the chart's fixed window and its `now` edge claim. Folding
+    /// where a *report* arrives would advance a trace on events instead.
+    ///
     /// Called before the rows are built, so every figure a row shows came
-    /// from this sample rather than the last one. A task the sample does
-    /// not name is dropped here, so an exited task leaks neither its
-    /// counters nor its history.
+    /// from this sample rather than the last one. A task or device the sample
+    /// does not name is dropped here, so neither leaks its counters or its
+    /// history.
     pub fn record(&mut self, sample: &Sample, hysteresis: Hysteresis, session: &SessionReport) {
         self.system.record(sample, hysteresis);
         self.tasks.record(sample);
@@ -1035,6 +1039,65 @@ impl RollingMeters {
             self.system.memory_pressured(),
             now,
         );
+        self.record_devices(sample, session);
+    }
+
+    /// Fold this sample's per-device counters: each storage device, each
+    /// managed interface, and the display path.
+    ///
+    /// The device set is *discovered* from the sample, and one no longer named
+    /// is retired, so a removed disk or interface leaks neither its counters
+    /// nor its trace.
+    fn record_devices(&mut self, sample: &Sample, session: &SessionReport) {
+        let mut recorded = alloc::vec![
+            DeviceId::Cpu,
+            DeviceId::Memory,
+            DeviceId::Identity,
+            DeviceId::Sessions,
+            DeviceId::Authority,
+        ];
+        // Grouped into devices before anything is folded: the counters belong
+        // to the device, so a volume projected at several mount points and
+        // several volumes on one disk each fold exactly once. Folding per
+        // mount deltas a device's counters against themselves.
+        for subject in crate::resource_report::storage_subjects(sample) {
+            let id = subject.device_id();
+            let key = subject.key();
+            self.devices.record_volume(
+                id,
+                crate::resource_report::find_volume_stats(sample.volume_io_stats.as_deref(), &key),
+                crate::resource_report::find_volume_stats(sample.volume_io_queue.as_deref(), &key),
+                sample.elapsed_ns,
+            );
+            recorded.push(id);
+        }
+        for iface in sample.net_facts.iter().flatten() {
+            let id = DeviceId::Interface(iface.name);
+            // Recorded even when the counters are absent, so a sample that
+            // could not read them breaks the series: the next one that can is
+            // a first sample again rather than a delta over a gap.
+            self.devices.record_interface(
+                id,
+                sample
+                    .net_counters
+                    .as_ref()
+                    .and_then(|records| records.iter().find(|r| r.name == iface.name))
+                    .map(|record| record.counters),
+                sample.elapsed_ns,
+            );
+            recorded.push(id);
+        }
+        self.devices.record_graphics(
+            DeviceId::Graphics,
+            session.frame,
+            sample
+                .gpu_stats
+                .as_ref()
+                .and_then(|records| records.first()),
+            sample.elapsed_ns,
+        );
+        recorded.push(DeviceId::Graphics);
+        self.devices.retain_recorded(&recorded);
     }
 }
 

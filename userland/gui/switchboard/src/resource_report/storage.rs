@@ -51,7 +51,7 @@ struct StorageVolume<'a> {
 }
 
 /// One storage device the rail lists, and what is on it.
-pub(super) struct StorageSubject<'a> {
+pub(crate) struct StorageSubject<'a> {
     /// Its own identity, which the selection remembers.
     id: StorageId,
     /// The volumes on it, in the mount table's own order. Never empty: a
@@ -89,12 +89,12 @@ impl<'a> StorageSubject<'a> {
     /// The list is non-empty by construction; the nil identity matches no
     /// record, so a subject that somehow held none would read unmeasured
     /// rather than borrow another device's figures.
-    pub(super) fn key(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+    pub(crate) fn key(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
         self.volumes.first().map_or(NO_VOLUME, |volume| volume.id)
     }
 
     /// This device's rail entry identity.
-    pub(super) const fn device_id(&self) -> DeviceId {
+    pub(crate) const fn device_id(&self) -> DeviceId {
         DeviceId::Storage(self.id)
     }
 
@@ -138,7 +138,7 @@ impl<'a> StorageSubject<'a> {
     /// session that may read no queue depth and no health can still name what
     /// it lists.
     fn device_name(&self, sample: &Sample) -> Option<String> {
-        let name = super::find_volume(sample.volume_io_stats.as_deref(), &self.key())
+        let name = super::find_volume_stats(sample.volume_io_stats.as_deref(), &self.key())
             .map(VolumeIoStatsRecord::device)?;
         name.is_named().then(|| name.as_str().to_string())
     }
@@ -193,7 +193,7 @@ impl<'a> StorageSubject<'a> {
 ///
 /// The order is the mount table's, which is the registry's own stable
 /// registration order, so the rail does not reorder itself between samples.
-pub(super) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
+pub(crate) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
     let mut subjects: Vec<StorageSubject<'_>> = Vec::new();
     for mount in sample.mounts.iter().flatten() {
         let volume = mount.volume_id();
@@ -215,7 +215,7 @@ pub(super) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
 /// The service query is the ungated one of the three, so this grouping holds
 /// for a session that may read no queue depth and no health.
 fn subject_of(sample: &Sample, volume: &[u8; MOUNT_VOLUME_ID_LEN]) -> StorageId {
-    super::find_volume(sample.volume_io_stats.as_deref(), volume)
+    super::find_volume_stats(sample.volume_io_stats.as_deref(), volume)
         .map(VolumeIoStatsRecord::dev)
         .filter(|dev| *dev != 0)
         .map_or(StorageId::Volume(*volume), StorageId::Device)
@@ -315,27 +315,20 @@ fn blocks(
         PaneBlock::half(
             "SERVICE & QUEUE",
             BlockBody::Facts(service_facts(sample, service))
-        )
-        .with_note(
-            "Every figure here is a two-sample delta over this pane's own interval: utilisation is busy time over the interval, await is wait time over the requests that completed in it. They are the device's, shared by every volume on it.",
         ),
         PaneBlock::half(
             "CAPACITY & MEDIUM",
             BlockBody::Facts(capacity_facts(sample, subject, service))
         ),
+        PaneBlock::half("VOLUMES & MOUNTS", BlockBody::Facts(volume_facts(subject))),
         PaneBlock::half(
-            "VOLUMES & MOUNTS",
-            BlockBody::Facts(volume_facts(subject))
-        )
-        .with_note(
-            "One row per volume on this device, then the paths it is reachable at. A volume projected at several paths is one volume.",
+            "HEALTH — EVERY COMPLETION, BUCKETED",
+            health(sample, subject)
         ),
-        PaneBlock::half("HEALTH — EVERY COMPLETION, BUCKETED", health(sample, subject)),
         PaneBlock::half(
             "TOP CONSUMERS — DISK",
             BlockBody::Consumers(super::consumers::by_disk(sample, &meters.tasks, bundles)),
-        )
-        .with_note(super::consumers::NOT_A_TOTAL),
+        ),
     ]
 }
 
@@ -518,7 +511,7 @@ fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
             Unmeasured::from_absence(sample.absence(DegradedField::VolumeHealth)),
         ));
     };
-    let Some(record) = super::find_volume(Some(records.as_slice()), &subject.key()) else {
+    let Some(record) = super::find_volume_stats(Some(records.as_slice()), &subject.key()) else {
         return BlockBody::Absence(absence_statement(
             "this device's I/O health",
             Unmeasured::Unavailable,
@@ -527,7 +520,7 @@ fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
     let counters = record.counters();
     let severity = subject
         .heads()
-        .filter_map(|(volume, _)| super::find_volume(Some(records.as_slice()), volume))
+        .filter_map(|(volume, _)| super::find_volume_stats(Some(records.as_slice()), volume))
         .map(|record| health_state(record.availability()))
         .max()
         .unwrap_or_else(|| health_state(record.availability()));

@@ -363,3 +363,58 @@ fn hero_tile(items: &[super::PaneItem]) -> &tairix_controls::MetricTile {
         })
         .expect("the pane's hero")
 }
+
+/// The axis row states the box's span at both ends, so the trace reads as a
+/// *window* rather than a shape. The span is derived from the sampler's own
+/// cadence, so it cannot claim a minute over a two-minute window.
+#[test]
+fn a_traces_axis_row_states_its_own_span_and_that_its_edge_is_now() {
+    let label = super::trace_window_label();
+    let seconds = tairix_controls::MAX_CHART_SAMPLES as u64
+        * (crate::schedule::SAMPLE_PERIOD_NS / 1_000_000_000);
+    assert_eq!(label, alloc::format!("-{seconds} s"));
+    assert!(
+        seconds > 60,
+        "the window is {seconds} s, so a hard-coded -60 s would be a fabricated span"
+    );
+    assert_eq!(super::AXIS_NOW, "now");
+}
+
+/// A block's plate closes below its last reading rather than through it: the
+/// rows are inset from the top of the band, so a plate exactly as tall as its
+/// content ran the last row over its own rim — which is what put the memory
+/// hero's share bar outside its plate.
+#[test]
+fn a_plated_block_claims_room_below_its_last_row() {
+    let theme = Theme::dark();
+    let hero = PaneHero::facts(Reading::measured("8.5"), "/ 16.0 GiB");
+    let block = super::PaneBlock::full(
+        "MEMORY",
+        BlockBody::Facts(alloc::vec![crate::view::reading::ReadingFact::text(
+            "Swap", "none"
+        )]),
+    );
+    let items = compile(
+        &hero,
+        false,
+        core::slice::from_ref(&block),
+        PressureKind::Memory,
+        6,
+    );
+    let plate = items
+        .iter()
+        .find(|item| matches!(item.body, super::ItemBody::Plate) && item.row > 0)
+        .expect("the block plates itself");
+    let last = items
+        .iter()
+        .filter(|item| item.plated && item.row >= plate.row)
+        .map(|item| item.row + item.rows)
+        .max()
+        .expect("the block has rows");
+    assert!(
+        plate.row + plate.rows > last,
+        "the plate ends level with its last row, so that row runs over its rim"
+    );
+    let pad = crate::view::block::content_inset(Scale::ONE, &theme);
+    assert!(pad > 0, "a plate with no padding has nothing to overrun");
+}

@@ -56,10 +56,6 @@ pub(super) use pane::PaneItem;
 /// panel allows.
 const SIDEBAR_WIDTH: u32 = 168;
 
-/// The footer band's logical height: the sampling cadence and the
-/// auto-refresh toggle.
-const FOOTER_HEIGHT: u32 = 28;
-
 /// The band `ComboBox`'s logical width, which replaces the rail's *route*
 /// when the frame sheds the sidebar.
 const BAND_COMBO_WIDTH: u32 = 132;
@@ -416,29 +412,7 @@ impl ResourcesSection {
             relief.render(surface, button, ctx.scale, ctx.theme);
         }
     }
-
-    /// Paint the footer: the cadence and window the readings are averaged
-    /// over, so a rate a reader acts on states its own span.
-    fn render_footer(surface: &mut Surface, ctx: SectionCtx<'_>) {
-        let footer = ctx.frame.footer;
-        if footer.height == 0 {
-            return;
-        }
-        ctx.font.draw_text(
-            surface,
-            footer.left(),
-            footer.top(),
-            CADENCE,
-            Color::from(ctx.theme.palette().on_surface_muted),
-        );
-    }
 }
-
-/// What the footer states about every reading on the pane.
-///
-/// A pane that states its own averaging window is the difference between a
-/// rate a reader can act on and a number.
-const CADENCE: &str = "Sampling every 1.0 s";
 
 /// The rail's entries: a window of the report from `offset`, each carrying
 /// its own reading and trace, and a group heading on the entry that *starts*
@@ -563,7 +537,7 @@ impl SectionView for ResourcesSection {
             detail_width: 0,
             impact_width: 0,
             rail_width: ACTION_RAIL_WIDTH,
-            footer_height: FOOTER_HEIGHT,
+            footer_height: 0,
             primary_row_commands: 0,
         }
     }
@@ -738,7 +712,6 @@ impl SectionView for ResourcesSection {
                 self.actions.render(surface, content, ctx.scale, ctx.theme);
             }
         }
-        Self::render_footer(surface, ctx);
     }
 
     /// Route a pointer event to the rail, the banner's relief, or the

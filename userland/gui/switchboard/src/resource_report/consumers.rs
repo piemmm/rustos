@@ -19,14 +19,6 @@ use crate::view::resources::ConsumerRow;
 /// there.
 const CONSUMERS: usize = 5;
 
-/// What every top-consumers block says about itself.
-///
-/// Summing the tasks on a device is not the device's total: filesystem,
-/// RAID and swap traffic belongs to no process, so a reader who added the
-/// rows up would be reading a number the system never measured.
-pub(super) const NOT_A_TOTAL: &str =
-    "A sum of tasks is not the device's total: filesystem, RAID and swap work belongs to no process.";
-
 /// The tasks costing the processor most.
 pub(super) fn by_cpu(sample: &Sample, bundles: &OwnerBundles) -> Vec<ConsumerRow> {
     rank(

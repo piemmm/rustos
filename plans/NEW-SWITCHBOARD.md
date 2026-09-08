@@ -407,6 +407,42 @@ reading; a fact list cannot carry it.
   row — keeps the spelled form. The magnitude prefix belongs to the unit for
   the same reason: `4.2` against `M px`, never `4.2M` against `px`.
 
+**One fold, once per sample — a trace's x-axis is time.** `RollingMeters::record`
+folds every side, including each storage device, each interface and the display
+path; `build_resource_report` only *reads* the meters, which the type now says.
+Folding in the builder advanced a trace on every *rebuild*, and a rebuild
+happens on each frame, seat and owner-bundle report as well as each sample — so
+the display path's trace ran in bursts while the compositor was busy and
+stalled while it was quiet, and dragged the storage and interface traces along
+with it. A trace whose axis is "reports since I started watching" cannot be read
+against a clock, and the `-Ns`/`now` markers below it would be a fabricated span.
+
+**A trace states its own window at both ends.** The axis row under a hero's
+trace carries how far back the box reaches, what its extent means, and that its
+trailing edge is `now`, in one dimmer, smaller face — instrument furniture, not
+a reading. The span is *derived* from the chart's window and the sampler's own
+cadence (64 slots x 2 s = 128 s), never the boards' design-time `-60 s`: a label
+claiming a minute over a two-minute window is a fabricated reading. The removed
+footer's "Sampling every 1.0 s" was that same defect — the cadence is 2 s.
+
+**A hero's figure carries no unit and its column fits its own text.** A byte
+reading and the whole it is a share of are both scaled to *that whole's* unit
+(`byte_parts`), so the pair reads as one quantity: `8.5` against `/ 16.0 GiB`,
+and half a gibibyte of sixteen is `0.5`, never `512` against a whole in another
+unit. The reading column is measured from its widest context line rather than
+taken as a third of the hero, which truncated
+`53% committed - 7.4 GiB available` mid-reading.
+
+**A plated block claims one row past its content.** Its rows are inset from the
+top of its band, so a plate exactly as tall as its content ran the last row over
+its own rim and margin — which is what put the memory hero's share bar outside
+its plate.
+
+**A block carries no explanatory note.** The prose under each block ("a sum of
+tasks is not the device's total", "swap has no plaintext mode") is gone, along
+with `PaneBlock::note` and the cadence footer. A *stated absence* is not such a
+note and stays: it is a reading about a reading, not an explanation of one.
+
 **Every plate carries a margin, and that margin is the only gap.**
 `block::plate` insets itself from the band the flow hands it
 (`block::plate_margin`, half a control gap a side), so two blocks in adjacent

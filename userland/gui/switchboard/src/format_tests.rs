@@ -1,7 +1,7 @@
 //! Unit tests for the crate's one set of display formatters.
 
 use super::{
-    format_bytes, format_duration, format_latency, format_pixels, format_rate, percent,
+    byte_parts, format_bytes, format_duration, format_latency, format_pixels, format_rate, percent,
     pixel_parts, whole_percent,
 };
 use tairix_abi::Duration64;
@@ -109,4 +109,35 @@ fn pixel_parts_split_the_magnitude_into_the_unit() {
     assert_eq!(pixel_parts(4_000_000_000), ("4.0".into(), "G px".into()));
     // Saturates in the last unit rather than wrapping to a smaller figure.
     assert_eq!(pixel_parts(u64::MAX).1, "G px");
+}
+
+/// A hero reads as one quantity, so the figure and the whole it is a share of
+/// are scaled to the *whole's* unit. Scaling each independently spells a ratio
+/// out of two numbers that are not comparable.
+#[test]
+fn byte_parts_scales_the_figure_to_the_whole_it_is_a_share_of() {
+    let gib = 1024u64 * 1024 * 1024;
+    assert_eq!(
+        byte_parts(8 * gib + gib / 2, 16 * gib),
+        (
+            alloc::string::String::from("8.5"),
+            alloc::string::String::from("/ 16.0 GiB")
+        )
+    );
+    // Half a gibibyte of sixteen is not "512": the whole is in GiB, so the
+    // figure is too.
+    assert_eq!(
+        byte_parts(gib / 2, 16 * gib),
+        (
+            alloc::string::String::from("0.5"),
+            alloc::string::String::from("/ 16.0 GiB")
+        )
+    );
+    // And the figure never carries a unit of its own — that is what put
+    // "8.6 GiB" in the hero's large face beside a second unit.
+    let (figure, _) = byte_parts(8 * gib, 16 * gib);
+    assert!(
+        !figure.contains("iB") && !figure.contains(' '),
+        "the figure carried a unit: {figure}"
+    );
 }

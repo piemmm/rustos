@@ -62,13 +62,19 @@ fn permitted() -> Sample {
 /// The report `sample` produces under no authority at all.
 fn report_of(sample: &Sample) -> ResourceReport {
     let mut meters = RollingMeters::new();
-    build_resource_report(
-        sample,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    )
+    folded_report(sample, &mut meters, &SessionReport::HEALTHY)
+}
+
+/// Fold `sample` into `meters` and build the report from them, as the service
+/// does: the meters are folded once per sample and the report only reads them,
+/// so a test that builds twice does not advance a trace twice.
+fn folded_report(
+    sample: &Sample,
+    meters: &mut RollingMeters,
+    session: &SessionReport,
+) -> ResourceReport {
+    meters.record(sample, Hysteresis::new(), session);
+    build_resource_report(sample, meters, &OwnerBundles::new(), session, &NoAuthority)
 }
 
 /// The device with `id`, which the report must carry.
@@ -504,13 +510,7 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
         ..permitted()
     };
     let first = projected(io_stats(0, 0, 0, 0, 0, 0, 0));
-    let _ = build_resource_report(
-        &first,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let _ = folded_report(&first, &mut meters, &SessionReport::HEALTHY);
     let second = projected(io_stats(
         4 << 20,
         1 << 20,
@@ -520,13 +520,7 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
         64_000_000,
         32_000_000,
     ));
-    let report = build_resource_report(
-        &second,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let report = folded_report(&second, &mut meters, &SessionReport::HEALTHY);
     let device = device(&report, SERVED);
     assert_eq!(device.hero.value, Reading::measured("5.0 MiB/s"));
     // One interval, one trace point — not one per projection.
@@ -603,13 +597,7 @@ fn the_resource_panes_carry_both_a_trace_and_a_share_bar() {
         let _ = derive_summary(&sample, &mut hysteresis);
         meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     }
-    let report = build_resource_report(
-        &sample,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let report = folded_report(&sample, &mut meters, &SessionReport::HEALTHY);
     // The two answer different questions, and the boards draw both on each of
     // these panes: the trace says what the resource has been doing, the bar
     // how much of it is in use now.
@@ -781,13 +769,7 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
     // writes 32 ms. Every row below is one of those deltas over another.
     let mut meters = RollingMeters::new();
     let first = volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), Some(io_queue(0, 0, 0)));
-    let _ = build_resource_report(
-        &first,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let _ = folded_report(&first, &mut meters, &SessionReport::HEALTHY);
     let second = volume_sample(
         io_stats(
             4 << 20,
@@ -800,13 +782,7 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         ),
         Some(io_queue(3, 1_280, 640)),
     );
-    let report = build_resource_report(
-        &second,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let report = folded_report(&second, &mut meters, &SessionReport::HEALTHY);
     let volume = device(&report, SERVED);
 
     // busy_ns delta over the interval.
@@ -864,13 +840,7 @@ fn a_denied_queue_scope_costs_the_queue_rows_alone() {
         scopes: denied,
         ..volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None)
     };
-    let _ = build_resource_report(
-        &first,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let _ = folded_report(&first, &mut meters, &SessionReport::HEALTHY);
     let second = Sample {
         scopes: denied,
         ..volume_sample(
@@ -878,13 +848,7 @@ fn a_denied_queue_scope_costs_the_queue_rows_alone() {
             None,
         )
     };
-    let report = build_resource_report(
-        &second,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let report = folded_report(&second, &mut meters, &SessionReport::HEALTHY);
     let volume = device(&report, SERVED);
     assert_eq!(fact(volume, "Utilisation"), &Reading::measured("50%"));
     assert_eq!(fact(volume, "Await, read"), &Reading::measured("125.0 us"));
@@ -917,13 +881,7 @@ fn a_sample_with_no_counters_breaks_the_series_rather_than_deltaing_over_the_gap
     ];
     let mut last = None;
     for sample in steps {
-        last = Some(build_resource_report(
-            &sample,
-            &mut meters,
-            &OwnerBundles::new(),
-            &SessionReport::HEALTHY,
-            &NoAuthority,
-        ));
+        last = Some(folded_report(&sample, &mut meters, &SessionReport::HEALTHY));
     }
     let report = last.expect("three samples were folded");
     let volume = device(&report, SERVED);
@@ -961,13 +919,7 @@ fn the_graphics_utilisation_is_an_interval_share_and_breaks_on_a_gap() {
         ..permitted()
     };
     let step = |meters: &mut RollingMeters, sample: &Sample| {
-        build_resource_report(
-            sample,
-            meters,
-            &OwnerBundles::new(),
-            &SessionReport::HEALTHY,
-            &NoAuthority,
-        )
+        folded_report(sample, meters, &SessionReport::HEALTHY)
     };
 
     let _ = step(&mut meters, &graphics(1_000_000_000, None, true));
@@ -1012,36 +964,22 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
         volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None),
         volume_sample(stats, None),
     ] {
-        let _ = build_resource_report(
-            &sample,
-            &mut meters,
-            &OwnerBundles::new(),
-            &SessionReport::HEALTHY,
-            &NoAuthority,
-        );
+        let _ = folded_report(&sample, &mut meters, &SessionReport::HEALTHY);
     }
     let id = SERVED;
     assert!(!meters.devices.primary_history(id).is_empty());
 
     // Unmounted: the sample names no volume at all.
-    let _ = build_resource_report(
-        &permitted(),
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
+    let _ = folded_report(&permitted(), &mut meters, &SessionReport::HEALTHY);
     assert!(meters.devices.primary_history(id).is_empty());
     assert_eq!(meters.devices.volume_service(id), VolumeService::default());
 
     // Back again, with the counters the departed volume left behind: the
     // first sample after the return is a first sample, so there is no rate.
-    let report = build_resource_report(
+    let report = folded_report(
         &volume_sample(stats, None),
         &mut meters,
-        &OwnerBundles::new(),
         &SessionReport::HEALTHY,
-        &NoAuthority,
     );
     let volume = device(&report, id);
     assert_eq!(volume.hero.value, Reading::Absent(Unmeasured::Unavailable));
@@ -1077,19 +1015,11 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
     // tracking.
     let mut meters = RollingMeters::new();
     let first = interface_sample(0, 0);
-    let _ = build_resource_report(
-        &first,
-        &mut meters,
-        &OwnerBundles::new(),
-        &SessionReport::HEALTHY,
-        &NoAuthority,
-    );
-    let report = build_resource_report(
+    let _ = folded_report(&first, &mut meters, &SessionReport::HEALTHY);
+    let report = folded_report(
         &interface_sample(4 << 20, 1 << 20),
         &mut meters,
-        &OwnerBundles::new(),
         &SessionReport::HEALTHY,
-        &NoAuthority,
     );
     let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
     assert_eq!(eth0.trend.len(), 1);
@@ -1117,9 +1047,11 @@ fn the_memory_entry_carries_its_own_committed_share_trace() {
         let _ = derive_summary(&sample, &mut hysteresis);
         meters.record(&sample, hysteresis, &SessionReport::HEALTHY);
     }
+    // Built directly: the meters carry exactly the two samples folded above,
+    // and building a report must not add a third point.
     let report = build_resource_report(
         &sample,
-        &mut meters,
+        &meters,
         &OwnerBundles::new(),
         &SessionReport::HEALTHY,
         &NoAuthority,
@@ -1128,6 +1060,68 @@ fn the_memory_entry_carries_its_own_committed_share_trace() {
         device(&report, DeviceId::Memory).trend,
         alloc::vec![530, 530]
     );
+}
+
+/// Building a report reads the meters and folds nothing, so a trace's
+/// horizontal axis is *time* — one slot per sample — and not "reports since I
+/// started watching".
+///
+/// The session's frame report arrives several times a second while the
+/// compositor is busy and not at all while it is quiet, and each one rebuilds
+/// an open panel. Folding in the builder therefore advanced the display path's
+/// trace in bursts and stalled it between them, and dragged the storage and
+/// interface traces along on seat and owner-bundle reports too.
+#[test]
+fn rebuilding_a_report_never_advances_a_trace() {
+    let mut meters = RollingMeters::new();
+    let sample = Sample {
+        memory_pressure: Some(MemoryPressureSample {
+            band: 0,
+            used_permille: 530,
+            total_bytes: 16_000_000_000,
+        }),
+        cpu_busy_permille: Some(180),
+        net_facts: Some(alloc::vec![iface("eth0")]),
+        gpu_stats: Some(alloc::vec![graphics_device()]),
+        elapsed_ns: Some(1_000_000_000),
+        ..permitted()
+    };
+    // One sample, then a handful of rebuilds as reports would drive.
+    meters.record(&sample, Hysteresis::new(), &SessionReport::HEALTHY);
+    let after_fold = (
+        device(
+            &build_resource_report(
+                &sample,
+                &meters,
+                &OwnerBundles::new(),
+                &SessionReport::HEALTHY,
+                &NoAuthority,
+            ),
+            DeviceId::Graphics,
+        )
+        .trend
+        .len(),
+        meters.system.cpu_history().len(),
+        meters.system.memory_history().len(),
+    );
+    for _ in 0..5 {
+        let report = build_resource_report(
+            &sample,
+            &meters,
+            &OwnerBundles::new(),
+            &SessionReport::HEALTHY,
+            &NoAuthority,
+        );
+        assert_eq!(
+            (
+                device(&report, DeviceId::Graphics).trend.len(),
+                meters.system.cpu_history().len(),
+                meters.system.memory_history().len(),
+            ),
+            after_fold,
+            "a rebuild advanced a trace"
+        );
+    }
 }
 
 #[test]
@@ -1216,13 +1210,7 @@ fn the_graphics_rail_entry_reads_the_frames_damage_not_the_hero_figure() {
         frame: Some(frame_report()),
         ..SessionReport::HEALTHY
     };
-    let report = build_resource_report(
-        &permitted(),
-        &mut meters,
-        &OwnerBundles::new(),
-        &session,
-        &NoAuthority,
-    );
+    let report = folded_report(&permitted(), &mut meters, &session);
     let graphics = device(&report, DeviceId::Graphics);
     assert_eq!(graphics.reading, Reading::measured("3.2k px"));
     // The hero's figure carries no unit of its own — the unit trails it, so a

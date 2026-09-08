@@ -109,15 +109,14 @@ fn blocks(
     busy_permille: Option<u16>,
 ) -> Vec<PaneBlock> {
     alloc::vec![
-        PaneBlock::half("FRAME WORK — COUNTS ONLY", frame_block(frame)).with_note(
-            "No wall-clock figure rides this path: a duration is neither reproducible nor assertable, so the compositor reports work and the reader draws the conclusion.",
-        ),
+        PaneBlock::half("FRAME WORK — COUNTS ONLY", frame_block(frame)),
         PaneBlock::half(
             "COMPOSITING PATH",
             BlockBody::Facts(path_facts(sample, stats)),
         ),
-        PaneBlock::full("GRAPHICS DEVICE", device_block(sample, stats, busy_permille)).with_note(
-            "Identity comes from the hardware tree; the device's own occupancy, memory and compositor capability come from the display service that drives it. A per-engine breakdown awaits a device that reports its engines separately.",
+        PaneBlock::full(
+            "GRAPHICS DEVICE",
+            device_block(sample, stats, busy_permille)
         ),
     ]
 }

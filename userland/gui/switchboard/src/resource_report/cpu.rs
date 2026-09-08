@@ -107,14 +107,11 @@ fn blocks(sample: &Sample, meters: &RollingMeters, bundles: &OwnerBundles) -> Ve
                 BlockBody::Cores(cores)
             },
         ),
-        PaneBlock::half("PROCESSOR", BlockBody::Facts(processor_facts(sample))).with_note(
-            "TAIRiX accounts busy and idle only, so this is one busy trace, never a stacked area.",
-        ),
+        PaneBlock::half("PROCESSOR", BlockBody::Facts(processor_facts(sample))),
         PaneBlock::half(
             "TOP CONSUMERS — CPU",
             BlockBody::Consumers(consumers::by_cpu(sample, bundles)),
-        )
-        .with_note(consumers::NOT_A_TOTAL),
+        ),
     ]
 }
 

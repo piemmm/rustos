@@ -17,6 +17,7 @@
 //! time, and the paint never lays out anything: it walks the items the
 //! viewport covers and draws them.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -29,6 +30,7 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 use tairix_controls::{
     inset, plate_border, Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue,
     MetricInstrument, MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
+    MAX_CHART_SAMPLES,
 };
 use tairix_font::BitmapFont;
 
@@ -156,9 +158,6 @@ pub struct PaneBlock {
     pub span: BlockSpan,
     /// What it holds.
     pub body: BlockBody,
-    /// A line under the block stating what the figures mean and what they
-    /// do not. Empty when the readings speak for themselves.
-    pub note: String,
 }
 
 impl PaneBlock {
@@ -169,7 +168,6 @@ impl PaneBlock {
             title: String::from(title),
             span: BlockSpan::Half,
             body,
-            note: String::new(),
         }
     }
 
@@ -180,13 +178,6 @@ impl PaneBlock {
             span: BlockSpan::Full,
             ..Self::half(title, body)
         }
-    }
-
-    /// This block with `note` under it.
-    #[must_use]
-    pub fn with_note(mut self, note: &str) -> Self {
-        self.note = String::from(note);
-        self
     }
 }
 
@@ -380,7 +371,7 @@ pub(in crate::view) enum ItemBody {
     },
     /// A status pill.
     Pill(StatusPill),
-    /// A line of quiet prose: a block's note, or a statement of absence.
+    /// A statement of absence, in words.
     Note(String),
 }
 
@@ -621,9 +612,14 @@ fn push_block(
             }
             BlockBody::Absence(statement) => push(1, ItemBody::Note(statement.clone())),
         }
-        if !block.note.is_empty() {
-            push(1, ItemBody::Note(block.note.clone()));
-        }
+    }
+    // A plated block's rows are inset from the top of its band, so its last
+    // row would otherwise end level with the band — running its content over
+    // the plate's own rim and margin, which is what put the hero's share bar
+    // outside its plate. The block claims one row past its content instead, so
+    // the plate closes below the last reading rather than through it.
+    if plated {
+        row = row.saturating_add(1);
     }
     if let Some(slot) = plate.and_then(|slot| items.get_mut(slot)) {
         slot.rows = row.saturating_sub(start);
@@ -982,9 +978,7 @@ fn render_hero(surface: &mut Surface, parts: HeroParts<'_>, rect: Rect, window: 
     let muted = Color::from(theme.palette().on_surface_muted);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let reading_w = match parts.chart {
-        // The trace takes the greater share: a rate's shape is the reading,
-        // and the figure beside it needs only its own width.
-        Some(_) => rect.width / 3,
+        Some(_) => reading_column(&parts, rect.width, gap, font),
         None => rect.width,
     };
     let reading = Rect::new(rect.left(), rect.top(), reading_w, rect.height);
@@ -1012,23 +1006,124 @@ fn render_hero(surface: &mut Surface, parts: HeroParts<'_>, rect: Rect, window: 
     };
     let left = rect.left() + to_i32(reading_w.saturating_add(gap));
     let width = rect.width.saturating_sub(reading_w).saturating_sub(gap);
-    let caption_h = font.line_height().min(rect.height);
-    let plot_h = rect.height.saturating_sub(caption_h);
+    let axis = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
+    let axis_h = axis.line_height().min(rect.height);
+    let plot_h = rect.height.saturating_sub(axis_h);
     chart.render(
         surface,
         Rect::new(left, rect.top(), width, plot_h),
         scale,
         theme,
     );
-    if !parts.caption.is_empty() {
-        font.draw_text(
-            surface,
-            left,
-            rect.top() + to_i32(plot_h),
-            font.truncate_to_width(parts.caption, width),
-            muted,
-        );
+    render_axis(
+        surface,
+        Rect::new(left, rect.top() + to_i32(plot_h), width, axis_h),
+        parts.caption,
+        (axis, theme),
+    );
+}
+
+/// How wide the hero's reading column sits when a trace shares its row: what
+/// its own widest context line needs, bounded so the trace always keeps the
+/// greater share.
+///
+/// Measured rather than a fixed fraction of the hero. A third of the pane is
+/// narrower than `53% committed · 7.4 GiB available` at body size, so the line
+/// truncated mid-reading — and a fraction that happens to fit one pane's
+/// wording says nothing about the next one's.
+fn reading_column(parts: &HeroParts<'_>, width: u32, gap: u32, font: BitmapFont) -> u32 {
+    let widest = parts
+        .context
+        .iter()
+        .map(|line| font.text_width(line))
+        .max()
+        .unwrap_or(0);
+    let floor = width / 4;
+    // Half the hero less the gap: past that the trace is the smaller half and
+    // stops being the thing the pane leads with.
+    let ceiling = width.saturating_sub(gap) / 2;
+    widest
+        .saturating_add(gap)
+        .clamp(floor.min(ceiling), ceiling)
+}
+
+/// The trailing marker: the box's newest slot is the present.
+const AXIS_NOW: &str = "now";
+
+/// How much of the muted foreground an axis label keeps, against the plate it
+/// sits on.
+///
+/// An axis label is instrument furniture, not a reading: it says where the box
+/// begins and ends and what its extent means, and at a reading's own weight it
+/// competes with the trace above it. Derived from the theme's own muted
+/// foreground rather than authored as a palette role, exactly as a toned
+/// pill's wash is, so the whole row moves with a theme rather than needing one.
+const AXIS_INK_PERMILLE: u16 = 570;
+
+/// Paint a trace's axis row: how far back the box reaches, what its extent
+/// means, and that its trailing edge is now.
+///
+/// The two markers are what make the box a *window* rather than a shape — a
+/// trace with no span stated is a picture, not a reading — and the span is
+/// derived from the sampler's own cadence, so it cannot drift from the
+/// interval the points were taken at.
+fn render_axis(
+    surface: &mut Surface,
+    rect: Rect,
+    caption: &str,
+    (font, theme): (BitmapFont, &Theme),
+) {
+    if rect.is_empty() {
+        return;
     }
+    let palette = theme.palette();
+    let ink = Color::from(
+        palette
+            .on_surface_muted
+            .mix(palette.surface, AXIS_INK_PERMILLE),
+    );
+    let span = trace_window_label();
+    let now = AXIS_NOW;
+    let span_w = font.text_width(&span);
+    let now_w = font.text_width(now);
+    font.draw_text(surface, rect.left(), rect.top(), &span, ink);
+    font.draw_text(
+        surface,
+        rect.left() + to_i32(rect.width.saturating_sub(now_w)),
+        rect.top(),
+        now,
+        ink,
+    );
+    // Centred in the box, and drawn only where it clears both markers: a
+    // caption overlapping the span it is captioning reads as neither.
+    let room = rect
+        .width
+        .saturating_sub(span_w.saturating_add(now_w))
+        .saturating_sub(font.text_width("  ").saturating_mul(2));
+    let fitted = font.truncate_to_width(caption, room);
+    if fitted.is_empty() {
+        return;
+    }
+    let text_w = font.text_width(fitted).min(rect.width);
+    font.draw_text(
+        surface,
+        rect.left() + to_i32(rect.width.saturating_sub(text_w) / 2),
+        rect.top(),
+        fitted,
+        ink,
+    );
+}
+
+/// How far back a full trace reaches, from the chart's own window and the
+/// sampler's own cadence.
+///
+/// Spelled in whole seconds rather than through the shared duration format:
+/// that one answers "how long has this stood" and drops the seconds above a
+/// minute, which would label a 128-second window `2m`.
+fn trace_window_label() -> String {
+    let seconds = u64::try_from(MAX_CHART_SAMPLES).unwrap_or(0)
+        * (crate::schedule::SAMPLE_PERIOD_NS / 1_000_000_000).max(1);
+    format!("-{seconds} s")
 }
 
 /// Paint one grid row's cells side by side, each with its own trace under

@@ -40,6 +40,8 @@ mod machine;
 mod memory;
 mod storage;
 
+pub(crate) use storage::subjects as storage_subjects;
+
 /// Build the Resources section's whole report from this sample.
 ///
 /// One value carries every pane, so the view never asks a second question
@@ -47,10 +49,14 @@ mod storage;
 /// than the rail entry beside it. The rail's length is *discovered*: one
 /// entry per device the sample names, so a hundred-core machine with a
 /// dozen volumes gets a longer rail rather than a truncated one.
+///
+/// The meters are read, never folded: `RollingMeters::record` folds them once
+/// per sample, so building a report — which a report arriving from the session
+/// also does, several times a second — cannot advance a trace.
 #[must_use]
 pub fn build_resource_report(
     sample: &Sample,
-    meters: &mut RollingMeters,
+    meters: &RollingMeters,
     bundles: &OwnerBundles,
     session: &SessionReport,
     authority: &dyn CapabilityQuery,
@@ -59,61 +65,17 @@ pub fn build_resource_report(
         cpu::device(sample, meters, bundles),
         memory::device(sample, meters, bundles),
     ];
-    let mut recorded = alloc::vec![DeviceId::Cpu, DeviceId::Memory];
-
-    // Grouped into devices before anything is folded: the counters belong to
-    // the device, so a volume projected at several mount points and several
-    // volumes on one disk each fold exactly once. Folding per mount deltas a
-    // device's counters against themselves and plots the nought that
-    // produces.
     for subject in storage::subjects(sample) {
-        // The counters are cumulative, so this device's rates are the delta
-        // this fold produces rather than anything one sample carries. The two
-        // blocks are separately gated: a denied queue costs the queue reading
-        // alone.
-        let id = subject.device_id();
-        let key = subject.key();
-        meters.devices.record_volume(
-            id,
-            find_volume(sample.volume_io_stats.as_deref(), &key),
-            find_volume(sample.volume_io_queue.as_deref(), &key),
-            sample.elapsed_ns,
-        );
         devices.push(storage::device(sample, meters, &subject, bundles));
-        recorded.push(id);
     }
     for iface in sample.net_facts.iter().flatten() {
-        // The counters are cumulative, so the interface's own rate is the
-        // delta this fold produces rather than anything one sample carries.
-        let id = DeviceId::Interface(iface.name);
-        // Recorded even when the counters are absent, so a sample that could
-        // not read them breaks the series: the next one that can is a first
-        // sample again rather than a delta over a gap.
-        meters.devices.record_interface(
-            id,
-            sample
-                .net_counters
-                .as_ref()
-                .and_then(|records| records.iter().find(|r| r.name == iface.name))
-                .map(|record| record.counters),
-            sample.elapsed_ns,
-        );
         devices.push(interface::device(sample, meters, iface));
-        recorded.push(id);
     }
 
-    // The compositor's last frame is one point of the display path's trace,
-    // and the device's cumulative busy time is a rate source like any other:
-    // both are folded here so the pane spells a series and a share the
-    // meters derived rather than reading an empty chart and a lifetime
-    // average.
     let gpu = sample
         .gpu_stats
         .as_ref()
         .and_then(|records| records.first());
-    meters
-        .devices
-        .record_graphics(DeviceId::Graphics, session.frame, gpu, sample.elapsed_ns);
     devices.push(graphics::device(
         sample,
         session.frame,
@@ -121,16 +83,9 @@ pub fn build_resource_report(
         meters.devices.graphics_busy(DeviceId::Graphics),
         meters.devices.primary_history(DeviceId::Graphics),
     ));
-    recorded.push(DeviceId::Graphics);
-
     devices.push(machine::identity(sample));
     devices.push(machine::sessions(sample));
     devices.push(machine::authority(sample, authority));
-    recorded.extend([DeviceId::Identity, DeviceId::Sessions, DeviceId::Authority]);
-
-    // Anything the sample did not name this cycle leaks neither its history
-    // nor its counters.
-    meters.devices.retain_recorded(&recorded);
 
     ResourceReport {
         devices,
@@ -198,7 +153,7 @@ impl VolumeBytes {
 ///
 /// The three per-volume queries are keyed and ordered alike, so one lookup
 /// serves all of them and no pane can join two of them differently.
-fn find_volume<'a, R: VolumeKeyed>(
+pub(crate) fn find_volume_stats<'a, R: VolumeKeyed>(
     records: Option<&'a [R]>,
     volume_id: &[u8; 16],
 ) -> Option<&'a R> {
@@ -206,7 +161,7 @@ fn find_volume<'a, R: VolumeKeyed>(
 }
 
 /// A per-volume record that names the volume it describes.
-trait VolumeKeyed {
+pub(crate) trait VolumeKeyed {
     /// The volume's durable 16-byte identity.
     fn key(&self) -> [u8; 16];
 }

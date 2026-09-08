@@ -144,7 +144,6 @@ fn cpu_device() -> ResourceDevice {
                     share: 970,
                 }]),
             )
-            .with_note("A sum of tasks is not the device's total."),
         ],
         banner: None,
         actions: alloc::vec![
