@@ -13,9 +13,10 @@
 //! ships in a production image.
 
 use crate::{
-    MailboxError, MailboxTransport, RtcRegister, CODE_RESPONSE_OK, PROPERTY_WORDS, TAG_ALLOCATE,
-    TAG_GET_FIRMWARE_REVISION, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_GET_RTC_REG,
-    TAG_RESPONSE_BIT, TAG_SET_RTC_REG,
+    FirmwareClock, MailboxError, MailboxTransport, RtcRegister, CODE_RESPONSE_OK, PROPERTY_WORDS,
+    TAG_ALLOCATE, TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE,
+    TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT,
+    TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
 };
 
 /// A mock firmware answering property messages with configured values.
@@ -40,6 +41,18 @@ pub struct MockFirmware {
     /// Millivolts the RTC's backup-cell voltage register answers with;
     /// zero models a board with no cell fitted.
     pub rtc_backup_mv: u32,
+    /// Rate in Hz the ARM clock is running at. Writable through the
+    /// set-clock-rate tag — clamped to the range below and rounded down to
+    /// `arm_clock_grain_hz`, as a firmware synthesising from a PLL does — so
+    /// a consumer's set-then-read round trip is faithful.
+    pub arm_clock_hz: u32,
+    /// Lowest ARM-clock rate the modelled firmware accepts.
+    pub arm_clock_min_hz: u32,
+    /// Highest ARM-clock rate the modelled firmware accepts.
+    pub arm_clock_max_hz: u32,
+    /// Granularity the modelled firmware rounds a requested rate down to,
+    /// so a consumer cannot assume it gets back exactly what it asked for.
+    pub arm_clock_grain_hz: u32,
 }
 
 impl MockFirmware {
@@ -58,6 +71,10 @@ impl MockFirmware {
             firmware_revision: 0x0123_4567,
             rtc_secs: 1_767_225_600,
             rtc_backup_mv: 3000,
+            arm_clock_hz: 600_000_000,
+            arm_clock_min_hz: 600_000_000,
+            arm_clock_max_hz: 1_500_000_000,
+            arm_clock_grain_hz: 2_000_000,
         }
     }
 
@@ -104,6 +121,17 @@ impl MockFirmware {
                     self.set_rtc_register(message[at + 3], message[at + 4]);
                     8
                 }
+                // The clock-rate tags echo the selector and carry the rate
+                // in the second word; an unmodelled clock is answered zero,
+                // which is how the firmware spells "no such clock".
+                TAG_GET_CLOCK_RATE | TAG_GET_MIN_CLOCK_RATE | TAG_GET_MAX_CLOCK_RATE => {
+                    message[at + 4] = self.clock_rate(tag, message[at + 3]);
+                    8
+                }
+                TAG_SET_CLOCK_RATE => {
+                    message[at + 4] = self.set_clock_rate(message[at + 3], message[at + 4]);
+                    8
+                }
                 // Set-tags echo their request values unchanged.
                 _ => message[at + 1],
             };
@@ -132,6 +160,32 @@ impl MockFirmware {
         } else if selector == RtcRegister::BackupVolts.as_u32() {
             self.rtc_backup_mv = value;
         }
+    }
+
+    /// The modelled rate `tag` reports for clock `selector`.
+    fn clock_rate(&self, tag: u32, selector: u32) -> u32 {
+        if selector != FirmwareClock::Arm.as_u32() {
+            return 0;
+        }
+        match tag {
+            TAG_GET_MIN_CLOCK_RATE => self.arm_clock_min_hz,
+            TAG_GET_MAX_CLOCK_RATE => self.arm_clock_max_hz,
+            _ => self.arm_clock_hz,
+        }
+    }
+
+    /// Apply `rate_hz` to clock `selector`, returning the rate the modelled
+    /// firmware actually adopted: clamped to its range and rounded down to
+    /// `arm_clock_grain_hz`. An unmodelled clock adopts nothing and answers
+    /// zero.
+    fn set_clock_rate(&mut self, selector: u32, rate_hz: u32) -> u32 {
+        if selector != FirmwareClock::Arm.as_u32() {
+            return 0;
+        }
+        let clamped = rate_hz.clamp(self.arm_clock_min_hz, self.arm_clock_max_hz);
+        let grain = self.arm_clock_grain_hz.max(1);
+        self.arm_clock_hz = (clamped / grain) * grain;
+        self.arm_clock_hz
     }
 }
 

@@ -2411,6 +2411,7 @@ fn generate_syscall() -> String {
     emit_power_contract(&mut out);
     emit_waitset_contract(&mut out);
     emit_latency_contract(&mut out);
+    emit_cpufreq_contract(&mut out);
 
     out.push_str("/* Syscall entry points, implemented by the user-space stub library. */\n");
     for spec in SYSCALLS {
@@ -2532,6 +2533,58 @@ fn emit_latency_contract(out: &mut String) {
         out,
         "#define TAIRIX_LATENCY_BUDGET_DISARM {}ull",
         latency::BUDGET_DISARM
+    );
+    out.push('\n');
+}
+
+/// Emit the CPU frequency mechanism contract into `tairix_syscall.h`: the two
+/// records the `cpufreq_bind()`/`cpufreq_wait()` pair exchanges, with their
+/// wire lengths read from `lib/abi` and never re-typed.
+///
+/// A C mechanism cannot use either call without the layouts, since both take
+/// a pointer to one.
+fn emit_cpufreq_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
+    out.push_str(
+        "/* cpufreq_bind() — take the machine's CPU frequency mechanism role, declaring\n\
+         * the operating range this driver can deliver. Requires TAIRIX_CAP_CPUFREQ, and\n\
+         * is refused with TAIRIX_E_ALREADY_EXISTS when a mechanism is already bound: the\n\
+         * machine has one clock policy. The kernel re-validates the range and refuses one\n\
+         * no governor could pick from. The binding is released when the holding process\n\
+         * ends, so a replacement needs no explicit unbind. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_CPU_FREQ_LIMITS_LEN {}u",
+        CpuFreqLimits::WIRE_LEN
+    );
+    out.push_str(
+        "typedef struct tairix_cpu_freq_limits {\n\
+         \tuint64_t min_hz;\n\
+         \tuint64_t max_hz;\n\
+         \tuint64_t step_hz;  /* granularity the governor quantises a target to */\n\
+         } tairix_cpu_freq_limits_t;\n",
+    );
+    out.push_str(
+        "/* cpufreq_wait() — block until the governor's target differs from `last_seq`,\n\
+         * then read it back. Pass 0 on the first call to be answered at once. There is no\n\
+         * timeout: the kernel wakes the waiter both on a demand change and at the point\n\
+         * its own decay would next move the rate. Wait on `seq` rather than on the rate:\n\
+         * a mechanism does not get to apply exactly what it was asked for (firmware\n\
+         * clamps and rounds), so \"block until the target equals what I applied\" would\n\
+         * spin forever. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_CPU_FREQ_TARGET_LEN {}u",
+        CpuFreqTarget::WIRE_LEN
+    );
+    out.push_str(
+        "typedef struct tairix_cpu_freq_target {\n\
+         \tuint64_t seq;        /* advances on every real change of target_hz */\n\
+         \tuint64_t target_hz;\n\
+         } tairix_cpu_freq_target_t;\n",
     );
     out.push('\n');
 }

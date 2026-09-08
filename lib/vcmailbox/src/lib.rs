@@ -882,6 +882,209 @@ pub fn decode_rtc_register_write_response(
     }
 }
 
+// --- Clock rates ----------------------------------------------------------
+
+/// `RPI_FIRMWARE_GET_CLOCK_RATE`: the rate a clock is running at now.
+const TAG_GET_CLOCK_RATE: u32 = 0x0003_0002;
+
+/// `RPI_FIRMWARE_GET_MAX_CLOCK_RATE`: the highest rate the firmware accepts
+/// for a clock.
+const TAG_GET_MAX_CLOCK_RATE: u32 = 0x0003_0004;
+
+/// `RPI_FIRMWARE_GET_MIN_CLOCK_RATE`: the lowest rate the firmware accepts
+/// for a clock.
+const TAG_GET_MIN_CLOCK_RATE: u32 = 0x0003_0007;
+
+/// `RPI_FIRMWARE_SET_CLOCK_RATE`: ask the firmware to run a clock at a rate.
+const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
+
+/// Which clock a rate exchange names.
+///
+/// The firmware owns every clock on the `SoC` and identifies each by this
+/// selector in the tag's first value word. Only the ARM core clock is
+/// spelled — it is the one this crate's consumers drive, and a selector with
+/// no caller would be surface with no reader. The discriminant is the
+/// firmware's own (`RPI_FIRMWARE_ARM_CLK_ID`), so it is not renumbered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FirmwareClock {
+    /// The ARM core clock — the one dynamic frequency scaling moves.
+    Arm = 3,
+}
+
+impl FirmwareClock {
+    /// The firmware's selector word.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Which rate of a clock a query asks about.
+///
+/// The three are separate firmware tags rather than fields of one answer, so
+/// a consumer that needs the operating range pays three exchanges.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ClockRateQuery {
+    /// The rate the clock is running at now.
+    Current,
+    /// The lowest rate the firmware accepts.
+    Min,
+    /// The highest rate the firmware accepts.
+    Max,
+}
+
+impl ClockRateQuery {
+    /// The firmware property tag that carries this query.
+    const fn tag(self) -> u32 {
+        match self {
+            Self::Current => TAG_GET_CLOCK_RATE,
+            Self::Min => TAG_GET_MIN_CLOCK_RATE,
+            Self::Max => TAG_GET_MAX_CLOCK_RATE,
+        }
+    }
+}
+
+/// Encode a query for one of `clock`'s rates.
+///
+/// The tag's value buffer is two words — the selector and the slot the
+/// firmware writes the rate into — and the firmware echoes the selector, so
+/// the decode can prove the answer describes the clock that was asked about.
+#[must_use]
+pub fn encode_clock_rate_query(
+    clock: FirmwareClock,
+    query: ClockRateQuery,
+) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, query.tag(), &[clock.as_u32(), 0]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Encode a request to run `clock` at `rate_hz`.
+///
+/// Two value words (selector, rate), as `clk-raspberrypi` spells it. The
+/// optional third "skip setting turbo" word is omitted, so the firmware
+/// applies the voltage settings that go with the rate rather than leaving the
+/// core under-volted at a rate it cannot hold.
+#[must_use]
+pub fn encode_clock_rate_write(clock: FirmwareClock, rate_hz: u32) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(
+        &mut words,
+        at,
+        TAG_SET_CLOCK_RATE,
+        &[clock.as_u32(), rate_hz],
+    );
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Decode the firmware's answer to [`encode_clock_rate_query`], returning the
+/// rate in Hz.
+///
+/// The echoed selector must match `clock`: a firmware that answered about a
+/// different clock would otherwise have a peripheral's rate read as the core's.
+/// A zero rate is returned as-is — the firmware spells "no such clock" that
+/// way, and judging whether a rate is believable is the caller's policy, not
+/// this framing layer's.
+///
+/// # Errors
+///
+/// * [`MailboxError::FirmwareError`] — the firmware rejected the request or
+///   returned an unknown header code.
+/// * [`MailboxError::MalformedResponse`] — a protocol violation, an
+///   unhonoured tag (no per-tag response bit), or an echoed selector naming a
+///   different clock.
+pub fn decode_clock_rate_response(
+    clock: FirmwareClock,
+    query: ClockRateQuery,
+    words: &[u32; PROPERTY_WORDS],
+) -> Result<u32, MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    match tag_pair(words, query.tag())? {
+        (echoed, rate) if echoed == clock.as_u32() => Ok(rate),
+        _ => Err(MailboxError::MalformedResponse),
+    }
+}
+
+/// Decode the firmware's answer to [`encode_clock_rate_write`], returning the
+/// rate it actually applied.
+///
+/// The firmware clamps a request to the clock's operating range and rounds it
+/// to a rate the PLL can synthesise, so the applied rate is the only honest
+/// account of what the core is now running at. This decode therefore
+/// *requires* the echoed pair: unlike an RTC register write, a set-clock
+/// answer that reports nothing leaves the applied rate unknowable, and
+/// reporting a requested rate as though it were achieved would be a
+/// fabrication.
+///
+/// # Errors
+///
+/// As [`decode_clock_rate_response`].
+pub fn decode_clock_rate_write_response(
+    clock: FirmwareClock,
+    words: &[u32; PROPERTY_WORDS],
+) -> Result<u32, MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    match tag_pair(words, TAG_SET_CLOCK_RATE)? {
+        (echoed, rate) if echoed == clock.as_u32() => Ok(rate),
+        _ => Err(MailboxError::MalformedResponse),
+    }
+}
+
+/// Ask the firmware for one of `clock`'s rates over `transport`, in Hz.
+///
+/// The one place the query/exchange/decode sequence is spelled, so the
+/// boot-time clock raise and the autoloaded driver cannot frame it
+/// differently.
+///
+/// # Errors
+///
+/// As [`decode_clock_rate_response`], plus [`MailboxError::Timeout`] when the
+/// doorbell exchange does not complete within the transport's budget.
+pub fn query_clock_rate(
+    transport: &mut dyn MailboxTransport,
+    clock: FirmwareClock,
+    query: ClockRateQuery,
+) -> Result<u32, MailboxError> {
+    let mut words = encode_clock_rate_query(clock, query);
+    transport.exchange(&mut words)?;
+    decode_clock_rate_response(clock, query, &words)
+}
+
+/// Ask the firmware to run `clock` at `rate_hz` over `transport`, returning
+/// the rate it applied.
+///
+/// # Errors
+///
+/// As [`query_clock_rate`].
+pub fn set_clock_rate(
+    transport: &mut dyn MailboxTransport,
+    clock: FirmwareClock,
+    rate_hz: u32,
+) -> Result<u32, MailboxError> {
+    let mut words = encode_clock_rate_write(clock, rate_hz);
+    transport.exchange(&mut words)?;
+    decode_clock_rate_write_response(clock, &words)
+}
+
 // --- MMIO doorbell transport ----------------------------------------------
 
 /// Byte length of the mailbox doorbell register block.

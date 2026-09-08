@@ -72,6 +72,8 @@ for filesystems, the feature section below.
 | Memory tagging (software UAF floor) | ✓ | ✓ | ✓ | ✓ |
 | Fatal kernel-fault report (registers, backtrace, stop-the-world) | ◐ `#PF` only | ✓ | ✓ | — |
 | Interactive-stall report (frame budget + user backtrace, debug) | ✓ | ✓ | ✓ | ▢ |
+| CPU frequency scaling (governor + mechanism driver) | ▢ | ✓ firmware | ▢ | — |
+| Live core-frequency measurement (`cpu MHz`) | ✓ APERF | ✓ PMU | ✓ cycle | — |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
 | Runtime CPU-feature dispatch (page-zero accel) | ✓ ERMS | ✓ DC ZVA | — baseline | — baseline |
 | Runtime CPU-feature dispatch (hash group-scan accel) | — baseline | ✓ NEON | — baseline | — baseline |

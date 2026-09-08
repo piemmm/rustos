@@ -835,6 +835,30 @@ pub fn writeback_wake(deadline_ns: Option<u64>) {
     }
 }
 
+/// The wait-queue holding the bound CPU-frequency mechanism
+/// (`cpufreq_wait`). At most one waiter: the machine has one mechanism.
+///
+/// Woken by [`cpufreq_wake`] when work arrives on an idle CPU or a program is
+/// launched, and by the timed [`WaitQueue::sweep`] at the deadline the
+/// governor parked it on — one response window ahead while the rate is above
+/// the minimum, and never once it has settled there, so a quiet machine takes
+/// no wakeup at all.
+pub static CPUFREQ_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Request a wake of the bound frequency mechanism because the machine's
+/// performance demand rose.
+///
+/// Called from the dispatch loop's idle brackets and from the `spawn` path,
+/// which are dispatcher and task context respectively — never an interrupt
+/// handler — but the loop calls it with device interrupts masked around its
+/// park, so it only *flags* the queue ([`WaitQueue::request_wake`]) and the
+/// real `unpark` runs at the next dispatcher-context [`drain_pending_wakes`].
+/// The caller has already established that the rate is not already at its
+/// ceiling, so this is never a wake with nothing to say.
+pub fn cpufreq_wake() {
+    CPUFREQ_WAITQ.request_wake();
+}
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree and by the timed sweep below.
@@ -1059,6 +1083,10 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     // A timed `fs_lock` whose deadline passed leaves the wait and reports
     // the timeout rather than holding its task past the bound it asked for.
     FILE_LOCK_WAITQ.sweep(arch, now);
+    // The frequency governor's own review deadline: a quiescing machine steps
+    // its rate down here, so the sweep is what turns the response window into
+    // a real bound on how long a quiet machine runs fast.
+    CPUFREQ_WAITQ.sweep(arch, now);
     // The futex queues are per-key and created on demand, so they are swept
     // through their own module rather than named here (`plans/THREADS.md`
     // decision 5): a timed `futex_wait` is released exactly like any other
@@ -1112,6 +1140,14 @@ pub fn drain_pending_wakes() -> bool {
         WRITEBACK_WAITQ.wake_all(arch);
         woke = true;
     }
+    // The machine's performance demand rose: work arrived on an idle CPU, or
+    // a program was launched. Flagged from the dispatch loop's idle bracket,
+    // which runs with device interrupts masked around its park, so the real
+    // unpark of the frequency mechanism happens here.
+    if CPUFREQ_WAITQ.take_wake_pending() {
+        CPUFREQ_WAITQ.wake_all(arch);
+        woke = true;
+    }
     // Deadline sweep flagged by the timer one-shot.
     if TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel) {
         run_timed_sweep(arch);
@@ -1144,6 +1180,7 @@ pub fn has_pending_deferred_wake() -> bool {
         || IRQ_WAITQ.wake_is_pending()
         || PRESSURE_WAITQ.wake_is_pending()
         || WRITEBACK_WAITQ.wake_is_pending()
+        || CPUFREQ_WAITQ.wake_is_pending()
 }
 
 /// Whether a timed waiter's finite deadline has already elapsed, so the
@@ -1223,6 +1260,9 @@ pub fn nearest_timed_deadline() -> Option<u64> {
         WRITEBACK_WAITQ.earliest_deadline(),
         // A bounded wait for an advisory byte-range lock.
         FILE_LOCK_WAITQ.earliest_deadline(),
+        // The frequency governor's next review. A machine settled at its
+        // minimum registers no deadline, so it arms nothing.
+        CPUFREQ_WAITQ.earliest_deadline(),
     ]
     .into_iter()
     .flatten()
@@ -1281,6 +1321,51 @@ mod tests {
             *self.wakeup_calls.borrow_mut() += 1;
             *self.last_wakeup.borrow_mut() = deadline_ns;
         }
+    }
+
+    #[test]
+    fn the_frequency_queue_is_on_every_shared_path() {
+        // The defect this guards: a named queue is only useful if every
+        // shared path names it. A `cpufreq_wake` whose flag no drain
+        // consumes never reaches the mechanism, so a machine that had settled
+        // low would stay there through the work that arrived; and a review
+        // deadline no sweep visits and no arming counts would never fire, so
+        // a quiescing machine would never step back down.
+        //
+        // Checked structurally rather than through a live drain, because the
+        // drain needs the process-global installed arch these tests do not
+        // own — the flag and the deadline are the two things the paths must
+        // observe, and both are visible here.
+        CPUFREQ_WAITQ.deregister(4242);
+        assert!(!has_pending_deferred_wake() || CPUFREQ_WAITQ.wake_is_pending());
+        cpufreq_wake();
+        assert!(
+            has_pending_deferred_wake(),
+            "the preemption gate must see a flagged frequency wake, or a lone-task \
+             CPU never reschedules to reach the drain"
+        );
+        assert!(
+            CPUFREQ_WAITQ.take_wake_pending(),
+            "the flag must be the one the drain consumes"
+        );
+
+        CPUFREQ_WAITQ.register(4242, 9_000);
+        assert_eq!(
+            nearest_timed_deadline().map(|d| d.min(9_000)),
+            Some(9_000),
+            "a review deadline must be counted when the one-shot is armed"
+        );
+
+        // …and the sweep the fired one-shot runs must actually release it,
+        // or the mechanism re-parks and the rate never steps down.
+        let arch = MockArch::new();
+        *arch.now.borrow_mut() = 9_001;
+        run_timed_sweep(&arch);
+        assert!(
+            arch.unparked.borrow().contains(&4242),
+            "the timed sweep must visit the frequency queue"
+        );
+        CPUFREQ_WAITQ.deregister(4242);
     }
 
     #[test]

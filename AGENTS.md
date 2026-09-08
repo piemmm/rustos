@@ -553,6 +553,7 @@ tairix/
 │
 ├── drivers/             # Loadable modules. One folder per device class.
 │   ├── accelerator/     # Offload engines: virtio_crypto.
+│   ├── cpufreq/         # CPU frequency mechanisms: rpi (VideoCore ARM clock).
 │   ├── display/
 │   │   ├── vesa/
 │   │   ├── framebuffer/
@@ -1513,6 +1514,7 @@ You are not exempt from any rule above. In addition:
     | Pre-boot Supervisor console (ESC-at-boot REPL, pre-mount diagnostics/control, the `lib/supervisor` engine, the `lib/vt` lone-ESC resolution) | `plans/NEW-SUPERVISOR.md` |
     | Architecture ports / Arch HAL parity | `plans/WIRING.md`; `plans/ARCHSUPPORT.md` (x86_64 product parity: image, storage floor, unlock/login, autoload, verticals) |
     | CPU feature detection + self-optimising routine selection: build-time target-cpu/feature floor, the `cpufeatures` Arch-HAL slice, the `lib/cpuops` ops-table dispatch/benchmark framework | `plans/FIX-HARDWARE-FEATURES.md` |
+    | CPU frequency scaling: the in-kernel governor and its idle-bracket utilisation, the launch boost, the `cpufreq_bind`/`cpufreq_wait` mechanism seam, the boot-time clock floor, and the live-clock estimator's idle exclusion | `plans/CPUFREQ.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |

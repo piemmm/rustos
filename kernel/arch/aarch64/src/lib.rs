@@ -147,6 +147,9 @@ pub mod fault;
 /// (PSCI method, generic-timer PPI, `/memory`) layered on the shared
 /// [`tairix_fdt`] parser.
 pub mod fdt;
+/// The pre-MMU `VideoCore` firmware channel: the shared mailbox transport
+/// and the boot-time requests made over it.
+pub mod firmware;
 pub mod gic;
 /// Heterogeneous (`big.LITTLE`) core classification: the pure
 /// `capacity-dmips-mhz` → [`tairix_arch_api::CoreClass`] classifier

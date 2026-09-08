@@ -1056,3 +1056,162 @@ fn bind_keys_do_not_match_an_unrelated_node() {
     let other = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&other));
 }
+
+// --- Clock rates ----------------------------------------------------------
+
+#[test]
+fn clock_rate_query_lays_out_each_get_tag() {
+    for (query, tag) in [
+        (ClockRateQuery::Current, TAG_GET_CLOCK_RATE),
+        (ClockRateQuery::Min, TAG_GET_MIN_CLOCK_RATE),
+        (ClockRateQuery::Max, TAG_GET_MAX_CLOCK_RATE),
+    ] {
+        let words = encode_clock_rate_query(FirmwareClock::Arm, query);
+        // 8 used words: 2 header + a 5-word get tag ([tag, value-len,
+        // request, selector, rate slot]) + 1 end marker.
+        assert_eq!(words[0], 8 * 4, "{query:?} message byte length");
+        assert_eq!(words[1], CODE_REQUEST);
+        assert_eq!(
+            words[2..7],
+            [tag, 8, 0, FirmwareClock::Arm.as_u32(), 0],
+            "{query:?}"
+        );
+        assert_eq!(words[7], 0, "{query:?} end tag");
+    }
+}
+
+#[test]
+fn clock_rate_write_lays_out_the_set_tag() {
+    let words = encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000);
+    assert_eq!(words[0], 8 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(
+        words[2..7],
+        [
+            TAG_SET_CLOCK_RATE,
+            8,
+            0,
+            FirmwareClock::Arm.as_u32(),
+            1_500_000_000
+        ]
+    );
+    assert_eq!(words[7], 0, "end tag");
+}
+
+#[test]
+fn clock_rates_round_trip_through_a_healthy_firmware() {
+    let mut firmware = MockFirmware::healthy();
+    for (query, expected) in [
+        (ClockRateQuery::Current, firmware.arm_clock_hz),
+        (ClockRateQuery::Min, firmware.arm_clock_min_hz),
+        (ClockRateQuery::Max, firmware.arm_clock_max_hz),
+    ] {
+        assert_eq!(
+            query_clock_rate(&mut firmware, FirmwareClock::Arm, query),
+            Ok(expected),
+            "{query:?}"
+        );
+    }
+
+    // A write sticks and is reported back, so a consumer's set-then-read is
+    // faithful rather than a mock that always answers its constructor value.
+    assert_eq!(
+        set_clock_rate(&mut firmware, FirmwareClock::Arm, 1_500_000_000),
+        Ok(1_500_000_000)
+    );
+    assert_eq!(
+        query_clock_rate(&mut firmware, FirmwareClock::Arm, ClockRateQuery::Current),
+        Ok(1_500_000_000)
+    );
+}
+
+#[test]
+fn clock_rate_write_reports_what_the_firmware_actually_applied() {
+    // The firmware clamps to the clock's range and rounds to a rate the PLL
+    // can synthesise, so a consumer that assumed it got what it asked for
+    // would report a frequency the core is not running at.
+    let mut firmware = MockFirmware::healthy();
+    assert_eq!(
+        set_clock_rate(&mut firmware, FirmwareClock::Arm, u32::MAX),
+        Ok(firmware.arm_clock_max_hz),
+        "above the range clamps to max"
+    );
+    assert_eq!(
+        set_clock_rate(&mut firmware, FirmwareClock::Arm, 1),
+        Ok(firmware.arm_clock_min_hz),
+        "below the range clamps to min"
+    );
+    // 1_000_111_000 is not a multiple of the modelled 2 MHz grain.
+    assert_eq!(
+        set_clock_rate(&mut firmware, FirmwareClock::Arm, 1_000_111_000),
+        Ok(1_000_000_000),
+        "an unsynthesisable rate rounds down"
+    );
+}
+
+#[test]
+fn clock_rate_read_rejects_a_response_about_a_different_clock() {
+    // The wedge: a firmware answering about a peripheral clock would
+    // otherwise have that rate read as the core's.
+    let mut words = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Current);
+    MockFirmware::healthy().respond(&mut words);
+    assert!(
+        decode_clock_rate_response(FirmwareClock::Arm, ClockRateQuery::Current, &words).is_ok()
+    );
+    words[5] = FirmwareClock::Arm.as_u32() + 1;
+    assert_eq!(
+        decode_clock_rate_response(FirmwareClock::Arm, ClockRateQuery::Current, &words),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn clock_rate_read_fails_closed_on_a_bad_header_or_unhonoured_tag() {
+    let mut err = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max);
+    err[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_clock_rate_response(FirmwareClock::Arm, ClockRateQuery::Max, &err),
+        Err(MailboxError::FirmwareError)
+    );
+
+    let mut unknown = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max);
+    unknown[1] = 0x1234_5678;
+    assert_eq!(
+        decode_clock_rate_response(FirmwareClock::Arm, ClockRateQuery::Max, &unknown),
+        Err(MailboxError::MalformedResponse)
+    );
+
+    // A firmware that stamps the OK header but never processes the tag: the
+    // request's own zero slot would otherwise read as a 0 Hz ceiling.
+    let mut unhonoured = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max);
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_clock_rate_response(FirmwareClock::Arm, ClockRateQuery::Max, &unhonoured),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn clock_rate_write_requires_the_applied_rate() {
+    // Unlike an RTC register write, a set-clock answer that reports nothing
+    // leaves the applied rate unknowable; echoing back the request would be
+    // a fabrication.
+    let mut words = encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000);
+    words[1] = CODE_RESPONSE_OK;
+    words[4] = TAG_RESPONSE_BIT;
+    assert_eq!(
+        decode_clock_rate_write_response(FirmwareClock::Arm, &words),
+        Err(MailboxError::MalformedResponse)
+    );
+}
+
+#[test]
+fn an_unmodelled_clock_reads_as_zero_rather_than_another_clocks_rate() {
+    // The firmware spells "no such clock" as a zero rate; the framing layer
+    // reports it as given and leaves the judgement to the driver.
+    let mut firmware = MockFirmware::healthy();
+    let mut words = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Current);
+    words[5] = FirmwareClock::Arm.as_u32() + 7;
+    firmware.exchange(&mut words).expect("mock never fails");
+    assert_eq!(words[6], 0, "an unknown selector is answered zero");
+}

@@ -145,6 +145,8 @@ extern "C" {
 #define TAIRIX_SYS_LATENCY_WATCH 119u
 #define TAIRIX_SYS_FS_LOCK 120u
 #define TAIRIX_SYS_FS_LOCK_QUERY 121u
+#define TAIRIX_SYS_CPUFREQ_BIND 122u
+#define TAIRIX_SYS_CPUFREQ_WAIT 123u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -357,6 +359,31 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_LATENCY_MIN_BUDGET_NS 1000000ull
 #define TAIRIX_LATENCY_BUDGET_DISARM 0ull
 
+/* cpufreq_bind() — take the machine's CPU frequency mechanism role, declaring
+* the operating range this driver can deliver. Requires TAIRIX_CAP_CPUFREQ, and
+* is refused with TAIRIX_E_ALREADY_EXISTS when a mechanism is already bound: the
+* machine has one clock policy. The kernel re-validates the range and refuses one
+* no governor could pick from. The binding is released when the holding process
+* ends, so a replacement needs no explicit unbind. */
+#define TAIRIX_CPU_FREQ_LIMITS_LEN 24u
+typedef struct tairix_cpu_freq_limits {
+	uint64_t min_hz;
+	uint64_t max_hz;
+	uint64_t step_hz;  /* granularity the governor quantises a target to */
+} tairix_cpu_freq_limits_t;
+/* cpufreq_wait() — block until the governor's target differs from `last_seq`,
+* then read it back. Pass 0 on the first call to be answered at once. There is no
+* timeout: the kernel wakes the waiter both on a demand change and at the point
+* its own decay would next move the rate. Wait on `seq` rather than on the rate:
+* a mechanism does not get to apply exactly what it was asked for (firmware
+* clamps and rounds), so "block until the target equals what I applied" would
+* spin forever. */
+#define TAIRIX_CPU_FREQ_TARGET_LEN 16u
+typedef struct tairix_cpu_freq_target {
+	uint64_t seq;        /* advances on every real change of target_hz */
+	uint64_t target_hz;
+} tairix_cpu_freq_target_t;
+
 /* Syscall entry points, implemented by the user-space stub library. */
 void tairix_sys_yield(void);
 void tairix_sys_exit(int32_t a0);
@@ -480,6 +507,8 @@ uint64_t tairix_sys_port_write(uint64_t a0, uintptr_t a1, uint32_t a2, uintptr_t
 uint64_t tairix_sys_latency_watch(uint64_t a0);
 int32_t tairix_sys_fs_lock(uint32_t a0, uint32_t a1, uint32_t a2, uint64_t a3, uint64_t a4, uint64_t a5);
 uint64_t tairix_sys_fs_lock_query(uint32_t a0, uint32_t a1, uint64_t a2, uint64_t a3, void * a4, uintptr_t a5);
+uint64_t tairix_sys_cpufreq_bind(void * a0);
+int32_t tairix_sys_cpufreq_wait(uint64_t a0, uint64_t a1, void * a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

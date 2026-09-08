@@ -48,43 +48,9 @@ use tairix_fbcon::Geometry;
 /// Re-exported for the same reason: the boot consumer names the surface
 /// disposition it hands this port without naming `tairix_fbcon` directly.
 pub use tairix_fbcon::Surface;
-use tairix_fdt::Fdt;
 use tairix_vcmailbox::{
     discover_framebuffer, query_display_size, FramebufferRequest, MailboxTransport,
 };
-
-/// Compatible string of the BCM283x/BCM2711 firmware mailbox doorbell.
-const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
-
-/// A firmware mailbox doorbell located in a flattened device tree.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct DiscoveredMailbox {
-    /// CPU-physical MMIO base of the doorbell register block (the
-    /// node's first `reg` entry, decoded with its parent bus's cell
-    /// counts and translated through the ancestor buses' `ranges`).
-    pub base: u64,
-    /// Length in bytes of the register window.
-    pub len: u64,
-}
-
-/// Find the `VideoCore` firmware mailbox doorbell in `fdt`.
-///
-/// The walk early-returns at the matched node
-/// ([`tairix_fdt::scan_translated`]), so it stays safe with the MMU
-/// off. Returns `None` when the tree carries no mailbox (e.g. QEMU
-/// `virt`) or the node's `reg` cannot be decoded/translated — the
-/// caller then leaves the video console unconfigured (fail closed).
-#[must_use]
-pub fn find_mailbox(fdt: &Fdt<'_>) -> Option<DiscoveredMailbox> {
-    tairix_fdt::scan_translated(fdt, |node, levels, depth| {
-        let compatible = node.property("compatible")?;
-        if !compatible.iter_strings().any(|s| s == MAILBOX_COMPATIBLE) {
-            return None;
-        }
-        let (base, len) = tairix_fdt::translated_reg(node, depth, levels, 0)?;
-        Some(DiscoveredMailbox { base, len })
-    })
-}
 
 // --- Text geometry ---------------------------------------------------------
 //
@@ -305,25 +271,17 @@ pub fn purge() {}
 mod metal {
     use core::arch::asm;
     use core::cell::UnsafeCell;
-    use core::ptr::NonNull;
     use core::sync::atomic::Ordering;
 
-    use tairix_abi::RegisterWindow;
     use tairix_fbcon::{Cell, Surface, TextConsole};
     use tairix_fdt::Fdt;
     use tairix_fwcfg::{FwCfg, MmioDma, RamfbConfig, DRM_FORMAT_XRGB8888};
     use tairix_sync::IrqSafeSpinLock;
-    use tairix_vcmailbox::{
-        arm_physical_to_bus, MmioMailbox, DEFAULT_BUS_ALIAS, DEFAULT_POLL_BUDGET,
-        MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
-    };
 
+    use crate::firmware::{find_mailbox, with_transport, DiscoveredMailbox};
     use crate::irqmask::PortIrqControl;
 
-    use super::{
-        bring_up, find_mailbox, ramfb_geometry, DiscoveredMailbox, DiscoveredVideo, Geometry,
-        VIDEO_ACTIVE,
-    };
+    use super::{bring_up, ramfb_geometry, DiscoveredVideo, Geometry, VIDEO_ACTIVE};
 
     /// The discovered surface and, once attached post-MMU, the renderer.
     ///
@@ -377,19 +335,6 @@ mod metal {
     /// live inside a lock; the discipline on [`VideoSlot`] covers that window.
     static RENDER_LOCK: IrqSafeSpinLock<(), PortIrqControl> = IrqSafeSpinLock::new(());
 
-    /// The DMA-visible mailbox property message, 16-byte aligned as the
-    /// doorbell protocol requires.
-    #[repr(align(16))]
-    struct PropertyBuffer(UnsafeCell<[u8; PROPERTY_LEN_BYTES]>);
-
-    // SAFETY: written only by the single-threaded boot CPU inside
-    // `configure_from_fdt` (before SMP bring-up and before any other
-    // user exists); never touched again.
-    unsafe impl Sync for PropertyBuffer {}
-
-    static PROPERTY_BUFFER: PropertyBuffer =
-        PropertyBuffer(UnsafeCell::new([0; PROPERTY_LEN_BYTES]));
-
     /// Discover the board's display path in `fdt` and bring the
     /// framebuffer console up: the `VideoCore` firmware mailbox where
     /// the tree carries one (the Pi), else the QEMU `virt` `fw_cfg` /
@@ -415,29 +360,13 @@ mod metal {
     /// Bring the Pi's mailbox-allocated framebuffer console up: probe
     /// the attached display over the firmware property channel and
     /// publish the firmware-allocated surface.
+    ///
+    /// The doorbell window and the DMA-visible property buffer belong to
+    /// `crate::firmware`, which every early consumer of the firmware shares,
+    /// so the surface probe and the boot-time clock raise cannot build the
+    /// transport two different ways.
     fn configure_mailbox(mailbox: DiscoveredMailbox) -> Option<DiscoveredVideo> {
-        if mailbox.len < MAILBOX_REGS_LEN_BYTES as u64 {
-            return None;
-        }
-        // SAFETY: single-threaded boot CPU, pre-publication (see
-        // `PropertyBuffer`): no other reference to the buffer exists.
-        let buffer_ptr = unsafe { NonNull::new_unchecked(PROPERTY_BUFFER.0.get().cast::<u8>()) };
-        let buffer_phys = buffer_ptr.as_ptr() as u64;
-        let buffer_bus = arm_physical_to_bus(buffer_phys, DEFAULT_BUS_ALIAS).ok()?;
-        let doorbell_ptr = NonNull::new(usize::try_from(mailbox.base).ok()? as *mut u8)?;
-        // SAFETY: `mailbox.base` is the FDT-discovered, `ranges`-translated
-        // CPU-physical doorbell window (boot runs identity-addressed), at
-        // least `MAILBOX_REGS_LEN_BYTES` long (checked above); the buffer
-        // pointer covers exactly `PROPERTY_LEN_BYTES` of the static above.
-        // Both windows are accessed only through `RegisterWindow`'s checked
-        // 32-bit accessors, and neither outlives this call.
-        let regs = unsafe {
-            RegisterWindow::from_mapping(mailbox.base, doorbell_ptr, MAILBOX_REGS_LEN_BYTES)
-        };
-        let buffer =
-            unsafe { RegisterWindow::from_mapping(buffer_phys, buffer_ptr, PROPERTY_LEN_BYTES) };
-        let mut transport = MmioMailbox::new(regs, buffer, buffer_bus, DEFAULT_POLL_BUDGET).ok()?;
-        let configured = bring_up(&mut transport)?;
+        let configured = with_transport(mailbox, bring_up).flatten()?;
 
         let fb_base = usize::try_from(configured.phys_base).ok()?;
         // The firmware allocated `[fb_base, fb_base + len_bytes)`
@@ -918,8 +847,6 @@ mod metal {
 
 #[cfg(test)]
 mod tests {
-    use tairix_fdt::fixture::raspi_like_arm;
-    use tairix_fdt::Fdt;
     use tairix_vcmailbox::mock::MockFirmware;
 
     use super::*;
@@ -955,36 +882,6 @@ mod tests {
         // treating a zero-length extent as trivially fine.
         assert_eq!(surface_page_range(0x1000, 0), None);
         assert_eq!(surface_page_range(0x1000, usize::MAX), None);
-    }
-
-    // --- Mailbox discovery -------------------------------------------
-
-    #[test]
-    fn finds_the_mailbox_in_a_raspi_tree() {
-        // The fixture mirrors the real Pi 4 tree: the mailbox sits under
-        // `/soc` at bus address `0x7E00_B880`, remapped by `ranges` to
-        // CPU-physical `0xFE00_B880`.
-        let blob = raspi_like_arm(0x7e20_1000, 0x7e21_5040);
-        let fdt = Fdt::new(&blob).expect("valid fdt");
-        let mailbox = find_mailbox(&fdt).expect("mailbox present");
-        assert_eq!(mailbox.base, 0xfe00_b880);
-        assert_eq!(mailbox.len, 0x40);
-    }
-
-    #[test]
-    fn no_mailbox_in_a_mailboxless_tree_is_none() {
-        // A virt-like tree (no `brcm,bcm2835-mbox` node) yields no
-        // mailbox, so the video console stays unconfigured and the UART
-        // keeps the console.
-        let mut builder = tairix_fdt::fixture::DtbBuilder::new();
-        builder.begin_node("");
-        builder.begin_node("pl011@9000000");
-        builder.prop_str("compatible", "arm,pl011");
-        builder.end_node();
-        builder.end_node();
-        let blob = builder.build();
-        let fdt = Fdt::new(&blob).expect("valid fdt");
-        assert!(find_mailbox(&fdt).is_none());
     }
 
     // --- Firmware bring-up -------------------------------------------

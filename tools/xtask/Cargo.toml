@@ -211,6 +211,7 @@ tairix-drv-rtc-mc146818 = { path = "../../drivers/rtc/mc146818", version = "=0.0
 # The Raspberry Pi PMIC clock-chip driver's bind table, for the flashable Pi
 # image.
 tairix-drv-rtc-rpi = { path = "../../drivers/rtc/rpi", version = "=0.0.0" }
+tairix-drv-cpufreq-rpi = { path = "../../drivers/cpufreq/rpi", version = "=0.0.0" }
 # The Broadcom Serial Controller bus driver's bind table, for the flashable Pi
 # image: it serves the transfer endpoint each I2C clock chip below is reached
 # through.

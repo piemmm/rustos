@@ -1125,6 +1125,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-cpufreq-rpi"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-rt",
+ "tairix-vcmailbox",
+]
+
+[[package]]
 name = "tairix-drv-display-framebuffer"
 version = "0.0.0"
 dependencies = [
@@ -5917,6 +5928,7 @@ dependencies = [
  "tairix-drv-bus-pcie-brcm",
  "tairix-drv-bus-usb",
  "tairix-drv-bus-usb-vl805",
+ "tairix-drv-cpufreq-rpi",
  "tairix-drv-display-framebuffer",
  "tairix-drv-input-usb-kbd",
  "tairix-drv-input-usb-mouse",

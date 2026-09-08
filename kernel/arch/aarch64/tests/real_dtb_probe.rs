@@ -18,7 +18,7 @@
 //! firmware patches the real RAM ranges in at boot — so the memory walk
 //! is asserted for *shape* (`Some`), not for a size.
 
-use tairix_arch_aarch64::{console, uart_init, video};
+use tairix_arch_aarch64::{console, firmware, uart_init};
 use tairix_fdt::Fdt;
 
 #[test]
@@ -46,7 +46,7 @@ fn real_pi4_dtb_discovery() {
     let gpio = uart_init::find_gpio(&fdt).expect("BCM2711 GPIO controller discovered");
     assert_eq!(gpio.base, 0xfe20_0000);
 
-    let mailbox = video::find_mailbox(&fdt).expect("VideoCore mailbox discovered");
+    let mailbox = firmware::find_mailbox(&fdt).expect("VideoCore mailbox discovered");
     assert_eq!(mailbox.base, 0xfe00_b880);
 
     assert!(

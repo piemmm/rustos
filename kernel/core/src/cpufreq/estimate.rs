@@ -1,4 +1,5 @@
-//! Per-CPU live-core-frequency estimator.
+//! Per-CPU live-core-frequency estimator — the measurement half of
+//! [`crate::cpufreq`].
 //!
 //! The System Information API reports the *live* clock frequency of every
 //! CPU — the "cpu MHz" a `/proc/cpuinfo`-style reader expects — and it must
@@ -19,9 +20,27 @@
 //! reads the calling CPU's core and reference counters, divides the deltas
 //! since the previous tick, and publishes the result. An idle CPU that takes
 //! no ticks simply keeps its last published value (a reader sees the last
-//! measured clock, exactly as Linux's `aperfmperf` sampler does); a port with
-//! no core-clock counter publishes nothing and readers fall back to the
-//! discovered nominal frequency (fail closed — never a fabricated rate).
+//! measured clock); a port with no core-clock counter publishes nothing and
+//! readers fall back to the discovered nominal frequency (fail closed — never
+//! a fabricated rate).
+//!
+//! # Why the idle span is excluded
+//!
+//! The ratio is only a *frequency* if both counters stop together when the
+//! core does. Intel's `APERF`/`MPERF` pair does, and x86_64 is therefore
+//! correct either way — but the aarch64 pair (`PMCCNTR_EL0` over
+//! `CNTVCT_EL0`) and the riscv64 pair (the `cycle` CSR over the `time` CSR)
+//! do not: the core-clock counter is gated while the PE sits in `wfi` while
+//! the reference keeps running. A window containing idle would therefore
+//! report `frequency × duty_cycle` — a core running flat out at 1.5 GHz for
+//! 40% of the window reads as 600 MHz, which is a different quantity wearing
+//! the same units.
+//!
+//! [`rebase`] closes that by moving the baseline to the instant the core
+//! resumed running, so the next window spans running time only. A core that
+//! idles repeatedly moves it repeatedly, and the published figure stays a
+//! frequency however the core's duty cycle varies. Utilisation is a separate
+//! question with a separate answer ([`super::governor`]).
 //!
 //! The sampled counters live in interrupt-context-safe per-CPU atomics
 //! (the kernel's per-CPU `CpuState`); each CPU only ever writes its own slot,
@@ -85,6 +104,16 @@ pub fn is_supported() -> bool {
     REFERENCE_HZ.load(Ordering::Relaxed) != 0
 }
 
+/// Shortest window, in reference ticks, an estimate is published from.
+///
+/// The quotient carries the reference counter's own ±1-tick quantisation, so
+/// a window of `n` ticks is accurate to about `1/n`. A thousand ticks holds
+/// that near a tenth of a percent — well under the step any real clock moves
+/// in — while staying far below the span between two preemption ticks on
+/// every Tier-1 reference rate. A record bound on measurement quality, not a
+/// capacity: a shorter window publishes nothing rather than a noisy figure.
+const MIN_SAMPLE_REFERENCE_TICKS: u64 = 1024;
+
 /// Take one frequency sample for the calling CPU, `cpu`.
 ///
 /// Called from [`crate::preempt::note_preempt_tick`] on every fired one-shot
@@ -134,9 +163,43 @@ pub fn sample(cpu: CpuId) {
     // yields the true elapsed delta for any 64-bit counter.
     let delta_core = core.wrapping_sub(last_core);
     let delta_reference = reference.wrapping_sub(last_reference);
+    // A window too short to divide accurately keeps the previous figure: the
+    // baseline above has already moved, so the next tick measures from here.
+    if delta_reference < MIN_SAMPLE_REFERENCE_TICKS {
+        return;
+    }
     if let Some(hz) = frequency_hz(delta_core, delta_reference, reference_hz) {
         state.freq_hz.store(hz, Ordering::Relaxed);
     }
+}
+
+/// Move `cpu`'s sampling baseline to now, so the next [`sample`] measures
+/// only the span from here.
+///
+/// Called as a CPU leaves its idle park, on that CPU. The core-clock counter
+/// is gated while the PE idles on most ports, so a window straddling that
+/// park would divide running cycles by running-plus-idle reference ticks and
+/// report a duty cycle dressed as a frequency. Re-seeding here means every
+/// published figure spans running time only.
+///
+/// The baseline is taken from the live counters rather than cleared, so the
+/// very next tick still yields an estimate — one measured from the instant
+/// the core resumed. Two register reads and two relaxed stores, and nothing
+/// at all on a port with no core-clock source.
+pub(super) fn rebase(cpu: CpuId) {
+    if REFERENCE_HZ.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Ok(Some(clock)) = CORE_CLOCK.get() else {
+        return;
+    };
+    let Some(state) = cpu_state::get(cpu) else {
+        return;
+    };
+    let core = clock.core_cycles();
+    let reference = clock.reference_cycles();
+    state.freq_last_core.store(core, Ordering::Relaxed);
+    state.freq_last_ref.store(reference, Ordering::Relaxed);
 }
 
 /// The most recently measured live core frequency of `cpu`, in Hz.

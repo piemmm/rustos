@@ -2435,6 +2435,35 @@ impl SyscallNumber {
     /// [`Self::FS_LOCK`] can acquire it.
     pub const FS_LOCK_QUERY: Self = Self(121);
 
+    /// Take the machine's CPU frequency mechanism role, declaring the
+    /// operating range this driver can deliver.
+    ///
+    /// The single argument is a [`crate::cpufreq::CpuFreqLimits`] `UserPtr`.
+    /// Returns an opaque handle naming the binding, or `-errno`:
+    /// [`Errno::PermissionDenied`] without `CAP_CPUFREQ`,
+    /// [`Errno::OutOfRange`] for a range no governor could pick from, and
+    /// [`Errno::AlreadyExists`] when a live mechanism is already bound — the
+    /// machine has one clock policy, and two drivers fighting over it would
+    /// be worse than none. The binding is released when the holding task
+    /// exits, so a replaced driver needs no explicit unbind.
+    pub const CPUFREQ_BIND: Self = Self(122);
+
+    /// Block until the governor's performance target moves, then report it.
+    ///
+    /// Arguments are `(handle: Handle, last_seq: u64, out: UserPtr)`; `out`
+    /// receives a [`crate::cpufreq::CpuFreqTarget`]. The call returns as soon
+    /// as the published sequence differs from `last_seq`, so a driver that
+    /// passes `0` on its first call is answered at once and one that was busy
+    /// applying a rate observes only the newest target.
+    ///
+    /// Returns `Ok(0)` with `out` written, or `-errno`:
+    /// [`Errno::NotFound`] when the handle is not this task's live binding,
+    /// and [`Errno::Interrupted`] when a signal unwound the wait. There is no
+    /// timeout: the kernel wakes the waiter both on a demand change and at the
+    /// point its own decay would next move the target, so the wait is bounded
+    /// without the caller pacing it.
+    pub const CPUFREQ_WAIT: Self = Self(123);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

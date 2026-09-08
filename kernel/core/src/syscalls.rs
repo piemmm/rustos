@@ -73,11 +73,13 @@
 //! `cap_revoke`, and `clock_get` all consult the caller's already-
 //! validated [`CallerContext`] — there is no `uid == 0` shortcut.
 
+use crate::cpufreq::TargetWaiter;
 #[cfg(feature = "watchdog-diagnostics")]
 use crate::latency::Overrun;
 use crate::sched::{
     level_of_priority, priority_of_level, CpuId, SchedClass, Scheduler, SchedulerArch,
 };
+use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::seat::ReleaseSurface;
@@ -116,7 +118,7 @@ use tairix_kernel_mem::{
     copy_in, copy_out, AllocError, FrameAllocator, Page, PageCandidate, PhysMap,
     RamzipFaultOutcome, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
-use tairix_kernel_sched_api::Priority;
+use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
     CapTable, GroupId, ProcName, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId,
 };
@@ -3003,6 +3005,10 @@ where
     /// `yes` must fail `BrokenPipe` when `head` is done).
     pub(crate) fn reclaim_process_resources(&self, process: ProcessId) {
         let _ = self.irq.release_for(process);
+        // Release the CPU frequency mechanism role if this process held it,
+        // so a driver that dies leaves the machine's clock policy free for a
+        // replacement rather than bound to a process that no longer exists.
+        let _ = crate::cpufreq::release_process(process);
         // Tear down every synchronous call endpoint this process served
         // before dropping its capability record: a user-space service
         // that dies (cleanly, by fault, or killed) must not leave callers
@@ -5772,6 +5778,16 @@ where
             return Err(Errno::PermissionDenied);
         }
 
+        // A program launch is latency-sensitive from here on, and much of
+        // what follows waits on the volume the bundle is read from — during
+        // which every CPU can be idle and the frequency governor would see no
+        // demand at all. Tell it now, so the load, the signature check, and
+        // the new program's first moments all run at full speed. It is stamped
+        // after the coarse authority check so a refused caller cannot raise
+        // the machine's clock by asking.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        crate::cpufreq::note_launch(self.arch.monotonic_ns(cpu));
+
         // The dispatcher already checked that `path` is non-null
         // (`UserPtr`). Bound the staged path so a hostile
         // `path_len` cannot force an arbitrarily large kernel allocation; an over-long or empty path cannot name a
@@ -7853,6 +7869,51 @@ where
         crate::waitq::USERS_DB_WAITQ.deregister(task);
         self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
         result
+    }
+
+    fn cpufreq_bind(&self, caller: &CallerContext<'_>, limits: u64) -> SyscallResult {
+        // The dispatcher already checked `CAP_CPUFREQ` and that `limits` is
+        // non-null. Read the declared range through the validated
+        // `copy_from_user` boundary and re-validate it here: a range the
+        // governor could not pick from — a stopped clock, an inverted pair, a
+        // step wider than the range — is refused rather than divided by.
+        let mut bytes = [0u8; CpuFreqLimits::WIRE_LEN];
+        self.copy_in_user(caller, limits, &mut bytes)?;
+        let declared = CpuFreqLimits::from_bytes(&bytes)?;
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        let handle = crate::cpufreq::bind(caller.process(), declared, self.arch.monotonic_ns(cpu))?;
+        Ok(handle)
+    }
+
+    fn cpufreq_wait(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        last_seq: u64,
+        out: u64,
+    ) -> SyscallResult {
+        // The dispatcher already checked `CAP_CPUFREQ` and that `out` is
+        // non-null. Register on the queue *before* the first evaluation, so a
+        // demand rise that lands between the evaluation and the park is not
+        // lost — the deadline each park wants is re-registered inside the
+        // park itself, which keeps this task's FIFO position.
+        let task = caller.task_id.0;
+        crate::waitq::CPUFREQ_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+        let waiter = SyscallTargetWaiter {
+            arch: self.arch,
+            task,
+        };
+        let result = crate::cpufreq::wait(caller.process(), handle, last_seq, &waiter);
+        // Leave the wait set and re-point the one-shot at the nearest
+        // deadline any remaining waiter on *any* timed wait-queue needs, so a
+        // finished wait leaves no stale arming behind.
+        crate::waitq::CPUFREQ_WAITQ.deregister(task);
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
+        // The target is copied out only once the wait produced one, so a
+        // refused or interrupted wait writes nothing to the caller's buffer.
+        let target = result?;
+        self.copy_out_user(caller, out, &target.to_le_bytes())?;
+        Ok(0)
     }
 
     fn ipc_call(
@@ -12084,6 +12145,49 @@ where
             return Err(IrqWaitAbort::Interrupted);
         }
         Ok(())
+    }
+}
+
+/// [`TargetWaiter`] adapter wiring the `cpufreq_wait` handler's architecture
+/// borrow into the governor's publish-and-park loop.
+///
+/// Holds only borrows; constructed fresh per call. The CPU is read live on
+/// each clock read and park (never captured), so a mechanism task work-stolen
+/// to another core across a park is always suspended on the core it is
+/// running on now.
+struct SyscallTargetWaiter<'a, A>
+where
+    A: KernelArch + 'static,
+{
+    arch: &'a A,
+    task: SchedTaskId,
+}
+
+impl<A> TargetWaiter for SyscallTargetWaiter<'_, A>
+where
+    A: KernelArch + 'static,
+{
+    fn now_ns(&self) -> u64 {
+        self.arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+    }
+
+    fn park(&self, deadline_ns: u64) {
+        // Re-register to carry the deadline the governor just computed: one
+        // response window ahead while the rate is above the minimum, and none
+        // once it has settled there, so a quiet machine takes no wakeup at
+        // all. Re-registering keeps this task's FIFO position rather than
+        // growing the queue.
+        crate::waitq::CPUFREQ_WAITQ.register(self.task, deadline_ns);
+        // Arm the timed-wake one-shot to the nearest pending deadline across
+        // every timed wait-queue, so this deadline fires even on an otherwise
+        // idle CPU without dropping another queue's earlier wake.
+        self.arch.set_wakeup(crate::waitq::nearest_timed_deadline());
+        park_current_task(self.arch);
+    }
+
+    fn kill_pending(&self) -> bool {
+        crate::procsignal::kill_pending(self.task)
     }
 }
 
@@ -30291,6 +30395,117 @@ mod tests {
         .with_hw_tree(source);
         // Last observed generation 4 != current 5: wake immediately.
         assert_eq!(h.hw_tree_wait(&ctx, 4, u64::MAX), Ok(0));
+    }
+
+    /// A caller holding `CAP_CPUFREQ`, as the autoloaded frequency driver
+    /// does.
+    fn cpufreq_caller(sink: &'static TestSink) -> TaskCapabilities {
+        make_caps_record(2, &[CapabilityId::CPUFREQ], sink)
+    }
+
+    #[test]
+    fn cpufreq_bind_with_an_unreadable_range_binds_nothing() {
+        // The range comes from user memory, so the handler reads it through the
+        // checked copy boundary. A caller with no registered address space
+        // cannot be read from — and must leave the machine with no mechanism
+        // rather than a range the kernel invented.
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = cpufreq_caller(sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        crate::cpufreq::with_mechanism_lock(|| {
+            assert_eq!(h.cpufreq_bind(&ctx, 0x1000), Err(Errno::BadAddress));
+            // Nothing was bound, so a wait finds no binding to observe.
+            let mut target = [0u8; 16];
+            assert_eq!(
+                h.cpufreq_wait(&ctx, 1, 0, target.as_mut_ptr() as u64),
+                Err(Errno::NotFound)
+            );
+        });
+    }
+
+    #[test]
+    fn cpufreq_wait_on_an_unbound_machine_fails_closed() {
+        // No mechanism has taken the role, so there is no target to report and
+        // none is fabricated — and the caller's buffer is left untouched.
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = cpufreq_caller(sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let mut target = [0xAAu8; 16];
+        crate::cpufreq::with_mechanism_lock(|| {
+            assert_eq!(
+                h.cpufreq_wait(&ctx, 7, 0, target.as_mut_ptr() as u64),
+                Err(Errno::NotFound)
+            );
+        });
+        assert_eq!(target, [0xAAu8; 16], "a refused wait writes nothing");
+    }
+
+    #[test]
+    fn reclaiming_a_process_releases_the_frequency_mechanism_role() {
+        // A driver that dies must not hold the machine's clock policy: the
+        // shared task-reclaim path frees the role so a replacement can bind.
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let limits =
+            CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range");
+        let driver = ProcessId(0x0C_B0);
+        crate::cpufreq::with_mechanism_lock(|| {
+            let _ = crate::cpufreq::release_process(driver);
+            assert!(crate::cpufreq::bind(driver, limits, 1_000).is_ok());
+            assert_eq!(
+                crate::cpufreq::bind(ProcessId(0x0C_B1), limits, 1_000),
+                Err(Errno::AlreadyExists),
+                "the role is taken while the driver lives"
+            );
+            h.reclaim_process_resources(driver);
+            let replacement = ProcessId(0x0C_B2);
+            assert!(
+                crate::cpufreq::bind(replacement, limits, 2_000).is_ok(),
+                "the reclaim must have freed the role"
+            );
+            assert!(crate::cpufreq::release_process(replacement));
+        });
     }
 
     /// `hw_tree_wait` with a zero timeout and an unchanged generation

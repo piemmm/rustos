@@ -109,6 +109,12 @@ const NUM_FS_LOCK: u64 = SyscallNumber::FS_LOCK.as_u16() as u64;
 /// `fs_lock_query` syscall number (as above).
 const NUM_FS_LOCK_QUERY: u64 = SyscallNumber::FS_LOCK_QUERY.as_u16() as u64;
 
+/// `cpufreq_bind` syscall number (as above).
+const NUM_CPUFREQ_BIND: u64 = SyscallNumber::CPUFREQ_BIND.as_u16() as u64;
+
+/// `cpufreq_wait` syscall number (as above).
+const NUM_CPUFREQ_WAIT: u64 = SyscallNumber::CPUFREQ_WAIT.as_u16() as u64;
+
 /// `console_foreground` syscall number (as above).
 const NUM_CONSOLE_FOREGROUND: u64 = SyscallNumber::CONSOLE_FOREGROUND.as_u16() as u64;
 const NUM_KEY_INJECT: u64 = SyscallNumber::KEY_INJECT.as_u16() as u64;
@@ -498,6 +504,42 @@ pub extern "C" fn sys_irq_bind(line: u32) -> u64 {
 pub extern "C" fn sys_irq_wait(handle: u64, timeout_ns: u64) -> i32 {
     // SAFETY: see `sys_yield`.
     unsafe { ret_i32(raw_syscall(NUM_IRQ_WAIT, [handle, timeout_ns, 0, 0, 0, 0])) }
+}
+
+/// `cpufreq_bind`: take the machine's CPU frequency mechanism role over the
+/// `tairix_cpu_freq_limits_t` at `limits` (`SyscallNumber::CPUFREQ_BIND`).
+/// Returns the opaque 64-bit binding handle.
+///
+/// Gated kernel-side on `TAIRIX_CAP_CPUFREQ`, and refused when a mechanism is
+/// already bound — the machine has one clock policy.
+#[must_use]
+#[export_name = "tairix_sys_cpufreq_bind"]
+pub extern "C" fn sys_cpufreq_bind(limits: *mut c_void) -> u64 {
+    // SAFETY: see `sys_yield`; the kernel validates `limits` against the
+    // caller's address space before reading the range, and re-validates the
+    // range itself.
+    unsafe { raw_syscall(NUM_CPUFREQ_BIND, [ptr_arg(limits), 0, 0, 0, 0, 0]) }
+}
+
+/// `cpufreq_wait`: block until the governor's target differs from `last_seq`,
+/// writing a `tairix_cpu_freq_target_t` into `out`
+/// (`SyscallNumber::CPUFREQ_WAIT`). Returns a `TAIRIX_E_*` code.
+///
+/// Pass `0` for `last_seq` on the first call to be answered immediately with
+/// the current target. There is no timeout: the kernel wakes the waiter both
+/// on a demand change and at the point its own decay would next move the
+/// rate.
+#[must_use]
+#[export_name = "tairix_sys_cpufreq_wait"]
+pub extern "C" fn sys_cpufreq_wait(handle: u64, last_seq: u64, out: *mut c_void) -> i32 {
+    // SAFETY: see `sys_yield`; the kernel validates `out` against the
+    // caller's address space before writing the target.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CPUFREQ_WAIT,
+            [handle, last_seq, ptr_arg(out), 0, 0, 0],
+        ))
+    }
 }
 
 /// `random_get`: fill `len` bytes at `buf` with random bytes, honouring
@@ -3267,6 +3309,8 @@ mod tests {
         (NUM_LATENCY_WATCH, "latency_watch", 1),
         (NUM_FS_LOCK, "fs_lock", 6),
         (NUM_FS_LOCK_QUERY, "fs_lock_query", 6),
+        (NUM_CPUFREQ_BIND, "cpufreq_bind", 1),
+        (NUM_CPUFREQ_WAIT, "cpufreq_wait", 3),
     ];
 
     #[test]

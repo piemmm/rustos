@@ -1581,7 +1581,10 @@ type DriverBundles = Vec<(&'static [&'static [u8]], Vec<u8>)>;
 /// Pi RTC hangs off no bus at all — the firmware owns it — so its driver
 /// binds the discovered `raspberrypi,rpi-rtc` node and reaches the chip
 /// through the mailbox service; on a Pi 3 or Pi 4 there is no such node and
-/// the bundle simply stays unbound.
+/// the bundle simply stays unbound. The frequency driver hangs off no bus
+/// either: it binds the discovered `raspberrypi,firmware-clocks` node, takes
+/// the kernel's frequency mechanism role, and applies the governor's targets
+/// over the same mailbox service.
 fn build_image_driver_bundles(
     ctx: &Context,
     profile: tairix_mkimage::ImageProfile,
@@ -1629,6 +1632,10 @@ fn build_image_driver_bundles(
         (
             image_drivers::RPI_RTC_STORE_PATH,
             image_drivers::build_rpi_rtc_bundle(ctx, arch, profile)?,
+        ),
+        (
+            image_drivers::RPI_CPUFREQ_STORE_PATH,
+            image_drivers::build_rpi_cpufreq_bundle(ctx, arch, profile)?,
         ),
         (
             image_drivers::I2C_BCM2835_STORE_PATH,

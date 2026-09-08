@@ -659,6 +659,30 @@ impl CapabilityId {
     /// manager's scope.
     pub const SERVICE_CONTROL: Self = Self(45);
 
+    /// Be the machine's CPU frequency mechanism: declare an operating range
+    /// through `cpufreq_bind` (`abi-v1` number 122) and receive the
+    /// governor's targets through `cpufreq_wait` (123).
+    ///
+    /// The holder decides what rate every CPU on the machine actually runs
+    /// at, for every principal at once. That cuts both ways as an attack: a
+    /// holder that pins the minimum starves the whole machine of throughput,
+    /// and one that pins the maximum drives a passively-cooled board into
+    /// firmware thermal throttling — neither of which any per-process limit
+    /// bounds. So it is a guarded class in its own right, granted to the
+    /// autoloaded frequency driver and to nothing else; a session, an app, or
+    /// the system user gets nothing here, and there is no ambient path.
+    ///
+    /// It guards the whole DVFS surface rather than one clock or one call,
+    /// and no existing capability expresses it at that granularity:
+    /// `CAP_SYSTEM_POWER` ends the machine's power state rather than pacing
+    /// it, `CAP_IRQ_BIND` hands out interrupt lines, `CAP_MMIO_MAP` hands out
+    /// register windows a device driver already needs, and the `CAP_SYSINFO_*`
+    /// set only reads. The kernel checks it at dispatch, before either handler
+    /// touches any state, and audits the bind — the act that takes the role —
+    /// while leaving the per-target wait unaudited, so a busy governor cannot
+    /// drown the log.
+    pub const CPUFREQ: Self = Self(46);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -714,6 +738,7 @@ impl CapabilityId {
         (Self::SANDBOX_SPAWN, "CAP_SANDBOX_SPAWN"),
         (Self::APPDATA_ADMIN, "CAP_APPDATA_ADMIN"),
         (Self::SERVICE_CONTROL, "CAP_SERVICE_CONTROL"),
+        (Self::CPUFREQ, "CAP_CPUFREQ"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -886,6 +911,7 @@ mod tests {
             CapabilityId::APPDATA_ADMIN.name(),
             Some("CAP_APPDATA_ADMIN")
         );
+        assert_eq!(CapabilityId::CPUFREQ.name(), Some("CAP_CPUFREQ"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -896,15 +922,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=45 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=46 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=45 {
+        for raw in 1..=46 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(46).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(47).expect("in range").name(), None);
     }
 
     #[test]

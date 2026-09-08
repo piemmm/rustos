@@ -3034,6 +3034,49 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // A pure read of coordination state, like `fs_stat`.
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::CPUFREQ_BIND,
+        name: "cpufreq_bind",
+        arg_count: 1,
+        args: [
+            // The `CpuFreqLimits` the mechanism can deliver.
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Handle,
+        required_capability: Some(CapabilityId::CPUFREQ),
+        // Taking the role decides what speed the whole machine runs at for
+        // every principal, so the grant is recorded — and it happens once per
+        // driver bring-up, so the record cannot drown the log.
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CPUFREQ_WAIT,
+        name: "cpufreq_wait",
+        arg_count: 3,
+        args: [
+            // The binding handle, the last sequence the caller observed, and
+            // the caller's `CpuFreqTarget` buffer.
+            AbiType::Handle,
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `Ok(0)` with the target written, mirroring `irq_wait`.
+        ret: AbiType::Errno,
+        // The same gate the bind required: the wait only observes the role
+        // this task already holds.
+        required_capability: Some(CapabilityId::CPUFREQ),
+        // One record per frequency change would drown the log, exactly as
+        // `irq_wait` would per interrupt; the bind above is the audited act.
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

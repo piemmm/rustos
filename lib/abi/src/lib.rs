@@ -23,6 +23,7 @@ pub mod boot;
 pub mod bounded_text;
 pub mod capability;
 pub mod cpufeatures;
+pub mod cpufreq;
 pub mod desktop;
 pub mod display_ipc;
 pub mod driver;

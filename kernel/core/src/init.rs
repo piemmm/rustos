@@ -1262,6 +1262,16 @@ fn run_dispatch_loop<A: KernelArch>(
         // long idle park (which would be a false soft- or hard-lockup
         // report).
         crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
+        // Reaching here means this CPU is running work — either it never
+        // parked or it has just resumed. Both halves of the frequency
+        // subsystem need that edge: the live-clock estimator restarts its
+        // sampling window (its core-cycle counter was gated while the CPU
+        // idled, so a window spanning the park would report a duty cycle
+        // instead of a frequency), and the governor folds the idle span into
+        // this CPU's utilisation and asks for full speed for the work that
+        // has arrived. Idempotent, and two relaxed loads on a CPU that never
+        // parked.
+        crate::cpufreq::note_active(cpu, now_ns);
         // Retire any reschedule obligation left by the task that just
         // suspended before the policy makes its next decision. CFQ arms
         // the incoming task's one-shot inside `step`; clearing later in
@@ -1336,6 +1346,13 @@ fn run_dispatch_loop<A: KernelArch>(
                     // does not judge it; the loop re-stamps progress and
                     // republishes Active at its top on the next wake.
                     crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Idle);
+                    // Close this CPU's busy span before it stops running, so
+                    // the governor's utilisation filter sees exactly the time
+                    // the CPU spent on work. The clock is re-read rather than
+                    // reusing the top-of-loop stamp: everything between them
+                    // was work, and crediting it as idle would under-report a
+                    // busy machine.
+                    crate::cpufreq::note_idle(cpu, arch.monotonic_ns(cpu));
                     arch.wait_for_interrupt();
                 }
                 arch.set_device_irqs(true);

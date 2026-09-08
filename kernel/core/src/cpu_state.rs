@@ -197,6 +197,19 @@ pub(crate) struct CpuState {
     /// means "not yet measured" — the honest unknown, never a fabricated
     /// rate; a reader then falls back to the discovered nominal frequency.
     pub(crate) freq_hz: AtomicU64,
+    /// Monotonic time this CPU last became active, or `0` while it is
+    /// parked. The dispatch loop stamps both edges, which is what lets
+    /// [`crate::cpufreq`] tell an idle→active resumption apart from an
+    /// ordinary dispatch: the live-clock estimator restarts its sampling
+    /// window on the former only, and the governor folds spans that are
+    /// wholly busy or wholly idle rather than arbitrary slices.
+    pub(crate) cpu_active_since: AtomicU64,
+    /// Monotonic time [`Self::gov_util`] was last folded, so a reader can
+    /// advance the filter over the span since without the governor arming
+    /// anything periodic.
+    pub(crate) gov_folded_ns: AtomicU64,
+    /// This CPU's utilisation filter, in the governor's fixed point.
+    pub(crate) gov_util: AtomicU64,
     /// Watchdog **kernel-activity breadcrumb** — the site tag of the last
     /// in-kernel region this CPU *itself* entered (a
     /// [`crate::watchdog::KernelBreadcrumb`] encoded as `u8`), published by
@@ -342,6 +355,9 @@ impl CpuState {
             freq_last_core: AtomicU64::new(0),
             freq_last_ref: AtomicU64::new(0),
             freq_hz: AtomicU64::new(0),
+            cpu_active_since: AtomicU64::new(0),
+            gov_folded_ns: AtomicU64::new(0),
+            gov_util: AtomicU64::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
             kbc_site: AtomicU8::new(0),
             #[cfg(feature = "watchdog-diagnostics")]

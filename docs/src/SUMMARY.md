@@ -23,6 +23,7 @@
 - [Kernel syscall subsystem](./architecture/syscalls.md)
 - [Resource limits and scalability](./architecture/resource-limits.md)
 - [CPU feature detection and self-optimising dispatch](./architecture/cpu-feature-dispatch.md)
+- [CPU frequency scaling](./architecture/cpu-frequency.md)
 - [Modularity contracts and enforcement](./architecture/modularity.md)
 - [The pre-boot Supervisor console](./architecture/supervisor.md)
 

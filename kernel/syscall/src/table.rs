@@ -2870,6 +2870,39 @@ pub trait SyscallHandlers {
     fn futex_wake(&self, _caller: &CallerContext<'_>, _uaddr: u64, _count: u32) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
+
+    /// Take the machine's CPU frequency mechanism role over the operating
+    /// range at the non-null `limits` `UserPtr`, returning a binding handle.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::CPUFREQ`] and that `limits` is non-null. The
+    /// implementation must decode and re-validate the range under the
+    /// caller's own address space, refuse a second live binding with
+    /// [`Errno::AlreadyExists`], and mint a handle it can later recognise as
+    /// this task's.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn cpufreq_bind(&self, _caller: &CallerContext<'_>, _limits: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Block the calling task until the governor's target sequence differs
+    /// from `last_seq`, then write the target to the non-null `out` `UserPtr`.
+    ///
+    /// The dispatcher has already checked the capability and `out`. The
+    /// implementation must re-check that `handle` is the calling task's live
+    /// binding before writing anything, and returns `Ok(0)` on a change.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn cpufreq_wait(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _last_seq: u64,
+        _out: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Architecture-neutral syscall dispatcher.
@@ -3324,6 +3357,19 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the timeout in nanoseconds (`u64::MAX` for an
                 // effectively unbounded wait).
                 self.handlers.users_db_wait(caller, args.0[0])
+            }
+            SyscallNumber::CPUFREQ_BIND => {
+                // args[0] is the non-null `CpuFreqLimits` UserPtr
+                // (dispatcher-checked); the range itself is validated where
+                // the caller's memory can be read.
+                self.handlers.cpufreq_bind(caller, args.0[0])
+            }
+            SyscallNumber::CPUFREQ_WAIT => {
+                // args[0] the binding handle; args[1] the last sequence the
+                // caller observed; args[2] the non-null `CpuFreqTarget`
+                // out-pointer (dispatcher-checked).
+                self.handlers
+                    .cpufreq_wait(caller, args.0[0], args.0[1], args.0[2])
             }
             SyscallNumber::IPC_CALL => {
                 // args[0] is the call-endpoint id; args[1]/args[3] are non-null
@@ -4657,6 +4703,22 @@ mod tests {
             Ok(len as u64)
         }
 
+        fn cpufreq_bind(&self, _c: &CallerContext<'_>, limits: u64) -> SyscallResult {
+            self.record("cpufreq_bind");
+            // Echo the pointer back so the reachability test can assert the
+            // dispatcher decoded it, without a real binding registry here.
+            Ok(limits)
+        }
+        fn cpufreq_wait(
+            &self,
+            _c: &CallerContext<'_>,
+            _handle: u64,
+            _last_seq: u64,
+            _out: u64,
+        ) -> SyscallResult {
+            self.record("cpufreq_wait");
+            Ok(0)
+        }
         fn hw_tree_wait(
             &self,
             _c: &CallerContext<'_>,
@@ -5525,6 +5587,7 @@ mod tests {
                 CapabilityId::SCHED_REALTIME,
                 CapabilityId::SYSTEM_POWER,
                 CapabilityId::IPC_ENDPOINT,
+                CapabilityId::CPUFREQ,
             ],
             &sink,
         );
@@ -6232,6 +6295,90 @@ mod tests {
             .is_ok());
         let _ = args;
         assert_eq!(sink.ids(), [AuditEvent::SyscallInvoked.id().0]);
+    }
+
+    #[test]
+    fn cpufreq_bind_without_capability_is_refused_and_audited() {
+        // Taking the machine's frequency mechanism role decides what speed
+        // every CPU runs at for every principal, so the dispatcher must
+        // short-circuit on the capability check before the handler sees the
+        // call, and record the refusal.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 0x1000; // a well-typed, non-null limits pointer
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::CPUFREQ_BIND.as_u16()), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None, "the handler must never be reached");
+        assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn cpufreq_wait_without_capability_is_refused_and_not_audited() {
+        // The wait carries the same gate — it observes the role this task
+        // holds — but is not audited: one record per frequency change would
+        // drown the log, exactly as `irq_wait` would per interrupt.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1; // handle
+        args.0[2] = 0x2000; // a well-typed, non-null out pointer
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::CPUFREQ_WAIT.as_u16()), args),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(h.last(), None);
+        assert_eq!(sink.ids(), [AuditEvent::SyscallPermissionDenied.id().0]);
+    }
+
+    #[test]
+    fn cpufreq_calls_reject_a_null_pointer_before_the_handler() {
+        // Both carry a `UserPtr`, so the dispatcher's own null check must
+        // refuse a zero before any handler reads the caller's memory.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[CapabilityId::CPUFREQ], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers::default();
+        let d = Dispatcher::new(&h, &sink);
+
+        assert_eq!(
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::CPUFREQ_BIND.as_u16()),
+                RawArgs::ZERO
+            ),
+            Err(Errno::BadAlignment)
+        );
+        let mut wait_args = RawArgs::ZERO;
+        wait_args.0[0] = 1;
+        assert_eq!(
+            d.dispatch(
+                &ctx,
+                u64::from(SyscallNumber::CPUFREQ_WAIT.as_u16()),
+                wait_args
+            ),
+            Err(Errno::BadAlignment)
+        );
+        assert_eq!(h.last(), None, "the handler must never be reached");
     }
 
     #[test]

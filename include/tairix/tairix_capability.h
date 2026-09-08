@@ -65,5 +65,6 @@
 #define TAIRIX_CAP_SANDBOX_SPAWN ((uint16_t)43u)
 #define TAIRIX_CAP_APPDATA_ADMIN ((uint16_t)44u)
 #define TAIRIX_CAP_SERVICE_CONTROL ((uint16_t)45u)
+#define TAIRIX_CAP_CPUFREQ ((uint16_t)46u)
 
 #endif /* TAIRIX_CAPABILITY_H */

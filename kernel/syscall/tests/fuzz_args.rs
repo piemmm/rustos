@@ -224,6 +224,20 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn cpufreq_bind(&self, _c: &CallerContext<'_>, _limits: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn cpufreq_wait(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _last_seq: u64,
+        _out: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn stream_read(
         &self,
         _c: &CallerContext<'_>,

@@ -517,6 +517,49 @@ is reachable over IPC.
 
 ---
 
+## Stage 3 follow-up — CPU frequency scaling (`plans/CPUFREQ.md`)
+
+**Done** for the Raspberry Pi (aarch64); no other port has a frequency
+mechanism, and none is staged.
+
+A Pi 4B ran at 600 MHz under sustained load because the ARM core clock belongs
+to the `VideoCore` firmware, which leaves it at `arm_freq_min` unless an OS
+driver asks otherwise — and nothing in TAIRiX asked. What now exists:
+
+- **The governor** (`kernel/core/src/cpufreq/`) — arch-neutral, event-driven,
+  and tickless. Utilisation comes from the dispatch loop's existing idle
+  brackets, so nothing periodic is armed and the filter advances lazily when
+  read; a machine with no mechanism pays one relaxed load per idle transition.
+  Work arriving on an idle CPU or a program launch raises the rate to the
+  maximum at once; sustained load settles at `1.25 × max × util` quantised to
+  the mechanism's step; a quiet machine walks down a step per response window
+  and then arms nothing.
+- **The mechanism seam** — `cpufreq_bind` (122) and `cpufreq_wait` (123) under
+  `CAP_CPUFREQ`, with `CpuFreqLimits`/`CpuFreqTarget` in
+  `lib/abi/src/cpufreq.rs`. A driver waits on the target's *sequence*, since
+  firmware clamps and rounds a request; the kernel paces the wait itself, so
+  there is no timeout argument. One binding per machine, released by the
+  shared task-reclaim path.
+- **The Pi mechanism** (`drivers/cpufreq/rpi/`) — a user-space driver `devmgr`
+  autoloads on a `raspberrypi,firmware-clocks` node. It maps no MMIO and takes
+  no interrupt, reports the range the firmware declares, and applies targets
+  over the `vcmailbox` service.
+- **A boot-time floor** (`kernel/arch/aarch64/src/firmware.rs`) — one
+  `SET_CLOCK_RATE` during pre-MMU discovery so mounting, unlocking, and login
+  are not served at the minimum. The module also owns the pre-MMU mailbox
+  transport the framebuffer boot console now borrows rather than building its
+  own.
+- **An honest live-frequency measurement** — the estimator re-seeds its
+  baseline as a CPU leaves idle, because the aarch64 and riscv64 core-cycle
+  counters are gated in `wfi` while their references are not, so a window
+  containing idle reported `frequency × duty cycle` rather than a frequency.
+
+Remaining: a second frequency domain (a part with per-cluster clocks), a
+mechanism for any other port, and the on-metal acceptance run — QEMU models no
+`VideoCore`, so the firmware exchanges are proven against the mock.
+
+---
+
 ## Stage 4.HW — Hardware Detection and Driver Autoload
 
 **Dependencies:** Stage 4 (driver host + bus drivers) and the Stage 3
@@ -7598,6 +7641,20 @@ can see *why* a rule exists without diffing the charter's history.
   command, the Stage-D fullscreen UI, and the real per-port bodies + Stage-E
   destructive QEMU verticals for riscv64, aarch64, and x86_64 (wasm32 stays
   `NotSupported`).
+
+- **2026-09-08 — `CAP_CPUFREQ` and the CPU frequency subsystem.** Amended §3
+  (a new `drivers/cpufreq/` class), §15.18 (a `plans/CPUFREQ.md` row), and the
+  capability set (`CAP_CPUFREQ`, id 46) after a Raspberry Pi 4B was found
+  running at 600 MHz under load: the ARM clock belongs to the `VideoCore`
+  firmware, which leaves it at `arm_freq_min` unless an OS driver asks
+  otherwise, and TAIRiX never asked. The capability guards the whole DVFS
+  surface as a class — a holder that pins the minimum starves the machine of
+  throughput and one that pins the maximum drives a passively-cooled board
+  into thermal throttling, neither of which a per-process limit bounds — and
+  no existing capability expressed it (`CAP_SYSTEM_POWER` ends the machine's
+  power state rather than pacing it). It gains its live holder (the autoloaded
+  frequency driver) and its live enforcement point (`cpufreq_bind`) in the same
+  change.
 
 - **2026-07-27 — Arch HAL `CoreClock` live-frequency slice.** Amended §17.2 to
   enumerate a new closed Arch HAL slice, `CoreClock`, after the System

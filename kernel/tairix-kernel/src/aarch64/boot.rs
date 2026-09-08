@@ -59,8 +59,8 @@ use tairix_arch_aarch64::paging::{
 };
 
 use tairix_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, gic, halt_current_cpu, platform, serial, smp,
-    syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
+    console, enable_fp_el1, exceptions, fdt, firmware, gic, halt_current_cpu, platform, serial,
+    smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
 use tairix_arch_api::{PlatformDiscovery, SchedulerArch};
 use tairix_fdt::Fdt;
@@ -72,7 +72,7 @@ use tairix_kernel_sched_api::SchedulerConfig;
 use tairix_log::{log, Event, EventId, Field, Level, Sink, TeeSink};
 
 use tairix_arch_aarch64::irqmask::DaifIrqControl;
-use tairix_util::fmt::format_hex_u64;
+use tairix_util::fmt::{format_hex_u64, format_u64};
 
 use crate::aarch64::arch_wrapper::{console_layout, Aarch64BinArch};
 use crate::aarch64::dispatch::{
@@ -135,6 +135,15 @@ const KERNEL_BOOT_AARCH64_REACHED: EventId = EventId(4097);
 /// `4098`/`4099`; the id is part of the audit contract and may not be
 /// renumbered.
 const KERNEL_PCIE_DISCOVERED: EventId = EventId(4100);
+
+/// Audit event: the boot path asked the `VideoCore` firmware to run the ARM
+/// cores at their full rate, before anything else ran. Logged once, post-MMU,
+/// so a metal capture states the speed the rest of boot actually ran at — the
+/// firmware leaves the clock at `arm_freq_min` until something asks, and a
+/// board silently stuck there is otherwise only visible as everything being
+/// slow. Sits in the `kernel/core`-owned `4000..5000` range, clear of the ids
+/// above; the id is part of the audit contract and may not be renumbered.
+const KERNEL_CPU_CLOCK_RAISED: EventId = EventId(4101);
 
 /// Audit event: a started secondary CPU left the kernel dispatch loop
 /// (hand-off refused or scheduler stopped) and is parking fail-closed.
@@ -356,6 +365,25 @@ pub fn boot(
 
     if let Some(pcie) = early.pcie {
         log_pcie_discovery(log_sink, &pcie);
+    }
+
+    if early.cpu_clock_hz != 0 {
+        let mut rate_buf = [0u8; 20];
+        log(
+            log_sink,
+            &Event {
+                level: Level::Info,
+                id: KERNEL_CPU_CLOCK_RAISED,
+                message: "aarch64: firmware asked to run the ARM cores at full rate for boot",
+                fields: &[Field {
+                    key: "rate_hz",
+                    value: tairix_log::FieldValue::Str(format_u64(
+                        early.cpu_clock_hz,
+                        &mut rate_buf,
+                    )),
+                }],
+            },
+        );
     }
 
     // Discover the rest of the board from the firmware device tree: the
@@ -1549,6 +1577,11 @@ struct EarlyDiscovered {
     /// identity Device mask, and the bring-up consumes all three windows.
     /// `None` on a board with no bridge (the QEMU `virt` shape).
     pcie: Option<platform::PcieDiscovery>,
+    /// The rate in Hz the firmware was asked to run the ARM cores at, or `0`
+    /// on a board with no firmware clock (the QEMU `virt` shape) or where the
+    /// request failed. Recorded so the boot log can state the speed the rest
+    /// of boot ran at rather than leaving it to be inferred.
+    cpu_clock_hz: u64,
 }
 
 /// Point the console and the GICv2 driver at the bases the firmware tree
@@ -1572,6 +1605,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         video: None,
         dtb_len: 0,
         pcie: None,
+        cpu_clock_hz: 0,
     };
     if dtb == 0 {
         return out;
@@ -1593,6 +1627,14 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     // powered-up PL011 masks the omission (`uart_init`).
     uart_init::init_from_fdt(&fdt);
     out.gic = gic::configure_from_fdt(&fdt).is_some();
+    // Ask the firmware for full speed before anything else runs. On a Pi the
+    // ARM clock is the firmware's, and it leaves it at `arm_freq_min` — 600
+    // MHz on a board rated at 1.5 GHz — until an OS driver asks otherwise, so
+    // mounting the root volume, unlocking it, and reaching a login would all
+    // run at 40% of the machine's speed. The frequency driver `devmgr`
+    // autoloads takes over from here; this is the floor beneath it, and it
+    // fails closed to whatever rate the firmware had chosen.
+    out.cpu_clock_hz = firmware::raise_cpu_clock(&fdt).map_or(0, u64::from);
     out.video = video::configure_from_fdt(&fdt);
     // Discover the BCM2711 PCIe bridge's windows for the in-kernel
     // USB-keyboard service (`plans/PI.md` P10). The early-returning

@@ -56,6 +56,7 @@
 
 extern crate alloc;
 
+use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
 use tairix_abi::elevate::{
     elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST, ELEVATE_REPLY_LEN,
 };
@@ -442,6 +443,12 @@ const NUM_FUTEX_WAIT: u64 = SyscallNumber::FUTEX_WAIT.as_u16() as u64;
 
 /// `futex_wake` syscall number (as above).
 const NUM_FUTEX_WAKE: u64 = SyscallNumber::FUTEX_WAKE.as_u16() as u64;
+
+/// `cpufreq_bind` syscall number (as above).
+const NUM_CPUFREQ_BIND: u64 = SyscallNumber::CPUFREQ_BIND.as_u16() as u64;
+
+/// `cpufreq_wait` syscall number (as above).
+const NUM_CPUFREQ_WAIT: u64 = SyscallNumber::CPUFREQ_WAIT.as_u16() as u64;
 
 /// Marshal a 32-bit signed argument into its register value following the
 /// `abi-v1` `I32` convention (sign-extend through `i64`).
@@ -2210,6 +2217,79 @@ pub fn irq_wait(handle: u64, timeout_ns: u64) -> i64 {
     // `irq_wait` dereferences no user pointer.
     let ret = unsafe { raw_syscall(NUM_IRQ_WAIT, [handle, timeout_ns, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Take the machine's CPU frequency mechanism role, declaring the operating
+/// range this driver can deliver (`SyscallNumber::CPUFREQ_BIND`).
+///
+/// The kernel's governor then publishes a target rate for this driver to
+/// apply; it re-validates `limits` on the far side of the trap and refuses a
+/// range no governor could pick from. Needs `CAP_CPUFREQ`, which is held by
+/// the autoloaded frequency driver alone.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: a non-negative value is the binding handle, and a
+/// negative value is `-errno` (`Errno::AlreadyExists` when a mechanism is
+/// already bound, `Errno::OutOfRange` for an unusable range — recover the
+/// discriminant as `-ret`). The wrapper surfaces that raw signed value and
+/// hides no error.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 handle-or-`-errno` encoding.
+pub fn cpufreq_bind(limits: &CpuFreqLimits) -> i64 {
+    let bytes = limits.to_le_bytes();
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. The pointer argument names
+    // `CpuFreqLimits::WIRE_LEN` bytes of this frame's own array, which
+    // outlives the call, and the kernel copies it in through its checked
+    // `copy_from_user` boundary.
+    let ret = unsafe { raw_syscall(NUM_CPUFREQ_BIND, [bytes.as_ptr() as u64, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Park the calling task until the governor's target differs from `last_seq`,
+/// then read it back (`SyscallNumber::CPUFREQ_WAIT`).
+///
+/// `handle` is the binding a prior [`cpufreq_bind`] issued; the kernel
+/// re-checks it against the holding process on every call and parks the task
+/// off the run queue until the target moves (no busy-wait, and no timeout to
+/// pass — the kernel wakes the waiter both on a demand change and at the
+/// point its own decay would next move the rate). Pass `0` on the first call
+/// to be answered immediately with the current target.
+///
+/// The kernel encodes the result as a signed register following the standard
+/// `abi-v1` convention: `0` with `target` written, and a negative value is
+/// `-errno` (`Errno::NotFound` for a forged or released handle,
+/// `Errno::Interrupted` when a signal unwound the wait — recover the
+/// discriminant as `-ret`). `target` is left untouched on a negative result.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 `0`-or-`-errno` encoding.
+pub fn cpufreq_wait(handle: i64, last_seq: u64, target: &mut CpuFreqTarget) -> i64 {
+    let mut bytes = [0u8; CpuFreqTarget::WIRE_LEN];
+    // SAFETY: as `cpufreq_bind` — the pointer names this frame's own array
+    // and the kernel writes it through its checked `copy_to_user` boundary.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_CPUFREQ_WAIT,
+            [
+                handle.cast_unsigned(),
+                last_seq,
+                bytes.as_mut_ptr() as u64,
+                0,
+                0,
+                0,
+            ],
+        )
+    } as i64;
+    if ret == 0 {
+        // A decode failure would mean the kernel wrote a record this build
+        // cannot read, so the target is left as the caller had it rather than
+        // guessed at (fail closed).
+        match CpuFreqTarget::from_bytes(&bytes) {
+            Ok(decoded) => *target = decoded,
+            Err(err) => return -(err as i64),
+        }
+    }
+    ret
 }
 
 /// Wait for a child-process event, reading back the typed status record

@@ -137,6 +137,11 @@ pub const MC146818_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"mc146818", b"R
 /// mailbox).
 pub const RPI_RTC_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"rpi", b"Run"];
 
+/// Store path of the Raspberry Pi CPU frequency driver bundle: class
+/// `cpufreq`, the leaf `rpi` (the `VideoCore` firmware's ARM core clock,
+/// reached over the firmware mailbox).
+pub const RPI_CPUFREQ_STORE_PATH: &[&[u8]] = &[b"Drivers", b"cpufreq", b"rpi", b"Run"];
+
 /// Store path of the Broadcom Serial Controller I2C bus driver bundle: class
 /// `bus_i2c`, the controller leaf `bcm2835` (the part name appears only at
 /// the leaf; the class namespace above it stays vendor-neutral).
@@ -807,6 +812,35 @@ pub fn build_rpi_rtc_bundle(
         "tairix-drv-rtc-rpi",
         &[CapabilityId::MAILBOX, CapabilityId::IPC_BIND_PRIVILEGED],
         tairix_drv_rtc_rpi::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Raspberry Pi CPU frequency driver bundle.
+///
+/// Like [`build_rpi_rtc_bundle`] it requests no `CAP_MMIO_MAP` — the ARM
+/// clock belongs to the firmware, so its only path to the hardware is a
+/// property exchange the kernel gates on `CAP_MAILBOX` — and no
+/// `CAP_IRQ_BIND`, since it owns no interrupt line. It requests no
+/// `CAP_IPC_BIND_PRIVILEGED` either: it serves nobody, and instead holds
+/// `CAP_CPUFREQ` to take the machine's frequency mechanism role. Carries
+/// `tairix_drv_cpufreq_rpi::BIND_KEYS`, so it autoloads against a discovered
+/// `raspberrypi,firmware-clocks` node and stays unbound on a board with none.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_rpi_cpufreq_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-cpufreq-rpi",
+        &[CapabilityId::MAILBOX, CapabilityId::CPUFREQ],
+        tairix_drv_cpufreq_rpi::BIND_KEYS,
         profile,
     )
 }

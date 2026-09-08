@@ -166,6 +166,9 @@ members = [
     "drivers/rtc/mc146818",
     "drivers/rtc/rpi",
 
+    # Drivers — CPU frequency
+    "drivers/cpufreq/rpi",
+
     # Drivers — accelerator
     "drivers/accelerator/virtio_crypto",
 
