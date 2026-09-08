@@ -5,11 +5,18 @@
 //! laid out for a reader. It is
 //! assembled **purely from the shared Reactive Alloy controls** (spec §17) —
 //! a [`Breadcrumb`] location band, the collection controls
-//! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card),
-//! [`Panel`](tairix_controls::Panel)), action
-//! [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`]. The
-//! window manager decorates the window server-side, so the application draws
-//! no chrome of its own and carries no second copy of any control's behaviour.
+//! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card)),
+//! action [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`].
+//! The window manager decorates the window server-side, so the application
+//! draws no chrome of its own and carries no second copy of any control's
+//! behaviour.
+//!
+//! The one thing it composes rather than consumes is its titled block: the
+//! boards frame every readings block the same way, and
+//! [`Panel`](tairix_controls::Panel) is a different anatomy — a header band at
+//! control height with a dominant rail, a signal bead and an actions row — that
+//! the terminal, the taskbar and the file manager share, so matching the boards
+//! by retuning it would retune those three.
 //!
 //! # Package layout
 //!
@@ -80,6 +87,7 @@ use tairix_controls::{
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 
+mod block;
 pub mod frame;
 pub mod reading;
 pub mod recovery;

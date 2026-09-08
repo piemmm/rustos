@@ -1374,10 +1374,6 @@ mod program {
             let mut rasteriser = SandboxRasteriser {
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
             };
-            // Whether a decode delivered since the last nudge still owes the
-            // loop one, so a batch drained without waking it cannot be
-            // stranded by a final job the desk no longer wants.
-            let mut artwork_owed = false;
             loop {
                 let job = {
                     let mut work = self.work.lock();
@@ -1406,18 +1402,7 @@ mod program {
                         // what a tile draws.
                         let artwork =
                             render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
-                        let (delivered, more) = {
-                            let mut work = self.work.lock();
-                            (work.artwork.deliver(&job, artwork), work.artwork.has_work())
-                        };
-                        artwork_owed |= delivered;
-                        // Waking on the drained queue rather than each icon
-                        // costs a folder of fifty bundles one repaint instead
-                        // of fifty; a lone icon empties the queue at once, so
-                        // it still lands the moment it is ready.
-                        let nudge = artwork_owed && !more;
-                        artwork_owed &= !nudge;
-                        nudge
+                        self.work.lock().artwork.deliver(&job, artwork).wake()
                     }
                     Read::Probe(batch) => {
                         let answers = probe_batch(&batch);

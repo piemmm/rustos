@@ -16,16 +16,17 @@
 use alloc::string::String;
 use alloc::vec;
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::damage::sink;
 use crate::state::{ActivityState, ControlState, PressureKind, SelectionState, ValidationState};
 use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-use crate::testkit::{control_font, high_contrast};
+use crate::testkit::high_contrast;
 
 const W: u32 = 240;
 const H: u32 = 28;
@@ -941,8 +942,8 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
     );
     assert_eq!(
         render_in(&tabs, &theme, Scale::ONE, VW, VH).get(VW - 2, veach() + 4),
-        Some(premul(theme.palette().surface_raised)),
-        "the band under the pointer lifts"
+        Some(premul(theme.palette().surface_hover)),
+        "the band under the pointer takes the shared pointer wash"
     );
     assert_eq!(
         tabs.on_pointer(&PRESS, bounds, Scale::ONE, &Theme::dark(), &mut sink()),
@@ -953,16 +954,17 @@ fn a_vertical_press_selects_the_tab_that_was_drawn() {
         Some(TabsAction::Selected { index: 1 })
     );
     // The owner commits the selection, and the band the press chose is the one
-    // that draws as selected.
+    // that draws as selected: it lifts to the raised fill, while a resting
+    // band is the ground it sits on.
     tabs.adopt_selected(1);
     let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
     assert_eq!(
         surface.get(VW - 2, veach() + 4),
-        Some(premul(theme.palette().surface))
+        Some(premul(theme.palette().surface_raised))
     );
     assert_eq!(
         surface.get(VW - 2, 4),
-        Some(premul(theme.palette().surface_pressed))
+        Some(premul(theme.palette().surface))
     );
 }
 
@@ -1317,8 +1319,58 @@ fn device_rail() -> Tabs {
     .with_orientation(TabsOrientation::Vertical)
 }
 
+/// A group heading names its group in the accent, so a reader can tell a break
+/// in the list from one more entry's label without reading either.
+#[test]
+fn a_group_heading_is_drawn_in_the_accent() {
+    let theme = Theme::dark();
+    let rail = device_rail();
+    let surface = render_in(&rail, &theme, Scale::ONE, VW, VH);
+    let band = heading_band(&theme);
+    assert!(
+        region_has(&surface, (0, VW), (0, band), premul(theme.palette().accent)),
+        "the leading group's heading reads in the accent"
+    );
+}
+
+/// A sidebar entry's own name is not a selection mark: the lift and the leading
+/// rail carry selection, and tinting the label too would leave the reading
+/// beside it the only plain text on the row.
+#[test]
+fn a_selected_sidebar_entry_keeps_its_label_in_the_plain_foreground() {
+    let theme = Theme::dark();
+    let mut rail = device_rail();
+    rail.adopt_selected(1);
+    let surface = render_in(&rail, &theme, Scale::ONE, VW, VH);
+    // The Memory entry's own band, past the leading rail and its padding.
+    let band = heading_band(&theme) + veach() + trend_band(&theme);
+    let rows = (band + 2, band + veach() - 2);
+    assert!(
+        region_has(&surface, (4, VW), rows, premul(theme.palette().on_surface)),
+        "a selected entry's label reads in the plain foreground"
+    );
+    // A horizontal tab has no lift or rail to carry selection, so its label
+    // does take the accent — the two orientations must not converge.
+    let mut strip = three_tabs();
+    strip.adopt_selected(1);
+    let across = render(&strip, &theme);
+    assert!(
+        region_has(
+            &across,
+            (EACH + 2, 2 * EACH - 2),
+            (0, H - 2),
+            premul(theme.palette().accent)
+        ),
+        "a selected horizontal tab's label reads in the accent"
+    );
+}
+
+/// A group heading's band, derived from the theme the way the strip derives it:
+/// the header role's line — below body size, which is what makes a heading read
+/// as a break in the list rather than as another entry — with the control gap
+/// either side.
 fn heading_band(theme: &Theme) -> u32 {
-    let font = control_font(theme, Scale::ONE);
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, Scale::ONE);
     let gap = Scale::ONE.scale_length(theme.metrics().control_gap).max(1);
     font.line_height() + gap * 2
 }
@@ -1899,17 +1951,120 @@ fn restate_answers_whether_the_strip_moved() {
 }
 
 #[test]
-fn restate_takes_the_fresh_selection_absences_and_cursor() {
+fn restate_takes_the_fresh_selection_and_absences() {
     let mut tabs = vertical_three();
     tabs.adopt_selected(0);
     let mut fresh = vertical_three();
     fresh.adopt_selected(2);
-    fresh.adopt_current(Some(2));
     let fresh = fresh.with_absences(vec![TabGroupAbsence::new("NETWORK", "None present.", 3)]);
 
     assert!(tabs.restate(fresh));
 
     assert_eq!(tabs.selected(), Some(2));
-    assert_eq!(tabs.current(), Some(2));
     assert_eq!(tabs.absences().len(), 1);
+}
+
+/// The keyboard cursor is the reader's, not the sample's: a reader who has
+/// moved it down the strip without committing keeps it there across every
+/// refresh. A host that re-states the sample and takes its cursor instead
+/// snaps the cursor back to wherever the selection is, once per sample.
+#[test]
+fn restate_keeps_the_readers_cursor_across_an_unchanged_rebuild() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, VW, VH);
+    let mut tabs = vertical_three();
+    tabs.adopt_selected(0);
+    tabs.set_current(Some(2), bounds, Scale::ONE, &theme, &mut sink());
+    assert_eq!(tabs.current(), Some(2));
+
+    let mut fresh = vertical_three();
+    fresh.adopt_selected(0);
+    fresh.adopt_current(Some(0));
+    assert!(!tabs.restate(fresh), "an identical sample moved nothing");
+
+    assert_eq!(
+        tabs.current(),
+        Some(2),
+        "the sample moved the reader's cursor"
+    );
+}
+
+/// A run of entries that gained, lost or re-ordered one drops the cursor with
+/// the hover and the press latch: a cursor that cannot be placed must name no
+/// entry rather than the one that slid under it.
+#[test]
+fn restate_drops_the_cursor_when_the_entries_change() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, VW, VH);
+    let mut tabs = vertical_three();
+    tabs.set_current(Some(2), bounds, Scale::ONE, &theme, &mut sink());
+
+    assert!(
+        tabs.restate(Tabs::new(vec![Tab::new("only")]).with_orientation(TabsOrientation::Vertical))
+    );
+
+    assert_eq!(tabs.current(), None);
+}
+
+/// A sidebar entry's selection is a leading rail plus a lift — the same
+/// vocabulary every row family uses — so the mark takes the rail breadth
+/// rather than the narrower seam a horizontal tab's lower edge carries.
+#[test]
+fn a_selected_vertical_entry_lifts_and_draws_a_leading_rail() {
+    let theme = Theme::dark();
+    let mut tabs = vertical_three();
+    tabs.adopt_selected(1);
+    let surface = render_in(&tabs, &theme, Scale::ONE, VW, VH);
+
+    let accent = premul(theme.palette().accent);
+    let rail = tabs_rail_thickness(&theme);
+    let y = veach() + 4;
+    for x in 0..rail {
+        assert_eq!(
+            surface.get(x, y),
+            Some(accent),
+            "the leading rail is thinner than the rail breadth"
+        );
+    }
+    assert_ne!(
+        surface.get(rail, y),
+        Some(accent),
+        "the leading rail is wider than the rail breadth"
+    );
+    assert_eq!(
+        surface.get(VW - 2, y),
+        Some(premul(theme.palette().surface_raised)),
+        "a selected entry lifts to the raised fill"
+    );
+}
+
+/// The keyboard cursor on a sidebar entry reads as the shared pointer wash,
+/// never as a ring: a ring is a horizontal tab's affordance, and a rail plus
+/// a lift already says which entry is which.
+///
+/// Asserted as a two-shot comparison rather than as an absence of ink,
+/// because the strip fills its own bands opaque — every pixel is drawn, so
+/// "nothing was drawn here" cannot be observed directly.
+#[test]
+fn a_vertical_cursor_draws_no_ring() {
+    let theme = Theme::dark();
+    let mut without = vertical_three();
+    without.adopt_selected(1);
+    let plain = render_in(&without, &theme, Scale::ONE, VW, VH);
+
+    let mut with = vertical_three();
+    with.adopt_selected(1);
+    with.adopt_current(Some(1));
+
+    assert_eq!(
+        render_in(&with, &theme, Scale::ONE, VW, VH).pixels(),
+        plain.pixels(),
+        "the keyboard cursor drew a mark of its own on a sidebar entry"
+    );
+}
+
+/// The rail breadth the strip's own paint resolves, read from the same helper
+/// rather than restated as a literal.
+fn tabs_rail_thickness(theme: &Theme) -> u32 {
+    crate::paint::rail_thickness(theme, Scale::ONE)
 }

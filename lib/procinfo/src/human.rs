@@ -1,15 +1,43 @@
-//! Human-readable figure rendering shared by the full-screen viewers.
+//! Human-readable rendering of `sysinfo-v1` readings, shared by every surface
+//! that shows them.
 //!
-//! `top` and `sysmon` render the same `sysinfo-v1` figures — byte counts,
-//! tenths-of-a-percent shares, uptimes, load averages — in the same
-//! GNU-`top`-familiar spellings, so the formatting lives here once. Each
-//! viewer keeps its own layout; this module owns only the figure → text
-//! conversions they would otherwise copy.
+//! `top`, `sysmon`, `sysinfo`, the `info:`/`stats:` resolver and the desktop's
+//! monitor all render the same figures — byte counts, tenths-of-a-percent
+//! shares, uptimes, load averages, ISA feature sets — in the same
+//! GNU-familiar spellings, so the formatting lives here once. Each surface
+//! keeps its own layout; this module owns only the reading → text conversions
+//! they would otherwise copy.
 
 use alloc::format;
 use alloc::string::String;
 
+use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::sysinfo::LoadAverage;
+
+/// The lowercase, space-separated ISA-extension flag list of a raw
+/// [`CpuFeatureSet`] bitset, in stable bit order; `(none)` when the set is
+/// empty.
+///
+/// `(none)` is the honest answer for a build-time-floor CPU or a port that
+/// reads no features, never a fabricated flag. The walk is over
+/// [`CpuFeature::ALL`], so no caller keeps a private list of names or order.
+#[must_use]
+pub fn cpu_feature_flags(bits: u64) -> String {
+    let set = CpuFeatureSet::from_bits(bits);
+    let mut out = String::new();
+    for feature in CpuFeature::ALL {
+        if set.contains(feature) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(feature.name());
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(none)");
+    }
+    out
+}
 
 /// Render a tenths-of-a-percent figure as `W.T`, saturating at `999.9` so
 /// a column never widens.
@@ -131,9 +159,11 @@ pub fn format_load(fixed: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_count, format_load, format_mib, format_size, format_tenths, format_uptime,
-        SIZE_WIDTH,
+        cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
+        format_uptime, SIZE_WIDTH,
     };
+    use alloc::vec::Vec;
+    use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 
     #[test]
     fn counts_render_exact_then_compact_units() {
@@ -228,5 +258,28 @@ mod tests {
         use tairix_abi::sysinfo::LOAD_FIXED_SHIFT;
         assert_eq!(format_load(0), "0.00");
         assert_eq!(format_load(1 << LOAD_FIXED_SHIFT), "1.00");
+    }
+
+    /// Every consumer reads one spelling and one order: the walk is over the
+    /// ABI's own feature list, so a caller cannot re-order or rename a flag.
+    #[test]
+    fn feature_flags_are_listed_in_the_abi_bit_order() {
+        let set = CpuFeatureSet::new()
+            .with(CpuFeature::Aes)
+            .with(CpuFeature::Crc32);
+        let listed = cpu_feature_flags(set.bits());
+        let names: Vec<&str> = CpuFeature::ALL
+            .iter()
+            .filter(|feature| set.contains(**feature))
+            .map(|feature| feature.name())
+            .collect();
+        assert_eq!(listed, names.join(" "));
+    }
+
+    /// An empty set is stated, never elided into a blank column that would
+    /// read as a truncated list.
+    #[test]
+    fn an_empty_feature_set_states_that_it_is_empty() {
+        assert_eq!(cpu_feature_flags(0), "(none)");
     }
 }

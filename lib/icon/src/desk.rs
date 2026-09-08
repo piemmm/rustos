@@ -12,7 +12,9 @@
 //! so every rule below is a host test rather than an argument. Two embedders
 //! drive it differently over the same rules: the desktop session parks a
 //! worker thread on it behind the runtime's futex mutex, and the file manager
-//! pumps one job per turn of its own event loop.
+//! pumps one job per turn of its own event loop. When to wake that loop is
+//! part of the policy too — [`deliver`](ArtworkDesk::deliver) answers it — so
+//! neither embedder keeps its own count of what it still owes.
 //!
 //! # What the desk remembers, and for how long
 //!
@@ -67,6 +69,37 @@ enum State {
     Declined,
 }
 
+/// What recording one decode did: whether its answer was kept, and whether the
+/// embedder's loop is owed a wake now.
+///
+/// Two answers rather than one, because they are independent. A kept delivery
+/// owes no wake while the rest of its batch is still queued — that is the whole
+/// point of batching them. And a wake can fall due on a delivery that was *not*
+/// kept: a job the desk had already answered, handed back after the batch it
+/// belonged to drained, still leaves those earlier answers unshown. A single
+/// flag cannot say both, and a producer that read "kept" as "wake now" would
+/// repaint per icon while one that read "wake now" as "kept" would think a
+/// stopped desk had accepted its work.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Delivered {
+    kept: bool,
+    wake: bool,
+}
+
+impl Delivered {
+    /// Whether the desk kept this answer, so something new is there to draw.
+    #[must_use]
+    pub const fn kept(self) -> bool {
+        self.kept
+    }
+
+    /// Whether the embedder's loop is owed a wake now.
+    #[must_use]
+    pub const fn wake(self) -> bool {
+        self.wake
+    }
+}
+
 /// What has been asked for, what is being produced, and what has come back.
 ///
 /// The embedder supplies the exclusion and the blocking; nothing here waits.
@@ -80,6 +113,10 @@ pub struct ArtworkDesk {
     queue: VecDeque<ArtworkJob>,
     /// Whether anything has been delivered since the embedder last asked.
     landed: bool,
+    /// Whether a delivery still owes the embedder's loop a wake. Distinct
+    /// from `landed`, which the loop itself consumes: this is the producer's
+    /// debt, and it survives a delivery made while more work was queued.
+    wake_owed: bool,
     /// Set once the embedder is tearing down, so a parked producer leaves
     /// instead of looking for work and no further decode is recorded.
     stopping: bool,
@@ -93,6 +130,7 @@ impl ArtworkDesk {
             slots: BTreeMap::new(),
             queue: VecDeque::new(),
             landed: false,
+            wake_owed: false,
             stopping: false,
         }
     }
@@ -182,20 +220,24 @@ impl ArtworkDesk {
 
     /// Record what decoding `job` produced.
     ///
-    /// Answers `false` — and keeps nothing — when the desk is no longer
-    /// holding that job as in flight: it stopped, or the key was answered from
-    /// an earlier decode. The caller uses that to decide whether a wake is
-    /// owed at all.
-    pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Surface>) -> bool {
-        let Some(state) = self.slots.get_mut(job) else {
-            return false;
-        };
-        if !matches!(state, State::Running) {
-            return false;
+    /// A wake is owed once something has been delivered *and* no further decode
+    /// is waiting to be handed out. Waking on the drained batch rather than on
+    /// each icon costs a folder of fifty bundles one repaint instead of fifty,
+    /// and a lone icon empties the queue at once so it still lands the moment
+    /// it is ready. The debt outlives the delivery that incurred it, so a batch
+    /// drained without a wake cannot be stranded by a final job the desk no
+    /// longer wants.
+    pub fn deliver(&mut self, job: &ArtworkJob, artwork: Option<Surface>) -> Delivered {
+        let mut kept = false;
+        if let Some(state @ State::Running) = self.slots.get_mut(job) {
+            *state = State::Done(artwork);
+            self.landed = true;
+            self.wake_owed = true;
+            kept = true;
         }
-        *state = State::Done(artwork);
-        self.landed = true;
-        true
+        let wake = self.wake_owed && !self.has_work();
+        self.wake_owed &= !wake;
+        Delivered { kept, wake }
     }
 
     /// Whether anything has been delivered since this was last asked, clearing
@@ -251,6 +293,9 @@ impl ArtworkDesk {
     /// outlive their session in reusable heap.
     pub fn stop(&mut self) {
         self.stopping = true;
+        // Nothing is left to repaint, so a producer's outstanding wake debt
+        // dies with the answers it would have shown.
+        self.wake_owed = false;
         for state in self.slots.values_mut() {
             if let State::Done(Some(artwork)) = state {
                 artwork.wipe();

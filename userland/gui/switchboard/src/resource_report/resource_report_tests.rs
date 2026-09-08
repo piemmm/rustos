@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::{
     BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
 };
+use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
@@ -1213,7 +1214,10 @@ fn the_graphics_rail_entry_reads_the_frames_damage_not_the_hero_figure() {
     );
     let graphics = device(&report, DeviceId::Graphics);
     assert_eq!(graphics.reading, Reading::measured("3.2k px"));
-    assert_eq!(graphics.hero.value, Reading::measured("4.2M px"));
+    // The hero's figure carries no unit of its own — the unit trails it, so a
+    // spelled-out one would read "4.2M px M px blended".
+    assert_eq!(graphics.hero.value, Reading::measured("4.2"));
+    assert_eq!(graphics.hero.unit, "M px blended");
     // And the trace now has a series behind it: the frame's damage as a
     // permille of its own screen.
     assert_eq!(graphics.trend, alloc::vec![1]);
@@ -1350,4 +1354,77 @@ fn the_authority_pane_names_a_withheld_scope_as_not_permitted() {
         fact(authority, "Kernel readings"),
         &Reading::Absent(Unmeasured::NotPermitted)
     );
+}
+
+/// One CPU of `index` reporting `features`, so a heterogeneous fixture can
+/// give its cores different ISA sets.
+fn cpu_with_features(index: u32, features: CpuFeatureSet) -> CpuInfoRecord {
+    CpuInfoRecord::new(
+        index,
+        CpuCoreClass::Performance,
+        0,
+        features.bits(),
+        0,
+        0,
+        1_000_000,
+        b"Test Core",
+    )
+    .expect("a valid CPU record")
+}
+
+/// What a program may actually rely on is the intersection: a heterogeneous
+/// machine schedules a task on whichever core is free, so an extension only
+/// some cores implement is one no unpinned program may use.
+#[test]
+fn the_isa_fact_lists_the_features_every_core_implements() {
+    let common = CpuFeatureSet::new()
+        .with(CpuFeature::Asimd)
+        .with(CpuFeature::Crc32);
+    let sample = Sample {
+        cpu_info: Some(alloc::vec![
+            cpu_with_features(0, common.with(CpuFeature::Sha2)),
+            cpu_with_features(1, common),
+        ]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let cpu = device(&report, DeviceId::Cpu);
+
+    assert_eq!(
+        *fact(cpu, "ISA features"),
+        Reading::measured(tairix_procinfo::cpu_feature_flags(common.bits())),
+        "an extension only one core implements was reported as available"
+    );
+}
+
+/// A port that reads no ISA features answers zero bits. That reads as
+/// unmeasured, never as "this CPU implements none": the second would be a
+/// claim about the silicon that nothing measured.
+#[test]
+fn a_processor_reporting_no_features_states_the_reading_is_unmeasured() {
+    let sample = Sample {
+        cpu_info: Some(alloc::vec![cpu(0)]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let cpu = device(&report, DeviceId::Cpu);
+
+    assert_eq!(
+        *fact(cpu, "ISA features"),
+        Reading::Absent(Unmeasured::Unavailable)
+    );
+}
+
+/// With no per-CPU inventory at all the fact states *why* it is absent, from
+/// the verdict the sample already reached, rather than restating it.
+#[test]
+fn the_isa_fact_states_a_refused_inventory_as_refused() {
+    let sample = Sample {
+        cpu_info: None,
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let cpu = device(&report, DeviceId::Cpu);
+
+    assert!(matches!(*fact(cpu, "ISA features"), Reading::Absent(_)));
 }

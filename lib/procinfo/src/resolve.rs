@@ -44,7 +44,6 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
 
-use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondMemberRecord, NetIfAddr, NetIfKind,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
@@ -61,6 +60,7 @@ use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
 use tairix_resref::{KnownNamespace, Op, ResourceRef};
 
 use crate::cputime::for_each_cpu_time;
+use crate::human::cpu_feature_flags;
 use crate::kstats;
 use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
 use crate::list::{field_lossy, ListError, WalkStep};
@@ -1061,27 +1061,6 @@ pub fn cpu_info(transport: &dyn Transport) -> Result<Vec<CpuInfoRecord>, Resolve
         }
         offset = offset.saturating_add(u32::from(PAGE));
     }
-}
-
-/// The lowercase, space-separated ISA-extension flag list of a raw
-/// [`CpuFeatureSet`] bitset, in stable bit order; `(none)` when empty. The
-/// single decode shared by `info:cpu/features` (here) and the `sysinfo cpuinfo`
-/// renderer walks [`CpuFeature::ALL`], so neither keeps a private list.
-fn cpu_feature_flags(bits: u64) -> String {
-    let set = CpuFeatureSet::from_bits(bits);
-    let mut out = String::new();
-    for feature in CpuFeature::ALL {
-        if set.contains(feature) {
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(feature.name());
-        }
-    }
-    if out.is_empty() {
-        out.push_str("(none)");
-    }
-    out
 }
 
 /// The performance-class topology string: the online core count and the

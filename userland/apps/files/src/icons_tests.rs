@@ -351,7 +351,7 @@ fn a_decode_in_flight_is_neither_re_offered_nor_re_recorded() {
 
     let artwork = render_artwork(&mut grid.reader, &mut grid.rasteriser, &job.key, job.side);
     assert!(
-        grid.desk.borrow_mut().deliver(&job, artwork),
+        grid.desk.borrow_mut().deliver(&job, artwork).kept(),
         "the delivery of an in-flight decode was refused"
     );
     assert!(grid.paint(), "the landed decode is drawn");
@@ -374,7 +374,7 @@ fn a_delivery_after_teardown_keeps_nothing() {
 
     let artwork = render_artwork(&mut grid.reader, &mut grid.rasteriser, &job.key, job.side);
     assert!(
-        !grid.desk.borrow_mut().deliver(&job, artwork),
+        !grid.desk.borrow_mut().deliver(&job, artwork).kept(),
         "a stopped desk kept a delivery"
     );
     assert!(

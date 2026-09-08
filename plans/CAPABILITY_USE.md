@@ -452,6 +452,17 @@ authorises it; anything not listed is denied.
   now a re-export) all import the one definition, so the CU4 "one
   definition of both sets, shared with `tools/mkimage`" requirement is
   already satisfied for the installer to reuse.
+- `SESSION_BASELINE` lists **both** spawn capabilities. `CAP_SANDBOX_SPAWN` is
+  strictly narrower than the `CAP_PROC_SPAWN` beside it and the spawn gate
+  already accepts either for a canonical parser child, so listing it grants an
+  interactive account nothing. What it buys is the intersection: a program of
+  that account can request the *narrow* authority in its own manifest — "I
+  decode untrusted files, I start nothing" — and have it survive
+  `ceiling ∩ manifest`. Without it in the ceiling that intersection is empty
+  and such a program would be pushed to ask for general spawn instead, which
+  is exactly the escalation the narrow capability exists to prevent. The
+  desktop's Switchboard monitor is the first bundle to take that route
+  (`plans/ICONS.md`).
 - `tools/mkimage`'s profile-keyed `users_db` seeds the debug root grant
   as `administrator_ceiling()`; its unit test pins the seeded record to
   the exact set. The shared users-root QEMU fixture

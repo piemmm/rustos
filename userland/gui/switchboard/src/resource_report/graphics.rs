@@ -16,7 +16,7 @@ use tairix_abi::hwtree::{HwDeviceClass, HwNode};
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_controls::PressureKind;
 
-use crate::format::{format_bytes, format_pixels, percent};
+use crate::format::{format_bytes, format_pixels, percent, pixel_parts};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
@@ -69,9 +69,10 @@ fn hero(frame: Option<FrameReport>, history: &[u16]) -> PaneHero {
         return PaneHero::facts(Reading::measured("idle"), "")
             .with_context(alloc::vec![String::from("Nothing was recomposed.")]);
     }
+    let (blended, unit) = pixel_parts(frame.blended_px);
     PaneHero {
-        value: Reading::measured(format_pixels(frame.blended_px)),
-        unit: String::from("px blended"),
+        value: Reading::measured(blended),
+        unit: format!("{unit} blended"),
         context: alloc::vec![
             format!(
                 "to recompose {} of {} on screen",

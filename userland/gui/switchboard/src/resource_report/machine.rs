@@ -66,7 +66,7 @@ pub(super) fn sessions(sample: &Sample) -> ResourceDevice {
         kind: PressureKind::Network,
         reading: seats.clone(),
         trend: Vec::new(),
-        hero: PaneHero::facts(seats, "seats"),
+        hero: PaneHero::facts(seats, seat_unit(sample)),
         blocks: alloc::vec![
             PaneBlock::half("SEATS", seat_block(sample)),
             PaneBlock::half("CENSUS", BlockBody::Facts(census_facts(sample))),
@@ -84,6 +84,16 @@ fn seat_count(sample: &Sample) -> Reading {
         sample.seats.as_ref(),
         |seats| seats.len().to_string(),
     )
+}
+
+/// The seat hero's unit, agreeing with the figure beside it: a machine with
+/// one seat reads "1 seat", never "1 seats". An unmeasured count keeps the
+/// plural, which is the form a reader parses as "how many".
+fn seat_unit(sample: &Sample) -> &'static str {
+    match sample.seats.as_ref().map(alloc::vec::Vec::len) {
+        Some(1) => "seat",
+        _ => "seats",
+    }
 }
 
 /// One row per configured seat, naming who holds it.

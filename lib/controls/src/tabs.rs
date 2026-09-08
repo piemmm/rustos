@@ -38,13 +38,13 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, paint_bead, plate_border, role_font, seam_thickness, seam_width,
-    surface_rect, text_plate_height, to_i32, withheld, BeadShape,
+    draw_outline, heavy_contrast, paint_bead, plate_border, rail_thickness, role_font,
+    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -453,12 +453,17 @@ impl Tabs {
     /// pointer loses its lift on every sample.
     ///
     /// The pointer coordinate survives whatever the entries became: it is where
-    /// the reader's pointer is, not a claim about the sample. The hover and the
-    /// press latch each name one *entry*, so they survive only while the run of
-    /// entries is the same run — an entry's live reading and trend are the
-    /// sample's to say and do not disturb them, but a strip that gained, lost
-    /// or re-ordered an entry drops both and waits for the pointer's next
-    /// motion.
+    /// the reader's pointer is, not a claim about the sample. The hover, the
+    /// press latch and the keyboard cursor each name one *entry*, so they
+    /// survive only while the run of entries is the same run — an entry's live
+    /// reading and trend are the sample's to say and do not disturb them, but a
+    /// strip that gained, lost or re-ordered an entry drops all three and waits
+    /// for the reader's next input.
+    ///
+    /// The cursor is the reader's own, not the sample's: a reader who has moved
+    /// it down the strip without committing keeps it there across every
+    /// refresh, where taking `fresh`'s would snap it back to wherever the host
+    /// last set the selection.
     ///
     /// Answers whether the strip's drawn state moved, which is what decides
     /// whether the column it sits in owes a repaint.
@@ -467,6 +472,7 @@ impl Tabs {
         if same_entries(&self.items, &fresh.items) {
             fresh.hovered = self.hovered;
             fresh.armed = self.armed;
+            fresh.current = self.current;
         } else {
             fresh.hovered = None;
             fresh.armed = RenderInvariant::new(None);
@@ -808,7 +814,7 @@ impl Tabs {
             };
             match band.kind {
                 BandKind::Heading(index) => {
-                    self.paint_heading(surface, index, rect, scale, theme, font);
+                    self.paint_heading(surface, index, rect, scale, theme);
                 }
                 BandKind::Item(index) => {
                     self.paint_tab(surface, index, rect, scale, theme, font);
@@ -847,13 +853,7 @@ impl Tabs {
         }
         let left = to_i32(x.saturating_add(pad));
         let muted = Color::from(theme.palette().on_surface_muted);
-        font.draw_text(
-            surface,
-            left,
-            to_i32(y.saturating_add(gap)),
-            font.truncate_to_width(absence.heading(), avail),
-            muted,
-        );
+        paint_group_heading(surface, rect, scale, theme, absence.heading());
         let statement_top = y
             .saturating_add(heading_height(scale, theme))
             .saturating_add(gap);
@@ -869,9 +869,9 @@ impl Tabs {
         );
     }
 
-    /// Paint the quiet group heading above the entry at `index`: its own text
-    /// on the surface behind it, with no plate, so it reads as a break in the
-    /// list rather than as another entry.
+    /// Paint the group heading above the entry at `index`: its own text on the
+    /// surface behind it, with no plate, so it reads as a break in the list
+    /// rather than as another entry.
     fn paint_heading(
         &self,
         surface: &mut Surface,
@@ -879,28 +879,11 @@ impl Tabs {
         rect: (u32, u32, u32, u32),
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) {
         let Some(heading) = self.items.get(index).and_then(|tab| tab.group.as_deref()) else {
             return;
         };
-        let (x, y, w, h) = rect;
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let Some(avail) = w.checked_sub(pad.saturating_mul(2)) else {
-            return;
-        };
-        if avail == 0 || h < font.line_height() {
-            return;
-        }
-        let fitted = font.truncate_to_width(heading, avail);
-        font.draw_text(
-            surface,
-            to_i32(x.saturating_add(pad)),
-            to_i32(y.saturating_add(gap)),
-            fitted,
-            Color::from(theme.palette().on_surface_muted),
-        );
+        paint_group_heading(surface, rect, scale, theme, heading);
     }
 
     /// Paint the tab at `index` into the `rect` [`Self::layout`] gave it:
@@ -926,49 +909,64 @@ impl Tabs {
         let current = self.current == Some(index);
         let lifted = current || self.hovered == Some(index);
 
-        // Tab plate: the selected tab reads as a quiet selected plate on the
-        // content surface in either orientation; an unselected tab is
-        // quieter; a tab either the pointer or the keyboard cursor is on
-        // lifts. Disabled stays muted.
-        let plate = if tab.is_selected() {
-            palette.surface
-        } else if lifted {
-            palette.surface_raised
-        } else {
-            palette.surface_pressed
-        };
-        surface.fill_rect(x, y, w, h, Color::from(plate));
-
-        Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
-
-        // The keyboard focus ring, distinct from a hover lift.
-        if current {
-            draw_outline(
-                surface,
-                x,
-                y,
-                w,
-                h,
-                plate_border(theme, scale).max(1),
-                Color::from(palette.rim_active),
-            );
-        }
-
         match self.orientation {
-            TabsOrientation::Horizontal => {
-                Self::paint_centred_label(surface, rect, scale, theme, font, tab);
-            }
+            // A sidebar entry is a row: selection lifts it to the raised fill
+            // and the pointer or keyboard cursor takes the shared wash, which
+            // is deliberately not that fill — so the cursor can never imitate
+            // selection and needs no ring of its own. A resting entry is the
+            // ground it sits on.
             TabsOrientation::Vertical => {
+                let plate = if tab.is_selected() {
+                    palette.surface_raised
+                } else if lifted {
+                    palette.surface_hover
+                } else {
+                    palette.surface
+                };
+                surface.fill_rect(x, y, w, h, Color::from(plate));
+                Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
                 Self::paint_entry(surface, rect, scale, theme, font, tab);
+            }
+            // A horizontal tab is a page shape, not a row: the selected tab
+            // reads as the content surface it opens onto, an unselected one is
+            // quieter, and the keyboard cursor is ringed because a lift alone
+            // would read as the pointer.
+            TabsOrientation::Horizontal => {
+                let plate = if tab.is_selected() {
+                    palette.surface
+                } else if lifted {
+                    palette.surface_raised
+                } else {
+                    palette.surface_pressed
+                };
+                surface.fill_rect(x, y, w, h, Color::from(plate));
+                Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
+                if current {
+                    draw_outline(
+                        surface,
+                        x,
+                        y,
+                        w,
+                        h,
+                        plate_border(theme, scale).max(1),
+                        Color::from(palette.rim_active),
+                    );
+                }
+                Self::paint_centred_label(surface, rect, scale, theme, font, tab);
             }
         }
     }
 
-    /// Paint `tab`'s seam onto the edge its `orientation` carries it on: a
-    /// strong accent seam for the selected tab, else a Heat Seam while its
-    /// view loads (proportional when the fraction is known).
+    /// Paint `tab`'s selection mark or Heat Seam onto the edge its
+    /// `orientation` carries it on.
     ///
-    /// A selected tab shows selection rather than progress, so its seam wins
+    /// A selected horizontal tab marks the lower edge of a page shape, so it
+    /// takes the seam breadth; a selected sidebar entry marks its *leading*
+    /// edge, which is the shared selection rail every row family draws and so
+    /// takes the rail breadth. A loading tab draws a Heat Seam at the seam
+    /// breadth in either orientation, proportional when the fraction is known.
+    ///
+    /// A selected tab shows selection rather than progress, so its mark wins
     /// over a Heat Seam it would otherwise draw on the very same edge.
     fn paint_seam(
         surface: &mut Surface,
@@ -985,10 +983,15 @@ impl Tabs {
         };
         let base = seam_thickness(theme, scale);
         let (thickness, extent) = if tab.is_selected() {
-            // Heavier contrast doubles the selected seam, so selection still
-            // carries where a hue shift alone would not.
-            let heavy = if heavy_contrast(theme) { 2 } else { 1 };
-            (base.saturating_mul(heavy).min(cross), along)
+            let mark = match orientation {
+                TabsOrientation::Vertical => rail_thickness(theme, scale),
+                // Heavier contrast doubles the selected seam, so selection
+                // still carries where a hue shift alone would not.
+                TabsOrientation::Horizontal => {
+                    base.saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+                }
+            };
+            (mark.min(cross), along)
         } else if tab.is_loading() {
             (base.min(cross), seam_width(tab.state.activity, along))
         } else {
@@ -1002,12 +1005,19 @@ impl Tabs {
     }
 
     /// The colour `tab`'s label reads in: muted when its state rules it out,
-    /// the accent when selected, the plain foreground otherwise.
-    fn label_color(theme: &Theme, tab: &Tab) -> Color {
+    /// `selected` when it is the selected tab, the plain foreground otherwise.
+    ///
+    /// The selected colour is the caller's because the two orientations carry
+    /// selection differently. A page shape has no lift or leading rail to carry
+    /// it, so a horizontal tab's label takes the accent; a sidebar row already
+    /// wears both, and tinting its label as well would make the entry's own
+    /// name a third selection mark and leave the reading beside it the only
+    /// plain text on the row.
+    fn label_color(theme: &Theme, tab: &Tab, selected: Rgba) -> Color {
         let palette = theme.palette();
         Color::from(match tab.state.disposition() {
             ControlDisposition::DisabledByState => palette.on_surface_muted,
-            _ if tab.is_selected() => palette.accent,
+            _ if tab.is_selected() => selected,
             _ => palette.on_surface,
         })
     }
@@ -1044,7 +1054,7 @@ impl Tabs {
                 cx - to_i32(tw) / 2,
                 text_y,
                 fitted,
-                Self::label_color(theme, tab),
+                Self::label_color(theme, tab, theme.palette().accent),
             );
         }
         Self::paint_tab_bead(surface, rect, scale, theme, tab);
@@ -1105,7 +1115,7 @@ impl Tabs {
                 to_i32(inner_x),
                 to_i32(text_y),
                 fitted,
-                Self::label_color(theme, tab),
+                Self::label_color(theme, tab, theme.palette().on_surface),
             );
         }
 
@@ -1342,13 +1352,56 @@ fn entry_height(tab: &Tab, scale: Scale, theme: &Theme) -> u32 {
     }
 }
 
-/// The height one group heading claims: a quiet label with breathing room
-/// above and below, so a heading separates its group rather than reading as
-/// another entry.
-fn heading_height(scale: Scale, theme: &Theme) -> u32 {
-    let font = role_font(theme, scale, TextRole::Body);
+/// Paint a group heading into the top of `rect`: the accent, so a heading
+/// names its group rather than reading as one more entry's label, at the
+/// header role's own size.
+///
+/// Shared by a group's own heading and by the statement an empty group carries,
+/// because both are the same heading and a reader must not be able to tell
+/// which of the two they are looking at from its treatment.
+fn paint_group_heading(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    scale: Scale,
+    theme: &Theme,
+    heading: &str,
+) {
+    let (x, y, w, h) = rect;
+    let font = heading_font(theme, scale);
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-    font.line_height().saturating_add(gap.saturating_mul(2))
+    let Some(avail) = w.checked_sub(pad.saturating_mul(2)) else {
+        return;
+    };
+    if avail == 0 || h < font.line_height() {
+        return;
+    }
+    font.draw_text(
+        surface,
+        to_i32(x.saturating_add(pad)),
+        to_i32(y.saturating_add(gap)),
+        font.truncate_to_width(heading, avail),
+        Color::from(theme.palette().accent),
+    );
+}
+
+/// The face a group heading is set in: the role a header over a list takes,
+/// which is below body size and bold.
+///
+/// The measurement and the paint read this one definition, so a heading's band
+/// is always exactly as tall as the text put in it.
+fn heading_font(theme: &Theme, scale: Scale) -> BitmapFont {
+    role_font(theme, scale, TextRole::SectionHeader)
+}
+
+/// The height one group heading claims: its label with breathing room above
+/// and below, so a heading separates its group rather than reading as another
+/// entry.
+fn heading_height(scale: Scale, theme: &Theme) -> u32 {
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    heading_font(theme, scale)
+        .line_height()
+        .saturating_add(gap.saturating_mul(2))
 }
 
 /// The height an entry's trend claims, from the theme's own chart metric.

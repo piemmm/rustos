@@ -3359,10 +3359,6 @@ mod program {
                 RtLauncher::own_binary(),
                 tairix_rt::LogSink,
             )));
-            // Whether a delivery since the last nudge still owes the session
-            // one, so a batch drained without waking it cannot be stranded by a
-            // final job the desk no longer wants.
-            let mut owed = false;
             loop {
                 let job = {
                     let mut desk = self.desk.lock();
@@ -3382,18 +3378,10 @@ mod program {
                 // calling thread would have.
                 let artwork =
                     tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
-                let (delivered, more) = {
-                    let mut desk = self.desk.lock();
-                    (desk.deliver(&job, artwork), desk.has_work())
-                };
-                owed |= delivered;
-                // Wake the session when the batch is drained rather than after
-                // every icon: a bring-up that wants thirty of them costs one
-                // repaint instead of thirty, and they appear together. A lone
-                // icon empties the queue immediately, so it still lands the
-                // moment it is ready.
-                if owed && !more {
-                    owed = false;
+                // The desk owns when a wake falls due — one per drained batch,
+                // so a bring-up wanting thirty icons costs one repaint and they
+                // appear together — so this worker keeps no count of its own.
+                if self.desk.lock().deliver(&job, artwork).wake() {
                     self.wake.nudge();
                 }
             }

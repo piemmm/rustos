@@ -90,6 +90,11 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
     "program",
 ] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The parser sandbox: the icon artwork every task row and consumer draws is a
+# file on a volume — untrusted input — so it is decoded in a kernel-branded,
+# capability-empty worker this binary re-enters itself as, never in the
+# process that holds this service's authority.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
 
 # The screen's and the panel's tests draw and hit-test for real — a wheel
 # event resolved against real window geometry, theme metrics, and font

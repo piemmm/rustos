@@ -888,6 +888,28 @@ a page:
   metrics, the hit test and every damage-reporting entry point take the scale
   and theme the strip was laid out with — the same shape ActionRail (§11.38)
   already has, so a press can never select an entry drawn at another span.
+- **Selection is a lift and a leading rail, and a sidebar entry wears no focus
+  ring.** A row already has two marks for selection — it lifts to the raised
+  fill, and its *leading* edge takes the accent at the shared rail breadth, the
+  same rail every row family draws. The pointer and the keyboard cursor share
+  the hover wash instead, which §11.13 already keeps distinct from that raised
+  fill, so a cursor can never imitate selection. A ring as well would be a
+  third mark on the same entry and the loudest thing in the column, so the
+  vertical strip draws none; the selected entry's *label* stays the plain
+  foreground for the same reason, leaving the reading beside it and the label
+  reading alike. A resting entry is simply the ground it sits on.
+  A horizontal tab has neither a lift nor a leading rail — it is a page shape,
+  and its selected edge is the lower seam at the seam breadth — so it keeps
+  both the accent label and the ring that tells its keyboard cursor from a
+  hover. A group heading reads in the accent at the header role's size in
+  either form, so a break in the list is never taken for one more entry.
+- **The keyboard cursor belongs to the reader, not to the host's selection.**
+  `Tabs::restate` carries it across a refresh alongside the pointer's hover and
+  press latch, under the same rule: kept while the run of entries is the same
+  run, dropped when one is gained, lost or re-ordered. A host that re-derived
+  it from its own selection each sample would light a ring on the selected
+  entry permanently and snap a reader's cursor back the moment a live reading
+  moved.
 - **Settle point.** A strip has none of its own: selection is a discrete
   commit (`TabsAction::Selected`) the owner applies, and re-stating a reading
   or a trend is a repaint, never a durable action.

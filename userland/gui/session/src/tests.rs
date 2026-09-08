@@ -8411,7 +8411,10 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
         } {
             let artwork =
                 tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
-            assert!(desk.borrow_mut().deliver(&job, artwork));
+            assert!(
+                desk.borrow_mut().deliver(&job, artwork).kept(),
+                "the delivery of an in-flight decode was refused"
+            );
             decoded += 1;
             assert!(decoded < 64, "the warm-up must be a bounded set");
         }
@@ -11114,7 +11117,10 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
         } {
             let artwork =
                 tairix_icon::render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
-            assert!(desk.borrow_mut().deliver(&job, artwork));
+            assert!(
+                desk.borrow_mut().deliver(&job, artwork).kept(),
+                "the delivery of an in-flight decode was refused"
+            );
         }
         shell.warm_launched_artwork(&comp, launched.bundles());
         rounds += 1;

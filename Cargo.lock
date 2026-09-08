@@ -2675,6 +2675,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
+ "tairix-sandbox",
  "tairix-theme",
  "tairix-window",
 ]

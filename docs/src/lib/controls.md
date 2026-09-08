@@ -208,6 +208,24 @@ it, or frame the content that does:
   Because a vertical entry's rectangle depends on the theme's own metrics, the
   hit test and every damage-reporting entry point take the scale and theme the
   strip was laid out with, exactly as `ActionRail` does.
+- **The two orientations carry selection differently, because one is a row and
+  the other is a page shape.** A sidebar entry is a row: selection lifts it to
+  the raised fill and marks its *leading* edge at the shared rail breadth,
+  the pointer or keyboard cursor takes the shared hover wash — deliberately not
+  that fill, so a cursor can never imitate selection — and a resting entry is
+  simply the ground it sits on. It therefore needs no focus ring, and draws
+  none: a ring around the selected entry would be a third selection mark and
+  the loudest thing in the column. Its label stays the plain foreground for the
+  same reason. A horizontal tab has neither a lift nor a leading rail to carry
+  selection, so it keeps the accent label, the lower seam at the seam breadth,
+  and the ring that distinguishes its keyboard cursor from a hover. A group
+  heading reads in the accent at the header role's size in either form, so a
+  break in the list is never mistaken for one more entry's label.
+- **The keyboard cursor is the reader's, not the sample's.** `Tabs::restate`
+  carries it across a refresh alongside the pointer's hover and press latch,
+  and drops it with them when the run of entries gains, loses or re-orders one.
+  A host that re-derived it from its own selection each sample would snap a
+  reader's cursor back the moment a live reading moved.
 - A group with *no* entries states why, through `Tabs::with_absences`. A
   heading is declared by the entry that starts its group, so a group with
   nothing in it has nothing to hang one on and simply vanishes — leaving a

@@ -340,24 +340,43 @@ tier is resolved *in this process* and retained like any other entry, so the
 20–38 µs of coverage work is paid once per (kind, side) rather than per icon
 per frame.
 
-**Its resolver refuses, deliberately, and its icons are therefore the *class*
-tier.** Reading a shipped asset or a bundle's own icon needs `CAP_FS_ACCESS`,
-and decoding untrusted image bytes needs `CAP_PROC_SPAWN` for the sandbox
-child. The Switchboard's manifest requests neither and says so explicitly: it
-already holds the system-wide process scope, task control, and the machine's
-power authority, and it is the last process on the desktop that should also be
-able to read a user's files or start a child. So the cache resolves through
-`NoArtworkSeam` and every icon draws its built-in glyph.
+**Its resolver serves, and the narrow spawn capability is what makes that
+safe.** Reading a bundle's own icon needs `CAP_FS_ACCESS`; decoding those
+untrusted bytes needs a sandbox child, and the capability for *that* is
+`CAP_SANDBOX_SPAWN`, not `CAP_PROC_SPAWN`. The narrow one admits exactly one
+shape of child — the kernel-branded, capability-empty parser worker
+(`SpawnMode::ParserSandbox`) — so a process may decode a hostile file without
+gaining the authority to start anything else. That distinction is the whole
+answer to the objection this plan used to record: the Switchboard holds the
+system-wide process scope, task control and the machine's power authority, and
+a malformed PNG must never be decoded beside them — but it never is, because
+the decode does not happen in this process at all. The greeter holds the same
+pair for the same reason. Real reach stays per-inode, so the service reads only
+what the launching user could read, and an account whose ceiling withholds
+`CAP_FS_ACCESS` falls back to the glyphs.
 
-The *request* still names the bundle, so the resolution order is wired and
-correct end to end: the desktop session reports which bundle it launched each
-window owner from (`SwitchboardCommand::OwnerBundle`) and each row asks for
-that bundle's own icon first. Today that means an attested application draws
-the application-bundle glyph and a process nothing attests — PID 1, a time
-service, a kernel thread — draws the executable one, which is the distinction
-`01-tasks.png` shows between them. Drawing each application's *real* artwork
-needs those two capabilities granted to this service, which is a security
-decision this plan does not take on its own.
+Granting it needed one thing beyond the manifest: the effective set is
+`ceiling ∩ manifest`, and `SESSION_BASELINE` held `CAP_PROC_SPAWN` but not
+`CAP_SANDBOX_SPAWN`, so a manifest asking for the narrow authority intersected
+to nothing. The baseline now lists it — which grants an interactive account
+nothing new, since the spawn gate already accepts `CAP_PROC_SPAWN` for a parser
+child, and is what lets a program of that account ask for the narrow authority
+instead of general spawn.
+
+The read and the sandbox round trip run on a worker thread over the shared
+`ArtworkDesk`, never on the loop that owes the window a frame: a paint records
+what it missed and draws the glyph, and the worker's wake — a permanent member
+of the loop's wait-set — brings the pixels. One wake per drained batch, so a
+table of fifty rows costs one repaint rather than fifty; the desk owns that
+rule, so the file manager and the Switchboard cannot diverge on it.
+
+The *request* names the bundle, so the resolution order is correct end to end:
+the desktop session reports which bundle it launched each window owner from
+(`SwitchboardCommand::OwnerBundle`) and each row asks for that bundle's own
+icon first. Only a window owner has a bundle, so a process nothing attests —
+PID 1, a time service, a kernel thread — draws the executable glyph, which is
+the distinction `01-tasks.png` shows between them. Matching a process *name*
+against a bundle would be guessing and is not done.
 
 **The lookup is passed to the render methods, not carried on `SectionCtx`.**
 This plan said "through `SectionCtx`", which turned out not to fit: that

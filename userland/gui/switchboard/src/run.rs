@@ -69,6 +69,7 @@ mod program {
     use alloc::boxed::Box;
 
     use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+    use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::reply::decode_status_reply;
@@ -86,8 +87,9 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
-        artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, InlineArtwork,
-        NoArtworkSeam,
+        artwork_cache, render_artwork, ArtworkCache, ArtworkDesk, ArtworkJob, ArtworkKey,
+        ArtworkRasteriser, ArtworkReader, ArtworkResolver, Delivered, IconArtworkSource, Resolved,
+        MAX_ARTWORK_BYTES,
     };
     use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
     use tairix_log::{
@@ -96,6 +98,9 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
     use tairix_rt::io::{self, Stderr, Write};
+    use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
+    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
+    use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, CycleOutcome, DegradedField,
         PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction, WaitToken, PANEL_TITLE,
@@ -142,6 +147,12 @@ mod program {
     /// to stop quietly: exiting `0` here would leave the panel vanishing
     /// mid-use with nothing anywhere to say why.
     const EXIT_SESSION_REFUSED: i32 = 5;
+
+    /// Bound on one icon-artwork read: a single byte past the shared artwork
+    /// ceiling, so an asset that exceeds it is *detected* as over-long rather
+    /// than silently truncated into a decodable-looking one. The shared cache
+    /// refuses anything longer before a byte of it reaches the decoder.
+    const ARTWORK_READ_MAX: usize = MAX_ARTWORK_BYTES + 1;
 
     /// The system log this service records its own abnormal end through.
     ///
@@ -319,6 +330,7 @@ mod program {
             command_endpoint: u64,
             desktop: Desktop,
             output_bytes: usize,
+            reads: alloc::sync::Arc<Reads>,
         ) -> Self {
             // The reclaim bookkeeping's audit sink. The shared constructor
             // takes a `'static` borrow, and the runtime sink owns nothing.
@@ -344,7 +356,7 @@ mod program {
                 events: None,
                 session: None,
                 artwork,
-                artwork_resolver: Box::new(InlineArtwork::new(NoArtworkSeam, NoArtworkSeam)),
+                artwork_resolver: Box::new(DeferredArtwork(reads)),
             }
         }
 
@@ -1115,9 +1127,316 @@ mod program {
         Ok(set)
     }
 
+    /// Read at most `max` bytes of `path` under this service's own identity.
+    fn read_bounded_file(path: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
+        let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
+        let content = tairix_rt::read_fd_to_end(fd, max).ok();
+        let _ = tairix_rt::fs_close(fd);
+        content
+    }
+
+    /// The overview's [`ArtworkReader`]: one application's declared icon asset
+    /// read through this service's own capability-checked filesystem access,
+    /// under its own attested identity and with no authority beyond it.
+    ///
+    /// Real reach stays per-inode, so this reads only what the launching user
+    /// could read. The read is bounded by [`ARTWORK_READ_MAX`], so an asset
+    /// larger than the artwork ceiling comes back over-long and is refused
+    /// before any decode; a missing or unreadable asset simply reads as
+    /// `None`. Either way the row falls back to its built-in glyph, so no row
+    /// is ever blank.
+    struct VfsArtworkReader;
+
+    impl ArtworkReader for VfsArtworkReader {
+        fn read(&mut self, path: &str) -> Option<alloc::vec::Vec<u8>> {
+            read_bounded_file(path.as_bytes(), ARTWORK_READ_MAX)
+        }
+    }
+
+    /// The overview's [`ArtworkRasteriser`]: the decode runs in a
+    /// minimum-capability sandbox worker, never in this process.
+    ///
+    /// An application's icon is a file on a volume — untrusted input — so its
+    /// bytes go to the shared icon-rasterisation service running in a
+    /// kernel-branded, capability-empty child this binary re-enters itself as,
+    /// and only validated pixels come back. That matters more here than
+    /// anywhere: this process holds the authority to signal a task it did not
+    /// spawn and to end the machine's power state, and a malformed PNG must
+    /// never be decoded beside it. A refusing, crashed, or replaced worker
+    /// reports `None`, which the row draws as its built-in glyph.
+    struct SandboxRasteriser {
+        /// The parser-sandbox seam: one worker, started on the first decode and
+        /// replaced by the seam if it ever fails.
+        sandbox: ParserSandbox<RtLauncher, tairix_rt::LogSink>,
+    }
+
+    impl ArtworkRasteriser for SandboxRasteriser {
+        fn rasterise(&mut self, side: u32, bytes: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+            rasterise_icon(&mut self.sandbox, side, bytes).ok()
+        }
+    }
+
+    /// The icon reads this service keeps off the loop that owes the window a
+    /// frame, and the one worker that performs them.
+    ///
+    /// Resolving one icon is a bounded file read plus a round trip to the
+    /// parser sandbox. Performed inside a paint that would stall the overview
+    /// once per row, on a surface that lists every task on the machine. So a
+    /// paint *records* what it missed, draws the built-in glyph for that
+    /// frame, and the worker's wake brings the pixels.
+    struct Reads {
+        /// What the paints have asked to be decoded and what has come back.
+        /// Only the desk crosses this lock: the cache that keeps a picture
+        /// lends it as a borrow, which could not outlive a guard.
+        desk: tairix_rt::sync::Mutex<ArtworkDesk>,
+        /// Signalled when a decode is recorded, and on teardown.
+        signal: tairix_rt::sync::Condvar,
+        /// The wake the loop's own wait-set parks on.
+        wake: tairix_rt::sync::WorkerWake,
+    }
+
+    impl Reads {
+        fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
+            Self {
+                desk: tairix_rt::sync::Mutex::new(ArtworkDesk::new()),
+                signal: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One worker's whole life: park until a decode is wanted, read it,
+        /// decode it in the sandbox, deliver it, and wake the loop once the
+        /// batch it was working through has drained.
+        ///
+        /// The decoder seams are built here and reused for every later decode,
+        /// so no sandbox handle ever crosses a thread boundary.
+        fn serve(&self) {
+            let mut reader = VfsArtworkReader;
+            let mut rasteriser = SandboxRasteriser {
+                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+            };
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.signal.wait(desk);
+                    }
+                };
+                // The read and the sandbox round trip, with no lock held:
+                // these are the calls that would otherwise stall the window.
+                let artwork = render_artwork(&mut reader, &mut rasteriser, &job.key, job.side);
+                if self.deliver(&job, artwork).wake() {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Record what a decode produced. When a wake falls due is the desk's
+        /// own batch rule, never a count this service keeps.
+        fn deliver(&self, job: &ArtworkJob, artwork: Option<Surface>) -> Delivered {
+            self.desk.lock().deliver(job, artwork)
+        }
+
+        /// Answer a paint's miss: whatever has landed, else a recorded decode
+        /// and the built-in glyph for this frame.
+        ///
+        /// Called from *inside a paint*, so it must never read. A desk with no
+        /// worker records nothing and every row simply draws its glyph — the
+        /// authority to read a file is exercised on a worker or not at all.
+        fn resolve(&self, key: &ArtworkKey, side: u32) -> Resolved {
+            let (answer, wanted) = {
+                let mut desk = self.desk.lock();
+                let answer = desk.collect(key, side);
+                (answer, desk.has_work())
+            };
+            if wanted {
+                self.signal.notify_one();
+            }
+            answer
+        }
+
+        /// Record `key` at `side` as wanted, without collecting an answer.
+        fn want(&self, key: &ArtworkKey, side: u32) {
+            let wanted = {
+                let mut desk = self.desk.lock();
+                desk.want(key, side);
+                desk.has_work()
+            };
+            if wanted {
+                self.signal.notify_one();
+            }
+        }
+
+        /// Note that the cache could not keep this decode, so nothing offers
+        /// it again until the band that refused it moves.
+        fn decline(&self, key: &ArtworkKey, side: u32) {
+            self.desk.lock().decline(key, side);
+        }
+
+        /// The band moved: offer the refused decodes again.
+        fn retry_declined(&self) {
+            self.desk.lock().retry_declined();
+        }
+
+        /// Whether a decode has landed since this was last asked, so a wake
+        /// that delivered nothing costs no frame.
+        fn take_landed(&self) -> bool {
+            self.desk.lock().take_landed()
+        }
+
+        /// Ask the worker to leave and wake it.
+        fn stop(&self) {
+            // Overwrites every decode still held, so one user's rendered
+            // pixels do not outlive their window in reusable heap.
+            self.desk.lock().stop();
+            self.signal.notify_all();
+        }
+    }
+
+    /// The paint's artwork seam: whatever the worker has already decoded, and
+    /// otherwise a recorded decode and the built-in glyph for this frame.
+    struct DeferredArtwork(alloc::sync::Arc<Reads>);
+
+    impl ArtworkResolver for DeferredArtwork {
+        fn resolve(&mut self, key: &ArtworkKey, side: u32) -> Resolved {
+            self.0.resolve(key, side)
+        }
+
+        fn prefetch(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.want(key, side);
+        }
+
+        fn declined(&mut self, key: &ArtworkKey, side: u32) {
+            self.0.decline(key, side);
+        }
+    }
+
+    /// Stops the reader on every way out, so it is not left reading a disk for
+    /// a window that has gone.
+    ///
+    /// The thread is *detached* rather than joined: a worker mid-read of a slow
+    /// disk would otherwise hold the teardown for as long as that disk takes,
+    /// and it leaves at its next turn round its loop anyway.
+    struct ReadsGuard(alloc::sync::Arc<Reads>);
+
+    impl Drop for ReadsGuard {
+        fn drop(&mut self) {
+            self.0.stop();
+        }
+    }
+
+    /// Start the icon reader, stating a refusal once.
+    ///
+    /// A kernel that will not grant the thread is not a failure: the desk then
+    /// records nothing and every row draws its built-in glyph, which is
+    /// exactly what this service did before it had a reader. The degradation
+    /// is a glyph, never a read on the loop — the alternative would stall the
+    /// overview once per row on a surface that lists every task on the
+    /// machine.
+    fn spawn_reader(reads: &alloc::sync::Arc<Reads>) -> Option<tairix_rt::thread::JoinHandle<()>> {
+        let served = alloc::sync::Arc::clone(reads);
+        match tairix_rt::thread::Thread::spawn(move || served.serve()) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "switchboard: no icon-reader thread ({err:?}); every row draws its built-in glyph"
+                );
+                None
+            }
+        }
+    }
+
+    /// Bind this instance's two mailboxes — the session's per-instance command
+    /// mailbox and the window event mailbox — answering the pair.
+    ///
+    /// Both are derived from this process's own kernel-attested identity, and
+    /// a reserved endpoint is refused before the bind is attempted, so no
+    /// instance can claim a well-known name.
+    fn bind_mailboxes(pid: u64) -> Result<(u64, u64), i32> {
+        let commands = command_endpoint_for(pid);
+        if tairix_abi::ipc::is_reserved_endpoint(commands)
+            || tairix_rt::port_bind(commands, SwitchboardCommand::WIRE_LEN, COMMAND_CAPACITY) != 0
+        {
+            return Err(fail(EXIT_NO_COMMANDS, "command mailbox bind refused"));
+        }
+        let events = tairix_window::event_endpoint_for(pid);
+        if tairix_abi::ipc::is_reserved_endpoint(events)
+            || tairix_rt::port_bind(
+                events,
+                WindowEvent::WIRE_LEN,
+                tairix_window::EVENT_MAILBOX_CAPACITY,
+            ) != 0
+        {
+            return Err(fail(
+                EXIT_NO_WAIT_SOURCE,
+                "window event mailbox bind refused",
+            ));
+        }
+        Ok((commands, events))
+    }
+
+    /// Start the icon reader and arm its wake as a member of `set`.
+    ///
+    /// The desk comes back either way: a kernel that refuses the pipe or the
+    /// thread leaves it stopped, which records nothing and draws every row's
+    /// built-in glyph. Only a refused *wake arm* is fatal — the loop would
+    /// otherwise hold answers it is never told about.
+    ///
+    /// The worker's handle is dropped, which detaches it: a reader mid-read of
+    /// a slow disk must not hold the teardown for as long as that disk takes,
+    /// and it leaves at its next turn round its loop anyway.
+    fn open_reads(set: u64) -> Result<alloc::sync::Arc<Reads>, i32> {
+        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create()));
+        if spawn_reader(&reads).is_none() {
+            reads.stop();
+        }
+        if let Some(read) = reads.wake.read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                WaitToken::Artwork.as_u64(),
+            ) != 0
+            {
+                return Err(fail(EXIT_NO_WAIT_SOURCE, "icon-reader wake wait refused"));
+            }
+        }
+        Ok(reads)
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
+        // The sandbox-worker role, before any other bring-up: every row's
+        // icon artwork is untrusted input, so it is decoded by a
+        // capability-empty child this same binary is re-entered as with the
+        // reserved role argument. That child serves rasterisation requests
+        // over its wired standard streams and nothing else — it never becomes
+        // the monitor.
+        if worker_role() {
+            let mut service = ImageRenderService::default();
+            return match serve_stdio(&mut service) {
+                ServeEnd::Finished => 0,
+                ServeEnd::Failed(_) => 1,
+            };
+        }
+        monitor()
+    }
+
+    /// The monitor proper: bring the mailboxes, wait-set, icon reader and
+    /// window up, then run the tickless loop until something ends it.
+    ///
+    /// Split from [`main`] so the entry point is the role decision alone and
+    /// neither half hides inside the other.
+    fn monitor() -> i32 {
         // From here this task drives a user-facing loop, so declare the
         // frame it owes. A debug image then reports any span that overruns,
         // naming the call that spent it; a shippable one arms nothing and
@@ -1131,26 +1450,20 @@ mod program {
         };
         let pid = origin.pid();
 
-        let commands = command_endpoint_for(pid);
-        if tairix_abi::ipc::is_reserved_endpoint(commands)
-            || tairix_rt::port_bind(commands, SwitchboardCommand::WIRE_LEN, COMMAND_CAPACITY) != 0
-        {
-            return fail(EXIT_NO_COMMANDS, "command mailbox bind refused");
-        }
-        let events = tairix_window::event_endpoint_for(pid);
-        if tairix_abi::ipc::is_reserved_endpoint(events)
-            || tairix_rt::port_bind(
-                events,
-                WindowEvent::WIRE_LEN,
-                tairix_window::EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return fail(EXIT_NO_WAIT_SOURCE, "window event mailbox bind refused");
-        }
+        let (commands, events) = match bind_mailboxes(pid) {
+            Ok(pair) => pair,
+            Err(code) => return code,
+        };
         let set = match arm_wait_set(commands) {
             Ok(set) => set,
             Err(code) => return code,
         };
+
+        let reads = match open_reads(set) {
+            Ok(reads) => reads,
+            Err(code) => return code,
+        };
+        let _reads_guard = ReadsGuard(alloc::sync::Arc::clone(&reads));
 
         let mut client = WindowClient::new(RtWindowTransport);
         // The desktop this window will be shown on: the screen, the density,
@@ -1179,7 +1492,14 @@ mod program {
         // one sizing the window itself is opened with.
         let (frame_w, frame_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let output_bytes = region_bytes(&mode_for(frame_w, frame_h));
-        let mut host = RtHost::new(set, events, commands, desktop, output_bytes);
+        let mut host = RtHost::new(
+            set,
+            events,
+            commands,
+            desktop,
+            output_bytes,
+            alloc::sync::Arc::clone(&reads),
+        );
         host.client = client;
         let mut service = Service::new(pid, probe_scopes(&transport), &authority);
 
@@ -1219,6 +1539,15 @@ mod program {
                 Some(WaitToken::WindowEvent) => {
                     drain_window_events(&mut service, &mut host, &authority);
                 }
+                Some(WaitToken::Artwork) => {
+                    // The readiness is a level peek, so leaving it undrained
+                    // would report ready for ever and turn the park into a
+                    // spin.
+                    reads.wake.drain();
+                    if reads.take_landed() {
+                        service.panel_mut().repaint_whole();
+                    }
+                }
                 Some(WaitToken::MemoryPressure) if tairix_procinfo::pressure::refresh() => {
                     // The machine's band moved: give back whatever the new
                     // band says the retained artwork and glyphs may no longer
@@ -1227,6 +1556,9 @@ mod program {
                     // really move costs one read and no eviction work.
                     host.trim_artwork();
                     tairix_font::trim_glyph_cache();
+                    // The band that refused a decode has moved, so the keys
+                    // held back for it are offered again.
+                    reads.retry_declined();
                 }
                 // A band that did not move needs no trim, and a token the
                 // loop never arms is a spurious wake: either way, re-sample

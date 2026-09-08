@@ -126,7 +126,8 @@ pub mod valueread;
 pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
 pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
 pub use human::{
-    format_count, format_load, format_mib, format_size, format_tenths, format_uptime, SIZE_WIDTH,
+    cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
+    format_uptime, SIZE_WIDTH,
 };
 pub use hwtree::{bus_order, class_label, depth_of, fetch_tree, keep_with_ancestors, HW_TREE_PAGE};
 pub use kstats::{

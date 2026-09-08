@@ -374,3 +374,25 @@ fn the_pressure_banner_draws_nothing_outside_the_pane() {
         "the banner drew outside its own pane"
     );
 }
+
+/// The keyboard cursor is the reader's own, not the sample's. A rebuild that
+/// pinned it to the selection would snap a reader who has moved it down the
+/// rail — to compare two devices before committing — back to the selected
+/// entry once a second, and would light the focus ring on a rail nobody has
+/// focused.
+#[test]
+fn a_rebuilt_rail_leaves_the_readers_cursor_alone() {
+    let report = report(resources(), None, None);
+    let rail = build_rail(&report, 0, Some(DeviceId::Memory));
+
+    assert_eq!(
+        rail.selected(),
+        Some(1),
+        "the rail shows the selected device"
+    );
+    assert_eq!(
+        rail.current(),
+        None,
+        "a fresh sample claimed a keyboard cursor of its own"
+    );
+}

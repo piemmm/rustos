@@ -25,8 +25,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActionRail, Button, ButtonContent, ComboBox, Panel, RailAction, StatusPill, Tab,
-    TabGroupAbsence, Tabs, TabsAction, TabsOrientation,
+    ActionRail, Button, ButtonContent, ComboBox, RailAction, StatusPill, Tab, TabGroupAbsence,
+    Tabs, TabsAction, TabsOrientation,
 };
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
@@ -64,9 +64,8 @@ const FOOTER_HEIGHT: u32 = 28;
 /// when the frame sheds the sidebar.
 const BAND_COMBO_WIDTH: u32 = 132;
 
-/// The action rail's caption. The rail control carries no caption of its
-/// own, so the section seats it in a [`Panel`], which already defines what a
-/// titled container looks like.
+/// The action rail's caption. The rail control carries no caption of its own,
+/// so the section seats it in the surface's shared titled block.
 const RAIL_TITLE: &str = "DEVICE ACTIONS";
 
 /// Which of the section's cursor stops the keyboard is on.
@@ -117,8 +116,6 @@ pub(super) struct ResourcesSection {
     pub(super) compiled_for: (u32, Scale),
     /// The selected device's commands.
     pub(super) actions: ActionRail,
-    /// The plate the commands are seated in, which carries their caption.
-    pub(super) action_panel: Panel,
     /// The banner's relief command, when the selected device wears a banner.
     pub(super) relief: Option<Button>,
     /// The device chooser the band grows when the frame sheds the rail, so
@@ -141,7 +138,6 @@ impl ResourcesSection {
             items: Vec::new(),
             compiled_for: (0, Scale::ONE),
             actions: ActionRail::new(Vec::new()),
-            action_panel: Panel::new(RAIL_TITLE),
             relief: None,
             band_combo: ComboBox::new(Vec::new()),
             focus: 0,
@@ -237,12 +233,13 @@ impl ResourcesSection {
             return;
         }
         let (pitch, gap) = pane::metrics(ctx.scale, ctx.theme);
+        let pad = crate::view::block::content_inset(ctx.scale, ctx.theme);
         let start = u32::try_from(ctx.start).unwrap_or(u32::MAX);
         for (was, now) in rebuilt.retired.iter().zip(&self.items) {
             if was == now {
                 continue;
             }
-            if let Some(rect) = pane::item_rect(now, primary, start, pitch, gap) {
+            if let Some(rect) = pane::item_rect(now, primary, start, pitch, gap, pad) {
                 sweep.report(rect);
             }
         }
@@ -478,7 +475,6 @@ fn build_rail(report: &ResourceReport, offset: usize, selected: Option<DeviceId>
             .and_then(|index| index.checked_sub(offset))
         {
             rail.adopt_selected(position);
-            rail.adopt_current(Some(position));
         }
     }
     rail
@@ -729,9 +725,10 @@ impl SectionView for ResourcesSection {
             artwork,
         );
         if let Some(rect) = ctx.frame.rail {
-            self.action_panel
-                .render(surface, rect, ctx.scale, ctx.theme);
-            if let Some(content) = self.action_panel.content_rect(rect, ctx.scale, ctx.theme) {
+            if let Some(inner) = crate::view::block::plate(surface, rect, ctx.scale, ctx.theme) {
+                crate::view::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
+            }
+            if let Some(content) = crate::view::block::titled_content(rect, ctx.scale, ctx.theme) {
                 self.actions.render(surface, content, ctx.scale, ctx.theme);
             }
         }
@@ -769,7 +766,7 @@ impl SectionView for ResourcesSection {
             }
         }
         let rect = ctx.frame.rail?;
-        let content = self.action_panel.content_rect(rect, ctx.scale, ctx.theme)?;
+        let content = crate::view::block::titled_content(rect, ctx.scale, ctx.theme)?;
         match self
             .actions
             .on_pointer(event, content, ctx.scale, ctx.theme, damage)?
@@ -790,7 +787,7 @@ impl SectionView for ResourcesSection {
         let rect = sweep.ctx.and_then(|ctx| {
             ctx.frame
                 .rail
-                .and_then(|rect| self.action_panel.content_rect(rect, ctx.scale, ctx.theme))
+                .and_then(|rect| crate::view::block::titled_content(rect, ctx.scale, ctx.theme))
         });
         sweep.rail(&mut self.actions, slot, rect);
         for (index, button) in self.actions.items_mut().iter_mut().enumerate() {

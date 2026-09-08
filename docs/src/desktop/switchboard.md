@@ -182,9 +182,10 @@ the same reason.
 Tasks is a census in the location band, a header band, the rows, the selected
 task's commands beside them, and a footer band (`plans/NEW-SWITCHBOARD.md` S4).
 
-The window's **location band** carries the table's census: four plated
+The window's **location band** carries the table's census: four
 `MetricTile`s — Processes, Jobs, Services, Alerts — beside the trail naming
-where the reader is, each with the glyph of the thing it counts. The band grows
+where the reader is, each with the glyph of the thing it counts and each on
+the surface's shared block plate (below). The band grows
 to seat them and shrinks back for a section that has no census; a window too
 narrow to seat both drops the census rather than abbreviating the reader's own
 location.
@@ -214,15 +215,32 @@ carries a name and no image path. A process nothing attests a bundle for —
 PID 1, a time service, a kernel thread — draws the executable class icon rather
 than being handed an application's picture.
 
-This service resolves the *class* tier and no further, by design. Reading a
-shipped asset or a bundle's own icon would need `CAP_FS_ACCESS`, and decoding
-untrusted image bytes a `CAP_PROC_SPAWN` sandbox child; the manifest requests
-neither, because this process already holds the system-wide process scope,
-task control and the machine's power authority and is the last one that should
-also read a user's files. Every icon therefore draws its built-in glyph —
-resolved once per (kind, pixel side) into the panel's retained artwork cache
-and blitted thereafter, which is what stopped every tile and row re-resolving
-its coverage on the draw path each frame. Every
+**Every application draws its own icon, decoded away from this service's
+authority.** The manifest requests `CAP_FS_ACCESS` to read the launching
+bundle's declared asset under this service's own attested identity, and
+`CAP_SANDBOX_SPAWN` — not `CAP_PROC_SPAWN` — to decode those untrusted bytes.
+The narrow capability admits exactly one shape of child: a kernel-branded,
+capability-empty parser worker this binary re-enters itself as. So the monitor
+gains no general authority to start a process, and a malformed PNG is never
+decoded beside the system-wide process scope, task control and power authority
+this process holds. Real reach stays per-inode: it reads only what the
+launching user could read, and an account whose ceiling withholds
+`CAP_FS_ACCESS` simply gets the glyphs.
+
+The read and the sandbox round trip both happen on a worker thread, never on
+the loop that owes the window a frame. A paint *records* what it missed and
+draws the built-in glyph for that frame; the worker's wake — a permanent
+member of the same wait-set the loop already parks in — brings the pixels and
+the next frame shows them. One wake per drained batch, so a table of fifty
+rows costs one repaint rather than fifty. A kernel that refuses the thread or
+the wake pipe reports it once and every row keeps its glyph; the read never
+moves onto the loop. Each answer is retained once per (kind or asset, pixel
+side) in the panel's artwork cache and blitted thereafter, and the cache gives
+memory back on the memory-pressure band wake.
+
+Only a *window owner* has a bundle to draw, because the session is what
+reports it. A non-windowed process keeps its class glyph: matching a process
+*name* against a bundle would be guessing. Every
 column is a *reading* about the task. The sort is the header's own, applied
 over the filtered rows and stable — rows a column cannot separate keep the
 order the sample reported them in. *Activity* is the task's own CPU sparkline,
@@ -368,11 +386,39 @@ cells each with its own trace, the tasks costing the device most, a status
 pill the health buckets resolve to, or genuine facts. Rendering a resource as
 key/value text is the defect this section exists to fix.
 
-Each cell draws its own hairline rounded rim around an *unplated* tile, so a
-core's name, trace and two readings share one surface while a dozen cores stay
-told apart; its performance class is an outlined, toned `StatusPill` — orange
-for a throughput core, green for an efficiency one — because a resting pill's
-wash reads as nothing at badge size.
+**One block anatomy, shared by all three sections.** A block — the hero, a
+pane's detail block, a census tile, a per-core cell, a fault card, a fault's
+fact and timeline blocks, and each section's action column — is a
+hairline-rimmed plate a step lighter than the section behind it, under a
+small-caps accent title with a hairline rule. It is composition over the
+shared plate primitives rather than a control, because `Panel` is a different
+anatomy (a header band at control height, a dominant rail, a signal bead, an
+actions row) and is shared with the terminal, the taskbar and the file
+manager, so retuning its caption to match would retune those three. The paint
+and the layout read one definition of where a block's content lands, so a
+command is hit-tested and focused exactly where it was drawn.
+
+Two regions deliberately wear no plate. The **device rail** is a list of
+destinations rather than a block of readings: its selected entry lifts and
+marks its leading edge, and its group headings carry the accent. The
+**Recovery detail pane** *is* the detail region, and the fault's identity line
+at the top of it is the heading that says what it describes — it used to be a
+titled `Panel` whose caption was the fault's name *and* draw that name again
+inside itself, so the name appeared twice.
+
+A block whose body brings its own plates draws none of its own, and its title
+draws no rule. The per-core grid is the case: each cell draws the same plate,
+which is what tells one core's figures from its neighbour's, and a plate
+around the grid would nest one rim inside another. The tile inside a cell is
+*unplated*, so a core's name, trace and two readings share one surface; its
+performance class is an outlined, toned `StatusPill` — orange for a throughput
+core, green for an efficiency one — because a resting pill's wash reads as
+nothing at badge size.
+
+**The hero's figure leads and its unit trails quietly.** The figure is set in
+`TextRole::Display` — the one figure a surface is built around — against a
+body-size unit on the same baseline, and it therefore carries no unit of its
+own: a spelled-out percentage would render `18% % busy`.
 
 **The per-core grid spreads evenly and every cell is one size.** How many
 cells a row can seat is a function of the pane's width, so the grid wraps
@@ -481,7 +527,8 @@ selection to keep reads.
 
 The **detail** pane names the fault and the task it is, a `StatusPill` naming
 what the fault costs while it stands, a `FactList` of its status, its age and
-the recommendation, and then a `Tabs` strip over three pages:
+the recommendation on the shared block plate, and then a `Tabs` strip over
+three pages, whose selected page draws on a plate of its own:
 
 | Page | What it reads |
 |---|---|
@@ -496,10 +543,12 @@ says so plainly — a task the kernel stopped, or one merely gone
 unresponsive, has faulted without ever raising a user fault, so that is a
 statement of fact and deliberately does not wear the unmeasured mark.
 
-The **impact** column stacks four unplated `MetricTile`s for the faulting
-task's own CPU, memory, disk and network. Network is always unmeasured: no
-query reports a process's network use, so the tile says so rather than
-showing a zero.
+The **impact** column is titled and stacks four unplated `MetricTile`s for the
+faulting task's own CPU, memory, disk and network — titled but unplated,
+because the tiles are the readings the resource panes already draw and a
+plate around a stack of them would nest one inside the pane's own. Network is
+always unmeasured: no query reports a process's network use, so the tile says
+so rather than showing a zero.
 
 A fault's **age** is tracked by the service, not read from the kernel: there
 is no state-change timestamp anywhere in the System Information API, so the

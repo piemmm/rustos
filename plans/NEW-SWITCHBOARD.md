@@ -365,6 +365,17 @@ reading; a fact list cannot carry it.
   a dozen disks gets a scrolling rail, not a truncated one, and no entry
   count is a compile-time constant.
 
+  **The rail is the one region that wears no plate**, because it is a list of
+  destinations rather than a block of readings. Its selected entry lifts to the
+  raised fill and marks its leading edge at the rail breadth, and its group
+  headings read in the accent at the header role's size — the vocabulary
+  `plans/GUI-CONTROLS-DESIGN.md` §11.12 now states for every sidebar list, so
+  no part of it is this surface's own. The section must not re-derive the
+  strip's keyboard cursor from its own selection each sample: the cursor is the
+  reader's, `Tabs::restate` carries it, and pinning it to the selection lit a
+  focus ring around the selected entry permanently and snapped a reader's
+  cursor back whenever a reading moved.
+
 - **header — the pane's hero.** The device's headline reading, its context
   line, and its instrument: a `Chart` trend where the reading is a rate (CPU,
   disk, network, graphics) and a `Track` where it is a fraction of a measured
@@ -372,27 +383,60 @@ reading; a fact list cannot carry it.
   renderer. A rate has no fixed ceiling to fill a bar against.
 
   **The figure leads and the unit trails quietly**, so the hero reads as one
-  number rather than a sentence: the value is set in `TextRole::Heading` — the
-  role that means "the largest text in a surface", which is exactly what a
-  pane's headline reading is — against a body-size unit on the *same
-  baseline*. The boards draw the figure a little larger still (their `18`
-  measures about 2.9 body cap-heights against the unit's 1.4, so ~2.07×), and
-  the shipped ladder has no rung between `Heading` (133%) and `Display`
-  (250%). `Display` is the whole-screen readout role and its line does not fit
-  the hero's four-row allocation without dropping a context line, so `Heading`
-  is the rung; closing the remaining gap means a new ladder rung, which is a
-  theme change and not this surface's to make.
+  number rather than a sentence: the value is set in `TextRole::Display`
+  against a body-size unit on the *same baseline*. The boards draw the figure
+  about 2.9 body cap-heights, so of the two rungs that could carry it —
+  `Heading` (133%) and `Display` (250%) — `Display` is the near one and
+  `Heading` reads as barely emphasised beside its own unit. The role's job is
+  stated as "the one figure a surface is built around", which is what a pane's
+  headline reading is; it needs no new rung, and 250% seats its line plus both
+  context lines inside the hero's four-row band.
+
+  **The figure therefore carries no unit of its own.** A value spelled `18%`
+  against a `% busy` unit renders `18% % busy`, so a hero's figure comes from
+  a formatter that yields digits alone (`whole_percent`, `pixel_parts`) while a
+  reading that stands by itself — a rail entry, a per-core cell, a consumer
+  row — keeps the spelled form. The magnitude prefix belongs to the unit for
+  the same reason: `4.2` against `M px`, never `4.2M` against `px`.
+
+**One block anatomy, shared by all three sections** (`view/block.rs`). The
+boards draw every framed thing the same way, so it is defined once: a
+hairline-rimmed plate a step lighter than the section behind it
+(`surface_raised` as a `ChromeLayer::Plate`), under a small-caps accent title
+at `TextRole::SectionHeader` with a hairline rule. The hero, every pane detail
+block, a Tasks census tile, a per-core cell, a fault card and the fault's fact
+and timeline blocks are all that one block; so are the action columns' titled
+plates, which is what retired the `Panel` they used to sit in — a header band
+at control height with a dominant rail and a signal bead is a different
+anatomy, and `Panel` is shared with the terminal, the taskbar and the file
+manager, so retuning its caption would retune those.
+
+The paint and the layout read one definition of where a block's content lands
+(`block::content_rect`, `block::titled_content`, `block::title_height`), so a
+command is hit-tested and focused exactly where it was drawn.
+
+A block whose body brings its own plates draws none of its own and its title
+draws no rule (`BlockBody::self_plating`): the per-core grid's cells already
+carry the rim, and a plate around the grid would nest one inside another. The
+Recovery detail pane is the other case — it wears no plate at all, because it
+*is* the detail region and the fault's identity line is its heading; it used
+to be a titled `Panel` whose caption was the fault's name *and* draw that name
+again inside itself.
 
 - **primary — the pane's own detail**, per device:
 
   - **CPU** (`02-cpu.png`) — the per-core grid: one cell per logical CPU
     carrying the core's own trace, its busy percentage, its live measured
-    clock and its performance class. Then the processor fact columns.
+    clock and its performance class. Then the processor fact columns, which
+    include the ISA extensions a program may rely on: the *intersection* over
+    every reported core, because a heterogeneous machine schedules a task on
+    whichever core is free, so an extension only the performance cores
+    implement is one no unpinned program may use. Zero bits reads as
+    unmeasured, never as "this CPU implements none".
     "Unplated" is the *tile's* property — `MetricTile::unplated()`, no Alloy
     Plate and no padding of its own, so a core's name, trace and two readings
     share one surface instead of nesting a plate per reading. The **cell** is
-    the pane's own concept and draws its own hairline rounded rim around that
-    tile (`paint_surface_plate` at the shared `plate_border`), because in a
+    the block plate above, because in a
     grid of a dozen cores nothing else separates one core's figures from its
     neighbour's; the boards show that rim in both themes. The class badge is a
     toned, *outlined* `StatusPill` — orange `P`, green `E` — because a
@@ -1151,14 +1195,20 @@ does not yet say.
 - **The band's shed route is built but never drawn.** The narrow-window
   `ComboBox` (`09-theme-and-shed.png`'s "▼ CPU") is constructed on every
   sample and neither rendered nor hit-tested.
-- **Not yet audited against the boards at all:** the census tiles, the filter
-  pills, the task row's leading pressure gutter, the faulted-task Signal Bead,
-  the composition-bar legend, and the block section-header colour.
-- **Each application's *real* icon needs a capability decision.** The
-  resolution order is wired end to end and every row asks for the launching
-  bundle's own picture, but this service's resolver refuses: reading an asset
-  needs `CAP_FS_ACCESS` and decoding it needs a `CAP_PROC_SPAWN` sandbox
-  child, and the manifest requests neither on purpose (`plans/ICONS.md` §10).
-  Until that is granted — or the pixels arrive some other way — an attested
-  application draws the application-bundle glyph and everything else the
-  executable one.
+- **Not yet audited against the boards at all:** the filter pills (equal-width
+  across the strip where the boards size each to its own label), the task row's
+  leading pressure gutter, the faulted-task Signal Bead, and the
+  composition-bar legend.
+- **Still divergent, deliberately:** the per-core cell stacks its busy figure
+  under its name and draws its trace across both, where the boards put the name
+  alone on top, the trace in the middle and the two readings on the bottom
+  line; the class badge is a capsule at control height where the boards draw a
+  compact rounded square; and the processor block states one `Model` row joined
+  with `·` where the boards give the performance and efficiency parts a row
+  each and add a `Scheduler policy` row. None has a reading behind it that is
+  wrong — each is a layout the boards spell differently.
+- **The Recovery fault column carries no `FAULTS` heading**, where the boards
+  do. The card list's geometry is the shared `ListInfo::cards` scroll range, so
+  a heading means insetting that range rather than drawing above it, and the
+  column is the one place a heading would have to come from the section instead
+  of from a group of entries.

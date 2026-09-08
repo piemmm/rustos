@@ -13,7 +13,7 @@ use tairix_abi::sysinfo::{CpuCoreClass, CpuInfoRecord, CpuLoadRecord, LoadAverag
 use tairix_controls::PressureKind;
 
 use super::{consumers, reading as reading_of};
-use crate::format::percent;
+use crate::format::{percent, whole_percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
@@ -43,7 +43,14 @@ pub(super) fn device(
         reading: busy.clone(),
         trend: history.clone(),
         hero: PaneHero {
-            value: busy,
+            // The figure carries no unit of its own: the hero draws "% busy"
+            // beside it, and a spelled-out percentage would read "18% % busy".
+            value: reading_of(
+                sample,
+                DegradedField::CpuTime,
+                sample.cpu_busy_permille,
+                whole_percent,
+            ),
             unit: String::from("% busy"),
             context: context(sample),
             instrument: HeroInstrument::Trend {
@@ -112,6 +119,32 @@ fn blocks(sample: &Sample, meters: &RollingMeters, bundles: &OwnerBundles) -> Ve
     ]
 }
 
+/// The ISA extensions a program running on this machine may rely on: the
+/// intersection over every reported core, in the ABI's own flag spelling.
+///
+/// The intersection rather than the union, because a heterogeneous machine
+/// schedules a task on whichever core is free — an extension only the
+/// performance cores implement is one no program may use unpinned. A port
+/// that reads no features answers zero bits, and that reads as unmeasured
+/// rather than as "this CPU implements none": the second would be a claim
+/// about the silicon that nothing measured.
+fn isa_features(sample: &Sample) -> Reading {
+    let Some(cpus) = sample.cpu_info.as_ref() else {
+        return Reading::Absent(Unmeasured::from_absence(
+            sample.absence(DegradedField::CpuInfo),
+        ));
+    };
+    let shared = cpus
+        .iter()
+        .map(|cpu| cpu.feature_bits)
+        .reduce(|common, bits| common & bits)
+        .unwrap_or(0);
+    if shared == 0 {
+        return Reading::Absent(Unmeasured::Unavailable);
+    }
+    Reading::measured(tairix_procinfo::cpu_feature_flags(shared))
+}
+
 /// One cell per logical CPU, each carrying its own core's trace.
 fn core_cells(sample: &Sample, meters: &RollingMeters) -> Vec<CoreCell> {
     let Some(cpus) = sample.cpu_info.as_ref() else {
@@ -167,6 +200,7 @@ fn processor_facts(sample: &Sample) -> Vec<ReadingFact> {
             |total| format!("{total} since boot"),
         ),
     ));
+    facts.push(ReadingFact::new("ISA features", isa_features(sample)));
     facts.push(ReadingFact::new(
         "Run-queue depth",
         reading_of(

@@ -6,7 +6,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use tairix_abi::cpufeatures::{CpuFeature, CpuFeatureSet};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::raid::{ArrayHealth, RaidLevel};
 use tairix_abi::raid_admin::{
@@ -741,26 +740,6 @@ fn format_mhz(hz: u64) -> String {
     format!("{whole}.{milli:03}")
 }
 
-/// The lowercase feature-flag list of a [`CpuFeatureSet`], space-separated
-/// in stable bit order — the `/proc/cpuinfo` "flags" line. `(none)` when
-/// the set is empty (the honest answer for a build-time-floor CPU, never a
-/// fabricated flag).
-fn feature_flags(set: CpuFeatureSet) -> String {
-    let mut out = String::new();
-    for feature in CpuFeature::ALL {
-        if set.contains(feature) {
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(feature.name());
-        }
-    }
-    if out.is_empty() {
-        out.push_str("(none)");
-    }
-    out
-}
-
 /// Render one CPU's `/proc/cpuinfo`-superset block to `out`.
 ///
 /// Reports the vendor/model, the performance class, the live measured
@@ -799,7 +778,7 @@ fn render_cpu_info(record: &CpuInfoRecord, out: &dyn Output) -> Result<(), Sysin
         out,
         &format!(
             "flags         : {}",
-            feature_flags(CpuFeatureSet::from_bits(record.feature_bits))
+            tairix_procinfo::cpu_feature_flags(record.feature_bits)
         ),
     )
 }

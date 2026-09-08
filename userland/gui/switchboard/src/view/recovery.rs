@@ -19,7 +19,7 @@ use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
     ActionRail, AuthorityState, Button, ButtonContent, Card, ControlRole, ControlState, EventMark,
-    Fact, FactList, MetricLayout, MetricTile, Panel, PressureKind, RailAction, RecoveryState,
+    Fact, FactList, MetricLayout, MetricTile, PressureKind, RailAction, RecoveryState,
     SelectionState, StatusPill, Tab, Tabs, TabsAction, TabsOrientation, Timeline, TimelineEvent,
 };
 
@@ -227,9 +227,8 @@ impl FaultPage {
     }
 }
 
-/// The rail's title. The rail control carries no caption of its own, so
-/// the section seats it in a [`Panel`], which already defines what a titled
-/// container looks like.
+/// The rail's title. The rail control carries no caption of its own, so the
+/// section seats it in the surface's shared titled block.
 const RAIL_TITLE: &str = "RECOVERY ACTIONS";
 
 /// The impact column's logical width: one unplated reading tile.
@@ -257,8 +256,6 @@ pub(super) struct RecoverySection {
     pub(super) pages: Tabs,
     /// The selected fault's commands.
     pub(super) rail: ActionRail,
-    /// The plate the rail is seated in, which carries its caption.
-    pub(super) rail_panel: Panel,
     /// How many faults have cleared, as the model reports it.
     pub(super) resolved: usize,
     /// Where the content cursor is: a fault card, then the page strip,
@@ -311,7 +308,6 @@ impl RecoverySection {
             page: FaultPage::Timeline,
             pages: page_tabs(FaultPage::Timeline),
             rail: ActionRail::new(Vec::new()),
-            rail_panel: Panel::new(RAIL_TITLE),
             resolved: 0,
             focus: 0,
             action: 0,
@@ -465,7 +461,10 @@ impl RecoverySection {
         let gap = scale.scale_length(theme.metrics().control_gap);
         let line = font.line_height();
         let pill_h = StatusPill::measured_height(scale, theme);
-        let facts_h = FactList::row_height(scale, theme).saturating_mul(3);
+        let pad = crate::view::block::content_inset(scale, theme);
+        let facts_h = FactList::row_height(scale, theme)
+            .saturating_mul(3)
+            .saturating_add(pad.saturating_mul(2));
         let pages_h = pages.measured_extent(scale, theme);
         let mut top = content.top();
         let mut left = content.height;
@@ -499,33 +498,27 @@ impl RecoverySection {
     /// Where the detail pane seats its page strip, or [`None`] when the pane
     /// is too small to seat it.
     fn pages_rect(&self, ctx: SectionCtx<'_>) -> Option<Rect> {
-        let content = self.detail_content(&ctx.frame, ctx.scale, ctx.theme)?;
+        let content = Self::detail_content(&ctx.frame, ctx.scale, ctx.theme)?;
         let layout = Self::detail_layout(content, &self.pages, ctx.scale, ctx.theme, ctx.font)?;
         Some(layout.pages)
     }
 
-    /// The plate the detail pane draws in: its caption is the selected
-    /// fault's own name, so the pane says what it is describing.
-    fn detail_panel(&self) -> Panel {
-        Panel::new(self.selected_item().map_or(DETAIL_TITLE, |item| &item.name))
-    }
-
-    /// The detail pane's own content rectangle inside its plate, or
-    /// [`None`] when the frame dropped the pane under width pressure.
-    fn detail_content(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        self.detail_panel()
-            .content_rect(frame.detail?, scale, theme)
+    /// The detail pane's own content rectangle, or [`None`] when the frame
+    /// dropped the pane under width pressure.
+    ///
+    /// The pane wears no plate of its own: it *is* the section's detail
+    /// region, and the fault's identity line at the top of it is the heading
+    /// that says what it describes. The blocks inside it — the fact list and
+    /// the selected page's body — carry the plates, so a reader sees one
+    /// framed block per reading rather than a frame around the frames.
+    fn detail_content(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        crate::view::block::content_rect(frame.detail?, scale, theme)
     }
 
     /// The rail's own content rectangle inside its plate, or [`None`] when
     /// the frame dropped the rail under width pressure.
-    pub(super) fn rail_content(
-        &self,
-        frame: &SectionFrame,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<Rect> {
-        self.rail_panel.content_rect(frame.rail?, scale, theme)
+    pub(super) fn rail_content(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        crate::view::block::titled_content(frame.rail?, scale, theme)
     }
 
     /// Paint the selected fault's detail pane.
@@ -533,9 +526,7 @@ impl RecoverySection {
         let Some(rect) = ctx.frame.detail else {
             return;
         };
-        let panel = self.detail_panel();
-        panel.render(surface, rect, ctx.scale, ctx.theme);
-        let Some(content) = panel.content_rect(rect, ctx.scale, ctx.theme) else {
+        let Some(content) = crate::view::block::content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
         let palette = ctx.theme.palette();
@@ -562,7 +553,10 @@ impl RecoverySection {
             Color::from(palette.on_surface),
         );
         impact_pill(item).render(surface, layout.pill, ctx.scale, ctx.theme);
-        detail_facts(item).render(surface, layout.facts, ctx.scale, ctx.theme);
+        if let Some(inner) = crate::view::block::plate(surface, layout.facts, ctx.scale, ctx.theme)
+        {
+            detail_facts(item).render(surface, inner, ctx.scale, ctx.theme);
+        }
         self.pages
             .render(surface, layout.pages, ctx.scale, ctx.theme);
         self.render_page(surface, item, layout.body, ctx);
@@ -579,6 +573,9 @@ impl RecoverySection {
         if body.is_empty() {
             return;
         }
+        let Some(body) = crate::view::block::plate(surface, body, ctx.scale, ctx.theme) else {
+            return;
+        };
         let muted = Color::from(ctx.theme.palette().on_surface_muted);
         match self.page {
             FaultPage::Timeline => {
@@ -598,7 +595,12 @@ impl RecoverySection {
         }
     }
 
-    /// Paint the selected fault's four impact readings, stacked.
+    /// Paint the selected fault's four impact readings under their title,
+    /// stacked.
+    ///
+    /// Titled but unplated: the tiles are the readings the resource panes
+    /// already draw, and a plate around a stack of them would nest one inside
+    /// the pane's own.
     fn render_impact(&self, surface: &mut Surface, ctx: SectionCtx<'_>) {
         let Some(column) = ctx.frame.impact else {
             return;
@@ -606,6 +608,19 @@ impl RecoverySection {
         let Some(item) = self.selected_item() else {
             return;
         };
+        let below =
+            crate::view::block::bare_title(surface, column, ctx.scale, ctx.theme, IMPACT_TITLE);
+        let column = Rect::new(
+            column.left(),
+            below,
+            column.width,
+            column
+                .height
+                .saturating_sub(below.saturating_sub(column.top()).unsigned_abs()),
+        );
+        if column.is_empty() {
+            return;
+        }
         let tiles = impact_tiles(item);
         let gap = ctx.scale.scale_length(ctx.theme.metrics().control_gap);
         let count = u32::try_from(tiles.len()).unwrap_or(1).max(1);
@@ -630,8 +645,10 @@ impl RecoverySection {
         let Some(rail) = ctx.frame.rail else {
             return;
         };
-        self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
-        if let Some(content) = self.rail_panel.content_rect(rail, ctx.scale, ctx.theme) {
+        if let Some(inner) = crate::view::block::plate(surface, rail, ctx.scale, ctx.theme) {
+            crate::view::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
+        }
+        if let Some(content) = crate::view::block::titled_content(rail, ctx.scale, ctx.theme) {
             self.rail.render(surface, content, ctx.scale, ctx.theme);
         }
     }
@@ -652,8 +669,8 @@ impl RecoverySection {
     }
 }
 
-/// The detail pane's caption when no fault is selected.
-const DETAIL_TITLE: &str = "FAULT";
+/// What the impact column is a stack of.
+const IMPACT_TITLE: &str = "IMPACT";
 
 /// What the Crash Snapshot page says for a fault the kernel recorded no
 /// crash for.
@@ -1018,9 +1035,8 @@ impl SectionView for RecoverySection {
             }
             Stop::Rail(slot) => {
                 let index = self.selected_index()?;
-                let rail = self
-                    .rail_content(&ctx.frame, ctx.scale, ctx.theme)
-                    .unwrap_or(Rect::EMPTY);
+                let rail =
+                    Self::rail_content(&ctx.frame, ctx.scale, ctx.theme).unwrap_or(Rect::EMPTY);
                 self.rail.set_focus(Some(slot), rail, damage);
                 let RailAction::Activate { index: fired } = self.rail.on_key(key, rail, damage)?;
                 Some(SectionOutcome::Action(SwitchboardAction::Recovery {
@@ -1084,7 +1100,7 @@ impl SectionView for RecoverySection {
         }
 
         let index = self.selected_index()?;
-        let rail = self.rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
+        let rail = Self::rail_content(&ctx.frame, ctx.scale, ctx.theme)?;
         let RailAction::Activate { index: fired } = self
             .rail
             .on_pointer(event, rail, ctx.scale, ctx.theme, damage)?;
@@ -1118,7 +1134,7 @@ impl SectionView for RecoverySection {
         };
         let rail = sweep
             .ctx
-            .and_then(|ctx| self.rail_content(&ctx.frame, ctx.scale, ctx.theme));
+            .and_then(|ctx| Self::rail_content(&ctx.frame, ctx.scale, ctx.theme));
         sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));

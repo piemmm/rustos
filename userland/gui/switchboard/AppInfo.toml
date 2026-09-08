@@ -27,8 +27,19 @@
 # "not capable": the Restart and Shut Down rows are then never actionable
 # and nothing is ever attempted.
 #
-# The service requests no filesystem, spawn, or network authority: it samples
-# through the ungated/gated sysinfo queries, posts to the seat-scoped
+# CAP_FS_ACCESS and CAP_SANDBOX_SPAWN are what let every running application
+# draw its own icon: the overview reads the launching bundle's declared icon
+# asset under this service's own attested identity, and decodes those
+# untrusted bytes in a kernel-branded, capability-empty worker rather than in
+# the address space holding CAP_PROC_CONTROL and CAP_SYSTEM_POWER.
+# CAP_SANDBOX_SPAWN rather than CAP_PROC_SPAWN because it admits exactly that
+# one canonical parser child and nothing else, so the monitor gains no general
+# authority to start a process. Real reach stays per-inode: the service reads
+# only what the launching user could read, and an account whose ceiling
+# withholds CAP_FS_ACCESS simply gets the built-in glyphs.
+#
+# It requests no network authority and no general spawn: it samples through the
+# ungated/gated sysinfo queries, posts to the seat-scoped
 # SWITCHBOARD_ENDPOINT the desktop session itself binds, and asks that
 # session — never the kernel directly — to raise or re-launch an owner.
 id = "os.tairix.switchboard"
@@ -37,7 +48,7 @@ version = "0.1.0"
 kind = "service"
 # CAP_LOG_EMIT so the records it emits reach the log rather than being
 # refused into an audited denial that hides what they were reporting.
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER", "CAP_LOG_EMIT"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_KERNEL", "CAP_SYSINFO_HW", "CAP_SHM", "CAP_PROC_CONTROL", "CAP_SYSTEM_POWER", "CAP_FS_ACCESS", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "switchboard.png"
 # No icon-bar slot of its own: the bar carries a permanent Switchboard capsule

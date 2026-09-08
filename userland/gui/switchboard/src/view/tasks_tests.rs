@@ -435,6 +435,9 @@ fn expected_census(counts: [usize; 4]) -> alloc::vec::Vec<MetricTile> {
         MetricTile::new(*label, alloc::format!("{count}"), *tint)
             .with_layout(MetricLayout::Stacked)
             .with_icon(*icon)
+            // The band draws the shared block plate around it, so the tile
+            // itself carries none.
+            .unplated()
     })
     .collect()
 }

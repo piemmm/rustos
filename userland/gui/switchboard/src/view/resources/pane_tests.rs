@@ -287,3 +287,80 @@ fn a_consumer_row_asks_the_cache_for_the_launching_applications_picture() {
         artwork.asked
     );
 }
+
+/// The hero is the one figure the pane is built around, so it is set in the
+/// display role rather than the panel-heading role a block title takes.
+///
+/// Asserted through the height the tile measures — the role's own line — so
+/// the test observes what a reader sees rather than a field.
+#[test]
+fn the_hero_is_set_in_the_display_role() {
+    let theme = Theme::dark();
+    let hero = PaneHero::facts(Reading::measured("18"), "% busy");
+    let items = compile(&hero, false, &[], PressureKind::Cpu, 6);
+    let tile = hero_tile(&items);
+
+    let reference = |role| {
+        tairix_controls::MetricTile::new(
+            alloc::string::String::new(),
+            alloc::string::String::from("18"),
+            PressureKind::Cpu,
+        )
+        .with_layout(tairix_controls::MetricLayout::Stacked)
+        .with_value_role(role)
+        .with_unit(alloc::string::String::from("% busy"))
+        .unplated()
+        .measured_height(Scale::ONE, &theme)
+    };
+    assert_eq!(
+        tile.measured_height(Scale::ONE, &theme),
+        reference(tairix_theme::TextRole::Display)
+    );
+    assert!(
+        reference(tairix_theme::TextRole::Display) > reference(tairix_theme::TextRole::Heading),
+        "the display rung is not taller than the heading rung this replaced"
+    );
+}
+
+/// The taller figure must not cost the hero a context line: the rows it claims
+/// still seat the tile and the line the flow carries beneath it.
+#[test]
+fn the_display_hero_still_seats_both_context_lines() {
+    let theme = Theme::dark();
+    let hero = PaneHero::facts(Reading::measured("18"), "% busy").with_context(alloc::vec![
+        alloc::string::String::from("2.2 of 12 cores-equivalent"),
+        alloc::string::String::from("Load average 1.24 · 1.09 · 0.92"),
+    ]);
+    let items = compile(&hero, false, &[], PressureKind::Cpu, 6);
+    let hero_item = items
+        .iter()
+        .find(|item| matches!(item.body, ItemBody::Hero { .. }))
+        .expect("the pane's hero");
+    let ItemBody::Hero { tile, context, .. } = &hero_item.body else {
+        unreachable!("matched above")
+    };
+
+    // The tile carries the first line as its own detail; the flow draws the
+    // rest under it.
+    assert_eq!(context.len(), 1);
+    let font = tairix_font::BitmapFont::console();
+    let (pitch, _) = super::metrics(Scale::ONE, &theme);
+    let needed = tile.measured_height(Scale::ONE, &theme) + font.line_height();
+    assert!(
+        needed <= hero_item.rows * pitch,
+        "the display-role hero does not seat its context in {} rows: {needed} > {}",
+        hero_item.rows,
+        hero_item.rows * pitch
+    );
+}
+
+/// The hero's built tile, from the flow the pane compiled to.
+fn hero_tile(items: &[super::PaneItem]) -> &tairix_controls::MetricTile {
+    items
+        .iter()
+        .find_map(|item| match &item.body {
+            ItemBody::Hero { tile, .. } => Some(tile),
+            _ => None,
+        })
+        .expect("the pane's hero")
+}

@@ -69,9 +69,7 @@ fn recovery_row_force_activates_by_pointer() {
     let b = bounds();
     // Force is aimed at where the rail paints it, not at a rectangle split
     // out of the row: the row no longer carries the commands.
-    let content = sb
-        .recovery
-        .rail_content(&frame(&sb, &theme), Scale::ONE, &theme)
+    let content = super::RecoverySection::rail_content(&frame(&sb, &theme), Scale::ONE, &theme)
         .expect("the default window seats the recovery rail");
     let rect = sb
         .recovery
@@ -137,9 +135,7 @@ fn a_press_on_the_rail_resolves_the_command_for_the_pressed_fault() {
     // The commands live in the rail rather than on the card, so the press
     // that opened the fault and the command that acts on it must agree about
     // which fault is meant.
-    let content = sb
-        .recovery
-        .rail_content(&frame(&sb, &theme), Scale::ONE, &theme)
+    let content = super::RecoverySection::rail_content(&frame(&sb, &theme), Scale::ONE, &theme)
         .expect("the default window seats the recovery rail");
     let rect = sb
         .recovery
@@ -297,6 +293,31 @@ fn the_detail_pane_names_the_fault_and_its_impact() {
     assert!(identity.contains(&item.name), "{identity}");
     assert!(identity.contains("400"), "{identity}");
     assert_eq!(item.impact, FaultImpact::of(RecoveryState::Hung));
+}
+
+/// The pane names its fault exactly once. It used to wear a titled plate whose
+/// caption was the fault's name *and* draw the identity line inside it, so the
+/// name appeared twice and the pane read as a frame around its own frames.
+#[test]
+fn the_detail_pane_names_its_fault_once_and_wears_no_plate_of_its_own() {
+    let theme = Theme::dark();
+    let mut sb = Switchboard::new(&faults(&[0]));
+    sb.select_section(Section::Recovery);
+    let frame = frame(&sb, &theme);
+    let detail = frame.detail.expect("the detail pane is seated");
+    let content = super::RecoverySection::detail_content(&frame, Scale::ONE, &theme)
+        .expect("its content is seated");
+
+    // No title band is reserved: the content starts one plate padding in, so
+    // the identity line is the pane's heading rather than a second one.
+    let bare = crate::view::block::content_rect(detail, Scale::ONE, &theme)
+        .expect("a bare content rect is seated");
+    assert_eq!(content, bare, "the pane reserves no caption band");
+    assert!(
+        crate::view::block::titled_content(detail, Scale::ONE, &theme)
+            .is_some_and(|titled| titled.top() > content.top()),
+        "a titled container would push its content down; this pane is not one"
+    );
 }
 
 #[test]

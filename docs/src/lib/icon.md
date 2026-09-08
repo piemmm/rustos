@@ -195,6 +195,19 @@ a draw needs* and *producing it*:
   the pixels land.
 - Both produce the decode through `render_artwork`, so where it ran cannot
   change what it produced.
+- **When a wake falls due is the desk's rule, not each producer's.**
+  `ArtworkDesk::deliver` answers a `Delivered` carrying two independent facts:
+  `kept()`, whether the answer was recorded, and `wake()`, whether the
+  embedder's loop is owed a nudge now. A wake falls due once something has
+  landed *and* the queue has drained, so a surface wanting thirty icons costs
+  one repaint rather than thirty and they appear together; a lone icon empties
+  the queue at once and still lands immediately. The debt outlives the delivery
+  that incurred it, which is why the two facts cannot be one flag: a job the
+  desk had already answered, handed back after its batch drained, keeps nothing
+  yet still owes the wake that would show the earlier answers. Holding the rule
+  here is what stops the three producers that drive a desk — the desktop
+  session, the file manager and the Switchboard — from each keeping their own
+  count and drifting apart.
 
 The desk holds no lock, thread, or syscall, so its whole policy is host-tested.
 Two embedders drive it over the same rules, and both do it the same way: each

@@ -43,8 +43,8 @@ use tairix_theme::Theme;
 use tairix_controls::damage;
 use tairix_controls::{
     ActionRail, ActivityState, Button, ButtonContent, CellAlign, Chart, ComboAction, ComboBox,
-    ControlRole, ControlState, HeaderAction, HeaderColumn, MetricLayout, MetricTile, Panel,
-    PressureKind, PressureState, RailAction, RecoveryState, RowAction, SearchField, SelectionState,
+    ControlRole, ControlState, HeaderAction, HeaderColumn, MetricLayout, MetricTile, PressureKind,
+    PressureState, RailAction, RecoveryState, RowAction, SearchField, SelectionState,
     SelectorAction, SortOrder, StatusPill, Tab, TableCell, TableHeader, TableRow, Tabs, TabsAction,
     Toggle,
 };
@@ -548,9 +548,8 @@ const SEARCH_HEIGHT: u32 = 30;
 /// The footer band's logical height.
 const FOOTER_HEIGHT: u32 = 28;
 
-/// The rail's caption. The rail control carries no caption of its own, so
-/// the section seats it in a [`Panel`], which already defines what a titled
-/// container looks like.
+/// The rail's caption. The rail control carries no caption of its own, so the
+/// section seats it in the surface's shared titled block.
 const RAIL_TITLE: &str = "ACTIONS";
 
 /// One command the rail offers for the selected task.
@@ -731,8 +730,6 @@ pub(super) struct TasksSection {
     pub(super) selected: Option<ProcId>,
     /// The selected task's commands.
     pub(super) rail: ActionRail,
-    /// The plate the rail is seated in, which carries its caption.
-    pub(super) rail_panel: Panel,
     /// The filter strip, each tab labelled with its own real count.
     pub(super) filters: Tabs,
     /// The name search over the shown rows.
@@ -765,7 +762,6 @@ impl TasksSection {
             census: Vec::new(),
             selected: None,
             rail: ActionRail::new(Vec::new()),
-            rail_panel: Panel::new(RAIL_TITLE),
             filters: filter_tabs(),
             search: SearchField::new().with_placeholder("Search tasks"),
             count: StatusPill::new(count_line(0, 0)),
@@ -1164,6 +1160,10 @@ impl TasksSection {
                 )
                 .with_layout(MetricLayout::Stacked)
                 .with_icon(spec.icon)
+                // The band draws the shared block plate around each tile, so
+                // a census tile is the same plate a pane block is rather than
+                // the control's own.
+                .unplated()
             })
             .collect()
     }
@@ -1327,21 +1327,15 @@ impl TasksSection {
 
     /// The rail's own content rectangle inside the plate that captions it,
     /// or `None` when the frame seated no rail or the plate leaves no room.
-    fn rail_content(
-        frame: &SectionFrame,
-        panel: &Panel,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<Rect> {
-        panel.content_rect(frame.rail?, scale, theme)
+    fn rail_content(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        crate::view::block::titled_content(frame.rail?, scale, theme)
     }
 
     /// The rail's item rectangles, in rail order — the very rectangles the
     /// paint and the hit test share.
     #[cfg(test)]
     pub(super) fn rail_item_rects(&self, ctx: &SectionCtx<'_>) -> Vec<Rect> {
-        let Some(content) = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
-        else {
+        let Some(content) = Self::rail_content(&ctx.frame, ctx.scale, ctx.theme) else {
             return Vec::new();
         };
         (0..self.rail.len())
@@ -1874,8 +1868,7 @@ impl SectionView for TasksSection {
         if let Some(slot) = self.focused_rail() {
             // The rail's own item decides whether it may act, so a refused
             // command consumes the key without dispatching anything.
-            let rail = Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
-                .unwrap_or(Rect::EMPTY);
+            let rail = Self::rail_content(&ctx.frame, ctx.scale, ctx.theme).unwrap_or(Rect::EMPTY);
             self.rail.set_focus(Some(slot), rail, damage);
             let RailAction::Activate { index } = self.rail.on_key(key, rail, damage)?;
             return self.invoke_rail(index);
@@ -1898,13 +1891,16 @@ impl SectionView for TasksSection {
             .iter()
             .zip(self.census_rects(rect, scale, theme))
         {
+            let Some(inner) = crate::view::block::plate(surface, rect, scale, theme) else {
+                continue;
+            };
             // A census tile counts a class of thing, so its picture is that
             // class's — resolved through the cache like every other icon so
             // the band rasterises nothing per frame.
             let picture = tile.icon().and_then(|kind| {
-                artwork.artwork(IconRequest::kind(kind), tile.icon_side(rect, scale, theme))
+                artwork.artwork(IconRequest::kind(kind), tile.icon_side(inner, scale, theme))
             });
-            tile.render(surface, rect, scale, theme, picture);
+            tile.render(surface, inner, scale, theme, picture);
         }
     }
 
@@ -1950,10 +1946,10 @@ impl SectionView for TasksSection {
         // and its caption rather than appearing and vanishing under the
         // reader as the selection changes.
         if let Some(rail) = ctx.frame.rail {
-            self.rail_panel.render(surface, rail, ctx.scale, ctx.theme);
-            if let Some(content) =
-                Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
-            {
+            if let Some(inner) = crate::view::block::plate(surface, rail, ctx.scale, ctx.theme) {
+                crate::view::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
+            }
+            if let Some(content) = Self::rail_content(&ctx.frame, ctx.scale, ctx.theme) {
                 self.rail.render(surface, content, ctx.scale, ctx.theme);
             }
         }
@@ -2030,9 +2026,7 @@ impl SectionView for TasksSection {
         // The commands, before the rows: the rail is anchored beside the
         // table and never overlaps it, so the order is only a matter of
         // reaching the pressed control in one pass.
-        if let Some(content) =
-            Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme)
-        {
+        if let Some(content) = Self::rail_content(&ctx.frame, ctx.scale, ctx.theme) {
             if let Some(RailAction::Activate { index }) = self
                 .rail
                 .on_pointer(event, content, ctx.scale, ctx.theme, damage)
@@ -2091,7 +2085,7 @@ impl SectionView for TasksSection {
         let slot = focused.then_some(rail_focus).flatten();
         let rail = sweep
             .ctx
-            .and_then(|ctx| Self::rail_content(&ctx.frame, &self.rail_panel, ctx.scale, ctx.theme));
+            .and_then(|ctx| Self::rail_content(&ctx.frame, ctx.scale, ctx.theme));
         sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
             button.set_focused(slot == Some(index));

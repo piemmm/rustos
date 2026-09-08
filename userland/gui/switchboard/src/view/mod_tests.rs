@@ -644,9 +644,7 @@ fn pointer_after_selection_reaches_the_new_sections_content() {
     // aim moved with them: the rail sits in a column the Tasks section does
     // not seat at all, so only the new section can answer.
     let frame = resolve_section_frame(layout.content, sb.active().anatomy(), Scale::ONE, &theme);
-    let rail = sb
-        .recovery
-        .rail_content(&frame, Scale::ONE, &theme)
+    let rail = crate::view::recovery::RecoverySection::rail_content(&frame, Scale::ONE, &theme)
         .expect("the default window seats the recovery rail");
     let (x, y) = centre(
         sb.recovery
@@ -1429,4 +1427,42 @@ fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
             damage.rects()
         );
     }
+}
+
+/// The Tasks census tiles wear the surface's shared block plate — bordered
+/// and a step lighter than the band behind them — rather than the control's
+/// own, so a census tile, a pane block and a fault card are all one anatomy
+/// (`plans/switchboard/01-tasks.png`).
+#[test]
+fn the_census_tiles_wear_the_shared_block_plate() {
+    let theme = Theme::dark();
+    // Wider than the shared fixture: a band too narrow to seat the census
+    // drops it, and this is a test about how a seated tile is drawn.
+    let b = Rect::new(0, 0, 1000, 500);
+    let mut sb = Switchboard::new(&model());
+    sb.select_section(Section::Tasks);
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
+
+    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let summary = sb
+        .band(layout.location, &theme, Scale::ONE)
+        .summary
+        .expect("a band this wide seats the census");
+    let raised = Color::from(theme.palette().surface_raised).premultiply();
+    let rim = Color::from(theme.palette().rim).premultiply();
+    let mut grounds = 0usize;
+    let mut rims = 0usize;
+    for y in summary.top()..summary.bottom() {
+        for x in summary.left()..summary.right() {
+            let (xu, yu) = (u32::try_from(x).unwrap_or(0), u32::try_from(y).unwrap_or(0));
+            match surface.get(xu, yu) {
+                Some(p) if p == raised => grounds += 1,
+                Some(p) if p == rim => rims += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(grounds > 0, "a census tile draws no raised ground");
+    assert!(rims > 0, "a census tile draws no rim");
 }

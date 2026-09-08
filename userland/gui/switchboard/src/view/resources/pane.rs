@@ -27,9 +27,8 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
 use tairix_controls::{
-    inset, paint_surface_plate, plate_border, Chart, ChromeLayer, CompositionBar,
-    CompositionSegment, Fact, FactList, MeterValue, MetricInstrument, MetricLayout, MetricTile,
-    PressureKind, ProgressValue, StatusPill,
+    Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue, MetricInstrument,
+    MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
 };
 
 use crate::view::reading::{reading_text, HealthSeverity, Reading, ReadingFact, Unmeasured};
@@ -187,6 +186,19 @@ pub enum BlockBody {
     Absence(String),
 }
 
+impl BlockBody {
+    /// Whether this body draws its own plates, so the block around it draws
+    /// none.
+    ///
+    /// A grid of per-core cells already rims every cell — that rim is what
+    /// separates one core's figures from its neighbour's — so a plate around
+    /// the grid would nest one rim inside another and the boards show none.
+    #[must_use]
+    pub const fn self_plating(&self) -> bool {
+        matches!(self, BlockBody::Cores(_))
+    }
+}
+
 /// One named part of a composition's measured whole.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompositionPart {
@@ -265,6 +277,9 @@ pub(in crate::view) struct PaneItem {
     pub(in crate::view) rows: u32,
     /// Which column it sits in.
     pub(in crate::view) column: PaneColumn,
+    /// Whether it draws inside its block's plate, so its rectangle is inset
+    /// from the column by the plate's own padding.
+    pub(in crate::view) plated: bool,
     /// What it draws.
     pub(in crate::view) body: ItemBody,
 }
@@ -295,8 +310,17 @@ pub(in crate::view) enum ItemBody {
         /// What the trace's extent means.
         caption: String,
     },
-    /// A block's quiet title.
-    Title(String),
+    /// The plate a block's own rows are drawn on. Spans the block's whole
+    /// band and is drawn before them, so it is the ground they stand on.
+    Plate,
+    /// A block's quiet title, with the plate's hairline rule under it unless
+    /// the block's body brings its own plates.
+    Title {
+        /// The block's name.
+        text: String,
+        /// Whether the hairline rule is drawn under it.
+        ruled: bool,
+    },
     /// One labelled reading.
     Fact(FactList),
     /// A measured whole split into its named parts.
@@ -360,6 +384,14 @@ pub(super) fn compile(
         row,
         rows: HERO_ROWS,
         column: PaneColumn::Full,
+        plated: false,
+        body: ItemBody::Plate,
+    });
+    items.push(PaneItem {
+        row,
+        rows: HERO_ROWS,
+        column: PaneColumn::Full,
+        plated: true,
         body: hero_body(hero, kind),
     });
     row += HERO_ROWS;
@@ -402,11 +434,11 @@ pub(super) fn compile(
 /// The hero's own drawable: its reading beside its instrument.
 fn hero_body(hero: &PaneHero, kind: PressureKind) -> ItemBody {
     let mut context = hero.context.iter();
-    // The pane's headline figure is the largest text in the surface, which is
-    // what the heading role names; its unit stays at body size beside it.
+    // The one figure the pane is built around, which is what the display role
+    // names; its unit stays at body size beside it.
     let mut tile = MetricTile::new(String::new(), reading_text(&hero.value), kind)
         .with_layout(MetricLayout::Stacked)
-        .with_value_role(TextRole::Heading)
+        .with_value_role(TextRole::Display)
         .unplated();
     if !hero.unit.is_empty() {
         tile = tile.with_unit(hero.unit.clone());
@@ -449,78 +481,106 @@ fn push_block(
     cells_per_row: u32,
 ) -> u32 {
     let mut row = start;
-    let mut push = |rows: u32, body: ItemBody| {
+    // A body that plates its own items needs no plate around them, so the
+    // block's rows then sit on the section ground at full width.
+    let plated = !block.body.self_plating();
+    let plate = plated.then(|| {
+        let slot = items.len();
         items.push(PaneItem {
             row,
-            rows,
+            rows: 0,
             column,
-            body,
+            plated: false,
+            body: ItemBody::Plate,
         });
-        row = row.saturating_add(rows);
-    };
-    push(1, ItemBody::Title(block.title.clone()));
-    match &block.body {
-        BlockBody::Facts(facts) => {
-            for fact in facts {
-                push(1, ItemBody::Fact(fact_list(fact)));
+        slot
+    });
+    // Scoped so the plate's own span can be written once the block's rows are
+    // known: nothing else can say how tall a block turned out to be.
+    {
+        let mut push = |rows: u32, body: ItemBody| {
+            items.push(PaneItem {
+                row,
+                rows,
+                column,
+                plated,
+                body,
+            });
+            row = row.saturating_add(rows);
+        };
+        push(
+            1,
+            ItemBody::Title {
+                text: block.title.clone(),
+                ruled: plated,
+            },
+        );
+        match &block.body {
+            BlockBody::Facts(facts) => {
+                for fact in facts {
+                    push(1, ItemBody::Fact(fact_list(fact)));
+                }
             }
-        }
-        BlockBody::Composition(parts) => match composition(kind, parts) {
-            // Shares that do not account for the whole fail construction
-            // rather than drawing a silently short bar, so the block states
-            // the absence instead of under-reporting where the resource went.
-            Some(bar) => push(
-                1 + u32::try_from(parts.len()).unwrap_or(0),
-                ItemBody::Composition(bar),
-            ),
-            None => push(
-                1,
-                ItemBody::Note(crate::view::reading::absence_statement(
-                    "this composition",
-                    Unmeasured::Unavailable,
-                )),
-            ),
-        },
-        BlockBody::Cores(cells) => {
-            let columns = grid_columns(cells.len(), cells_per_row);
-            for chunk in cells.chunks(usize::try_from(columns).unwrap_or(1)) {
-                push(
-                    CELL_ROWS,
-                    ItemBody::Cells {
-                        cells: chunk.iter().map(|cell| cell_view(cell, kind)).collect(),
-                        columns,
-                    },
-                );
+            BlockBody::Composition(parts) => match composition(kind, parts) {
+                // Shares that do not account for the whole fail construction
+                // rather than drawing a silently short bar, so the block states
+                // the absence instead of under-reporting where the resource went.
+                Some(bar) => push(
+                    1 + u32::try_from(parts.len()).unwrap_or(0),
+                    ItemBody::Composition(bar),
+                ),
+                None => push(
+                    1,
+                    ItemBody::Note(crate::view::reading::absence_statement(
+                        "this composition",
+                        Unmeasured::Unavailable,
+                    )),
+                ),
+            },
+            BlockBody::Cores(cells) => {
+                let columns = grid_columns(cells.len(), cells_per_row);
+                for chunk in cells.chunks(usize::try_from(columns).unwrap_or(1)) {
+                    push(
+                        CELL_ROWS,
+                        ItemBody::Cells {
+                            cells: chunk.iter().map(|cell| cell_view(cell, kind)).collect(),
+                            columns,
+                        },
+                    );
+                }
             }
-        }
-        BlockBody::Consumers(rows) => {
-            for consumer in rows {
+            BlockBody::Consumers(rows) => {
+                for consumer in rows {
+                    push(
+                        1,
+                        ItemBody::Consumer {
+                            tile: consumer_row(consumer, kind),
+                            bundle: consumer.bundle.clone(),
+                        },
+                    );
+                }
+            }
+            BlockBody::Health {
+                pill,
+                severity,
+                facts,
+            } => {
                 push(
                     1,
-                    ItemBody::Consumer {
-                        tile: consumer_row(consumer, kind),
-                        bundle: consumer.bundle.clone(),
-                    },
+                    ItemBody::Pill(StatusPill::new(pill.clone()).with_tone(health_tone(*severity))),
                 );
+                for fact in facts {
+                    push(1, ItemBody::Fact(fact_list(fact)));
+                }
             }
+            BlockBody::Absence(statement) => push(1, ItemBody::Note(statement.clone())),
         }
-        BlockBody::Health {
-            pill,
-            severity,
-            facts,
-        } => {
-            push(
-                1,
-                ItemBody::Pill(StatusPill::new(pill.clone()).with_tone(health_tone(*severity))),
-            );
-            for fact in facts {
-                push(1, ItemBody::Fact(fact_list(fact)));
-            }
+        if !block.note.is_empty() {
+            push(1, ItemBody::Note(block.note.clone()));
         }
-        BlockBody::Absence(statement) => push(1, ItemBody::Note(statement.clone())),
     }
-    if !block.note.is_empty() {
-        push(1, ItemBody::Note(block.note.clone()));
+    if let Some(slot) = plate.and_then(|slot| items.get_mut(slot)) {
+        slot.rows = row.saturating_sub(start);
     }
     row
 }
@@ -677,6 +737,7 @@ pub(super) fn item_rect(
     start: u32,
     pitch: u32,
     gap: u32,
+    pad: u32,
 ) -> Option<Rect> {
     let top =
         i64::from(primary.top()) + (i64::from(item.row) - i64::from(start)) * i64::from(pitch);
@@ -691,12 +752,24 @@ pub(super) fn item_rect(
         return None;
     }
     let height = u32::try_from(clipped_bottom - clipped_top).unwrap_or(0);
-    Some(Rect::new(
+    let band = Rect::new(
         left,
         i32::try_from(clipped_top).unwrap_or(primary.top()),
         width,
         height,
-    ))
+    );
+    if !item.plated {
+        return Some(band);
+    }
+    // Inside the block's plate: the same padding the plate's own paint
+    // reports, so a row lands where the plate says its content goes.
+    let inner = Rect::new(
+        band.left().saturating_add(to_i32(pad)),
+        band.top().saturating_add(to_i32(pad)),
+        band.width.saturating_sub(pad.saturating_mul(2)),
+        band.height.saturating_sub(pad),
+    );
+    (!inner.is_empty()).then_some(inner)
 }
 
 /// The horizontal extent of one pane column within `primary`.
@@ -735,8 +808,9 @@ pub(super) fn render(
         font,
     } = window;
     let (pitch, gap) = metrics(scale, theme);
+    let pad = crate::view::block::content_inset(scale, theme);
     for item in items {
-        let Some(rect) = item_rect(item, primary, start, pitch, gap) else {
+        let Some(rect) = item_rect(item, primary, start, pitch, gap, pad) else {
             continue;
         };
         render_item(surface, &item.body, rect, scale, theme, font, artwork);
@@ -803,7 +877,7 @@ fn render_item(
                     surface,
                     reading.left(),
                     y,
-                    line,
+                    font.truncate_to_width(line, reading.width),
                     Color::from(palette.on_surface_muted),
                 );
                 y = y.saturating_add(to_i32(font.line_height()));
@@ -824,20 +898,21 @@ fn render_item(
                         surface,
                         left,
                         rect.top() + to_i32(plot_h),
-                        caption,
+                        font.truncate_to_width(caption, width),
                         Color::from(palette.on_surface_muted),
                     );
                 }
             }
         }
-        ItemBody::Title(text) => {
-            font.draw_text(
-                surface,
-                rect.left(),
-                rect.top(),
-                text,
-                Color::from(palette.accent),
-            );
+        ItemBody::Plate => {
+            crate::view::block::plate(surface, rect, scale, theme);
+        }
+        ItemBody::Title { text, ruled } => {
+            if *ruled {
+                crate::view::block::title(surface, rect, scale, theme, text);
+            } else {
+                crate::view::block::bare_title(surface, rect, scale, theme, text);
+            }
         }
         ItemBody::Fact(list) => list.render(surface, rect, scale, theme),
         ItemBody::Composition(bar) => bar.render(surface, rect, scale, theme),
@@ -864,7 +939,7 @@ fn render_item(
                 surface,
                 rect.left(),
                 rect.top(),
-                text,
+                font.truncate_to_width(text, rect.width),
                 Color::from(palette.on_surface_muted),
             );
         }
@@ -895,7 +970,11 @@ fn render_cells(
             .saturating_add(gap)
             .saturating_mul(u32::try_from(index).unwrap_or(0));
         let left = rect.left() + to_i32(step);
-        let Some(inner) = cell_plate(
+        // A cell is the same plate a block draws, and it is what separates
+        // one core's figures from its neighbour's in a grid of a dozen; the
+        // tile inside stays unplated so the cell's name, trace and two
+        // readings share one surface rather than nesting a plate per reading.
+        let Some(inner) = crate::view::block::plate(
             surface,
             Rect::new(left, rect.top(), width, rect.height),
             scale,
@@ -935,37 +1014,6 @@ fn render_cells(
             );
         }
     }
-}
-
-/// Paint one cell's rim and quiet ground, reporting the rectangle its readings
-/// draw inside — or [`None`] when the cell is too small to seat one.
-///
-/// The tile inside is unplated so a cell's name, trace, and two readings share
-/// one surface rather than nesting a plate per reading; the *cell* draws the
-/// rim, because in a grid of a dozen cores nothing else separates one core's
-/// figures from its neighbour's.
-fn cell_plate(surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    let (x, y, w, h) = (
-        u32::try_from(bounds.left()).ok()?,
-        u32::try_from(bounds.top()).ok()?,
-        bounds.width,
-        bounds.height,
-    );
-    let border = plate_border(theme, scale);
-    let radius = scale
-        .scale_length(theme.metrics().control_corner_radius)
-        .min(w / 2)
-        .min(h / 2);
-    let interior = paint_surface_plate(
-        surface,
-        (x, y, w, h),
-        (radius, border),
-        theme,
-        (theme.palette().surface, ChromeLayer::Ground),
-    )?;
-    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-    let (ix, iy, iw, ih) = inset(interior.0, interior.1, interior.2, interior.3, pad)?;
-    Some(Rect::new(to_i32(ix), to_i32(iy), iw, ih))
 }
 
 #[cfg(test)]

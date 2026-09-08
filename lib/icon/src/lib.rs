@@ -64,7 +64,7 @@ pub use artwork::{
     InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR,
     ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
-pub use desk::{ArtworkDesk, ArtworkJob};
+pub use desk::{ArtworkDesk, ArtworkJob, Delivered};
 pub use glyph::{builtin_icon, disk_icon, IconKind};
 pub use load::{IconAssetSource, IconSet, ICON_KINDS};
 pub use svg::decode as decode_svg;

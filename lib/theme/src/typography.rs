@@ -45,10 +45,10 @@ pub use tairix_abi::font_ipc::FamilyKey;
 /// never a new size literal at a draw site.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TextRole {
-    /// A whole-screen display readout — the one line a full-screen surface is
-    /// built around, such as the clock on the lock and login screens. Several
-    /// times body size, so it dominates the screen at a glance from across a
-    /// room rather than merely leading a panel.
+    /// A display readout — the one figure a surface is built around, such as
+    /// the clock on the lock and login screens or a monitoring pane's headline
+    /// reading. Several times body size, so it dominates its surface at a
+    /// glance rather than merely leading a panel.
     Display,
     /// A panel or dialog heading — the largest text in a surface.
     Heading,

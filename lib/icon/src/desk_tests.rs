@@ -77,7 +77,7 @@ fn a_delivered_decode_is_collected_once_and_reports_a_landing() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(desk.take_landed(), "a delivery owes the embedder a repaint");
     assert!(!desk.take_landed(), "the landing is reported once");
 
@@ -113,7 +113,7 @@ fn a_want_never_consumes_an_answer_a_draw_is_about_to_collect() {
     let mut desk = ArtworkDesk::new();
     desk.want(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
 
     desk.want(&asset("/a.png"), 8);
     assert!(
@@ -146,7 +146,7 @@ fn a_want_for_a_key_already_handed_over_starts_a_decode_again() {
     let mut desk = ArtworkDesk::new();
     desk.want(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
         desk.collect(&asset("/a.png"), 8),
         Resolved::Done(_)
@@ -172,7 +172,7 @@ fn a_refusal_is_delivered_and_collected_like_a_picture() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/broken.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, None));
+    assert!(desk.deliver(&running, None).kept());
     assert!(matches!(
         desk.collect(&asset("/broken.png"), 8),
         Resolved::Done(None)
@@ -189,7 +189,7 @@ fn a_key_the_cache_dropped_is_decoded_again() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
         desk.collect(&asset("/a.png"), 8),
         Resolved::Done(_)
@@ -219,7 +219,7 @@ fn a_declined_answer_is_not_offered_again_until_the_band_moves() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
         desk.collect(&asset("/a.png"), 8),
         Resolved::Done(_)
@@ -270,7 +270,7 @@ fn declining_a_key_in_flight_leaves_the_decode_to_land() {
 
     desk.decline(&asset("/a.png"), 8);
     assert!(
-        desk.deliver(&running, Some(picture(8))),
+        desk.deliver(&running, Some(picture(8))).kept(),
         "the decode in flight was stranded"
     );
     assert!(matches!(
@@ -289,7 +289,7 @@ fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
     let _ = desk.collect(&asset("/running.png"), 8);
     let done = desk.next_job().expect("the first job");
     let running = desk.next_job().expect("the second job");
-    assert!(desk.deliver(&done, Some(picture(8))));
+    assert!(desk.deliver(&done, Some(picture(8))).kept());
 
     assert!(
         matches!(
@@ -303,7 +303,7 @@ fn asking_again_keeps_work_in_flight_and_answers_not_yet_collected() {
         "a decode in flight was re-recorded rather than awaited"
     );
     assert!(!desk.has_work(), "and it was not queued a second time");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
 }
 
 /// A key re-asked after its answer was handed over is queued afresh, and
@@ -314,7 +314,7 @@ fn a_key_re_asked_after_its_answer_is_handed_out_exactly_once() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(8))));
+    assert!(desk.deliver(&running, Some(picture(8))).kept());
     assert!(matches!(
         desk.collect(&asset("/a.png"), 8),
         Resolved::Done(_)
@@ -333,7 +333,7 @@ fn teardown_releases_a_decode_it_is_still_holding() {
     let mut desk = ArtworkDesk::new();
     let _ = desk.collect(&asset("/a.png"), 4);
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(4))));
+    assert!(desk.deliver(&running, Some(picture(4))).kept());
 
     desk.stop();
     assert!(
@@ -350,7 +350,7 @@ fn an_answer_the_desk_is_not_holding_is_dropped() {
     let _ = desk.collect(&asset("/a.png"), 8);
     let running = desk.next_job().expect("a job");
     desk.stop();
-    assert!(!desk.deliver(&running, Some(picture(8))));
+    assert!(!desk.deliver(&running, Some(picture(8))).kept());
     assert!(!desk.take_landed());
 }
 
@@ -392,7 +392,7 @@ fn the_desk_answers_as_a_deferring_resolver() {
 
     let running = desk.next_job().expect("the miss recorded a decode");
     assert_eq!(running, job("/a.png", 16));
-    assert!(desk.deliver(&running, Some(picture(16))));
+    assert!(desk.deliver(&running, Some(picture(16))).kept());
     assert!(matches!(
         ArtworkResolver::resolve(&mut desk, &key, 16),
         Resolved::Done(Some(_))
@@ -411,7 +411,7 @@ fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
     assert!(desk.has_work(), "a prefetch records the decode");
 
     let running = desk.next_job().expect("a job");
-    assert!(desk.deliver(&running, Some(picture(16))));
+    assert!(desk.deliver(&running, Some(picture(16))).kept());
     assert!(matches!(
         ArtworkResolver::resolve(&mut desk, &key, 16),
         Resolved::Done(Some(_))
@@ -420,4 +420,81 @@ fn the_resolver_impl_prefetches_and_declines_through_the_same_policy() {
     ArtworkResolver::declined(&mut desk, &key, 16);
     assert!(is_pending(&ArtworkResolver::resolve(&mut desk, &key, 16)));
     assert!(!desk.has_work(), "a declined key must not be re-offered");
+}
+
+/// A batch of asks costs the loop one wake, not one per icon: a producer that
+/// takes and delivers one job at a time is owed nothing until the queue it is
+/// working through is empty.
+#[test]
+fn a_batch_of_decodes_owes_one_wake_on_the_last_of_them() {
+    let mut desk = ArtworkDesk::new();
+    for name in ["/a.png", "/b.png", "/c.png"] {
+        desk.want(&asset(name), 16);
+    }
+    for expected in ["/a.png", "/b.png"] {
+        let job = desk.next_job().expect("a queued job");
+        assert_eq!(job.key, asset(expected));
+        assert!(
+            !desk.deliver(&job, Some(picture(16))).wake(),
+            "a wake mid-batch costs the loop a repaint per icon"
+        );
+    }
+    let last = desk.next_job().expect("the last job");
+    assert!(
+        desk.deliver(&last, Some(picture(16))).wake(),
+        "the drained batch owes the loop its one wake"
+    );
+    assert!(desk.take_landed(), "all three landings are one repaint");
+}
+
+/// A lone ask is its own drained batch, so an icon still lands the moment it
+/// is ready rather than waiting for company.
+#[test]
+fn a_lone_decode_owes_its_wake_at_once() {
+    let mut desk = ArtworkDesk::new();
+    let _ = desk.collect(&asset("/a.png"), 16);
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(&job, Some(picture(16))).wake());
+}
+
+/// The debt outlives the delivery that incurred it, so a delivery the desk
+/// keeps nothing from still discharges what an earlier one is owed — a batch
+/// drained without a wake is never left unshown.
+///
+/// This is also why a delivery answers two things rather than one: here the
+/// second call keeps nothing *and* owes the wake, which no single flag can
+/// say. A producer reading one for the other would either strand the first
+/// answer unshown or believe a spent job had been accepted.
+#[test]
+fn a_delivery_that_keeps_nothing_still_discharges_an_outstanding_debt() {
+    let mut desk = ArtworkDesk::new();
+    desk.want(&asset("/a.png"), 16);
+    desk.want(&asset("/b.png"), 16);
+    let first = desk.next_job().expect("the first job");
+    let mid_batch = desk.deliver(&first, Some(picture(16)));
+    assert!(mid_batch.kept(), "the first answer was refused");
+    assert!(!mid_batch.wake(), "a wake mid-batch is a repaint per icon");
+    let _ = desk.next_job().expect("the second job");
+    let spent = desk.deliver(&first, Some(picture(16)));
+    assert!(
+        !spent.kept(),
+        "a key already answered was overwritten by a second decode"
+    );
+    assert!(
+        spent.wake(),
+        "the wake the first delivery is owed was forgotten"
+    );
+}
+
+/// Teardown discards the debt with the answers it would have shown.
+#[test]
+fn a_stopped_desk_owes_no_wake_for_what_it_wiped() {
+    let mut desk = ArtworkDesk::new();
+    desk.want(&asset("/a.png"), 16);
+    desk.want(&asset("/b.png"), 16);
+    let first = desk.next_job().expect("the first job");
+    assert!(!desk.deliver(&first, Some(picture(16))).wake());
+    let second = desk.next_job().expect("the second job");
+    desk.stop();
+    assert!(!desk.deliver(&second, Some(picture(16))).wake());
 }

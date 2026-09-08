@@ -1371,10 +1371,16 @@ mod tests {
     // the one holder of the authority to end the machine's power state, on
     // behalf of the session's confirmed quick-actions choice; an ordinary
     // account's ceiling strips it and the rows render refused. It publishes
-    // over the ungated `ipc_call` and holds no filesystem or spawn authority
-    // — a window is raised or re-launched by asking the session, never the
-    // kernel. Not an embedded spawn-floor program, so the list lives only in
-    // this pin.
+    // over the ungated `ipc_call`, and a window is raised or re-launched by
+    // asking the session, never the kernel. `CAP_FS_ACCESS` reads the
+    // launching bundle's own icon asset so every running application draws
+    // its own picture rather than one generic glyph, and `CAP_SANDBOX_SPAWN`
+    // decodes those untrusted bytes in a kernel-branded capability-empty
+    // worker instead of in the address space that holds `CAP_PROC_CONTROL`
+    // and `CAP_SYSTEM_POWER`; the narrow authority admits only that canonical
+    // parser child, so this is not `CAP_PROC_SPAWN` and the monitor can start
+    // nothing else. Not an embedded spawn-floor program, so the list lives
+    // only in this pin.
     const SWITCHBOARD_MONITOR_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::SYSINFO_GLOBAL,
@@ -1383,6 +1389,8 @@ mod tests {
         CapabilityId::SHM,
         CapabilityId::PROC_CONTROL,
         CapabilityId::SYSTEM_POWER,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::SANDBOX_SPAWN,
         CapabilityId::LOG_EMIT,
     ];
 

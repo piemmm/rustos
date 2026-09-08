@@ -1,6 +1,9 @@
 //! Unit tests for the crate's one set of display formatters.
 
-use super::{format_bytes, format_duration, format_latency, format_pixels, format_rate};
+use super::{
+    format_bytes, format_duration, format_latency, format_pixels, format_rate, percent,
+    pixel_parts, whole_percent,
+};
 use tairix_abi::Duration64;
 
 #[test]
@@ -82,4 +85,28 @@ fn a_latency_is_scaled_to_the_unit_that_keeps_it_readable() {
     // A figure beyond the last unit saturates in that unit rather than
     // wrapping to a smaller, misleading number.
     assert_eq!(format_latency(u64::MAX), "18446744073.7 s");
+}
+
+/// A hero's figure carries no unit of its own, because the hero draws the
+/// unit beside it: spelled with a `%` the CPU pane would read `18% % busy`.
+#[test]
+fn a_whole_percent_carries_no_unit_and_the_spelled_form_adds_one() {
+    assert_eq!(whole_percent(185), "18");
+    assert_eq!(percent(185), "18%");
+    assert_eq!(percent(0), "0%");
+    // Over a hundred percent is legitimate on more than one core, and is
+    // shown as measured rather than clamped.
+    assert_eq!(whole_percent(2_400), "240");
+}
+
+/// The magnitude prefix belongs to the unit, so a hero's figure is the
+/// mantissa alone and the joined spelling is unchanged by the split.
+#[test]
+fn pixel_parts_split_the_magnitude_into_the_unit() {
+    assert_eq!(pixel_parts(512), ("512".into(), "px".into()));
+    assert_eq!(pixel_parts(3_200), ("3.2".into(), "k px".into()));
+    assert_eq!(pixel_parts(4_200_000), ("4.2".into(), "M px".into()));
+    assert_eq!(pixel_parts(4_000_000_000), ("4.0".into(), "G px".into()));
+    // Saturates in the last unit rather than wrapping to a smaller figure.
+    assert_eq!(pixel_parts(u64::MAX).1, "G px");
 }

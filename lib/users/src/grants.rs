@@ -50,6 +50,16 @@ use tairix_caps::CapabilitySet;
 ///   per-inode, so a baseline holder still cannot write `/System`.
 /// * `CAP_PROC_SPAWN` — "may run programs at all"; the child is bounded by
 ///   its *own* manifest intersected with this same ceiling.
+/// * `CAP_SANDBOX_SPAWN` — the narrow authority to start a *kernel-branded,
+///   capability-empty parser child and nothing else*. It grants an
+///   interactive account nothing it did not already have, because
+///   `CAP_PROC_SPAWN` above already subsumes it: what it buys is that a
+///   program of that account can *request* the narrow authority in its own
+///   manifest instead of general spawn, and have it survive the
+///   ceiling∩manifest intersection. Without it in the ceiling that
+///   intersection is empty and such a program would be forced to ask for
+///   the far broader `CAP_PROC_SPAWN` to decode an untrusted file — exactly
+///   the escalation the narrow capability exists to avoid.
 /// * `CAP_CONSOLE_WRITE` / `CAP_CONSOLE_READ` — an interactive session's
 ///   inherited standard streams are console-backed; the fine authority
 ///   stays the inherited descriptor table.
@@ -102,6 +112,7 @@ use tairix_caps::CapabilitySet;
 pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::FS_ACCESS,
     CapabilityId::PROC_SPAWN,
+    CapabilityId::SANDBOX_SPAWN,
     CapabilityId::CONSOLE_WRITE,
     CapabilityId::CONSOLE_READ,
     CapabilityId::DISPLAY,
@@ -392,10 +403,11 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 9);
+        assert_eq!(set.len(), 10);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
+            CapabilityId::SANDBOX_SPAWN,
             CapabilityId::CONSOLE_WRITE,
             CapabilityId::CONSOLE_READ,
             CapabilityId::DISPLAY,
@@ -411,7 +423,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 27);
+        assert_eq!(set.len(), 28);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }
