@@ -6,11 +6,11 @@
 //!
 //! # Utilisation
 //!
-//! A CPU's utilisation is the fraction of the recent past it spent running.
-//! The dispatch loop already brackets idle exactly — it parks in one place
-//! and resumes in one place — so every span is wholly busy or wholly idle,
-//! and [`fold`] mixes one such span into the filter, weighted by how long it
-//! lasted. Three properties matter:
+//! A CPU's utilisation is the fraction of the recent past it spent running
+//! work. The dispatch loop brackets exactly that — a dispatch that ran a task
+//! body opens the span, one that found nothing closes it — so every span is
+//! wholly busy or wholly idle, and [`fold`] mixes one such span into the
+//! filter, weighted by how long it lasted. Three properties matter:
 //!
 //! * **It needs no periodic sampling, and a lazy read is exact.** Reading the
 //!   filter folds the span since the last commit at the moment somebody asks,

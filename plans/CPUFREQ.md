@@ -64,24 +64,36 @@ again has not earned the top rate, and only the filter can tell that apart
 from real work because only the filter measures it. A wake merely tells the
 waiter to start looking again.
 
-**Nothing arms a timer.** The dispatch loop already brackets idle exactly, so
-both hooks ride transitions it was making anyway, and the filter is advanced
-lazily when read. On a machine with no frequency driver the whole cost is a
-per-CPU slot lookup and one relaxed load per dispatch step.
+**Nothing arms a timer.** Both brackets ride transitions the dispatch loop was
+making anyway, and the filter is advanced lazily when read. On a machine with
+no frequency driver the whole governor cost is one relaxed load per dispatch
+step.
 
 **Load-bearing decisions.**
 
-* *The edge, not the step.* `note_active` runs at the top of every
-  dispatch-loop iteration, so it detects the idle→active *edge* rather than
-  treating each iteration as a resumption. Both halves depend on that: the
-  estimator would otherwise restart its sampling window every dispatch, leaving
-  each one too short to divide and publishing nothing at all. The edge marker
-  lives in `CpuState` and is maintained whether or not a mechanism is bound,
-  since the estimator needs it on every port.
-* *Idle brackets, not scheduler ticks.* Utilisation comes from
-  `kernel/core/src/init.rs`'s idle park, deliberately **not** from
-  `SchedulerPolicy::cpu_busy_ticks` — whose `in_flight_ticks` takes an
-  `RwLock`, and a lock shared with a timer interrupt is a self-deadlock.
+* *The two halves watch different edges, and must.* The governor's edge is
+  **work**: the dispatch loop opens a CPU's busy span in its `Ran` arm and
+  closes it in its `Idle` arm. The estimator's edge is the **park**: the
+  baseline is discarded going in and re-seeded coming out. Sharing one marker
+  is what made each of them wrong once (below). Only the edge does anything —
+  a CPU dispatching back to back re-stamps nothing — and the marker is gated
+  on a live binding, so a port with no mechanism pays one relaxed load per
+  dispatch step.
+* *A dispatcher looking for work is not a CPU doing any.* Utilisation must be
+  the same quantity `Scheduler::cpu_busy_ticks` reports as busy — time inside
+  task bodies — or the governor and every reader of the System Information API
+  contradict each other. The first revision opened the bracket at the top of
+  every iteration and closed it only at the `wfi`, but the loop declines to
+  park whenever it has *anything* to look at (a drained deferred wake, ready
+  work homed here, a fired one-shot) and re-steps instead. Folding those as
+  work let a CPU at ~2% duty cycle saturate its filter, and the busiest CPU
+  sets the rate: one such core pinned the whole machine to its ceiling while
+  `top` truthfully reported 2%. Regression test:
+  `the_governor_bracket_follows_dispatched_work_not_the_idle_park`.
+* *Utilisation is not read from the scheduler policy.* `cpu_busy_ticks` is the
+  quantity to agree with, not the source to read: `in_flight_ticks` takes an
+  `RwLock`, and a lock shared with a timer interrupt is a self-deadlock. The
+  dispatch brackets measure the same thing lock-free.
 * *O(1) on the hot path.* Surveying every CPU is O(cores) and happens in the
   waiter, at most once per window. A wake can only ever *raise* the rate, and
   it raises it to the declared maximum, which needs no survey. A wake is
@@ -115,8 +127,8 @@ per-CPU slot lookup and one relaxed load per dispatch step.
   still shows the ramp — with the headroom applied the filter must move
   several percent of full scale to shift the target one step — and it bounds a
   climb to a handful of round trips rather than one per step. A quiet machine
-  arms none of it. The idle→active edge stamps `ATTENTION_UNTIL_NS`, which
-  grants no rate and only bounds how often leaving idle costs a task wake.
+  arms none of it. The work edge stamps `ATTENTION_UNTIL_NS`, which grants no
+  rate and only bounds how often work arriving costs a task wake.
 * *The two top-of-range rules compound, by design.* Exceeding half a core
   takes just over 50 ms of work inside the 100 ms window, and that alone buys
   600 ms at the ceiling, so a workload bursting that hard twice a second sits
@@ -189,11 +201,30 @@ together when the core does:
 
 So a window containing idle reported `frequency × duty_cycle`: a core flat out
 at 1.5 GHz for 40% of a window read as 600 MHz — the same figure the firmware
-defect produced, which is what made the two hard to tell apart. The estimator
-now re-seeds its baseline as a CPU leaves its idle park (`estimate::rebase`,
-called from the same hook the governor uses), so every published figure spans
-running time only. One arch-neutral definition fixes aarch64 and riscv64 and
-is a no-op for x86_64's already-correct pair.
+defect produced, which is what made the two hard to tell apart.
+
+The park is bracketed on both sides, in one arch-neutral definition that fixes
+aarch64 and riscv64 and is a no-op for x86_64's already-correct pair:
+`estimate::invalidate` discards the baseline immediately before the wait and
+`estimate::rebase` re-seeds it immediately after.
+
+**The discard is the load-bearing half**, and re-seeding on resumption alone
+was the first revision's mistake. A port calls `note_preempt_tick` — and so
+`sample` — from the timer one-shot *and* from a device interrupt that requested
+a wake (aarch64 `note_resched_here`), which is exactly the interrupt that ends
+a park. It runs in interrupt context before the dispatch loop regains control,
+and before `wait_for_interrupt` even returns on a port that unmasks across the
+halt, so no resumption hook can precede it. Left uncovered, a mostly-idle core
+published a duty cycle on every wake — which made a machine pinned at its
+ceiling look as though its other cores were clocking down, and hid the governor
+defect above. Regression test:
+`the_interrupt_that_ends_a_park_cannot_publish_a_duty_cycle`.
+
+The baseline is two atomics meaning one instant, written from task context and
+read from interrupt context on the same CPU, so `rebase` clears the reference
+slot first and republishes it last: an interrupting sample reads "no prior
+sample" and re-seeds rather than pairing a fresh core reading with a stale
+reference one.
 
 A window too short to divide accurately (under 1024 reference ticks) publishes
 nothing rather than a noisy figure.

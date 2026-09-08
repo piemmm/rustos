@@ -104,17 +104,35 @@ instead of one per step, and it arms nothing at all on a quiet machine.
 
 ### Utilisation without a tick
 
-The dispatch loop already brackets idle exactly — it parks in one place and
-resumes in one place — so every span between transitions is wholly busy or
-wholly idle. Each transition folds its own CPU's span into a per-CPU filter
-weighted by how long it lasted, and reading the filter folds the span since
-the last commit at the moment somebody asks. So an idle CPU's utilisation
-decays with nothing armed to make it happen, and a busy one's rises as it
-runs, with no periodic timer behind either.
+The dispatch loop brackets *work*: a dispatch that ran a task body opens a
+CPU's busy span and one that found nothing to run closes it, so every span
+between transitions is wholly busy or wholly idle. Each transition folds its
+own CPU's span into a per-CPU filter weighted by how long it lasted, and
+reading the filter folds the span since the last commit at the moment somebody
+asks. So an idle CPU's utilisation decays with nothing armed to make it
+happen, and a busy one's rises as it runs, with no periodic timer behind
+either.
 
 The filter carries the duty cycle across idle: a task that runs 2 ms in every
 100 ms holds its CPU near 2%, so a low-duty background service does not read
 as a busy machine.
+
+### A dispatcher looking for work is not a CPU doing any
+
+Utilisation for a rate decision must be the same quantity the system reports
+as busy time — `Scheduler::cpu_busy_ticks`, the time spent inside task bodies,
+which is what `top` and the Switchboard render — or the two contradict each
+other and one of them is lying.
+
+An earlier revision opened the bracket at the top of every dispatch-loop
+iteration and closed it only where the loop committed to its `wfi`. But the
+loop declines to park whenever it has anything at all to look at: a deferred
+wake it has just drained, ready work homed on this CPU, a fired one-shot. Each
+of those re-steps without running a task body, and folding them as work let a
+CPU doing a couple of percent of it saturate its filter. The busiest CPU sets
+the rate for the whole machine, so one such CPU pinned a Raspberry Pi to its
+ceiling — reported as a core stuck at 1.4 GHz next to a scheduler truthfully
+reporting 2% busy. The bracket now opens only for a dispatched task body.
 
 ### The launch boost
 
@@ -134,10 +152,8 @@ that genuinely deserves it.
 
 ### Cost when nothing is bound
 
-A per-CPU slot lookup and one relaxed load per dispatch step, to tell an idle
-resumption from an ordinary dispatch — and nothing at all beyond that. Every
-port but the Raspberry Pi has no frequency mechanism today, and pays exactly
-that.
+One relaxed load per dispatch step, and nothing at all beyond that. Every port
+but the Raspberry Pi has no frequency mechanism today, and pays exactly that.
 
 ## The mechanism seam
 
@@ -204,8 +220,25 @@ CSR) the core counter is gated while the PE sits in `wfi` while the reference
 keeps running, so a window containing idle would report `frequency × duty
 cycle` — a core flat out at 1.5 GHz for 40% of a window reading as 600 MHz.
 
-The estimator therefore re-seeds its baseline as a CPU leaves its idle park,
-so every published figure spans running time only. A window too short to
-divide accurately publishes nothing rather than a noisy figure — `0` and a
-clear `CPU_INFO_FLAG_FREQ_MEASURED` are the honest unknown a reader falls back
-from, never a fabricated rate.
+The park is therefore bracketed on both sides: the baseline is discarded on
+the way in and re-seeded from the live counters on the way out, so every
+published figure spans running time only. **Both halves are needed, and the
+discard is the load-bearing one.** A port calls its per-CPU sampling point
+from the timer one-shot *and* from a device interrupt that requested a wake —
+which is exactly the interrupt that ends an idle park. That sample runs in
+interrupt context, before the dispatch loop regains control, and on a port
+whose wait unmasks across the halt it runs before the wait even returns; so
+re-seeding on resumption cannot come early enough on its own. Without the
+discard, a mostly-idle core published `frequency × duty cycle` on every wake,
+which is what made a machine pinned at its ceiling look as though three of its
+four cores were dutifully clocking down.
+
+The baseline is a pair of per-CPU atomics that means one instant, and the
+sampler runs in interrupt context on the same CPU, so the re-seed clears the
+reference slot before writing and republishes it last: a sample landing
+mid-write reads "no prior sample" and re-seeds rather than dividing a fresh
+core reading by a stale reference one.
+
+A window too short to divide accurately publishes nothing rather than a noisy
+figure — `0` and a clear `CPU_INFO_FLAG_FREQ_MEASURED` are the honest unknown
+a reader falls back from, never a fabricated rate.

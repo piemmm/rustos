@@ -16,13 +16,16 @@
 //! the fixed reference counter accrues `reference_hz · Δt` reference ticks
 //! over the same span, so their ratio yields `f` independent of `Δt`
 //! ([`tairix_arch_api::frequency_hz`]). The estimator therefore never waits:
-//! at each per-CPU preemption tick ([`crate::preempt::note_preempt_tick`]) it
+//! at each per-CPU preemption point ([`crate::preempt::note_preempt_tick`],
+//! which a port also calls from a device interrupt that requested a wake) it
 //! reads the calling CPU's core and reference counters, divides the deltas
-//! since the previous tick, and publishes the result. An idle CPU that takes
-//! no ticks simply keeps its last published value (a reader sees the last
-//! measured clock); a port with no core-clock counter publishes nothing and
-//! readers fall back to the discovered nominal frequency (fail closed — never
-//! a fabricated rate).
+//! since the previous sample, and publishes the result. Those calls arrive in
+//! interrupt context, which is why the park bracket below is what keeps a
+//! window honest rather than the dispatch loop's own ordering. An idle CPU
+//! that takes no samples simply keeps its last published value (a reader sees
+//! the last measured clock); a port with no core-clock counter publishes
+//! nothing and readers fall back to the discovered nominal frequency (fail
+//! closed — never a fabricated rate).
 //!
 //! # Why the idle span is excluded
 //!
@@ -36,11 +39,16 @@
 //! 40% of the window reads as 600 MHz, which is a different quantity wearing
 //! the same units.
 //!
-//! [`rebase`] closes that by moving the baseline to the instant the core
-//! resumed running, so the next window spans running time only. A core that
-//! idles repeatedly moves it repeatedly, and the published figure stays a
-//! frequency however the core's duty cycle varies. Utilisation is a separate
-//! question with a separate answer ([`super::governor`]).
+//! The park is therefore bracketed on both sides. [`invalidate`] discards the
+//! baseline on the way in and [`rebase`] re-seeds it on the way out, so the
+//! next window spans running time only. **Both are needed**: the sample that
+//! would be contaminated is the one the *waking* interrupt takes, from
+//! interrupt context, before the dispatch loop reaches the resumption hook —
+//! and on a port whose wait unmasks across the halt (x86_64 `hlt`) before
+//! `wait_for_interrupt` even returns. A core that idles repeatedly brackets
+//! repeatedly, and the published figure stays a frequency however the core's
+//! duty cycle varies. Utilisation is a separate question with a separate
+//! answer ([`super::governor`]).
 //!
 //! The sampled counters live in interrupt-context-safe per-CPU atomics
 //! (the kernel's per-CPU `CpuState`); each CPU only ever writes its own slot,
@@ -116,16 +124,20 @@ const MIN_SAMPLE_REFERENCE_TICKS: u64 = 1024;
 
 /// Take one frequency sample for the calling CPU, `cpu`.
 ///
-/// Called from [`crate::preempt::note_preempt_tick`] on every fired one-shot
-/// — a per-CPU periodic point off the context-switch hot path. Reads this
-/// CPU's core and reference counters, divides the deltas since the previous
-/// sample (scaled by the reference frequency), and publishes the live clock
-/// into this CPU's per-CPU `CpuState` slot. Pure per-CPU
-/// accounting: lock-free, allocation-free, and safe from interrupt context.
+/// Called from [`crate::preempt::note_preempt_tick`] — on every fired one-shot
+/// and, on a port that routes one, from a device interrupt that requested a
+/// wake. Reads this CPU's core and reference counters, divides the deltas
+/// since the previous sample (scaled by the reference frequency), and
+/// publishes the live clock into this CPU's per-CPU `CpuState` slot. Pure
+/// per-CPU accounting: lock-free, allocation-free, and safe from interrupt
+/// context — which it always runs in, so the park bracket (`invalidate` /
+/// `rebase`) is what keeps a window from spanning a park, not the order the
+/// dispatch loop does things in.
 ///
-/// The very first sample on a CPU only records the baseline counters (there
-/// is no prior pair to difference), so the published frequency stays `0`
-/// ("not yet measured") until the second tick.
+/// A CPU with no valid baseline — its first sample, or the first after a park
+/// — only records one, so the published frequency stays as it was (`0` where
+/// nothing has been measured yet) rather than becoming a figure measured over
+/// the wrong span.
 pub fn sample(cpu: CpuId) {
     // Fast, boot-constant gate: an unsupported port (or one with no known
     // reference rate) leaves `REFERENCE_HZ` at `0`, so the hot interrupt path
@@ -173,19 +185,29 @@ pub fn sample(cpu: CpuId) {
     }
 }
 
+/// Discard `cpu`'s sampling baseline, so no [`sample`] can divide across the
+/// park the CPU is about to enter.
+///
+/// Called on that CPU with device interrupts masked, immediately before the
+/// wait. The next sample — which is the one the *waking* interrupt takes, from
+/// interrupt context, before the dispatch loop regains control — then finds no
+/// prior pair and re-seeds instead of publishing running cycles over
+/// running-plus-parked ticks.
+pub(super) fn invalidate(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state.freq_last_ref.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Move `cpu`'s sampling baseline to now, so the next [`sample`] measures
 /// only the span from here.
 ///
-/// Called as a CPU leaves its idle park, on that CPU. The core-clock counter
-/// is gated while the PE idles on most ports, so a window straddling that
-/// park would divide running cycles by running-plus-idle reference ticks and
-/// report a duty cycle dressed as a frequency. Re-seeding here means every
-/// published figure spans running time only.
-///
-/// The baseline is taken from the live counters rather than cleared, so the
-/// very next tick still yields an estimate — one measured from the instant
-/// the core resumed. Two register reads and two relaxed stores, and nothing
-/// at all on a port with no core-clock source.
+/// Called as a CPU leaves its idle park, on that CPU. Together with
+/// [`invalidate`] this brackets the park: the invalidation is what makes a
+/// contaminated window impossible, and re-seeding from the live counters here
+/// is what keeps the *first* sample after the park useful rather than spent
+/// re-seeding. Two register reads and three relaxed stores, and nothing at all
+/// on a port with no core-clock source.
 pub(super) fn rebase(cpu: CpuId) {
     if REFERENCE_HZ.load(Ordering::Relaxed) == 0 {
         return;
@@ -198,6 +220,13 @@ pub(super) fn rebase(cpu: CpuId) {
     };
     let core = clock.core_cycles();
     let reference = clock.reference_cycles();
+    // The pair is two atomics but means one instant, and `sample` runs in
+    // interrupt context on this same CPU: a sample landing between the two
+    // stores would otherwise divide this core reading by an old reference one.
+    // Clearing the reference slot first makes that window read as "no prior
+    // sample" — the interrupting sample re-seeds and publishes nothing — and
+    // publishing it last revalidates the pair.
+    state.freq_last_ref.store(0, Ordering::Relaxed);
     state.freq_last_core.store(core, Ordering::Relaxed);
     state.freq_last_ref.store(reference, Ordering::Relaxed);
 }

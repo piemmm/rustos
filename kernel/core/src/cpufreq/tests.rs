@@ -30,22 +30,10 @@ const DRIVER: ProcessId = ProcessId(0x0C_9F);
 /// Run `body` with `limits` bound to [`DRIVER`] at time `now_ns`, holding the
 /// process-global mechanism state for the duration.
 ///
-/// The binding, the boost deadline, and the per-CPU filters are one machine's
-/// worth of state, so two tests running at once would read each other's. The
-/// guard serialises them and releases the binding afterwards however `body`
-/// ends, so a failing assertion cannot strand the role.
+/// The shared guard serialises the machine-global state and releases the
+/// binding however `body` ends; this only names [`DRIVER`] for it.
 fn with_mechanism<R>(limits: CpuFreqLimits, now_ns: u64, body: impl FnOnce(u64) -> R) -> R {
-    super::with_mechanism_lock(|| {
-        // A previous test's failure may have left the role bound.
-        let _ = domain::release_process(DRIVER);
-        let handle = domain::bind(DRIVER, limits, now_ns).expect("the role is free");
-        let result = body(handle);
-        assert!(
-            domain::release_process(DRIVER),
-            "the binding must still be the one this test took"
-        );
-        result
-    })
+    super::with_bound_mechanism(DRIVER, limits, now_ns, body)
 }
 
 /// A [`TargetWaiter`] over a scripted clock, standing in for the timed sweep
@@ -565,9 +553,8 @@ fn sustained_partial_load_settles_below_full_speed() {
 fn an_unbound_machine_does_no_governor_accounting() {
     // Deliberately outside `with_mechanism`. The hooks run on every dispatch
     // step of every CPU on every port, so with no frequency driver bound they
-    // must do none of the governor's work. The edge marker itself is still
-    // maintained — the live-clock estimator needs that edge on every port —
-    // but no utilisation is folded and no demand is raised.
+    // must do none of the governor's work: nothing folded, no edge stamped,
+    // and no demand raised.
     let state = cpu_state::get(7).expect("a test CPU");
     state.cpu_active_since.store(0, Ordering::Relaxed);
     state.gov_util.store(0, Ordering::Relaxed);
@@ -581,32 +568,37 @@ fn an_unbound_machine_does_no_governor_accounting() {
         0,
         "the filter's clock never started"
     );
+    assert_eq!(
+        state.cpu_active_since.load(Ordering::Relaxed),
+        0,
+        "no edge stamped for a governor that is not running"
+    );
 }
 
 #[test]
-fn an_ordinary_dispatch_step_is_not_an_idle_resumption() {
-    // The defect this guards: `note_active` runs at the top of every
-    // dispatch-loop iteration, not only after a park. Treating each of those
-    // as a resumption would restart the estimator's sampling window on every
-    // dispatch — leaving every window far too short to divide, so the
-    // estimator would publish *nothing* and the reported frequency would sit
-    // at zero for ever. Only the edge counts.
+fn back_to_back_dispatches_are_one_busy_span() {
+    // `note_active` runs after every dispatch that ran a task body, so a CPU
+    // working steadily reaches it thousands of times a second. Only the edge
+    // may do anything: re-stamping per dispatch would chop one busy span into
+    // arbitrary slices and hand the filter's non-composability a workload it
+    // was never meant to measure.
     let cpu = 9;
-    let state = cpu_state::get(cpu).expect("a test CPU");
-    state.cpu_active_since.store(0, Ordering::Relaxed);
-    note_active(cpu, 1_000);
-    let stamped = state.cpu_active_since.load(Ordering::Relaxed);
-    assert_ne!(stamped, 0, "the edge must be recorded");
-    for step in 1..8u64 {
-        note_active(cpu, 1_000 + step * 1_000);
-        assert_eq!(
-            state.cpu_active_since.load(Ordering::Relaxed),
-            stamped,
-            "dispatch step {step} was treated as a resumption"
-        );
-    }
-    note_idle(cpu, 100_000);
-    assert_eq!(state.cpu_active_since.load(Ordering::Relaxed), 0);
+    with_mechanism(pi4(), 1_000, |_handle| {
+        let state = cpu_state::get(cpu).expect("a test CPU");
+        note_active(cpu, 1_000);
+        let stamped = state.cpu_active_since.load(Ordering::Relaxed);
+        assert_ne!(stamped, 0, "the edge must be recorded");
+        for step in 1..8u64 {
+            note_active(cpu, 1_000 + step * 1_000);
+            assert_eq!(
+                state.cpu_active_since.load(Ordering::Relaxed),
+                stamped,
+                "dispatch step {step} restarted the busy span"
+            );
+        }
+        note_idle(cpu, 100_000);
+        assert_eq!(state.cpu_active_since.load(Ordering::Relaxed), 0);
+    });
 }
 
 #[test]
@@ -631,14 +623,36 @@ struct ScriptedCoreClock {
 
 /// The installed source. `estimate::install` is set-once for the life of the
 /// process, so the estimator tests share this one and script it.
+///
+/// Both counters start well clear of zero, because a real one has been running
+/// since reset and the estimator reads a stored reference of zero as "no prior
+/// sample". A clock scripted from zero would hand the first seeding sample
+/// that sentinel back, so the sample after it would discard too — and a test
+/// would then assert against a figure that was never measured.
 static SCRIPTED_CLOCK: ScriptedCoreClock = ScriptedCoreClock {
-    core: AtomicU64::new(0),
-    reference: AtomicU64::new(0),
+    core: AtomicU64::new(1_000_000_000),
+    reference: AtomicU64::new(1_000_000_000),
 };
 
 /// The scripted reference rate: 1 GHz, so a reference tick is a nanosecond
 /// and a core-to-reference ratio reads directly as a frequency.
 const SCRIPTED_REFERENCE_HZ: u64 = 1_000_000_000;
+
+/// Serialise the estimator tests: they share the one installed
+/// [`SCRIPTED_CLOCK`], whose counters each of them advances by hand, so two
+/// running at once would measure each other's trace.
+fn with_scripted_clock<R>(body: impl FnOnce() -> R) -> R {
+    static CLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CLOCK_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    estimate::install(&SCRIPTED_CLOCK);
+    assert!(
+        estimate::is_supported(),
+        "the scripted source must be the installed one"
+    );
+    body()
+}
 
 impl CoreClock for ScriptedCoreClock {
     fn enable(&self) {}
@@ -680,43 +694,86 @@ fn an_idle_park_does_not_turn_the_measured_frequency_into_a_duty_cycle() {
     // 1.5 GHz for 40% of a window then reads as 600 MHz — the exact figure
     // the Switchboard was showing — which is a different quantity wearing the
     // same units.
-    static ESTIMATOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = ESTIMATOR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    estimate::install(&SCRIPTED_CLOCK);
-    assert!(
-        estimate::is_supported(),
-        "the scripted source must be the installed one"
-    );
-    let cpu = 11;
-    let state = cpu_state::get(cpu).expect("a test CPU");
+    with_scripted_clock(|| {
+        let cpu = 11;
+        let state = cpu_state::get(cpu).expect("a test CPU");
 
-    // Seed a baseline, then run one window that is 40% busy at 1.5 GHz.
-    estimate::sample(cpu);
-    let full_speed = 1_500_000_000;
-    SCRIPTED_CLOCK.run(4_000_000, full_speed);
-    SCRIPTED_CLOCK.park(6_000_000);
-    SCRIPTED_CLOCK.run(1_000_000, full_speed);
-    estimate::sample(cpu);
-    let contaminated = state.freq_hz.load(Ordering::Relaxed);
-    assert!(
-        contaminated < full_speed / 2,
-        "the unbracketed window should read low, not {contaminated}"
-    );
+        // Seed a baseline, then run one window that is 40% busy at 1.5 GHz.
+        estimate::sample(cpu);
+        let full_speed = 1_500_000_000;
+        SCRIPTED_CLOCK.run(4_000_000, full_speed);
+        SCRIPTED_CLOCK.park(6_000_000);
+        SCRIPTED_CLOCK.run(1_000_000, full_speed);
+        estimate::sample(cpu);
+        let contaminated = state.freq_hz.load(Ordering::Relaxed);
+        assert!(
+            contaminated < full_speed / 2,
+            "the unbracketed window should read low, not {contaminated}"
+        );
 
-    // Now the same trace with the park bracketed, as the dispatch loop does:
-    // the baseline moves to the resumption, so the window measures running
-    // time only.
-    SCRIPTED_CLOCK.run(1_000_000, full_speed);
-    estimate::sample(cpu);
-    SCRIPTED_CLOCK.park(6_000_000);
-    estimate::rebase(cpu);
-    SCRIPTED_CLOCK.run(4_000_000, full_speed);
-    estimate::sample(cpu);
-    assert_eq!(
-        state.freq_hz.load(Ordering::Relaxed),
-        full_speed,
-        "a bracketed window must report the frequency the core ran at"
-    );
+        // Now the same trace with the park bracketed, as the dispatch loop does:
+        // the baseline is discarded on the way in and moves to the resumption, so
+        // the window measures running time only.
+        SCRIPTED_CLOCK.run(1_000_000, full_speed);
+        estimate::sample(cpu);
+        estimate::invalidate(cpu);
+        SCRIPTED_CLOCK.park(6_000_000);
+        estimate::rebase(cpu);
+        SCRIPTED_CLOCK.run(4_000_000, full_speed);
+        estimate::sample(cpu);
+        assert_eq!(
+            state.freq_hz.load(Ordering::Relaxed),
+            full_speed,
+            "a bracketed window must report the frequency the core ran at"
+        );
+    });
+}
+
+#[test]
+fn the_interrupt_that_ends_a_park_cannot_publish_a_duty_cycle() {
+    // The half of the park bracket a resumption hook cannot cover. Ports call
+    // `note_preempt_tick` — and so `sample` — from the timer one-shot *and*
+    // from a device interrupt that requested a wake, which is exactly the
+    // interrupt that ends an idle park. It runs in interrupt context, before
+    // the dispatch loop regains control, so re-seeding on resumption is too
+    // late: without the invalidation on the way in, that first sample divides
+    // pre-park running cycles by running-plus-parked reference ticks and
+    // publishes a duty cycle wearing hertz — which is what made an idle core
+    // look as though its clock had been lowered.
+    with_scripted_clock(|| {
+        let cpu = 12;
+        let state = cpu_state::get(cpu).expect("a test CPU");
+        let full_speed = 1_500_000_000;
+
+        // A window of real work, measured: the figure a reader would see.
+        estimate::sample(cpu);
+        SCRIPTED_CLOCK.run(4_000_000, full_speed);
+        estimate::sample(cpu);
+        assert_eq!(state.freq_hz.load(Ordering::Relaxed), full_speed);
+
+        // Now: a brief run, the park, and the waking interrupt's own sample —
+        // ordered as the machine orders them, with nothing between the park and
+        // the interrupt.
+        SCRIPTED_CLOCK.run(20_000, full_speed);
+        estimate::invalidate(cpu);
+        SCRIPTED_CLOCK.park(50_000_000);
+        estimate::sample(cpu);
+        assert_eq!(
+            state.freq_hz.load(Ordering::Relaxed),
+            full_speed,
+            "the waking interrupt's sample must re-seed, not publish"
+        );
+
+        // And the baseline it re-seeded is usable: the next window reports the
+        // frequency the core ran at, with no measurement lost to the park.
+        estimate::rebase(cpu);
+        let lowered = 600_000_000;
+        SCRIPTED_CLOCK.run(4_000_000, lowered);
+        estimate::sample(cpu);
+        assert_eq!(
+            state.freq_hz.load(Ordering::Relaxed),
+            lowered,
+            "a real change of clock must be reported after a park"
+        );
+    });
 }

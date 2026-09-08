@@ -1262,16 +1262,6 @@ fn run_dispatch_loop<A: KernelArch>(
         // long idle park (which would be a false soft- or hard-lockup
         // report).
         crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
-        // Reaching here means this CPU is running work — either it never
-        // parked or it has just resumed. Both halves of the frequency
-        // subsystem need that edge: the live-clock estimator restarts its
-        // sampling window (its core-cycle counter was gated while the CPU
-        // idled, so a window spanning the park would report a duty cycle
-        // instead of a frequency), and the governor folds the idle span into
-        // this CPU's utilisation and asks for full speed for the work that
-        // has arrived. Idempotent, and two relaxed loads on a CPU that never
-        // parked.
-        crate::cpufreq::note_active(cpu, now_ns);
         // Retire any reschedule obligation left by the task that just
         // suspended before the policy makes its next decision. CFQ arms
         // the incoming task's one-shot inside `step`; clearing later in
@@ -1310,6 +1300,10 @@ fn run_dispatch_loop<A: KernelArch>(
                 // accesses into a wild fault. A task that was not killed
                 // while running makes this a single relaxed atomic read.
                 crate::procsignal::land_running_kill(id);
+                // A task body ran, which is the only thing that makes a CPU
+                // busy. Stamped with the top-of-loop instant so the span the
+                // governor folds covers the run rather than starting after it.
+                crate::cpufreq::note_active(cpu, now_ns);
                 if matches!(role, DispatchRole::Boot) && scheduler.live_task_count() == 0 {
                     break;
                 }
@@ -1326,6 +1320,12 @@ fn run_dispatch_loop<A: KernelArch>(
             // work lands here, or a device IRQ — then re-step. Never
             // busy-spin (tickless idle).
             Ok(StepOutcome::Idle) => {
+                // Nothing ran, so the busy span ends here whether or not this
+                // iteration goes on to park: an iteration that declines to
+                // park is the dispatcher looking for work, not a CPU doing
+                // any, and folding those as work saturated the filter of a
+                // CPU that was a couple of percent busy.
+                crate::cpufreq::note_idle(cpu, now_ns);
                 if matches!(role, DispatchRole::Boot) && scheduler.live_task_count() == 0 {
                     break;
                 }
@@ -1346,14 +1346,14 @@ fn run_dispatch_loop<A: KernelArch>(
                     // does not judge it; the loop re-stamps progress and
                     // republishes Active at its top on the next wake.
                     crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Idle);
-                    // Close this CPU's busy span before it stops running, so
-                    // the governor's utilisation filter sees exactly the time
-                    // the CPU spent on work. The clock is re-read rather than
-                    // reusing the top-of-loop stamp: everything between them
-                    // was work, and crediting it as idle would under-report a
-                    // busy machine.
-                    crate::cpufreq::note_idle(cpu, arch.monotonic_ns(cpu));
+                    // The core clock stops here while its reference does
+                    // not, so the estimator's baseline is discarded going in
+                    // and re-seeded coming out. The discard is what covers
+                    // the waking interrupt's own sample, which runs before
+                    // this loop regains control.
+                    crate::cpufreq::note_park(cpu);
                     arch.wait_for_interrupt();
+                    crate::cpufreq::note_resume(cpu);
                 }
                 arch.set_device_irqs(true);
             }
@@ -1361,10 +1361,12 @@ fn run_dispatch_loop<A: KernelArch>(
         }
     }
     arch.set_device_irqs(false);
-    // No dispatcher runs on this CPU any more, so it owes no progress:
-    // publish Offline so the watchdog never mistakes a retired CPU for a
-    // lockup.
+    // No dispatcher runs on this CPU any more, so it owes no progress and
+    // accrues no utilisation: publish Offline so the watchdog never mistakes
+    // a retired CPU for a lockup, and close the governor's span so however
+    // the loop ended it leaves none open to grow without bound.
     crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Offline);
+    crate::cpufreq::note_idle(cpu, arch.monotonic_ns(cpu));
 }
 
 #[cfg(test)]
@@ -1409,6 +1411,126 @@ mod dispatch_loop_tests {
             arch.irq_enable_count(),
             2,
             "initial enable plus post-step restoration must both occur"
+        );
+    }
+
+    /// The CPU the bracket test drives. Every other dispatch-loop test drives
+    /// CPU 0 and they run in parallel, so this one takes a slot of its own
+    /// rather than racing them for the per-CPU frequency accounting.
+    const BRACKET_CPU: tairix_kernel_sched_api::CpuId = 3;
+
+    /// A scheduler over [`BRACKET_CPU`] and its lower siblings, with no
+    /// threads, so the loop's first step decides everything.
+    fn bracket_cpus() -> (Arc<TestArch>, Scheduler<TestArch>) {
+        let cpus = BRACKET_CPU + 1;
+        let arch = Arc::new(TestArch::with_cpus(cpus));
+        let scheduler = Scheduler::new(
+            SchedulerConfig {
+                cpus,
+                queue_capacity_per_band: 8,
+                yields_before_demotion: 1,
+                boost_interval_ticks: 10,
+            },
+            arch.clone(),
+        )
+        .expect("scheduler builds");
+        (arch, scheduler)
+    }
+
+    #[test]
+    fn the_governor_bracket_follows_dispatched_work_not_the_idle_park() {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        use tairix_abi::cpufreq::CpuFreqLimits;
+        use tairix_kernel_sec::ProcessId;
+
+        // The reported defect: a Raspberry Pi held its ARM clock at the
+        // ceiling while the scheduler reported the boot CPU two percent busy.
+        // The bracket the governor folds used to open at the top of every
+        // iteration and close only where the loop committed to `wfi`, so
+        // every iteration that found nothing to run yet declined to park — a
+        // deferred wake just drained, ready work homed here, a fired one-shot
+        // — folded as work. A CPU cycling through those saturated its filter,
+        // and the busiest CPU sets the rate for the whole machine.
+        //
+        // Both edges are observed from inside the loop, because the exit
+        // closes the span too and would hide either of them from after it.
+        // The gate is the loop's masked idle-commit window, which it reaches
+        // *before* any park, so an observation there is the whole point.
+        // Never read except to prove it changed, so the sentinel is a value no
+        // real stamp can be.
+        const UNSEEN: u64 = u64::MAX;
+        let limits =
+            CpuFreqLimits::new(600_000_000, 1_500_000_000, 100_000_000).expect("a real range");
+        let in_body = Arc::new(AtomicU64::new(UNSEEN));
+        let at_gate = Arc::new(AtomicU64::new(UNSEEN));
+
+        crate::cpufreq::with_bound_mechanism(ProcessId(0x0C_D0), limits, 0, |_handle| {
+            let (arch, scheduler) = bracket_cpus();
+            let scheduler = Arc::new(scheduler);
+
+            // Runs twice: the second dispatch reads the span the first one
+            // opened, which only the `Ran` arm can have opened.
+            let runs = AtomicU64::new(0);
+            let body_in_body = in_body.clone();
+            let sentinel = scheduler
+                .spawn(BRACKET_CPU, Priority::Normal, move |_| {
+                    if runs.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return TaskAction::Yield;
+                    }
+                    let state = crate::cpu_state::get(BRACKET_CPU).expect("a test CPU");
+                    body_in_body.store(
+                        state.cpu_active_since.load(Ordering::Relaxed),
+                        Ordering::Release,
+                    );
+                    TaskAction::Park
+                })
+                .expect("task spawns");
+
+            arch.arm_idle_mask_gate();
+            let gate_arch = arch.clone();
+            let gate_scheduler = scheduler.clone();
+            let gate_at_gate = at_gate.clone();
+            let observer = thread::spawn(move || {
+                while !gate_arch.idle_mask_gate_entered() {
+                    thread::yield_now();
+                }
+                let state = crate::cpu_state::get(BRACKET_CPU).expect("a test CPU");
+                gate_at_gate.store(
+                    state.cpu_active_since.load(Ordering::Relaxed),
+                    Ordering::Release,
+                );
+                // Retire the parked task so the loop drains and returns,
+                // then release the gate. Recording before publishing keeps
+                // the observation from racing the loop's next iteration.
+                gate_scheduler
+                    .exit(sentinel)
+                    .expect("the parked task is live");
+                gate_arch.release_idle_mask_gate();
+            });
+
+            run_dispatch_loop(
+                scheduler.as_ref(),
+                arch.as_ref(),
+                BRACKET_CPU,
+                DispatchRole::Boot,
+            );
+            observer.join().expect("the observer thread completes");
+        });
+
+        assert_ne!(
+            in_body.load(Ordering::Acquire),
+            UNSEEN,
+            "the task body must have run twice"
+        );
+        assert_ne!(
+            in_body.load(Ordering::Acquire),
+            0,
+            "a dispatched task body is what opens the busy span"
+        );
+        assert_eq!(
+            at_gate.load(Ordering::Acquire),
+            0,
+            "an empty dispatch must end the busy span before the loop parks"
         );
     }
 

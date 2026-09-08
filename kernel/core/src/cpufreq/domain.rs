@@ -8,11 +8,11 @@
 //!
 //! # What is on the hot path and what is not
 //!
-//! The dispatch loop's idle brackets run thousands of times a second on every
+//! The dispatch loop's work brackets run thousands of times a second on every
 //! CPU, so they take no lock and do no survey. Each one folds *its own* CPU's
-//! utilisation through per-CPU atomics, and asks nothing for it: leaving idle
+//! utilisation through per-CPU atomics, and asks nothing for it: work arriving
 //! grants no rate here, only [`attention`], which flags a task wake at most
-//! once per [`ACTIVE_REVIEW_NS`] however often the machine idles.
+//! once per [`ACTIVE_REVIEW_NS`] however often the machine goes quiet.
 //!
 //! Deciding the rate needs every CPU's utilisation, which is O(number of
 //! CPUs) — so it happens in the waiter, under the binding lock. Holding the
@@ -63,13 +63,15 @@ struct Binding {
 /// The one binding, or `None` when the machine has no mechanism.
 static BINDING: SpinLock<Option<Binding>> = SpinLock::new(None);
 
-/// Whether a mechanism is bound — the idle path's whole gate.
-///
-/// One relaxed load, so a machine with no frequency driver (every port but
-/// the Raspberry Pi today) pays exactly that per idle transition and nothing
-/// else. It duplicates no value from [`Binding`]; it answers only "is there
-/// anything to account for".
+/// Whether a mechanism is bound. It duplicates no value from [`Binding`]; it
+/// answers only "is there anything to account for".
 static BOUND: AtomicBool = AtomicBool::new(false);
+
+/// The dispatch hooks' whole gate, so a port with no frequency driver pays one
+/// relaxed load per dispatch step.
+pub(super) fn is_bound() -> bool {
+    BOUND.load(Ordering::Acquire)
+}
 
 /// Monotonic time the current launch boost expires. Only starting a program
 /// extends it, and nothing shortens it.
@@ -125,9 +127,9 @@ pub(crate) fn bind(process: ProcessId, limits: CpuFreqLimits, now_ns: u64) -> Re
     // reads the whole history of the boot as one idle span, so the first
     // target would be the *minimum* — actively slowing a machine that is
     // demonstrably busy launching this very driver. And on a *re*-bind, the
-    // idle brackets have been gated off since the last binding was released,
-    // so a CPU recorded active back then still reads active: it would never
-    // take another idle→active edge and would count as busy forever.
+    // work brackets have been gated off since the last binding was released,
+    // so a CPU recorded busy back then still reads busy: it would never take
+    // another edge and would count as busy forever.
     //
     // Clearing fabricates no utilisation. It says the governor does not know
     // yet, and a governor that does not know must not slow the machine down.
@@ -165,32 +167,24 @@ pub(crate) fn release_process(process: ProcessId) -> bool {
     true
 }
 
-/// Account for a CPU's idle→active edge at `now_ns`.
+/// Account for a CPU's idle→busy edge at `now_ns` — a dispatch that ran a
+/// task body after one that did not.
 ///
-/// The caller ([`super::note_active`]) owns the edge detection, since the
-/// live-clock estimator needs the same edge on every port. This folds the
-/// idle span that just ended into the CPU's filter and makes sure the waiter
-/// is looking; it grants no rate, because leaving idle says only that
-/// *something* happened, not that it is worth the clock. One relaxed load on
-/// a machine with no mechanism bound.
+/// Folds the idle span that just ended into the CPU's filter and makes sure
+/// the waiter is looking; it grants no rate, because work arriving says only
+/// that *something* happened, not that it is worth the clock.
 pub(crate) fn on_active_edge(state: &CpuState, now_ns: u64) {
-    if !BOUND.load(Ordering::Acquire) {
-        return;
-    }
     fold_span(state, now_ns, false);
     attention(now_ns);
 }
 
-/// Account for a CPU's active→idle edge at `now_ns` — the mirror of
+/// Account for a CPU's busy→idle edge at `now_ns` — the mirror of
 /// [`on_active_edge`].
 ///
 /// It folds the busy span that just ended and flags nothing: a rate only ever
-/// falls at the waiter's own paced re-evaluation, so a CPU parking never costs
-/// a survey or a wake.
+/// falls at the waiter's own paced re-evaluation, so a CPU running out of work
+/// never costs a survey or a wake.
 pub(crate) fn on_idle_edge(state: &CpuState, now_ns: u64) {
-    if !BOUND.load(Ordering::Acquire) {
-        return;
-    }
     fold_span(state, now_ns, true);
 }
 
@@ -275,6 +269,15 @@ struct Survey {
 /// idle machine, which is most of what a desktop does. Whether anything is
 /// running comes from the same pass, since it costs nothing extra and decides
 /// whether the rise is still worth looking for.
+///
+/// The reviewing CPU does not report itself busy merely for running this
+/// review, and that is what lets a quiet machine settle rather than sustain
+/// its own cadence for ever. The busy edge is stamped in the dispatch loop's
+/// `Ran` arm *after* a task body returns, so while the mechanism task executes
+/// its CPU still carries what its previous dispatch left: idle where it woke
+/// from a park to serve this review, busy where it was already working through
+/// other tasks. Both are the true answer, and the busy one is what keeps a
+/// continuously loaded CPU under review.
 fn survey(now_ns: u64) -> Survey {
     let mut found = Survey {
         peak_util: 0,

@@ -197,12 +197,13 @@ pub(crate) struct CpuState {
     /// means "not yet measured" — the honest unknown, never a fabricated
     /// rate; a reader then falls back to the discovered nominal frequency.
     pub(crate) freq_hz: AtomicU64,
-    /// Monotonic time this CPU last became active, or `0` while it is
-    /// parked. The dispatch loop stamps both edges, which is what lets
-    /// [`crate::cpufreq`] tell an idle→active resumption apart from an
-    /// ordinary dispatch: the live-clock estimator restarts its sampling
-    /// window on the former only, and the governor folds spans that are
-    /// wholly busy or wholly idle rather than arbitrary slices.
+    /// Monotonic time this CPU last began running work, or `0` while its
+    /// dispatches are finding none. The dispatch loop stamps the edge on
+    /// either side of a task body, so the spans
+    /// [`crate::cpufreq`]'s governor folds are wholly busy or wholly idle —
+    /// and a dispatcher merely looking for work is not counted as doing any.
+    /// Only the governor reads it; the live-clock estimator brackets the idle
+    /// *park*, which is a different edge.
     pub(crate) cpu_active_since: AtomicU64,
     /// Monotonic time [`Self::gov_util`] was last folded, so a reader can
     /// advance the filter over the span since without the governor arming
