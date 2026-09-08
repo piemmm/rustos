@@ -29,8 +29,11 @@ build on the *same* engine without depending on each other — exactly the split
 - `Xhci` — the controller engine. `open` validates the capability block and
   runs the xHCI 1.2 §4.2 prologue (halt, clear latched status, Host Controller
   Reset, wait ready); `start` programs the DMA structures (`DCBAAP`, command
-  ring, interrupter-0 event ring) and runs the controller; `reset_port` /
-  `set_port_power` / `ring_doorbell` / `ack_event` drive the root hub and rings.
+  ring, interrupter-0 event ring) and runs the controller; `begin_port_reset` /
+  `clear_port_reset_change` / `set_port_power` / `ring_doorbell` / `ack_event`
+  drive the root hub and rings. Awaiting a reset it started is deliberately
+  *not* this layer's job — that needs a clock and the controller's interrupt,
+  which `UsbDevice` owns (`await_root_port_reset_complete`).
 - `device::UsbDevice` — the multi-device enumeration engine: per device,
   Enable Slot → Address Device → an 8-byte `GET_DESCRIPTOR` prefix whose
   validated `bMaxPacketSize0` drives an Evaluate Context EP0 fix-up when
@@ -104,7 +107,14 @@ build on the *same* engine without depending on each other — exactly the split
   windows supplied by the `tairix_abi::Delay` seam) — a keyboard and a
   storage stick plugged in together are both served, neither displacing the
   other, and a port whose device fails enumeration is skipped with its slot
-  released, never allowed to cost the other devices their service. A device
+  released, never allowed to cost the other devices their service — including
+  when *every* connected port fails, which is a controller serving nothing
+  rather than a bring-up error, so one unservable device can never take the
+  controller and its watches down with it. `retry_skipped_ports` re-drives
+  every connected-but-unserved port (a served port is left untouched: the
+  re-drive resets the port, which would tear a working device down), so the
+  HCD can owe a skipped port one deferred re-attach rather than wait for a
+  physical re-plug. A device
   absent at bring-up is a first-class state, not a failure: the controller
   comes up watched (each hub's status-change endpoint, and the root ports'
   latched connect changes serviced by `next_root_change`, with no controller

@@ -144,6 +144,14 @@ pub const PORTSC_SPEED_MASK: u32 = 0xF;
 /// `PORTSC` Connect Status Change (write-1-to-clear).
 pub const PORTSC_CSC: u32 = 1 << 17;
 
+/// `PORTSC` Port Enabled/Disabled Change (write-1-to-clear).
+pub const PORTSC_PEC: u32 = 1 << 18;
+
+/// `PORTSC` Port Reset Change (write-1-to-clear): latched when the port
+/// finishes the reset software requested. Left latched, the port carries a
+/// stale change the next reset cannot be distinguished from.
+pub const PORTSC_PRC: u32 = 1 << 21;
+
 /// `PORTSC` bits that are write-1-to-clear or reserved-preserve;
 /// masked off before a control write so a read-modify-write never
 /// clears a change bit by accident (§5.4.8).

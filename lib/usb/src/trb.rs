@@ -3,8 +3,10 @@
 //! A TRB is the 16-byte unit every xHCI ring is built from: commands to
 //! the controller, transfer descriptors to an endpoint, and events back
 //! from the controller all travel as TRBs. Only the TRB types the
-//! bring-up and HID-interrupt paths use are defined;
-//! the set grows with the consumers.
+//! bring-up and HID-interrupt paths *issue* are defined, and that set grows
+//! with the consumers; the [`CompletionCode`] set the controller answers
+//! *with* is complete, because a code the driver cannot name is a code no
+//! diagnostic can report.
 
 use tairix_abi::DriverError;
 
@@ -290,7 +292,14 @@ impl TrbType {
     }
 }
 
-/// Event completion codes this driver models (§6.4.5, table 6-90).
+/// The xHCI-defined event completion codes (§6.4.5, table 6-90).
+///
+/// The whole architected set is named, not the subset today's call sites
+/// branch on: a code the decoder cannot name reaches a diagnostic as
+/// "undecodable", which is precisely the information a metal capture needs
+/// and the reason the Pi 4's `Context State Error` on Address Device read as
+/// a driver decode failure. Only *reserved* and *vendor-defined* values stay
+/// undecodable ([`Self::from_raw`]).
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
@@ -307,9 +316,68 @@ pub enum CompletionCode {
     TrbError = 5,
     /// The endpoint returned STALL.
     StallError = 6,
+    /// The controller has no internal resource for the command.
+    ResourceError = 7,
+    /// The endpoint's requested bandwidth is not available.
+    BandwidthError = 8,
+    /// Every device slot is already enabled.
+    NoSlotsAvailable = 9,
+    /// The command named a stream type the endpoint does not support.
+    InvalidStreamType = 10,
+    /// The command named a slot that is not enabled.
+    SlotNotEnabled = 11,
+    /// The command named an endpoint that is not enabled.
+    EndpointNotEnabled = 12,
     /// The transfer completed short of the requested length —
     /// expected for variable-length HID interrupt reports.
     ShortPacket = 13,
+    /// An isochronous endpoint's transfer ring was empty when its
+    /// service interval came due.
+    RingUnderrun = 14,
+    /// An isochronous endpoint's transfer ring was full when its
+    /// service interval came due.
+    RingOverrun = 15,
+    /// A virtual function's event ring is full.
+    VfEventRingFull = 16,
+    /// A context or command parameter field is invalid.
+    ParameterError = 17,
+    /// An isochronous endpoint exceeded its allotted bandwidth.
+    BandwidthOverrun = 18,
+    /// The command's target slot or endpoint was not in a state that
+    /// permits it — the controller's view of the device state did not match
+    /// software's ([`Self::indicates_state_disagreement`]).
+    ContextStateError = 19,
+    /// A `SuperSpeed` device did not answer the controller's ping.
+    NoPingResponse = 20,
+    /// The event ring is full and the controller could not post an event.
+    EventRingFull = 21,
+    /// The device is not usable at the port's operating speed.
+    IncompatibleDevice = 22,
+    /// A periodic endpoint's service interval was missed.
+    MissedService = 23,
+    /// The command ring was stopped by software.
+    CommandRingStopped = 24,
+    /// The command was aborted by software.
+    CommandAborted = 25,
+    /// The transfer was stopped by a Stop Endpoint command.
+    Stopped = 26,
+    /// Stopped, and the reported residual length is not reliable.
+    StoppedLengthInvalid = 27,
+    /// Stopped on a short packet.
+    StoppedShortPacket = 28,
+    /// The requested Max Exit Latency is larger than the periodic
+    /// schedule allows.
+    MaxExitLatencyTooLarge = 29,
+    /// An isochronous transfer overran its buffer.
+    IsochBufferOverrun = 31,
+    /// The controller dropped an event because the ring was full.
+    EventLost = 32,
+    /// The controller reported an error it could not classify.
+    UndefinedError = 33,
+    /// The command named an invalid stream id.
+    InvalidStreamId = 34,
+    /// A secondary bandwidth domain cannot satisfy the request.
+    SecondaryBandwidthError = 35,
     /// A split transaction to a low/full-speed device behind a high-speed
     /// hub's transaction translator failed: the hub could not complete the
     /// start-/complete-split handshake to the device. On a hot-removal of a
@@ -330,9 +398,10 @@ impl CompletionCode {
     ///
     /// # Errors
     ///
-    /// [`DriverError::OutOfRange`] if `raw` is not a modelled code —
-    /// the caller treats the event as a device fault rather than
-    /// guessing at its meaning.
+    /// [`DriverError::OutOfRange`] for a value the specification leaves
+    /// *reserved* (`0`, `30`, `37..=191`) or *vendor-defined*
+    /// (`192..=255`) — the caller treats the event as a device fault rather
+    /// than guessing at its meaning.
     pub const fn from_raw(raw: u32) -> Result<Self, DriverError> {
         match raw {
             1 => Ok(Self::Success),
@@ -341,7 +410,34 @@ impl CompletionCode {
             4 => Ok(Self::UsbTransactionError),
             5 => Ok(Self::TrbError),
             6 => Ok(Self::StallError),
+            7 => Ok(Self::ResourceError),
+            8 => Ok(Self::BandwidthError),
+            9 => Ok(Self::NoSlotsAvailable),
+            10 => Ok(Self::InvalidStreamType),
+            11 => Ok(Self::SlotNotEnabled),
+            12 => Ok(Self::EndpointNotEnabled),
             13 => Ok(Self::ShortPacket),
+            14 => Ok(Self::RingUnderrun),
+            15 => Ok(Self::RingOverrun),
+            16 => Ok(Self::VfEventRingFull),
+            17 => Ok(Self::ParameterError),
+            18 => Ok(Self::BandwidthOverrun),
+            19 => Ok(Self::ContextStateError),
+            20 => Ok(Self::NoPingResponse),
+            21 => Ok(Self::EventRingFull),
+            22 => Ok(Self::IncompatibleDevice),
+            23 => Ok(Self::MissedService),
+            24 => Ok(Self::CommandRingStopped),
+            25 => Ok(Self::CommandAborted),
+            26 => Ok(Self::Stopped),
+            27 => Ok(Self::StoppedLengthInvalid),
+            28 => Ok(Self::StoppedShortPacket),
+            29 => Ok(Self::MaxExitLatencyTooLarge),
+            31 => Ok(Self::IsochBufferOverrun),
+            32 => Ok(Self::EventLost),
+            33 => Ok(Self::UndefinedError),
+            34 => Ok(Self::InvalidStreamId),
+            35 => Ok(Self::SecondaryBandwidthError),
             36 => Ok(Self::SplitTransactionError),
             _ => Err(DriverError::OutOfRange),
         }
@@ -363,6 +459,24 @@ impl CompletionCode {
         matches!(
             self,
             Self::UsbTransactionError | Self::SplitTransactionError
+        )
+    }
+
+    /// Whether this code means the controller *rejected* the command because
+    /// its own view of the slot's or port's state did not match software's,
+    /// rather than the device answering at all.
+    ///
+    /// The Pi 4 (VL805) rejects an Address Device issued to a port that has
+    /// not finished settling out of its reset with
+    /// [`Self::ContextStateError`]; the device never saw a `SET_ADDRESS`, so
+    /// it stays in Default state and re-driving a fresh slot recovers it,
+    /// exactly as for an unreachable device. Distinct from
+    /// [`Self::indicates_device_unreachable`], which reads as a hot-removal.
+    #[must_use]
+    pub const fn indicates_state_disagreement(self) -> bool {
+        matches!(
+            self,
+            Self::ContextStateError | Self::SlotNotEnabled | Self::EndpointNotEnabled
         )
     }
 }

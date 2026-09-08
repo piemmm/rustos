@@ -210,9 +210,12 @@ pub enum BringupPhase {
     /// chunk's allocation and its aperture/alignment refusals (the bank
     /// fails closed on a chunk the controller could not reach).
     ControllerStart,
-    /// Bringing the controller up to serve the keyboard
-    /// ([`UsbDevice::bring_up`]); a device absent at boot is not a
-    /// failure of this phase, only a real enumeration fault is.
+    /// Bringing the controller up to serve the attached devices
+    /// ([`UsbDevice::bring_up`]). Only a fault of the **controller** reaches
+    /// this phase: neither a device absent at boot nor one that will not
+    /// enumerate is a failure — the latter is a counted skip
+    /// ([`UsbDevice::skipped_port_count`]) and the controller is left
+    /// serving.
     Enumerate,
 }
 
@@ -303,7 +306,9 @@ impl ControllerBringupError {
 /// [`BringupPhase::Enumerate`] with `enum_stage = EnableSlot` and
 /// `last_completion = 0` is the classic DMA-not-visible signature; a
 /// [`BringupPhase::ControllerOpen`] stall names the reset sub-stage and its
-/// `USBCMD`/`USBSTS`.
+/// `USBCMD`/`USBSTS`. A device that merely failed to enumerate never lands
+/// here — the walk skips it and the HCD warns with that port's own snapshot
+/// ([`UsbDevice::last_attach_fault`]) while the controller keeps serving.
 ///
 /// # Errors
 ///

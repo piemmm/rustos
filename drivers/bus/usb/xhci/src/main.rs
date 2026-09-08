@@ -111,7 +111,7 @@ mod program {
     use tairix_drv_bus_usb::bringup::{
         bring_up_controller_diagnostic, derive_controller_resources, BringupPhase,
     };
-    use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth};
+    use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, SkippedPortRetry};
     use tairix_drv_bus_usb::serve::{attach_transport_grants, UrbOutcome, UrbReply, UrbService};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_hid::{ReportFieldSummary, ReportMapSummary};
@@ -845,6 +845,49 @@ mod program {
         true
     }
 
+    /// Spend the single deferred re-attach the bring-up walk owed a port it
+    /// could not serve (`SkippedPortRetry`): re-drive every connected but
+    /// unserved port, publish an interface for whatever that served, and log
+    /// the outcome.
+    ///
+    /// A port skipped by the walk had its connect latch consumed there, so no
+    /// hot-plug event will ever wake it again — this is the one chance a
+    /// device that merely lost the boot race gets before a user has to unplug
+    /// it. A port still unserved afterwards is logged with its failing
+    /// snapshot and left alone; the retry is never re-armed, so a genuinely
+    /// broken device cannot loop.
+    fn retry_skipped_ports(
+        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
+        transports: &mut Vec<Option<Transport>>,
+        set: u64,
+        urb_base: u64,
+        delay: ClockDelay,
+    ) {
+        if let Err(err) = device.retry_skipped_ports(&delay) {
+            log_hex_event(
+                HCD_WAIT_ERROR,
+                Level::Warn,
+                "usb-hcd: deferred re-attach of unserved port(s) failed",
+                "err_hex",
+                err as u64,
+            );
+        }
+        reconcile_interfaces(device, transports, set, urb_base);
+        if device.skipped_port_count() == 0 {
+            log(
+                &LogSink,
+                &Event {
+                    level: Level::Info,
+                    id: HCD_READY,
+                    message: "usb-hcd: deferred re-attach served every connected port",
+                    fields: &[],
+                },
+            );
+            return;
+        }
+        log_skipped_ports(device);
+    }
+
     /// The capability set the HCD host re-checks up front; the kernel is the
     /// authority and re-checks every trap. It mirrors the resources the
     /// matched node carries plus the privilege to publish the interface node
@@ -1484,21 +1527,82 @@ mod program {
                 ],
             },
         );
-        if device.skipped_port_count() > 0 {
-            log(
-                &LogSink,
-                &Event {
-                    level: Level::Warn,
-                    id: HCD_BRINGUP_FAILED,
-                    message: "usb-hcd: connected device(s) failed enumeration and were skipped",
-                    fields: &[Field {
-                        key: "skipped_ports",
-                        value: tairix_log::FieldValue::UnsignedInt(u64::from(
-                            device.skipped_port_count(),
-                        )),
-                    }],
-                },
-            );
+        log_skipped_ports(device);
+    }
+
+    /// Warn that connected device(s) were present but left unserved, naming
+    /// the **first failing port's snapshot** — the port, the enumeration step
+    /// it failed in, and the completion/event-type/reject codes the failing
+    /// transfer saw, captured at the failure before the cleanup transfers
+    /// overwrote the live state.
+    ///
+    /// The live engine breadcrumb is not usable here: the walk continues past
+    /// a skip, so after a multi-port controller it describes whichever port
+    /// ran *last*, not the one that failed. QEMU models no Pi USB, so this is
+    /// the diagnostic a metal capture localises an unserved device with.
+    fn log_skipped_ports(device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>) {
+        if device.skipped_port_count() == 0 {
+            return;
+        }
+        let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
+        let skipped = Field {
+            key: "skipped_ports",
+            value: u(u64::from(device.skipped_port_count())),
+        };
+        let message = "usb-hcd: connected device(s) failed enumeration and were skipped";
+        match device.last_attach_fault() {
+            Some(fault) => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: HCD_BRINGUP_FAILED,
+                        message,
+                        fields: &[
+                            skipped,
+                            Field {
+                                key: "err",
+                                value: u(fault.error as u64),
+                            },
+                            Field {
+                                key: "attach_port",
+                                value: u(u64::from(fault.port)),
+                            },
+                            Field {
+                                key: "enum_stage",
+                                value: u(u64::from(fault.stage.as_u8())),
+                            },
+                            Field {
+                                key: "completion",
+                                value: u(u64::from(fault.completion)),
+                            },
+                            Field {
+                                key: "event_type",
+                                value: u(u64::from(fault.event_type)),
+                            },
+                            Field {
+                                key: "reject",
+                                value: u(u64::from(fault.reject)),
+                            },
+                            Field {
+                                key: "port_status",
+                                value: u(u64::from(fault.port_status)),
+                            },
+                        ],
+                    },
+                );
+            }
+            None => {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: HCD_BRINGUP_FAILED,
+                        message,
+                        fields: &[skipped],
+                    },
+                );
+            }
         }
     }
 
@@ -1714,6 +1818,15 @@ mod program {
         let controller_owner = u32::try_from(urb_base & 0xFFFF_FFFF).unwrap_or(u32::MAX);
         let mut controller_health = ControllerHealth::new(controller_owner);
 
+        // A port the walk could not serve had its connect latch consumed
+        // there, so no hot-plug event will ever wake it again. Owe it one
+        // deferred re-attach so a device that merely lost the boot race comes
+        // up without the user unplugging it.
+        let mut port_retry = SkippedPortRetry::default();
+        if device.skipped_port_count() > 0 {
+            port_retry.arm(tairix_rt::clock_get());
+        }
+
         serve_events(
             &mut device,
             &mut transports,
@@ -1721,6 +1834,7 @@ mod program {
             urb_base,
             delay,
             &mut controller_health,
+            &mut port_retry,
         )
     }
 
@@ -1740,6 +1854,7 @@ mod program {
         urb_base: u64,
         delay: ClockDelay,
         health: &mut ControllerHealth,
+        port_retry: &mut SkippedPortRetry,
     ) -> i32 {
         // Running total of interrupt reports the engine has dropped because a
         // class driver stalled past the buffer depth; logged (once per new
@@ -1747,26 +1862,42 @@ mod program {
         let mut reported_drops = 0u64;
         loop {
             let mut token = 0u64;
-            // While the controller is recovering, park only until its grace
-            // one-shot comes due, so a faulted controller — which raises no
-            // further interrupt (xHCI §4.24.1) — is retried and failed closed
-            // on time off a one-shot rather than parking forever. With nothing
-            // recovering the loop parks unbounded (never a spin).
-            let timeout = health
-                .wait_timeout(tairix_rt::clock_get())
+            // Park only as long as the nearest armed one-shot allows. Two can
+            // be pending: the controller's grace window — a faulted
+            // controller raises no further interrupt (xHCI §4.24.1), so it
+            // must be retried and failed closed off a timer — and the single
+            // deferred re-attach owed to a port the walk could not serve.
+            // With neither armed the loop parks unbounded (never a spin).
+            let now_ns = tairix_rt::clock_get();
+            let timeout = [health.wait_timeout(now_ns), port_retry.wait_timeout(now_ns)]
+                .into_iter()
+                .flatten()
+                .min()
                 .unwrap_or(super::WAIT_FOREVER_NS);
             let wait_ret = tairix_rt::waitset_wait(set, timeout, &mut token);
             if wait_ret < 0 {
                 if Errno::from_syscall(wait_ret) == Errno::TimedOut {
-                    // The controller grace one-shot fired. Retry the reset (a
-                    // faulted controller raises no interrupt to wake us); this
-                    // fails it closed once the window has elapsed. If it is no
-                    // longer faulted it returned on its own — record that.
+                    let fired_ns = tairix_rt::clock_get();
+                    // Spend the deferred re-attach whenever its deadline has
+                    // passed, even if the controller's own recovery is what
+                    // runs instead: an overdue one-shot left armed would bound
+                    // every later park at zero and spin the loop.
+                    let retry_due = port_retry.take_if_due(fired_ns);
                     if device.controller_faulted() {
+                        // Nothing below the controller can be attached while
+                        // it is faulted, and its recovery re-runs the whole
+                        // bring-up walk, which subsumes the re-attach.
                         let _ =
                             recover_controller(device, transports, set, urb_base, delay, health);
-                    } else if let Some(event) = health.note_reset(true, tairix_rt::clock_get()) {
-                        log_domain_event(event, health.owner());
+                    } else {
+                        // Not faulted when its window came due: it returned on
+                        // its own. Silent on an already-healthy controller.
+                        if let Some(event) = health.note_reset(true, fired_ns) {
+                            log_domain_event(event, health.owner());
+                        }
+                        if retry_due {
+                            retry_skipped_ports(device, transports, set, urb_base, delay);
+                        }
                     }
                     continue;
                 }

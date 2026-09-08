@@ -882,21 +882,34 @@ the live controller behaviour is host- and CI-proven first.
     (`UsbDevice::skipped_port_count`) instead of looking like an empty
     port. Host regressions:
     `a_missing_completion_times_out_by_wall_clock_and_parks_instead_of_spinning`,
-    `an_empty_root_hub_parks_through_the_connect_window_and_reports_not_found`,
+    `an_empty_root_hub_parks_through_the_connect_window_and_serves_nothing`,
     `start_enables_the_interrupter`.
-  - **A downstream-port reset is polled to completion, and a failed attach
-    keeps its evidence.** Hot-plugging an (empty) external hub into the
-    integrated hub faulted the attach (`hub status-change service failed
-    err_hex=a`) with nothing in the log to say why. Two fixes:
-    - The attach used to wait one fixed 50 ms and then require the port
-      enabled in a single `GET_PORT_STATUS`, but a slow external hub
-      legitimately takes hundreds of milliseconds to complete a downstream
-      reset. `await_port_reset_complete` now re-polls the port status at
-      20 ms parked intervals (bounded at 800 ms, the budget production
-      stacks allow), requires reset-signalling done **and** the port
-      enabled, and settles `TRSTRCY` (10 ms) before the device is
-      addressed — a fast hub costs one poll, a slow one is no longer
-      refused as a `DeviceFault`.
+  - **Both port tiers run the one port-reset protocol step.** The reset
+    figures live once (`PORT_RESET_POLL_US` 20 ms, `PORT_RESET_POLLS` 40 →
+    800 ms, `PORT_RESET_SETTLE_US` = `TRSTRCY` 10 ms) and both tiers spend
+    them the same way: re-poll the port at parked intervals until the reset
+    signalling is done **and** the port is enabled, consume the reset's own
+    change latches, then settle `TRSTRCY` before the device is addressed. A
+    fast port costs one poll; a slow external hub, which legitimately takes
+    hundreds of milliseconds, is no longer refused as a `DeviceFault`.
+    - `await_hub_port_reset_complete` polls a downstream port's
+      `GET_PORT_STATUS` on the `Delay` seam (a hub raises no interrupt for
+      its own reset completion while its status-change report is being
+      serviced).
+    - `await_root_port_reset_complete` polls `PORTSC` parked on the
+      controller's **interrupt** (a completed reset posts a Port Status
+      Change Event, so a fast port wakes early), and
+      `Xhci::clear_port_reset_change` consumes `PRC`/`PEC`. `Xhci` owns only
+      `begin_port_reset`; awaiting it needs a clock and the interrupt, which
+      `UsbDevice` has. A `SuperSpeed` port, which trains and enables without
+      a reset, still gets the settle.
+    Landing the polled-reset fix on the hub tier alone was the Pi 4B defect:
+    the root port returned the instant `PORTSC.PR` read clear and addressed
+    the device inside its recovery interval, which the VL805 answers with a
+    Context State Error (`enum_stage=3 completion=19`).
+  - **A failed attach keeps its evidence.** Hot-plugging an (empty) external
+    hub into the integrated hub faulted the attach (`hub status-change
+    service failed err_hex=a`) with nothing in the log to say why.
     - A failed attach snapshots its diagnostics before the best-effort
       latch drain overwrites the live state
       (`UsbDevice::last_attach_fault`: port, error, enumeration stage,
@@ -910,7 +923,54 @@ the live controller behaviour is host- and CI-proven first.
       hub plug) is attributable to the controller's actual verdict.
     Host regressions:
     `a_slow_hub_port_reset_is_polled_until_it_completes`,
-    `a_port_that_never_enables_records_its_stage_port_and_final_status`.
+    `a_port_that_never_enables_records_its_stage_port_and_final_status`,
+    `a_root_port_reset_consumes_its_change_latches_and_settles_reset_recovery`,
+    `a_root_port_that_never_leaves_reset_fails_closed_within_the_poll_bound`.
+  - **The controller answers with the whole architected completion-code set,
+    and a rejected command is retried.** `CompletionCode` covers all of xHCI
+    1.2 table 6-90 (only reserved/vendor values still fail closed): a code
+    the decoder cannot name reaches a diagnostic as "undecodable", which is
+    how the VL805's `Context State Error` read as a driver decode failure
+    (`error=5 reject=3`) and, worse, fell outside the retry classification.
+    Enumeration now re-drives a fresh slot — settling `TRSTRCY` first, since
+    an immediate re-drive re-fails in the same microsecond — for **any**
+    pipe-bring-up fault that left the device untouched: a USB/split
+    transaction error (it could not answer) or a command the controller
+    rejected on its own slot/port state
+    (`CompletionCode::indicates_state_disagreement`). A device that *answers*
+    wrong (STALL, babble, a forged descriptor) still fails on the first
+    attempt. Bounded by `ENUM_ATTEMPTS` (4, Linux's `PORT_INIT_TRIES`), never
+    an unbounded retry. A command that completes with a non-Success code also
+    retires its command-ring slot now — the controller consumed the TRB — so
+    the ring no longer leaks a slot per rejection.
+    Host regressions:
+    `an_address_device_rejected_for_context_state_is_retried_on_a_fresh_slot`,
+    `the_completion_code_decoder_names_the_whole_architected_set`,
+    `a_rejected_command_retires_its_command_ring_slot`.
+  - **A device that will not enumerate never takes the controller down, and
+    is owed one deferred re-attach.** `bring_up` fails only on a fault of the
+    **controller itself**; every per-port enumeration failure is a counted
+    skip, including the case where *every* connected port fails, which used
+    to error the walk and exit the HCD (code 82) — discarding a healthy,
+    started controller with its watches armed, so one unservable device took
+    the keyboard, the mouse, and every later hot-plug with it. The skip
+    warning now carries the failing port's own snapshot rather than the live
+    breadcrumb (which after a multi-port walk describes whichever port ran
+    last). Because the walk consumed the skipped port's connect latch,
+    nothing would ever wake it again, so the serve loop arms one one-shot
+    (`SkippedPortRetry`, ~1 s) and spends it on
+    `UsbDevice::retry_skipped_ports`, which re-drives every
+    connected-but-unserved port on every tier and leaves an already-served
+    port untouched (the re-drive resets the port, which would tear a working
+    device down). It fires **once ever**, so a genuinely broken device cannot
+    loop; after that the port waits for a physical re-plug, as Linux's does.
+    Host regressions:
+    `a_skipped_root_port_is_re_attached_by_the_deferred_retry`,
+    `the_deferred_retry_never_resets_an_already_served_port`,
+    `the_skipped_port_retry_fires_exactly_once_ever`,
+    `an_unarmed_skipped_port_retry_bounds_no_park_and_is_never_due`,
+    `arming_the_skipped_port_retry_twice_keeps_the_first_deadline`,
+    `an_overdue_skipped_port_retry_bounds_the_park_at_zero`.
   - **A controller-fault recovery can no longer be wedged by a dead class
     driver's leftover URB submit.** Mid-typing (no plug/unplug) the VL805
     latched a controller fault; the HCD's reset/re-enumerate recovery

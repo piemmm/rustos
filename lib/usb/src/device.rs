@@ -146,24 +146,27 @@ const AWAIT_EVENT_BUDGET_US: u64 = 5_000_000;
 /// not a scalable capacity.
 const CONNECT_WINDOW_US: u64 = 500_000;
 
-/// How many times enumeration re-drives a fresh slot for one device when the
-/// controller reports a *transaction* fault (a USB or split transaction
-/// error) rather than the device actively responding with an error.
+/// How many times enumeration re-drives a fresh slot for one device when a
+/// fault leaves the device *untouched*, rather than the device actively
+/// responding with an error.
 ///
-/// A CRC/timeout/bad-PID or a hub transaction-translator split failure is
-/// exactly what a device that is *present but momentarily disturbed*
-/// produces — for instance a keyboard or mouse hammered with input while its
-/// control endpoint is still being brought up (the on-metal defect: typing
-/// during boot, before USB bring-up, intermittently killed the whole USB
-/// controller). Such a fault means the device never received or acknowledged
-/// the command, so it stays in its prior (Default) state and a fresh Enable
-/// Slot + Address Device cleanly re-drives it. A device that *answers* with an
-/// error (STALL, babble) or a forged descriptor is not retried — those
-/// re-fail deterministically. This is the enumeration analogue of the report-
-/// endpoint transaction-fault recovery, and mirrors the bounded
-/// re-initialisation real xHCI stacks perform (Linux `hub_port_init`'s
-/// `PORT_INIT_TRIES`). A recovery bound, not a scalable capacity, and never an
-/// unbounded retry-until-it-works.
+/// Two shapes qualify. A CRC/timeout/bad-PID or a hub
+/// transaction-translator split failure is what a device that is *present
+/// but momentarily disturbed* produces — for instance a keyboard or mouse
+/// hammered with input while its control endpoint is still being brought up
+/// (the on-metal defect: typing during boot, before USB bring-up,
+/// intermittently killed the whole USB controller). A command the controller
+/// *rejected* on its own state
+/// ([`CompletionCode::indicates_state_disagreement`]) never reached the
+/// device at all — the VL805 answers an Address Device issued into a port
+/// still settling out of its reset that way. Either leaves the device in its
+/// prior (Default) state, so a fresh Enable Slot + Address Device cleanly
+/// re-drives it. A device that *answers* with an error (STALL, babble) or a
+/// forged descriptor is not retried — those re-fail deterministically. This
+/// is the enumeration analogue of the report-endpoint transaction-fault
+/// recovery, and mirrors the bounded re-initialisation real xHCI stacks
+/// perform (Linux `hub_port_init`'s `PORT_INIT_TRIES`). A recovery bound, not
+/// a scalable capacity, and never an unbounded retry-until-it-works.
 const ENUM_ATTEMPTS: u32 = 4;
 
 /// TRB slots in the command, EP0, and interrupt transfer rings and in
@@ -337,27 +340,33 @@ const DCI_CONTROL: u8 = 1;
 /// protocol settle, not a scalable capacity.
 const HUB_POWER_ON_GOOD_US: u32 = 100_000;
 
-/// Poll spacing, in microseconds, while awaiting a downstream port's
-/// reset completion. A hub drives the reset for 10–20 ms (USB 2.0
-/// §11.5.1.5 `TDRST`), so the first poll usually observes it complete;
-/// each poll parks the interval on the caller's clock (the hub exposes
-/// no interrupt for reset completion while its status-change watch is
-/// being serviced, so a bounded `GET_STATUS` re-poll is the protocol's
-/// own completion signal). A fixed protocol settle, not a scalable
-/// capacity.
-const HUB_RESET_POLL_US: u32 = 20_000;
+/// Poll spacing, in microseconds, while awaiting a port's reset
+/// completion — the same figure for a root-hub port and a downstream hub
+/// port, which run the same protocol step. A reset signals for 10–20 ms
+/// (USB 2.0 §11.5.1.5 `TDRST`), so the first poll usually observes it
+/// complete; each interval is parked, never spun. A fixed protocol settle,
+/// not a scalable capacity.
+pub(crate) const PORT_RESET_POLL_US: u32 = 20_000;
 
-/// Bound on the reset-completion polls: 40 polls of [`HUB_RESET_POLL_US`]
+/// Bound on the reset-completion polls: 40 polls of [`PORT_RESET_POLL_US`]
 /// give a slow hub 800 ms to enable the port — the budget production
 /// stacks allow — after which the attach fails closed. A single fixed
 /// 50 ms wait was not enough for slow external hubs, which legitimately
 /// take hundreds of milliseconds to complete a downstream reset.
-const HUB_RESET_POLLS: u32 = 40;
+pub(crate) const PORT_RESET_POLLS: u32 = 40;
 
 /// Reset-recovery settle (`TRSTRCY`, USB 2.0 §7.1.7.5), in microseconds,
-/// after the port reports reset complete and enabled, before the device
+/// after a port reports reset complete and enabled, before the device
 /// behind it is addressed.
-const HUB_RESET_SETTLE_US: u32 = 10_000;
+///
+/// Skipping it on the root-hub port is the metal defect this figure now
+/// covers on both tiers: a full-speed device addressed inside its recovery
+/// interval has the VL805 reject the Address Device with a Context State
+/// Error, which killed the whole controller. Doubling as the settle between
+/// re-driven enumeration attempts ([`ENUM_ATTEMPTS`]) is deliberate — it is
+/// the interval the protocol already names for "let a just-disturbed device
+/// become answerable again".
+pub(crate) const PORT_RESET_SETTLE_US: u32 = 10_000;
 
 /// Bounded attempts for the hub-descriptor read
 /// ([`UsbDevice::read_hub_topology`]): production stacks retry this
@@ -3351,13 +3360,30 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         // the event, so `last_completion_code()` is meaningful even
         // when this validation rejects it below.
         let event = self.await_event_for(&[outcome.address])?;
+        // The controller has consumed the TRB and posted its completion, so
+        // the ring slot is free whatever the code says. Retiring only on
+        // success leaked a slot per rejected command, and the ring read full
+        // after as many rejections as it has slots.
+        self.command_ring.retire_one()?;
         if event.trb_type() != Ok(TrbType::CommandCompletion)
             || event.completion_code() != Ok(CompletionCode::Success)
         {
             return Err(DriverError::DeviceFault);
         }
-        self.command_ring.retire_one()?;
         Ok(event)
+    }
+
+    /// Clear the whole shared input context (§6.2.5.1), so a command writes
+    /// its contexts over zeroes rather than over another device's.
+    fn zero_input_ctx(&mut self) -> Result<(), DriverError> {
+        // Walk the contiguous span, not one write per context: with 64-byte
+        // contexts a context-wide write would leave the padding between them
+        // carrying the previous device's bytes.
+        let zeros = [0u8; CTX_DWORDS * 4];
+        for offset in (0..INPUT_CONTEXTS * self.layout.ctx_size).step_by(zeros.len()) {
+            self.dma.write(self.layout.input_ctx + offset, &zeros)?;
+        }
+        Ok(())
     }
 
     /// Write context `index` of the input context (§6.2.5).
@@ -3708,6 +3734,11 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// ([`Self::ep0_ring_off`]), so a downstream device addressed after
     /// [`Self::rebind_to_device_region`] gets its own ring.
     ///
+    /// The input context is cleared first (§6.2.5.1 requires software to
+    /// initialise it): the structure is shared across devices, so without
+    /// this a device is addressed over the endpoint contexts the *previous*
+    /// device's Configure Endpoint left behind.
+    ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the controller rejects the command.
@@ -3717,6 +3748,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         slot: u8,
         max_packet: u32,
     ) -> Result<(), DriverError> {
+        self.zero_input_ctx()?;
         self.write_input_ctx(0, &input_control_dwords(0b11))?;
         self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(DCI_CONTROL)))?;
         self.write_input_ctx(
@@ -4574,11 +4606,15 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// # Errors
     ///
-    /// * [`Xhci::set_port_power`] or a faulting port-status read during the
-    ///   connect window (the controller itself is broken).
-    /// * The first attach failure — but only when **no** connected port
-    ///   attached at all, so a boot diagnostic names what failed; with any
-    ///   port served, individual failures are skips, not errors.
+    /// Only a fault of the **controller itself** —
+    /// [`Xhci::set_port_power`] or a faulting port-status read during the
+    /// connect window. No device's enumeration failure is ever an error
+    /// here: it is a counted skip ([`Self::skipped_port_count`],
+    /// [`Self::last_attach_fault`]) and the controller is left serving with
+    /// its watches armed, because throwing a healthy controller away because
+    /// one device would not answer takes every *other* port and every later
+    /// hot-plug with it. [`Self::retry_skipped_ports`] gives such a port one
+    /// more chance.
     pub fn bring_up(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
         self.skipped_ports = 0;
         self.attach_fault = None;
@@ -4606,35 +4642,75 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             }
             self.wait.wait_us(deadline - now);
         }
-        // Attach every connected root port, consuming each port's connect
-        // latch either way so the steady-state root scan
-        // ([`Self::next_root_change`]) reacts only to *new* changes.
-        let mut attached = 0u32;
-        let mut first_failure = None;
+        // Consume every port's connect latch before attaching anything, so
+        // the steady-state root scan ([`Self::next_root_change`]) reacts only
+        // to *new* changes.
         for port in 1..=max_ports {
             let _ = self.xhci.clear_port_connect_change(port);
+        }
+        self.attach_connected_root_ports(delay);
+        Ok(())
+    }
+
+    /// Attach every connected root-hub port that is not already served,
+    /// fail-soft: one port's broken device is skipped (counted in
+    /// [`Self::skipped_ports`], its first failure snapshotted in
+    /// [`Self::attach_fault`]) and the remaining ports are still served.
+    /// Touches no port latch — the caller owns those — so it serves both the
+    /// boot walk and the deferred retry.
+    fn attach_connected_root_ports(&mut self, delay: &dyn Delay) {
+        for port in 1..=self.xhci.max_ports() {
+            if self.root_attachment_on(port).is_some() {
+                continue;
+            }
             let Ok(status) = self.xhci.port_status(port) else {
                 continue;
             };
             if !status.connected() {
                 continue;
             }
-            match self.attach_root_port(port, delay) {
-                Ok(_) => attached += 1,
-                Err(err) => {
-                    self.skipped_ports = self.skipped_ports.saturating_add(1);
-                    if first_failure.is_none() {
-                        first_failure = Some(err);
-                    }
-                }
+            if self.attach_root_port(port, delay).is_err() {
+                self.skipped_ports = self.skipped_ports.saturating_add(1);
             }
         }
-        match (attached, first_failure) {
-            // Every connected port failed to attach: surface the first
-            // failure so the boot diagnostic names it.
-            (0, Some(err)) => Err(err),
-            _ => Ok(()),
+    }
+
+    /// Give every port that is connected but unserved — on the root hub and
+    /// on every watched hub tier — one more attach attempt, and report how
+    /// many are still unserved afterwards through
+    /// [`Self::skipped_port_count`].
+    ///
+    /// A device that failed enumeration during [`Self::bring_up`] had its
+    /// connect latch consumed there, so nothing will ever wake its port
+    /// again: without this it stays dead until it is physically re-plugged,
+    /// which is a poor answer when the device that lost the boot race is the
+    /// keyboard. The re-attempt re-drives the port's reset, so it recovers a
+    /// port whose state — not just its device — was wrong. A port that is
+    /// *already* served is skipped untouched: re-resetting it would break a
+    /// working device.
+    ///
+    /// The caller bounds how often this runs; the engine does not retry on
+    /// its own, so a permanently broken device can never loop.
+    ///
+    /// # Errors
+    ///
+    /// Only a failure to restore the resting control context between hub
+    /// tiers (the controller itself is broken). Every per-port failure is a
+    /// counted skip, exactly as in [`Self::bring_up`].
+    pub fn retry_skipped_ports(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
+        self.skipped_ports = 0;
+        self.attach_fault = None;
+        self.attach_connected_root_ports(delay);
+        for hub_index in 0..self.hubs.len() {
+            if self.hubs[hub_index].is_none() {
+                continue;
+            }
+            self.attach_connected_hub_ports(hub_index, delay);
+            // Restore the resting control context between tiers, exactly as
+            // a hot-plug service does, so no hub watch loses its ring.
+            self.rest_active_context()?;
         }
+        Ok(())
     }
 
     /// Attach whatever is connected on root-hub `port`: reset the port when
@@ -4695,7 +4771,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         port: u8,
         delay: &dyn Delay,
     ) -> Result<AttachOutcome, DriverError> {
-        let outcome = self.attach_root_on_port(port)?;
+        let outcome = self.attach_root_on_port(port, delay)?;
         // A freshly installed root hub is descended only now, with the
         // cursor rested, so its own attach failures can never wedge
         // another tier's watch. A tier that cannot be powered or watched
@@ -4711,16 +4787,21 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
 
     /// Confirm the connect on root-hub `port`, reset the port when it is
     /// not already enabled (a USB2 port enables only through a reset; a
-    /// `SuperSpeed` port trains on its own), and enumerate and serve the
-    /// device on a fresh table entry and region — a hub is installed and
-    /// watched-ready but **not** yet descended (the caller descends it, so
-    /// its downstream failures never wedge this attach). The slot-level
-    /// stage every root attach shares.
+    /// `SuperSpeed` port trains on its own), settle the device's
+    /// [`PORT_RESET_SETTLE_US`] recovery interval either way, and enumerate
+    /// and serve the device on a fresh table entry and region — a hub is
+    /// installed and watched-ready but **not** yet descended (the caller
+    /// descends it, so its downstream failures never wedge this attach). The
+    /// slot-level stage every root attach shares.
     ///
     /// # Errors
     ///
     /// As [`Self::attach_root_port`], minus the descend.
-    pub(crate) fn attach_root_on_port(&mut self, port: u8) -> Result<AttachOutcome, DriverError> {
+    pub(crate) fn attach_root_on_port(
+        &mut self,
+        port: u8,
+        delay: &dyn Delay,
+    ) -> Result<AttachOutcome, DriverError> {
         if self.root_attachment_on(port).is_some() {
             // The port already carries a served attachment (a connect
             // glitch, or a repeated scan): never double-attach.
@@ -4733,15 +4814,22 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             return Err(DriverError::DeviceFault);
         }
         let status = if status.enabled() {
+            // A `SuperSpeed` port trains and enables on its own, so it needs
+            // no reset — but it has still only just done so, and the device
+            // behind it is owed the same recovery interval before it is
+            // addressed as one that was reset.
+            self.xhci.clear_port_reset_change(port)?;
+            delay.delay_us(PORT_RESET_SETTLE_US);
             status
         } else {
-            self.xhci.reset_port(port, self.budget)?
+            self.xhci.begin_port_reset(port)?;
+            self.await_root_port_reset_complete(port, delay)?
         };
         let speed = status.speed();
         let max_packet = ep0_max_packet(speed)?;
         let index = self.claim_device_entry()?;
         self.rebind_to_device_region(index)?;
-        let result = self.attach_on_rebound_region(index, None, port, speed, max_packet);
+        let result = self.attach_on_rebound_region(index, None, port, speed, max_packet, delay);
         // Rest the control cursor off the just-touched entry whether or
         // not the attach succeeded — no hub watch may lose its ring — and
         // release every claim nothing owns, so no attach outcome leaks DMA.
@@ -4873,7 +4961,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     }
 
     /// Reset the hub at `hub_index`'s downstream `port`, await the reset
-    /// completing ([`Self::await_port_reset_complete`]), and attach
+    /// completing ([`Self::await_hub_port_reset_complete`]), and attach
     /// whatever is behind it ([`Self::attach_downstream_device`]) — a leaf
     /// device, or a further hub tier that is installed and descended.
     ///
@@ -4928,7 +5016,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
 
     /// The attach core of [`Self::attach_hub_port`]: reset the port so the
     /// hub enables it and establishes its speed and transaction translator,
-    /// await the reset completing ([`Self::await_port_reset_complete`]),
+    /// await the reset completing ([`Self::await_hub_port_reset_complete`]),
     /// and attach the device behind it.
     fn reset_confirm_and_attach(
         &mut self,
@@ -4939,7 +5027,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::PortReset;
         self.last_attach_status = 0;
         self.reset_hub_port(hub_index, port)?;
-        let status = self.await_port_reset_complete(hub_index, port, delay)?;
+        let status = self.await_hub_port_reset_complete(hub_index, port, delay)?;
         // A `SuperSpeed` hub's ports carry only `SuperSpeed` devices; its
         // `wPortStatus` reserves the USB 2.0 speed bits as zero (USB 3.2
         // §10.16.2.6), so decoding them would misread the device as
@@ -4954,7 +5042,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     }
 
     /// Await the hub completing a downstream `port` reset: poll the port's
-    /// `wPortStatus` (USB 2.0 §11.24.2.7) at [`HUB_RESET_POLL_US`] spacing —
+    /// `wPortStatus` (USB 2.0 §11.24.2.7) at [`PORT_RESET_POLL_US`] spacing —
     /// each interval parked on `delay`, never spun — until the hub reports
     /// the reset signalling done and the port enabled, then wait the
     /// `TRSTRCY` recovery settle and return the final status (its speed
@@ -4970,25 +5058,79 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the port does not report enabled
-    ///   within [`HUB_RESET_POLLS`] polls (the device never established a
+    ///   within [`PORT_RESET_POLLS`] polls (the device never established a
     ///   speed/TT, so addressing it would be a guess — fail closed).
     /// * Any error of [`Self::hub_port_status`].
-    fn await_port_reset_complete(
+    fn await_hub_port_reset_complete(
         &mut self,
         hub_index: usize,
         port: u8,
         delay: &dyn Delay,
     ) -> Result<u16, DriverError> {
-        for _ in 0..HUB_RESET_POLLS {
-            delay.delay_us(HUB_RESET_POLL_US);
+        for _ in 0..PORT_RESET_POLLS {
+            delay.delay_us(PORT_RESET_POLL_US);
             let status = self.hub_port_status(hub_index, port)?;
             self.last_attach_status = status;
             if !hub_port_resetting(status) && hub_port_enabled(status) {
-                delay.delay_us(HUB_RESET_SETTLE_US);
+                delay.delay_us(PORT_RESET_SETTLE_US);
                 return Ok(status);
             }
         }
         Err(DriverError::DeviceFault)
+    }
+
+    /// Await a root-hub `port` completing the reset
+    /// [`Xhci::begin_port_reset`] requested, and return its final status
+    /// (whose speed field selects the device's protocol speed) — the
+    /// root-port counterpart of [`Self::await_hub_port_reset_complete`],
+    /// running the same protocol step against `PORTSC` instead of a hub's
+    /// `wPortStatus`.
+    ///
+    /// `PORTSC` is re-read at [`PORT_RESET_POLL_US`] spacing, bounded by the
+    /// **wall clock** at [`PORT_RESET_POLLS`] of those intervals, until the
+    /// port reports the reset done **and** enabled — a USB2 port enables only through its reset, and reading
+    /// `PED` in the same instant `PR` clears catches a port mid-transition.
+    /// Each interval is parked on the controller's own interrupt rather than
+    /// a blind timer: a completed reset posts a Port Status Change Event, so
+    /// a fast port wakes early and costs one park, and a stalled one still
+    /// gives the CPU up. The reset's own `PRC`/`PEC` latches are then
+    /// consumed, and only then is the `TRSTRCY` recovery interval settled —
+    /// on `delay`, because a settle the protocol mandates must not be cut
+    /// short by an unrelated controller event.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the port does not report enabled
+    ///   within [`PORT_RESET_POLLS`] polls (it never established a speed, so
+    ///   addressing the device would be a guess — fail closed).
+    /// * Any error of [`Xhci::port_status`] or
+    ///   [`Xhci::clear_port_reset_change`].
+    fn await_root_port_reset_complete(
+        &mut self,
+        port: u8,
+        delay: &dyn Delay,
+    ) -> Result<PortStatus, DriverError> {
+        // Bounded by wall clock, not by an iteration count: a park on the
+        // controller's interrupt may return early on any unrelated event (a
+        // report completing), so counting parks would spend the whole budget
+        // in microseconds on a busy controller and refuse a slow port.
+        let deadline = self.wait.now_us().saturating_add(
+            u64::from(PORT_RESET_POLL_US).saturating_mul(u64::from(PORT_RESET_POLLS)),
+        );
+        loop {
+            let status = self.xhci.port_status(port)?;
+            if !status.resetting() && status.enabled() {
+                self.xhci.clear_port_reset_change(port)?;
+                delay.delay_us(PORT_RESET_SETTLE_US);
+                return Ok(status);
+            }
+            let now = self.wait.now_us();
+            if now >= deadline {
+                return Err(DriverError::DeviceFault);
+            }
+            self.wait
+                .wait_us(u64::from(PORT_RESET_POLL_US).min(deadline - now));
+        }
     }
 
     /// Number of root-hub ports the controller reports
@@ -5302,6 +5444,12 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         for slot in 0..RING_TRBS {
             self.dma
                 .write(region.ep0_ring + slot * trb::TRB_LEN, &zeros)?;
+        }
+        // The output device context must reach Address Device zeroed (§4.5.2);
+        // a reused region still holds the previous device's contexts.
+        let ctx_zeros = [0u8; CTX_DWORDS * 4];
+        for offset in (0..OUTPUT_CONTEXTS * self.layout.ctx_size).step_by(ctx_zeros.len()) {
+            self.dma.write(region.output_ctx + offset, &ctx_zeros)?;
         }
         let base = self.phys_of(region.ep0_ring)?;
         let (ring, link) = ProducerRing::new(RING_TRBS, base)?;
@@ -5700,6 +5848,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             root_port,
             speed,
             max_packet,
+            delay,
         );
         // Rest the active control context again whether or not the attach
         // succeeded — no hub watch may lose its ring — and clear *every*
@@ -5753,12 +5902,16 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     /// assigned releases it (Disable Slot, DCBAA cleared, trailing events
     /// tolerated), so an aborted attach leaks nothing.
     ///
-    /// A *transaction* fault (a USB or split transaction error) *while the
-    /// control pipe is being established* ([`EnumStage::is_pipe_bringup`]) is a
-    /// present-but-disturbed device, not a broken one, so enumeration re-drives
-    /// a fresh slot up to [`ENUM_ATTEMPTS`] times before giving up (see there);
-    /// a device that answers with an error (STALL/babble), a forged descriptor,
-    /// or a fault past the pipe-bring-up phase is surfaced on the first attempt.
+    /// A fault *while the control pipe is being established*
+    /// ([`EnumStage::is_pipe_bringup`]) that leaves the device untouched — a
+    /// USB or split transaction error, or a command the controller rejected
+    /// because its own slot/port state disagreed with software's
+    /// ([`CompletionCode::indicates_state_disagreement`]) — is a
+    /// present-but-disturbed device, not a broken one, so enumeration settles
+    /// [`PORT_RESET_SETTLE_US`] and re-drives a fresh slot up to
+    /// [`ENUM_ATTEMPTS`] times before giving up (see there); a device that
+    /// answers with an error (STALL/babble), a forged descriptor, or a fault
+    /// past the pipe-bring-up phase is surfaced on the first attempt.
     fn attach_on_rebound_region(
         &mut self,
         index: usize,
@@ -5766,6 +5919,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
         root_port: u8,
         speed: u8,
         max_packet: u32,
+        delay: &dyn Delay,
     ) -> Result<AttachOutcome, DriverError> {
         let (route_string, tt_hub_slot, tt_port, parent_slot) = match parent {
             Some((hub_index, down_port)) => {
@@ -5865,17 +6019,22 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             self.last_event_type = event_type;
             self.last_reject = reject;
 
-            // A transaction fault while the control pipe is still being
-            // established leaves the device in its prior (Default) state — it
-            // never saw the command — so a fresh slot re-drives it cleanly.
-            // Retry a bounded number of times; a fault that means the device
-            // answered wrong, one past the pipe-bring-up phase, or the final
-            // attempt surfaces the error.
+            // A fault while the control pipe is still being established
+            // leaves the device in its prior (Default) state — it never saw
+            // the command, whether because it could not answer or because the
+            // controller rejected the command outright — so a fresh slot
+            // re-drives it cleanly. Retry a bounded number of times, settling
+            // the recovery interval first so the re-drive is not issued into
+            // the same unsettled microsecond that just failed; a fault that
+            // means the device answered wrong, one past the pipe-bring-up
+            // phase, or the final attempt surfaces the error.
             attempt += 1;
             let transient = stage.is_pipe_bringup()
-                && CompletionCode::from_raw(u32::from(completion))
-                    .is_ok_and(CompletionCode::indicates_device_unreachable);
+                && CompletionCode::from_raw(u32::from(completion)).is_ok_and(|code| {
+                    code.indicates_device_unreachable() || code.indicates_state_disagreement()
+                });
             if transient && attempt < ENUM_ATTEMPTS {
+                delay.delay_us(PORT_RESET_SETTLE_US);
                 continue;
             }
             return Err(err);
@@ -5906,24 +6065,46 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
             self.power_hub_port(hub_index, port)?;
         }
         delay.delay_us(HUB_POWER_ON_GOOD_US);
+        self.attach_connected_hub_ports(hub_index, delay);
+        self.configure_hub_watch(hub_index)
+    }
+
+    /// Attach every connected downstream port of the hub at `hub_index` that
+    /// is not already served, fail-soft — the hub-tier counterpart of
+    /// [`Self::attach_connected_root_ports`], shared by the descent
+    /// ([`Self::descend_hub`]) and the deferred retry
+    /// ([`Self::retry_skipped_ports`]).
+    ///
+    /// One broken or hostile device must not cost the other ports their
+    /// service: a failed attach releases its slot and chunks inside
+    /// [`Self::attach_hub_port`] and the walk continues. A port the bank can
+    /// supply no memory for stays unserved fail-closed, never displacing a
+    /// served device. The skip is counted so the driver can surface "present
+    /// but unserved" instead of silence. An already-served port is skipped
+    /// untouched — [`Self::attach_hub_port`] resets the port it attaches, and
+    /// resetting a working device's port would tear it down.
+    fn attach_connected_hub_ports(&mut self, hub_index: usize, delay: &dyn Delay) {
+        let Some(num_ports) = self.hub(hub_index).map(|hub| hub.num_ports) else {
+            return;
+        };
         for port in 1..=num_ports {
+            if self
+                .device_index_for_hub_and_port(hub_index, port)
+                .is_some()
+                || self.hub_index_for_hub_and_port(hub_index, port).is_some()
+            {
+                continue;
+            }
             let Ok(status) = self.hub_port_status(hub_index, port) else {
                 continue;
             };
             if !hub_port_connected(status) {
                 continue;
             }
-            // One broken or hostile device must not cost the other ports
-            // their service: a failed attach releases its slot and chunks
-            // inside `attach_hub_port` and the walk continues. A port the
-            // bank can supply no memory for stays unserved fail-closed,
-            // never displacing a served device. The skip is counted so the
-            // driver can surface "present but unserved" instead of silence.
             if self.attach_hub_port(hub_index, port, delay).is_err() {
                 self.skipped_ports = self.skipped_ports.saturating_add(1);
             }
         }
-        self.configure_hub_watch(hub_index)
     }
 
     /// Record `slot` in the freed-slot tolerance set ([`Self::freed_slots`])
@@ -6522,8 +6703,9 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// # Errors
     ///
-    /// [`DriverError`] from the controller reset, re-programming, or
-    /// bring-up (fail closed).
+    /// [`DriverError`] from the controller reset or its re-programming (fail
+    /// closed). A device that will not enumerate is a counted skip, exactly
+    /// as in [`Self::bring_up`], never a failed recovery.
     pub fn reset_and_reenumerate(&mut self, delay: &dyn Delay) -> Result<(), DriverError> {
         self.xhci
             .reset_to_ready(self.budget)
@@ -6546,21 +6728,22 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
 
     /// The enumeration step the most recent attach last entered.
     ///
-    /// After a [`Self::bring_up`] failure this pins
-    /// which xHCI operation a [`DriverError::DeviceFault`] came from —
+    /// The **live** breadcrumb, so it describes whichever attach ran last:
     /// [`EnumStage::Scan`] means no connected port was ever entered (an
-    /// empty hub / [`DriverError::NotFound`]); any later variant names
-    /// the faulting step.
+    /// empty controller), any later variant names the step that attach
+    /// reached. To localise a *failed* attach after a multi-port walk, read
+    /// its snapshot from [`Self::last_attach_fault`] instead.
     #[must_use]
     pub const fn enum_stage(&self) -> EnumStage {
         self.stage
     }
 
-    /// Downstream hub ports whose connected device failed enumeration and
-    /// was skipped fail-soft by the most recent bring-up walk
-    /// ([`Self::bring_up`] / [`Self::reset_and_reenumerate`]), so the
-    /// driver can log "a device was present but never served" rather than
-    /// the port silently looking empty.
+    /// Ports — root-hub or downstream — whose connected device failed
+    /// enumeration and was skipped fail-soft by the most recent walk
+    /// ([`Self::bring_up`], [`Self::reset_and_reenumerate`], or
+    /// [`Self::retry_skipped_ports`]), so the driver can log "a device was
+    /// present but never served" rather than the port silently looking
+    /// empty.
     #[must_use]
     pub const fn skipped_port_count(&self) -> u32 {
         self.skipped_ports
@@ -6803,6 +6986,12 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     /// drive one synchronous completion wait directly.
     pub(crate) fn command_for_test(&mut self, command: Trb) -> Result<Trb, DriverError> {
         self.command(command)
+    }
+
+    /// Test-only command-ring occupancy, so a regression can prove a
+    /// *rejected* command still retires its slot rather than leaking it.
+    pub(crate) fn command_ring_in_flight(&self) -> usize {
+        self.command_ring.in_flight()
     }
 }
 

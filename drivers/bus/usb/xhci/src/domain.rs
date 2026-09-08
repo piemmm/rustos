@@ -211,6 +211,66 @@ impl ControllerHealth {
     }
 }
 
+/// How long after the bring-up walk a port it could not serve is given one
+/// more attach attempt.
+///
+/// Long enough that a device which merely lost the boot race — a port still
+/// settling, a device slow to answer its first descriptor read — has finished
+/// coming up, and short enough that a user does not notice. A one-shot
+/// recovery delay, not a capacity or a poll interval.
+const SKIPPED_PORT_RETRY_NS: u64 = 1_000_000_000;
+
+/// The **single** deferred re-attach the driver owes a port the bring-up walk
+/// could not serve.
+///
+/// A skipped port had its connect latch consumed by the walk, so no hot-plug
+/// event will ever wake it again: without one more attempt it stays dead
+/// until it is physically re-plugged, which is a poor answer when the device
+/// that lost the boot race is the keyboard. It fires **once ever** — a port
+/// whose device is genuinely broken can therefore never loop, which is why
+/// this lives here rather than as a retry inside the engine.
+///
+/// Pure given the caller's monotonic reading, like [`ControllerHealth`], so
+/// the schedule is proven host-side.
+#[derive(Default)]
+pub struct SkippedPortRetry {
+    /// The monotonic deadline, once armed and while still pending.
+    due_ns: Option<u64>,
+    /// Whether the one attempt has been spent, so it is never armed again.
+    spent: bool,
+}
+
+impl SkippedPortRetry {
+    /// Arm the retry to come due a second or so after `now_ns`, unless it
+    /// has already been armed or spent.
+    pub fn arm(&mut self, now_ns: u64) {
+        if self.spent || self.due_ns.is_some() {
+            return;
+        }
+        self.due_ns = Some(now_ns.saturating_add(SKIPPED_PORT_RETRY_NS));
+    }
+
+    /// The **relative** one-shot timeout (nanoseconds from `now_ns`) the
+    /// serve loop should bound its park by, or [`None`] when nothing is
+    /// pending. Saturates at zero once due, so an already-elapsed deadline
+    /// wakes the loop immediately rather than parking it again.
+    #[must_use]
+    pub fn wait_timeout(&self, now_ns: u64) -> Option<u64> {
+        self.due_ns.map(|due| due.saturating_sub(now_ns))
+    }
+
+    /// Whether the retry is due at `now_ns`, spending it if so — so the
+    /// caller performs the re-attach exactly once.
+    pub fn take_if_due(&mut self, now_ns: u64) -> bool {
+        if self.due_ns.is_some_and(|due| now_ns >= due) {
+            self.due_ns = None;
+            self.spent = true;
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +398,59 @@ mod tests {
         let mut health = ControllerHealth::new(0);
         assert_eq!(health.note_reset(true, 10), None);
         assert_eq!(health.state(), FaultDomainState::Healthy);
+    }
+
+    #[test]
+    fn an_unarmed_skipped_port_retry_bounds_no_park_and_is_never_due() {
+        let retry = SkippedPortRetry::default();
+        assert_eq!(retry.wait_timeout(0), None);
+        assert_eq!(retry.wait_timeout(u64::MAX), None);
+    }
+
+    #[test]
+    fn the_skipped_port_retry_fires_exactly_once_ever() {
+        // A port whose device is genuinely broken must never loop: the one
+        // deferred attempt is spent on first use and cannot be re-armed.
+        let mut retry = SkippedPortRetry::default();
+        retry.arm(100);
+        assert_eq!(
+            retry.wait_timeout(100),
+            Some(SKIPPED_PORT_RETRY_NS),
+            "the loop parks until the deadline"
+        );
+        assert!(
+            !retry.take_if_due(100 + SKIPPED_PORT_RETRY_NS - 1),
+            "not due before its deadline"
+        );
+        assert!(retry.take_if_due(100 + SKIPPED_PORT_RETRY_NS), "due");
+
+        assert!(
+            !retry.take_if_due(u64::MAX),
+            "the one attempt is spent, so it never comes due again"
+        );
+        retry.arm(u64::MAX);
+        assert_eq!(
+            retry.wait_timeout(u64::MAX),
+            None,
+            "a spent retry cannot be re-armed, so no port can loop"
+        );
+    }
+
+    #[test]
+    fn arming_the_skipped_port_retry_twice_keeps_the_first_deadline() {
+        // A second arm must not postpone the attempt.
+        let mut retry = SkippedPortRetry::default();
+        retry.arm(0);
+        retry.arm(SKIPPED_PORT_RETRY_NS);
+        assert_eq!(retry.wait_timeout(0), Some(SKIPPED_PORT_RETRY_NS));
+    }
+
+    #[test]
+    fn an_overdue_skipped_port_retry_bounds_the_park_at_zero() {
+        // An already-elapsed deadline must wake the loop at once rather than
+        // park it for a wrapped-around eternity.
+        let mut retry = SkippedPortRetry::default();
+        retry.arm(0);
+        assert_eq!(retry.wait_timeout(SKIPPED_PORT_RETRY_NS * 2), Some(0));
     }
 }

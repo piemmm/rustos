@@ -13,8 +13,8 @@ use super::device::{
     hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval, pointer_min_interval,
     route_for_child, AttachOutcome, BulkDirection, BulkPipe, DeviceDescriptor, DmaBank, EnumStage,
     EventWait, HubEvent, InterfaceInfo, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, CAPTURE_LEN,
-    EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, MAX_HUB_DEPTH, REPORT_LEN, REPORT_QUEUE_CAP,
-    RING_TRBS, SPEED_HIGH,
+    EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, MAX_HUB_DEPTH, PORT_RESET_POLLS,
+    PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_LEN, REPORT_QUEUE_CAP, RING_TRBS, SPEED_HIGH,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
@@ -660,10 +660,17 @@ struct MockXhci {
     pending_status_clear: u32,
     doorbells: Vec<(usize, u32)>,
     /// `PORTSC` reads report Port Reset in progress for this many
-    /// reads after a reset write (models the self-clearing bit).
+    /// reads after a reset write (models the self-clearing bit). The port
+    /// enables — and latches its reset change — only when this reaches zero,
+    /// as real silicon does: a port mid-reset reports neither.
     port_reset_reads: u32,
     /// The port index a reset is in progress on.
     port_reset_port: usize,
+    /// When set, a requested port reset never finishes: `PORTSC` keeps
+    /// reporting Port Reset and the port never enables, modelling a port
+    /// whose device wedges its reset. The driver must fail closed within its
+    /// poll bound instead of waiting forever.
+    port_reset_never_completes: bool,
     /// The shared DMA buffer, when the device model is attached.
     mem: Option<SharedMem>,
     // Captured DMA-programming registers.
@@ -779,6 +786,12 @@ struct MockXhci {
     /// bounded enumeration retry must re-drive a fresh slot and still serve
     /// the device.
     fault_next_address_device: Option<CompletionCode>,
+    /// As [`Self::fault_next_address_device`], but for a device on a *root*
+    /// hub port — modelling the Pi 4 (VL805) rejecting an Address Device
+    /// with a Context State Error when the port has not finished settling
+    /// out of its reset. The command never reaches the device, so a fresh
+    /// slot must re-drive it.
+    fault_next_root_address_device: Option<CompletionCode>,
     /// When set, the device is physically **gone**: a device-side
     /// `CLEAR_FEATURE(ENDPOINT_HALT)` on the interrupt endpoint — the last
     /// step of the interrupt-IN halt recovery — faults with a device-
@@ -1191,6 +1204,7 @@ impl MockXhci {
             doorbells: Vec::new(),
             port_reset_reads: 0,
             port_reset_port: 0,
+            port_reset_never_completes: false,
             mem: None,
             config: 0,
             dcbaap: [0; 2],
@@ -1238,6 +1252,7 @@ impl MockXhci {
             forge_report_residual: false,
             fault_one_report_completion: None,
             fault_next_address_device: None,
+            fault_next_root_address_device: None,
             device_gone: false,
             inject_int_fault_on_clear: None,
             suppress_disable_completion: false,
@@ -1869,6 +1884,8 @@ impl MockXhci {
             if let Some(code) = self.fault_next_address_device.take() {
                 return code;
             }
+        } else if let Some(code) = self.fault_next_root_address_device.take() {
+            return code;
         }
         let control = self.read_dwords(input_ctx, 2);
         // Add flags must name the slot context and EP0 (A0 | A1).
@@ -3150,7 +3167,11 @@ impl XhciHost for MockXhci {
                 if port == self.port_reset_port && self.port_reset_reads > 0 {
                     self.port_reset_reads -= 1;
                     if self.port_reset_reads == 0 {
+                        // The reset finishes: the port drops Port Reset,
+                        // enables, and latches both its change bits — a port
+                        // mid-reset reports none of that.
                         self.portsc[port] &= !regs::PORTSC_PR;
+                        self.portsc[port] |= regs::PORTSC_PED | regs::PORTSC_PRC | regs::PORTSC_PEC;
                     }
                 }
                 return Ok(self.portsc[port]);
@@ -3230,17 +3251,24 @@ impl XhciHost for MockXhci {
                     }
                 }
                 if value & regs::PORTSC_PR != 0 {
-                    // A reset re-enables a connected port; PR reads as
-                    // in-progress for a couple of polls.
-                    self.portsc[port] |= regs::PORTSC_PED | regs::PORTSC_PR;
-                    self.port_reset_reads = 2;
+                    // A reset signals for a couple of polls and only *then*
+                    // enables the port and latches its changes (see the read
+                    // path), so a driver that reads `PED` in the instant it
+                    // asks for the reset sees a port mid-transition.
+                    self.portsc[port] &= !(regs::PORTSC_PED | regs::PORTSC_PRC | regs::PORTSC_PEC);
+                    self.portsc[port] |= regs::PORTSC_PR;
+                    self.port_reset_reads = if self.port_reset_never_completes {
+                        u32::MAX
+                    } else {
+                        2
+                    };
                     self.port_reset_port = port;
                 }
-                if value & regs::PORTSC_CSC != 0 {
-                    // Connect Status Change is write-1-to-clear (xHCI 1.2
-                    // §5.4.8): the root-port scan consumes the latch.
-                    self.portsc[port] &= !regs::PORTSC_CSC;
-                }
+                // Every change bit is write-1-to-clear (xHCI 1.2 §5.4.8): the
+                // root-port scan consumes the connect latch, the reset path
+                // its own reset/enable latches.
+                self.portsc[port] &=
+                    !(value & (regs::PORTSC_CSC | regs::PORTSC_PRC | regs::PORTSC_PEC));
                 return Ok(());
             }
         }
@@ -3881,7 +3909,7 @@ fn arm_report_request_for(device: &mut UsbDevice<'_, MockXhci, MockDma>, index: 
 /// tests that drive the downstream ports' power/reset/class requests
 /// themselves rather than letting the walk attach everything.
 fn install_root_hub_on_port_1(device: &mut UsbDevice<'_, MockXhci, MockDma>) -> usize {
-    match device.attach_root_on_port(1) {
+    match device.attach_root_on_port(1, &TestDelay::default()) {
         Ok(AttachOutcome::Hub(hub)) => hub,
         other => panic!("the root hub enumerates and installs: {other:?}"),
     }
@@ -3893,7 +3921,7 @@ fn attach_root_device(
     device: &mut UsbDevice<'_, MockXhci, MockDma>,
     port: u8,
 ) -> Result<usize, DriverError> {
-    match device.attach_root_on_port(port)? {
+    match device.attach_root_on_port(port, &TestDelay::default())? {
         AttachOutcome::Device(index) => Ok(index),
         // These callers attach leaf devices only; a hub here is a harness bug.
         AttachOutcome::Hub(_) => Err(DriverError::BadMagic),
@@ -4083,11 +4111,11 @@ fn root_attach_fails_closed_on_an_empty_port() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     assert_eq!(
-        device.attach_root_on_port(2).err(),
+        device.attach_root_on_port(2, &TestDelay::default()).err(),
         Some(DriverError::DeviceFault)
     );
     assert_eq!(
-        device.attach_root_on_port(0).err(),
+        device.attach_root_on_port(0, &TestDelay::default()).err(),
         Some(DriverError::OutOfRange)
     );
 }
@@ -4098,7 +4126,7 @@ fn root_attach_twice_on_one_port_is_refused() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("first enumeration");
     assert_eq!(
-        device.attach_root_on_port(1).err(),
+        device.attach_root_on_port(1, &TestDelay::default()).err(),
         Some(DriverError::Busy),
         "the port already carries a served attachment"
     );
@@ -4195,6 +4223,263 @@ fn bring_up_connects_a_port_only_after_power() {
     assert_eq!(identity.vendor_id, 0x046D);
     assert_eq!(device.raw_device_slot(0), 1);
     assert!(device.host_mut().configured);
+}
+
+#[test]
+fn a_root_port_reset_consumes_its_change_latches_and_settles_reset_recovery() {
+    // The Pi 4 defect. The root-port reset used to return the instant
+    // `PORTSC.PR` read clear and address the device straight away, leaving
+    // the reset's own `PRC`/`PEC` latches set and skipping the `TRSTRCY`
+    // recovery interval (USB 2.0 §7.1.7.5) the device is owed — which is
+    // what had the VL805 reject the Address Device with a Context State
+    // Error. The downstream hub-port path already did this correctly; the
+    // root port now runs the same protocol step.
+    //
+    // `latent_device_port` gives a port that only connects once powered and
+    // is *not* pre-enabled, so the reset path genuinely runs.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.portsc[0] = 0;
+    mock.latent_device_port = Some(0);
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device
+        .bring_up(&delay)
+        .expect("the reset device enumerates");
+    assert!(device.device_live(0), "the reset device is served");
+
+    let portsc = device.root_port_status_raw(1).expect("port 1 reads");
+    assert_ne!(portsc & regs::PORTSC_PED, 0, "the reset enabled the port");
+    assert_eq!(
+        portsc & (regs::PORTSC_PRC | regs::PORTSC_PEC),
+        0,
+        "the reset's own change latches are consumed, so the next reset's \
+         completion is distinguishable from this one's"
+    );
+    assert_eq!(
+        (delay.calls.get(), delay.now_us()),
+        (1, u64::from(PORT_RESET_SETTLE_US)),
+        "the device is given exactly the TRSTRCY recovery interval before it \
+         is addressed"
+    );
+}
+
+#[test]
+fn a_root_port_that_never_leaves_reset_fails_closed_within_the_poll_bound() {
+    // A port whose reset wedges must not be addressed (its speed was never
+    // established) and must not be waited on forever: the attach fails
+    // closed once the bounded, parked re-poll is spent.
+    let mem = shared_mem();
+    let wait = TestWait::leaked();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.portsc[0] = 0;
+    mock.latent_device_port = Some(0);
+    mock.port_reset_never_completes = true;
+    let mut device = started_device_with_wait(mock, &mem, wait);
+    let waits_before = wait.waits.get();
+    let clock_before = wait.now_us.get();
+
+    device
+        .bring_up(&TestDelay::default())
+        .expect("one wedged port never fails the controller's bring-up");
+    assert!(
+        !device.any_device_live(),
+        "a port that never enables is left unserved, never addressed on a \
+         guessed speed"
+    );
+    assert_eq!(device.skipped_port_count(), 1, "the wedged port is counted");
+    assert!(
+        wait.waits.get() > waits_before,
+        "the reset was awaited by parking on the controller's interrupt, not \
+         by spinning the register"
+    );
+    // The bound is wall clock, not an iteration count: a park may return
+    // early on any unrelated controller event, so counting parks would spend
+    // the budget in microseconds on a busy controller and refuse a slow port.
+    assert_eq!(
+        wait.now_us.get() - clock_before,
+        u64::from(PORT_RESET_POLL_US) * u64::from(PORT_RESET_POLLS),
+        "the full reset-completion budget was waited before failing closed"
+    );
+}
+
+#[test]
+fn the_completion_code_decoder_names_the_whole_architected_set() {
+    // A completion code the decoder cannot name reaches a diagnostic as
+    // "undecodable", which is exactly the information a metal capture needs:
+    // the Pi 4's Context State Error (19) on Address Device read as a driver
+    // decode failure rather than as the controller's own answer. Every code
+    // xHCI 1.2 table 6-90 architects decodes; only the values it reserves or
+    // leaves vendor-defined still fail closed.
+    for raw in 1..=36u32 {
+        let decoded = CompletionCode::from_raw(raw);
+        if raw == 30 {
+            assert_eq!(
+                decoded,
+                Err(DriverError::OutOfRange),
+                "30 is reserved, so nothing may name it"
+            );
+            continue;
+        }
+        assert_eq!(
+            decoded.map(CompletionCode::as_u8),
+            Ok(u8::try_from(raw).expect("in range")),
+            "code {raw} round-trips through the decoder"
+        );
+    }
+    for reserved in [0, 37, 191, 192, 255] {
+        assert_eq!(
+            CompletionCode::from_raw(reserved),
+            Err(DriverError::OutOfRange),
+            "{reserved} is reserved or vendor-defined and fails closed"
+        );
+    }
+
+    // A rejected *command* is classified apart from an unreachable device: a
+    // fresh slot re-drives either, but only the latter reads as a removal.
+    assert!(
+        CompletionCode::ContextStateError.indicates_state_disagreement(),
+        "the Pi 4's Address Device rejection is a state disagreement"
+    );
+    assert!(
+        !CompletionCode::ContextStateError.indicates_device_unreachable(),
+        "a rejected command must never be read as a hot-removal"
+    );
+    assert!(
+        !CompletionCode::StallError.indicates_state_disagreement()
+            && !CompletionCode::BabbleDetected.indicates_state_disagreement(),
+        "a device answering wrong is not a state disagreement, so it is not \
+         retried"
+    );
+}
+
+#[test]
+fn a_skipped_root_port_is_re_attached_by_the_deferred_retry() {
+    // A device skipped during the boot walk had its connect latch consumed
+    // there, so nothing will ever wake its port again: without the deferred
+    // re-attach it stays dead until it is physically re-plugged — a poor
+    // answer when the device that lost the boot race is the keyboard. Here
+    // the port wedges its reset at boot and is skipped; once it settles, one
+    // retry re-drives the reset and serves it.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.portsc[0] = 0;
+    mock.latent_device_port = Some(0);
+    mock.port_reset_never_completes = true;
+    let mut device = started_device(mock, &mem);
+    let delay = TestDelay::default();
+
+    device.bring_up(&delay).expect("the walk survives the skip");
+    assert_eq!(device.skipped_port_count(), 1, "the wedged port is skipped");
+    assert!(!device.any_device_live(), "nothing is served yet");
+
+    device.host_mut().port_reset_never_completes = false;
+    device
+        .retry_skipped_ports(&delay)
+        .expect("the retry re-drives the port's reset");
+    assert!(
+        device.device_live(0),
+        "the port that lost the boot race is served without a re-plug"
+    );
+    assert_eq!(
+        device.skipped_port_count(),
+        0,
+        "the retry reports no port still unserved"
+    );
+}
+
+#[test]
+fn the_deferred_retry_never_resets_an_already_served_port() {
+    // The retry re-drives a port's *reset*, which would tear down a working
+    // device. A served port must therefore be skipped untouched — its slot,
+    // its device-table entry, and its configuration all survive.
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+    let delay = TestDelay::default();
+    device.bring_up(&delay).expect("the keyboard enumerates");
+    let slot = device.raw_device_slot(0);
+    let slots_handed_out = device.host_mut().next_slot;
+
+    device
+        .retry_skipped_ports(&delay)
+        .expect("the retry walks a fully-served controller cleanly");
+
+    assert!(device.device_live(0), "the served device is untouched");
+    assert_eq!(device.raw_device_slot(0), slot, "it keeps its slot");
+    assert_eq!(
+        device.host_mut().next_slot,
+        slots_handed_out,
+        "no fresh slot was enabled, so the served port was never re-attached"
+    );
+    assert_eq!(device.skipped_port_count(), 0);
+}
+
+#[test]
+fn an_address_device_rejected_for_context_state_is_retried_on_a_fresh_slot() {
+    // The exact metal failure: `enum_stage=3 completion=19` — the VL805
+    // rejecting Address Device with a Context State Error because its view of
+    // the port/slot state did not match the driver's. The command never
+    // reached the device, so it stays in Default state and a fresh slot
+    // re-drives it cleanly (as Linux's `hub_port_init` does). Before the fix
+    // code 19 was not modelled at all: it decoded as "undecodable", took the
+    // fault out of the retry classification, and — with the only connected
+    // root port failing — killed the whole controller.
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.fault_next_root_address_device = Some(CompletionCode::ContextStateError);
+    let mut device = started_device(mock, &mem);
+
+    device
+        .bring_up(&TestDelay::default())
+        .expect("a rejected Address Device is retried, not fatal");
+    assert!(
+        device.device_live(0),
+        "the device is served after the retry"
+    );
+    assert_eq!(
+        device.skipped_port_count(),
+        0,
+        "the rejection was recovered, not counted as an unserved port"
+    );
+    assert_eq!(
+        device.host_mut().next_slot,
+        3,
+        "the retry ran on a *fresh* slot rather than re-using the rejected one"
+    );
+}
+
+#[test]
+fn a_rejected_command_retires_its_command_ring_slot() {
+    // A command that completes with a non-Success code has still been
+    // consumed by the controller, so its ring slot is free. Retiring only on
+    // success leaked one slot per rejection, and the ring read full after as
+    // many rejections as it has slots — which the enumeration retry makes
+    // reachable. An Address Device whose input context names no Add flags is
+    // the mock's malformed-command answer (`TrbError`).
+    const UNTOUCHED_DMA: u64 = MOCK_DMA_BASE + 0x30_0000;
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
+
+    for _ in 0..RING_TRBS * 2 {
+        assert_eq!(
+            device
+                .command_for_test(Trb::new(
+                    TrbType::AddressDevice,
+                    UNTOUCHED_DMA,
+                    0,
+                    crate::trb::control_slot(1),
+                ))
+                .err(),
+            Some(DriverError::DeviceFault),
+            "the controller rejects a malformed Address Device"
+        );
+        assert_eq!(
+            device.command_ring_in_flight(),
+            0,
+            "a rejected command leaves nothing in flight"
+        );
+    }
 }
 
 #[test]
@@ -4320,7 +4605,7 @@ fn root_attach_fails_closed_on_a_non_stall_class_fault() {
     mock.fault_class_requests = true;
     let mut device = started_device(mock, &mem);
     assert_eq!(
-        device.attach_root_on_port(1).err(),
+        device.attach_root_on_port(1, &TestDelay::default()).err(),
         Some(DriverError::DeviceFault)
     );
     assert_eq!(device.enum_stage(), EnumStage::SetProtocol);
@@ -4340,7 +4625,7 @@ fn root_attach_recognises_a_hub_via_the_device_class() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
     assert_eq!(
-        device.attach_root_on_port(1),
+        device.attach_root_on_port(1, &TestDelay::default()),
         Ok(AttachOutcome::Hub(0)),
         "device class 0x09 is recognised and installed as a hub"
     );
@@ -4611,7 +4896,8 @@ impl Delay for TestDelay {
 fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
     // A keyboard wired straight to a root-hub port (no intervening hub):
     // the orchestration enumerates the first connected port and, because
-    // the device is not a hub, returns it without touching the clock.
+    // the device is not a hub, waits only the one settle the protocol owes
+    // the device it just reset.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let delay = TestDelay::default();
@@ -4625,9 +4911,9 @@ fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
     assert!(device.device_live(0), "the enumerated device is live");
     assert_eq!(descriptor.vendor_id, 0x046D);
     assert_eq!(
-        delay.calls.get(),
-        0,
-        "no hub tier means no settle window is waited"
+        (delay.calls.get(), delay.now_us()),
+        (1, u64::from(PORT_RESET_SETTLE_US)),
+        "no hub tier means the root port's reset-recovery settle is the only wait"
     );
 
     // Its boot report drains after the class side asks for one.
@@ -4936,17 +5222,31 @@ fn an_interface_in_report_protocol_with_no_map_delivers_nothing() {
 #[test]
 fn a_mouse_whose_descriptor_read_faults_fails_closed() {
     // A pointer's descriptor read *is* load bearing — it selects report
-    // protocol — so a non-STALL fault there still fails the bring-up rather
+    // protocol — so a non-STALL fault there still fails the *attach* rather
     // than silently running a mouse the engine could not characterise. Only
-    // the keyboard's observational read is tolerated.
+    // the keyboard's observational read is tolerated. The controller itself
+    // is healthy, so the port is a counted skip and the walk still succeeds.
     let mem = shared_mem();
     let mut mock = MockXhci::with_report_mouse(&mem);
     mock.fault_report_descriptor_request = true;
     let mut device = started_device(mock, &mem);
     let delay = TestDelay::default();
+    device
+        .bring_up(&delay)
+        .expect("one unservable device never fails the controller's bring-up");
     assert!(
-        device.bring_up(&delay).is_err(),
-        "a pointer's faulting descriptor read fails closed"
+        !device.any_device_live(),
+        "a pointer's faulting descriptor read fails closed: it is not served"
+    );
+    assert_eq!(
+        device.skipped_port_count(),
+        1,
+        "the unservable port is counted, not silently absent"
+    );
+    assert_eq!(
+        device.last_attach_fault().map(|fault| fault.port),
+        Some(1),
+        "the failing port is named for the driver's diagnostic"
     );
 }
 
@@ -5371,10 +5671,11 @@ fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
         "the keyboard gets its own slot"
     );
     assert_eq!(device.host_mut().downstream_route_port, 4);
-    // Every hardware settle window was honoured exactly once: power-on-good,
-    // one reset-completion poll interval (the hub reports the port enabled
-    // on the first read), then the TRSTRCY reset-recovery settle.
-    assert_eq!(delay.calls.get(), 3);
+    // Every hardware settle window was honoured exactly once: the root
+    // port's own reset-recovery settle, the hub's power-on-good, one
+    // reset-completion poll interval (the hub reports the port enabled on the
+    // first read), then the downstream TRSTRCY reset-recovery settle.
+    assert_eq!(delay.calls.get(), 4);
 
     // With the hub marked and the endpoint configured, a requested report drains.
     arm_report_request_for(&mut device, 1);
@@ -5422,9 +5723,10 @@ fn bring_up_keyboard_arms_the_hub_watch_when_no_downstream_device_is_present() {
         !device.device_live(0),
         "no HID device is live until one connects downstream"
     );
-    // The power-on-good window was waited once; the reset-recovery wait is
-    // never reached because no connected port is found.
-    assert_eq!(delay.calls.get(), 1);
+    // The root port's reset-recovery settle and the hub's power-on-good
+    // window were each waited once; the downstream reset-recovery wait is
+    // never reached because no connected downstream port is found.
+    assert_eq!(delay.calls.get(), 2);
 }
 
 #[test]
@@ -5682,7 +5984,7 @@ fn a_forged_hub_descriptor_fails_the_attach_closed() {
     mock.forge_hub_descriptor = true;
     let mut device = started_device(mock, &mem);
     assert_eq!(
-        device.attach_root_on_port(1).err(),
+        device.attach_root_on_port(1, &TestDelay::default()).err(),
         Some(DriverError::BadMagic)
     );
 }
@@ -5700,7 +6002,10 @@ fn a_garbled_hub_descriptor_reply_is_retried_and_the_attach_succeeds() {
     mock.garble_hub_descriptor_replies = 1;
     let mut device = started_device(mock, &mem);
     assert!(
-        matches!(device.attach_root_on_port(1), Ok(AttachOutcome::Hub(_))),
+        matches!(
+            device.attach_root_on_port(1, &TestDelay::default()),
+            Ok(AttachOutcome::Hub(_))
+        ),
         "one garbled hub-descriptor reply is retried, never fatal"
     );
 }
@@ -5752,7 +6057,7 @@ fn persistently_garbled_hub_descriptor_replies_fail_the_attach_closed() {
     mock.garble_hub_descriptor_replies = u8::MAX;
     let mut device = started_device(mock, &mem);
     assert_eq!(
-        device.attach_root_on_port(1).err(),
+        device.attach_root_on_port(1, &TestDelay::default()).err(),
         Some(DriverError::BadMagic)
     );
 }
@@ -5795,14 +6100,14 @@ fn faulting_hub_port_status_records_an_undecodable_completion_code() {
     // carried a completion code this driver does not model (its
     // fail-closed `completion_code()` decode), leaving
     // `last_completion_code()` at the `0` "no event" sentinel. The fix
-    // records the raw code as the event is observed, so a reserved /
-    // controller-specific code (here xHCI `7`, Resource Error) survives
-    // for the metal capture. This fails before the
-    // fix (code lost to `0`) and passes after.
-    const RESOURCE_ERROR: u8 = 7;
+    // records the raw code as the event is observed, so a code outside the
+    // architected set — here `30`, which xHCI 1.2 table 6-90 reserves, so
+    // nothing can name it — survives for the metal capture. This fails
+    // before the fix (code lost to `0`) and passes after.
+    const RESERVED_CODE: u8 = 30;
     let mem = shared_mem();
     let mut mock = MockXhci::with_hub(&mem, 4, 2);
-    mock.fault_hub_port_status_raw = RESOURCE_ERROR;
+    mock.fault_hub_port_status_raw = RESERVED_CODE;
     let mut device = started_device(mock, &mem);
     let hub = install_root_hub_on_port_1(&mut device);
 
@@ -5813,7 +6118,7 @@ fn faulting_hub_port_status_records_an_undecodable_completion_code() {
     );
     assert_eq!(
         device.last_completion_code(),
-        RESOURCE_ERROR,
+        RESERVED_CODE,
         "the raw, undecodable completion code is preserved for the diagnostic"
     );
 }
@@ -6286,7 +6591,8 @@ fn a_transient_split_fault_during_enumeration_retries_and_serves_the_device() {
 
 #[test]
 fn an_active_device_error_during_enumeration_is_not_retried() {
-    // The retry is only for a *transaction* fault (a non-responding device).
+    // The retry is only for a fault that left the device untouched (it could
+    // not answer, or the controller rejected the command on its own state).
     // A device that actively answers wrong must fail the attach on the first
     // attempt, never be re-driven: a forged/garbled hub descriptor (a
     // successful transfer carrying bytes that are not a hub descriptor) is
@@ -6296,12 +6602,25 @@ fn an_active_device_error_during_enumeration_is_not_retried() {
     let mut mock = MockXhci::with_hub(&mem, 4, 4);
     mock.forge_hub_descriptor = true;
     let mut device = started_device(mock, &mem);
-    // The hub's own descriptor is forged, so the root attach fails; with the
-    // hub the only connected root port, the whole bring-up surfaces it rather
-    // than silently retrying a device that answered with bad data.
+
+    device
+        .bring_up(&TestDelay::default())
+        .expect("a device answering wrong never fails the controller's bring-up");
     assert!(
-        device.bring_up(&TestDelay::default()).is_err(),
-        "an active bad-descriptor answer fails closed, it is not retried"
+        !device.any_device_live() && !device.hub_watch_active(),
+        "an active bad-descriptor answer fails closed: nothing behind it is served"
+    );
+    assert_eq!(
+        device.skipped_port_count(),
+        1,
+        "the port carrying the lying hub is counted as unserved"
+    );
+    // One slot only was ever handed out (the mock numbers them from 1), so
+    // the attach was not re-driven — that is the property under test.
+    assert_eq!(
+        device.host_mut().next_slot,
+        2,
+        "a device that answered wrong is refused on the first attempt, not retried"
     );
 }
 

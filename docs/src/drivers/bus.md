@@ -400,18 +400,28 @@ reset condition instead of collapsing every timeout to a bare `device_fault`.
 address that is zero or not 64-byte aligned (`DmaProgram` plausibility,
 §6.1, fail closed). `Xhci::ack_event` advances `ERDP` (clearing Event
 Handler Busy) after each consumed event. `PORTSC` reads decode through
-`PortStatus` with 1-based port bounds checks, `Xhci::reset_port` runs
-the §4.19.5 port reset with the write-1-to-clear bits masked so no
-pending change bit is consumed by accident, and doorbell rings
-validate both the index (≤ `MaxSlots`) and the §5.6 target rules.
+`PortStatus` with 1-based port bounds checks, `Xhci::begin_port_reset`
+starts the §4.19.5 port reset with the write-1-to-clear bits masked so no
+pending change bit is consumed by accident (its completion is awaited a
+layer up, where the clock and the controller interrupt live) and
+`Xhci::clear_port_reset_change` consumes the reset's own latches, and
+doorbell rings validate both the index (≤ `MaxSlots`) and the §5.6 target
+rules.
 
 ### TRB rings
 
-`trb` defines the 16-byte TRB plus fail-closed `TrbType` /
-`CompletionCode` subsets (an unknown type or completion code is
-`OutOfRange`, never a guess), the on-ring little-endian byte
-conversion, and the transfer-event field decoders (slot ID, endpoint
-ID, transfer residual). `ring` carries the §4.9 state machines and
+`trb` defines the 16-byte TRB plus a fail-closed `TrbType` subset (an
+unknown type is `OutOfRange`, never a guess) and the **complete**
+`CompletionCode` set of xHCI 1.2 table 6-90 — a code the decoder cannot
+name is a code no diagnostic can report, which is how the Pi 4's
+`Context State Error` on Address Device read as a driver decode failure;
+only the values the specification reserves or leaves vendor-defined still
+fail closed. `indicates_device_unreachable` names the codes that read as a
+hot-removal and `indicates_state_disagreement` those where the controller
+*rejected* the command on its own slot/port state, which a fresh slot
+re-drives. It also carries the on-ring little-endian byte conversion and
+the transfer-event field decoders (slot ID, endpoint ID, transfer
+residual). `ring` carries the §4.9 state machines and
 holds **no memory**: `ProducerRing::push` returns a `PushOutcome` —
 the cycle-stamped TRB, its slot and device-visible address, and (on a
 wrap) the re-cycled Link TRB to publish *after* the data TRB — so the
@@ -448,7 +458,14 @@ compile-time budget.
 the rings' Link TRBs, and starts the controller through `Xhci::start`.
 `UsbDevice::attach_root_port(port)` then brings the device on a root-hub
 port to the configured state (§4.3): port reset when the port is not
-yet enabled, Enable Slot (validating the returned slot ID), Address
+yet enabled — awaited to completion exactly as a downstream hub port's is
+(`await_root_port_reset_complete`: `PORTSC` re-read at 20 ms intervals
+parked on the controller's interrupt, bounded at 800 ms, requiring the
+reset done **and** the port enabled, then the reset's own `PRC`/`PEC`
+latches consumed and the `TRSTRCY` recovery interval settled before the
+device is addressed; skipping that settle is what had the Pi 4's VL805
+reject Address Device with a Context State Error) — Enable Slot
+(validating the returned slot ID), Address
 Device (input control context `A0 | A1`, slot context, EP0 context
 with the speed-derived **worst-case** max packet size), an 8-byte
 `GET_DESCRIPTOR(device)` prefix read ending at `bMaxPacketSize0` —
@@ -574,11 +591,15 @@ the hub as the active control context and releases the claimed slot, so
 one port's broken device never costs the other ports their service. The
 caller owns the wall-clock settle windows (the `Delay` seam): the walk
 powers the port, resets it (`SET_FEATURE(PORT_RESET)`), then **polls the
-reset to completion** (`await_port_reset_complete`: `GET_STATUS` at 20 ms
-parked intervals, bounded at 800 ms — a slow external hub legitimately
-takes hundreds of milliseconds — requiring reset-signalling done and the
-port enabled, then the `TRSTRCY` settle) before addressing at the speed
-the final status reports. A failed attach snapshots its diagnostics
+reset to completion** (`await_hub_port_reset_complete`: `GET_STATUS` at
+20 ms parked intervals, bounded at 800 ms — a slow external hub
+legitimately takes hundreds of milliseconds — requiring reset-signalling
+done and the port enabled, then the `TRSTRCY` settle) before addressing at
+the speed the final status reports. The root-port tier runs the same
+protocol step over `PORTSC` off the same three figures
+(`PORT_RESET_POLL_US` / `PORT_RESET_POLLS` / `PORT_RESET_SETTLE_US`,
+defined once), so a fix to the reset handling cannot land on one tier and
+miss the other. A failed attach snapshots its diagnostics
 (`UsbDevice::last_attach_fault`: port, error, stage, completion/
 event-type/reject, final `wPortStatus`) before the latch drain overwrites
 the live state, so the HCD's hot-plug failure warning names the failing
@@ -1013,7 +1034,16 @@ region as it attaches) is verified at allocation time to lie wholly
 `OutOfRange`, `AGENTS.md` §5.4) — and then brings the controller up
 through `Xhci::open` + `UsbDevice::start` + `UsbDevice::bring_up`
 (`bring_up_controller_diagnostic`, whose phase breadcrumb reports a
-map / open / start / enumerate failure distinctly).
+map / open / start / enumerate failure distinctly — the `enumerate`
+phase now only ever names a fault of the **controller**, because a device
+that will not enumerate is a counted skip and never fails the walk). A
+skipped port is warned with the failing port's own snapshot (port,
+enumeration stage, completion / event-type / reject) rather than the live
+breadcrumb, which after a multi-port walk describes whichever port ran
+last; the serve loop then owes it exactly one deferred re-attach off a
+one-shot (`SkippedPortRetry` → `UsbDevice::retry_skipped_ports`), so a
+device that merely lost the boot race comes up without a re-plug while a
+genuinely broken one can never loop.
 QEMU models no Pi USB timing (`AGENTS.md` §0.4), so the host tests prove
 the composition and its fail-closed paths up to the controller hand-off;
 the live controller bring-up is the on-metal acceptance item.

@@ -1956,7 +1956,7 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
   memory owner publishes; borrow-free `EventRingCursor`), `Xhci`
   (§4.2 `open` prologue; `start` programming
   `CONFIG`/`DCBAAP`/`CRCR` + interrupter 0's event ring over `RTSOFF`
-  and running the controller; `ack_event`; RW1C-safe `reset_port`),
+  and running the controller; `ack_event`; RW1C-safe `begin_port_reset`),
   and `device::UsbDevice` — the single-device enumeration engine
   (64-byte-aligned layout of all device-shared structures; Enable
   Slot / Address Device / Configure Endpoint command flow; control

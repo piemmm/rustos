@@ -795,34 +795,56 @@ impl<H: XhciHost> Xhci<H> {
         Ok(status)
     }
 
-    /// Reset a root-hub port and wait for it to come back enabled
-    /// (§4.19.5 — required before a USB2 device can be addressed).
+    /// Start a root-hub port reset (§4.19.5 — required before a USB2 device
+    /// can be addressed), returning as soon as the request is issued.
     ///
-    /// The read-modify-write masks the write-1-to-clear bits
-    /// ([`regs::PORTSC_RW1C_MASK`]) so no pending change bit is
-    /// consumed by accident.
+    /// Awaiting the reset and settling the protocol's recovery interval is
+    /// the caller's job (`device::UsbDevice::await_root_port_reset_complete`):
+    /// it owns the clock and the controller's interrupt, and this layer owns
+    /// only the register. The read-modify-write masks the write-1-to-clear
+    /// bits ([`regs::PORTSC_RW1C_MASK`]) so no pending change bit is consumed
+    /// by accident.
     ///
     /// # Errors
     ///
     /// * [`DriverError::OutOfRange`] if `port` is zero or above
     ///   [`Self::max_ports`].
-    /// * [`DriverError::DeviceFault`] if no device is connected, the
-    ///   reset never completes within `budget` polls, or the port
-    ///   does not come back enabled.
-    pub fn reset_port(&mut self, port: u8, budget: u32) -> Result<PortStatus, DriverError> {
-        let status = self.port_status(port)?;
-        if !status.connected() {
+    /// * [`DriverError::DeviceFault`] if no device is connected or the
+    ///   register window rejects the access.
+    pub fn begin_port_reset(&mut self, port: u8) -> Result<(), DriverError> {
+        if !self.port_status(port)?.connected() {
             return Err(DriverError::DeviceFault);
         }
         let offset = regs::PORTSC_BASE + (usize::from(port) - 1) * regs::PORTSC_STRIDE;
         let raw = self.read_op(offset)?;
-        self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PR)?;
-        self.wait_op_clear(offset, regs::PORTSC_PR, budget)?;
-        let status = self.port_status(port)?;
-        if !(status.connected() && status.enabled()) {
-            return Err(DriverError::DeviceFault);
+        self.write_op(offset, (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PR)
+    }
+
+    /// Clear one root-hub port's latched reset and enable changes
+    /// ([`regs::PORTSC_PRC`] / [`regs::PORTSC_PEC`], write-1-to-clear).
+    ///
+    /// A completed reset latches both. Left set, the port carries a stale
+    /// change that the *next* reset's completion cannot be told apart from,
+    /// so a reset is not finished until its own latches are consumed. The
+    /// write masks every other write-1-to-clear bit so an unrelated pending
+    /// change — the connect latch the hot-plug scan keys on — survives.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::OutOfRange`] if `port` is zero or above
+    ///   [`Self::max_ports`].
+    /// * [`DriverError::DeviceFault`] if the register window rejects the
+    ///   access.
+    pub fn clear_port_reset_change(&mut self, port: u8) -> Result<(), DriverError> {
+        if port == 0 || port > self.max_ports {
+            return Err(DriverError::OutOfRange);
         }
-        Ok(status)
+        let offset = regs::PORTSC_BASE + (usize::from(port) - 1) * regs::PORTSC_STRIDE;
+        let raw = self.read_op(offset)?;
+        self.write_op(
+            offset,
+            (raw & !regs::PORTSC_RW1C_MASK) | regs::PORTSC_PRC | regs::PORTSC_PEC,
+        )
     }
 
     /// Read and decode one root-hub port's `PORTSC`.
@@ -875,7 +897,7 @@ impl<H: XhciHost> Xhci<H> {
     /// (xHCI 1.2 §4.19.1.1 / §5.4.8). Without this an attached device
     /// is invisible to [`Self::port_status`]. The read-modify-write
     /// masks the write-1-to-clear bits ([`regs::PORTSC_RW1C_MASK`]) so
-    /// no pending change bit is consumed (as [`Self::reset_port`]).
+    /// no pending change bit is consumed (as [`Self::begin_port_reset`]).
     /// Writing `PP` to an already-powered or non-controlled port is a
     /// no-op the hardware ignores, so this is safe to call on every
     /// reported port.
