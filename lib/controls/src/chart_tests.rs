@@ -551,6 +551,73 @@ fn a_duplex_chart_draws_a_heavier_axis_under_heavy_contrast() {
     );
 }
 
+// --- Stated full scale ----------------------------------------------------
+
+/// A count has no permille ceiling, so its series states the denominator it is
+/// read against: half of a stated scale must reach exactly where half of the
+/// permille default does.
+#[test]
+fn a_stated_full_scale_reads_a_count_against_itself() {
+    let theme = Theme::dark();
+    let counted = chart_surface(
+        &Chart::new(PressureKind::Cpu)
+            .with_samples([50; 8])
+            .with_full_scale(100),
+        &theme,
+    );
+    let permille = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([500; 8]),
+        &theme,
+    );
+    assert_eq!(
+        topmost(&counted, cpu(&theme)),
+        topmost(&permille, cpu(&theme)),
+        "50 of 100 must plot where 500 of 1000 does"
+    );
+}
+
+/// Stating a scale must not move any existing trace: the permille default is
+/// the same arithmetic with a ceiling of FULL.
+#[test]
+fn the_default_scale_still_clamps_at_permille_full() {
+    let theme = Theme::dark();
+    let over = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([2000; 8]),
+        &theme,
+    );
+    let full = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([1000; 8]),
+        &theme,
+    );
+    assert_eq!(
+        topmost(&over, cpu(&theme)),
+        topmost(&full, cpu(&theme)),
+        "a reading past the ceiling fills the box, it does not wrap"
+    );
+}
+
+/// A zero denominator would divide by nothing, so it falls back to the
+/// permille default rather than failing the draw.
+#[test]
+fn a_zero_full_scale_falls_back_to_permille() {
+    let theme = Theme::dark();
+    let zeroed = chart_surface(
+        &Chart::new(PressureKind::Cpu)
+            .with_samples([500; 8])
+            .with_full_scale(0),
+        &theme,
+    );
+    let default = chart_surface(
+        &Chart::new(PressureKind::Cpu).with_samples([500; 8]),
+        &theme,
+    );
+    assert_eq!(
+        topmost(&zeroed, cpu(&theme)),
+        topmost(&default, cpu(&theme))
+    );
+    assert!(!is_blank(&zeroed), "a zero scale must still draw");
+}
+
 // --- Fail-closed ----------------------------------------------------------
 
 #[test]

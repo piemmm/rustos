@@ -62,15 +62,20 @@ because it arranges those controls into one particular window
 
 The window manager decorates the window server-side (the frame, title bar,
 window commands, and resize grabber — see `plans/COMPOSITOR-WORK.md`);
-Switchboard draws only its client content, beginning with a **location band**
-at the top: a `Breadcrumb` reading `Switchboard › <section>` and, at
-its trailing end, an `IconButton` that opens a `Menu` of the three sections with
-the one on show marked selected. The trail's leading crumb opens the same
-list, so the section is reachable by pointer or keyboard — with the band
-focused, Space or Enter opens the list, Up/Down walk it, Enter shows the
-section under the cursor, and Escape closes it unchanged. There is no tab
-strip: the band is the whole section switcher, and both routes run the one
-transition `Switchboard::select_section` runs.
+Switchboard draws only its client content, beginning with the **navigation
+rail** down the leading edge: one vertical `Tabs` strip listing every subject
+the surface can show — the task list under `TASKS`, each resource device under
+its own group heading, and the recovery list under `RECOVERY` — each entry
+carrying its own reading and a bounded `Chart` of it. The rail is the whole
+switcher: pressing an entry, or walking the cursor onto it with Up/Down once
+the rail holds focus, shows that subject's pane. On a rail the cursor *is* the
+choice, so browsing shows what it names rather than waiting for a second key.
+
+The rail is never shed. It is the only route between subjects, so a drop order
+that could take it away would strand the reader wherever they happened to be;
+`MIN_WIN_WIDTH` therefore includes it, and a section's own frame is resolved
+in what is left. Both the pointer and the keyboard run the one transition
+`Switchboard::select_section` runs.
 
 There is at most **one** window: a second
 `OpenPanel` asks the session to raise the existing one (naming this
@@ -93,9 +98,9 @@ rectangle and only those pixels are copied into the shared frame: every pixel
 outside it is the one already on screen. Every control the input path reaches
 reports the rectangle it redraws into one sink the panel owns, so hovering a
 row costs the row it left and the row it entered; a composition-wide transition
-reports what it re-lays instead (a scroll marks the content column, a section
-change the whole client, and opening or dismissing the section list the pixels
-the popup covers).
+reports what it re-lays instead (a scroll marks the content column, and a
+subject change the whole client, since the pane beside the rail is replaced
+outright).
 
 **A fresh reading reports the instruments and cells that moved**, not the
 client. The reading is adopted against the very frame the composition will next
@@ -104,9 +109,10 @@ Tasks reports the visible rows whose cells moved and its footer's readout when
 that count changed, Recovery the fault cards the sample changed, and Resources
 the pane items whose readings moved plus its device rail and command column
 when either did. A list that gained or lost an entry has moved everything below
-the change and reports its list whole; the location band's own summary is the
-host's to report, because the band is shared chrome rather than any section's
-region. Measured over the fixture window, a sample that moves every task's CPU
+the change and reports its list whole; the rail is the host's to report,
+because it is shared chrome rather than any section's region — and because it
+states every subject's reading, a reading from a subject that is *not* on show
+still costs that one column, never the client. Measured over the fixture window, a sample that moves every task's CPU
 cell costs 185 µs against 916 µs for the whole client, and presents 442×144
 pixels instead of 760×560 — which is also what the session's serve thread pays
 to decode the frame.
@@ -179,16 +185,15 @@ the same reason.
 
 ### The Tasks table
 
-Tasks is a census in the location band, a header band, the rows, the selected
-task's commands beside them, and a footer band (`plans/NEW-SWITCHBOARD.md` S4).
+Tasks is a census, a filter strip, a search field, the rows, the selected
+task's commands beside them, and a footer band
+(`plans/NEW-SWITCHBOARD.md` S4).
 
-The window's **location band** carries the table's census: four
-`MetricTile`s — Processes, Jobs, Services, Alerts — beside the trail naming
-where the reader is, each with the glyph of the thing it counts and each on
-the surface's shared block plate (below). The band grows
-to seat them and shrinks back for a section that has no census; a window too
-narrow to seat both drops the census rather than abbreviating the reader's own
-location.
+The **census** is the header's own first row: four `MetricTile`s — Processes,
+Users, Mine, Alerts — each with the glyph of the thing it counts and each on
+the surface's shared block plate (below). A tile keeps its own width rather
+than sharing the row out, so four counts do not stretch across a wide header,
+and a header too narrow for all four draws the ones that fit.
 
 The **header** carries a filter `Tabs` strip (All, Processes, Jobs, Services,
 Faults) whose labels carry each filter's own count, and beneath it a

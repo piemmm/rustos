@@ -117,6 +117,10 @@ it, or frame the content that does:
   current level (a `MeterValue`, tinted by the tile's resource kind, whose
   unmeasurable case draws the bare groove rather than a fabricated zero), or a
   `Trend` `Chart` of its recent history, never two instruments for one number.
+  A series is read against the chart's own scale: a permille fraction of the
+  resource's capacity by default, or the ceiling `Chart::with_full_scale`
+  states. A *count* has no capacity to be a share of, so a caller plotting one
+  says what the top of the box means rather than leaving a reader to assume.
   A `Chart` claims the whole box it is given, because a series confined to a
   track's thickness cannot rise more than a pixel or two whatever it reads. A
   rate with two *directions* — read/write, receive/send — is one reading, so it

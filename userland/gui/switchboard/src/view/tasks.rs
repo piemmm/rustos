@@ -49,7 +49,7 @@ use tairix_controls::{
     Toggle,
 };
 
-use super::frame::{BandSummary, SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
+use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::{carry_hover, restate_rail};
 use super::resources::TaskCostColumn;
 use super::task_icon;
@@ -1243,54 +1243,57 @@ impl TasksSection {
             .saturating_add(slot.min(self.rail.len().saturating_sub(1)))
     }
 
-    /// The rectangles of the header band's two rows: the filter strip, then
-    /// the search field beneath it.
+    /// The rectangles of the header band's three rows: the census, then the
+    /// filter strip, then the search field beneath it.
     ///
-    /// The search reads over the whole table it searches rather than being
-    /// squeezed into the end of the filter row: the two are separate
-    /// questions — *which kind* of task, and *which* task — so each gets its
-    /// own row and its own full width. The strip is clipped before the search
-    /// is, so a header band too short for both still shows the filters.
-    fn header_rows(frame: &SectionFrame, scale: Scale) -> (Rect, Rect) {
-        let filters_h = scale.scale_length(FILTER_HEIGHT).min(frame.header.height);
-        let filters = Rect::new(
-            frame.header.left(),
-            frame.header.top(),
-            frame.header.width,
-            filters_h,
-        );
+    /// The census leads because it describes the whole list the two rows
+    /// below it narrow. The search reads over the whole table it searches
+    /// rather than being squeezed into the end of the filter row: the two are
+    /// separate questions — *which kind* of task, and *which* task — so each
+    /// gets its own row and its own full width. Each row is clipped before
+    /// the one beneath it, so a header too short for all three still shows
+    /// the census.
+    pub(super) fn header_rows(frame: &SectionFrame, scale: Scale) -> (Rect, Rect, Rect) {
+        let band = frame.header;
+        let census_h = scale.scale_length(CENSUS_HEIGHT).min(band.height);
+        let census = Rect::new(band.left(), band.top(), band.width, census_h);
+        let below_top = band.top() + to_i32(census_h);
+        let below_h = band.height.saturating_sub(census_h);
+        let filters_h = scale.scale_length(FILTER_HEIGHT).min(below_h);
+        let filters = Rect::new(band.left(), below_top, band.width, filters_h);
         let search = Rect::new(
-            frame.header.left(),
-            frame.header.top() + to_i32(filters_h),
-            frame.header.width,
-            frame.header.height.saturating_sub(filters_h),
+            band.left(),
+            below_top + to_i32(filters_h),
+            band.width,
+            below_h.saturating_sub(filters_h),
         );
-        (filters, search)
+        (census, filters, search)
     }
 
-    /// The census tiles' own rectangles within the band summary the location
-    /// band seated, laid out in reading order with the theme's control gap
-    /// between them.
+    /// The census tiles' own rectangles within the header's census row, laid
+    /// out in reading order with the theme's control gap between them.
     ///
     /// The one layout the paint reads, so a tile can never be drawn outside
-    /// the region the band resolved for the whole census.
-    fn census_rects(&self, summary: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    /// the row the header resolved for the whole census.
+    fn census_rects(&self, row: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let count = u32::try_from(self.census.len()).unwrap_or(0);
         if count == 0 {
             return Vec::new();
         }
         let gap = scale.scale_length(theme.metrics().control_gap);
-        let gaps = gap.saturating_mul(count.saturating_sub(1));
-        let each = summary.width.saturating_sub(gaps) / count;
+        // A tile keeps its own width rather than sharing the row out: four
+        // counts stretched across a wide header would read as four panels.
+        let each = scale.scale_length(CENSUS_TILE_WIDTH);
         (0..count)
             .map(|i| {
                 Rect::new(
-                    summary.left() + to_i32(each.saturating_add(gap).saturating_mul(i)),
-                    summary.top(),
+                    row.left() + to_i32(each.saturating_add(gap).saturating_mul(i)),
+                    row.top(),
                     each,
-                    summary.height,
+                    row.height,
                 )
             })
+            .filter(|tile| tile.right() <= row.right())
             .collect()
     }
 
@@ -1384,7 +1387,7 @@ impl TasksSection {
     fn mark_filters(&mut self, index: Option<usize>, sweep: &mut Sweep<'_, '_>) {
         match sweep.ctx {
             Some(ctx) => {
-                let (filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
+                let (_, filters, _) = Self::header_rows(&ctx.frame, ctx.scale);
                 self.filters
                     .set_current(index, filters, ctx.scale, ctx.theme, sweep.damage);
             }
@@ -1519,7 +1522,7 @@ impl TasksSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
+        let (_, filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
         match self.focus {
             STOP_FILTERS => {
                 if let Some(TabsAction::Selected { index }) = self
@@ -1682,15 +1685,6 @@ fn count_text(count: usize) -> String {
     format!("{count}")
 }
 
-/// How many census tiles there are, for the room the location band is asked
-/// to seat them in.
-///
-/// Derived from the one [`CENSUS`] declaration, so the room asked for and the
-/// tiles drawn cannot disagree.
-fn census_tiles() -> u32 {
-    u32::try_from(CENSUS.len()).unwrap_or(0)
-}
-
 /// One rail command's [`Button`], carrying the verdict `authority` reached
 /// for it.
 ///
@@ -1756,19 +1750,46 @@ fn compare_reading<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
     }
 }
 
+impl TasksSection {
+    /// Paint the census tiles across the header's own census row.
+    fn render_census(
+        &self,
+        surface: &mut Surface,
+        rect: Rect,
+        scale: Scale,
+        theme: &Theme,
+        artwork: &mut dyn IconArtwork,
+    ) {
+        for (tile, rect) in self
+            .census
+            .iter()
+            .zip(self.census_rects(rect, scale, theme))
+        {
+            let Some(inner) = crate::view::block::plate(surface, rect, scale, theme) else {
+                continue;
+            };
+            // A census tile counts a class of thing, so its picture is that
+            // class's — resolved through the cache like every other icon so
+            // the header rasterises nothing per frame.
+            let picture = tile.icon().and_then(|kind| {
+                artwork.artwork(IconRequest::kind(kind), tile.icon_side(inner, scale, theme))
+            });
+            tile.render(surface, inner, scale, theme, picture);
+        }
+    }
+}
+
 impl SectionView for TasksSection {
-    /// The census sits in the location band beside the trail; the header band
-    /// carries the filter strip and the search field, one row each; the rail
-    /// carries the selected task's commands; and the footer carries the
-    /// count, the refresh toggle and the grouping choice.
+    /// The header band carries the census, the filter strip and the search
+    /// field, one row each; the rail carries the selected task's commands;
+    /// and the footer carries the count, the refresh toggle and the grouping
+    /// choice.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
-            band_summary: Some(BandSummary {
-                width: CENSUS_TILE_WIDTH.saturating_mul(census_tiles()),
-                height: CENSUS_HEIGHT,
-            }),
             sidebar_width: 0,
-            header_height: FILTER_HEIGHT.saturating_add(SEARCH_HEIGHT),
+            header_height: CENSUS_HEIGHT
+                .saturating_add(FILTER_HEIGHT)
+                .saturating_add(SEARCH_HEIGHT),
             detail_width: 0,
             impact_width: 0,
             rail_width: ACTION_RAIL_WIDTH,
@@ -1886,35 +1907,9 @@ impl SectionView for TasksSection {
         self.row_on_key(row, key, ctx, damage)
     }
 
-    /// Paint the census tiles the location band seated for this section.
-    fn render_band(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        artwork: &mut dyn IconArtwork,
-    ) {
-        for (tile, rect) in self
-            .census
-            .iter()
-            .zip(self.census_rects(rect, scale, theme))
-        {
-            let Some(inner) = crate::view::block::plate(surface, rect, scale, theme) else {
-                continue;
-            };
-            // A census tile counts a class of thing, so its picture is that
-            // class's — resolved through the cache like every other icon so
-            // the band rasterises nothing per frame.
-            let picture = tile.icon().and_then(|kind| {
-                artwork.artwork(IconRequest::kind(kind), tile.icon_side(inner, scale, theme))
-            });
-            tile.render(surface, inner, scale, theme, picture);
-        }
-    }
-
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
-        let (filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
+        let (census, filters, search) = Self::header_rows(&ctx.frame, ctx.scale);
+        self.render_census(surface, census, ctx.scale, ctx.theme, artwork);
         self.filters.render(surface, filters, ctx.scale, ctx.theme);
         self.search.render(surface, search, ctx.scale, ctx.theme);
 
@@ -1981,7 +1976,7 @@ impl SectionView for TasksSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        let (tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
+        let (_, tabs, search) = Self::header_rows(&ctx.frame, ctx.scale);
         if let Some(TabsAction::Selected { index }) = self
             .filters
             .on_pointer(event, tabs, ctx.scale, ctx.theme, damage)

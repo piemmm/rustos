@@ -975,6 +975,9 @@ fn render_hero(surface: &mut Surface, parts: HeroParts<'_>, rect: Rect, window: 
     let PaneWindow {
         scale, theme, font, ..
     } = window;
+    let Some(rect) = hero_rect(rect, scale, theme) else {
+        return;
+    };
     let muted = Color::from(theme.palette().on_surface_muted);
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let reading_w = match parts.chart {
@@ -1021,6 +1024,22 @@ fn render_hero(surface: &mut Surface, parts: HeroParts<'_>, rect: Rect, window: 
         parts.caption,
         (axis, theme),
     );
+}
+
+/// The hero's drawable rect within the band the flow gave it.
+///
+/// A row inside a plate is inset at the top only: that inset is the row's
+/// leading and the rows stack. The hero is not a row — it spans the whole
+/// plate — so it closes the bottom edge itself, or its axis sits on the rim.
+fn hero_rect(band: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
+    let rect = Rect::new(
+        band.left(),
+        band.top(),
+        band.width,
+        band.height
+            .saturating_sub(crate::view::block::content_inset(scale, theme)),
+    );
+    (!rect.is_empty()).then_some(rect)
 }
 
 /// How wide the hero's reading column sits when a trace shares its row: what

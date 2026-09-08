@@ -734,14 +734,14 @@ const _: () = assert!(
     "the paged sysinfo list queries must share one paging-header layout",
 );
 
-/// The busy share of `delta_ns` over `interval_ns`, in permille
-/// (`0..=1000`), or `None` when `interval_ns` is zero (an unmeasurable
-/// interval — the honest absence, never a fabricated rate).
-pub(crate) fn permille_of(delta_ns: u64, interval_ns: u64) -> Option<u16> {
-    if interval_ns == 0 {
+/// The share of `part` in `whole`, in permille (`0..=1000`), or `None` when
+/// `whole` is zero — nothing to be a share of is the honest absence, never a
+/// fabricated rate.
+pub(crate) fn permille_of(part: u64, whole: u64) -> Option<u16> {
+    if whole == 0 {
         return None;
     }
-    let permille = (u128::from(delta_ns) * 1000 / u128::from(interval_ns)).min(1000);
+    let permille = (u128::from(part) * 1000 / u128::from(whole)).min(1000);
     Some(u16::try_from(permille).unwrap_or(1000))
 }
 

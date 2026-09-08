@@ -100,51 +100,46 @@ Resources is large enough to want its own directory: `view/resources/`, one
 module per pane over a shared pane frame, reached through the one
 `SectionView` dispatch like any other section. A pane is not a section.
 
-## S2 — Chrome: the location band — done, section set amended
+## S2 — Chrome: the navigation rail — done, band retired
 
 The window is decorated **server-side** by the window manager (see
 `plans/COMPOSITOR-WORK.md`): title bar, window commands, frame and resize
 grabber are the compositor's, drawn around the client. Switchboard draws no
 chrome of its own — its content is the whole client, starting with the
-location band — and resizes only by re-mapping its region on
+navigation rail — and resizes only by re-mapping its region on
 `WindowEvent::Resized`. Those arrive one per pointer sample of a resize
 grab, so they are read through the shared folding stream
 (`tairix_window::WindowEvents`) and a whole drag costs one re-map.
 
-At the top of the client sits the **location band**:
+Down the leading edge sits the **navigation rail**: one vertical `Tabs`
+strip, owned by the shell rather than by any section, listing every subject
+the surface can show in `RailGroup` order — `TASKS`, then the resource groups
+(`RESOURCES`, `STORAGE`, `NETWORK`, `GRAPHICS`, `MACHINE`), then `RECOVERY`.
+Each entry carries its own reading and a bounded `Chart` of it, so the rail
+states what every subject is doing whichever one is on show.
 
-- a `Breadcrumb` on the left reading `Switchboard › <section>`. Its trailing
-  crumb is the current location, which a breadcrumb never activates, so the
-  leading crumb is the route: activating it opens the section list.
-- the active section's own **band summary**, if it declares one, seated
-  between the trail and the command. Tasks' four census tiles live here;
-  Resources and Recovery declare none.
-- a section-list `IconButton` (`IconKind::ListMenu`) at the trailing end,
-  opening a `Menu` of the sections. The section on show is marked with
-  `Menu::set_current` *and* the item's `SelectionState::Selected` — the pair
-  `ComboBox` already marks its own choice with, not a second convention.
+- **The rail is the whole switcher, and is never shed.** It is the only route
+  between subjects, so a drop order that could take it away would strand the
+  reader; it is carved in `compute_layout` before any section frame, and
+  `MIN_WIN_WIDTH`/`WIN_WIDTH` include `RAIL_WIDTH`. Pointer and keyboard run
+  the one `select_section_index` transition.
+- **The cursor is the choice.** Moving the rail cursor selects as it moves —
+  a rail entry names the pane the reader is reading — rather than waiting for
+  a second key to confirm.
+- **The subject on show is lit immediately.** `select_section` marks the rail
+  from the cached `rail_subjects`, so a section change never leaves the
+  previous entry lit for a sampling interval.
+- **Empty groups still state themselves.** `STORAGE` and `NETWORK` are the
+  only groups that can be empty; each states whether the query was refused or
+  simply found nothing, in its own rail position.
 
-The band's three regions are resolved once by `frame::resolve_band`, which
-both the paint and the hit test read, so a press can never land on a control
-drawn elsewhere. The band's *height* belongs to the section on show
-(`SectionAnatomy::band_height`): one control height at rest, or as much more
-as its summary needs. A band too narrow to seat the summary beside a whole
-trail drops the summary rather than abbreviating the trail — the reader's own
-location outranks a census the table still states.
-
-There is no global tab strip: the band is the whole section switcher, and
-both routes run the one `select_section_index` transition, so the trail, the
-content and the per-section scroll offset cannot disagree. The band is a
-Tab-cycle focus region, so a section is reachable without a pointer.
-
-**There is still no permanent resource band.** A resource reading belongs to
-the surface that is *about* it. Resources' readings are its own rail and pane
-headers; Tasks' census rides the band precisely because it is a census of
-that section. A strip of meters above every section would state the same
-numbers twice and steal height from the section a reader asked for.
-
-Content taller than a section's primary column is governed by the one shared
-vertical `ScrollBar`.
+**The location band is retired**, and with it the `Breadcrumb` trail, the
+`ListMenu` `IconButton`, the section `Menu`, `BandSummary`/`BandLayout`/
+`resolve_band`/`band_height`, and the Resources `band_combo` that existed only
+to survive a shed rail. Tasks' four census tiles moved into that section's own
+header, where they lead the filter strip and the search field. The retired
+footer's "Sampling every 1.0 s" is gone too — it was false as well as
+redundant, since the cadence is 2 s.
 
 ## S3 — The section frame — done, Resources anatomy added
 
@@ -747,6 +742,25 @@ A fault's age has no interface behind it either, so the service tracks when it
 first saw each task faulted, keyed by `ProcId`, clocked off the monotonic
 uptime reading, pruned the first sample the fault clears, and counting each
 pruned entry as the resolved tally.
+
+## S4a — The two rail subjects that are not devices — done
+
+The rail lists more than devices, so `RollingMeters::record` folds two more
+series once per sample, on the same clock as every other trace:
+
+- **Tasks** reads the process population, and its trace is that count against
+  the largest this session has seen (`LiveMeters::process_peak`). A count has
+  no capacity to be a permille share of, so the trace states its own ceiling
+  through `Chart::with_full_scale`; a high-water only grows, so the box means
+  the same thing from one sample to the next, where a ceiling refitted per
+  window would redraw the same history differently every time it rolled.
+- **Recovery** reads the number of stopped processes, and its trace is that
+  count as a share of the population — already a permille, so it needs no
+  stated ceiling.
+
+An unread process list arrives as an empty one, so neither series records a
+point when `DegradedField::ProcessList` is degraded: plotting its nought would
+show a real population collapsing to zero and back.
 
 ## S5 — What the service samples — planned
 

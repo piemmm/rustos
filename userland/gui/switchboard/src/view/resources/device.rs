@@ -18,13 +18,16 @@ use super::pane::{PaneBlock, PaneHero};
 use crate::view::reading::Unmeasured;
 use crate::view::ActionVerdict;
 
-/// Which group of the device rail an entry sits in.
+/// Which group of the rail an entry sits in.
 ///
 /// The order is the rail's order, and a group heading is drawn by the entry
 /// that *starts* its group, so a heading can never point at a group with no
-/// entries in it.
+/// entries in it. The rail navigates the whole surface, so it holds the two
+/// subjects that are not devices at either end of the devices between them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum DeviceGroup {
+pub enum RailGroup {
+    /// What is running: the task list.
+    Tasks,
     /// The processor and the machine's memory.
     Resources,
     /// One entry per storage device.
@@ -35,23 +38,27 @@ pub enum DeviceGroup {
     Graphics,
     /// The machine itself: its identity, its seats, its authority.
     Machine,
+    /// What broke: hung objects and their recovery actions.
+    Recovery,
 }
 
-impl DeviceGroup {
+impl RailGroup {
     /// The rail's quiet group heading.
     #[must_use]
     pub const fn heading(self) -> &'static str {
         match self {
-            DeviceGroup::Resources => "RESOURCES",
-            DeviceGroup::Storage => "STORAGE",
-            DeviceGroup::Network => "NETWORK",
-            DeviceGroup::Graphics => "GRAPHICS",
-            DeviceGroup::Machine => "MACHINE",
+            RailGroup::Tasks => "TASKS",
+            RailGroup::Resources => "RESOURCES",
+            RailGroup::Storage => "STORAGE",
+            RailGroup::Network => "NETWORK",
+            RailGroup::Graphics => "GRAPHICS",
+            RailGroup::Machine => "MACHINE",
+            RailGroup::Recovery => "RECOVERY",
         }
     }
 }
 
-/// Which storage subject a [`DeviceGroup::Storage`] entry is about.
+/// Which storage subject a [`RailGroup::Storage`] entry is about.
 ///
 /// The I/O counters the per-volume queries report are the *device's*: every
 /// volume on one disk reads the same fold, and one volume is projected at as
@@ -224,7 +231,7 @@ pub struct ResourceDevice {
     /// The device's own identity, which the selection remembers.
     pub id: DeviceId,
     /// Which rail group it sits in.
-    pub group: DeviceGroup,
+    pub group: RailGroup,
     /// Its name, as the rail entry and the pane header state it.
     pub name: String,
     /// Its identity colour, which tints its instruments.

@@ -4,7 +4,7 @@
 //! the live task, resource-device and recovery state this service samples,
 //! laid out for a reader. It is
 //! assembled **purely from the shared Reactive Alloy controls** (spec §17) —
-//! a [`Breadcrumb`] location band, the collection controls
+//! a [`Tabs`] navigation rail, the collection controls
 //! ([`ListRow`](tairix_controls::ListRow), [`Card`](tairix_controls::Card)),
 //! action [`Button`](tairix_controls::Button)s, and one shared [`ScrollBar`].
 //! The window manager decorates the window server-side, so the application
@@ -33,13 +33,13 @@
 //!
 //! - The window manager decorates the window server-side, so the whole
 //!   application region is the client content described here.
-//! - Along the top of the client sits the **location band**: a [`Breadcrumb`] reading
-//!   `Switchboard › <section>` with a section-list [`IconButton`] at its
-//!   trailing end. The trail's leading crumb and that command both open the
-//!   one [`Menu`] of the three [`Section`]s — the one being shown marked
-//!   selected — and choosing a row switches section. The host chooses which
-//!   section the panel opens on — Recovery when the user reached for a
-//!   flagged capsule, Tasks otherwise — with
+//! - Down the leading edge sits the **navigation rail**: one vertical [`Tabs`]
+//!   strip listing every subject the surface can show — the task list, each
+//!   resource device under its group heading, and the recovery list — each
+//!   entry carrying its own reading and trace. It is the whole switcher, and
+//!   is never shed, because it is the only route between subjects. The host
+//!   chooses which subject the panel opens on — Recovery when the user
+//!   reached for a flagged capsule, the processor otherwise — with
 //!   [`Switchboard::select_section`], never by feeding synthetic input.
 //! - Each section lays itself out into the one
 //!   [`SectionFrame`] anatomy resolved from what that
@@ -76,14 +76,14 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActionRail, AuthorityState, Breadcrumb, BreadcrumbAction, ButtonAction, CardAction,
-    ControlRole, ControlState, Crumb, IconButton, Menu, MenuAction, MenuItem, RenderInvariant,
-    ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, SelectionState,
+    damage, ActionRail, AuthorityState, CardAction, Chart, ControlState, PressureKind,
+    RenderInvariant, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Tab,
+    TabGroupAbsence, Tabs, TabsAction, TabsOrientation,
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 
@@ -101,15 +101,14 @@ pub use reading::{
 };
 pub use recovery::{CrashSnapshot, FaultImpact, FaultMark, RecoveryControl, RecoveryItem};
 pub use resources::{
-    BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceGroup,
-    DeviceId, HeroInstrument, PaneBlock, PaneHero, PressureBanner, ResourceControl, ResourceDevice,
-    ResourceReport, TaskCostColumn,
+    BlockBody, BlockSpan, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceId,
+    HeroInstrument, PaneBlock, PaneHero, PressureBanner, RailGroup, ResourceControl,
+    ResourceDevice, ResourceReport, TaskCostColumn,
 };
 pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskSummary};
 
 use frame::{
-    action_button_width, resolve_band, resolve_section_frame, row_commands_width, BandLayout,
-    SectionAnatomy, SectionFrame,
+    action_button_width, resolve_section_frame, row_commands_width, SectionAnatomy, SectionFrame,
 };
 use recovery::RecoverySection;
 use resources::ResourcesSection;
@@ -121,6 +120,16 @@ mod test_support;
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rail_tests.rs"]
+mod rail_tests;
+
+/// The navigation rail's logical width: wide enough for the longest subject
+/// name beside its reading at the reference density, and narrow enough that
+/// the rail, the pane and a section's own action column all still seat in the
+/// smallest window the panel allows.
+pub(crate) const RAIL_WIDTH: u32 = 168;
 
 /// One of Switchboard's three top-level sections
 /// (`plans/NEW-SWITCHBOARD.md` S4) — one per question a reader arrives
@@ -162,6 +171,33 @@ impl Section {
             Section::Tasks => "Tasks",
             Section::Resources => "Resources",
             Section::Recovery => "Recovery",
+        }
+    }
+}
+
+/// One subject the navigation rail can show.
+///
+/// The rail is the surface's whole navigator, so its entries span more than
+/// the resource devices: what is running and what broke are subjects in their
+/// own right, listed either side of the machine's devices.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RailSubject {
+    /// The task list.
+    Tasks,
+    /// One resource device's pane.
+    Device(DeviceId),
+    /// The recovery list.
+    Recovery,
+}
+
+impl RailSubject {
+    /// Which section shows this subject.
+    #[must_use]
+    pub const fn section(self) -> Section {
+        match self {
+            RailSubject::Tasks => Section::Tasks,
+            RailSubject::Device(_) => Section::Resources,
+            RailSubject::Recovery => Section::Recovery,
         }
     }
 }
@@ -227,9 +263,29 @@ pub struct SwitchboardModel {
     /// here — never re-derived by the screen, which sees one model at a
     /// time and would count differently depending on what it saw before.
     pub recovery_resolved: usize,
+    /// The Tasks rail entry's own trace: the process population over the
+    /// window, read against the largest this session has seen.
+    pub tasks_trend: RailTrace,
+    /// The Recovery rail entry's own trace: the share of the population that
+    /// was stopped.
+    pub recovery_trend: RailTrace,
     /// Everything the Resources section shows: one device per pane, in rail
     /// order.
     pub resources: ResourceReport,
+}
+
+/// One rail entry's trace: the readings, and what the top of their box means.
+///
+/// A device's trace is a permille share of that device's own capacity, so its
+/// box needs no stated ceiling. The two subjects that are not devices count
+/// things instead, and a count has no capacity — so it carries the denominator
+/// its trace is drawn against rather than leaving the reader to assume one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RailTrace {
+    /// The readings, oldest first.
+    pub points: Vec<u16>,
+    /// What the top of the box means. Zero leaves the permille default.
+    pub full_scale: u16,
 }
 
 impl SwitchboardModel {
@@ -242,6 +298,8 @@ impl SwitchboardModel {
             tasks: Vec::new(),
             recovery: Vec::new(),
             recovery_resolved: 0,
+            tasks_trend: RailTrace::default(),
+            recovery_trend: RailTrace::default(),
             resources: ResourceReport::default(),
         }
     }
@@ -293,9 +351,6 @@ pub enum SwitchboardAction {
         offset: u64,
     },
 }
-
-/// The screen's own name: the leading crumb of the location trail.
-const APP_NAME: &str = "Switchboard";
 
 /// The text every surface shows in place of a figure the service did not
 /// measure.
@@ -425,9 +480,8 @@ fn select_pressed_card(
 /// the Tab key so the whole surface is keyboard-navigable.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FocusRegion {
-    /// The location band: its trail's leading crumb, which opens the section
-    /// list.
-    Location,
+    /// The navigation rail, which chooses what the surface shows.
+    Rail,
     /// The active section's content list.
     Content,
     /// The vertical scrollbar.
@@ -437,7 +491,7 @@ enum FocusRegion {
 impl FocusRegion {
     /// The regions in Tab-cycle order.
     const ORDER: [FocusRegion; 3] = [
-        FocusRegion::Location,
+        FocusRegion::Rail,
         FocusRegion::Content,
         FocusRegion::Scrollbar,
     ];
@@ -627,23 +681,6 @@ trait SectionView {
     /// the context is `Copy` and reaches the input paths too, and a mutable
     /// borrow on it would have to be threaded through every one of them.
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork);
-
-    /// Paint the summary this section asked the location band to seat
-    /// ([`SectionAnatomy::band_summary`]), into the rectangle the band
-    /// resolved for it.
-    ///
-    /// Nothing by default: a section with no census in its anatomy is never
-    /// given a rectangle to paint into, so the two can never disagree.
-    fn render_band(
-        &self,
-        surface: &mut Surface,
-        rect: Rect,
-        scale: Scale,
-        theme: &Theme,
-        artwork: &mut dyn IconArtwork,
-    ) {
-        let _ = (surface, rect, scale, theme, artwork);
-    }
 
     /// Route a pointer event to the section's items, reporting every control
     /// whose drawn state the event changed into `damage`.
@@ -840,13 +877,17 @@ impl<'a, 'b> Sweep<'a, 'b> {
 /// [`section`]: Switchboard::section
 #[derive(Clone, Debug, Eq)]
 pub struct Switchboard {
-    /// The location trail: the screen's name, then the section on show.
-    trail: Breadcrumb,
-    /// The location band's trailing command, which opens the same section list
-    /// the trail's leading crumb does.
-    section_list: IconButton,
-    /// The open section list, or `None` while it is closed.
-    section_menu: Option<Menu>,
+    /// The navigation rail: every subject the surface can show — the task
+    /// list, each resource device, and the recovery list — in one grouped
+    /// list, each entry carrying its own reading and trace.
+    rail: Tabs,
+    /// The first rail subject the rail's window shows, so a machine with more
+    /// subjects than the column seats scrolls rather than drawing past itself.
+    rail_offset: usize,
+    /// The subjects the rail listed when it was last built, so a chosen entry
+    /// names the subject the reader actually pressed rather than whatever the
+    /// next sample put in that row.
+    rail_subjects: Vec<RailSubject>,
     scroll: ScrollBar,
     /// The three sections, each owning its own view models, controls, cursor
     /// and overlays. The screen reaches the one on show through
@@ -867,9 +908,9 @@ pub struct Switchboard {
 impl PartialEq for Switchboard {
     fn eq(&self, other: &Self) -> bool {
         let Self {
-            trail,
-            section_list,
-            section_menu,
+            rail,
+            rail_offset,
+            rail_subjects,
             scroll,
             tasks,
             resources,
@@ -880,9 +921,9 @@ impl PartialEq for Switchboard {
             pointer,
         } = self;
         *section == other.section
-            && *trail == other.trail
-            && *section_list == other.section_list
-            && *section_menu == other.section_menu
+            && *rail == other.rail
+            && *rail_offset == other.rail_offset
+            && *rail_subjects == other.rail_subjects
             && *scroll == other.scroll
             && *offsets == other.offsets
             && *focus == other.focus
@@ -899,17 +940,18 @@ impl Switchboard {
     /// Build a Switchboard from a typed model, turning each view model into
     /// its shared control.
     ///
-    /// It opens on [`Section::Tasks`] at the top of the list; a host that
-    /// wants another section calls
+    /// It opens on [`Section::Resources`] with the processor selected — what
+    /// this machine is doing is the question a monitor is opened to answer. A
+    /// host that wants another section calls
     /// [`select_section`](Switchboard::select_section), and one that samples
     /// live state feeds each new reading to
     /// [`set_model`](Switchboard::set_model) rather than building again.
     #[must_use]
     pub fn new(model: &SwitchboardModel) -> Self {
         let mut switchboard = Self {
-            trail: Self::build_trail(Section::Tasks),
-            section_list: IconButton::new(IconKind::ListMenu, ControlRole::Navigation),
-            section_menu: None,
+            rail: Tabs::new(Vec::new()).with_orientation(TabsOrientation::Vertical),
+            rail_offset: 0,
+            rail_subjects: Vec::new(),
             scroll: ScrollBar::new(
                 ScrollOrientation::Vertical,
                 ScrollModel::new(ScrollRange::EMPTY, 1, 1),
@@ -917,51 +959,13 @@ impl Switchboard {
             tasks: TasksSection::new(),
             resources: ResourcesSection::new(),
             recovery: RecoverySection::new(),
-            section: Section::Tasks,
+            section: Section::Resources,
             offsets: [0; Section::ALL.len()],
             focus: FocusRegion::Content,
             pointer: RenderInvariant::new(Point::ORIGIN),
         };
         switchboard.adopt(model, &mut Sweep::adopting(&mut damage::sink()));
         switchboard
-    }
-
-    /// The location trail for `section`: the screen's own name, then the
-    /// section being shown.
-    ///
-    /// The leading crumb is the activatable ancestor — addressing it opens the
-    /// section list — and the trailing crumb is the current location, which a
-    /// [`Breadcrumb`] never activates, so the reader can never "navigate" to
-    /// the section already on show.
-    fn build_trail(section: Section) -> Breadcrumb {
-        Breadcrumb::new(alloc::vec![
-            Crumb::new(APP_NAME),
-            Crumb::new(section.title()),
-        ])
-    }
-
-    /// The section list both routes open: one row per [`Section`], with
-    /// `section` marked selected *and* current — the same pair
-    /// [`ComboBox`](tairix_controls::ComboBox) marks its own choice with, so
-    /// there is one convention for "this is the one you are on" rather than a
-    /// second invented here.
-    fn build_section_menu(section: Section) -> Menu {
-        let mut menu = Menu::new(
-            Section::ALL
-                .iter()
-                .map(|s| {
-                    let selection = if *s == section {
-                        SelectionState::Selected
-                    } else {
-                        SelectionState::Unselected
-                    };
-                    MenuItem::new(s.title())
-                        .with_state(ControlState::idle().with_selection(selection))
-                })
-                .collect::<Vec<_>>(),
-        );
-        menu.adopt_current(Some(section.index()));
-        menu
     }
 
     /// Adopt `model` with no frame to report against, for a window whose
@@ -1023,11 +1027,8 @@ impl Switchboard {
         font: BitmapFont,
         damage: &mut Region,
     ) {
-        let layout = self.compute_layout(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-        if let Some(summary) = self.band(layout.location, theme, scale).summary {
-            damage.add(summary);
-        }
         let was = self.active().item_count();
         self.adopt(model, &mut Sweep::reporting(ctx, damage));
         // A sample that added or removed an item moved the thumb, and the bar
@@ -1072,10 +1073,235 @@ impl Switchboard {
                     .adopt(model, &mut Sweep::adopting(&mut damage::sink())),
             }
         }
+        // Rebuilt from the adopted model, after the sections, so a subject that
+        // appeared or went away moves the rail's entries with it. Restated
+        // rather than replaced: the strip holds where the pointer is, which
+        // entry it rests on and which one a press is waiting for, and a fresh
+        // strip would know none of them — so a sample landing between a
+        // reader's motion and their press would swallow the click and drop the
+        // lift from under the pointer.
+        self.rail_subjects = Self::subjects(model);
+        let rebuilt = self.build_rail(model);
+        let rail_moved = self.rail.restate(rebuilt);
+        if rail_moved {
+            if let Some(ctx) = sweep.ctx() {
+                let layout = Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme);
+                sweep.damage.add(layout.rail);
+            }
+        }
         match sweep.ctx() {
             Some(ctx) => self.apply_focus_marks(&mut Sweep::reporting(ctx, sweep.damage)),
             None => self.apply_focus_marks(&mut Sweep::adopting(&mut damage::sink())),
         }
+    }
+
+    /// Every subject the rail lists, in rail order: what is running, then the
+    /// machine's devices, then what broke.
+    ///
+    /// Derived from the model rather than held, so a device that appears or
+    /// goes away between samples moves the rail's entries with it and no
+    /// second list can disagree about what the surface can show.
+    fn subjects(model: &SwitchboardModel) -> Vec<RailSubject> {
+        let mut subjects = alloc::vec![RailSubject::Tasks];
+        subjects.extend(
+            model
+                .resources
+                .devices
+                .iter()
+                .map(|device| RailSubject::Device(device.id)),
+        );
+        subjects.push(RailSubject::Recovery);
+        subjects
+    }
+
+    /// The rail's entries: a window of the subjects from
+    /// [`rail_offset`](Self::rail_offset), each carrying its own reading, its
+    /// group heading where it starts one, and its trace.
+    fn build_rail(&self, model: &SwitchboardModel) -> Tabs {
+        let mut tabs = Vec::new();
+        let mut previous: Option<RailGroup> = None;
+        for (index, subject) in Self::subjects(model).into_iter().enumerate() {
+            let (name, group, reading, trace, kind) = match subject {
+                RailSubject::Tasks => (
+                    String::from("Tasks"),
+                    RailGroup::Tasks,
+                    alloc::format!("{}", model.tasks.len()),
+                    &model.tasks_trend,
+                    PressureKind::Cpu,
+                ),
+                RailSubject::Recovery => (
+                    String::from("Recovery"),
+                    RailGroup::Recovery,
+                    alloc::format!("{}", model.recovery.len()),
+                    &model.recovery_trend,
+                    PressureKind::Thermal,
+                ),
+                RailSubject::Device(id) => {
+                    let Some(device) = model.resources.devices.iter().find(|d| d.id == id) else {
+                        continue;
+                    };
+                    let mut tab = Tab::new(device.name.clone())
+                        .with_reading(reading::reading_text(&device.reading));
+                    if previous != Some(device.group) {
+                        tab = tab.with_group(device.group.heading());
+                    }
+                    previous = Some(device.group);
+                    if !device.trend.is_empty() {
+                        tab = tab.with_trend(
+                            Chart::new(device.kind).with_samples(device.trend.iter().copied()),
+                        );
+                    }
+                    if index >= self.rail_offset {
+                        tabs.push(tab);
+                    }
+                    continue;
+                }
+            };
+            let mut tab = Tab::new(name).with_reading(reading);
+            if previous != Some(group) {
+                tab = tab.with_group(group.heading());
+            }
+            previous = Some(group);
+            if !trace.points.is_empty() {
+                tab = tab.with_trend(
+                    Chart::new(kind)
+                        .with_samples(trace.points.iter().copied())
+                        .with_full_scale(trace.full_scale),
+                );
+            }
+            if index >= self.rail_offset {
+                tabs.push(tab);
+            }
+        }
+        let mut rail = Tabs::new(tabs)
+            .with_orientation(TabsOrientation::Vertical)
+            .with_absences(self.rail_absences(model));
+        if let Some(position) = self
+            .selected_position(model)
+            .and_then(|index| index.checked_sub(self.rail_offset))
+        {
+            rail.adopt_selected(position);
+        }
+        rail
+    }
+
+    /// The empty groups the rail states, in rail order.
+    ///
+    /// Only `Storage` and `Network` can be empty: the task list, the
+    /// processor, the machine's memory, the display path and the machine's
+    /// own facts always answer, and so does recovery. Each is stated whether
+    /// the query was refused or simply found nothing — the two read
+    /// differently, and silence reads as neither.
+    fn rail_absences(&self, model: &SwitchboardModel) -> Vec<TabGroupAbsence> {
+        let report = &model.resources;
+        [
+            (RailGroup::Storage, report.storage_absent, "storage device"),
+            (
+                RailGroup::Network,
+                report.interfaces_absent,
+                "managed interface",
+            ),
+        ]
+        .into_iter()
+        .filter(|(group, _, _)| !report.devices.iter().any(|device| device.group == *group))
+        .map(|(group, refusal, subject)| {
+            let statement = match refusal {
+                Some(reason) => reading::absence_statement(subject, reason),
+                None => alloc::format!("No {subject} is present."),
+            };
+            TabGroupAbsence::new(group.heading(), statement, self.group_start(model, group))
+        })
+        .collect()
+    }
+
+    /// The rail position an empty `group` would have started at, within the
+    /// window from [`rail_offset`](Self::rail_offset): before the first seated
+    /// subject of a later group, or last where no later group has one.
+    fn group_start(&self, model: &SwitchboardModel, group: RailGroup) -> usize {
+        let seated: Vec<RailGroup> = Self::subjects(model)
+            .into_iter()
+            .skip(self.rail_offset)
+            .map(|subject| match subject {
+                RailSubject::Tasks => RailGroup::Tasks,
+                RailSubject::Recovery => RailGroup::Recovery,
+                RailSubject::Device(id) => model
+                    .resources
+                    .devices
+                    .iter()
+                    .find(|d| d.id == id)
+                    .map_or(RailGroup::Machine, |d| d.group),
+            })
+            .collect();
+        seated
+            .iter()
+            .position(|seated| *seated > group)
+            .unwrap_or(seated.len())
+    }
+
+    /// Move the rail's lit entry to the subject now on show.
+    ///
+    /// Read from the subjects the rail was last built over rather than from a
+    /// model, because a section change carries none: without this the rail
+    /// would keep lighting the previous subject until the next sample rebuilt
+    /// it, which is a whole sampling interval of pointing at the wrong pane.
+    fn mark_rail_selection(&mut self) {
+        let shown = match self.section {
+            Section::Tasks => Some(RailSubject::Tasks),
+            Section::Recovery => Some(RailSubject::Recovery),
+            Section::Resources => self.resources.selected.map(RailSubject::Device),
+        };
+        let position = shown
+            .and_then(|shown| self.rail_subjects.iter().position(|s| *s == shown))
+            .and_then(|index| index.checked_sub(self.rail_offset));
+        if let Some(index) = position {
+            self.rail.adopt_selected(index);
+        }
+    }
+
+    /// Where the subject on show sits in the rail's whole list.
+    fn selected_position(&self, model: &SwitchboardModel) -> Option<usize> {
+        let shown = self.shown_subject(model)?;
+        Self::subjects(model)
+            .into_iter()
+            .position(|subject| subject == shown)
+    }
+
+    /// The subject the surface is showing: the section, and for Resources the
+    /// device its pane is drawn from.
+    fn shown_subject(&self, model: &SwitchboardModel) -> Option<RailSubject> {
+        match self.section {
+            Section::Tasks => Some(RailSubject::Tasks),
+            Section::Recovery => Some(RailSubject::Recovery),
+            Section::Resources => self
+                .resources
+                .selected
+                .or_else(|| model.resources.devices.first().map(|device| device.id))
+                .map(RailSubject::Device),
+        }
+    }
+
+    /// Show the rail entry at `index`, switching section and — for a device —
+    /// the pane beside it, through the one section transition every other
+    /// route runs.
+    ///
+    /// An out-of-range entry changes nothing (fail closed).
+    fn select_rail_entry(
+        &mut self,
+        index: usize,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SwitchboardAction> {
+        let subject = *self
+            .rail_subjects
+            .get(index.saturating_add(self.rail_offset))?;
+        let mut sweep = Sweep::reporting(ctx, damage);
+        if let RailSubject::Device(id) = subject {
+            self.resources.select_device(id, &mut sweep);
+        }
+        let action = self.select_section_index(subject.section().index(), &mut sweep);
+        self.mark_rail_selection();
+        sweep.client();
+        action
     }
 
     /// The currently selected section.
@@ -1140,43 +1366,14 @@ impl Switchboard {
             .saturating_mul(3)
             .saturating_add(scale.scale_length(m.control_gap).saturating_mul(2))
     }
-
-    /// The overlay rectangle for `menu`: its preferred size, placed below
-    /// `anchor` (or above it when there is no room below), clamped inside
-    /// `bounds` so it never draws outside the window.
-    ///
-    /// The section list and a section's own popup place themselves the same
-    /// way, so there is one placement rule rather than one per menu.
-    pub(super) fn popup_rect(
-        menu: &Menu,
-        anchor: Rect,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Rect {
-        let w = menu.preferred_width(scale, theme).min(bounds.width);
-        let h = menu.preferred_height(scale, theme).min(bounds.height);
-        let max_x = bounds.left().max(bounds.right() - to_i32(w));
-        let x = anchor.left().clamp(bounds.left(), max_x);
-        let below = anchor.bottom();
-        let y = if below + to_i32(h) <= bounds.bottom() {
-            below
-        } else {
-            (anchor.top() - to_i32(h)).max(bounds.top())
-        };
-        let max_y = bounds.top().max(bounds.bottom() - to_i32(h));
-        let y = y.clamp(bounds.top(), max_y);
-        Rect::new(x, y, w, h)
-    }
 }
 /// The laid-out regions of a Switchboard for one outer bounds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct SbLayout {
-    /// The location band along the top of the client: the trail, the active
-    /// section's own band summary, and the trailing section-list command,
-    /// split by [`resolve_band`].
-    location: Rect,
-    /// The section content area (excludes the scrollbar gutter).
+    /// The navigation rail down the leading edge: every subject the surface
+    /// can show, in one list.
+    rail: Rect,
+    /// The section content area (excludes the rail and the scrollbar gutter).
     content: Rect,
     /// The vertical scrollbar track.
     scroll: Rect,
@@ -1238,37 +1435,34 @@ impl Switchboard {
     /// Lay the composition out within `bounds` for the active theme.
     ///
     /// The window manager carves out the client area server-side, so the
-    /// bounds handed in are the client itself. The location band claims its
-    /// section's band height along the top and the content and scrollbar take
-    /// what is left, clipped so a window too short for the full anatomy still
-    /// lays out in bounds (fail closed, never negative or overlapping).
-    fn compute_layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> SbLayout {
+    /// bounds handed in are the client itself. The rail claims its width down
+    /// the leading edge and the content and scrollbar take what is left,
+    /// clipped so a window too small for the full anatomy still lays out in
+    /// bounds (fail closed, never negative or overlapping).
+    ///
+    /// The rail is carved here rather than inside a section's frame because it
+    /// is the only route between sections: a drop order that could shed it
+    /// would strand the reader wherever they happened to be.
+    fn compute_layout(bounds: Rect, scale: Scale, theme: &Theme) -> SbLayout {
         let client = bounds;
 
-        // How tall the band is belongs to the section on show: one that seats
-        // a census there needs more than the resting control height, and one
-        // that does not must not pay for it.
-        let location_h = self
-            .active()
-            .anatomy()
-            .band_height(scale, theme)
-            .min(client.height);
-        let location = Rect::new(client.left(), client.top(), client.width, location_h);
+        let rail_w = scale.scale_length(RAIL_WIDTH).min(client.width);
+        let rail = Rect::new(client.left(), client.top(), rail_w, client.height);
 
-        let below_top = client.top() + to_i32(location_h);
-        let below_h = client.height.saturating_sub(location_h);
+        let beside_left = client.left() + to_i32(rail_w);
+        let beside_w = client.width.saturating_sub(rail_w);
         let gutter = scale
             .scale_length(theme.metrics().scrollbar_breadth)
             .max(1)
-            .min(client.width);
-        let content_w = client.width.saturating_sub(gutter);
-        let content = Rect::new(client.left(), below_top, content_w, below_h);
+            .min(beside_w);
+        let content_w = beside_w.saturating_sub(gutter);
+        let content = Rect::new(beside_left, client.top(), content_w, client.height);
 
-        let gutter_left = client.left() + to_i32(content_w);
-        let scroll = Rect::new(gutter_left, below_top, gutter, below_h);
+        let gutter_left = beside_left + to_i32(content_w);
+        let scroll = Rect::new(gutter_left, client.top(), gutter, client.height);
 
         SbLayout {
-            location,
+            rail,
             content,
             scroll,
         }
@@ -1286,12 +1480,6 @@ impl Switchboard {
             bounds.height,
             Color::from(theme.palette().surface),
         );
-    }
-
-    /// The location band's rectangles for the section on show, resolved
-    /// through the one [`resolve_band`] every paint and hit test reads.
-    fn band(&self, location: Rect, theme: &Theme, scale: Scale) -> BandLayout {
-        resolve_band(location, self.active().anatomy().band_summary, scale, theme)
     }
 
     /// The section on show, for everything the screen asks a section that
@@ -1432,7 +1620,7 @@ impl Switchboard {
     /// range change (a section switch or a resize) re-clamps the offset rather
     /// than leaving it out of bounds.
     fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) {
-        let layout = self.compute_layout(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
         let frame = self.section_frame(&layout, scale, theme);
         self.active_mut().relayout(&frame, scale, theme);
         let info = self.list_info(&layout, scale, theme);
@@ -1452,7 +1640,7 @@ impl Switchboard {
         artwork: &mut dyn IconArtwork,
     ) {
         self.sync_scroll(bounds, scale, theme);
-        let layout = self.compute_layout(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
         // The window manager decorates the window, but its content pixels are
@@ -1460,42 +1648,15 @@ impl Switchboard {
         // pixel no control covers keeps whatever the shared frame region held
         // before, which reads as a transparent window.
         Self::fill_client(surface, bounds, theme);
-        self.render_location(surface, layout.location, scale, theme, artwork);
+        self.rail.render(surface, layout.rail, scale, theme);
         self.render_section(surface, ctx, artwork);
 
         // The scrollbar, drawn after the content so its thumb sits above it.
         self.scroll.render(surface, layout.scroll, scale, theme);
 
-        // The popups, painted last of all so they sit above every other
-        // region, including the scrollbar. Only one can be open:
-        // each is modal over the whole composition while it is, so no input
-        // can reach the control that would open the other.
+        // The section's own overlay last of all, so it sits above every other
+        // region including the scrollbar.
         self.active().render_overlay(surface, ctx, artwork);
-        if let Some(menu) = &self.section_menu {
-            let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme);
-            menu.render(surface, rect, scale, theme);
-        }
-    }
-
-    /// Paint the location band: the trail naming where the reader is, the
-    /// section's own summary beside it, then the command that opens the
-    /// section list, over the one [`Switchboard::band`] the hit test reads.
-    fn render_location(
-        &self,
-        surface: &mut Surface,
-        location: Rect,
-        scale: Scale,
-        theme: &Theme,
-        artwork: &mut dyn IconArtwork,
-    ) {
-        let band = self.band(location, theme, scale);
-        self.trail.render(surface, band.trail, scale, theme);
-        if let Some(summary) = band.summary {
-            self.active()
-                .render_band(surface, summary, scale, theme, artwork);
-        }
-        self.section_list
-            .render(surface, band.command, scale, theme, None);
     }
 
     /// Paint the active section's content, then the Edge Wake on the action
@@ -1575,17 +1736,13 @@ impl Switchboard {
         // routes to it first, and a primary press outside its bounds dismisses
         // it rather than falling through to whatever sits beneath.
         if self.active().holds_pointer() {
-            let layout = self.compute_layout(bounds, scale, theme);
+            let layout = Self::compute_layout(bounds, scale, theme);
             let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
             let outcome = self.active_mut().overlay_on_pointer(event, ctx, damage);
             return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage));
         }
-        if self.section_menu.is_some() {
-            return self.section_menu_on_pointer(event, bounds, scale, theme, font, damage);
-        }
-
         self.sync_scroll(bounds, scale, theme);
-        let layout = self.compute_layout(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
 
         // The mouse wheel scrolls the active section (spec §17 / no deferral).
         if let InputEvent::PointerScrolled { dx, dy } = event {
@@ -1607,19 +1764,13 @@ impl Switchboard {
             return Some(SwitchboardAction::Scrolled { offset });
         }
 
-        // The location band: the trail's leading crumb and the trailing
-        // section-list command are two ways to the same list.
-        let band = self.band(layout.location, theme, scale);
-        let (trail, command) = (band.trail, band.command);
-        if let Some(BreadcrumbAction::Activate { .. }) =
-            self.trail.on_pointer(event, trail, scale, theme, damage)
+        // The navigation rail: choosing a subject is what switches section.
+        if let Some(TabsAction::Selected { index }) =
+            self.rail
+                .on_pointer(event, layout.rail, scale, theme, damage)
         {
-            self.open_section_menu(layout.location, bounds, scale, theme, damage);
-            return None;
-        }
-        if self.section_list.on_pointer(event, command, damage) == Some(ButtonAction::Activated) {
-            self.open_section_menu(layout.location, bounds, scale, theme, damage);
-            return None;
+            let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+            return self.select_rail_entry(index, ctx, damage);
         }
 
         // The active section's content.
@@ -1671,22 +1822,6 @@ impl Switchboard {
     /// Open the section list on the section currently shown, so the reader
     /// starts from where they are, reporting the pixels it will cover.
     ///
-    /// A popup that has just been built has never drawn, so it cannot have
-    /// reported its own rectangle; the route that opens it does, from the one
-    /// anchor the paint and the hit test share.
-    fn open_section_menu(
-        &mut self,
-        location: Rect,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        let menu = Self::build_section_menu(self.section);
-        damage.add(Self::popup_rect(&menu, location, bounds, scale, theme));
-        self.section_menu = Some(menu);
-    }
-
     /// Report the scrollbar when a round changed *how many* items the section
     /// holds, `was` being the count it started with.
     ///
@@ -1707,7 +1842,7 @@ impl Switchboard {
         damage: &mut Region,
     ) {
         if self.active().item_count() != was {
-            damage.add(self.compute_layout(bounds, scale, theme).scroll);
+            damage.add(Self::compute_layout(bounds, scale, theme).scroll);
         }
     }
 
@@ -1722,107 +1857,18 @@ impl Switchboard {
         damage.add(content);
     }
 
-    /// Route a pointer event to the open section list: a primary press off its
-    /// rows closes it, an activated row switches section, and its own dismissal
-    /// closes it. The one anchor is the location band both routes opened it
-    /// from.
-    fn section_menu_on_pointer(
-        &mut self,
-        event: &InputEvent,
-        bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        damage: &mut Region,
-    ) -> Option<SwitchboardAction> {
-        let layout = self.compute_layout(bounds, scale, theme);
-        let menu = self.section_menu.as_ref()?;
-        let rect = Self::popup_rect(menu, layout.location, bounds, scale, theme);
-
-        if let InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        } = event
-        {
-            if menu.row_at(rect, scale, theme, *self.pointer).is_none() {
-                self.close_section_menu(rect, damage);
-                return None;
-            }
-        }
-
-        let menu = self.section_menu.as_mut()?;
-        match menu.on_pointer(event, rect, scale, theme, damage) {
-            Some(MenuAction::Activated { index }) => {
-                let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-                self.choose_section_row(index, rect, ctx, damage)
-            }
-            Some(MenuAction::Dismissed) => {
-                self.close_section_menu(rect, damage);
-                None
-            }
-            Some(MenuAction::OpenSubmenu { .. }) | None => None,
-        }
-    }
-
-    /// Route a key to the open section list, closing it on a choice or a
-    /// dismissal. The one anchor is the location band both routes opened it
-    /// from, so the list reports the same rectangle it is drawn in.
-    fn section_menu_on_key(
-        &mut self,
-        key: Key,
-        ctx: SectionCtx<'_>,
-        damage: &mut Region,
-    ) -> Option<SwitchboardAction> {
-        let layout = self.compute_layout(ctx.bounds, ctx.scale, ctx.theme);
-        let menu = self.section_menu.as_mut()?;
-        let rect = Self::popup_rect(menu, layout.location, ctx.bounds, ctx.scale, ctx.theme);
-        let action = menu.on_key(key, rect, ctx.scale, ctx.theme, damage);
-        match action {
-            Some(MenuAction::Activated { index }) => {
-                self.choose_section_row(index, rect, ctx, damage)
-            }
-            Some(MenuAction::Dismissed) => {
-                self.close_section_menu(rect, damage);
-                None
-            }
-            Some(MenuAction::OpenSubmenu { .. }) | None => None,
-        }
-    }
-
-    /// Apply a choice from the section list: the list closes either way, and an
-    /// out-of-range row changes nothing (fail closed).
-    fn choose_section_row(
-        &mut self,
-        index: usize,
-        rect: Rect,
-        ctx: SectionCtx<'_>,
-        damage: &mut Region,
-    ) -> Option<SwitchboardAction> {
-        self.close_section_menu(rect, damage);
-        self.select_section_index(index, &mut Sweep::reporting(ctx, damage))
-    }
-
-    /// Close the section list, reporting `rect` — the pixels it covered are
-    /// the composition's again, and the popup itself is gone before it could
-    /// report them.
-    fn close_section_menu(&mut self, rect: Rect, damage: &mut Region) {
-        if self.section_menu.take().is_some() {
-            damage.add(rect);
-        }
-    }
-
     /// Feed one key event, returning the typed action it produced (if any).
     ///
     /// The active section's own overlay — an in-flight inline edit or an open
     /// popup — takes every key first: it is modal over the composition, so no
     /// key reaches the regions beneath it until it commits, cancels, or
-    /// dismisses. Otherwise Tab cycles keyboard focus between the location
-    /// band, the content list, and the scrollbar; keys are then routed to the
+    /// dismisses. Otherwise Tab cycles keyboard focus between the navigation
+    /// rail, the content list, and the scrollbar; keys are then routed to the
     /// focused region's control.
     ///
-    /// Sections are reachable without a pointer: with focus on the location
-    /// band, Space or Enter opens the section list, Up/Down walk it, and Enter
-    /// shows the section under the cursor — the [`Menu`]'s own keys, with
-    /// Escape closing it and leaving the section as it was.
+    /// Subjects are reachable without a pointer: with focus on the rail,
+    /// Up/Down walk its entries and Home/End jump to either end. On a rail the
+    /// cursor is the choice, so walking onto an entry shows its pane.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -1850,15 +1896,12 @@ impl Switchboard {
         font: BitmapFont,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
-        let layout = self.compute_layout(bounds, scale, theme);
+        let layout = Self::compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
         if self.active().holds_keyboard() {
             let outcome = self.active_mut().overlay_on_key(key, ctx, damage);
             return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage));
-        }
-        if self.section_menu.is_some() {
-            return self.section_menu_on_key(key, ctx, damage);
         }
         if key == Key::Named(NamedKey::Tab) {
             self.focus = self.focus.next();
@@ -1866,18 +1909,22 @@ impl Switchboard {
             return None;
         }
         match self.focus {
-            // The trail is the band's keyboard route: its leading crumb opens
-            // the section list, which then owns the keys until it closes. The
-            // trailing command is the same command for the pointer, so giving
-            // it its own stop would be a second stop for one action.
-            FocusRegion::Location => {
-                let trail = self.band(layout.location, theme, scale).trail;
-                if let Some(BreadcrumbAction::Activate { .. }) =
-                    self.trail.on_key(key, trail, scale, theme, damage)
+            // The rail is the keyboard's route between subjects: moving its
+            // cursor and committing a choice are the control's own keys.
+            FocusRegion::Rail => {
+                let was = self.rail.current();
+                if let Some(TabsAction::Selected { index }) =
+                    self.rail.on_key(key, layout.rail, scale, theme, damage)
                 {
-                    self.open_section_menu(layout.location, bounds, scale, theme, damage);
+                    return self.select_rail_entry(index, ctx, damage);
                 }
-                None
+                // Moving the cursor *is* choosing: a rail entry names the pane
+                // the reader is reading, so browsing the rail shows what it
+                // names rather than waiting for a second key to confirm.
+                match self.rail.current() {
+                    Some(index) if Some(index) != was => self.select_rail_entry(index, ctx, damage),
+                    _ => None,
+                }
             }
             FocusRegion::Scrollbar => match self.scroll.on_key(key, layout.scroll, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
@@ -1962,11 +2009,11 @@ impl Switchboard {
     /// location trail, the content, and the per-section scroll offset can never
     /// disagree.
     ///
-    /// It re-spells the trail, shows the section, and puts keyboard focus back
-    /// on its first item; the offset stays each section's own and is re-clamped
-    /// against the new content by the next scroll sync. Re-selecting the shown
-    /// section is a no-op, and an out-of-range index changes nothing (fail
-    /// closed); both report no change.
+    /// It shows the section and puts keyboard focus back on its first item;
+    /// the offset stays each section's own and is re-clamped against the new
+    /// content by the next scroll sync. Re-selecting the shown section is a
+    /// no-op, and an out-of-range index changes nothing (fail closed); both
+    /// report no change.
     fn select_section_index(
         &mut self,
         index: usize,
@@ -1977,14 +2024,13 @@ impl Switchboard {
             return None;
         }
         // Every overlay names the section that opened it — a popup anchors on
-        // one of its rows, an inline edit sits in one of them, and the section
-        // list marks the section on show — so a section change drops them
-        // rather than leaving one standing over, lying about, or still taking
-        // keys for content the reader has navigated away from.
+        // one of its rows, an inline edit sits in one of them — so a section
+        // change drops them rather than leaving one standing over, lying
+        // about, or still taking keys for content the reader has navigated
+        // away from.
         self.active_mut().dismiss_overlay();
-        self.section_menu = None;
         self.section = section;
-        self.trail = Self::build_trail(section);
+        self.mark_rail_selection();
         self.active_mut().set_content_focus(0, sweep);
         self.active_mut().set_row_action(0, sweep);
         self.apply_focus_marks(sweep);
@@ -2033,17 +2079,19 @@ impl Switchboard {
     /// beside some unrelated neighbours, and it is why membership is set from
     /// the same `focus_here` fact the ring is — the two can never disagree.
     fn apply_focus_marks(&mut self, sweep: &mut Sweep<'_, '_>) {
-        // The trail's leading crumb is the band's one keyboard stop; the
-        // trailing crumb is the current location a breadcrumb never focuses.
-        let crumb = (self.focus == FocusRegion::Location).then_some(0);
+        // The rail shows its keyboard cursor only while it holds focus: the
+        // selected subject stays lit either way, so an unfocused rail states
+        // where the reader is without also claiming their keys.
+        let cursor = (self.focus == FocusRegion::Rail)
+            .then(|| self.rail.selected().unwrap_or(0))
+            .or(None);
         match sweep.ctx {
             Some(ctx) => {
-                let layout = self.compute_layout(ctx.bounds, ctx.scale, ctx.theme);
-                let trail = self.band(layout.location, ctx.theme, ctx.scale).trail;
-                self.trail
-                    .set_focus(crumb, trail, ctx.scale, ctx.theme, sweep.damage);
+                let layout = Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme);
+                self.rail
+                    .set_current(cursor, layout.rail, ctx.scale, ctx.theme, sweep.damage);
             }
-            None => self.trail.adopt_focus(crumb),
+            None => self.rail.adopt_current(cursor),
         }
         self.scroll
             .set_focused(self.focus == FocusRegion::Scrollbar);

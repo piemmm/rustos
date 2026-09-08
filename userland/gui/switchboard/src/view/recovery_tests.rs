@@ -27,7 +27,7 @@ use crate::view::{
 
 /// The Recovery section's resolved regions for a default-sized window.
 fn frame(sb: &Switchboard, theme: &Theme) -> SectionFrame {
-    let layout = sb.compute_layout(bounds(), Scale::ONE, theme);
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, theme);
     resolve_section_frame(layout.content, sb.recovery.anatomy(), Scale::ONE, theme)
 }
 

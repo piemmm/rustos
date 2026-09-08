@@ -353,6 +353,39 @@ fn the_display_hero_still_seats_both_context_lines() {
     );
 }
 
+/// The axis row under a hero's trace was drawn flush to the plate's lower
+/// border: the flow insets a plated item's top but not its bottom, which is
+/// right for a row inside a plate (that inset is its leading) and wrong for
+/// the hero, which spans the whole plate.
+#[test]
+fn a_hero_closes_the_plate_edge_below_its_axis() {
+    let theme = Theme::dark();
+    let inset = crate::view::block::content_inset(Scale::ONE, &theme);
+    let band = Rect::new(0, 0, 400, 160);
+    let rect = super::hero_rect(band, Scale::ONE, &theme).expect("the hero draws");
+
+    assert_eq!(
+        band.bottom() - rect.bottom(),
+        i32::try_from(inset).unwrap_or(0),
+        "the hero must leave the plate's own margin below its axis"
+    );
+    assert_eq!(
+        rect.top(),
+        band.top(),
+        "the top inset is the flow's, not ours"
+    );
+}
+
+/// A band with no room left for the margin draws nothing rather than
+/// wrapping its height around zero.
+#[test]
+fn a_hero_with_no_room_for_its_margin_draws_nothing() {
+    let theme = Theme::dark();
+    let inset = crate::view::block::content_inset(Scale::ONE, &theme);
+    let band = Rect::new(0, 0, 400, inset);
+    assert!(super::hero_rect(band, Scale::ONE, &theme).is_none());
+}
+
 /// The hero's built tile, from the flow the pane compiled to.
 fn hero_tile(items: &[super::PaneItem]) -> &tairix_controls::MetricTile {
     items

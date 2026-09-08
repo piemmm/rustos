@@ -37,9 +37,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::Theme;
 
-use crate::paint::{
-    clamp_permille, plate_border, seam_thickness, signal_color, surface_rect, withheld, FULL,
-};
+use crate::paint::{plate_border, seam_thickness, signal_color, surface_rect, withheld, FULL};
 use crate::state::PressureKind;
 
 /// The most samples a [`Chart`] may hold.
@@ -81,6 +79,10 @@ struct Opposing {
 /// quiet filled area beneath it, tinted by its resource's semantic rail colour
 /// (spec §11.35).
 ///
+/// Readings are permille of the resource's capacity by default; a series with
+/// no such ceiling — a count — states its own with
+/// [`with_full_scale`](Self::with_full_scale).
+///
 /// The owner supplies every visible fact — the resource kind and the series —
 /// and re-renders when either changes. A chart with no samples draws *nothing*:
 /// an honest "nothing recorded yet" leaving the plate it sits on untouched,
@@ -91,6 +93,7 @@ pub struct Chart {
     kind: PressureKind,
     samples: Vec<u16>,
     opposing: Option<Opposing>,
+    full_scale: u16,
 }
 
 impl Chart {
@@ -102,13 +105,30 @@ impl Chart {
             kind,
             samples: Vec::new(),
             opposing: None,
+            full_scale: FULL,
         }
     }
 
-    /// This chart with an oldest-to-newest series. Each sample is a permille
-    /// fraction of the resource's capacity, clamped fail closed; the series is
-    /// capped to the most recent [`MAX_CHART_SAMPLES`], dropping the oldest
-    /// first.
+    /// This chart reading its series against `full_scale` rather than against
+    /// a permille capacity.
+    ///
+    /// A count has no permille ceiling of its own, so a caller plotting one
+    /// states the denominator it means: the box's top edge is `full_scale`,
+    /// and a sample at or above it fills the box. A zero scale would divide by
+    /// nothing, so it falls back to the permille default rather than failing
+    /// the draw.
+    #[must_use]
+    pub fn with_full_scale(mut self, full_scale: u16) -> Self {
+        self.full_scale = if full_scale == 0 { FULL } else { full_scale };
+        self
+    }
+
+    /// This chart with an oldest-to-newest series, read against the chart's
+    /// scale — a permille fraction of the resource's capacity unless
+    /// [`with_full_scale`](Self::with_full_scale) states another ceiling. A
+    /// reading at or above that ceiling fills the box, clamped fail closed;
+    /// the series is capped to the most recent [`MAX_CHART_SAMPLES`], dropping
+    /// the oldest first.
     #[must_use]
     pub fn with_samples(mut self, samples: impl IntoIterator<Item = u16>) -> Self {
         self.samples = bounded(samples);
@@ -180,7 +200,15 @@ impl Chart {
                 box_px: plot_box,
                 rising_up: true,
             };
-            paint_series(surface, &self.samples, &band, weight, self.kind, theme);
+            paint_series(
+                surface,
+                &self.samples,
+                &band,
+                weight,
+                self.kind,
+                theme,
+                self.full_scale,
+            );
             return;
         };
 
@@ -201,6 +229,7 @@ impl Chart {
             split.weight,
             self.kind,
             theme,
+            self.full_scale,
         );
         paint_series(
             surface,
@@ -209,15 +238,18 @@ impl Chart {
             split.weight,
             opposing.kind,
             theme,
+            self.full_scale,
         );
     }
 }
 
-/// `samples` clamped fail closed and capped to the most recent
-/// [`MAX_CHART_SAMPLES`], oldest dropped first — the one admission rule both
-/// of a chart's series pass through.
+/// `samples` capped to the most recent [`MAX_CHART_SAMPLES`], oldest dropped
+/// first — the one admission rule both of a chart's series pass through.
+///
+/// Readings are kept as the caller stated them; the chart's own `full_scale`
+/// is what maps them into the box, so a count survives ingest intact.
 fn bounded(samples: impl IntoIterator<Item = u16>) -> Vec<u16> {
-    let mut buf: Vec<u16> = samples.into_iter().map(clamp_permille).collect();
+    let mut buf: Vec<u16> = samples.into_iter().collect();
     if buf.len() > MAX_CHART_SAMPLES {
         let drop = buf.len() - MAX_CHART_SAMPLES;
         buf.drain(..drop);
@@ -286,8 +318,9 @@ fn paint_series(
     weight: i32,
     kind: PressureKind,
     theme: &Theme,
+    full_scale: u16,
 ) {
-    let Some(poly) = plot(samples, band, weight) else {
+    let Some(poly) = plot(samples, band, weight, full_scale) else {
         return;
     };
     // The filled area is the whole polygon and the trace is its interior, so
@@ -344,7 +377,7 @@ fn area_ramp(y: u32, band_top: u32, height: u32, rising_up: bool) -> u8 {
 /// instead made the trace rewrite its own shape on every sample — the same
 /// history redrawn at a different scale — and claimed a minute's span for
 /// three seconds of readings.
-fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<Vec<(i32, i32)>> {
+fn plot(samples: &[u16], band: &Band, weight: i32, full_scale: u16) -> Option<Vec<(i32, i32)>> {
     let count = samples.len();
     if count == 0 {
         return None;
@@ -388,17 +421,19 @@ fn plot(samples: &[u16], band: &Band, weight: i32) -> Option<Vec<(i32, i32)>> {
         0 => start,
         span => start.saturating_add(reach.saturating_mul(i) / span),
     };
-    let rise_at = |permille: u16| {
-        let rise =
-            span_y.saturating_mul(i32::from(clamp_permille(permille))) / i32::from(FULL).max(1);
+    // The box's top edge is `full_scale`, so a reading at or above it fills the
+    // band: the permille default is just the case where that ceiling is FULL.
+    let ceiling = i32::from(full_scale).max(1);
+    let rise_at = |reading: u16| {
+        let rise = span_y.saturating_mul(i32::from(reading).min(ceiling)) / ceiling;
         zero.saturating_add(rise.saturating_mul(rise_sign))
     };
     // Closed at both ends in place, and a lone reading holds its slot flat:
     // two vertices at the same height rather than an invisible point.
     let mut points = Vec::with_capacity(count + 3);
     points.push((start, close));
-    for (i, &permille) in samples.iter().enumerate() {
-        points.push((at(i32::try_from(i).unwrap_or(covered)), rise_at(permille)));
+    for (i, &reading) in samples.iter().enumerate() {
+        points.push((at(i32::try_from(i).unwrap_or(covered)), rise_at(reading)));
     }
     if covered == 0 {
         if let Some(&only) = samples.first() {

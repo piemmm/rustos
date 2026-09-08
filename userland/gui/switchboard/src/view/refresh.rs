@@ -167,9 +167,17 @@ pub(super) fn restate_rail(rail: &mut ActionRail, fresh: Vec<Button>) -> bool {
     let mut moved = false;
     if same_commands(rail.items(), &fresh) {
         for (live, derived) in rail.items_mut().iter_mut().zip(fresh) {
-            let pointer = live.state().pointer;
-            let state = derived.state().with_pointer(pointer);
-            moved |= live.state() != state;
+            // A sample restates what the *system* says about a command — its
+            // verdict, its activity — and nothing about where the reader is.
+            // Keeping their pointer and their focus ring is what stops a
+            // refresh dragging the ring off a command once a second.
+            let live_state = live.state();
+            let state = ControlState {
+                focus: live_state.focus,
+                pointer: live_state.pointer,
+                ..derived.state()
+            };
+            moved |= live_state != state;
             live.set_state(state);
         }
     } else {

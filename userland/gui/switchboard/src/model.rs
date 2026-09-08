@@ -29,9 +29,9 @@ use crate::resource_report::{build_resource_report, reading};
 use crate::sample::{permille_of, DegradedField, ProcessSummary, Sample};
 use crate::view::resources::DeviceId;
 use crate::view::{
-    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem,
-    Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskOwner,
-    TaskSummary, Unmeasured,
+    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, RailTrace, Reading, RecoveryControl,
+    RecoveryItem, Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl,
+    TaskOwner, TaskSummary, Unmeasured,
 };
 
 /// Convert a wire [`CommandSection`] into the shared control's own
@@ -107,6 +107,16 @@ impl Series {
     }
 }
 
+/// The measured process population, or `None` when the list could not be read.
+///
+/// An unread list arrives as an empty one, and an empty machine is not a thing
+/// that happens: recording its nought would plot a real population collapsing
+/// to zero and back.
+fn process_count(sample: &Sample) -> Option<u16> {
+    (!sample.degradations.contains(&DegradedField::ProcessList))
+        .then(|| u16::try_from(sample.processes.len()).unwrap_or(u16::MAX))
+}
+
 /// The rolling instrument state the panel's resource rows need that no single
 /// [`Sample`] carries: the CPU and memory charts' bounded histories, and the
 /// pressure verdicts the tray summary's own derivation already reached for
@@ -115,6 +125,16 @@ impl Series {
 pub struct LiveMeters {
     cpu: Series,
     memory: Series,
+    processes: Series,
+    /// The largest process population this session has seen, which is what the
+    /// Tasks trace is read against.
+    ///
+    /// A count has no capacity to be a share of, so its box needs a stated
+    /// ceiling. A high-water only ever grows, so the box means the same thing
+    /// from one sample to the next — a ceiling refitted to each window would
+    /// redraw the same history differently every time it rolled.
+    processes_peak: u16,
+    stopped: Series,
     cpu_pressured: bool,
     memory_pressured: bool,
 }
@@ -132,6 +152,9 @@ impl LiveMeters {
         Self {
             cpu: Series::new(),
             memory: Series::new(),
+            processes: Series::new(),
+            processes_peak: 0,
+            stopped: Series::new(),
             cpu_pressured: false,
             memory_pressured: false,
         }
@@ -154,6 +177,15 @@ impl LiveMeters {
         if let Some(memory) = sample.memory_pressure {
             self.memory.push(memory.used_permille);
         }
+        if let Some(count) = process_count(sample) {
+            self.processes.push(count);
+            self.processes_peak = self.processes_peak.max(count);
+            // Nothing running is nothing stopped, so an empty population is a
+            // nought share rather than a division by it.
+            let stopped = sample.stopped_count.min(count);
+            self.stopped
+                .push(permille_of(u64::from(stopped), u64::from(count)).unwrap_or(0));
+        }
     }
 
     /// The recorded CPU readings, oldest first.
@@ -166,6 +198,26 @@ impl LiveMeters {
     #[must_use]
     pub fn memory_history(&self) -> &[u16] {
         self.memory.points()
+    }
+
+    /// The recorded process populations, oldest first, read against
+    /// [`process_peak`](Self::process_peak).
+    #[must_use]
+    pub fn process_history(&self) -> &[u16] {
+        self.processes.points()
+    }
+
+    /// The largest population seen this session: what the Tasks trace's box
+    /// tops out at. Zero until a population has been measured.
+    #[must_use]
+    pub const fn process_peak(&self) -> u16 {
+        self.processes_peak
+    }
+
+    /// The recorded shares of the population that were stopped, oldest first.
+    #[must_use]
+    pub fn stopped_history(&self) -> &[u16] {
+        self.stopped.points()
     }
 
     /// Whether CPU pressure is latched active.
@@ -1180,9 +1232,9 @@ impl PanelModel {
 /// loaded from that user's own program store draws its bundle's icon from it.
 ///
 /// `meters` must already have this sample folded in, so the rows carry this
-/// cycle's rates and histories rather than the previous cycle's; the
-/// Resources report folds each device's own counters in as it builds them,
-/// which is why the meters are taken mutably. `authority` is queried once per
+/// cycle's rates and histories rather than the previous cycle's; they are
+/// taken mutably for the fault ledger alone, which counts a fault clearing as
+/// it builds the recovery rows. `authority` is queried once per
 /// action kind that needs it, so the rendered [`SwitchboardModel`] and the
 /// effect [`apply_action`] later produces from the same authority can never
 /// disagree about whether an action is available.
@@ -1212,6 +1264,14 @@ pub fn build_model(
     model.tasks = tasks;
     model.recovery = recovery;
     model.recovery_resolved = meters.faults.resolved();
+    model.tasks_trend = RailTrace {
+        points: meters.system.process_history().to_vec(),
+        full_scale: meters.system.process_peak(),
+    };
+    model.recovery_trend = RailTrace {
+        points: meters.system.stopped_history().to_vec(),
+        full_scale: 0,
+    };
     model.resources = resources;
 
     PanelModel {
