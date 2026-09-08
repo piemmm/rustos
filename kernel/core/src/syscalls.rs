@@ -5778,16 +5778,6 @@ where
             return Err(Errno::PermissionDenied);
         }
 
-        // A program launch is latency-sensitive from here on, and much of
-        // what follows waits on the volume the bundle is read from — during
-        // which every CPU can be idle and the frequency governor would see no
-        // demand at all. Tell it now, so the load, the signature check, and
-        // the new program's first moments all run at full speed. It is stamped
-        // after the coarse authority check so a refused caller cannot raise
-        // the machine's clock by asking.
-        let cpu = SchedulerArch::current_cpu(self.arch);
-        crate::cpufreq::note_launch(self.arch.monotonic_ns(cpu));
-
         // The dispatcher already checked that `path` is non-null
         // (`UserPtr`). Bound the staged path so a hostile
         // `path_len` cannot force an arbitrarily large kernel allocation; an over-long or empty path cannot name a
@@ -5812,6 +5802,17 @@ where
             self.audit_spawn_denied("proc_spawn_required");
             return Err(Errno::PermissionDenied);
         }
+
+        // The kernel has now committed to running an executable, and from
+        // here the launch is latency-critical: most of what follows waits on
+        // the volume the image is read from, during which every CPU can be
+        // idle and the frequency governor would measure no demand at all. So
+        // it is told outright, and the load, the signature check, and the new
+        // program's first moments all run at full speed. Stamped behind both
+        // authority checks, so a caller the kernel refused cannot raise the
+        // machine's clock by asking.
+        let cpu = SchedulerArch::current_cpu(self.arch);
+        crate::cpufreq::note_launch(self.arch.monotonic_ns(cpu));
 
         let strings_buf = self.stage_spawn_strings(caller, strings, strings_len)?;
 

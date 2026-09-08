@@ -15,7 +15,7 @@ use tairix_arch_api::{CoreClock, CoreClockSupport};
 use tairix_kernel_sec::ProcessId;
 
 use super::domain::{self, TargetWaiter};
-use super::governor::RESPONSE_WINDOW_NS;
+use super::governor::{MAX_HOLD_NS, RESPONSE_WINDOW_NS, UTIL_ONE};
 use super::{estimate, note_active, note_idle};
 use crate::cpu_state;
 
@@ -217,6 +217,10 @@ fn the_first_target_after_bind_is_full_speed_not_the_minimum() {
 /// Walk a quiescing machine down until the governor settles, returning the
 /// last target it asked for and the sequence it was published at.
 ///
+/// The caller must have marked the machine idle first ([`all_cpus_idle`]):
+/// while anything is running the governor keeps looking, and rightly never
+/// settles.
+///
 /// Each wait parks to the deadline the governor itself chose, so this follows
 /// the governor's own pacing rather than a cadence the test invented. It stops
 /// when the governor parks with no deadline — the machine will take no wakeup
@@ -270,26 +274,230 @@ fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
 }
 
 #[test]
-fn work_arriving_on_an_idle_machine_is_served_at_full_speed() {
-    // The reported defect's shape: the machine has gone quiet and settled at
-    // its idle rate, and must come back to full speed for the work rather
-    // than serve it slowly.
+fn sustained_work_climbs_to_full_speed() {
+    // Work that keeps running produces no transition to observe, so the rate
+    // has to rise from the waiter looking again on its own cadence. It must
+    // reach the ceiling, and get there within about the window the filter
+    // measures over.
     let limits = pi4();
     let start = 1_000_000;
     with_mechanism(limits, start, |handle| {
         all_cpus_idle(start);
         let waiter = ScriptedWaiter::at(start);
-        let (settled_at, seq) = settle(handle, &waiter, &limits);
+        let (settled_at, mut seq) = settle(handle, &waiter, &limits);
         assert_eq!(settled_at, limits.min_hz);
 
-        let woke_at = waiter.now_ns() + 1_000;
-        note_active(3, woke_at);
-        let woken = ScriptedWaiter::at(woke_at);
+        // One CPU picks up work and keeps it.
+        let began = waiter.now_ns() + 1_000;
+        note_active(3, began);
+        let busy = ScriptedWaiter::at(began);
+        let mut target = limits.min_hz;
+        let mut climbed = false;
+        for _ in 0..16 {
+            match domain::wait(DRIVER, handle, seq, &busy) {
+                Ok(observed) => {
+                    assert!(
+                        observed.target_hz >= target,
+                        "a busy machine must not slow down: {} after {}",
+                        observed.target_hz,
+                        target
+                    );
+                    target = observed.target_hz;
+                    seq = observed.seq;
+                }
+                Err(err) => panic!("a busy machine must keep looking: {err:?}"),
+            }
+            if target == limits.max_hz {
+                climbed = true;
+                break;
+            }
+        }
+        assert!(
+            climbed,
+            "sustained work never reached the ceiling: {target}"
+        );
+        assert!(
+            busy.now_ns() - began <= RESPONSE_WINDOW_NS * 2,
+            "the climb took longer than the filter's own window"
+        );
+    });
+}
+
+/// Drive a busy machine's rate upward until it stops climbing, returning the
+/// last target and its sequence.
+///
+/// Stops at the ceiling, because a rate that has arrived there stops changing
+/// and a further wait would never return. Any refusal is a failure: a machine
+/// with work running must keep being looked at.
+fn climb(handle: u64, waiter: &ScriptedWaiter, limits: &CpuFreqLimits) -> (u64, u64) {
+    let mut seq = 0;
+    let mut target = 0;
+    for _ in 0..64 {
+        let observed = domain::wait(DRIVER, handle, seq, waiter)
+            .expect("the governor must keep looking at a machine with work running");
+        assert!(
+            observed.target_hz >= target,
+            "a busy machine must not slow down: {} after {}",
+            observed.target_hz,
+            target
+        );
+        target = observed.target_hz;
+        seq = observed.seq;
+        if target == limits.max_hz {
+            break;
+        }
+    }
+    (target, seq)
+}
+
+#[test]
+fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
+    // The hole this guards. A wake inside the attention span is deliberately
+    // not flagged, because the waiter is expected to look again by itself. So
+    // if the waiter were allowed to park indefinitely while that span stands,
+    // a CPU that resumed just after a survey found the machine quiet would
+    // have no edge left to announce it — and a machine that then stayed busy
+    // would sit at the floor for ever.
+    let limits = pi4();
+    let start = 1_000_000;
+    with_mechanism(limits, start, |handle| {
+        all_cpus_idle(start);
+        let quiet = ScriptedWaiter::at(start);
+        let (settled_at, _) = settle(handle, &quiet, &limits);
+        assert_eq!(settled_at, limits.min_hz);
+
+        // A blip: one CPU wakes and parks again at once, stamping an
+        // attention span that will suppress the next wake's flag.
+        let blip = quiet.now_ns() + 1_000;
+        note_active(5, blip);
+        note_idle(5, blip + 1_000);
+
+        // Real work starts inside that span and never stops, so no further
+        // edge will announce it.
+        note_active(5, blip + 2_000);
+        let busy = ScriptedWaiter::at(blip + 2_000);
+        let (target, _) = climb(handle, &busy, &limits);
         assert_eq!(
-            domain::wait(DRIVER, handle, seq, &woken)
+            target, limits.max_hz,
+            "sustained work inside the attention span never raised the rate"
+        );
+    });
+}
+
+#[test]
+fn a_machine_past_half_busy_is_given_the_whole_range() {
+    // The proportional rate with its headroom only reaches the ceiling at
+    // four fifths of a core, which leaves a genuinely busy machine climbing
+    // through rates it will not stay at.
+    let limits = pi4();
+    let start = 1_000_000;
+    with_mechanism(limits, start, |handle| {
+        all_cpus_idle(start);
+        let quiet = ScriptedWaiter::at(start);
+        let (_, seq) = settle(handle, &quiet, &limits);
+
+        // Hand one CPU a filter just past half busy, dated now, and let the
+        // bind boost lapse so utilisation alone decides.
+        let now = quiet.now_ns() + RESPONSE_WINDOW_NS;
+        let state = cpu_state::get(2).expect("a test CPU");
+        state.gov_util.store(UTIL_ONE / 2 + 1, Ordering::Relaxed);
+        state.gov_folded_ns.store(now, Ordering::Relaxed);
+        let waiter = ScriptedWaiter::at(now);
+        assert_eq!(
+            domain::wait(DRIVER, handle, seq, &waiter)
                 .expect("a target")
                 .target_hz,
-            limits.max_hz
+            limits.max_hz,
+            "past half a core the whole range is asked for"
+        );
+    });
+}
+
+#[test]
+fn the_ceiling_is_held_before_it_is_given_up() {
+    // Reaching the top and dropping straight off it again costs a mechanism
+    // round trip each way and serves the part of the burst that mattered at
+    // the lower rate. So once asked for, the ceiling is kept for a while
+    // whatever the machine does next.
+    //
+    // The wait itself is the observation: it returns only when the published
+    // rate actually changes, so the waiter's clock at the first reduction is
+    // when the reduction happened. Its park advances that clock to whatever
+    // deadline the governor chose, so nothing here invents a cadence.
+    let limits = pi4();
+    let start = 1_000_000;
+    with_mechanism(limits, start, |handle| {
+        let waiter = ScriptedWaiter::at(start);
+        let seq = domain::wait(DRIVER, handle, 0, &waiter)
+            .expect("the bind boost puts the machine at the ceiling")
+            .seq;
+        // Nothing runs from here on, so utilisation alone would give the
+        // ceiling up as soon as the boost lapsed.
+        all_cpus_idle(start);
+
+        let dropped = domain::wait(DRIVER, handle, seq, &waiter).expect("a reduction");
+        assert!(
+            dropped.target_hz < limits.max_hz,
+            "the rate never came off the ceiling"
+        );
+        assert!(
+            waiter.now_ns() - start >= MAX_HOLD_NS,
+            "the ceiling was given up after only {} ns",
+            waiter.now_ns() - start
+        );
+    });
+}
+
+#[test]
+fn the_hold_never_delays_a_rise() {
+    // The hold exists to stop the rate flapping off the top, not to slow it
+    // reaching the top: a machine that gets busy while a hold stands on a
+    // *lower* rate must not be made to wait.
+    let limits = pi4();
+    let start = 1_000_000;
+    with_mechanism(limits, start, |handle| {
+        all_cpus_idle(start);
+        let quiet = ScriptedWaiter::at(start);
+        let (settled_at, seq) = settle(handle, &quiet, &limits);
+        assert_eq!(settled_at, limits.min_hz);
+
+        let busy_at = quiet.now_ns() + 1_000;
+        note_active(4, busy_at);
+        let busy = ScriptedWaiter::at(busy_at);
+        let (target, _) = climb(handle, &busy, &limits);
+        assert_eq!(target, limits.max_hz);
+        assert!(
+            busy.now_ns() - busy_at < MAX_HOLD_NS,
+            "the climb waited out a hold it should never have seen"
+        );
+        let _ = seq;
+    });
+}
+
+#[test]
+fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
+    // The reported defect. An idle desktop showing a live monitor wakes a CPU
+    // many times a second to do almost nothing, and used to sit at its
+    // ceiling for ever: every wake re-extended a boost that granted the
+    // maximum outright, so the measured utilisation never got a say. Leaving
+    // idle now grants no rate at all.
+    let limits = pi4();
+    let mut now = 1_000_000;
+    with_mechanism(limits, now, |handle| {
+        all_cpus_idle(now);
+        // Twenty wakes a second, each a millisecond of work: about 2% of one
+        // core, and far more often than a boost window would have lapsed.
+        for _ in 0..40 {
+            note_active(1, now);
+            now += 1_000_000;
+            note_idle(1, now);
+            now += 49_000_000;
+        }
+        let waiter = ScriptedWaiter::at(now);
+        let (target, _) = settle(handle, &waiter, &limits);
+        assert_eq!(
+            target, limits.min_hz,
+            "a 2%-busy machine settled at {target} rather than the floor"
         );
     });
 }

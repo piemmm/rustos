@@ -43,22 +43,30 @@
 //! say how much faster it would like to be, so the governor must overshoot to
 //! find out.
 //!
-//! # Ramp
+//! # A wake is not a reason to go fast; a launch is
 //!
-//! Utilisation alone answers the sustained case and gets the transient
-//! exactly wrong: work that arrives on an idle machine finds the filter at
-//! zero and would be served at the minimum rate for as long as the filter
-//! takes to notice — which is precisely the latency a governor exists to
-//! avoid. So a CPU leaving idle, and a program launch, both stamp a boost
-//! deadline ([`RESPONSE_WINDOW_NS`] ahead) during which the target is the
-//! maximum outright, and the filter takes over once it has had a full window
-//! of evidence.
+//! Leaving idle says *something* happened, not how much: a CPU that wakes to
+//! do a millisecond of work and parks again has not earned the top rate. An
+//! earlier revision granted the maximum for a whole window on every such
+//! wake, and because each wake pushed the deadline further out, any machine
+//! waking more than ten times a second — an idle desktop with a compositor
+//! and a clock — sat at its ceiling for ever at one percent load. Only the
+//! filter can tell those apart, because only the filter measures the work.
+//! So a wake grants no rate at all; it merely tells the governor to start
+//! looking again ([`ACTIVE_REVIEW_NS`]).
 //!
-//! That would degenerate on a kernel whose CPUs wake for housekeeping: every
-//! stray timer tick would re-stamp the boost and pin the clock high. This one
-//! is tickless — a quiet CPU takes no interrupt at all — so a wake really is
-//! work arriving, and treating it as such is the honest reading rather than a
-//! bias toward speed.
+//! A program **launch** is the one case measurement cannot answer, and it is
+//! the reason the boost still exists. The work is latency-critical from
+//! before it has run an instruction, and most of what follows is waiting on
+//! the volume the executable is read from — during which every CPU may be
+//! idle and no utilisation accrues at all. So the kernel commits to the
+//! maximum for one window when it starts an executable, and the filter takes
+//! over from there. That is an explicit, bounded, infrequent event, not an
+//! inference from a wake.
+//!
+//! It grants no authority a caller did not have: stamping it needs spawn
+//! authority, and a principal that may start a program may equally pin the
+//! clock by running work that genuinely deserves it.
 
 use tairix_abi::cpufreq::CpuFreqLimits;
 
@@ -79,7 +87,7 @@ pub(super) const UTIL_ONE: u64 = 1 << UTIL_SHIFT;
 /// question:
 ///
 /// * the utilisation filter's time constant,
-/// * how long a wake or a program launch holds the maximum rate, and
+/// * how long a program launch holds the maximum rate, and
 /// * how often the target may step back down.
 ///
 /// A tenth of a second is under the threshold at which a person perceives a
@@ -88,6 +96,53 @@ pub(super) const UTIL_ONE: u64 = 1 << UTIL_SHIFT;
 /// step rather than a storm of them. A policy constant, not a capacity: it
 /// paces decisions and bounds nothing.
 pub(super) const RESPONSE_WINDOW_NS: u64 = 100_000_000;
+
+/// How often the target is revisited while any CPU is running work, in
+/// nanoseconds.
+///
+/// A CPU that stays busy produces no transition to observe, so the rise has
+/// to be looked for rather than waited for. Four looks per window is the
+/// coarsest cadence that still shows the ramp: with the headroom applied, the
+/// filter must move several percent of full scale to shift the target by one
+/// step, so looking much more often would find nothing changed, and looking
+/// less often would jump straight from the floor to the ceiling and skip the
+/// rates in between.
+///
+/// It bounds the climb to a handful of mechanism round trips rather than one
+/// per step, and it arms nothing on a quiet machine: no CPU active means no
+/// cadence.
+pub(super) const ACTIVE_REVIEW_NS: u64 = RESPONSE_WINDOW_NS / 4;
+
+/// The cadence must divide the window and be strictly finer than it, or the
+/// ramp is either invisible or never reached.
+const _: () = assert!(ACTIVE_REVIEW_NS > 0 && ACTIVE_REVIEW_NS < RESPONSE_WINDOW_NS);
+const _: () = assert!(RESPONSE_WINDOW_NS.is_multiple_of(ACTIVE_REVIEW_NS));
+
+/// Utilisation above which the ceiling is asked for outright, rather than
+/// scaled up to.
+///
+/// The proportional rate with its headroom reaches the ceiling on its own at
+/// four fifths of a core, which leaves a genuinely busy machine climbing
+/// through intermediate rates it will not stay at. Past half a core the
+/// workload has shown it wants the machine, so it is given it: an operator
+/// decision that trades some power for the throughput and latency of the
+/// range's top end.
+pub(super) const BUSY_THRESHOLD: u64 = UTIL_ONE / 2;
+
+/// Shortest time the ceiling is held once asked for, in nanoseconds.
+///
+/// Reaching the top and dropping straight off it again is the worst of both:
+/// the workload pays a mechanism round trip in each direction and gets the
+/// lower rate for the part of its burst that mattered. Holding for six tenths
+/// of a second spans several bursts of a workload that is intermittent at the
+/// filter's own granularity, so the rate stops flapping at the top of the
+/// range. An operator decision, and a pacing constant rather than a capacity:
+/// it delays a reduction and bounds nothing.
+pub(super) const MAX_HOLD_NS: u64 = 600_000_000;
+
+/// The hold must outlast the window the filter measures over, or a burst
+/// would be re-measured as quiet before the hold it started could expire.
+const _: () = assert!(MAX_HOLD_NS > RESPONSE_WINDOW_NS);
 
 /// Headroom numerator and denominator applied to a utilisation-derived rate.
 ///
@@ -147,19 +202,65 @@ pub(super) fn proportional_hz(limits: &CpuFreqLimits, util: u64) -> u64 {
     u64::try_from(clamped).unwrap_or(limits.max_hz)
 }
 
-/// The rate to ask for, given the machine's busiest CPU and whether a boost
-/// is still live.
+/// The rate to ask for, given the machine's busiest CPU and whether a launch
+/// boost is still live.
 ///
 /// `boosted` is decided by the caller against its own clock, so this stays
-/// pure. A boost is the maximum outright rather than a scaled figure: its
-/// whole purpose is that no measurement yet describes the work that just
-/// arrived.
+/// pure. Two cases ask for the ceiling outright rather than scaling up to it:
+/// a launch, because no measurement yet describes the program that is
+/// starting, and a machine past [`BUSY_THRESHOLD`], because it has already
+/// shown it wants the whole range.
 #[must_use]
 pub(super) fn target_hz(limits: &CpuFreqLimits, peak_util: u64, boosted: bool) -> u64 {
-    if boosted {
+    if boosted || peak_util > BUSY_THRESHOLD {
         limits.max_hz
     } else {
         proportional_hz(limits, peak_util)
+    }
+}
+
+/// The rate to publish, given what [`target_hz`] wants and what is already
+/// published.
+///
+/// A reduction off the ceiling is refused until the ceiling has been held for
+/// [`MAX_HOLD_NS`]; `at_max_since` is when the published rate last became the
+/// maximum, and is ignored when the published rate is not the maximum. A
+/// *rise* is never delayed — the hold exists to stop the rate flapping off the
+/// top, not to slow it reaching it.
+#[must_use]
+pub(super) fn held_target_hz(
+    limits: &CpuFreqLimits,
+    want_hz: u64,
+    published_hz: u64,
+    at_max_since: u64,
+    now_ns: u64,
+) -> u64 {
+    // One definition of "is the ceiling held": a second spelling here could
+    // disagree with the deadline the waiter parks on.
+    if hold_expiry(limits, want_hz, published_hz, at_max_since, now_ns).is_some() {
+        limits.max_hz
+    } else {
+        want_hz
+    }
+}
+
+/// When a hold on the ceiling expires, or [`None`] when nothing is held.
+///
+/// The waiter parks on this: while the ceiling is held nothing else can move
+/// the published rate, so the expiry is the only event worth waking for.
+#[must_use]
+pub(super) fn hold_expiry(
+    limits: &CpuFreqLimits,
+    want_hz: u64,
+    published_hz: u64,
+    at_max_since: u64,
+    now_ns: u64,
+) -> Option<u64> {
+    let expiry = at_max_since.saturating_add(MAX_HOLD_NS);
+    if published_hz == limits.max_hz && want_hz < limits.max_hz && now_ns < expiry {
+        Some(expiry)
+    } else {
+        None
     }
 }
 
@@ -298,10 +399,29 @@ mod tests {
     }
 
     #[test]
-    fn a_boost_asks_for_the_maximum_however_idle_the_machine_looks() {
+    fn a_launch_boost_asks_for_the_maximum_however_idle_the_machine_looks() {
         let limits = pi4();
         assert_eq!(target_hz(&limits, 0, true), limits.max_hz);
         assert_eq!(target_hz(&limits, 0, false), limits.min_hz);
+    }
+
+    #[test]
+    fn a_low_duty_cycle_asks_for_the_minimum() {
+        // The reported defect, at the policy level: an idle desktop showing a
+        // live monitor sits at about one percent of a core, and must ask for
+        // the floor. It already did — every load under about a third asks for
+        // the minimum once the headroom and the clamp are applied — which is
+        // why no utilisation threshold was added: the rate was pinned by a
+        // wake boost that never let this arithmetic run.
+        let limits = pi4();
+        for percent in [1u64, 2, 5, 10] {
+            let util = UTIL_ONE * percent / 100;
+            assert_eq!(
+                proportional_hz(&limits, util),
+                limits.min_hz,
+                "{percent}% of a core asked for more than the floor"
+            );
+        }
     }
 
     #[test]

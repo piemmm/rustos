@@ -48,11 +48,21 @@ mechanism moved out to user space.
   publish-and-park loop.
 * `estimate.rs` — the live-clock estimator (unchanged in role; see below).
 
-**Behaviour.** Work arriving on an idle CPU raises the rate to the maximum at
-once. Sustained partial load settles proportionally. A program launch holds
-the maximum across the load and start, which is mostly spent waiting on a
-volume rather than accruing utilisation. A machine that falls quiet walks back
-to the minimum a step per response window and then takes no wakeup at all.
+**Behaviour.** The rate follows measured utilisation: `1.25 × max × util`,
+quantised to the mechanism's step and clamped, so anything under about a third
+of a core asks for the floor on a Pi 4B. Sustained work climbs as the filter
+fills. A machine past `BUSY_THRESHOLD` (half a core) is given the ceiling
+outright, and once the ceiling is asked for it is held for `MAX_HOLD_NS`
+(600 ms) — both operator decisions, trading some power for the top of the
+range. A program launch holds the maximum across the load and start, which is
+mostly spent waiting on a volume rather than accruing utilisation. A machine
+that falls quiet walks back to the minimum a step per response window and then
+takes no wakeup at all.
+
+**Leaving idle grants no rate.** A CPU that wakes for a millisecond and parks
+again has not earned the top rate, and only the filter can tell that apart
+from real work because only the filter measures it. A wake merely tells the
+waiter to start looking again.
 
 **Nothing arms a timer.** The dispatch loop already brackets idle exactly, so
 both hooks ride transitions it was making anyway, and the filter is advanced
@@ -83,16 +93,46 @@ per-CPU slot lookup and one relaxed load per dispatch step.
   interrupt handler runs touches that lock.
 * *A sequence, not the rate, is what a driver waits on.* Firmware clamps and
   rounds, so "block until target equals what I applied" would spin forever.
-* *One policy constant.* `RESPONSE_WINDOW_NS` (100 ms) is the filter's time
-  constant, the boost window, and the step-down pacing — the same question
-  asked three ways.
+* *One policy constant, and one cadence derived from it.*
+  `RESPONSE_WINDOW_NS` (100 ms) is the filter's time constant, the launch-boost
+  window, and the step-down pacing — the same question asked three ways —
+  with `ACTIVE_REVIEW_NS` a quarter of it.
 * *The bind seeds a clean slate plus a boost.* A filter dated time zero would
   read the whole boot as idle and ask for the *minimum* on a machine that is
   demonstrably busy launching the driver; and on a re-bind a CPU recorded
   active under the previous binding would count as busy forever.
-* *Boost-on-wake does not degenerate here.* On a kernel whose CPUs wake for
-  housekeeping every stray tick would re-stamp the boost. TAIRiX is tickless,
-  so a wake really is work arriving.
+* *No boost on a wake — the first revision got this wrong.* It granted the
+  maximum for a window on every idle→active edge, and each edge pushed the
+  deadline further out, so any machine waking more than ten times a second —
+  an idle desktop with a compositor and a clock — sat at its ceiling for ever
+  at one percent load, warm enough for the firmware to start soft-throttling.
+  The reasoning behind it (TAIRiX is tickless, so a wake really is work) was
+  true but did not license the conclusion: a wake says *something* happened,
+  never how much. Only measurement answers that.
+* *A busy CPU is looked at, not waited for.* Work that never stops produces no
+  transition, so while any CPU is active the waiter revisits the target four
+  times per window (`ACTIVE_REVIEW_NS`). That is the coarsest cadence that
+  still shows the ramp — with the headroom applied the filter must move
+  several percent of full scale to shift the target one step — and it bounds a
+  climb to a handful of round trips rather than one per step. A quiet machine
+  arms none of it. The idle→active edge stamps `ATTENTION_UNTIL_NS`, which
+  grants no rate and only bounds how often leaving idle costs a task wake.
+* *The two top-of-range rules compound, by design.* Exceeding half a core
+  takes just over 50 ms of work inside the 100 ms window, and that alone buys
+  600 ms at the ceiling, so a workload bursting that hard twice a second sits
+  at the maximum more or less continuously. The operator chose that trade;
+  it is the first thing to revisit if a board runs hot.
+* *The hold runs from arrival at the ceiling, and blocks only reductions.* It
+  is stamped on the transition into the maximum and cleared on the way out, so
+  a machine that simply stays at the top cannot keep extending its own hold,
+  and a rise is never delayed. While it stands nothing else can move the
+  published rate, so it is also the waiter's park deadline — one review at the
+  expiry rather than six inside it.
+* *The launch boost is the one thing measurement cannot answer,* and there is
+  exactly one `spawn` syscall, so every launch goes through it. The stamp sits
+  behind both of the spawn path's authority checks and grants nothing a caller
+  did not have: a principal that may start a program may equally pin the clock
+  by running work that deserves it.
 
 **The filter is not composable.** The blend is linear in the span's length,
 so the same duty cycle switched coarsely and finely settle to slightly

@@ -17,11 +17,18 @@
 //!
 //! # What the machine does
 //!
-//! Work arriving on an idle CPU raises the rate to the maximum at once;
-//! sustained partial load settles proportionally to measured utilisation;
-//! launching a program holds the maximum across the load and start, which is
-//! mostly spent waiting on a volume rather than accruing utilisation; and a
-//! machine that falls quiet walks back down to the minimum a step at a time.
+//! The rate follows measured utilisation: a machine that is a few percent
+//! busy asks for the floor, one that is fully busy asks for the ceiling, and
+//! one in between asks proportionally. Sustained work climbs as the filters
+//! fill, and a machine that falls quiet walks back down a step at a time.
+//!
+//! Leaving idle is *not* itself a reason to go fast — a CPU that wakes for a
+//! millisecond and parks again has not earned the top rate, and treating
+//! every wake as if it had pinned an idle desktop at its ceiling. Starting a
+//! **program** is the exception, because it is latency-critical before it has
+//! run an instruction and spends most of its time waiting on a volume where
+//! no utilisation accrues, so the kernel commits to the maximum outright for
+//! that.
 //!
 //! None of it arms a timer. The dispatch loop already brackets idle exactly,
 //! so both hooks below ride transitions the loop was making anyway, and the

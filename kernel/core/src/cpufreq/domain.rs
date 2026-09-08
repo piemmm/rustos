@@ -10,26 +10,25 @@
 //!
 //! The dispatch loop's idle brackets run thousands of times a second on every
 //! CPU, so they take no lock and do no survey. Each one folds *its own* CPU's
-//! utilisation through per-CPU atomics, and on the idle→active edge extends
-//! [`BOOST_UNTIL_NS`] with one `fetch_max`. A wake is flagged only when the
-//! previous boost had already lapsed, which bounds wakes to one per
-//! [`RESPONSE_WINDOW_NS`] however often the machine idles and wakes: while a
-//! boost is live the published target is already the maximum, so there is
-//! nothing to tell the mechanism.
+//! utilisation through per-CPU atomics, and asks nothing for it: leaving idle
+//! grants no rate here, only [`attention`], which flags a task wake at most
+//! once per [`ACTIVE_REVIEW_NS`] however often the machine idles.
 //!
 //! Deciding the rate needs every CPU's utilisation, which is O(number of
-//! CPUs) — so it happens in the waiter, under the binding lock, at most once
-//! per window per direction. Holding the lock across that survey is what
-//! makes the sequence and the rate advance together, with no pair a reader
-//! can catch half-updated and no second copy of either. Nothing an interrupt
-//! handler runs touches this lock.
+//! CPUs) — so it happens in the waiter, under the binding lock. Holding the
+//! lock across that [`survey`] is what makes the sequence and the rate
+//! advance together, with no pair a reader can catch half-updated and no
+//! second copy of either. Nothing an interrupt handler runs touches this
+//! lock.
 //!
 //! # Bounded without a caller pacing it
 //!
-//! [`wait`] parks with a deadline of its own choosing: one window ahead while
-//! the target is above the minimum, and none once it has settled there. So a
-//! quiescing machine walks down a step per window and then sleeps until real
-//! work arrives, and the driver needs neither a timeout argument nor a poll.
+//! [`wait`] parks with a deadline of its own choosing: the active cadence
+//! while work is running, a window while the rate is above the floor and
+//! decaying, and none once it has settled at the floor with nothing running.
+//! So a busy machine's rate climbs as its filters fill, a quiescing one walks
+//! back down a step per window, and a quiet one sleeps until real work
+//! arrives — and the driver needs neither a timeout argument nor a poll.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -38,7 +37,9 @@ use tairix_abi::Errno;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
-use super::governor::{fold, target_hz, RESPONSE_WINDOW_NS, UTIL_ONE};
+use super::governor::{
+    fold, held_target_hz, hold_expiry, target_hz, ACTIVE_REVIEW_NS, RESPONSE_WINDOW_NS,
+};
 use crate::cpu_state::{self, CpuState};
 
 /// The live mechanism binding.
@@ -53,6 +54,10 @@ struct Binding {
     /// Both live here so they can never be read out of step.
     target_hz: u64,
     seq: u64,
+    /// Monotonic time [`Self::target_hz`] last *became* the maximum, or `0`
+    /// while it is not the maximum. Set on the transition only, so a machine
+    /// that stays at the ceiling cannot keep extending its own hold.
+    at_max_since: u64,
 }
 
 /// The one binding, or `None` when the machine has no mechanism.
@@ -66,9 +71,20 @@ static BINDING: SpinLock<Option<Binding>> = SpinLock::new(None);
 /// anything to account for".
 static BOUND: AtomicBool = AtomicBool::new(false);
 
-/// Monotonic time the current boost expires. A wake or a launch extends it;
-/// nothing shortens it.
-static BOOST_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
+/// Monotonic time the current launch boost expires. Only starting a program
+/// extends it, and nothing shortens it.
+static LAUNCH_BOOST_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic time until which the waiter has already been told the machine is
+/// active, so a further wake has nothing to add.
+///
+/// This grants no rate. It bounds how often leaving idle costs a task wake —
+/// one per [`ACTIVE_REVIEW_NS`] however often the machine idles and resumes —
+/// and, because a wake inside the span is therefore *not* flagged, it is also
+/// a promise [`next_review`] must keep: the waiter may not park indefinitely
+/// while it stands, or a CPU that resumed inside the span would have no edge
+/// left to announce it.
+static ATTENTION_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
 
 /// The next binding handle to issue. Monotonic from one, so a handle left
 /// over from a released binding cannot name the next one, and zero is never
@@ -99,6 +115,7 @@ pub(crate) fn bind(process: ProcessId, limits: CpuFreqLimits, now_ns: u64) -> Re
         // the first decision therefore always publishes.
         target_hz: 0,
         seq: 0,
+        at_max_since: 0,
     });
 
     // Start every filter from a clean slate dated *now*, and cover the window
@@ -119,7 +136,11 @@ pub(crate) fn bind(process: ProcessId, limits: CpuFreqLimits, now_ns: u64) -> Re
         state.gov_util.store(0, Ordering::Relaxed);
         state.gov_folded_ns.store(now_ns, Ordering::Relaxed);
     }
-    BOOST_UNTIL_NS.store(now_ns.saturating_add(RESPONSE_WINDOW_NS), Ordering::Relaxed);
+    // The mechanism driver is itself a program that has just been started, so
+    // the machine is demonstrably busy: the same boost a launch gets covers
+    // the window the filters take to fill.
+    LAUNCH_BOOST_UNTIL_NS.store(now_ns.saturating_add(RESPONSE_WINDOW_NS), Ordering::Relaxed);
+    ATTENTION_UNTIL_NS.store(now_ns.saturating_add(ACTIVE_REVIEW_NS), Ordering::Relaxed);
     // Arm the idle path last, once the binding behind it exists.
     BOUND.store(true, Ordering::Release);
     Ok(handle)
@@ -139,24 +160,25 @@ pub(crate) fn release_process(process: ProcessId) -> bool {
     // nothing at all, so nothing accounts against a binding being torn down.
     BOUND.store(false, Ordering::Release);
     *slot = None;
-    BOOST_UNTIL_NS.store(0, Ordering::Relaxed);
+    LAUNCH_BOOST_UNTIL_NS.store(0, Ordering::Relaxed);
+    ATTENTION_UNTIL_NS.store(0, Ordering::Relaxed);
     true
 }
 
 /// Account for a CPU's idle→active edge at `now_ns`.
 ///
 /// The caller ([`super::note_active`]) owns the edge detection, since the
-/// live-clock estimator needs the same edge on every port. This folds the idle
-/// span that just ended into the CPU's filter and extends the boost, so work
-/// that has just arrived is served at full speed rather than at whatever rate
-/// the quiet machine had settled to. One relaxed load on a machine with no
-/// mechanism bound.
+/// live-clock estimator needs the same edge on every port. This folds the
+/// idle span that just ended into the CPU's filter and makes sure the waiter
+/// is looking; it grants no rate, because leaving idle says only that
+/// *something* happened, not that it is worth the clock. One relaxed load on
+/// a machine with no mechanism bound.
 pub(crate) fn on_active_edge(state: &CpuState, now_ns: u64) {
     if !BOUND.load(Ordering::Acquire) {
         return;
     }
     fold_span(state, now_ns, false);
-    demand_rose(now_ns);
+    attention(now_ns);
 }
 
 /// Account for a CPU's active→idle edge at `now_ns` — the mirror of
@@ -182,21 +204,30 @@ pub(crate) fn note_launch(now_ns: u64) {
     if !BOUND.load(Ordering::Acquire) {
         return;
     }
-    demand_rose(now_ns);
+    let until = now_ns.saturating_add(RESPONSE_WINDOW_NS);
+    let previous = LAUNCH_BOOST_UNTIL_NS.fetch_max(until, Ordering::Relaxed);
+    // While a boost is live the published target is already the maximum, so
+    // there is nothing to say; a lapsed one means the rate may have decayed
+    // and the mechanism must be told. Stamping before testing is what makes
+    // that safe — a waiter mid-decision has either not yet read the boost,
+    // and will before it parks, or has already published the maximum.
+    if previous <= now_ns {
+        crate::waitq::cpufreq_wake();
+    }
+    attention(now_ns);
 }
 
-/// Extend the boost to a window past `now_ns`, and tell the mechanism if it
-/// does not already know.
+/// Make sure the waiter is looking at the machine, without asking for a rate.
 ///
-/// The wake is flagged only when the previous boost had *lapsed*. While one
-/// is live the published target is already the maximum, so there is nothing
-/// to say — which is what bounds wakes to one per window however often the
-/// machine idles. Stamping before testing is what makes that safe: a waiter
-/// mid-decision has either not yet read the boost, and will before it parks,
-/// or has already published the maximum.
-fn demand_rose(now_ns: u64) {
-    let until = now_ns.saturating_add(RESPONSE_WINDOW_NS);
-    let previous = BOOST_UNTIL_NS.fetch_max(until, Ordering::Relaxed);
+/// A CPU that stays busy produces no further transition, so the rise has to
+/// be looked for; the waiter does that on its own cadence while any CPU is
+/// active, and this is what restarts that cadence after the machine has been
+/// fully quiescent. The wake is flagged only when the waiter has *not* been
+/// told recently, which bounds it to one per [`ACTIVE_REVIEW_NS`] however
+/// often the machine idles and resumes.
+fn attention(now_ns: u64) {
+    let until = now_ns.saturating_add(ACTIVE_REVIEW_NS);
+    let previous = ATTENTION_UNTIL_NS.fetch_max(until, Ordering::Relaxed);
     if previous <= now_ns {
         crate::waitq::cpufreq_wake();
     }
@@ -230,34 +261,71 @@ fn util_at(state: &CpuState, now_ns: u64) -> u64 {
     fold(util, now_ns.saturating_sub(folded_ns), active_since != 0)
 }
 
-/// The busiest CPU's utilisation as of `now_ns`.
-///
-/// The machine has one clock, so the busiest CPU sets the rate: scaling to an
-/// average would under-serve a single-threaded workload on an otherwise idle
-/// machine, which is most of what a desktop does.
-fn peak_util(now_ns: u64) -> u64 {
-    let mut peak = 0;
-    for state in cpu_state::states() {
-        let util = util_at(state, now_ns);
-        if util > peak {
-            peak = util;
-        }
-        if peak == UTIL_ONE {
-            break;
-        }
-    }
-    peak
+/// What one survey of the machine found: the busiest CPU's utilisation as of
+/// `now_ns`, and whether any CPU is running work.
+struct Survey {
+    peak_util: u64,
+    any_active: bool,
 }
 
-/// When a settled target could next change on its own.
+/// Survey every CPU as of `now_ns`.
 ///
-/// A target above the minimum can fall as utilisation decays, so it is
-/// revisited a window later. One already at the minimum with no boost live
-/// cannot move until real work arrives, so it carries no deadline at all and
-/// the machine takes no wakeup.
-fn next_review(limits: &CpuFreqLimits, target: u64, now_ns: u64, boost_until: u64) -> u64 {
-    if now_ns < boost_until {
-        boost_until
+/// The busiest CPU sets the rate, because the machine has one clock: scaling
+/// to an average would under-serve a single-threaded workload on an otherwise
+/// idle machine, which is most of what a desktop does. Whether anything is
+/// running comes from the same pass, since it costs nothing extra and decides
+/// whether the rise is still worth looking for.
+fn survey(now_ns: u64) -> Survey {
+    let mut found = Survey {
+        peak_util: 0,
+        any_active: false,
+    };
+    for state in cpu_state::states() {
+        if state.cpu_active_since.load(Ordering::Relaxed) != 0 {
+            found.any_active = true;
+        }
+        let util = util_at(state, now_ns);
+        if util > found.peak_util {
+            found.peak_util = util;
+        }
+    }
+    found
+}
+
+/// When the answer could next change, and so when to look again.
+///
+/// Five cases, in order. A held ceiling comes first: while the minimum hold
+/// stands nothing else can move the published rate, so its expiry is the only
+/// event worth waking for. A live launch boost expires at a known instant, so
+/// that is the next thing to reconsider. Work that is still running produces
+/// no transition to observe, so a busy machine is revisited on the active
+/// cadence — that is what turns a rising filter into a rising rate. An
+/// `attention_until` still in the future must be honoured even when nothing
+/// looks busy right now, because a wake inside that span is deliberately not
+/// flagged: this deadline is what promises the look instead, and without it a
+/// CPU that resumed just after a survey found the machine quiet could stay
+/// busy indefinitely at the floor with no edge left to announce it. Otherwise
+/// the rate can only fall as utilisation decays, which takes a window; and
+/// once it has reached the floor with nothing running and nothing promised,
+/// nothing can move it until real work arrives, so the machine takes no
+/// wakeup at all.
+fn next_review(
+    limits: &CpuFreqLimits,
+    target: u64,
+    now_ns: u64,
+    launch_until: u64,
+    attention_until: u64,
+    any_active: bool,
+    held_until: Option<u64>,
+) -> u64 {
+    if let Some(expiry) = held_until {
+        expiry
+    } else if now_ns < launch_until {
+        launch_until
+    } else if any_active {
+        now_ns.saturating_add(ACTIVE_REVIEW_NS)
+    } else if now_ns < attention_until {
+        attention_until
     } else if target > limits.min_hz {
         now_ns.saturating_add(RESPONSE_WINDOW_NS)
     } else {
@@ -293,18 +361,49 @@ pub(crate) trait TargetWaiter {
 /// [`Errno::NotFound`] when the binding is absent, held by another process,
 /// or named by a different handle.
 fn review(process: ProcessId, handle: u64, now_ns: u64) -> Result<(u64, u64, u64), Errno> {
-    let boost_until = BOOST_UNTIL_NS.load(Ordering::Relaxed);
+    let launch_until = LAUNCH_BOOST_UNTIL_NS.load(Ordering::Relaxed);
     let mut slot = BINDING.lock();
     let bound = match slot.as_mut() {
         Some(bound) if bound.process == process && bound.handle == handle => bound,
         _ => return Err(Errno::NotFound),
     };
-    let target = target_hz(&bound.limits, peak_util(now_ns), now_ns < boost_until);
+    let found = survey(now_ns);
+    let want = target_hz(&bound.limits, found.peak_util, now_ns < launch_until);
+    let held_until = hold_expiry(
+        &bound.limits,
+        want,
+        bound.target_hz,
+        bound.at_max_since,
+        now_ns,
+    );
+    let target = held_target_hz(
+        &bound.limits,
+        want,
+        bound.target_hz,
+        bound.at_max_since,
+        now_ns,
+    );
     if bound.target_hz != target {
+        // The hold runs from the instant the ceiling was reached, so it is
+        // stamped on the way in and cleared on the way out — never refreshed
+        // by a machine that simply stays there.
+        bound.at_max_since = if target == bound.limits.max_hz {
+            now_ns
+        } else {
+            0
+        };
         bound.target_hz = target;
         bound.seq += 1;
     }
-    let review_at = next_review(&bound.limits, target, now_ns, boost_until);
+    let review_at = next_review(
+        &bound.limits,
+        target,
+        now_ns,
+        launch_until,
+        ATTENTION_UNTIL_NS.load(Ordering::Relaxed),
+        found.any_active,
+        held_until,
+    );
     Ok((bound.seq, target, review_at))
 }
 

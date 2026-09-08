@@ -42,15 +42,65 @@ hardware through the same capability-gated paths any driver uses.
 
 | Situation | Rate asked for |
 |---|---|
-| A CPU leaves idle | the maximum, at once |
 | A program is launched | the maximum, across the load and start |
-| Sustained load, utilisation `u` | `1.25 × max × u`, rounded up to a step |
+| The busiest CPU past half busy | the maximum, outright |
+| Load with utilisation `u` | `1.25 × max × u`, rounded up to a step |
+| Sustained load | climbs as the filter fills, reaching the maximum |
+| Just reached the maximum | held there for at least 600 ms |
 | Every CPU idle for a window | walks down a step per window to the minimum |
-| Settled at the minimum | unchanged, and no wakeup is armed |
+| Settled at the minimum, nothing running | unchanged, and no wakeup is armed |
 
 The quarter of headroom is `schedutil`'s: a CPU saturated at its current rate
 cannot report how much faster it wanted to go, so the target overshoots to
-find out.
+find out. With that headroom and the clamp, anything under about a third of a
+core already asks for the floor on a 600–1500 MHz part.
+
+### Past half busy, and the hold at the top
+
+Two operator decisions shape the top of the range, both trading some power for
+throughput and latency.
+
+The proportional rate reaches the ceiling on its own only at four fifths of a
+core, which leaves a genuinely busy machine climbing through rates it will not
+stay at. **Past half a core the ceiling is asked for outright.**
+
+And **once the ceiling is asked for it is held for at least 600 ms.** Arriving
+at the top and dropping straight off again costs a mechanism round trip in each
+direction and serves the part of the burst that mattered at the lower rate; six
+tenths of a second spans several bursts of a workload that is intermittent at
+the filter's own granularity, so the rate stops flapping there. The hold runs
+from the instant the ceiling was reached and is never refreshed by a machine
+that simply stays there, and it never delays a *rise* — it exists to stop the
+rate coming off the top, not to slow it getting there. While it stands nothing
+else can move the published rate, so the waiter parks on its expiry.
+
+Together they are deliberately biased toward the top of the range: exceeding
+half a core takes just over 50 ms of work inside the filter's 100 ms window,
+and that alone buys 600 ms at the ceiling. A workload that bursts that hard
+every half second will sit at the maximum more or less continuously. That is
+the intended trade — responsiveness over power — and it is the first place to
+look if a board runs hotter than expected.
+
+### Leaving idle is not a reason to go fast
+
+A CPU that wakes to do a millisecond of work and parks again has not earned
+the top rate, and only the filter can tell that apart from real work, because
+only the filter measures it. So a wake grants no rate: it merely tells the
+governor to start looking again.
+
+An earlier revision did grant the maximum for a window on every wake, and
+because each wake pushed the deadline further out, any machine waking more
+than ten times a second — an idle desktop with a compositor and a clock — sat
+at its ceiling permanently at one percent load, warm enough for the firmware
+to start soft-throttling. Utilisation never got a say.
+
+### Why work that keeps running still speeds up
+
+Work that never stops produces no transition to observe, so the rise has to be
+looked for rather than waited for. While any CPU is active the waiter revisits
+the target four times per window, which is the coarsest cadence that still
+shows the ramp: it bounds a climb to a handful of mechanism round trips
+instead of one per step, and it arms nothing at all on a quiet machine.
 
 ### Utilisation without a tick
 
@@ -59,7 +109,8 @@ resumes in one place — so every span between transitions is wholly busy or
 wholly idle. Each transition folds its own CPU's span into a per-CPU filter
 weighted by how long it lasted, and reading the filter folds the span since
 the last commit at the moment somebody asks. So an idle CPU's utilisation
-decays with nothing armed to make it happen, and the kernel stays tickless.
+decays with nothing armed to make it happen, and a busy one's rises as it
+runs, with no periodic timer behind either.
 
 The filter carries the duty cycle across idle: a task that runs 2 ms in every
 100 ms holds its CPU near 2%, so a low-duty background service does not read
@@ -67,11 +118,19 @@ as a busy machine.
 
 ### The launch boost
 
-A program launch is latency-sensitive before it has done anything measurable,
-and much of it is spent waiting on the volume the bundle is read from — during
-which every CPU can be idle and no utilisation accrues at all. The `spawn`
-path therefore stamps the boost directly, after the authority check so a
-refused caller cannot raise the machine's clock by asking.
+A program launch is the one case measurement cannot answer. It is
+latency-critical before it has run an instruction, and most of what follows
+waits on the volume the executable is read from — during which every CPU can
+be idle and no utilisation accrues at all. So the kernel commits to the
+maximum for one window at the point it starts an executable.
+
+There is exactly one `spawn` syscall, so every launch goes through it: the
+shell, the taskbar, the file manager, `appmgr` starting a bundle, and `devmgr`
+autoloading a driver. The stamp sits behind *both* of the spawn path's
+authority checks, so a caller the kernel refused cannot raise the machine's
+clock by asking — and it grants nothing a caller did not already have, since a
+principal that may start a program may equally pin the clock by running work
+that genuinely deserves it.
 
 ### Cost when nothing is bound
 
