@@ -33,7 +33,7 @@ use crate::model::{OwnerBundles, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, HealthSeverity, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
-    BlockBody, DeviceAction, DeviceGroup, DeviceId, HeroInstrument, PaneBlock, PaneHero,
+    BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice, StorageId, TaskCostColumn,
 };
 
@@ -235,7 +235,7 @@ pub(super) fn device(
     let service = meters.devices.volume_service(id);
     ResourceDevice {
         id,
-        group: DeviceGroup::Storage,
+        group: RailGroup::Storage,
         // The rail states how full the device is, not how fast: a reader
         // scanning the rail is choosing which device to look at, and its
         // trace beside this already carries the rate.

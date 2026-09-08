@@ -29,7 +29,7 @@ use super::{build_resource_report, used_permille};
 use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{OwnerBundles, RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
-use crate::view::resources::{BlockBody, DeviceGroup, DeviceId, HeroInstrument, StorageId};
+use crate::view::resources::{BlockBody, DeviceId, HeroInstrument, RailGroup, StorageId};
 use crate::view::{
     HealthSeverity, Reading, ReadingFact, ResourceDevice, ResourceReport, Unmeasured,
 };
@@ -266,11 +266,11 @@ fn the_rail_always_carries_the_processor_memory_graphics_and_machine_panes() {
     assert!(!report
         .devices
         .iter()
-        .any(|device| device.group == DeviceGroup::Storage));
+        .any(|device| device.group == RailGroup::Storage));
     assert!(!report
         .devices
         .iter()
-        .any(|device| device.group == DeviceGroup::Network));
+        .any(|device| device.group == RailGroup::Network));
 }
 
 /// The rail's `Storage` entries, in rail order, with their names.
@@ -278,7 +278,7 @@ fn storage(report: &ResourceReport) -> Vec<(DeviceId, alloc::string::String)> {
     report
         .devices
         .iter()
-        .filter(|d| d.group == DeviceGroup::Storage)
+        .filter(|d| d.group == RailGroup::Storage)
         .map(|d| (d.id, d.name.clone()))
         .collect()
 }
@@ -299,7 +299,7 @@ fn the_rail_grows_one_entry_per_discovered_device_and_interface() {
         report
             .devices
             .iter()
-            .filter(|d| d.group == DeviceGroup::Network)
+            .filter(|d| d.group == RailGroup::Network)
             .count(),
         3
     );

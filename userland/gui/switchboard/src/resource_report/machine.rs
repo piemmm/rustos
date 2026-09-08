@@ -19,7 +19,7 @@ use crate::model::display_name;
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
-    BlockBody, DeviceAction, DeviceGroup, DeviceId, PaneBlock, PaneHero, ResourceControl,
+    BlockBody, DeviceAction, DeviceId, PaneBlock, PaneHero, RailGroup, ResourceControl,
     ResourceDevice,
 };
 
@@ -30,7 +30,7 @@ pub(super) fn identity(sample: &Sample) -> ResourceDevice {
     });
     ResourceDevice {
         id: DeviceId::Identity,
-        group: DeviceGroup::Machine,
+        group: RailGroup::Machine,
         name: String::from("Identity & uptime"),
         kind: PressureKind::Cpu,
         reading: uptime.clone(),
@@ -61,7 +61,7 @@ pub(super) fn sessions(sample: &Sample) -> ResourceDevice {
     let seats = seat_count(sample);
     ResourceDevice {
         id: DeviceId::Sessions,
-        group: DeviceGroup::Machine,
+        group: RailGroup::Machine,
         name: String::from("Sessions & seats"),
         kind: PressureKind::Network,
         reading: seats.clone(),
@@ -180,7 +180,7 @@ pub(super) fn authority(sample: &Sample, caps: &dyn CapabilityQuery) -> Resource
         + u32::from(sample.scopes.hardware_scope);
     ResourceDevice {
         id: DeviceId::Authority,
-        group: DeviceGroup::Machine,
+        group: RailGroup::Machine,
         name: String::from("Permissions & limits"),
         kind: PressureKind::Memory,
         reading: Reading::measured(held.to_string()),

@@ -24,10 +24,7 @@ use tairix_input::{InputEvent, Key};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
-use tairix_controls::{
-    ActionRail, Button, ButtonContent, ComboBox, RailAction, StatusPill, Tab, TabGroupAbsence,
-    Tabs, TabsAction, TabsOrientation,
-};
+use tairix_controls::{ActionRail, Button, ButtonContent, RailAction, StatusPill};
 
 use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH};
 use super::refresh::restate_rail;
@@ -40,7 +37,7 @@ mod device;
 mod pane;
 
 pub use device::{
-    DeviceAction, DeviceGroup, DeviceId, PressureBanner, ResourceControl, ResourceDevice,
+    DeviceAction, DeviceId, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
     ResourceReport, StorageId, TaskCostColumn,
 };
 pub use pane::{
@@ -50,15 +47,9 @@ pub use pane::{
 
 pub(super) use pane::PaneItem;
 
-/// The rail's logical width: wide enough for the longest device name beside
-/// its reading at the reference density, and narrow enough that the rail,
-/// the pane and the action column all still seat in the smallest window the
-/// panel allows.
-const SIDEBAR_WIDTH: u32 = 168;
-
-/// The band `ComboBox`'s logical width, which replaces the rail's *route*
-/// when the frame sheds the sidebar.
-const BAND_COMBO_WIDTH: u32 = 132;
+/// The pressure banner's relief-command width, wide enough at the reference
+/// density for the longest relief a banner offers.
+const RELIEF_BUTTON_WIDTH: u32 = 132;
 
 /// The action rail's caption. The rail control carries no caption of its own,
 /// so the section seats it in the surface's shared titled block.
@@ -67,8 +58,6 @@ const RAIL_TITLE: &str = "DEVICE ACTIONS";
 /// Which of the section's cursor stops the keyboard is on.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Stop {
-    /// A device entry in the rail, by its index in the report.
-    Device(usize),
     /// The pressure banner's relief command.
     Relief,
     /// A command in the trailing action rail, by its slot.
@@ -78,8 +67,6 @@ enum Stop {
 /// What one [`ResourcesSection::rebuild`] changed, so its caller reports
 /// exactly the regions the screen now owes.
 struct Rebuilt {
-    /// The device rail's own entries moved: the sidebar owes a repaint.
-    rail: bool,
     /// The selected device's commands moved: the action column owes one.
     rail_column: bool,
     /// The pane owes a repaint whole, rather than item by item.
@@ -95,12 +82,6 @@ pub(super) struct ResourcesSection {
     /// The report every pane is drawn from, kept so a device switch needs no
     /// fresh sample.
     pub(super) report: ResourceReport,
-    /// The device rail. Its entries are a *window* of the report, starting
-    /// at [`Self::rail_offset`], so a hundred-core machine's rail scrolls
-    /// rather than drawing past its own column.
-    pub(super) rail: Tabs,
-    /// The first device the rail's window shows.
-    pub(super) rail_offset: usize,
     /// The session's own account root, which resolves the icon of a consumer
     /// loaded from this user's own program store.
     pub(super) home: Option<alloc::string::String>,
@@ -117,9 +98,6 @@ pub(super) struct ResourcesSection {
     pub(super) actions: ActionRail,
     /// The banner's relief command, when the selected device wears a banner.
     pub(super) relief: Option<Button>,
-    /// The device chooser the band grows when the frame sheds the rail, so
-    /// losing the rail never loses a pane.
-    pub(super) band_combo: ComboBox,
     /// Where the content cursor is.
     pub(super) focus: usize,
     /// Which of the focused stop's actions the keyboard is on.
@@ -132,14 +110,11 @@ impl ResourcesSection {
         let mut section = Self {
             home: None,
             report: ResourceReport::default(),
-            rail: Tabs::new(Vec::new()).with_orientation(TabsOrientation::Vertical),
-            rail_offset: 0,
             selected: None,
             items: Vec::new(),
             compiled_for: (0, Scale::ONE),
             actions: ActionRail::new(Vec::new()),
             relief: None,
-            band_combo: ComboBox::new(Vec::new()),
             focus: 0,
             action: 0,
         };
@@ -148,7 +123,7 @@ impl ResourcesSection {
     }
 
     /// The selected device, or [`None`] when the report holds none.
-    fn device(&self) -> Option<&ResourceDevice> {
+    pub(super) fn device(&self) -> Option<&ResourceDevice> {
         let id = self.selected?;
         self.report.devices.iter().find(|device| device.id == id)
     }
@@ -162,15 +137,6 @@ impl ResourcesSection {
     /// Rebuild the rail, the chooser, the commands and the pane flow from
     /// the report and the current selection.
     fn rebuild(&mut self) -> Rebuilt {
-        // Restated rather than replaced: the strip holds where the pointer is,
-        // which entry it rests on and which one a press is waiting for, and a
-        // fresh strip would know none of them — so a sample landing between a
-        // reader's motion and their press would swallow the click and drop the
-        // lift from under the pointer.
-        let rail_moved =
-            self.rail
-                .restate(build_rail(&self.report, self.rail_offset, self.selected));
-        self.band_combo = build_combo(&self.report.devices, self.selected_index());
         let commands = self
             .device()
             .map(|device| device.actions.iter().map(build_command).collect())
@@ -201,7 +167,6 @@ impl ResourcesSection {
             rail_column = true;
         }
         Rebuilt {
-            rail: rail_moved,
             rail_column,
             pane: pane_moved,
             retired,
@@ -217,11 +182,6 @@ impl ResourcesSection {
         let Some(ctx) = sweep.ctx() else {
             return;
         };
-        if rebuilt.rail {
-            if let Some(sidebar) = ctx.frame.sidebar {
-                sweep.report(sidebar);
-            }
-        }
         if rebuilt.rail_column {
             if let Some(rail) = ctx.frame.rail {
                 sweep.report(rail);
@@ -263,12 +223,25 @@ impl ResourcesSection {
     /// The cursor's stops, in the order Up/Down walks them: the rail's
     /// device entries, then the banner's relief, then the commands.
     fn stops(&self) -> Vec<Stop> {
-        let mut stops: Vec<Stop> = (0..self.report.devices.len()).map(Stop::Device).collect();
+        let mut stops: Vec<Stop> = Vec::new();
         if self.relief.is_some() {
             stops.push(Stop::Relief);
         }
         stops.extend((0..self.actions.len()).map(Stop::Rail));
         stops
+    }
+
+    /// Select the device `id` names, wherever it sits in the report.
+    ///
+    /// The rail addresses a device by its own identity rather than by a row,
+    /// so a sample that reorders the report cannot land the reader on a
+    /// different device than the one they chose. A device the report no
+    /// longer names changes nothing (fail closed).
+    pub(super) fn select_device(&mut self, id: DeviceId, sweep: &mut Sweep<'_, '_>) {
+        let Some(index) = self.report.devices.iter().position(|d| d.id == id) else {
+            return;
+        };
+        self.select(index, sweep);
     }
 
     /// The stop at cursor `index`.
@@ -286,26 +259,12 @@ impl ResourcesSection {
             return;
         };
         self.selected = Some(device.id);
-        self.keep_in_window(index);
         let rebuilt = self.rebuild();
         // The pane, its commands and the rail's own marks all describe the
         // device that is selected, so switching device owes every one of them
         // — a selection that reported only the strip's own lift would leave
         // the reader reading the previous device's pane.
         self.report_refresh(&rebuilt, sweep);
-    }
-
-    /// Scroll the rail's window so the device at `index` is inside it.
-    fn keep_in_window(&mut self, index: usize) {
-        if index < self.rail_offset {
-            self.rail_offset = index;
-        }
-    }
-
-    /// The rail's rectangle, or the empty one when the frame seated no
-    /// sidebar: drawn nowhere reports nothing.
-    fn rail_rect(frame: &SectionFrame) -> Rect {
-        frame.sidebar.unwrap_or(Rect::new(0, 0, 0, 0))
     }
 
     /// Where the pane's own flow draws: the primary column, below the
@@ -329,7 +288,7 @@ impl ResourcesSection {
             return None;
         }
         let band = Rect::new(primary.left(), primary.top(), primary.width, height);
-        let button_w = scale.scale_length(BAND_COMBO_WIDTH).min(band.width);
+        let button_w = scale.scale_length(RELIEF_BUTTON_WIDTH).min(band.width);
         let button_h = scale
             .scale_length(theme.metrics().control_height)
             .min(band.height);
@@ -414,109 +373,6 @@ impl ResourcesSection {
     }
 }
 
-/// The rail's entries: a window of the report from `offset`, each carrying
-/// its own reading and trace, and a group heading on the entry that *starts*
-/// its group so a heading can never point at one that is not there.
-///
-/// A group the report has no devices for still appears, stating why it is
-/// empty: a reader must be able to tell a machine with no such device from a
-/// session that was refused the inventory.
-fn build_rail(report: &ResourceReport, offset: usize, selected: Option<DeviceId>) -> Tabs {
-    let devices = &report.devices;
-    let mut tabs = Vec::new();
-    let mut previous: Option<DeviceGroup> = None;
-    for (index, device) in devices.iter().enumerate() {
-        let starts_group = previous != Some(device.group);
-        previous = Some(device.group);
-        if index < offset {
-            continue;
-        }
-        let mut tab = Tab::new(device.name.clone())
-            .with_reading(crate::view::reading::reading_text(&device.reading));
-        if starts_group {
-            tab = tab.with_group(device.group.heading());
-        }
-        if !device.trend.is_empty() {
-            tab = tab.with_trend(
-                tairix_controls::Chart::new(device.kind).with_samples(device.trend.iter().copied()),
-            );
-        }
-        tabs.push(tab);
-    }
-    let mut rail = Tabs::new(tabs)
-        .with_orientation(TabsOrientation::Vertical)
-        .with_absences(rail_absences(report, offset));
-    if let Some(id) = selected {
-        if let Some(position) = devices
-            .iter()
-            .position(|device| device.id == id)
-            .and_then(|index| index.checked_sub(offset))
-        {
-            rail.adopt_selected(position);
-        }
-    }
-    rail
-}
-
-/// The empty groups the rail states, in rail order.
-///
-/// Only `Storage` and `Network` can be empty: the processor and the machine's
-/// memory always answer, the display path always has a pane, and the
-/// `Machine` group is facts about the session. Each is stated whether the
-/// query was refused or simply found nothing — the two read differently, and
-/// silence reads as neither.
-fn rail_absences(report: &ResourceReport, offset: usize) -> Vec<TabGroupAbsence> {
-    [
-        (
-            DeviceGroup::Storage,
-            report.storage_absent,
-            "storage device",
-        ),
-        (
-            DeviceGroup::Network,
-            report.interfaces_absent,
-            "managed interface",
-        ),
-    ]
-    .into_iter()
-    .filter(|(group, _, _)| !report.devices.iter().any(|device| device.group == *group))
-    .map(|(group, refusal, subject)| {
-        let statement = match refusal {
-            Some(reason) => crate::view::reading::absence_statement(subject, reason),
-            None => alloc::format!("No {subject} is present."),
-        };
-        TabGroupAbsence::new(
-            group.heading(),
-            statement,
-            group_start(report, group, offset),
-        )
-    })
-    .collect()
-}
-
-/// The rail position an empty `group` would have started at, within the
-/// window from `offset`: before the first seated device of a later group, or
-/// last where no later group has one.
-fn group_start(report: &ResourceReport, group: DeviceGroup, offset: usize) -> usize {
-    report
-        .devices
-        .iter()
-        .enumerate()
-        .skip(offset)
-        .position(|(_, device)| device.group > group)
-        .unwrap_or(report.devices.len().saturating_sub(offset))
-}
-
-/// The band's device chooser, holding the same device set the rail does.
-fn build_combo(devices: &[ResourceDevice], selected: Option<usize>) -> ComboBox {
-    let mut combo =
-        ComboBox::new(devices.iter().map(|d| d.name.clone()).collect()).with_placeholder("Device");
-    if let Some(index) = selected {
-        combo.set_selected(index);
-    }
-    combo
-}
-
 /// One command as a [`Button`], refused visibly when the caller cannot take
 /// it so the reader learns before attempting it.
 fn build_command(action: &DeviceAction) -> Button {
@@ -531,8 +387,7 @@ impl SectionView for ResourcesSection {
     /// band so no destination is lost.
     fn anatomy(&self) -> SectionAnatomy {
         SectionAnatomy {
-            band_summary: None,
-            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_width: 0,
             header_height: 0,
             detail_width: 0,
             impact_width: 0,
@@ -549,16 +404,13 @@ impl SectionView for ResourcesSection {
         self.home.clone_from(&model.home);
         self.selected =
             resolve_selection(previous, self.report.devices.iter().map(|device| device.id));
-        self.rail_offset = self
-            .rail_offset
-            .min(self.report.devices.len().saturating_sub(1));
         let rebuilt = self.rebuild();
         self.report_refresh(&rebuilt, sweep);
         // The cursor is put back on the same *kind* of stop, so a device
         // cursor follows the device it was on rather than staying on a
         // number that now names a different one.
         self.focus = match stop {
-            Some(Stop::Device(_)) | None => self.selected_index().unwrap_or(0),
+            None => 0,
             Some(Stop::Relief) => self
                 .stops()
                 .iter()
@@ -620,13 +472,8 @@ impl SectionView for ResourcesSection {
         self.focus
     }
 
-    /// Move the cursor, selecting the device a rail stop names so the pane
-    /// and the commands always describe the entry the reader is on.
-    fn set_content_focus(&mut self, index: usize, sweep: &mut Sweep<'_, '_>) {
+    fn set_content_focus(&mut self, index: usize, _sweep: &mut Sweep<'_, '_>) {
         self.focus = index;
-        if let Some(Stop::Device(row)) = self.stop_at(index) {
-            self.select(row, sweep);
-        }
     }
 
     fn row_action(&self) -> usize {
@@ -650,10 +497,6 @@ impl SectionView for ResourcesSection {
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
         match self.stop_at(self.focus)? {
-            Stop::Device(row) => {
-                self.select(row, &mut Sweep::reporting(ctx, damage));
-                None
-            }
             Stop::Relief => {
                 let _ = damage;
                 // The button decides for itself whether it may fire, so a
@@ -676,9 +519,6 @@ impl SectionView for ResourcesSection {
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
-        if let Some(rect) = ctx.frame.sidebar {
-            self.rail.render(surface, rect, ctx.scale, ctx.theme);
-        }
         let mut pane = Self::pane_rect(&ctx.frame);
         if let Some((band, button)) = self.banner_layout(&ctx.frame, ctx.scale, ctx.theme) {
             self.render_banner(surface, band, button, ctx);
@@ -722,21 +562,6 @@ impl SectionView for ResourcesSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        if let Some(rect) = ctx.frame.sidebar {
-            if let Some(action) = self
-                .rail
-                .on_pointer(event, rect, ctx.scale, ctx.theme, damage)
-            {
-                match action {
-                    TabsAction::Selected { index } => {
-                        let row = self.rail_offset.saturating_add(index);
-                        self.focus = row;
-                        self.select(row, &mut Sweep::reporting(ctx, damage));
-                        return None;
-                    }
-                }
-            }
-        }
         if let Some((_, button)) = self.banner_layout(&ctx.frame, ctx.scale, ctx.theme) {
             if let Some(relief) = self.relief.as_mut() {
                 if relief.on_pointer(event, button, damage).is_some() {
@@ -778,23 +603,5 @@ impl SectionView for ResourcesSection {
             relief.set_focused(on_relief);
             relief.set_in_focus_field(on_relief);
         }
-        // A rail entry the reader has navigated away from must not keep its
-        // ring lit under content nobody is looking at.
-        let device = match stop {
-            Some(Stop::Device(row)) => row.checked_sub(self.rail_offset),
-            _ => None,
-        };
-        match sweep.ctx {
-            Some(ctx) => {
-                let rail = Self::rail_rect(&ctx.frame);
-                self.rail
-                    .set_current(device, rail, ctx.scale, ctx.theme, sweep.damage);
-            }
-            None => self.rail.adopt_current(device),
-        }
     }
 }
-
-#[cfg(test)]
-#[path = "rail_tests.rs"]
-mod rail_tests;

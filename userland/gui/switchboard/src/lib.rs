@@ -150,9 +150,9 @@ pub use service::{
     SESSION_REFUSED,
 };
 pub use view::{
-    ActionVerdict, BlockBody, DeviceAction, DeviceGroup, DeviceId, HealthSeverity, PaneBlock,
-    PaneHero, PressureBanner, Reading, ReadingFact, RecoveryControl, RecoveryItem, ResourceControl,
-    ResourceDevice, ResourceReport, Section, Switchboard, SwitchboardAction, SwitchboardModel,
-    TaskSummary, Unmeasured,
+    ActionVerdict, BlockBody, DeviceAction, DeviceId, HealthSeverity, PaneBlock, PaneHero,
+    PressureBanner, RailGroup, Reading, ReadingFact, RecoveryControl, RecoveryItem,
+    ResourceControl, ResourceDevice, ResourceReport, Section, Switchboard, SwitchboardAction,
+    SwitchboardModel, TaskSummary, Unmeasured,
 };
 pub use wait::{required_members, WaitToken};

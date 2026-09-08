@@ -1,7 +1,7 @@
-//! Unit tests for the device rail: that a group with no entries states why
-//! it is empty, in its own rail position, that stating it shifts no entry's
-//! index, and that pressing an entry selects it and repaints the pane it
-//! now draws.
+//! Unit tests for the surface's navigation rail: that a group with no
+//! entries states why it is empty, in its own rail position, that stating it
+//! shifts no entry's index, and that pressing an entry selects it and
+//! repaints the pane it now draws.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -12,10 +12,9 @@ use tairix_theme::Theme;
 
 use tairix_controls::{damage, PressureKind};
 
-use super::{build_rail, rail_absences};
 use crate::view::reading::{Reading, Unmeasured};
 use crate::view::resources::{
-    DeviceGroup, DeviceId, PaneHero, ResourceDevice, ResourceReport, StorageId,
+    DeviceId, PaneHero, RailGroup, ResourceDevice, ResourceReport, StorageId,
 };
 use crate::view::test_support::{
     bounds, centre, click, font, model, moved, refresh, shot, unreported_change, PRESS, RELEASE,
@@ -24,7 +23,7 @@ use crate::view::{Section, Switchboard};
 
 /// A bare rail entry in `group`, with no instrument and no pane detail: this
 /// suite is about which groups the rail states, not what a pane draws.
-fn entry(id: DeviceId, group: DeviceGroup, name: &str) -> ResourceDevice {
+fn entry(id: DeviceId, group: RailGroup, name: &str) -> ResourceDevice {
     ResourceDevice {
         id,
         group,
@@ -55,8 +54,8 @@ fn report(
 /// The processor and the machine's memory, which always answer.
 fn resources() -> Vec<ResourceDevice> {
     alloc::vec![
-        entry(DeviceId::Cpu, DeviceGroup::Resources, "CPU"),
-        entry(DeviceId::Memory, DeviceGroup::Resources, "Memory"),
+        entry(DeviceId::Cpu, RailGroup::Resources, "CPU"),
+        entry(DeviceId::Memory, RailGroup::Resources, "Memory"),
     ]
 }
 
@@ -64,19 +63,42 @@ fn resources() -> Vec<ResourceDevice> {
 fn disk() -> ResourceDevice {
     entry(
         DeviceId::Storage(StorageId::Device(7)),
-        DeviceGroup::Storage,
+        RailGroup::Storage,
         "virtio-blk · ARXFSRoot",
     )
 }
 
 /// The graphics entry, which always has a pane.
 fn graphics() -> ResourceDevice {
-    entry(DeviceId::Graphics, DeviceGroup::Graphics, "Compositor")
+    entry(DeviceId::Graphics, RailGroup::Graphics, "Compositor")
 }
 
 /// Each stated absence as `(heading, statement)`, in rail order.
+/// The rail the shell builds for `report`, with `selected` showing.
+fn rail_for(report: &ResourceReport, selected: DeviceId) -> tairix_controls::Tabs {
+    let mut model = model();
+    model.resources = report.clone();
+    let mut screen = Switchboard::new(&model);
+    screen.select_section(Section::Resources);
+    screen
+        .resources
+        .select_device(selected, &mut super::Sweep::adopting(&mut damage::sink()));
+    screen.build_rail(&model)
+}
+
+fn absences(report: &ResourceReport) -> Vec<tairix_controls::TabGroupAbsence> {
+    let mut model = model();
+    model.resources = report.clone();
+    let screen = Switchboard::new(&model);
+    screen.rail_absences(&model)
+}
+
 fn stated(report: &ResourceReport) -> Vec<(String, String)> {
-    rail_absences(report, 0)
+    let mut model = model();
+    model.resources = report.clone();
+    let screen = Switchboard::new(&model);
+    screen
+        .rail_absences(&model)
         .iter()
         .map(|absence| {
             (
@@ -93,7 +115,7 @@ fn a_group_with_entries_states_no_absence() {
         alloc::vec![
             resources().remove(0),
             disk(),
-            entry(DeviceId::Interface([0; 16]), DeviceGroup::Network, "eth0"),
+            entry(DeviceId::Interface([0; 16]), RailGroup::Network, "eth0"),
             graphics(),
         ],
         None,
@@ -150,15 +172,15 @@ fn an_empty_group_is_stated_in_its_own_rail_position() {
     let mut devices = resources();
     devices.push(graphics());
     let report = report(devices, None, None);
-    let absences = rail_absences(&report, 0);
+    let absences = absences(&report);
     let storage = absences
         .iter()
         .find(|absence| absence.heading() == "STORAGE")
         .expect("the empty storage group is stated");
     assert_eq!(
         storage.before(),
-        2,
-        "before the graphics entry, after the two resources entries"
+        3,
+        "before the graphics entry, after Tasks and the two resources entries"
     );
 }
 
@@ -168,12 +190,12 @@ fn a_trailing_empty_group_is_stated_last() {
     let mut devices = resources();
     devices.push(disk());
     let report = report(devices, None, None);
-    let absences = rail_absences(&report, 0);
+    let absences = absences(&report);
     let network = absences
         .iter()
         .find(|absence| absence.heading() == "NETWORK")
         .expect("the empty network group is stated");
-    assert_eq!(network.before(), 3);
+    assert_eq!(network.before(), 4);
 }
 
 #[test]
@@ -184,14 +206,27 @@ fn stating_an_absence_shifts_no_entry_index() {
     let mut devices = resources();
     devices.push(graphics());
     let report = report(devices, Some(Unmeasured::NotPermitted), None);
-    let rail = build_rail(&report, 0, Some(DeviceId::Graphics));
-    assert_eq!(rail.len(), 3, "three entries, two stated absences");
+    let rail = rail_for(&report, DeviceId::Graphics);
+    assert_eq!(rail.len(), 5, "Tasks, two resources, graphics, Recovery");
     assert_eq!(rail.absences().len(), 2);
     assert_eq!(
         rail.selected(),
-        Some(2),
-        "the graphics entry is the third *item*, whatever is drawn between them"
+        Some(3),
+        "the graphics entry is the fourth *item*, whatever is drawn between them"
     );
+}
+
+/// Adopting the same readings twice must leave the rail alone: a strip that
+/// restated as "moved" every sample would repaint the whole column once a
+/// second for nothing.
+#[test]
+fn adopting_the_same_readings_twice_does_not_move_the_rail() {
+    let m = model();
+    let mut sb = Switchboard::new(&m);
+    let _ = shot(&mut sb);
+    let before = sb.rail.clone();
+    let _ = refresh(&mut sb, &m);
+    assert_eq!(sb.rail, before, "the same model must rebuild the same rail");
 }
 
 /// The screen on the Resources section, showing the shared fixture report.
@@ -202,34 +237,25 @@ fn resources_screen() -> Switchboard {
     sb
 }
 
-/// The window point that hits rail entry `index`, read from the strip's own
-/// layout so a test aims where the screen really seats the entry.
+/// The window point that hits the rail entry for *device* `index`, read from
+/// the strip's own layout so a test aims where the screen really seats it.
+///
+/// Offset past the Tasks entry that leads the rail, so a suite about devices
+/// counts devices rather than rail rows.
 fn rail_point(sb: &Switchboard, index: usize) -> (i32, i32) {
     let theme = Theme::dark();
     let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
-    let sidebar = ctx
-        .frame
-        .sidebar
-        .expect("the fixture window seats a sidebar");
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let area = sb
-        .resources
         .rail
-        .tab_area(index, sidebar, Scale::ONE, &theme)
+        .tab_area(index + 1, layout.rail, Scale::ONE, &theme)
         .expect("the entry is seated");
     centre(area)
 }
 
-/// The sidebar's own rectangle in the fixture window.
-fn sidebar_rect(sb: &Switchboard) -> Rect {
-    let theme = Theme::dark();
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
-    ctx.frame
-        .sidebar
-        .expect("the fixture window seats a sidebar")
+/// The navigation rail's own rectangle in the fixture window.
+fn rail_rect() -> Rect {
+    Switchboard::compute_layout(bounds(), Scale::ONE, &Theme::dark()).rail
 }
 
 /// Feed one event to the screen, accumulating what it reports into `reported`.
@@ -300,7 +326,7 @@ fn a_sample_keeps_the_lift_under_a_resting_pointer() {
     let _ = refresh(&mut sb, &model());
     let after = shot(&mut sb);
     assert_eq!(
-        unreported_change(&before, &after, sidebar_rect(&sb), &damage::sink()),
+        unreported_change(&before, &after, rail_rect(), &damage::sink()),
         None,
         "an identical sample must leave the rail's own pixels alone"
     );
@@ -311,6 +337,19 @@ fn the_keyboard_reports_the_pane_it_selects_onto() {
     // The cursor on a rail entry *is* the selection, so Down owes the new
     // pane exactly as a press does.
     let mut sb = resources_screen();
+    // The rail is a focus region of its own, reached by cycling Tab round
+    // from the content to the scrollbar and on to the rail.
+    let mut discard = damage::sink();
+    for _ in 0..2 {
+        sb.on_key(
+            Key::Named(NamedKey::Tab),
+            bounds(),
+            Scale::ONE,
+            &Theme::dark(),
+            font(),
+            &mut discard,
+        );
+    }
     let before = shot(&mut sb);
     let mut reported = damage::sink();
     sb.on_key(
@@ -357,7 +396,7 @@ fn the_pressure_banner_draws_nothing_outside_the_pane() {
     );
     let bannered = shot(&mut sb);
 
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
     let pane = ctx.frame.primary;
     let rail = ctx.frame.rail.expect("the fixture window seats a rail");
@@ -383,12 +422,12 @@ fn the_pressure_banner_draws_nothing_outside_the_pane() {
 #[test]
 fn a_rebuilt_rail_leaves_the_readers_cursor_alone() {
     let report = report(resources(), None, None);
-    let rail = build_rail(&report, 0, Some(DeviceId::Memory));
+    let rail = rail_for(&report, DeviceId::Memory);
 
     assert_eq!(
         rail.selected(),
-        Some(1),
-        "the rail shows the selected device"
+        Some(2),
+        "the rail shows the selected device, one past the Tasks entry"
     );
     assert_eq!(
         rail.current(),

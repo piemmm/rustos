@@ -19,7 +19,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{BlockBody, CoreCell, HeroInstrument, PaneBlock, PaneHero};
 use crate::view::resources::{
-    DeviceAction, DeviceGroup, DeviceId, ResourceControl, ResourceDevice, TaskCostColumn,
+    DeviceAction, DeviceId, RailGroup, ResourceControl, ResourceDevice, TaskCostColumn,
 };
 
 /// The processor's rail entry and pane.
@@ -37,7 +37,7 @@ pub(super) fn device(
     let history = meters.system.cpu_history().to_vec();
     ResourceDevice {
         id: DeviceId::Cpu,
-        group: DeviceGroup::Resources,
+        group: RailGroup::Resources,
         name: String::from("CPU"),
         kind: PressureKind::Cpu,
         reading: busy.clone(),

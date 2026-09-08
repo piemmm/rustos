@@ -19,7 +19,7 @@ use crate::model::{display_name, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
-    BlockBody, DeviceAction, DeviceGroup, DeviceId, HeroInstrument, PaneBlock, PaneHero,
+    BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice,
 };
 
@@ -38,7 +38,7 @@ pub(super) fn device(
     let total = rate.map(|rate| rate.rx_bps.saturating_add(rate.tx_bps));
     ResourceDevice {
         id,
-        group: DeviceGroup::Network,
+        group: RailGroup::Network,
         name: display_name(trim_nul(&iface.name)),
         kind: PressureKind::Network,
         reading: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),

@@ -361,7 +361,10 @@ pub const PANEL_TITLE: &str = "Switchboard";
 /// binary opens and resizes the window with it, and the QEMU vertical's
 /// host-side scan-out assertion measures the panel's region against it —
 /// so the drawn window and the pixels a test looks at cannot disagree.
-pub const WIN_WIDTH: u32 = 760;
+///
+/// Wider than it was by the navigation rail, so the window still opens with
+/// the room a section's own anatomy had beside it.
+pub const WIN_WIDTH: u32 = 760 + crate::view::RAIL_WIDTH;
 
 /// The overview window's initial client height in physical pixels (see
 /// [`WIN_WIDTH`]).
@@ -385,12 +388,14 @@ pub const WIN_SIZING: WindowSizing = WindowSizing::Resizable {
 /// its own window back up would fight the drag once per pointer sample.
 ///
 /// The floor is what every section's primary column must still seat — the
-/// widest unshrinkable row-command strip any section declares. The optional
-/// columns beside it (a detail pane, an impact column, an action rail) are
-/// shed in the section frame's drop order when they do not fit, so they do
-/// not set this floor; a row whose inline commands would be pushed off its
-/// own edge has nothing left to shed and does.
-pub const MIN_WIN_WIDTH: u32 = 640;
+/// widest unshrinkable row-command strip any section declares — plus the
+/// navigation rail, which is never shed because it is the only route between
+/// subjects. The optional columns beside the primary (a detail pane, an
+/// impact column, an action rail) are shed in the section frame's drop order
+/// when they do not fit, so they do not set this floor; a row whose inline
+/// commands would be pushed off its own edge has nothing left to shed and
+/// does.
+pub const MIN_WIN_WIDTH: u32 = 640 + crate::view::RAIL_WIDTH;
 
 /// The shortest client height the panel is laid out for (see
 /// [`MIN_WIN_WIDTH`]).

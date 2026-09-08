@@ -166,6 +166,13 @@ fn scroll_offset(panel: &Panel) -> u64 {
 
 /// Feed a bare pointer move to the open panel, the way the run loop
 /// delivers a `WindowEvent::Pointer` `Moved` action.
+/// A point `x` into the section's content, past the navigation rail down the
+/// leading edge — so a test aiming at a row lands on one rather than on the
+/// rail that chooses which list the rows belong to.
+fn in_content(x: i32, y: i32) -> Point {
+    Point::new(x + i32::try_from(crate::view::RAIL_WIDTH).unwrap_or(0), y)
+}
+
 fn pointer_move(panel: &mut Panel, to: Point) {
     panel.on_pointer(
         &InputEvent::PointerMoved { to },
@@ -293,37 +300,41 @@ fn refreshing_with_a_changed_model_redraws_and_keeps_the_section() {
 }
 
 #[test]
-fn refreshing_a_section_that_is_not_on_show_draws_nothing() {
+fn a_reading_from_another_subject_repaints_the_rail_and_not_the_window() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, empty_model());
     open(&mut panel, &mut host, CommandSection::Recovery);
-    let presents = host.presents;
 
-    // A task appears, which only the Tasks section draws.
+    // A task appears. The rail states every subject's reading whichever one
+    // is on show, so this is on screen even from Recovery — but it is one
+    // column of it, never the window.
     panel.refresh(&host, task_model(10));
     panel.flush(&mut host);
 
-    assert_eq!(
-        host.presents, presents,
-        "a reading no shown section draws must not repaint the window"
+    let rect = host.last_presented_rect().expect("the rail moved");
+    assert!(
+        rect.width_px < host.bounds.2,
+        "another subject's reading costs the rail, never the client: {rect:?}"
     );
     assert_eq!(panel.section(), Some(Section::Recovery));
 }
 
 #[test]
-fn a_fresh_frame_reading_draws_nothing_while_tasks_is_on_show() {
+fn a_fresh_frame_reading_costs_the_rail_and_not_the_window() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, frame_model(3_200));
     open(&mut panel, &mut host, CommandSection::Tasks);
-    let presents = host.presents;
 
     panel.refresh(&host, frame_model(6_400));
     panel.flush(&mut host);
 
-    assert_eq!(
-        host.presents, presents,
-        "the session reports a frame per compositor frame, and only the \
-         System section draws it"
+    // The session reports a frame per compositor frame, and the display
+    // path's own trace rides the rail, so each one costs that column — which
+    // is why it must never cost the client.
+    let rect = host.last_presented_rect().expect("the rail moved");
+    assert!(
+        rect.width_px < host.bounds.2,
+        "a frame reading costs the rail, never the client: {rect:?}"
     );
 }
 
@@ -696,7 +707,7 @@ fn a_hover_presents_the_control_it_crossed_rather_than_the_window() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     assert_eq!(host.last_presented_rect(), Some(whole_client(&host)));
 
-    pointer_move(&mut panel, Point::new(40, 200));
+    pointer_move(&mut panel, in_content(40, 200));
     panel.flush(&mut host);
 
     let rect = host.last_presented_rect().expect("the hover presented");
@@ -768,7 +779,7 @@ fn a_hover_report_does_not_survive_into_the_next_present() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, busy_model(100));
     open(&mut panel, &mut host, CommandSection::Tasks);
-    pointer_move(&mut panel, Point::new(40, 200));
+    pointer_move(&mut panel, in_content(40, 200));
     panel.flush(&mut host);
 
     // Nothing reported this time, so the account is clean and the only thing
@@ -784,7 +795,7 @@ fn discarded_pixels_are_redrawn_whole() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, busy_model(100));
     open(&mut panel, &mut host, CommandSection::Tasks);
-    pointer_move(&mut panel, Point::new(40, 200));
+    pointer_move(&mut panel, in_content(40, 200));
 
     panel.repaint_whole();
     panel.flush(&mut host);

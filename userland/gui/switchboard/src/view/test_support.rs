@@ -18,8 +18,8 @@ use tairix_controls::{
 use tairix_icon::NoArtwork;
 
 use super::resources::{
-    BlockBody, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceGroup, DeviceId,
-    HeroInstrument, PaneBlock, PaneHero, PressureBanner, ResourceControl, ResourceDevice,
+    BlockBody, CompositionPart, ConsumerRow, CoreCell, DeviceAction, DeviceId, HeroInstrument,
+    PaneBlock, PaneHero, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
     ResourceReport, StorageId, TaskCostColumn,
 };
 use super::{
@@ -107,7 +107,7 @@ pub(super) fn resource_report() -> ResourceReport {
 fn cpu_device() -> ResourceDevice {
     ResourceDevice {
         id: DeviceId::Cpu,
-        group: DeviceGroup::Resources,
+        group: RailGroup::Resources,
         name: alloc::string::String::from("CPU"),
         kind: PressureKind::Cpu,
         reading: Reading::measured("18%"),
@@ -161,7 +161,7 @@ fn cpu_device() -> ResourceDevice {
 fn memory_device() -> ResourceDevice {
     ResourceDevice {
         id: DeviceId::Memory,
-        group: DeviceGroup::Resources,
+        group: RailGroup::Resources,
         name: alloc::string::String::from("Memory"),
         kind: PressureKind::Memory,
         reading: Reading::measured("53%"),
@@ -212,7 +212,7 @@ fn memory_device() -> ResourceDevice {
 fn storage_device() -> ResourceDevice {
     ResourceDevice {
         id: DeviceId::Storage(StorageId::Device(0x5953_2001)),
-        group: DeviceGroup::Storage,
+        group: RailGroup::Storage,
         name: alloc::string::String::from("nvme0"),
         kind: PressureKind::Disk,
         reading: Reading::measured("72%"),
@@ -250,7 +250,7 @@ fn storage_device() -> ResourceDevice {
 fn machine_device() -> ResourceDevice {
     ResourceDevice {
         id: DeviceId::Identity,
-        group: DeviceGroup::Machine,
+        group: RailGroup::Machine,
         name: alloc::string::String::from("Identity & uptime"),
         kind: PressureKind::Cpu,
         reading: Reading::measured("2h 12m"),
@@ -353,7 +353,9 @@ pub(super) fn refresh(sb: &mut Switchboard, model: &SwitchboardModel) -> Region 
 }
 
 pub(super) fn bounds() -> Rect {
-    Rect::new(0, 0, 600, 400)
+    // The navigation rail is chrome every section pays for, so a fixture that
+    // still seats a section's own anatomy beside it is wider by exactly that.
+    Rect::new(0, 0, 600 + crate::view::RAIL_WIDTH, 400)
 }
 
 pub(super) fn centre(rect: Rect) -> (i32, i32) {
@@ -369,7 +371,7 @@ pub(super) fn centre(rect: Rect) -> (i32, i32) {
 /// from the section's own list geometry, so a test aims where the screen
 /// really seats the card rather than at a rectangle of its own invention.
 pub(super) fn card_slot(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> Rect {
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, theme);
     let info = sb.list_info(&layout, Scale::ONE, theme);
     info.item_rect(u32::try_from(index).unwrap_or(0))
 }
@@ -509,7 +511,7 @@ pub(super) fn report(sb: &mut Switchboard, event: &InputEvent) -> Region {
 pub(super) fn activate(sb: &mut Switchboard, key: Key) -> Option<SectionOutcome> {
     let theme = Theme::dark();
     let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let ctx = sb.section_ctx(&layout, b, Scale::ONE, &theme, font());
     sb.active_mut()
         .activate_focused(key, ctx, &mut damage::sink())
@@ -526,7 +528,7 @@ pub(super) fn task_rail_rects(
     scale: Scale,
     theme: &Theme,
 ) -> alloc::vec::Vec<Rect> {
-    let layout = sb.compute_layout(b, scale, theme);
+    let layout = Switchboard::compute_layout(b, scale, theme);
     let ctx = sb.section_ctx(&layout, b, scale, theme, font());
     sb.tasks.rail_item_rects(&ctx)
 }
@@ -539,7 +541,7 @@ pub(super) fn task_row_point(
     theme: &Theme,
     row: usize,
 ) -> (i32, i32) {
-    let layout = sb.compute_layout(b, scale, theme);
+    let layout = Switchboard::compute_layout(b, scale, theme);
     let info = sb.list_info(&layout, scale, theme);
     centre(info.item_rect(u32::try_from(row).unwrap_or(0)))
 }

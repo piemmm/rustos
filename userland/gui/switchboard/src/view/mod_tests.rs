@@ -20,15 +20,13 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::testkit::high_contrast;
-use tairix_controls::{
-    ActivityState, ControlDisposition, Crumb, PressureState, RecoveryState, SelectionState,
-};
+use tairix_controls::{ActivityState, ControlDisposition, PressureState, RecoveryState};
 
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, refresh,
-    report, resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point,
+    bounds, centre, click, focus_task_row, font, key, model, moved, pointer, refresh, report,
+    resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point,
     unreported_change, PRESS, RELEASE,
 };
 use super::{
@@ -66,42 +64,42 @@ fn inert_point() -> (i32, i32) {
     (bounds().right() + 10, bounds().bottom() + 10)
 }
 
-/// A point inside the client but clear of the open section list.
+/// The active section's list metrics at the test bounds.
+/// A screen showing `model` on the Tasks section.
 ///
-/// The list is a popup anchored under the location band and overlaying the
-/// content, so "press somewhere else" has to be measured against the popup
-/// the composition actually drew, not against a corner of the content that
-/// the popup may well cover.
-fn off_menu_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let menu = sb.section_menu.as_ref().expect("the list is open");
-    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme);
-    let y = rect.bottom() + 4;
-    assert!(
-        y < layout.content.bottom(),
-        "the probe must stay inside the content"
-    );
-    (layout.content.left() + 4, y)
+/// The surface opens on Resources, whose pane is a flow of instrument items
+/// rather than a list of rows. A test about rows — hover, focus rings, the
+/// pixels a press moves — says which list it means rather than relying on
+/// whichever subject leads the rail.
+fn on_tasks(model: &SwitchboardModel) -> Switchboard {
+    let mut sb = Switchboard::new(model);
+    sb.select_section(Section::Tasks);
+    sb
 }
 
-/// The active section's list metrics at the test bounds.
 fn list_info(sb: &Switchboard, theme: &Theme) -> super::ListInfo {
-    let layout = sb.compute_layout(bounds(), Scale::ONE, theme);
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, theme);
     sb.list_info(&layout, Scale::ONE, theme)
 }
 
+/// What this machine is doing is the question a monitor is opened to answer,
+/// so the surface leads with it rather than with the task list.
 #[test]
-fn new_starts_on_tasks_at_offset_zero() {
+fn new_starts_on_resources_at_offset_zero() {
     let sb = Switchboard::new(&model());
-    assert_eq!(sb.section(), Section::Tasks);
+    assert_eq!(sb.section(), Section::Resources);
     assert_eq!(sb.scroll_offset(), 0);
+    assert_eq!(
+        sb.resources.selected,
+        model().resources.devices.first().map(|device| device.id),
+        "the rail opens on the processor, the first subject of the devices"
+    );
 }
 
 #[test]
 fn render_paints_content() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
     sb.render(
         &mut surface,
@@ -117,9 +115,8 @@ fn render_paints_content() {
 #[test]
 fn scroll_track_sits_beside_the_content_inside_bounds() {
     let theme = Theme::dark();
-    let sb = Switchboard::new(&model());
     let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     // The content area stops where the scrollbar gutter begins, and the two
     // together stay inside the bounds the compositor carved out.
     assert_eq!(layout.content.right(), layout.scroll.left());
@@ -131,172 +128,25 @@ fn scroll_track_sits_beside_the_content_inside_bounds() {
 #[test]
 fn the_client_content_begins_at_the_top_of_bounds() {
     let theme = Theme::dark();
-    let sb = Switchboard::new(&model());
     let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     // The window manager decorates server-side, so the app draws no title bar
-    // of its own: its first region, the location band, sits at the very top
-    // edge of the bounds it was handed. A re-introduced private title bar
-    // would inset the client and push the band down, failing this.
-    assert_eq!(layout.location.top(), b.top());
-    // And the band really is placed there: its trail, the band's one keyboard
-    // stop, resolves to the first rows of the client.
-    let trail = sb.band(layout.location, &theme, Scale::ONE).trail;
-    assert_eq!(trail.top(), b.top());
-}
-
-/// Open the section list the way a reader does — a click on the location
-/// band's trailing command — and hand back whatever actions that produced.
-fn open_section_list(sb: &mut Switchboard, theme: &Theme) -> alloc::vec::Vec<SwitchboardAction> {
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let command = sb.band(layout.location, theme, Scale::ONE).command;
-    let (x, y) = centre(command);
-    click(sb, b, Scale::ONE, theme, x, y)
-}
-
-/// Open the section list from the other route: a click on the trail's leading
-/// crumb, the ancestor a breadcrumb activates.
-fn open_section_list_from_trail(
-    sb: &mut Switchboard,
-    theme: &Theme,
-) -> alloc::vec::Vec<SwitchboardAction> {
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let trail = sb.band(layout.location, theme, Scale::ONE).trail;
-    let x = trail.left() + 1;
-    let y = centre(trail).1;
-    // Aim through the trail's own hit test, so the click is proven to land on
-    // the leading crumb rather than on a guessed coordinate.
-    assert_eq!(
-        sb.trail
-            .crumb_at(trail, Scale::ONE, theme, Point::new(x, y)),
-        Some(0),
-        "the leading crumb draws at the trail's leading edge"
-    );
-    click(sb, b, Scale::ONE, theme, x, y)
-}
-
-/// The centre of the open section list's row for `section`, read from the
-/// menu's own row geometry rather than a hand-copied position.
-fn section_row_centre(sb: &Switchboard, theme: &Theme, section: Section) -> (i32, i32) {
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, theme);
-    let menu = sb
-        .section_menu
-        .as_ref()
-        .expect("the section list must be open");
-    let rect = Switchboard::popup_rect(menu, layout.location, b, Scale::ONE, theme);
-    let row = menu
-        .row_rect(section.index(), rect, Scale::ONE, theme)
-        .expect("the row must be drawn");
-    centre(row)
-}
-
-#[test]
-fn the_trails_leading_crumb_opens_the_same_section_list() {
-    let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let b = bounds();
-    assert_eq!(
-        open_section_list_from_trail(&mut sb, &theme),
-        alloc::vec::Vec::new()
-    );
-    assert!(
-        sb.section_menu.is_some(),
-        "the leading crumb opens the list"
-    );
-    let (x, y) = section_row_centre(&sb, &theme, Section::Recovery);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert!(actions.contains(&SwitchboardAction::SectionChanged {
-        section: Section::Recovery
-    }));
-    assert_eq!(sb.section(), Section::Recovery);
-}
-
-#[test]
-fn the_location_band_paints_the_trail_and_its_command() {
-    let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let b = bounds();
-    let mut surface = Surface::new(b.width, b.height).expect("surface");
-    sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let band = sb.band(layout.location, &theme, Scale::ONE);
-    let (trail, command) = (band.trail, band.command);
-    assert!(has_ink(&surface, trail), "the trail names the location");
-    assert!(
-        has_ink(&surface, command),
-        "the section-list command is drawn"
-    );
-    assert!(
-        trail.right() < command.left(),
-        "the trail and the command never share a pixel"
-    );
-    assert_eq!(command.right(), layout.location.right());
-}
-
-#[test]
-fn the_trail_names_the_section_on_show() {
-    let mut sb = Switchboard::new(&model());
-    for section in Section::ALL {
-        sb.select_section(section);
-        let labels: alloc::vec::Vec<&str> = sb.trail.crumbs().iter().map(Crumb::label).collect();
-        assert_eq!(labels, alloc::vec!["Switchboard", section.title()]);
-    }
-}
-
-#[test]
-fn the_section_list_marks_the_section_on_show() {
-    let theme = Theme::dark();
-    for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
-        sb.select_section(section);
-        open_section_list(&mut sb, &theme);
-        let menu = sb.section_menu.as_ref().expect("open");
-        assert_eq!(menu.current(), Some(section.index()));
-        for (i, item) in menu.items().iter().enumerate() {
-            let expected = if i == section.index() {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
-            assert_eq!(item.state().selection, expected, "row {i}");
-            assert_eq!(item.label(), Section::ALL[i].title());
-        }
-    }
-}
-
-#[test]
-fn a_press_off_the_section_list_closes_it_and_changes_nothing() {
-    let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let b = bounds();
-    open_section_list(&mut sb, &theme);
-    let (x, y) = off_menu_point(&sb, &theme);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert_eq!(actions, alloc::vec::Vec::new());
-    assert!(sb.section_menu.is_none());
-    assert_eq!(sb.section(), Section::Tasks);
-}
-
-#[test]
-fn choosing_the_section_already_shown_closes_the_list_without_a_change() {
-    let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let b = bounds();
-    open_section_list(&mut sb, &theme);
-    let (x, y) = section_row_centre(&sb, &theme, Section::Tasks);
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert_eq!(actions, alloc::vec::Vec::new());
-    assert!(sb.section_menu.is_none());
-    assert_eq!(sb.section(), Section::Tasks);
+    // of its own: its first region, the navigation rail, sits at the very top
+    // left of the bounds it was handed. A re-introduced private title bar
+    // would inset the client and push it down, failing this.
+    assert_eq!(layout.rail.top(), b.top());
+    assert_eq!(layout.rail.left(), b.left());
+    assert_eq!(layout.content.top(), b.top());
+    // The rail claims the leading edge and the content sits beside it, so no
+    // region overlaps another.
+    assert_eq!(layout.content.left(), layout.rail.right());
+    assert!(layout.scroll.left() >= layout.content.right());
 }
 
 #[test]
 fn wheel_scrolls_the_active_section() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let b = bounds();
     let action = pointer(
         &mut sb,
@@ -315,7 +165,7 @@ fn wheel_scrolls_the_active_section() {
 #[test]
 fn keyboard_scrolls_the_focused_scrollbar() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
     // Render once so the scroll model matches the layout.
     sb.render(
@@ -336,23 +186,10 @@ fn keyboard_scrolls_the_focused_scrollbar() {
 }
 
 #[test]
-fn escape_closes_the_section_list_and_leaves_the_section_alone() {
-    let mut sb = Switchboard::new(&model());
-    for _ in 0..2 {
-        assert_eq!(key(&mut sb, Key::Named(NamedKey::Tab)), None);
-    }
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
-    assert!(sb.section_menu.is_none());
-    assert_eq!(sb.section(), Section::Tasks);
-}
-
-#[test]
 fn no_part_of_the_client_is_left_transparent() {
     let b = bounds();
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let mut surface = Surface::new(b.width, b.height).expect("surface");
         sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
@@ -370,7 +207,7 @@ fn no_part_of_the_client_is_left_transparent() {
 fn the_client_is_laid_over_the_theme_surface_tint() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     assert!(
@@ -417,16 +254,16 @@ fn denied_action_renders_distinct_from_disabled() {
 #[test]
 fn layout_scales_with_the_ui_scale() {
     let theme = Theme::dark();
-    let sb = Switchboard::new(&model());
-    let one = sb.compute_layout(bounds(), Scale::ONE, &theme);
-    let two = sb.compute_layout(bounds(), Scale::from_percent(200).expect("scale"), &theme);
-    assert!(two.location.height > one.location.height);
+    let one = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let two =
+        Switchboard::compute_layout(bounds(), Scale::from_percent(200).expect("scale"), &theme);
+    assert!(two.rail.width > one.rail.width);
 }
 
 #[test]
 fn light_theme_renders() {
     let theme = Theme::light();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
     sb.render(
         &mut surface,
@@ -442,7 +279,7 @@ fn light_theme_renders() {
 #[test]
 fn high_contrast_theme_renders() {
     let theme = high_contrast();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(600, 400).expect("surface");
     sb.render(
         &mut surface,
@@ -456,34 +293,16 @@ fn high_contrast_theme_renders() {
 }
 
 #[test]
-fn press_on_the_location_bands_first_row_reaches_its_command() {
-    let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let b = bounds();
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let command = sb.band(layout.location, &theme, Scale::ONE).command;
-    // The band's very first row of pixels, at the very top of the client.
-    let x = centre(command).0;
-    let y = layout.location.top();
-    let actions = click(&mut sb, b, Scale::ONE, &theme, x, y);
-    assert_eq!(actions, alloc::vec::Vec::new());
-    assert!(
-        sb.section_menu.is_some(),
-        "the press reached the band's section-list command"
-    );
-}
-
-#[test]
 fn window_too_short_for_the_anatomy_still_renders_in_bounds() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     // Shorter than the location band would ordinarily need.
     let b = Rect::new(0, 0, 600, 24);
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     // Must not panic: every region clips to the bounds instead.
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    assert!(layout.location.bottom() <= b.bottom());
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
+    assert!(layout.rail.bottom() <= b.bottom());
     assert!(layout.content.bottom() <= b.bottom());
     assert!(layout.scroll.bottom() <= b.bottom());
 }
@@ -491,7 +310,7 @@ fn window_too_short_for_the_anatomy_still_renders_in_bounds() {
 #[test]
 fn the_minimum_window_size_seats_every_declared_anatomy() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     // The panel clamps a resize up so a section is never drawn into a box that
     // starves what it must keep. What it must keep is its primary column's
     // declared floor: the optional columns beside it are shed in the frame's
@@ -502,7 +321,7 @@ fn the_minimum_window_size_seats_every_declared_anatomy() {
     // row-command strip, sidebar or rail than this floor can hold fails here
     // instead of pushing its own commands off the row on a small window.
     let b = Rect::new(0, 0, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     for section in Section::ALL {
         sb.select_section(section);
         let anatomy = sb.active().anatomy();
@@ -536,7 +355,7 @@ fn select_section_shows_that_section_and_names_it_in_the_trail() {
     let b = bounds();
     let mut painted = alloc::vec::Vec::new();
     for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let changed = sb.select_section(section);
         if section == Section::Tasks {
             assert_eq!(changed, None, "Tasks is what a fresh Switchboard shows");
@@ -544,10 +363,6 @@ fn select_section_shows_that_section_and_names_it_in_the_trail() {
             assert_eq!(changed, Some(SwitchboardAction::SectionChanged { section }));
         }
         assert_eq!(sb.section(), section);
-        assert_eq!(
-            sb.trail.crumbs().last().map(Crumb::label),
-            Some(section.title())
-        );
         let mut surface = Surface::new(b.width, b.height).expect("surface");
         sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         painted.push((section, surface.pixels().to_vec()));
@@ -565,7 +380,7 @@ fn select_section_shows_that_section_and_names_it_in_the_trail() {
 #[test]
 fn select_section_reranges_the_scroll_for_the_new_section() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     // Scroll deep into the long (50-item) Tasks list.
@@ -610,7 +425,7 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
 #[test]
 fn selecting_the_shown_section_changes_nothing() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let b = bounds();
     pointer(
         &mut sb,
@@ -636,10 +451,10 @@ fn selecting_the_shown_section_changes_nothing() {
 #[test]
 fn pointer_after_selection_reaches_the_new_sections_content() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let b = bounds();
     sb.select_section(Section::Recovery);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     // Recovery's commands moved from the row into an anchored rail, so the
     // aim moved with them: the rail sits in a column the Tasks section does
     // not seat at all, so only the new section can answer.
@@ -665,23 +480,23 @@ fn pointer_after_selection_reaches_the_new_sections_content() {
     );
 }
 
+/// Walking the rail onto a subject and asking for its section directly are
+/// the same transition, so they must leave the same state: the rail is the
+/// only route a reader has, and a host that asks for a section must not land
+/// somewhere the rail could not.
 #[test]
 fn direct_selection_and_the_keyboard_path_agree() {
-    let mut by_key = Switchboard::new(&model());
-    let mut direct = Switchboard::new(&model());
-    // Put both on the location band (Content -> Scrollbar -> Location) so the
-    // only difference is how the section is chosen.
+    let mut by_key = on_tasks(&model());
+    let mut direct = on_tasks(&model());
+    // Put both on the rail (Content -> Scrollbar -> Rail) so the only
+    // difference is how the subject is chosen.
     for _ in 0..2 {
         assert_eq!(key(&mut by_key, Key::Named(NamedKey::Tab)), None);
         assert_eq!(key(&mut direct, Key::Named(NamedKey::Tab)), None);
     }
-    // One opens the section list, walks it to Recovery and commits it...
-    assert_eq!(key(&mut by_key, Key::Named(NamedKey::Enter)), None);
-    for _ in 0..Section::Recovery.index() {
-        assert_eq!(key(&mut by_key, Key::Named(NamedKey::Down)), None);
-    }
-    let by_key_action = key(&mut by_key, Key::Named(NamedKey::Enter));
-    // ...the other asks for it directly.
+    // Recovery is the last subject the rail lists, so End walks straight to
+    // it — and on a rail the cursor *is* the choice.
+    let by_key_action = key(&mut by_key, Key::Named(NamedKey::End));
     let direct_action = direct.select_section(Section::Recovery);
 
     assert_eq!(
@@ -736,7 +551,7 @@ fn refreshed_model(tasks: usize, devices: usize) -> SwitchboardModel {
 fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     pointer(
@@ -773,7 +588,7 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
 fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     for _ in 0..4 {
@@ -798,7 +613,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
         "an emptied section has nothing to activate"
     );
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     assert!(layout.content.bottom() <= b.bottom());
 }
 
@@ -806,7 +621,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
 fn pointer_after_set_model_addresses_the_new_rows() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
@@ -838,7 +653,7 @@ fn pointer_after_set_model_addresses_the_new_rows() {
 
     // Row three is gone; a press one row-height below the last row it does
     // have must select nothing at all.
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     let info = sb.list_info(&layout, Scale::ONE, &theme);
     let last = info.item_rect(2);
     let (x, y) = (
@@ -857,7 +672,7 @@ fn pointer_after_set_model_addresses_the_new_rows() {
 fn set_model_cannot_complete_a_press_begun_on_the_row_it_replaced() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     // Move the selection off row 0 first, so a press completing there would
@@ -893,7 +708,8 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
     let theme = Theme::dark();
     let b = bounds();
     // Neither has been interacted with, so there is no preserved state to
-    // account for: any difference would be a second derivation.
+    // account for: any difference would be a second derivation. Choosing a
+    // section would be an interaction, so both stay where the surface opens.
     let mut refreshed = Switchboard::new(&model());
     let _ = refresh(&mut refreshed, &refreshed_model(4, 2));
     let mut built = Switchboard::new(&refreshed_model(4, 2));
@@ -927,7 +743,7 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
 
 #[test]
 fn action_focus_clamps_and_resets_with_the_row_focus() {
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     // The Tasks table's rows carry no controls of their own, so the sideways
     // cursor has nowhere to go within a row; the filter strip, whose tabs it
     // does traverse, is where the clamp is worth proving.
@@ -943,7 +759,7 @@ fn action_focus_clamps_and_resets_with_the_row_focus() {
 
     // A fresh screen rests on the filter strip, whose tabs the sideways
     // cursor does traverse.
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let stops = sb.tasks.filters.len();
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Left)), None);
     assert_eq!(
@@ -981,7 +797,7 @@ fn painted(sb: &mut Switchboard, theme: &Theme) -> Surface {
 /// A Switchboard whose layout has been settled by one render, so a following
 /// pointer event resolves against the geometry the next render will use.
 fn settled(theme: &Theme) -> Switchboard {
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     let _ = painted(&mut sb, theme);
     sb
 }
@@ -1246,15 +1062,20 @@ fn every_pixel_a_walk_moves_lies_inside_what_it_reported() {
 
         let info = list_info(&sb, &theme);
         let (row0, row1) = (centre(info.item_rect(0)), centre(info.item_rect(1)));
-        let layout = sb.compute_layout(bounds(), Scale::ONE, &theme);
-        let command = centre(sb.band(layout.location, &theme, Scale::ONE).command);
+        let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+        let rail_entry = centre(Rect::new(
+            layout.rail.left(),
+            layout.rail.top(),
+            layout.rail.width,
+            super::Switchboard::row_item_height(Scale::ONE, &theme),
+        ));
         let steps = [
             moved(row0.0, row0.1),
             PRESS,
             RELEASE,
             moved(row1.0, row1.1),
             InputEvent::PointerScrolled { dx: 0, dy: 2 },
-            moved(command.0, command.1),
+            moved(rail_entry.0, rail_entry.1),
             PRESS,
             RELEASE,
         ];
@@ -1276,42 +1097,6 @@ fn every_pixel_a_walk_moves_lies_inside_what_it_reported() {
             "{section:?} drew nothing new for the whole walk, so it proved nothing"
         );
     }
-}
-
-#[test]
-fn opening_and_closing_the_section_list_reports_the_pixels_it_covers() {
-    let theme = Theme::dark();
-    let mut sb = settled(&theme);
-    let layout = sb.compute_layout(bounds(), Scale::ONE, &theme);
-    let (x, y) = centre(sb.band(layout.location, &theme, Scale::ONE).command);
-
-    let before = shot(&mut sb);
-    let _ = report(&mut sb, &moved(x, y));
-    let _ = report(&mut sb, &PRESS);
-    let opened = report(&mut sb, &RELEASE);
-    let after = shot(&mut sb);
-    assert!(
-        sb.section_menu.is_some(),
-        "the press opens the section list"
-    );
-    assert_eq!(
-        unreported_change(&before, &after, bounds(), &opened),
-        None,
-        "a popup that has never drawn cannot report itself; the route that opens it must"
-    );
-
-    // A press clear of its rows dismisses it, revealing what it covered.
-    let (x, y) = (bounds().right() - 2, bounds().bottom() - 2);
-    let before = shot(&mut sb);
-    let _ = report(&mut sb, &moved(x, y));
-    let closed = report(&mut sb, &PRESS);
-    let after = shot(&mut sb);
-    assert!(sb.section_menu.is_none(), "the press outside closes it");
-    assert_eq!(
-        unreported_change(&before, &after, bounds(), &closed),
-        None,
-        "the pixels a dismissed popup gives back are the composition's again"
-    );
 }
 
 #[test]
@@ -1356,7 +1141,7 @@ fn moved_reading() -> SwitchboardModel {
 #[test]
 fn a_refresh_reports_every_pixel_it_moved_in_every_section() {
     for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let _ = sb.select_section(section);
         let before = shot(&mut sb);
 
@@ -1378,7 +1163,7 @@ fn a_refresh_reports_every_pixel_it_moved_in_every_section() {
 #[test]
 fn a_refresh_reports_less_than_the_client_in_every_section() {
     for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let _ = sb.select_section(section);
         let _ = shot(&mut sb);
 
@@ -1397,7 +1182,7 @@ fn a_refresh_that_changed_the_count_reports_every_pixel_it_moved() {
     // A sample that shortens a list moves the scrollbar's thumb as well as
     // the rows, and the bar is no section's region to report.
     for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let _ = sb.select_section(section);
         let before = shot(&mut sb);
 
@@ -1415,7 +1200,7 @@ fn a_refresh_that_changed_the_count_reports_every_pixel_it_moved() {
 #[test]
 fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
     for section in Section::ALL {
-        let mut sb = Switchboard::new(&model());
+        let mut sb = on_tasks(&model());
         let _ = sb.select_section(section);
         let _ = shot(&mut sb);
 
@@ -1439,16 +1224,19 @@ fn the_census_tiles_wear_the_shared_block_plate() {
     // Wider than the shared fixture: a band too narrow to seat the census
     // drops it, and this is a test about how a seated tile is drawn.
     let b = Rect::new(0, 0, 1000, 500);
-    let mut sb = Switchboard::new(&model());
+    let mut sb = on_tasks(&model());
     sb.select_section(Section::Tasks);
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
-    let layout = sb.compute_layout(b, Scale::ONE, &theme);
-    let summary = sb
-        .band(layout.location, &theme, Scale::ONE)
-        .summary
-        .expect("a band this wide seats the census");
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
+    let frame = super::resolve_section_frame(
+        layout.content,
+        super::SectionView::anatomy(&sb.tasks),
+        Scale::ONE,
+        &theme,
+    );
+    let (summary, _, _) = super::tasks::TasksSection::header_rows(&frame, Scale::ONE);
     let raised = Color::from(theme.palette().surface_raised).premultiply();
     let rim = Color::from(theme.palette().rim).premultiply();
     let mut grounds = 0usize;

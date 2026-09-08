@@ -1406,7 +1406,14 @@ that plots one bounded oldest-to-newest series of readings as a line.
 
 - **A chart owns its box, and its readings map across the whole of it.** Full
   capacity is the ceiling and nothing at all is the floor, both inset only by
-  the room the line's own weight needs. This is the whole reason it is not a
+  the room the line's own weight needs.
+- **The ceiling is stated where it is not a capacity.** A series is permille of
+  the resource's capacity by default; one that counts things has no capacity to
+  be a share of, so it states its own denominator (`with_full_scale`) and the
+  box's top edge means that. A zero denominator falls back to the permille
+  default rather than failing the draw. Refitting the ceiling to each window
+  instead would redraw the same history differently every time it rolled, so a
+  stated scale is the caller's to choose and to keep stable. This is the whole reason it is not a
   track variant: a series confined to an instrument track's thickness cannot
   rise more than a pixel or two whatever its values are, which is a graph that
   cannot report its own data.

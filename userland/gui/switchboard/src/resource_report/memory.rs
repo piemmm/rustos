@@ -15,7 +15,7 @@ use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{BlockBody, CompositionPart, HeroInstrument, PaneBlock, PaneHero};
 use crate::view::resources::{
-    DeviceAction, DeviceGroup, DeviceId, PressureBanner, ResourceControl, ResourceDevice,
+    DeviceAction, DeviceId, PressureBanner, RailGroup, ResourceControl, ResourceDevice,
     TaskCostColumn,
 };
 
@@ -33,7 +33,7 @@ pub(super) fn device(
     );
     ResourceDevice {
         id: DeviceId::Memory,
-        group: DeviceGroup::Resources,
+        group: RailGroup::Resources,
         name: String::from("Memory"),
         kind: PressureKind::Memory,
         reading: committed.clone(),

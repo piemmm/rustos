@@ -1001,6 +1001,82 @@ fn a_system_trace_is_bounded_and_drops_its_oldest_reading() {
     assert_eq!(meters.system.memory_history(), expected.as_slice());
 }
 
+// --- The two rail subjects that are not devices ----------------------------
+
+/// A sample of `count` processes, the first `halted` of them stopped.
+///
+/// `stopped_count` is derived from the same states the rows carry, so the
+/// fixture cannot claim a share its own population does not show.
+fn population(count: usize, halted: usize) -> Sample {
+    let processes: Vec<ProcessSummary> = (0..count)
+        .map(|i| {
+            let pid = u64::try_from(i).unwrap_or(0) + 1;
+            let state = if i < halted {
+                ProcessState::Stopped
+            } else {
+                ProcessState::Running
+            };
+            process(pid, state, b"task", Some(10))
+        })
+        .collect();
+    let stopped_count = u16::try_from(
+        processes
+            .iter()
+            .filter(|p| p.state == ProcessState::Stopped)
+            .count(),
+    )
+    .unwrap_or(u16::MAX);
+    Sample {
+        stopped_count,
+        ..sample_with(processes)
+    }
+}
+
+#[test]
+fn the_tasks_trace_records_the_population_and_its_high_water() {
+    let meters = meters_over(&[population(4, 0), population(9, 0), population(6, 0)]);
+    assert_eq!(meters.system.process_history(), &[4, 9, 6]);
+    assert_eq!(
+        meters.system.process_peak(),
+        9,
+        "the ceiling is the largest seen, not the latest"
+    );
+}
+
+/// The box must mean the same thing from one sample to the next, so the
+/// ceiling never follows the population back down.
+#[test]
+fn the_tasks_ceiling_only_ever_grows() {
+    let meters = meters_over(&[population(20, 0), population(3, 0), population(3, 0)]);
+    assert_eq!(meters.system.process_peak(), 20);
+}
+
+#[test]
+fn the_recovery_trace_is_the_stopped_share_of_the_population() {
+    let meters = meters_over(&[population(4, 1), population(10, 0)]);
+    // One of four is 250 permille; none of ten is nought.
+    assert_eq!(meters.system.stopped_history(), &[250, 0]);
+}
+
+/// An unread process list arrives as an empty one. Recording its nought would
+/// plot a real population collapsing to zero and back.
+#[test]
+fn an_unread_process_list_contributes_no_point_to_either_trace() {
+    let mut unread = population(0, 0);
+    unread.degradations = alloc::vec![crate::sample::DegradedField::ProcessList];
+    let meters = meters_over(&[population(5, 1), unread, population(7, 0)]);
+    assert_eq!(meters.system.process_history(), &[5, 7]);
+    assert_eq!(meters.system.stopped_history(), &[200, 0]);
+    assert_eq!(meters.system.process_peak(), 7);
+}
+
+/// Nothing running is nothing stopped, not a division by an empty population.
+#[test]
+fn an_empty_population_yields_a_nought_share_rather_than_dividing() {
+    let meters = meters_over(&[population(0, 0)]);
+    assert_eq!(meters.system.stopped_history(), &[0]);
+}
+
 // --- Which bundle each owner was launched from -----------------------------
 
 #[test]

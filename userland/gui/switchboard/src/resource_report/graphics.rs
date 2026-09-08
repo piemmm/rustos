@@ -20,7 +20,7 @@ use crate::format::{format_bytes, format_pixels, percent, pixel_parts};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{
-    BlockBody, DeviceAction, DeviceGroup, DeviceId, HeroInstrument, PaneBlock, PaneHero,
+    BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice,
 };
 
@@ -39,7 +39,7 @@ pub(super) fn device(
     let damaged = frame.map(|frame| frame.damaged_px);
     ResourceDevice {
         id: DeviceId::Graphics,
-        group: DeviceGroup::Graphics,
+        group: RailGroup::Graphics,
         name: String::from("Compositor"),
         kind: PressureKind::Gpu,
         reading: damaged.map_or_else(
