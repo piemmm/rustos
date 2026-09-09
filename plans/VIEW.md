@@ -240,18 +240,35 @@ clients, and their exit-code sets are their own.
   terminal's settings sheet — beside their own retained pictures, which is why
   the pane owns no surface.
 - `lib/image` sequence API (`Sequence`/`SequenceInfo`/`SequenceKind`/`Frame`),
-  with the still picture as its one-entry case — **done**. Forward-only with a
-  rewind, because disposal makes an animation exactly that; page-addressed
-  formats add addressed access when the first of them lands, rather than
-  ahead of one.
+  with the still picture as its one-entry case — **done**. Stepping is
+  forward-only with a rewind, because disposal makes an animation exactly
+  that; `page(index)` addresses a page container's entries directly, and is
+  total over every kind (addressing an animation's frame restarts the
+  composition and steps to it, which is what a frame *n* means when frames
+  composite).
 - `lib/image` GIF — **done**, complete as specified above, with the whole
   disposal model, the deferred clear, interlacing, and a structure-aware fuzz
   generator. `decode` on a GIF answers its first composited frame, which is
   what a still consumer wants; whether the icon or wallpaper pipeline admits
   the format stays their own decision, and neither does today.
-- `lib/image` BMP/ICO, Sprite, TIFF, WEBP — planned, in that order (TIFF's
-  CCITT and LZW codecs and WEBP's VP8 lossy decoder are each a change in their
-  own right).
+- `lib/image` BMP and ICO/CUR — **done**, complete as specified above. BMP is
+  the shared decoder and ICO the directory over it, so an icon entry is either
+  a DIB that decoder reads or a whole PNG file through the existing `png`
+  module — never a second decoder for either. Two de-facto readings the
+  format's own text does not give are stated in the module rustdoc and the
+  crate docs: a 32-bit `BI_RGB` pixel's undefined fourth byte is ignored in a
+  BMP file and read as alpha in an icon (the file header tells the cases
+  apart), and an icon whose alpha is zero everywhere falls back to its 1-bit
+  mask. The OS/2 2.x header lengths are refused by name rather than half-read,
+  because they reuse compression codes 3 and 4 for Huffman 1D and RLE24.
+  `Sequence` gained the addressed access page-addressed formats were always
+  going to need — `page(index)`, total over every kind — and a page container
+  weighs nothing against the caller's limits when it opens, because it
+  allocates nothing until a page is asked for and a caller may want a small
+  page out of a file whose largest it could never afford.
+- `lib/image` Sprite, TIFF, WEBP — planned, in that order (TIFF's CCITT and
+  LZW codecs and WEBP's VP8 lossy decoder are each a change in their own
+  right).
 - `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.

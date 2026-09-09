@@ -66,6 +66,19 @@ is the whole waiting mechanism. Grepping the log again to see which stage it is
 on buys nothing the completion signal does not, and a run of those probes spends
 the context the rest of the work needs. One check that it started, then wait.
 
+**A `sleep` is not a waiter — it is a poll with a timer in front of it.** The
+monitor is the only waiting mechanism; between arming it and its firing you
+issue no tool calls about that run at all. A bare `sleep`, a `sleep`-then-`tail`,
+an "idle" echo to pass the time, or a run of short no-op calls alongside an
+armed monitor are all the same forbidden thing, however they are spelled.
+
+**Arm the monitor only against a log the run has already written to.** The
+launch chain starts with `cargo clean`, which takes long enough that a waiter
+armed straight after can match the *previous* run's `CI-RC=` line and fire in
+seconds — certifying a status that describes a different tree. Check
+`grep -c 'CI-RC=' /tmp/ci.log` is `0` and that `xtask ci` is actually running,
+then arm.
+
 The limits §7 puts on this are the ones worth repeating: finish every source
 and doc edit *first*, do no other work while it runs, and run `ci` exactly once
 on the final tree. An edit that becomes necessary mid-run means stopping the

@@ -943,6 +943,23 @@ an update to this section.
     recorded exit code. A ladder of short sleeps, or a loop of "is it done
     yet" probes, is the polling this rule forbids — and it burns the limited
     context the rest of the work needs.
+  - **The waiter is a monitor, and nothing else is a waiter.** Waiting means
+    one blocking watcher that fires when the run ends — a `Monitor` on the
+    exit-code line, or the harness's completion notification. A `sleep` in a
+    tool call is **not** waiting: it is a poll with a timer in front of it,
+    and it is forbidden however it is dressed up — a bare `sleep`, a
+    `sleep`-then-`tail`, an "idle" echo issued to pass the time, or a run of
+    short no-op calls while a monitor is already armed. Between arming the
+    waiter and its firing you issue **no** tool calls about that run at all.
+    If you catch yourself wondering how far it has got, that is the rule
+    working; the answer arrives on its own.
+  - **Arm the waiter only against a log the run itself has already written
+    to.** A watcher started while the launch chain is still in `cargo clean`
+    or has not yet truncated the log can match a *previous* run's exit-code
+    line and fire in seconds — reporting a status that describes a different
+    tree, which is precisely the hack this section forbids. Confirm the log
+    holds no exit-code line (`grep -c 'CI-RC=' …` is `0`) and that the run is
+    genuinely under way, and only then arm.
   - The completion report quotes the output of a run watched to its end.
   `tools/ci/soak.sh` is additionally capped on a developer machine (that's
   us) to a **maximum of 20 seconds** (`tools/ci/soak.sh both --secs 20`); the

@@ -3,9 +3,9 @@
 Stability tier: **experimental**.
 
 First-party TAIRiX raster-image decoding: complete, fail-closed PNG, JPEG,
-and GIF decoders that turn untrusted artwork into a validated, straight-alpha
-RGBA8 pixel buffer, or a typed refusal — never a panic, and never more
-memory than the caller allows.
+GIF, BMP, and ICO/CUR decoders that turn untrusted artwork into a validated,
+straight-alpha RGBA8 pixel buffer, or a typed refusal — never a panic, and
+never more memory than the caller allows.
 
 ## Consumers
 
@@ -48,11 +48,34 @@ only when a real consumer needs it — never speculatively.
   case and the deferred clear; four-pass interlacing; the transparent colour
   index; the full frame-disposal model; and the de-facto `NETSCAPE2.0`
   animation-loop count.
+- **BMP** (`ImageFormat::Bmp`, the Windows device-independent bitmap): the
+  `BITMAPFILEHEADER` and every DIB header of the Windows lineage —
+  `BITMAPCOREHEADER`, `BITMAPINFOHEADER`, and the `V2`/`V3`/`V4`/`V5`
+  headers extending it; 1, 2, 4, 8, 16, 24, and 32 bits per pixel;
+  `BI_RGB`, `BI_RLE4`, `BI_RLE8`, `BI_BITFIELDS`, and `BI_ALPHABITFIELDS`;
+  bottom-up and top-down row order; and colour tables of both entry widths.
+- **ICO and CUR** (`ImageFormat::Ico`, the Windows icon and cursor
+  containers): the directory of independent pictures at different sizes,
+  each entry a DIB with its 1-bit AND mask or a whole PNG file, with
+  addressed access to any page.
 
 A format this crate claims is decoded **completely** — every bit depth,
 compression, colour handling, and structural variant the format defines, not
 the subset a common file happens to use. A format that could only be
 half-decoded is not claimed at all.
+
+BMP reads the specification literally but for two places, both stated in its
+module's own rustdoc. A 32-bit `BI_RGB` pixel's fourth byte is undefined, so
+a BMP file's is ignored and the picture comes out opaque, while an icon's is
+the alpha channel every writer since Windows XP fills — the file header is
+what tells the two apart. And pixels a run-length-encoded array never covers
+stay fully transparent, because the format gives them no value and every
+other choice invents one. An icon whose alpha channel is zero in every pixel
+carries none at all, so its 1-bit mask is what says which pixels are absent.
+
+The OS/2 2.x header lengths are refused by name rather than half-read: they
+share the Windows prefix but read compression codes 3 and 4 as Huffman 1D and
+RLE24, two codecs with no other consumer here.
 
 GIF reads the specification literally but for two places, both stated in the
 module's own rustdoc: *restore to background* clears to fully transparent
@@ -120,25 +143,29 @@ from its plane.
   shape every format decodes into: row-major RGBA8, **straight**
   (non-premultiplied) alpha. `lib/raster`'s `Surface::from_rgba8` is where
   premultiplication happens, once, on the consumer side.
-- `Sequence::{open, info, next_frame, rewind}`, `SequenceInfo`,
+- `Sequence::{open, info, next_frame, page, rewind}`, `SequenceInfo`,
   `SequenceKind::{Animation, Pages}`, and `Frame` — the multi-entry shape
   (see below).
 - `DecodeError` — every fail-closed refusal reason, including a
-  `CompressedData` variant wrapping `tairix_compress::zlib::Error` and the
+  `CompressedData` variant wrapping `tairix_compress::zlib::Error`, the
   `Jpeg*` family covering signature, marker, segment, table, entropy,
-  scan-header, restart, unsupported-mode, and progressive-store refusals.
+  scan-header, restart, unsupported-mode, and progressive-store refusals,
+  and the `Bmp*` and `Ico*` families covering header version, bit count,
+  compression, mask, colour-table, pixel-offset, run-length, and directory
+  refusals.
 
 ### Sequences and pages
 
 `Sequence` is the one shape for a container holding more than one picture:
 `open` validates the structure and decodes no pixels, `info` answers the
-format, the geometry every entry's pixels are, the entry count, and whether
-the entries are an `Animation { loop_count }` or `Pages`; `next_frame`
-decodes the next entry and lends a `Frame` (index, geometry, declared delay
-in nanoseconds, pixels); `rewind` restarts, which is also what makes it safe
-to step on after a refusal — a refusal hands out no pixels and is remembered
-until then, because an animation's frame that stopped part-way leaves the
-canvas describing no whole frame.
+format, the geometry of the picture the container is, the entry count, and
+whether the entries are an `Animation { loop_count }` or `Pages`;
+`next_frame` decodes the next entry and lends a `Frame` (index, geometry,
+declared delay in nanoseconds, pixels); `page` decodes one entry by index;
+`rewind` restarts, which is also what makes it safe to step on after a
+refusal — a refusal hands out no pixels and is remembered until then, because
+an animation's frame that stopped part-way leaves the canvas describing no
+whole frame.
 
 It is **forward-only with a rewind**, because that is what an animation *is*.
 A GIF frame composites onto whatever its predecessors left on the logical
@@ -151,10 +178,18 @@ know the format's disposal model. They are borrowed rather than owned for the
 same reason: the canvas has to be retained for the next frame, so an owned
 buffer per step would copy the whole canvas every frame for nothing.
 
+A **page** container's entries are independent pictures instead, so `page`
+addresses one directly and a refused page disturbs no other. An icon file is
+the case that matters: its pages are one picture at several sizes, and
+choosing between them is the whole point of the format. Addressing a frame of
+an *animation* still costs a restart and a walk, which is why a player steps.
+
 A still picture is the **one-entry case** of the same shape, so a consumer
-that shows both pictures and animations needs one path rather than two.
-`decode` on a multi-frame container answers its first composited frame —
-the picture the format shows first, and exactly what a still consumer wants.
+that shows pictures, animations, and icon files needs one path rather than
+three. `decode` on a multi-frame container answers its first composited frame
+— the picture the format shows first — and on a page container its largest
+page, which is what a container of one picture at several sizes means by its
+picture.
 
 ### Reduced-scale decode is a JPEG property, not a shared feature
 
@@ -179,13 +214,18 @@ refused, and then with whichever limit that smallest possible output broke.
 `decode` has no such freedom and keeps none: it always means natural size,
 and is refused outright when that size breaches the limits.
 
-Neither PNG nor GIF has such a process — filtered zlib-compressed scanlines
-and an LZW code stream do not separate into scale-selectable passes — so
-`decode_fitted` on either *is* `decode`, at natural size, with no scale to
-degrade to. That asymmetry is an honest property of the formats, not a gap in
-this crate: a caller that wants a smaller PNG or GIF resamples the decoded
-image through `lib/raster` (the one shared resampler), exactly as it would to
-hit a size no JPEG scale lands on.
+An icon container has a scale of its own kind: it *is* one picture at several
+sizes, so `decode_fitted` takes the smallest page covering the box that stays
+within the limits, falling back to the largest that does. Nothing is computed
+and nothing is resampled — a page is already the picture at that size.
+
+None of PNG, GIF, and BMP has such a process — filtered zlib-compressed
+scanlines, an LZW code stream, and a padded row array do not separate into
+scale-selectable passes — so `decode_fitted` on those *is* `decode`, at
+natural size, with no scale to degrade to. That asymmetry is an honest
+property of the formats, not a gap in this crate: a caller that wants a
+smaller one resamples the decoded image through `lib/raster` (the one shared
+resampler), exactly as it would to hit a size no JPEG scale lands on.
 
 ## Security
 
@@ -241,8 +281,11 @@ that sandbox, never the calling service.
 ## Tests
 
 Host-unit-tested beside the code (`src/png_tests.rs`, `src/jpeg_tests.rs`,
-`src/gif_tests.rs`, `src/crc32.rs`) with no external fixture files: the JPEG tests build their
-streams marker by marker, check a progressive stream against the pixels of
+`src/gif_tests.rs`, `src/bmp_tests.rs`, `src/ico_tests.rs`, `src/crc32.rs`)
+with no external fixture files, the PNG writer they share living in
+`src/png_fixture.rs` because an icon entry may be a whole PNG file: the JPEG
+tests build their streams marker by marker, check a progressive stream
+against the pixels of
 the equivalent baseline one, check **every** inverse-DCT scale against a
 direct reference the test file restates from the standard's own definition
 over many pseudo-random full coefficient blocks (asserting no more than a
@@ -254,10 +297,15 @@ at, and cover every structural variant, the whole disposal model with
 hand-verified canvases, an exhaustive check that the four interlace passes
 cover every row exactly once, a compressed stream matched against the literal
 stream of the same pixels, and every refusal — including every prefix of a
-valid file being refused rather than half-decoded. Every format is fuzzed by
-`tests/fuzz_image.rs` — random bytes, random bytes behind each valid
-signature, and structurally mutated valid fixtures (PNG chunks, JPEG baseline
-and progressive marker segments, GIF blocks), each walked through `decode`,
-`decode_fitted`, and a full `Sequence` pass with a rewind — through the shared
-`tests/fuzzseed` seed and budget seam, registered with `cargo xtask fuzz`.
+valid file being refused rather than half-decoded. The BMP and icon tests
+build every header version, bit depth, encoding, row order, and mask layout
+the same way, and cover the run-length escapes, the alpha-versus-mask rule,
+page addressing, and a truncated container still answering a page it wholly
+holds. Every format is fuzzed by `tests/fuzz_image.rs` — random bytes, random
+bytes behind each valid signature, and structurally mutated valid fixtures
+(PNG chunks, JPEG baseline and progressive marker segments, GIF blocks, icon
+directory entries, and a BMP header's declared fields), each walked through
+`decode`, `decode_fitted`, and a full `Sequence` pass with a rewind — through
+the shared `tests/fuzzseed` seed and budget seam, registered with
+`cargo xtask fuzz`.
 The subsystem page is `docs/src/lib/image.md`.

@@ -15,10 +15,13 @@
 //!
 //! [`decode`] and [`decode_fitted`] dispatch on the format [`sniff`]
 //! recognises from a byte signature: PNG ([`ImageFormat::Png`]), JPEG
-//! ([`ImageFormat::Jpeg`]), and GIF ([`ImageFormat::Gif`]), each decoded by
-//! its own private module. [`ImageFormat`] stays closed and grows only with a
-//! real consumer, exactly as PNG was added for the icon pipeline, JPEG for
-//! the wallpaper masters, and GIF for the picture viewer. Being the one raster
+//! ([`ImageFormat::Jpeg`]), GIF ([`ImageFormat::Gif`]), BMP
+//! ([`ImageFormat::Bmp`]), and the icon and cursor containers
+//! ([`ImageFormat::Ico`]), each decoded by its own private module — BMP and
+//! ICO by one, because an icon's entries are the bitmaps BMP already reads.
+//! [`ImageFormat`] stays closed and grows only with a real consumer, exactly
+//! as PNG was added for the icon pipeline, JPEG for the wallpaper masters,
+//! and the rest for the picture viewer. Being the one raster
 //! registry is what keeps a format's decoder in a single place: a consumer
 //! that decides to admit a further one needs no decoder of its own — though
 //! admitting it is that consumer's decision, and the icon pipeline
@@ -29,12 +32,15 @@
 //! Some containers hold more than one picture. [`Sequence`] is the one shape
 //! for all of them: [`Sequence::open`] validates the structure and reports
 //! [`SequenceInfo`], and [`Sequence::next_frame`] decodes the entries in
-//! order. It is forward-only with [`Sequence::rewind`], because that is what
-//! an animation *is* — a frame composites onto its predecessors under the
-//! container's own disposal model, so being able to ask for frame *n*
-//! directly would mean re-compositing every frame before it. A still picture
-//! is the one-entry case of the same shape, so a consumer that shows both
-//! pictures and animations needs one path rather than two.
+//! order. Stepping is forward-only with [`Sequence::rewind`], because that is
+//! what an animation *is* — a frame composites onto its predecessors under
+//! the container's own disposal model, so being able to ask for frame *n*
+//! directly would mean re-compositing every frame before it. A page
+//! container's entries are independent pictures instead, and choosing
+//! between them is the point, so [`Sequence::page`] addresses one directly.
+//! A still picture is the one-entry case of the same shape, so a consumer
+//! that shows pictures, animations, and icon files needs one path rather
+//! than three.
 //!
 //! [`RasterImage`] is the one output shape every format decodes into: a
 //! row-major, 4-byte-per-pixel, **straight-alpha** RGBA8 buffer (not
@@ -56,12 +62,14 @@
 //! [`decode_fitted`] degrades to the largest scale that fits rather than
 //! refusing — a deliberate trade of sharpness for memory, decided from the
 //! header's geometry before anything is allocated, and refused only when
-//! not even the coarsest scale fits. PNG has no such reduced-scale decode
-//! process at all — its entropy coding does not separate into
-//! scale-selectable passes the way a block transform does — so for PNG,
-//! [`decode_fitted`] is exactly [`decode`] and has no degradation to
-//! offer; that is an honest property of the format, not a gap this crate is
-//! missing.
+//! not even the coarsest scale fits. An icon container has its own kind of
+//! scale — it *is* one picture at several sizes — so a fitted decode there
+//! takes the smallest entry covering the box rather than computing anything.
+//! PNG, GIF, and BMP have no reduced-scale decode process at all — their
+//! entropy coding and row layout do not separate into scale-selectable
+//! passes the way a block transform does — so for those [`decode_fitted`] is
+//! exactly [`decode`] and has no degradation to offer; that is an honest
+//! property of the formats, not a gap this crate is missing.
 //!
 //! # Bounds and fail-closed policy
 //!
@@ -96,10 +104,46 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+mod bmp;
 mod crc32;
 mod gif;
+mod ico;
 mod jpeg;
 mod png;
+#[cfg(test)]
+mod png_fixture;
+
+/// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
+/// shape [`RasterImage`] and every format decoder here produce.
+pub(crate) const RGBA_BYTES: usize = 4;
+
+/// Limits a header probe holds a declared geometry to: none of its own.
+///
+/// A probe allocates nothing from the geometry it reports, so it has nothing
+/// to protect by bounding it — its caller does, and applies its own bounds to
+/// the answer. The zero-dimension refusal still applies, because a zero-sided
+/// picture is malformed rather than merely large.
+pub(crate) const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u32::MAX, u32::MAX, u64::MAX, 0);
+
+/// The little-endian 16-bit value at `at`, or `None` where the input holds
+/// fewer than two bytes there.
+///
+/// The one definition of a little-endian field read: the formats that use
+/// one each name their own refusal for a missing field, but none of them
+/// needs its own copy of the read.
+pub(crate) fn le_u16(data: &[u8], at: usize) -> Option<u16> {
+    data.get(at..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map(|bytes| u16::from_le_bytes(*bytes))
+}
+
+/// The little-endian 32-bit value at `at`, or `None` where the input holds
+/// fewer than four bytes there.
+pub(crate) fn le_u32(data: &[u8], at: usize) -> Option<u32> {
+    data.get(at..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map(|bytes| u32::from_le_bytes(*bytes))
+}
 
 /// Why decoding an image failed. Every variant is a fail-closed refusal:
 /// no malformed, truncated, or adversarial input ever panics or produces a
@@ -162,7 +206,8 @@ pub enum DecodeError {
 
     /// `IHDR`'s payload was not exactly 13 bytes.
     InvalidIhdrLength,
-    /// `IHDR` declared a width or height of zero.
+    /// A width or height of zero was declared. Raised by the shared limits
+    /// check, so it belongs to no one format.
     ZeroDimension,
     /// `IHDR`'s bit depth was not one of `1`, `2`, `4`, `8`, or `16`.
     InvalidBitDepth,
@@ -327,6 +372,57 @@ pub enum DecodeError {
     /// A frame's LZW stream ended before it had produced every pixel the
     /// Image Descriptor declares.
     GifTruncatedImageData,
+
+    /// The file did not begin with the two-byte `BM` magic.
+    BmpBadSignature,
+    /// A header, colour table, or mask field ran past the end of the input.
+    BmpTruncated,
+    /// The DIB header declared a length that is none of the six the Windows
+    /// lineage defines (`BITMAPCOREHEADER` through `BITMAPV5HEADER`).
+    BmpUnsupportedHeaderSize,
+    /// The DIB header declared a negative width.
+    BmpInvalidDimensions,
+    /// The DIB header declared a colour-plane count other than 1.
+    BmpInvalidPlanes,
+    /// The DIB header declared a bit count that is not one of `1`, `2`, `4`,
+    /// `8`, `16`, `24`, or `32`.
+    BmpUnsupportedBitCount,
+    /// The DIB header declared a compression this decoder does not claim:
+    /// an embedded JPEG or PNG pixel array, a CMYK encoding, or a code the
+    /// format does not define.
+    BmpUnsupportedCompression,
+    /// The declared compression and bit count contradict each other, or a
+    /// run-length-encoded array declared top-down rows, which it may not.
+    BmpCompressionMismatch,
+    /// A bitfield mask left a colour channel unaddressed, reached outside
+    /// the pixel, named a bit another channel already claimed, or held bits
+    /// that are not contiguous.
+    BmpInvalidMask,
+    /// `biClrUsed` declared more colour-table entries than the bit count can
+    /// index, or the table does not fit in the gap before the pixel array.
+    BmpInvalidPaletteLength,
+    /// `bfOffBits` pointed before the end of the header or past the end of
+    /// the input.
+    BmpInvalidPixelOffset,
+    /// The pixel array held fewer bytes than the declared geometry needs.
+    BmpPixelDataTruncated,
+    /// A pixel referenced a colour-table entry beyond the end of the table.
+    BmpPaletteIndexOutOfRange,
+    /// A run-length-encoded run, delta, or line reached outside the picture.
+    BmpRleOutOfBounds,
+    /// A run-length-encoded array ended before it had covered every row.
+    BmpRleTruncated,
+
+    /// The file did not begin with an icon or cursor directory header.
+    IcoBadSignature,
+    /// The directory, or an entry's declared extent, ran past the end of the
+    /// input.
+    IcoTruncated,
+    /// The directory declared no pictures at all.
+    IcoNoEntries,
+    /// An entry's bitmap declared an odd height, so it cannot be the colour
+    /// rows and the mask over them that an icon's is.
+    IcoInvalidMaskHeight,
 }
 
 impl DecodeError {
@@ -363,7 +459,7 @@ impl DecodeError {
             Self::MissingEnd => "PNG has no IEND chunk",
             Self::MalformedEnd => "PNG's IEND chunk is not empty",
             Self::InvalidIhdrLength => "PNG IHDR chunk has the wrong length",
-            Self::ZeroDimension => "PNG declares a zero width or height",
+            Self::ZeroDimension => "image declares a zero width or height",
             Self::InvalidBitDepth => "PNG declares an invalid bit depth",
             Self::InvalidColourType => "PNG declares an invalid colour type",
             Self::UnsupportedColourTypeAndDepth => {
@@ -453,6 +549,29 @@ impl DecodeError {
             Self::GifInvalidCodeSize => "GIF frame declares an out-of-range LZW code size",
             Self::GifInvalidCode => "GIF LZW stream holds a code its table cannot resolve",
             Self::GifTruncatedImageData => "GIF LZW stream ends before its frame's last pixel",
+            Self::BmpBadSignature => "not a BMP file (bad signature)",
+            Self::BmpTruncated => "BMP header runs past the end of the input",
+            Self::BmpUnsupportedHeaderSize => "BMP declares an unsupported header size",
+            Self::BmpInvalidDimensions => "BMP declares a negative width",
+            Self::BmpInvalidPlanes => "BMP declares a colour-plane count other than one",
+            Self::BmpUnsupportedBitCount => "BMP declares an unsupported bit count",
+            Self::BmpUnsupportedCompression => "BMP declares an unsupported compression",
+            Self::BmpCompressionMismatch => {
+                "BMP's compression and bit count or row order contradict each other"
+            }
+            Self::BmpInvalidMask => "BMP declares an invalid channel mask",
+            Self::BmpInvalidPaletteLength => "BMP's colour table has an invalid length",
+            Self::BmpInvalidPixelOffset => "BMP's pixel-array offset is out of range",
+            Self::BmpPixelDataTruncated => "BMP pixel array is shorter than its geometry needs",
+            Self::BmpPaletteIndexOutOfRange => {
+                "BMP pixel references a colour-table entry out of range"
+            }
+            Self::BmpRleOutOfBounds => "BMP run-length-encoded run reaches outside the picture",
+            Self::BmpRleTruncated => "BMP run-length-encoded array ends before its last row",
+            Self::IcoBadSignature => "not an icon or cursor file (bad signature)",
+            Self::IcoTruncated => "icon entry runs past the end of the input",
+            Self::IcoNoEntries => "icon directory declares no pictures",
+            Self::IcoInvalidMaskHeight => "icon entry's bitmap declares an odd height",
         }
     }
 }
@@ -626,8 +745,8 @@ impl RasterImage {
 /// A raster image format this crate can decode.
 ///
 /// Deliberately closed, and grows only with a real consumer: the desktop
-/// icon pipeline hands this crate PNG artwork, and the desktop pinboard
-/// hands it the JPEG wallpaper masters.
+/// icon pipeline hands this crate PNG artwork, the desktop pinboard hands it
+/// the JPEG wallpaper masters, and the picture viewer opens the rest.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ImageFormat {
@@ -641,6 +760,14 @@ pub enum ImageFormat {
     /// palette-indexed LZW sequence over one logical screen, with the
     /// format's full frame-disposal model.
     Gif,
+    /// The Windows device-independent bitmap file format (BMP): a
+    /// `BITMAPFILEHEADER` over a DIB, from `BITMAPCOREHEADER` through
+    /// `BITMAPV5HEADER`, at every bit depth and encoding those define.
+    Bmp,
+    /// The Windows icon and cursor containers (ICO and CUR): a directory of
+    /// independent pictures at different sizes, each a DIB with a 1-bit mask
+    /// over it or a whole PNG file.
+    Ico,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -670,6 +797,12 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     }
     if bytes.starts_with(&GIF_SIGNATURE) {
         return Some(ImageFormat::Gif);
+    }
+    if bytes.starts_with(&bmp::MAGIC) {
+        return Some(ImageFormat::Bmp);
+    }
+    if bytes.starts_with(&ico::ICO_SIGNATURE) || bytes.starts_with(&ico::CUR_SIGNATURE) {
+        return Some(ImageFormat::Ico);
     }
     None
 }
@@ -728,6 +861,8 @@ pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
         ImageFormat::Png => png::probe(bytes)?,
         ImageFormat::Jpeg => jpeg::probe(bytes)?,
         ImageFormat::Gif => gif::probe(bytes)?,
+        ImageFormat::Bmp => bmp::probe(bytes)?,
+        ImageFormat::Ico => ico::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -783,6 +918,8 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, Decode
         Some(ImageFormat::Png) => png::decode(bytes, limits),
         Some(ImageFormat::Jpeg) => jpeg::decode(bytes, limits),
         Some(ImageFormat::Gif) => gif::decode(bytes, limits),
+        Some(ImageFormat::Bmp) => bmp::decode(bytes, limits),
+        Some(ImageFormat::Ico) => ico::decode(bytes, limits),
         None => Err(DecodeError::UnknownFormat),
     }
 }
@@ -814,13 +951,21 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, Decode
 /// [`decode`] has no such freedom and keeps none: it always means natural
 /// size, and is refused outright when that size breaches `limits`.
 ///
-/// # PNG and GIF
+/// # An icon container fits by choosing a page
 ///
-/// Neither has a reduced-scale decode process — LZW and DEFLATE entropy
-/// coding does not separate into scale-selectable passes the way a block
-/// transform does — so for both this is exactly [`decode`], always at
-/// natural size, and the degradation above cannot apply. That is an honest
-/// property of those formats, not a gap this crate is missing.
+/// An icon file *is* one picture at several sizes, so there is nothing to
+/// compute: this takes the smallest page covering `fit` on both axes that
+/// also stays within `limits`, falling back to the largest that does. A page
+/// is already the picture at that size, so nothing is scaled and nothing is
+/// resampled.
+///
+/// # PNG, GIF, and BMP
+///
+/// None has a reduced-scale decode process — LZW and DEFLATE entropy coding
+/// and a padded row array do not separate into scale-selectable passes the
+/// way a block transform does — so for those this is exactly [`decode`],
+/// always at natural size, and the degradation above cannot apply. That is
+/// an honest property of those formats, not a gap this crate is missing.
 ///
 /// The format is chosen by [`sniff`]; an unrecognised signature is refused
 /// as [`DecodeError::UnknownFormat`] before any format-specific parsing
@@ -838,6 +983,8 @@ pub fn decode_fitted(
         Some(ImageFormat::Png) => png::decode(bytes, limits),
         Some(ImageFormat::Jpeg) => jpeg::decode_fitted(bytes, limits, fit),
         Some(ImageFormat::Gif) => gif::decode(bytes, limits),
+        Some(ImageFormat::Bmp) => bmp::decode(bytes, limits),
+        Some(ImageFormat::Ico) => ico::decode_fitted(bytes, limits, fit),
         None => Err(DecodeError::UnknownFormat),
     }
 }
@@ -877,14 +1024,15 @@ impl SequenceInfo {
         self.format
     }
 
-    /// The width every entry's pixels are, in pixels: the animation canvas,
-    /// or the still picture's own width.
+    /// The width of the picture the container is: the animation canvas, a
+    /// still picture's own width, or — where pages differ in size, as an
+    /// icon file's do — the largest page's. Each [`Frame`] carries its own.
     #[must_use]
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    /// The height every entry's pixels are, in pixels.
+    /// The height of the picture the container is; see [`Self::width`].
     #[must_use]
     pub const fn height(&self) -> u32 {
         self.height
@@ -970,6 +1118,8 @@ enum Entries<'a> {
     },
     /// A GIF's block chain, composited onto its retained canvas.
     Gif(gif::Frames<'a>),
+    /// An icon container's directory of independent pictures.
+    Ico(ico::Pages<'a>),
 }
 
 /// A container's frames or pages, decoded in order.
@@ -991,11 +1141,14 @@ impl<'a> Sequence<'a> {
     /// Validate `bytes`' structure and prepare to decode its entries,
     /// decoding no pixels.
     ///
-    /// The geometry every entry will be produced at is weighed against
-    /// `limits` here, before any canvas is allocated, so a container that
-    /// lies about its size cannot make this reserve memory proportional to
-    /// the lie — and a caller learns it cannot afford the picture before it
-    /// has laid anything out for it.
+    /// A container with one canvas has its geometry weighed against `limits`
+    /// here, before that canvas is allocated, so a container that lies about
+    /// its size cannot make this reserve memory proportional to the lie — and
+    /// a caller learns it cannot afford the picture before it has laid
+    /// anything out for it. A page container allocates nothing until a page
+    /// is asked for and weighs nothing here: its pages are independent
+    /// pictures, and a caller may well want a small one out of a file whose
+    /// largest it could never afford.
     ///
     /// # Errors
     ///
@@ -1019,30 +1172,48 @@ impl<'a> Sequence<'a> {
                     entries: Entries::Gif(frames),
                 })
             }
-            format => {
-                let (width, height) = match format {
-                    ImageFormat::Png => png::probe(bytes)?,
-                    ImageFormat::Jpeg => jpeg::probe(bytes)?,
-                    ImageFormat::Gif => return Err(DecodeError::UnknownFormat),
-                };
-                limits.check(width, height)?;
+            ImageFormat::Ico => {
+                let pages = ico::Pages::open(bytes, limits)?;
                 Ok(Self {
                     info: SequenceInfo {
-                        format,
-                        width,
-                        height,
-                        count: 1,
+                        format: ImageFormat::Ico,
+                        width: pages.width(),
+                        height: pages.height(),
+                        count: pages.count(),
                         kind: SequenceKind::Pages,
                     },
-                    entries: Entries::Still {
-                        bytes,
-                        limits: *limits,
-                        decoded: None,
-                        served: false,
-                    },
+                    entries: Entries::Ico(pages),
                 })
             }
+            ImageFormat::Png => Self::still(ImageFormat::Png, png::probe(bytes)?, bytes, limits),
+            ImageFormat::Jpeg => Self::still(ImageFormat::Jpeg, jpeg::probe(bytes)?, bytes, limits),
+            ImageFormat::Bmp => Self::still(ImageFormat::Bmp, bmp::probe(bytes)?, bytes, limits),
         }
+    }
+
+    /// The one-entry case: a format holding a single picture.
+    fn still(
+        format: ImageFormat,
+        (width, height): (u32, u32),
+        bytes: &'a [u8],
+        limits: &DecodeLimits,
+    ) -> Result<Self, DecodeError> {
+        limits.check(width, height)?;
+        Ok(Self {
+            info: SequenceInfo {
+                format,
+                width,
+                height,
+                count: 1,
+                kind: SequenceKind::Pages,
+            },
+            entries: Entries::Still {
+                bytes,
+                limits: *limits,
+                decoded: None,
+                served: false,
+            },
+        })
     }
 
     /// What the container declares about its entries as a whole.
@@ -1102,6 +1273,72 @@ impl<'a> Sequence<'a> {
                     pixels: frames.canvas(),
                 }))
             }
+            Entries::Ico(pages) => {
+                let index = pages.index();
+                if !pages.step()? {
+                    return Ok(None);
+                }
+                Ok(page_frame(index, pages.current()))
+            }
+        }
+    }
+
+    /// Decode the entry at `index`, or `None` where the container holds no
+    /// such entry.
+    ///
+    /// This is what a page container is *for*: an icon file's pages are
+    /// independent pictures at different sizes, and choosing between them is
+    /// the point. A page costs its own decode and nothing else, and a page
+    /// that refuses says so without disturbing the others.
+    ///
+    /// An animation has no independent pages — a frame composites onto its
+    /// predecessors — so addressing frame `n` restarts the composition and
+    /// steps to it, costing exactly what [`Self::rewind`] and `n + 1` calls
+    /// to [`Self::next_frame`] would. That is why a player steps rather than
+    /// addressing, and why this clears a remembered refusal for an animation
+    /// but not for a page container, which never had one to clear.
+    ///
+    /// # Errors
+    ///
+    /// Whichever refusal the entry's own decode raises.
+    pub fn page(&mut self, index: u32) -> Result<Option<Frame<'_>>, DecodeError> {
+        let (width, height) = (self.info.width, self.info.height);
+        match &mut self.entries {
+            Entries::Still {
+                bytes,
+                limits,
+                decoded,
+                ..
+            } => {
+                if index != 0 {
+                    return Ok(None);
+                }
+                if decoded.is_none() {
+                    *decoded = Some(decode(bytes, limits)?);
+                }
+                Ok(page_frame(0, decoded.as_ref()))
+            }
+            Entries::Gif(frames) => {
+                frames.rewind();
+                for _ in 0..=index {
+                    if !frames.step()? {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(Frame {
+                    index,
+                    width,
+                    height,
+                    delay_ns: frames.delay_ns(),
+                    pixels: frames.canvas(),
+                }))
+            }
+            Entries::Ico(pages) => {
+                if !pages.page(index)? {
+                    return Ok(None);
+                }
+                Ok(page_frame(index, pages.current()))
+            }
         }
     }
 
@@ -1115,8 +1352,21 @@ impl<'a> Sequence<'a> {
         match &mut self.entries {
             Entries::Still { served, .. } => *served = false,
             Entries::Gif(frames) => frames.rewind(),
+            Entries::Ico(pages) => pages.rewind(),
         }
     }
+}
+
+/// Lend a decoded page as a frame. A page is a picture in its own right, so
+/// it carries its own geometry and declares no delay.
+fn page_frame(index: u32, image: Option<&RasterImage>) -> Option<Frame<'_>> {
+    image.map(|image| Frame {
+        index,
+        width: image.width(),
+        height: image.height(),
+        delay_ns: 0,
+        pixels: image.pixels(),
+    })
 }
 
 #[cfg(test)]

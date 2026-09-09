@@ -25,29 +25,20 @@ use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
-use crate::{crc32, DecodeError, DecodeLimits, RasterImage};
+use crate::{crc32, DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
 /// The 8-byte PNG file signature.
 const SIGNATURE: [u8; 8] = crate::PNG_SIGNATURE;
 
-const IHDR: [u8; 4] = *b"IHDR";
-const PLTE: [u8; 4] = *b"PLTE";
-const IDAT: [u8; 4] = *b"IDAT";
-const IEND: [u8; 4] = *b"IEND";
-const TRNS: [u8; 4] = *b"tRNS";
+pub(crate) const IHDR: [u8; 4] = *b"IHDR";
+pub(crate) const PLTE: [u8; 4] = *b"PLTE";
+pub(crate) const IDAT: [u8; 4] = *b"IDAT";
+pub(crate) const IEND: [u8; 4] = *b"IEND";
+pub(crate) const TRNS: [u8; 4] = *b"tRNS";
 
 /// The `IHDR` payload length (W3C PNG §"IHDR Image header"): four fields of
 /// 4 bytes plus five of 1 byte.
 const IHDR_LEN: usize = 13;
-
-/// The limits a header probe holds a declared geometry to: none of its own.
-///
-/// A probe allocates nothing from the geometry it reports, so it has nothing
-/// to protect by bounding it — its caller does, and applies its own bounds
-/// to the answer. The zero-dimension refusal the shared header parser makes
-/// is still enforced, because a zero-sided image is malformed rather than
-/// merely large. The progressive-coefficient bound is irrelevant to PNG.
-const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u32::MAX, u32::MAX, u64::MAX, 0);
 
 /// The five legal PNG colour types, made a closed type so an unvalidated
 /// byte can never reach the pixel-assembly code — an illegal colour type is
@@ -627,7 +618,7 @@ fn pixel_rgba(
     ihdr: &Ihdr,
     palette: Option<&[[u8; 3]]>,
     trns: Option<&Trns>,
-) -> Result<[u8; 4], DecodeError> {
+) -> Result<[u8; RGBA_BYTES], DecodeError> {
     let channels = ihdr.colour_type.channels();
     let depth = ihdr.bit_depth;
     let sample = |channel: u32| {
@@ -720,7 +711,7 @@ fn decode_pixels(
         .ok_or(DecodeError::DimensionsOverflow)?;
     let output_len = to_usize64(
         pixel_count
-            .checked_mul(4)
+            .checked_mul(RGBA_BYTES as u64)
             .ok_or(DecodeError::DimensionsOverflow)?,
     )?;
     let mut output = fallible::filled(output_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
@@ -754,9 +745,9 @@ fn decode_pixels(
                 let rgba = pixel_rgba(row, x, ihdr, palette, trns)?;
                 let out_x = to_usize(placed_coordinate(pass.col_start, x, pass.col_step)?)?;
                 let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
-                let index = (out_y * width + out_x) * 4;
+                let index = (out_y * width + out_x) * RGBA_BYTES;
                 output
-                    .get_mut(index..index + 4)
+                    .get_mut(index..index + RGBA_BYTES)
                     .ok_or(DecodeError::CompressedSizeMismatch)?
                     .copy_from_slice(&rgba);
             }

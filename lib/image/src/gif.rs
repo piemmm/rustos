@@ -31,7 +31,7 @@ use core::ops::Range;
 
 use tairix_util::fallible;
 
-use crate::{DecodeError, DecodeLimits, RasterImage};
+use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
 /// The three magic bytes every GIF opens with.
 const MAGIC: [u8; 3] = *b"GIF";
@@ -85,10 +85,6 @@ const NO_PREFIX: u16 = u16::MAX;
 /// Bytes per colour-table entry: one each of red, green, and blue.
 const PALETTE_ENTRY_LEN: usize = 3;
 
-/// Bytes per canvas pixel: straight-alpha RGBA8, the crate's one output
-/// shape.
-const CANVAS_PIXEL_LEN: usize = 4;
-
 /// Nanoseconds in the hundredth of a second a GIF delay counts in.
 const DELAY_TICK_NS: u64 = 10_000_000;
 
@@ -99,13 +95,6 @@ const DELAY_TICK_NS: u64 = 10_000_000;
 /// viewer has use for an animation longer than this. It bounds the count the
 /// structural pass accepts; nothing is allocated per frame.
 const MAX_FRAMES: u32 = 16_384;
-
-/// Limits a header probe holds a declared geometry to: none of its own.
-///
-/// A probe allocates nothing from the geometry it reports, so it has nothing
-/// to protect by bounding it. The zero-dimension refusal still applies,
-/// because a zero-sided screen is malformed rather than merely large.
-const PROBE_LIMITS: DecodeLimits = DecodeLimits::new(u32::MAX, u32::MAX, u64::MAX, 0);
 
 /// A forward byte reader over the whole stream, refusing every read that
 /// would run past the end.
@@ -148,11 +137,10 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The little-endian 16-bit field at `at` of a fixed-length record.
+/// The little-endian 16-bit field at `at` of a record whose length the
+/// caller has already proved, so an absent field cannot arise.
 fn word(fields: &[u8], at: usize) -> u32 {
-    let lo = fields.get(at).copied().unwrap_or_default();
-    let hi = fields.get(at + 1).copied().unwrap_or_default();
-    u32::from(u16::from(lo) | (u16::from(hi) << 8))
+    u32::from(crate::le_u16(fields, at).unwrap_or_default())
 }
 
 /// What happens to a frame's area once it has been shown (`GIF89a` §23).
@@ -721,7 +709,7 @@ impl<'a> Frames<'a> {
         let canvas_len = usize::try_from(
             u64::from(screen.width)
                 .checked_mul(u64::from(screen.height))
-                .and_then(|pixels| pixels.checked_mul(CANVAS_PIXEL_LEN as u64))
+                .and_then(|pixels| pixels.checked_mul(RGBA_BYTES as u64))
                 .ok_or(DecodeError::DimensionsOverflow)?,
         )
         .map_err(|_| DecodeError::DimensionsOverflow)?;
@@ -868,7 +856,7 @@ impl<'a> Frames<'a> {
 
     /// Bytes one canvas row occupies.
     fn row_bytes(&self) -> usize {
-        usize::try_from(self.width).unwrap_or(usize::MAX) * CANVAS_PIXEL_LEN
+        usize::try_from(self.width).unwrap_or(usize::MAX) * RGBA_BYTES
     }
 
     /// The canvas byte range `rect`'s `row`-th row occupies, or `None` when
@@ -879,15 +867,15 @@ impl<'a> Frames<'a> {
         let width = usize::try_from(rect.width).ok()?;
         let start = y
             .checked_mul(self.row_bytes())?
-            .checked_add(x.checked_mul(CANVAS_PIXEL_LEN)?)?;
-        let end = start.checked_add(width.checked_mul(CANVAS_PIXEL_LEN)?)?;
+            .checked_add(x.checked_mul(RGBA_BYTES)?)?;
+        let end = start.checked_add(width.checked_mul(RGBA_BYTES)?)?;
         (end <= self.canvas.len()).then_some(start..end)
     }
 
     /// Copy `rect` of the canvas aside, so a restore-to-previous disposal can
     /// put it back.
     fn save(&mut self, rect: Rect) -> Result<(), DecodeError> {
-        let row_len = usize::try_from(rect.width).unwrap_or(usize::MAX) * CANVAS_PIXEL_LEN;
+        let row_len = usize::try_from(rect.width).unwrap_or(usize::MAX) * RGBA_BYTES;
         let total = row_len
             .checked_mul(usize::try_from(rect.height).unwrap_or(usize::MAX))
             .ok_or(DecodeError::DimensionsOverflow)?;
@@ -918,7 +906,7 @@ impl<'a> Frames<'a> {
     /// this rectangle, so a row that does not resolve is unreachable and
     /// leaves the canvas as it stands rather than inventing pixels.
     fn restore(&mut self, rect: Rect) {
-        let row_len = usize::try_from(rect.width).unwrap_or(usize::MAX) * CANVAS_PIXEL_LEN;
+        let row_len = usize::try_from(rect.width).unwrap_or(usize::MAX) * RGBA_BYTES;
         for row in 0..rect.height {
             let (Some(target), Some(from)) = (
                 self.row_span(rect, row),
@@ -983,7 +971,7 @@ impl<'a> Frames<'a> {
             ) else {
                 return Err(DecodeError::GifTruncatedImageData);
             };
-            let (quads, _) = target.as_chunks_mut::<CANVAS_PIXEL_LEN>();
+            let (quads, _) = target.as_chunks_mut::<RGBA_BYTES>();
             for (index, pixel) in row.iter().zip(quads) {
                 if control.transparent == Some(*index) {
                     continue;

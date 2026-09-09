@@ -1,4 +1,5 @@
-//! Deterministic fuzz harness for every image decoder (PNG, JPEG, and GIF).
+//! Deterministic fuzz harness for every image decoder (PNG, JPEG, GIF, BMP,
+//! and ICO/CUR).
 //!
 //! Invariants, for any bytes an untrusted bundle icon, wallpaper, or opened
 //! picture may carry:
@@ -7,8 +8,9 @@
 //!    panic for any input, and never report a frame whose width, height, or
 //!    pixel count exceeds the [`DecodeLimits`] they were given.
 //! 2. Structure-aware mutations of a valid, builder-made file — bit flips,
-//!    length/CRC tweaks, and reordering of PNG chunks, JPEG marker segments,
-//!    or GIF blocks — never panic: the mutated bytes either decode within
+//!    length/CRC tweaks, reordering of PNG chunks, JPEG marker segments,
+//!    GIF blocks, or icon directory entries, and overwriting a BMP header's
+//!    declared fields — never panic: the mutated bytes either decode within
 //!    the limits or are refused with a typed error.
 //! 3. The generators are not degenerate: every pristine fixture each one
 //!    produces actually decodes (a corpus that never round-trips would
@@ -26,7 +28,7 @@
 //! still caught here.
 
 use tairix_fuzzseed::Lcg;
-use tairix_image::{decode, decode_fitted, sniff, DecodeLimits, FitBox, Sequence};
+use tairix_image::{decode, decode_fitted, sniff, DecodeLimits, FitBox, Sequence, SequenceKind};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -806,6 +808,340 @@ fn mutate_gif(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------
+// BMP fixtures
+// -----------------------------------------------------------------------
+
+/// The two magic bytes every BMP file opens with, restated here for the
+/// same reason the PNG signature is.
+const BMP_MAGIC: [u8; 2] = *b"BM";
+
+/// `BITMAPFILEHEADER`'s fixed length.
+const BMP_FILE_HEADER: usize = 14;
+
+/// The DIB header lengths the decoder claims: `BITMAPCOREHEADER`,
+/// `BITMAPINFOHEADER`, and the `V2`/`V3`/`V4`/`V5` headers extending it.
+const BMP_HEADER_LENS: [u32; 6] = [12, 40, 52, 56, 108, 124];
+
+/// The bit counts the format defines.
+const BMP_BIT_COUNTS: [u32; 7] = [1, 2, 4, 8, 16, 24, 32];
+
+/// Bytes one row of `width` pixels at `bits` occupies once padded out to a
+/// four-byte boundary.
+fn bmp_stride(width: u32, bits: u32) -> usize {
+    usize::try_from((u64::from(width) * u64::from(bits)).div_ceil(32) * 4).unwrap_or(0)
+}
+
+/// A run-length-encoded pixel array covering `height` rows of `width`
+/// pixels exactly, mixing encoded and absolute runs.
+fn bmp_rle(rng: &mut Lcg, width: u32, height: u32, four_bit: bool) -> Vec<u8> {
+    let width = usize::try_from(width).unwrap_or(1);
+    let mut out = Vec::new();
+    for _ in 0..height {
+        let mut x = 0usize;
+        while x < width {
+            let run = rng.below(width - x) + 1;
+            if run >= 3 && rng.below(4) == 0 {
+                out.push(0);
+                out.push(u8::try_from(run).unwrap_or(3));
+                let bytes = if four_bit { run.div_ceil(2) } else { run };
+                for _ in 0..bytes {
+                    out.push(u8::try_from(rng.below(256)).unwrap_or(0));
+                }
+                if bytes % 2 == 1 {
+                    out.push(0);
+                }
+            } else {
+                out.push(u8::try_from(run).unwrap_or(1));
+                out.push(u8::try_from(rng.below(256)).unwrap_or(0));
+            }
+            x += run;
+        }
+        out.extend_from_slice(&[0, 0]);
+    }
+    out.extend_from_slice(&[0, 1]);
+    out
+}
+
+/// A DIB header of `size` bytes, with the masks wherever the version or the
+/// compression puts them and zeroes over the colour-space description that
+/// may follow.
+fn bmp_dib(size: u32, width: i32, height: i32, bits: u32, compression: u32) -> Vec<u8> {
+    let mut out = size.to_le_bytes().to_vec();
+    if size == 12 {
+        out.extend_from_slice(&width.to_le_bytes()[..2]);
+        out.extend_from_slice(&height.to_le_bytes()[..2]);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&u16::try_from(bits).unwrap_or(1).to_le_bytes());
+        return out;
+    }
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&u16::try_from(bits).unwrap_or(1).to_le_bytes());
+    out.extend_from_slice(&compression.to_le_bytes());
+    for _ in 0..5 {
+        out.extend_from_slice(&0u32.to_le_bytes());
+    }
+    let masks: [u32; 4] = if bits == 16 {
+        [0xF800, 0x07E0, 0x001F, 0]
+    } else {
+        [0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000]
+    };
+    let written = if compression == 6 || size >= 56 {
+        4
+    } else if compression == 3 || size >= 52 {
+        3
+    } else {
+        0
+    };
+    for mask in masks.iter().take(written) {
+        out.extend_from_slice(&mask.to_le_bytes());
+    }
+    while out.len() < usize::try_from(size).unwrap_or(0) {
+        out.push(0);
+    }
+    out
+}
+
+/// Build one structurally valid, randomised BMP: a randomised header
+/// version, geometry, row order, bit count, encoding, and colour table.
+fn build_valid_bmp(rng: &mut Lcg) -> Vec<u8> {
+    let size = *BMP_HEADER_LENS
+        .get(rng.below(BMP_HEADER_LENS.len()))
+        .unwrap_or(&40);
+    let core = size == 12;
+    let bits = *BMP_BIT_COUNTS
+        .get(rng.below(BMP_BIT_COUNTS.len()))
+        .unwrap_or(&24);
+    let width = u32::try_from(rng.below(20) + 1).unwrap_or(1);
+    let height = u32::try_from(rng.below(20) + 1).unwrap_or(1);
+    // Only a `BITMAPINFOHEADER` or later can spell either of these, and a
+    // run-length-encoded array may not be top-down.
+    let top_down = !core && rng.below(4) == 0;
+    let compression = if core {
+        0
+    } else if bits == 8 && !top_down && rng.below(3) == 0 {
+        1
+    } else if bits == 4 && !top_down && rng.below(3) == 0 {
+        2
+    } else if (bits == 16 || bits == 32) && rng.below(3) == 0 {
+        if rng.below(2) == 0 {
+            3
+        } else {
+            6
+        }
+    } else {
+        0
+    };
+
+    // Always the bit count's full complement of entries, so any raw index
+    // byte at any indexed depth is in range.
+    let mut palette = vec![
+        0u8;
+        if bits <= 8 {
+            (if core { 3 } else { 4 }) << bits
+        } else {
+            0
+        }
+    ];
+    rng.fill(&mut palette);
+
+    let mut pixels = match compression {
+        1 => bmp_rle(rng, width, height, false),
+        2 => bmp_rle(rng, width, height, true),
+        _ => vec![0u8; bmp_stride(width, bits) * usize::try_from(height).unwrap_or(0)],
+    };
+    if compression == 0 || compression == 3 || compression == 6 {
+        rng.fill(&mut pixels);
+    }
+
+    let signed_height = i32::try_from(height).unwrap_or(1);
+    let dib = bmp_dib(
+        size,
+        i32::try_from(width).unwrap_or(1),
+        if top_down {
+            -signed_height
+        } else {
+            signed_height
+        },
+        bits,
+        compression,
+    );
+    let offset = BMP_FILE_HEADER + dib.len() + palette.len();
+    let mut out = BMP_MAGIC.to_vec();
+    out.extend_from_slice(
+        &u32::try_from(offset + pixels.len())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&u32::try_from(offset).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&dib);
+    out.extend_from_slice(&palette);
+    out.extend_from_slice(&pixels);
+    out
+}
+
+/// The `(start, end)` byte range of every declared field a BMP's two
+/// headers carry.
+///
+/// A BMP has no repeated blocks to reorder the way a PNG's chunks or a
+/// GIF's blocks can be, so what is worth corrupting on purpose is the
+/// fields the decoder sizes and bounds everything else from: the pixel-array
+/// offset, the header length, the geometry, the bit count, the compression,
+/// and the colour-table count.
+fn bmp_fields(bytes: &[u8]) -> Vec<(usize, usize)> {
+    if !bytes.starts_with(&BMP_MAGIC) {
+        return Vec::new();
+    }
+    let mut fields = vec![(10, 14)];
+    for at in [0usize, 4, 8, 12, 14, 16, 32] {
+        let (start, end) = (BMP_FILE_HEADER + at, BMP_FILE_HEADER + at + 4);
+        if end <= bytes.len() {
+            fields.push((start, end));
+        }
+    }
+    fields
+}
+
+/// Structurally mutate a pristine BMP: maybe overwrite one declared header
+/// field, then flip a handful of random bits.
+fn mutate_bmp(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    let fields = bmp_fields(&bytes);
+    if rng.below(2) == 0 {
+        if let Some(&(start, end)) = fields.get(rng.below(fields.len().max(1))) {
+            for at in start..end {
+                if let Some(slot) = bytes.get_mut(at) {
+                    *slot = u8::try_from(rng.below(256)).unwrap_or(0);
+                }
+            }
+        }
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
+// -----------------------------------------------------------------------
+// ICO and CUR fixtures
+// -----------------------------------------------------------------------
+
+/// The four leading bytes of an icon and of a cursor container.
+const ICO_HEADER: [u8; 4] = [0, 0, 1, 0];
+const CUR_HEADER: [u8; 4] = [0, 0, 2, 0];
+
+/// One entry's directory row.
+const ICO_ENTRY_LEN: usize = 16;
+
+/// One icon entry's bitmap: a `BITMAPINFOHEADER` declaring twice the
+/// picture's height, its colour table, the colour rows, and the 1-bit mask
+/// over them.
+fn ico_dib_picture(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+    let bits = *BMP_BIT_COUNTS
+        .get(rng.below(BMP_BIT_COUNTS.len()))
+        .unwrap_or(&32);
+    let top_down = rng.below(4) == 0;
+    let signed = i32::try_from(height * 2).unwrap_or(2);
+    let mut out = bmp_dib(
+        40,
+        i32::try_from(width).unwrap_or(1),
+        if top_down { -signed } else { signed },
+        bits,
+        0,
+    );
+    let mut palette = vec![0u8; if bits <= 8 { 4usize << bits } else { 0 }];
+    rng.fill(&mut palette);
+    out.extend_from_slice(&palette);
+    let rows = usize::try_from(height).unwrap_or(1);
+    let mut colour = vec![0u8; bmp_stride(width, bits) * rows];
+    rng.fill(&mut colour);
+    out.extend_from_slice(&colour);
+    let mut mask = vec![0u8; bmp_stride(width, 1) * rows];
+    rng.fill(&mut mask);
+    out.extend_from_slice(&mask);
+    out
+}
+
+/// Build one structurally valid, randomised icon or cursor: a randomised
+/// entry count, with each entry either a bitmap or a whole PNG file.
+fn build_valid_ico(rng: &mut Lcg) -> Vec<u8> {
+    let pictures: Vec<Vec<u8>> = (0..=rng.below(3))
+        .map(|_| {
+            if rng.below(4) == 0 {
+                build_valid_png(rng)
+            } else {
+                let width = u32::try_from(rng.below(16) + 1).unwrap_or(1);
+                let height = u32::try_from(rng.below(16) + 1).unwrap_or(1);
+                ico_dib_picture(rng, width, height)
+            }
+        })
+        .collect();
+
+    let mut out = if rng.below(4) == 0 {
+        CUR_HEADER.to_vec()
+    } else {
+        ICO_HEADER.to_vec()
+    };
+    out.extend_from_slice(&u16::try_from(pictures.len()).unwrap_or(0).to_le_bytes());
+    let mut at = 6 + pictures.len() * ICO_ENTRY_LEN;
+    for picture in &pictures {
+        // The declared side and bit count are hints the decoder does not act
+        // on, so they are randomised rather than made to agree.
+        out.push(u8::try_from(rng.below(256)).unwrap_or(0));
+        out.push(u8::try_from(rng.below(256)).unwrap_or(0));
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&u32::try_from(picture.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(at).unwrap_or(0).to_le_bytes());
+        at += picture.len();
+    }
+    for picture in &pictures {
+        out.extend_from_slice(picture);
+    }
+    out
+}
+
+/// The `(start, end)` byte range of every directory row an icon declares.
+fn ico_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
+    if !bytes.starts_with(&ICO_HEADER) && !bytes.starts_with(&CUR_HEADER) {
+        return Vec::new();
+    }
+    let Some(count) = bytes
+        .get(4..6)
+        .map(|c| usize::from(u16::from_le_bytes([c[0], c[1]])))
+    else {
+        return Vec::new();
+    };
+    (0..count)
+        .map(|index| (6 + index * ICO_ENTRY_LEN, 6 + (index + 1) * ICO_ENTRY_LEN))
+        .take_while(|&(_, end)| end <= bytes.len())
+        .collect()
+}
+
+/// Structurally mutate a pristine icon: maybe swap two directory rows (so
+/// every entry's declared length and offset describe the wrong picture),
+/// maybe overwrite one row's fields, then flip a handful of random bits.
+fn mutate_ico(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    let bounds = ico_bounds(&bytes);
+    if rng.below(2) == 0 {
+        if let Some(rebuilt) = swap_two_ranges(rng, &bytes, &bounds) {
+            bytes = rebuilt;
+        }
+    }
+    if rng.below(2) == 0 {
+        if let Some(&(start, end)) = bounds.get(rng.below(bounds.len().max(1))) {
+            let at = start + rng.below((end - start).max(1));
+            if let Some(slot) = bytes.get_mut(at) {
+                *slot = u8::try_from(rng.below(256)).unwrap_or(0);
+            }
+        }
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
+// -----------------------------------------------------------------------
 // Mutation and invariants
 // -----------------------------------------------------------------------
 
@@ -924,21 +1260,28 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     // frame. A rewind and a second walk cover the restart too.
     if let Ok(mut sequence) = Sequence::open(bytes, &limits) {
         let info = sequence.info();
-        assert!(info.width() <= limits.max_width());
-        assert!(info.height() <= limits.max_height());
         for pass in 0..2 {
             let mut steps = 0u32;
             while steps < SEQUENCE_STEPS {
                 match sequence.next_frame() {
                     Ok(Some(frame)) => {
-                        assert_eq!(frame.width(), info.width());
-                        assert_eq!(frame.height(), info.height());
+                        assert!(frame.width() <= limits.max_width());
+                        assert!(frame.height() <= limits.max_height());
+                        let pixels = u64::from(frame.width()) * u64::from(frame.height());
+                        assert!(pixels <= limits.max_pixels());
                         assert_eq!(
                             frame.pixels().len(),
-                            usize::try_from(u64::from(info.width()) * u64::from(info.height()) * 4)
-                                .unwrap_or(usize::MAX)
+                            usize::try_from(pixels * 4).unwrap_or(usize::MAX)
                         );
                         assert!(frame.index() < info.count());
+                        if matches!(info.kind(), SequenceKind::Animation { .. }) {
+                            // An animation's frames are one canvas, so each
+                            // is the container's own size; a page container's
+                            // pages are pictures in their own right and carry
+                            // their own, so its geometry is only the largest.
+                            assert_eq!(frame.width(), info.width());
+                            assert_eq!(frame.height(), info.height());
+                        }
                     }
                     Ok(None) | Err(_) => break,
                 }
@@ -991,7 +1334,14 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
             body.clear();
             body.resize(rng.below(300), 0);
             rng.fill(&mut body);
-            for prefix in [&SIGNATURE[..], &[0xFF, SOI][..], &GIF_MAGIC[..]] {
+            for prefix in [
+                &SIGNATURE[..],
+                &[0xFF, SOI][..],
+                &GIF_MAGIC[..],
+                &BMP_MAGIC[..],
+                &ICO_HEADER[..],
+                &CUR_HEADER[..],
+            ] {
                 buf.clear();
                 buf.extend_from_slice(prefix);
                 buf.extend_from_slice(&body);
@@ -1124,5 +1474,85 @@ fn the_jpeg_generator_produces_a_valid_corpus() {
             pixels.iter().all(|&px| px == [128, 128, 128, 255]),
             "a pristine fixture decoded to something other than flat mid-grey"
         );
+    }
+}
+
+#[test]
+fn mutated_valid_bmp_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_bmp_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = build_valid_bmp(&mut rng);
+            let mutated = mutate_bmp(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn mutated_valid_ico_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_ico_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = build_valid_ico(&mut rng);
+            let mutated = mutate_ico(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_bmp_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_bmp_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = limits();
+    for _ in 0..DRAWS {
+        let bmp = build_valid_bmp(&mut rng);
+        assert!(
+            decode(&bmp, &limits).is_ok(),
+            "a pristine generated fixture failed to decode"
+        );
+    }
+}
+
+#[test]
+fn the_ico_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_ico_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = limits();
+    for _ in 0..DRAWS {
+        let ico = build_valid_ico(&mut rng);
+        let mut sequence =
+            Sequence::open(&ico, &limits).expect("a pristine generated fixture failed to open");
+        let count = sequence.info().count();
+        let mut seen = 0u32;
+        while sequence
+            .next_frame()
+            .expect("a pristine generated fixture failed to decode a page")
+            .is_some()
+        {
+            seen += 1;
+        }
+        assert_eq!(seen, count, "a fixture decoded a different page count");
     }
 }
