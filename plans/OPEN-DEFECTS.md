@@ -149,6 +149,7 @@ table normalises all three to **closed**. 23 open, 94 closed, 117 total.
 | D115 | the Switchboard memory composition read "unknown" under load, because it was built from a count of *mappings* rather than of RAM |
 | D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
+| D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
 
 ## Scope
 
@@ -6744,3 +6745,85 @@ The rule the record keeps: a host test may read a process-global wait-queue
 flag only monotonically and only its own — set, then observe set. Registering
 on a global queue, sweeping one, or reading a flag it did not set is a race
 against whichever sibling owns it.
+
+## D118 — process-global kernel registries whose host tests take no guard (PARTLY FIXED)
+
+D117 is one instance of a family. Several `kernel/core` subsystems keep one
+machine's worth of process-global state that concurrently-running host tests
+share, and only some of those tests hold the guard that state needs. The
+pattern that works is already in the tree: `cpufreq::with_mechanism_lock`,
+whose own prose states that this module's tests, the syscall-handler tests and
+the dispatch-loop tests *all* hold the one lock, which is why it lives beside
+the state rather than beside any one test module.
+
+**Fixed here.**
+
+- `cpufreq::an_unbound_machine_does_no_governor_accounting` was deliberately
+  outside `with_mechanism`, which also put it outside `with_mechanism_lock` —
+  so a sibling's *bound* machine was what its hooks saw, and it read the
+  governor accounting that binding legitimately did (`gov_util` 2621, expected
+  0; 1 failure in 120 whole-crate shuffled runs). It now holds the lock
+  without taking a binding, which is what "an unbound machine" has to mean.
+- The five `fs_lock` syscall tests named distinct `FileId`s, which stops them
+  seeing *each other's* locks but not `filelock_tests`' entry reset: that
+  clears the whole registry, so a reset landing while these held a lock made
+  the conflicting request they assert is refused succeed instead
+  (`Ok(0)` where `Err(WouldBlock)` was expected). The guard and its reset now
+  live beside the registry as `filelock::registry_guard`, held by both test
+  modules — the `lock_fixture` returns it, so a case added later cannot forget
+  it.
+
+**Open — and the axis is identity, not the registry.** Guarding the call
+registry did *not* stop `call_reap_times_out_once_the_deadline_passes`: it
+failed once more in 600 shuffled runs with 29 call tests holding the new
+guard. The cause is the one `test_boot::claim_task` already documents — a call
+path reads kernel state keyed by task id alone, so a concurrent test naming
+the same id cancels an in-flight call out from under its owner, and the reap
+answers `NotFound` where the deadline should have said `WouldBlock`. The
+endpoint *creator* took a claimed id; the *caller* was the literal `2`. That
+one test now claims its principal for all four identity sites (the caps record
+derives its `ProcessId` from the same number, so they move together), and it
+has not recurred.
+
+**Two more closed the same way.** A 500-run shuffle after the first fix
+produced three failures, and two were the same identity defect:
+
+- `syscalls::call_post_then_reap_round_trips` — four identity sites, all
+  meaning "me", now one claimed principal.
+- `syscalls::call_peer_seat_reports_the_live_lease_of_the_in_service_peer` —
+  the *client* that posts the call owns the in-flight state, so it is the id
+  that had to be claimed. Note what claiming it exposed: the literal `7` was
+  also the `SeatOwner` the test acquires and asserts on eviction, so changing
+  only the caller made the test fail deterministically with `SeatNotOwner`.
+  The claimed id is threaded through the seat owner too. This is the concrete
+  reason the 297-site sweep below cannot be mechanical: a literal that means
+  "me" in one line means "this named party" three lines later.
+
+**Still open, and honestly unexplained.**
+`console::cooked_foreground_maps_ctrl_c_to_a_queued_interrupt` failed once in
+500 runs and its output was not captured. It is *not* the obvious candidates:
+it already holds `procsignal::foreground_test_lock`, every other user of that
+state holds it too, and its device and queue come from `filter_device`, which
+leaks a fresh pair per call. The untested lead is that
+`install_foreground_signal` is install-once while `init.rs` installs the
+*concrete* hook, so a test driving the boot path first would leave the real
+hook in place and `ensure_foreground_hook_for_test` ignores its own failed
+install — order-dependent, at about the right rate. It did not recur in 1200
+runs after the two fixes above, which settles nothing: it was seen at 1-in-500
+and 1200 clean runs cannot distinguish "fixed" from "not yet seen".
+
+**The 297-site sweep, not attempted.** 297 `#[test]` functions in
+`syscalls.rs` name the shared low identity, over 945 literal sites
+(`make_caps_record(2, …)` 260, `SecTaskId(2)` 309, `ProcessId(2)` 376). The
+cheap structural form is to make an isolated identity the *default* a test
+gets — one `principal()` helper returning this test's claimed id, used
+wherever a test means only "me" — so a case added later is isolated without
+its author knowing the hazard exists. Only a test that genuinely names a
+second party keeps a literal, and the seat case above shows those exist and
+must be found per test rather than assumed away.
+
+**What a green run is worth here: nothing.** Observed rates are 1–3 failures
+per 500 runs, and long clean stretches appear either side of an unchanged tree
+(400 clean before a fix, 1200 clean after). Neither the whole-project gate nor
+a repeated suite run can distinguish this class; only the shuffled stress can,
+and only in aggregate.

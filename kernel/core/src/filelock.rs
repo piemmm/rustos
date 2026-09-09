@@ -425,6 +425,25 @@ static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 /// locked.
 static LIVE_RECORDS: AtomicU64 = AtomicU64::new(0);
 
+/// Serialise a test that touches the process-global lock registry, leaving it
+/// empty for the caller.
+///
+/// The registry, the per-process charge map and the system-wide live count are
+/// one machine's worth of state, and the reset this performs clears all of it
+/// — so a test still holding a lock while a sibling reset ran would find it
+/// gone, and grant a conflicting request. This module's own tests and the
+/// `fs_lock` syscall-handler tests all hold this one lock, which is why it
+/// lives here rather than beside either of them.
+#[cfg(test)]
+pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_for_test();
+    guard
+}
+
 /// Mint the owner identity for a fresh open file description.
 #[must_use]
 pub fn mint_owner() -> OwnerId {

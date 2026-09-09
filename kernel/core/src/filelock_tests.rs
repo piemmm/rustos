@@ -7,29 +7,16 @@
 
 use alloc::vec::Vec;
 
-use std::sync::{Mutex, PoisonError};
-
 use tairix_abi::{Errno, LockMode, LockRange, LOCK_LEN_TO_END};
 use tairix_kernel_sec::ProcessId;
 use tairix_rng::{FastRng, RandU64};
 
 use super::{
     acquire, dequeue, enqueue, held_ranges, invariants_hold, live_records, locks_present,
-    mint_owner, query, release, release_owner, usage, Conflict, Held, OwnerId, Refusal, Request,
+    mint_owner, query, registry_guard, release, release_owner, usage, Conflict, Held, OwnerId,
+    Refusal, Request,
 };
 use tairix_abi::FileId;
-
-/// The registry, the per-process charge map and the system-wide live count
-/// are process-global, so a test asserting on any of them would race a
-/// sibling running concurrently. Every case runs under this guard,
-/// recovering a poisoned lock so one failure does not wedge the rest.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    let guard = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    super::reset_for_test();
-    guard
-}
 
 /// A distinct file identity per test.
 fn file(node: u64) -> FileId {
@@ -98,7 +85,7 @@ fn coverage(f: FileId, owner: OwnerId, len: u64) -> Vec<Option<Held>> {
 
 #[test]
 fn an_owner_never_conflicts_with_itself_however_the_ranges_overlap() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(1);
     let owner = mint_owner();
     take(f, owner, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -111,7 +98,7 @@ fn an_owner_never_conflicts_with_itself_however_the_ranges_overlap() {
 
 #[test]
 fn two_opens_of_one_file_are_two_owners_and_do_conflict() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(2);
     let (first, second) = (mint_owner(), mint_owner());
     take(f, first, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -141,7 +128,7 @@ fn two_opens_of_one_file_are_two_owners_and_do_conflict() {
 
 #[test]
 fn shared_holders_coexist_and_only_an_exclusive_request_is_turned_away() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(3);
     let (a, b, c) = (mint_owner(), mint_owner(), mint_owner());
     take(f, a, PID, 1, LockRange::WHOLE, Held::Shared);
@@ -181,7 +168,7 @@ fn shared_holders_coexist_and_only_an_exclusive_request_is_turned_away() {
 
 #[test]
 fn disjoint_ranges_never_conflict_in_either_mode() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(4);
     let (a, b) = (mint_owner(), mint_owner());
     take(f, a, PID, 1, range(0, 99), Held::Exclusive);
@@ -219,7 +206,7 @@ fn disjoint_ranges_never_conflict_in_either_mode() {
 
 #[test]
 fn an_unbounded_range_covers_everything_from_its_start() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(5);
     let (a, b) = (mint_owner(), mint_owner());
     let tail = LockRange::new(100, LOCK_LEN_TO_END).expect("tail");
@@ -258,7 +245,7 @@ fn an_unbounded_range_covers_everything_from_its_start() {
 
 #[test]
 fn abutting_same_mode_locks_merge_into_one_record() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(6);
     let owner = mint_owner();
     take(f, owner, PID, 1, range(0, 9), Held::Exclusive);
@@ -274,7 +261,7 @@ fn abutting_same_mode_locks_merge_into_one_record() {
 
 #[test]
 fn unlocking_the_middle_splits_one_record_into_two() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(7);
     let owner = mint_owner();
     take(f, owner, PID, 1, range(0, 99), Held::Exclusive);
@@ -294,7 +281,7 @@ fn unlocking_the_middle_splits_one_record_into_two() {
 
 #[test]
 fn an_upgrade_converts_the_range_and_leaves_the_rest_alone() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(8);
     let owner = mint_owner();
     take(f, owner, PID, 1, range(0, 99), Held::Shared);
@@ -312,7 +299,7 @@ fn an_upgrade_converts_the_range_and_leaves_the_rest_alone() {
 
 #[test]
 fn a_downgrade_over_the_whole_range_collapses_back_to_one_record() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(9);
     let owner = mint_owner();
     take(f, owner, PID, 1, range(0, 99), Held::Exclusive);
@@ -323,7 +310,7 @@ fn a_downgrade_over_the_whole_range_collapses_back_to_one_record() {
 
 #[test]
 fn a_release_of_the_whole_range_drops_the_owner_and_the_file() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(10);
     let owner = mint_owner();
     take(f, owner, PID, 1, range(0, 99), Held::Exclusive);
@@ -336,7 +323,7 @@ fn a_release_of_the_whole_range_drops_the_owner_and_the_file() {
 
 #[test]
 fn releasing_a_range_no_one_holds_is_a_no_op_rather_than_an_error() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(11);
     let owner = mint_owner();
     assert!(release(f, owner, LockRange::WHOLE, ROOMY).is_ok());
@@ -351,7 +338,7 @@ fn releasing_a_range_no_one_holds_is_a_no_op_rather_than_an_error() {
 
 #[test]
 fn releasing_the_description_drops_every_lock_it_held_on_every_file() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let (one, two) = (file(12), file(13));
     let owner = mint_owner();
     take(f_of(one), owner, PID, 1, range(0, 9), Held::Exclusive);
@@ -371,7 +358,7 @@ fn f_of(f: FileId) -> FileId {
 
 #[test]
 fn the_record_bound_refuses_growth_but_never_a_whole_release() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(14);
     let owner = mint_owner();
     acquire(&Request {
@@ -406,7 +393,7 @@ fn the_record_bound_refuses_growth_but_never_a_whole_release() {
 
 #[test]
 fn a_fresh_lock_past_the_bound_is_refused_before_anything_is_recorded() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(15);
     let owner = mint_owner();
     acquire(&Request {
@@ -439,7 +426,7 @@ fn a_fresh_lock_past_the_bound_is_refused_before_anything_is_recorded() {
 
 #[test]
 fn a_query_reports_the_blocking_holder_and_says_nothing_when_free() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(16);
     let (a, b) = (mint_owner(), mint_owner());
     assert!(query(f, b, LockRange::WHOLE, Held::Exclusive).is_none());
@@ -466,7 +453,7 @@ fn a_query_reports_the_blocking_holder_and_says_nothing_when_free() {
 
 #[test]
 fn a_waiter_is_woken_only_when_the_range_it_waits_on_is_freed() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(17);
     let (holder, waiter_owner) = (mint_owner(), mint_owner());
     take(f, holder, PID, 1, range(0, 99), Held::Exclusive);
@@ -487,7 +474,7 @@ fn a_waiter_is_woken_only_when_the_range_it_waits_on_is_freed() {
 
 #[test]
 fn a_release_of_the_description_wakes_the_waiters_it_was_blocking() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(18);
     let (holder, other) = (mint_owner(), mint_owner());
     take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -501,7 +488,7 @@ fn a_release_of_the_description_wakes_the_waiters_it_was_blocking() {
 
 #[test]
 fn a_queued_writer_makes_an_arriving_reader_queue_behind_it() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(19);
     let (reader, writer, latecomer) = (mint_owner(), mint_owner(), mint_owner());
     take(f, reader, PID, 1, LockRange::WHOLE, Held::Shared);
@@ -558,7 +545,7 @@ fn a_queued_writer_makes_an_arriving_reader_queue_behind_it() {
 
 #[test]
 fn a_conversion_is_exempt_from_the_queue_so_it_cannot_be_boxed_in() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(20);
     let (holder, writer) = (mint_owner(), mint_owner());
     take(f, holder, PID, 1, range(0, 99), Held::Shared);
@@ -586,7 +573,7 @@ fn a_conversion_is_exempt_from_the_queue_so_it_cannot_be_boxed_in() {
 
 #[test]
 fn a_two_owner_cycle_is_refused_rather_than_joined() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let (one, two) = (file(21), file(22));
     let (a, b) = (mint_owner(), mint_owner());
     take(one, a, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -642,7 +629,7 @@ fn a_two_owner_cycle_is_refused_rather_than_joined() {
 
 #[test]
 fn a_holder_that_is_not_waiting_is_not_a_deadlock() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(23);
     let (a, b) = (mint_owner(), mint_owner());
     take(f, a, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -665,7 +652,7 @@ fn a_holder_that_is_not_waiting_is_not_a_deadlock() {
 
 #[test]
 fn a_three_owner_cycle_is_found_through_the_middle_waiter() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let (one, two, three) = (file(24), file(25), file(26));
     let (a, b, c) = (mint_owner(), mint_owner(), mint_owner());
     take(one, a, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -693,7 +680,7 @@ fn a_three_owner_cycle_is_found_through_the_middle_waiter() {
 
 #[test]
 fn waiting_on_a_range_the_owner_itself_holds_elsewhere_is_a_self_deadlock() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(27);
     let (a, b) = (mint_owner(), mint_owner());
     take(f, a, PID, 1, range(0, 9), Held::Exclusive);
@@ -720,7 +707,7 @@ fn waiting_on_a_range_the_owner_itself_holds_elsewhere_is_a_self_deadlock() {
 
 #[test]
 fn a_re_queued_waiter_keeps_its_place_in_line() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(28);
     let (holder, first, second) = (mint_owner(), mint_owner(), mint_owner());
     take(f, holder, PID, 1, LockRange::WHOLE, Held::Exclusive);
@@ -764,7 +751,7 @@ fn a_re_queued_waiter_keeps_its_place_in_line() {
 
 #[test]
 fn usage_is_reported_per_process_and_charged_to_the_first_locker() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(29);
     let (a, b) = (mint_owner(), mint_owner());
     take(f, a, PID, 1, range(0, 9), Held::Exclusive);
@@ -782,7 +769,7 @@ fn usage_is_reported_per_process_and_charged_to_the_first_locker() {
 
 #[test]
 fn held_mode_maps_onto_the_abi_and_refuses_unlock_as_a_held_state() {
-    let _serial = serial();
+    let _serial = registry_guard();
     assert_eq!(Held::from_mode(LockMode::Shared), Some(Held::Shared));
     assert_eq!(Held::from_mode(LockMode::Exclusive), Some(Held::Exclusive));
     assert_eq!(
@@ -796,7 +783,7 @@ fn held_mode_maps_onto_the_abi_and_refuses_unlock_as_a_held_state() {
 
 #[test]
 fn owner_ids_are_unique_so_a_reclaimed_description_cannot_inherit_locks() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let first = mint_owner();
     let second = mint_owner();
     assert_ne!(
@@ -808,7 +795,7 @@ fn owner_ids_are_unique_so_a_reclaimed_description_cannot_inherit_locks() {
 
 #[test]
 fn the_record_algebra_matches_a_per_byte_model_over_a_randomised_run() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(30);
     let owner = mint_owner();
     let mut model: Vec<Option<Held>> = std::vec![None; SINGLE_OWNER_SPAN];
@@ -884,7 +871,7 @@ fn the_record_algebra_matches_a_per_byte_model_over_a_randomised_run() {
 
 #[test]
 fn a_randomised_run_across_several_owners_keeps_exclusion_exact() {
-    let _serial = serial();
+    let _serial = registry_guard();
     let f = file(31);
     let owners = [mint_owner(), mint_owner(), mint_owner()];
     // Per owner, the mode covering each byte — the whole truth the manager
@@ -958,7 +945,7 @@ fn a_randomised_run_across_several_owners_keeps_exclusion_exact() {
 
 #[test]
 fn an_error_from_the_abi_range_constructor_never_reaches_the_registry() {
-    let _serial = serial();
+    let _serial = registry_guard();
     // The handler validates the range before the manager sees it, so the
     // manager's contract starts at a well-formed span. Pinned here so a
     // future caller cannot quietly pass an unvalidated pair.

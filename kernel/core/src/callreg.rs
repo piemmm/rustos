@@ -50,6 +50,22 @@ use crate::aspace::AddressSpaceRegistry;
 static CALL_ENDPOINTS: SpinLock<BTreeMap<EndpointId, Arc<CallEndpoint>>> =
     SpinLock::new(BTreeMap::new());
 
+/// Serialise a test that binds into or reads the process-global call-endpoint
+/// registry.
+///
+/// Endpoints are torn down *by owner*, and a call's claimant is the caller's
+/// task — so two tests in the registry at once can cancel each other's
+/// in-flight calls, which surfaces as a reap answering "not found" for a
+/// ticket its own `call_post` had just minted. Distinct endpoint ids do not
+/// prevent it; only one test being in the registry at a time does.
+#[cfg(test)]
+pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Bind `endpoint` into the registry under its own [`CallEndpoint::id`].
 ///
 /// # Errors

@@ -432,20 +432,18 @@ impl MenuItem {
         let border = plate_border(theme, scale);
         let actionable = self.is_actionable();
 
-        // The row highlight for the current item. An ordinary row changes the
-        // *shade* of the ground it already sits on — the same wash a list row
-        // takes under the pointer, so the desktop has one highlight vocabulary
-        // rather than two. A warning or a danger keeps its solid emphasis
-        // colour, which has to read as one whatever the wallpaper behind the
-        // plate. A non-actionable current row (denied, disabled, pending)
-        // shades to the quieter pressed tint so it never masquerades as an
-        // available action.
+        // The row highlight for the current item. An ordinary row takes the
+        // selected band — a shade of the surface, never the accent, but laid
+        // *solid*: this is the mark that says which row will act, and a mark
+        // diluted by the backdrop leaves it no heavier than the rest. A
+        // warning or a danger keeps its own emphasis colour instead, equally
+        // solid. A non-actionable current row (denied, disabled, pending) is
+        // the one that stays a background: it shades quietly to the pressed
+        // tint so it can never masquerade as an available action.
         if current {
             let fill = match self.emphasis_fill(palette) {
                 Some(emphasis) => emphasis,
-                None if actionable => {
-                    ground_fill(theme, palette.surface_hover, ChromeLayer::Ground)
-                }
+                None if actionable => palette.surface_selected,
                 None => ground_fill(theme, palette.surface_pressed, ChromeLayer::Ground),
             };
             surface.fill_rect(x, y, w, h, Color::from(fill));

@@ -12,9 +12,17 @@ A menu is a **chain of session-owned plates**.
 - A **plate** is one column of rows under a **title band**: a centred title and
   nothing else — no window commands, no resize edge. The band is the plate's
   drag handle, and it reads as a *heading* over the rows: it shades its own
-  strip one step off the plate ground and sets its title in the type ladder's
-  bold heading face, so a plate is a titled block rather than a column of rows
-  with an odd centred one on top.
+  strip one step off the plate ground and sets its title **bold**, so a plate
+  is a titled block rather than a column of rows with an odd centred one on
+  top. The heading rung carries its hierarchy on weight at the *interface
+  size* — the same size as the rows it caps — because a band set smaller than
+  its own rows reads as a caption instead. The band measures its title box in
+  that same bold face: a variable face advances wider at a heavier weight, so a
+  box measured in the lighter titling face elides a title the band had room for
+  (a plate titled "System" read "Syst…"). A plate is also **at least as wide as
+  its own title**, not merely as its widest row — it is chrome the desktop
+  sizes to its content, so a title it has the freedom to show is never
+  truncated to fit rows that happen to be shorter.
 - A **chain** is a root plate and the descendants open beneath it. A child is
   placed edge-adjacent to its parent at its parent row's top, flipped to the
   parent's other side when the screen edge leaves no room, and slid to stay on

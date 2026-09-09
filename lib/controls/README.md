@@ -105,10 +105,13 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 - `menu` — `MenuItem` rows and the elevated `Menu` plate (icon column, shortcut
   or disabled-row reason, submenu chevron, destructive danger rail, §13 Signal
   Bead; current-row highlight distinct from a keyboard focus ring). An ordinary
-  row's highlight changes the *shade* of the ground it sits on — the same
-  `surface_hover` wash a list row takes, so the desktop has one highlight
-  vocabulary — while a destructive or recovery row keeps its solid hue, which
-  has to read as a warning whatever is behind the plate. The `Menu`
+  row's highlight is the `surface_selected` band — a shade of the surface
+  rather than the accent hue, but laid **solid**, because it is the mark that
+  says which row will act and a mark diluted by the wallpaper leaves it no
+  heavier than the rest of a floating plate. A destructive or recovery row
+  keeps its own emphasis colour, equally solid; only a *non-actionable*
+  current row stays a quiet background, so it can never masquerade as an
+  available action. The `Menu`
   owns Up/Down/Home/End/Right/Enter/Space/Escape and pointer hover/click, sizes
   itself (`preferred_width`/`preferred_height`), and emits a typed `MenuAction`.
   It also carries `plate_rect` — the one rule that places a plate against a

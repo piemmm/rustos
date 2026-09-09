@@ -78,6 +78,21 @@ pub struct Palette {
     /// The inner plate of a control while it is pressed (darker than
     /// [`surface`](Self::surface)).
     pub surface_pressed: Rgba,
+    /// The band filling the row a command surface will act on — a menu's
+    /// current row, whichever the pointer or the keyboard put it on.
+    ///
+    /// A *selection*, not a hover, which is why it is not
+    /// [`surface_hover`](Self::surface_hover): in a menu there is no separate
+    /// selected state for a pointer to hover *towards*, so the current row is
+    /// the choice itself and has to read like one. It is therefore a decisive
+    /// band rather than a wash, and it is laid **solid** — a diluted mark on
+    /// floating chrome leaves the row that will act no heavier than the rest.
+    ///
+    /// A shade of the surface, never a hue: the accent is spent on the roles
+    /// that must shout across the whole desktop, and a menu highlighted in it
+    /// competes with them. Only a warning or a danger row overrides this with
+    /// its own colour.
+    pub surface_selected: Rgba,
     /// The quiet perimeter (Signal Rim) of a resting control.
     pub rim: Rgba,
     /// The reactive perimeter of a hovered, focused, or active control.

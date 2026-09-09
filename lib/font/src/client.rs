@@ -1091,8 +1091,11 @@ impl FontTransport for SolidTestTransport {
                 family,
                 scalars,
                 pixel_height,
-                weight: _,
-            } => test_glyphs_reply(reply, family, &scalars, pixel_height),
+                weight,
+            } => test_glyphs_reply(reply, family, &scalars, pixel_height, weight),
+            // A fixed-pitch cell is the same width at every weight, and the
+            // proportional family reports no cell at all, so the one metric
+            // this reply carries does not vary with the weight asked for.
             FontRequest::Metrics {
                 family,
                 pixel_height,
@@ -1103,6 +1106,11 @@ impl FontTransport for SolidTestTransport {
     }
 }
 
+/// The synthetic proportional family [`SolidTestTransport`] serves beside the
+/// built-in monospace one.
+#[cfg(any(test, feature = "test-util"))]
+const TEST_PROPORTIONAL_FAMILY: &str = "test-sans";
+
 /// Whether `family` is served as fixed-pitch by [`SolidTestTransport`].
 #[cfg(any(test, feature = "test-util"))]
 fn test_family_is_monospace(family: FamilyKey) -> bool {
@@ -1110,25 +1118,46 @@ fn test_family_is_monospace(family: FamilyKey) -> bool {
 }
 
 /// The advance [`SolidTestTransport`] reports for `scalar` at `pixel_height`
-/// in `family`.
+/// in `family`, set in `weight`.
 ///
-/// A monospace family shares one cell width times [`tairix_vt::char_width`];
-/// a proportional family varies by scalar (a small deterministic spread
-/// around the same cell width) so measurement and truncation tests exercise
-/// genuinely different per-character advances rather than a relabelled grid.
+/// A monospace family shares one cell width times [`tairix_vt::char_width`] at
+/// every weight — a fixed pitch a heavier stroke does not move. A proportional
+/// family varies by scalar (a small deterministic spread around the same cell
+/// width) so measurement and truncation tests exercise genuinely different
+/// per-character advances rather than a relabelled grid, and widens with the
+/// weight as a variable face instantiated at a heavier `wght` does
+/// ([`FontWeight`]) — a weight-blind double reports one width for both and
+/// hides a box measured in the wrong face.
 #[cfg(any(test, feature = "test-util"))]
-fn test_advance(family: FamilyKey, scalar: char, pixel_height: u32) -> u32 {
+fn test_advance(family: FamilyKey, scalar: char, pixel_height: u32, weight: FontWeight) -> u32 {
     let cell = fallback_metrics(pixel_height).monospace_advance;
     if test_family_is_monospace(family) {
         return cell.saturating_mul(u32::from(tairix_vt::char_width(scalar)));
     }
-    if scalar == ' ' {
-        return cell.max(1) / 2;
+    let base = if scalar == ' ' {
+        cell.max(1) / 2
+    } else {
+        // A deterministic spread of roughly 0.6x to 1.4x the cell width, so
+        // different scalars measure to genuinely different widths.
+        let spread = u32::from(scalar) % 5;
+        (cell.saturating_mul(6 + 2 * spread) / 10).max(1)
+    };
+    base.saturating_add(test_weight_widening(weight))
+}
+
+/// How much wider than [`FontWeight::Regular`] the test transport's
+/// proportional face advances at `weight`, in pixels.
+///
+/// One pixel per step: enough that a measurement taken in the wrong weight can
+/// never round back onto the right answer, and small enough to stay a
+/// plausible face rather than a caricature.
+#[cfg(any(test, feature = "test-util"))]
+const fn test_weight_widening(weight: FontWeight) -> u32 {
+    match weight {
+        FontWeight::Regular => 0,
+        FontWeight::Medium => 1,
+        FontWeight::Bold => 2,
     }
-    // A deterministic spread of roughly 0.6x to 1.4x the cell width, so
-    // different scalars measure to genuinely different widths.
-    let spread = u32::from(scalar) % 5;
-    (cell.saturating_mul(6 + 2 * spread) / 10).max(1)
 }
 
 /// Encode a [`FontRequest::Glyphs`] reply for [`SolidTestTransport`],
@@ -1139,13 +1168,14 @@ fn test_glyphs_reply(
     family: FamilyKey,
     scalars: &GlyphRun,
     pixel_height: u32,
+    weight: FontWeight,
 ) -> Result<usize, Errno> {
     use alloc::vec;
     use tairix_abi::font_ipc::{GlyphBatchWriter, GlyphCoverage};
 
     let mut writer = GlyphBatchWriter::new(reply)?;
     for &scalar in scalars.scalars() {
-        let advance = test_advance(family, scalar, pixel_height);
+        let advance = test_advance(family, scalar, pixel_height, weight);
         // Space is blank, like the real face: no ink, no coverage bytes.
         let width = if scalar == ' ' { 0 } else { advance.max(1) };
         let coverage = vec![255u8; (width * pixel_height) as usize];
@@ -1192,7 +1222,7 @@ fn test_metrics_reply(
 fn test_families_reply(reply: &mut [u8]) -> Result<usize, Errno> {
     use tairix_abi::font_ipc::{encode_families_reply, FamilyKind};
 
-    let proportional = FamilyKey::new("test-sans").unwrap_or(FamilyKey::MONO);
+    let proportional = FamilyKey::new(TEST_PROPORTIONAL_FAMILY).unwrap_or(FamilyKey::MONO);
     let entries = [
         FamilyEntry::new(FamilyKey::MONO, "Mono", FamilyKind::Monospace)?,
         FamilyEntry::new(proportional, "Test Sans", FamilyKind::Proportional)?,
@@ -1452,12 +1482,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_test_face_advances_wider_at_a_heavier_weight_but_keeps_a_fixed_pitch() {
+        // The real service instantiates a variable outline at the weight's
+        // `wght` axis, so its advance moves with the weight; a fixed-pitch
+        // family's cell does not. A double that ignored the weight reported
+        // one width for both and hid a box measured in the wrong face.
+        let sans = FamilyKey::new(super::TEST_PROPORTIONAL_FAMILY).expect("family");
+        let at = |w| test_advance(sans, 'S', 28, w);
+        assert!(at(FontWeight::Medium) > at(FontWeight::Regular));
+        assert!(at(FontWeight::Bold) > at(FontWeight::Medium));
+        for w in [FontWeight::Regular, FontWeight::Medium, FontWeight::Bold] {
+            assert_eq!(
+                test_advance(FamilyKey::MONO, 'S', 28, w),
+                test_advance(FamilyKey::MONO, 'S', 28, FontWeight::Regular),
+                "a fixed pitch is the same width at every weight"
+            );
+        }
+    }
+
+    #[test]
     fn a_glyph_is_fetched_then_served_from_cache() {
         let (mut client, _gauge) = cached_client();
         let (width, height, data) =
             coverage(&mut client, 'A', FamilyKey::MONO, 28).expect("fetched");
         assert_eq!(height, 28);
-        assert_eq!(width, test_advance(FamilyKey::MONO, 'A', 28));
+        assert_eq!(
+            width,
+            test_advance(FamilyKey::MONO, 'A', 28, FontWeight::Regular)
+        );
         assert_eq!(data.len(), (width * height) as usize);
         assert!(data.iter().all(|&c| c == 255));
 

@@ -25,7 +25,7 @@ use tairix_abi::window_ipc::{AppMenuItemId, MenuRefusal};
 use tairix_controls::damage::{self, Repaint};
 use tairix_controls::{
     plate_rect, ChainChild, ChainModel, FactList, Menu, MenuAction, PlatePlacement, TitleBar,
-    TitleBarCommands, TitleBarEvent,
+    TitleBarEvent,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_taskbar::MenuSubject;
@@ -1175,17 +1175,16 @@ fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &Chai
 }
 
 /// A plate's preferred extent: the band over the rows, never narrower than a
-/// band can be drawn.
+/// band can be drawn or than its own title needs.
+///
+/// A plate is chrome the desktop sizes to its content, so a title it has the
+/// freedom to show is never elided to fit rows that happen to be shorter.
 fn plate_extent(plate: &Plate, geom: &ChainGeometry<'_>) -> (u32, u32) {
     let band_h = TitleBar::band_height(geom.scale, geom.theme);
     let width = plate
         .menu
         .preferred_width(geom.scale, geom.theme)
-        .max(TitleBar::min_band_width(
-            TitleBarCommands::Empty,
-            geom.scale,
-            geom.theme,
-        ))
+        .max(plate.band.preferred_band_width(geom.scale, geom.theme))
         .max(1);
     let height = band_h
         .saturating_add(plate.menu.preferred_height(geom.scale, geom.theme))

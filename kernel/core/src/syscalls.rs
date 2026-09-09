@@ -23700,13 +23700,20 @@ mod tests {
 
     /// A handler over a filesystem that reports one regular file at `/big`
     /// with a real identity, ready for the lock calls.
+    /// The handlers, the caller and the guard serialising the process-global
+    /// advisory-lock registry, which the returned tuple holds for the test's
+    /// duration: a sibling case resets that registry on entry, and a reset
+    /// while these hold a lock would grant the conflicting request they
+    /// assert is refused.
     fn lock_fixture(
         node: u64,
     ) -> (
         &'static RwLock<AddressSpaceRegistry>,
         KernelSyscallHandlers<'static, TestArch>,
         CallerContext<'static>,
+        std::sync::MutexGuard<'static, ()>,
     ) {
+        let registry = crate::filelock::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
@@ -23738,7 +23745,7 @@ mod tests {
         let fs: &'static RecordingFs = Box::leak(Box::new(mock));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs);
-        (aspaces, h, ctx)
+        (aspaces, h, ctx, registry)
     }
 
     /// Open `/big` with `flags`, returning the descriptor.
@@ -23758,7 +23765,7 @@ mod tests {
 
     #[test]
     fn a_lock_is_granted_and_a_second_description_of_the_same_file_conflicts() {
-        let (_aspaces, h, ctx) = lock_fixture(42);
+        let (_aspaces, h, ctx, _registry) = lock_fixture(42);
         let (start, len) = whole();
         let first = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let second = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
@@ -23826,7 +23833,7 @@ mod tests {
 
     #[test]
     fn closing_the_last_descriptor_releases_the_locks_it_held() {
-        let (_aspaces, h, ctx) = lock_fixture(43);
+        let (_aspaces, h, ctx, _registry) = lock_fixture(43);
         let (start, len) = whole();
         let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let other = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
@@ -23861,7 +23868,7 @@ mod tests {
 
     #[test]
     fn the_mode_must_match_the_access_the_descriptor_was_opened_for() {
-        let (_aspaces, h, ctx) = lock_fixture(44);
+        let (_aspaces, h, ctx, _registry) = lock_fixture(44);
         let (start, len) = whole();
         let reader = lock_open(&h, &ctx, OpenFlags::READ);
         assert_eq!(
@@ -23906,7 +23913,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_with_no_file_to_lock_fails_closed() {
-        let (aspaces, h, ctx) = lock_fixture(45);
+        let (aspaces, h, ctx, _registry) = lock_fixture(45);
         let (start, len) = whole();
         assert_eq!(
             h.fs_lock(
@@ -23990,7 +23997,7 @@ mod tests {
 
     #[test]
     fn the_query_reports_the_holder_and_says_nothing_when_the_range_is_free() {
-        let (_aspaces, h, ctx) = lock_fixture(46);
+        let (_aspaces, h, ctx, _registry) = lock_fixture(46);
         let (start, len) = whole();
         let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
         let asker = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
@@ -31855,6 +31862,7 @@ mod tests {
     /// closed with `MessageTooLarge` before any copy.
     #[test]
     fn ipc_call_oversize_request_is_message_too_large() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -31887,6 +31895,7 @@ mod tests {
     /// closed with `BadAddress` during the request copy-in — it never reaches the post/park.
     #[test]
     fn ipc_call_without_registered_aspace_is_bad_address() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -31919,6 +31928,7 @@ mod tests {
     /// time — after the request copy-in, before any reply.
     #[test]
     fn ipc_call_without_send_capability_is_permission_denied() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -31981,6 +31991,7 @@ mod tests {
     /// plays the server so the parked caller is woken with a real reply.
     #[test]
     fn ipc_call_round_trips_request_and_reply() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32027,6 +32038,7 @@ mod tests {
     /// `BufferTooSmall` rather than truncating.
     #[test]
     fn ipc_call_reply_larger_than_buffer_is_buffer_too_small() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32075,6 +32087,10 @@ mod tests {
     /// out and returns its length (`plans/FIX-IO.md` IO1).
     #[test]
     fn call_post_then_reap_round_trips() {
+        // An in-flight call is keyed by its poster's task id, so a shared low
+        // id lets a concurrent test's teardown cancel this one's call.
+        let principal = crate::test_boot::claim_task();
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32086,13 +32102,13 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(ProcessId(2), space, physmap)
+            .register(ProcessId(principal), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(principal, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(principal),
             caps: &caps,
         };
         let id = 0xCA11_2003;
@@ -32105,7 +32121,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, u64::MAX), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
             read_ticket(physmap)
         };
 
@@ -32127,7 +32143,7 @@ mod tests {
         // The reap now copies the reply out and reports its length.
         assert_eq!(h.call_reap(&ctx, id, ticket, 0x2000, 64), Ok(4));
         let guard = aspaces.read();
-        let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
+        let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
         assert_eq!(read_reply_page(physmap, 4), b"pong");
         drop(guard);
         crate::callreg::unregister(EndpointId(id));
@@ -32139,6 +32155,10 @@ mod tests {
     /// caller forever (`plans/FIX-IO.md` IO1).
     #[test]
     fn call_reap_times_out_once_the_deadline_passes() {
+        let _registry = crate::callreg::registry_guard();
+        // An in-flight call's claimant is keyed by task id alone, so a concurrent
+        // test naming the same low id can cancel this one's call out from under it.
+        let principal = crate::test_boot::claim_task();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32151,13 +32171,13 @@ mod tests {
         let rng = unseeded_rng();
         aspaces
             .write()
-            .register(ProcessId(2), space, physmap)
+            .register(ProcessId(principal), space, physmap)
             .expect("registration succeeds");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[], sink);
+        let caps = make_caps_record(principal, &[], sink);
         let ctx = CallerContext {
-            task_id: SecTaskId(2),
+            task_id: SecTaskId(principal),
             caps: &caps,
         };
         let id = 0xCA11_2004;
@@ -32170,7 +32190,7 @@ mod tests {
         assert_eq!(h.call_post(&ctx, id, 0x1000, 4, 0x2000, 100), Ok(0));
         let ticket = {
             let guard = aspaces.read();
-            let (_s, physmap) = guard.resolve(ProcessId(2)).expect("aspace present");
+            let (_s, physmap) = guard.resolve(ProcessId(principal)).expect("aspace present");
             read_ticket(physmap)
         };
 
@@ -32199,6 +32219,7 @@ mod tests {
     /// reap is `NotFound`); a foreign ticket cancels nothing.
     #[test]
     fn call_cancel_withdraws_the_posted_request() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32304,6 +32325,7 @@ mod tests {
     /// then resolve, and refuses to re-point a live id.
     #[test]
     fn call_create_registers_a_resolvable_endpoint_and_refuses_a_clash() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32362,6 +32384,7 @@ mod tests {
     /// the kernel-trusted caller id, never a claim.
     #[test]
     fn call_create_seat_scoped_endpoints_bind_only_for_the_live_seat_lease_holder() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32446,6 +32469,7 @@ mod tests {
     /// allocated IRQ line.
     #[test]
     fn call_create_grant_restricted_mints_the_endpoint_grant() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32492,6 +32516,7 @@ mod tests {
 
     #[test]
     fn call_create_admits_a_bus_child_endpoint_only_to_the_driver_holding_its_duty() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32593,6 +32618,7 @@ mod tests {
     /// cannot reach another's transport endpoint.
     #[test]
     fn ipc_call_grant_restricted_without_grant_is_permission_denied() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32627,6 +32653,7 @@ mod tests {
     /// matched node.
     #[test]
     fn ipc_call_grant_restricted_with_grant_round_trips() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -32679,6 +32706,7 @@ mod tests {
     /// rather than landing on the impostor.
     #[test]
     fn a_recreated_endpoint_id_does_not_resurrect_a_revoked_grant() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -33038,6 +33066,7 @@ mod tests {
     /// (`plans/DISPLAY.md` D7a).
     #[test]
     fn shm_grant_delegates_only_a_held_region_to_the_endpoints_server() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -33107,6 +33136,7 @@ mod tests {
     /// sibling of `shm_grant` (`plans/FIX-IO.md` `IO6b`).
     #[test]
     fn call_grant_delegates_only_a_held_endpoint_to_the_recipients_server() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -33807,6 +33837,7 @@ mod tests {
     /// (`plans/DISPLAY.md` D7a).
     #[test]
     fn call_peer_seat_reports_the_live_lease_of_the_in_service_peer() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -33841,10 +33872,14 @@ mod tests {
         );
         crate::callreg::register(ep.clone(), sink).expect("registered");
 
-        // The client (task 7) posts a present request.
-        let client_caps = make_caps_record(7, &[], sink);
+        // The client posts a present request. Its id is claimed, not spelled:
+        // the in-flight call is keyed by the poster's task, so a concurrent
+        // test tearing down a shared low id cancels this call and the reads
+        // below answer "no such ticket" instead of the seat's own refusal.
+        let client = crate::test_boot::claim_task();
+        let client_caps = make_caps_record(client, &[], sink);
         let ticket = ep
-            .post(&client_caps, 7, b"present", u64::MAX, sink)
+            .post(&client_caps, client, b"present", u64::MAX, sink)
             .expect("posted");
 
         let ctx = CallerContext {
@@ -33886,7 +33921,7 @@ mod tests {
         );
         // The peer acquires the seat: the answer is the live generation.
         let lease = seat
-            .acquire(SEAT_PRIMARY, SeatOwner(7))
+            .acquire(SEAT_PRIMARY, SeatOwner(client))
             .expect("seat acquired");
         assert_eq!(
             h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
@@ -33901,7 +33936,7 @@ mod tests {
         // revoked refusal — the service refuses the present and the client
         // learns it lost the seat.
         let evicted = seat.revoke(SEAT_PRIMARY).expect("lease revoked");
-        assert_eq!(evicted, SeatOwner(7));
+        assert_eq!(evicted, SeatOwner(client));
         assert_eq!(
             h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
             Err(Errno::SeatRevoked)
@@ -34493,6 +34528,7 @@ mod tests {
     /// it: after draining, a second wait times out.
     #[test]
     fn waitset_wait_reports_a_pending_endpoint_member_drained_by_recv() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34581,6 +34617,7 @@ mod tests {
     /// blocked in, and they hang for as long as the drag lasts.
     #[test]
     fn waitset_wait_reports_two_ready_members_in_turn() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34670,6 +34707,7 @@ mod tests {
     /// event-loop edge (`plans/FIX-IO.md` IO1/IO2).
     #[test]
     fn waitset_reports_a_call_reply_member_when_its_reply_lands() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34750,6 +34788,7 @@ mod tests {
     /// `TimedOut` (`plans/FIX-IO.md` IO1).
     #[test]
     fn waitset_reports_a_call_reply_member_when_its_deadline_elapses() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -34819,6 +34858,7 @@ mod tests {
     /// could never arrive.
     #[test]
     fn waitset_reports_a_call_reply_member_whose_endpoint_was_torn_down() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -35677,6 +35717,7 @@ mod tests {
     /// at `call_recv` before any state is touched.
     #[test]
     fn call_recv_without_required_recv_cap_is_permission_denied() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -35731,6 +35772,7 @@ mod tests {
     /// client. The serving task is the endpoint owner.
     #[test]
     fn call_recv_and_reply_round_trip_the_server_side() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -35813,6 +35855,7 @@ mod tests {
     /// a queued request normally.
     #[test]
     fn nonblocking_call_recv_answers_an_empty_queue_with_would_block() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -35882,6 +35925,7 @@ mod tests {
     /// refused its replacement's every submit as `AlreadyExists`).
     #[test]
     fn reclaim_scrubs_a_dead_posters_queued_call() {
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -35952,6 +35996,7 @@ mod tests {
     #[test]
     fn call_peer_origin_attests_the_caller_and_fails_closed() {
         use tairix_abi::{Origin, ProcId, TrustDomain, ORIGIN_WIRE_LEN};
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -38718,6 +38763,7 @@ mod tests {
         // byte per iteration overshoots it four-fold.
         const SLACK_BYTES: isize = 1024;
 
+        let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let counter: &'static crate::test_alloc::LiveBytes =
             Box::leak(Box::new(crate::test_alloc::LiveBytes::new()));

@@ -206,7 +206,7 @@ fn menu_paints_the_elevated_plate_and_rim() {
 // --- Current-row highlight ---------------------------------------------
 
 #[test]
-fn current_neutral_row_shades_the_ground_rather_than_taking_the_accent() {
+fn current_neutral_row_takes_the_selected_band_rather_than_the_accent() {
     for theme in [Theme::dark(), Theme::light()] {
         let palette = theme.palette();
         let menu = three_item_menu().with_current(1);
@@ -215,19 +215,41 @@ fn current_neutral_row_shades_the_ground_rather_than_taking_the_accent() {
         let top = BORDER + ROW_H;
         let band = ((BORDER + 2, W - BORDER - 2), (top + 2, top + ROW_H - 2));
         assert!(
-            region_has(&surface, band.0, band.1, premul(palette.surface_hover)),
-            "an ordinary highlighted row takes the shared row-hover wash"
+            region_has(&surface, band.0, band.1, premul(palette.surface_selected)),
+            "an ordinary highlighted row takes the selected band"
         );
         assert!(
             !region_has(&surface, band.0, band.1, premul(palette.accent)),
-            "the highlight changes the ground's shade, never its hue"
-        );
-        assert_ne!(
-            premul(palette.surface_hover),
-            premul(palette.surface_raised),
-            "the wash has to differ from the resting plate ground to read at all"
+            "the highlight is a shade of the surface, never the accent hue"
         );
     }
+}
+
+#[test]
+fn the_selected_band_is_laid_solid_even_on_floating_chrome() {
+    // The band says which row will act, so it is a mark rather than a
+    // background: taking the chrome alpha would let the wallpaper through and
+    // leave the row that acts no heavier than the rest of the plate. This is
+    // what two rounds of "the highlight is not visible enough" were.
+    let theme = Theme::dark().floating();
+    let palette = theme.palette();
+    let menu = three_item_menu().with_current(1);
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let surface = render(&menu, &theme, h);
+    let top = BORDER + ROW_H;
+    assert!(
+        region_has(
+            &surface,
+            (BORDER + 2, W - BORDER - 2),
+            (top + 2, top + ROW_H - 2),
+            premul(palette.surface_selected),
+        ),
+        "the band keeps its full weight on a translucent plate"
+    );
+    assert!(
+        palette.surface_selected.is_opaque(),
+        "and the token it comes from is itself solid"
+    );
 }
 
 #[test]

@@ -55,7 +55,23 @@ bundles, under a stable `ThemeId`:
     hover or press. The hover role therefore steps *away* from
     `surface_raised` (the bar fill) in the direction its appearance calls for —
     brighter on dark, deeper on light — and the tests assert that separation on
-    both appearances rather than trusting the authored numbers.
+    both appearances rather than trusting the authored numbers. The asserted
+    floor is what "one clear step" means to a user, not the smallest difference
+    a screen can resolve: this is also the wash a menu row and a list row are
+    highlighted with, so a hover authored a few luma off its ground reads as no
+    highlight at all, everywhere at once. The tests additionally hold body text
+    legible *on* both plates, so the wash can never be strengthened into the
+    foreground it carries.
+  - `surface_selected` is the band filling the row a command surface will act
+    on — a menu's current row, wherever the pointer or the keyboard put it. It
+    is deliberately *not* `surface_hover`: in a menu there is no separate
+    selected state to hover towards, so the current row **is** the choice and
+    has to read like one, which makes it a decisive band rather than a wash.
+    It is also laid **solid** rather than through `ground_fill`, because it is
+    a mark: a highlight diluted by the wallpaper leaves the row that acts no
+    heavier than the rest of a floating plate. The tests hold it a stated
+    distance from both the plate and the hover wash, in the appearance's own
+    direction, and hold body text legible on it.
   - `selection_fill` is the plate a selected item is filled with — an icon tile
     in the file manager's grid, on the desktop's icon field, or on the login
     chooser. It is each theme's own `accent` at three tenths opacity (alpha

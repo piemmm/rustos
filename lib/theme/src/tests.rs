@@ -164,9 +164,14 @@ fn pointer_plates_step_away_from_the_bar_fill_in_the_appearance_direction() {
     // Both plates must therefore separate from `surface_raised` (the bar) and
     // from each other, and the hover must move in the direction the
     // appearance calls for — brighter on a dark theme, deeper on a light one.
-    // The light band is the tighter of the two, so the floor is the smallest
-    // step that still reads rather than a flattering number.
-    const MIN_STEP: u32 = 4;
+    //
+    // The floor is what the token's own promise of "one clear step" means, not
+    // the smallest difference a screen can resolve: a hover authored a few
+    // luma off its ground is one a user reports as no highlight at all, which
+    // is what a floor of four admitted. It is also the shared row wash a menu
+    // and a list both highlight with, so a whisper here is a whisper
+    // everywhere.
+    const MIN_STEP: u32 = 12;
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
         let (bar, hover, pressed) = (
@@ -200,6 +205,73 @@ fn pointer_plates_step_away_from_the_bar_fill_in_the_appearance_direction() {
                 "{}: a light hover deepens into the bar",
                 theme.name()
             ),
+        }
+    }
+}
+
+#[test]
+fn the_selected_band_reads_as_a_choice_rather_than_a_wash() {
+    // The row a menu will act on is a *selection*, not a hover: it is the only
+    // thing distinguishing the command Enter runs from the rest of the plate,
+    // so it is authored as a decisive band. The floor is well above the hover
+    // wash's because two reports of "the highlight is not visible enough" were
+    // both this token being treated as a wash.
+    const MIN_BAND: u32 = 32;
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        let (plate, band, hover) = (
+            luma(p.surface_raised),
+            luma(p.surface_selected),
+            luma(p.surface_hover),
+        );
+        assert!(
+            band.abs_diff(plate) >= MIN_BAND,
+            "{}: the selected band is a wash, not a choice ({} from the plate)",
+            theme.name(),
+            band.abs_diff(plate)
+        );
+        assert!(
+            band.abs_diff(hover) >= 12,
+            "{}: the band and the hover wash must not be mistaken for each other",
+            theme.name()
+        );
+        // It separates in the appearance's own direction, exactly as the
+        // pointer plates do, so a theme cannot invert one against the other.
+        match theme.appearance() {
+            Appearance::Dark => assert!(band > plate, "{}: the band lifts", theme.name()),
+            Appearance::Light => assert!(band < plate, "{}: the band deepens", theme.name()),
+        }
+        assert!(
+            p.surface_selected.is_opaque(),
+            "{}: the band is a mark and is laid solid",
+            theme.name()
+        );
+    }
+    assert_ne!(
+        Theme::dark().palette().surface_selected,
+        Theme::light().palette().surface_selected
+    );
+}
+
+#[test]
+fn body_text_stays_legible_on_a_hovered_or_pressed_plate() {
+    // A highlighted menu row and a hovered list row both draw `on_surface` on
+    // `surface_hover`, so that pair is a real combination and not just an
+    // incidental one — strengthening the wash must not be able to walk it into
+    // the foreground it carries. The floor is the one body text already holds
+    // against the base surface.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        for (role, fill) in [
+            ("hover", p.surface_hover),
+            ("pressed", p.surface_pressed),
+            ("selected", p.surface_selected),
+        ] {
+            assert!(
+                luma(p.on_surface).abs_diff(luma(fill)) >= 96,
+                "{}: body text on the {role} plate has too little contrast",
+                theme.name()
+            );
         }
     }
 }
@@ -605,7 +677,14 @@ fn the_ladder_derives_every_role_from_one_base_size() {
     assert!(fonts.spec(TextRole::Heading).size_px > fonts.spec(TextRole::ItemTitle).size_px);
     assert!(fonts.spec(TextRole::ItemTitle).size_px > fonts.spec(TextRole::Body).size_px);
     assert!(fonts.spec(TextRole::Body).size_px > fonts.spec(TextRole::Caption).size_px);
-    assert!(fonts.spec(TextRole::Caption).size_px > fonts.spec(TextRole::SectionHeader).size_px);
+    // A header is the interface size and carries its hierarchy on weight
+    // alone: a group header set smaller than the rows it heads reads as a
+    // caption, which is what a smaller rung made of it.
+    assert_eq!(
+        fonts.spec(TextRole::SectionHeader).size_px,
+        fonts.spec(TextRole::Body).size_px
+    );
+    assert_eq!(fonts.spec(TextRole::SectionHeader).weight, FontWeight::Bold);
     // The display rung breaks out of the cluster: a screen-filling readout is
     // dominant, not merely one step up from a panel heading.
     assert!(fonts.spec(TextRole::Display).size_px >= fonts.spec(TextRole::Body).size_px * 2);
@@ -906,6 +985,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             border: Rgba::rgb(60, 60, 60),
             surface_hover: Rgba::rgb(30, 30, 30),
             surface_pressed: Rgba::rgb(5, 5, 5),
+            surface_selected: Rgba::rgb(60, 60, 60),
             rim: Rgba::rgb(70, 70, 70),
             rim_active: Rgba::rgb(120, 170, 255),
             danger: Rgba::rgb(255, 90, 90),

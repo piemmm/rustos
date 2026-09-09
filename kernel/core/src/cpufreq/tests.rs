@@ -551,28 +551,32 @@ fn sustained_partial_load_settles_below_full_speed() {
 
 #[test]
 fn an_unbound_machine_does_no_governor_accounting() {
-    // Deliberately outside `with_mechanism`. The hooks run on every dispatch
-    // step of every CPU on every port, so with no frequency driver bound they
-    // must do none of the governor's work: nothing folded, no edge stamped,
-    // and no demand raised.
-    let state = cpu_state::get(7).expect("a test CPU");
-    state.cpu_active_since.store(0, Ordering::Relaxed);
-    state.gov_util.store(0, Ordering::Relaxed);
-    state.gov_folded_ns.store(0, Ordering::Relaxed);
-    note_active(7, 5_000_000);
-    note_idle(7, 9_000_000);
-    domain::note_launch(9_000_000);
-    assert_eq!(state.gov_util.load(Ordering::Relaxed), 0, "nothing folded");
-    assert_eq!(
-        state.gov_folded_ns.load(Ordering::Relaxed),
-        0,
-        "the filter's clock never started"
-    );
-    assert_eq!(
-        state.cpu_active_since.load(Ordering::Relaxed),
-        0,
-        "no edge stamped for a governor that is not running"
-    );
+    // Bound to no mechanism but still holding the mechanism lock: the hooks
+    // run on every dispatch step of every CPU on every port, so with no
+    // frequency driver bound they must do none of the governor's work —
+    // nothing folded, no edge stamped, no demand raised. Without the lock a
+    // sibling's *bound* machine is what these hooks would see, and the
+    // accounting they then do is not this test's to observe.
+    super::with_mechanism_lock(|| {
+        let state = cpu_state::get(7).expect("a test CPU");
+        state.cpu_active_since.store(0, Ordering::Relaxed);
+        state.gov_util.store(0, Ordering::Relaxed);
+        state.gov_folded_ns.store(0, Ordering::Relaxed);
+        note_active(7, 5_000_000);
+        note_idle(7, 9_000_000);
+        domain::note_launch(9_000_000);
+        assert_eq!(state.gov_util.load(Ordering::Relaxed), 0, "nothing folded");
+        assert_eq!(
+            state.gov_folded_ns.load(Ordering::Relaxed),
+            0,
+            "the filter's clock never started"
+        );
+        assert_eq!(
+            state.cpu_active_since.load(Ordering::Relaxed),
+            0,
+            "no edge stamped for a governor that is not running"
+        );
+    });
 }
 
 #[test]

@@ -751,6 +751,20 @@ impl ClusterMetrics {
     }
 }
 
+/// The ladder rung a band seating `commands` sets its title in.
+///
+/// A plate's band is the bold header over the rows it caps; a window's is
+/// titling furniture. The one reading of that choice, because the band
+/// *measures* its title box and then *paints* into it: a box measured in a
+/// lighter or smaller face than the one drawn in it elides a title that had
+/// room.
+const fn band_text_role(commands: TitleBarCommands) -> TextRole {
+    match commands {
+        TitleBarCommands::Empty => TextRole::SectionHeader,
+        TitleBarCommands::Window => TextRole::WindowTitle,
+    }
+}
+
 /// The corner the command in layout `slot` rounds: the first cell is hard
 /// against the band's leading end and the last against its trailing one, both
 /// following the window's own `radius`; the two between them are square.
@@ -1065,11 +1079,8 @@ impl TitleBar {
         self.identity
     }
 
-    /// The pixel side the identity icon paints at inside the title band
-    /// `bounds`.
-    ///
     /// The pixel side the identity icon draws at inside a title band of
-    /// `bounds`.
+    /// `bounds` seating `commands`.
     ///
     /// `bounds` is the title band itself — the same rectangle passed to
     /// [`layout`](Self::layout) and [`render`](Self::render), never the whole
@@ -1077,11 +1088,13 @@ impl TitleBar {
     /// rasterising the window's identity artwork produces it at exactly the size
     /// [`render`](Self::render) will place. The side is the same whether or not
     /// the bar carries an identity, so a caller can size artwork before deciding
-    /// to supply it — which is why it takes no bar at all.
+    /// to supply it — which is why it takes no bar at all. It takes `commands`
+    /// because the slot is sized off the band's own face, and a band that
+    /// seats no command sets its title in a different rung.
     #[must_use]
-    pub fn icon_side(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+    pub fn icon_side(commands: TitleBarCommands, bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
         icon_slot_side(
-            role_font(theme, scale, TextRole::WindowTitle),
+            role_font(theme, scale, band_text_role(commands)),
             bounds.height,
         )
     }
@@ -1135,6 +1148,35 @@ impl TitleBar {
             .saturating_add(m.extent)
     }
 
+    /// The narrowest band that seats this bar's commands *and* its whole
+    /// identity group — the slot and an untruncated title — in physical
+    /// pixels. Never narrower than [`min_band_width`](Self::min_band_width).
+    ///
+    /// A band elides a title too long for it, which is right for a window the
+    /// user has sized. Chrome that sizes itself to its own content asks for
+    /// this instead, so it never truncates a title it could have shown. Built
+    /// from the metrics [`layout`](Self::layout) seats against, in the face
+    /// that band draws in, so the two cannot disagree about what fits; the gap
+    /// either side of the group is a cluster's clearance, which on a band with
+    /// no cluster is the title's margin from the plate edge.
+    #[must_use]
+    pub fn preferred_band_width(&self, scale: Scale, theme: &Theme) -> u32 {
+        let (_, band_h, _) = WindowFrame::edges(scale, theme);
+        let m = ClusterMetrics::of(scale, theme, band_h, self.commands);
+        let font = role_font(theme, scale, self.text_role());
+        let side = icon_slot_side(font, band_h);
+        let reserved = if self.identity.is_some() && side > 0 {
+            side.saturating_add(m.identity_gap)
+        } else {
+            0
+        };
+        let group = reserved
+            .saturating_add(font.text_width(&self.display_text()))
+            .saturating_add(m.span_gap.saturating_mul(2));
+        Self::min_band_width(self.commands, scale, theme)
+            .max(m.cluster_w.saturating_mul(2).saturating_add(group))
+    }
+
     /// Whether this band is a heading over the rows beneath it rather than a
     /// window's furniture.
     ///
@@ -1143,6 +1185,11 @@ impl TitleBar {
     /// unrepresentable.
     const fn is_heading(&self) -> bool {
         matches!(self.commands, TitleBarCommands::Empty)
+    }
+
+    /// The ladder rung this band sets its title in.
+    pub(crate) const fn text_role(&self) -> TextRole {
+        band_text_role(self.commands)
     }
 
     /// Which commands this band seats.
@@ -1256,7 +1303,9 @@ impl TitleBar {
     /// the very line that is drawn: the font layer memoises a measurement by
     /// whole string, so laying out and then painting the same title measure it
     /// once between them, and no piecewise total can disagree with what
-    /// appears.
+    /// appears. That only holds because the face is
+    /// [`text_role`](Self::text_role)'s — a box measured in a lighter weight
+    /// than it is painted in elides a title that had room.
     fn seat_identity(
         &self,
         span: Rect,
@@ -1265,7 +1314,7 @@ impl TitleBar {
         gap: u32,
         centred: bool,
     ) -> (Rect, Rect) {
-        let font = role_font(theme, scale, TextRole::WindowTitle);
+        let font = role_font(theme, scale, self.text_role());
         let side = icon_slot_side(font, span.height);
         let show_icon = self.identity.is_some() && side > 0 && span.width >= side;
         let reserved = if show_icon {
@@ -1326,17 +1375,7 @@ impl TitleBar {
             return;
         }
         let heading = self.is_heading();
-        // A window's furniture is titling text; a plate's band is the heading
-        // over the rows beneath it, so it takes the ladder's bold role.
-        let font = role_font(
-            theme,
-            scale,
-            if heading {
-                TextRole::SectionHeader
-            } else {
-                TextRole::WindowTitle
-            },
-        );
+        let font = role_font(theme, scale, self.text_role());
         let palette = theme.palette();
         let layout = self.layout(bounds, scale, theme);
 
@@ -2014,7 +2053,12 @@ impl WindowFrame {
     #[must_use]
     pub fn identity_icon_side(scale: Scale, theme: &Theme) -> u32 {
         let (_, title_h, _) = Self::edges(scale, theme);
-        TitleBar::icon_side(Rect::new(0, 0, 0, title_h), scale, theme)
+        TitleBar::icon_side(
+            TitleBarCommands::Window,
+            Rect::new(0, 0, 0, title_h),
+            scale,
+            theme,
+        )
     }
 
     /// The three scaled frame metrics —

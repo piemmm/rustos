@@ -184,9 +184,11 @@ const LADDER: [Rung; 9] = [
         percent: 87,
         weight: FontWeight::Regular,
     },
+    // A header carries its hierarchy on weight, at the size of the text it
+    // heads: set smaller than its own rows it reads as a caption instead.
     Rung {
         role: TextRole::SectionHeader,
-        percent: 80,
+        percent: 100,
         weight: FontWeight::Bold,
     },
     Rung {

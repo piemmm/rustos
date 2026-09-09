@@ -25,7 +25,7 @@ use crate::state::{
     AuthorityState, ControlState, PointerState, SizeAction, WindowActivationState,
     WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
-use crate::testkit::high_contrast;
+use crate::testkit::{high_contrast, text_ladder};
 use crate::window::{
     BandCorner, FrameInsets, FrameRim, FurniturePart, GrabReach, ResizeEdge, ResizeEvent,
     ResizeGrabber, ScrollCorner, TitleBar, TitleBarCommands, TitleBarEvent, TitleHit,
@@ -1750,7 +1750,7 @@ fn an_identity_leads_the_group_and_the_title_follows_it() {
 
     let bare = plain.layout(bounds, Scale::ONE, &theme);
     let with = identified.layout(bounds, Scale::ONE, &theme);
-    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(TitleBarCommands::Window, bounds, Scale::ONE, &theme);
     assert!(side > 0, "the band is tall enough for a slot");
     assert_eq!(with.icon.width, side);
     assert_eq!(with.icon.height, side);
@@ -1812,7 +1812,7 @@ fn an_identity_draws_its_artwork_and_falls_back_to_the_glyph() {
         "the built-in glyph fills the slot"
     );
 
-    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(TitleBarCommands::Window, bounds, Scale::ONE, &theme);
     let mut art = Surface::new(side, side).expect("artwork");
     art.fill_rect(0, 0, side, side, Color::from(theme.palette().accent));
     let drawn = paint(&bar, Some(&art));
@@ -1844,7 +1844,7 @@ fn the_identity_artwork_desaturates_with_the_frame() {
     let mut bar = TitleBar::new(furniture());
     bar.set_identity(Some(IconKind::AppBundle));
     bar.set_title("Report");
-    let side = TitleBar::icon_side(bounds, Scale::ONE, &theme);
+    let side = TitleBar::icon_side(TitleBarCommands::Window, bounds, Scale::ONE, &theme);
     assert!(side > 0, "the band is tall enough for a slot");
     let mut art = Surface::new(side, side).expect("artwork");
     art.fill_rect(0, 0, side, side, Color::from(ink));
@@ -2885,7 +2885,34 @@ fn a_plate_band_lays_its_own_ground_one_shade_off_the_plate() {
 }
 
 #[test]
-fn a_plate_band_sets_its_title_in_the_section_header_face() {
+fn a_plate_bands_title_is_set_at_the_same_size_as_the_rows_it_caps() {
+    // A band set smaller than the rows beneath it reads as a caption, not a
+    // heading. The band's own ground is what makes it a heading; the face only
+    // has to carry the same size as the interface text, which is what the rows
+    // are drawn in.
+    for base in [12u16, 16, 24] {
+        let theme = text_ladder(base);
+        let fonts = theme.fonts();
+        assert_eq!(
+            fonts.spec(TextRole::WindowTitle).size_px,
+            fonts.spec(TextRole::Body).size_px,
+            "a plate band's face must never be smaller than a menu row's"
+        );
+        assert_eq!(
+            fonts.spec(TextRole::SectionHeader).size_px,
+            fonts.spec(TextRole::Body).size_px,
+            "the heading rung the band uses is the interface size too"
+        );
+        assert_eq!(
+            fonts.spec(TextRole::SectionHeader).weight,
+            tairix_theme::FontWeight::Bold,
+            "a plate band's title is bold"
+        );
+    }
+}
+
+#[test]
+fn a_plate_band_draws_its_ground_then_its_title_and_nothing_else() {
     const TITLE: &str = "Appearance";
     let theme = Theme::dark();
     let palette = theme.palette();
@@ -2893,60 +2920,42 @@ fn a_plate_band_sets_its_title_in_the_section_header_face() {
     bar.set_title(TITLE);
     let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
 
-    // A plate band draws exactly two things: its own ground and its title. So
-    // the band composed with a given face is an exact reference — the header
-    // face must reproduce it and the window-title face must not.
-    let reference = |role: TextRole| {
-        let font = BitmapFont::for_role(theme.fonts(), role, Scale::ONE);
-        let mut surface = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
-        surface.fill(Color::from(palette.surface_raised));
-        let (x, y, w, h) = (
-            0,
-            0,
-            TITLE_BOUNDS.width,
-            TITLE_BOUNDS.height.min(TITLE_BOUNDS.height),
-        );
-        surface.fill_rect(
-            x,
-            y,
-            w,
-            h,
-            Color::from(crate::paint::ground_fill(
-                &theme,
-                palette.surface_hover,
-                crate::paint::ChromeLayer::Ground,
-            )),
-        );
-        let glyph_h = font.glyph_height();
-        let ty = layout.title.top()
-            + (i32::try_from(layout.title.height).unwrap_or(i32::MAX)
-                - i32::try_from(glyph_h).unwrap_or(i32::MAX))
-            .max(0)
-                / 2;
-        let (fitted, _) = font.elide_to_width(TITLE, layout.title.width);
-        font.draw_text(
-            &mut surface,
-            layout.title.left(),
-            ty,
-            fitted,
-            Color::from(palette.on_surface),
-        );
-        surface
-    };
-
-    let header = reference(TextRole::SectionHeader);
-    let window_title = reference(TextRole::WindowTitle);
-    assert_ne!(
-        header.pixels(),
-        window_title.pixels(),
-        "the two faces must differ for this probe to discriminate"
+    // A plate band draws exactly two things, so composing them by hand is an
+    // exact reference for what it must paint.
+    let font = BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, Scale::ONE);
+    let mut reference = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
+    reference.fill(Color::from(palette.surface_raised));
+    reference.fill_rect(
+        0,
+        0,
+        TITLE_BOUNDS.width,
+        TITLE_BOUNDS.height,
+        Color::from(crate::paint::ground_fill(
+            &theme,
+            palette.surface_hover,
+            crate::paint::ChromeLayer::Ground,
+        )),
+    );
+    let glyph_h = font.glyph_height();
+    let ty = layout.title.top()
+        + (i32::try_from(layout.title.height).unwrap_or(i32::MAX)
+            - i32::try_from(glyph_h).unwrap_or(i32::MAX))
+        .max(0)
+            / 2;
+    let (fitted, _) = font.elide_to_width(TITLE, layout.title.width);
+    font.draw_text(
+        &mut reference,
+        layout.title.left(),
+        ty,
+        fitted,
+        Color::from(palette.on_surface),
     );
 
     let painted = band_over_plate(TitleBarCommands::Empty, &theme);
     assert_eq!(
         painted.pixels(),
-        header.pixels(),
-        "a plate band's title is set in the ladder's heading face"
+        reference.pixels(),
+        "a plate band is its shaded ground plus its title, at the interface size"
     );
 }
 
@@ -3085,4 +3094,74 @@ fn a_plate_band_takes_no_keyboard_focus_it_has_nothing_to_focus() {
             None
         );
     }
+}
+
+#[test]
+fn a_bands_title_box_is_measured_in_the_face_the_band_draws_it_in() {
+    // A box measured in one face and painted in another elides a title that
+    // would have fitted: a plate band's bold header advances wider than the
+    // titling face a window's bar uses, so "System" came out "Syst…" on a
+    // plate whose band had room for it twice over.
+    const TITLE: &str = "System";
+    let theme = Theme::dark();
+    for (label, mut bar) in [
+        ("plate", TitleBar::plate()),
+        ("window", TitleBar::new(WindowFurnitureState::default())),
+    ] {
+        bar.set_title(TITLE);
+        let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+        let font = BitmapFont::for_role(theme.fonts(), bar.text_role(), Scale::ONE);
+        assert!(
+            font.text_width(TITLE) <= layout.title.width,
+            "{label}: the title box is narrower than the line drawn in it"
+        );
+        let (_, marked) = font.elide_to_width(TITLE, layout.title.width);
+        assert!(
+            !marked,
+            "{label}: a title that fits its band must not elide"
+        );
+    }
+}
+
+#[test]
+fn a_band_asks_for_the_width_its_whole_title_needs() {
+    // Chrome that sizes itself to its content asks a band how wide it must be
+    // rather than eliding a title it had the freedom to show. The asked-for
+    // width must therefore actually seat the title: laying the band out at it
+    // leaves a box the drawn line fits in.
+    let theme = Theme::dark();
+    for (label, mut bar) in [
+        ("plate", TitleBar::plate()),
+        ("window", TitleBar::new(WindowFurnitureState::default())),
+    ] {
+        for title in ["A", "System", "A rather longer plate title than usual"] {
+            bar.set_title(title);
+            let want = bar.preferred_band_width(Scale::ONE, &theme);
+            assert!(
+                want >= TitleBar::min_band_width(bar.commands(), Scale::ONE, &theme),
+                "{label}/{title}: never narrower than a band can be drawn"
+            );
+            let band = Rect::new(0, 0, want, TitleBar::band_height(Scale::ONE, &theme));
+            let layout = bar.layout(band, Scale::ONE, &theme);
+            let font = BitmapFont::for_role(theme.fonts(), bar.text_role(), Scale::ONE);
+            let (_, marked) = font.elide_to_width(title, layout.title.width);
+            assert!(
+                !marked,
+                "{label}/{title}: the width it asked for still elides the title"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_longer_title_asks_for_a_wider_band() {
+    let theme = Theme::dark();
+    let mut short = TitleBar::plate();
+    short.set_title("Edit");
+    let mut long = TitleBar::plate();
+    long.set_title("Edit this document's properties");
+    assert!(
+        long.preferred_band_width(Scale::ONE, &theme)
+            > short.preferred_band_width(Scale::ONE, &theme)
+    );
 }

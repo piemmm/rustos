@@ -1330,3 +1330,54 @@ fn a_plate_lays_the_raised_ground_and_follows_the_theme() {
         "a theme switch repaints the plate"
     );
 }
+
+#[test]
+fn a_plate_is_wide_enough_for_its_own_title_not_only_its_rows() {
+    // A plate is chrome the desktop sizes to its content, so a title wider
+    // than every row widens the plate rather than being elided to fit rows
+    // that happen to be short.
+    const TITLE: &str = "A rather longer plate title than any of its rows";
+    let theme = theme();
+    let g = geom(&theme);
+    let mut chain = MenuChain::new();
+    let mut model = ChainModel::new(TITLE);
+    for (index, label) in ["Cut", "Copy"].iter().enumerate() {
+        let id = AppMenuItemId::for_index(index).expect("row id");
+        model.push(ChainRow::item(id, MenuItem::new(*label)));
+    }
+    chain
+        .open(
+            APP,
+            model,
+            PlatePlacement::adjacent(Rect::new(0, 0, 1, 1)),
+            &g,
+        )
+        .expect("open");
+    let plate = chain
+        .surfaces()
+        .into_iter()
+        .find(|s| s.kind == SurfaceKind::Plate(0))
+        .expect("root plate")
+        .rect;
+
+    let mut band = tairix_controls::TitleBar::plate();
+    band.set_title(TITLE);
+    assert!(
+        plate.width >= band.preferred_band_width(g.scale, g.theme),
+        "the plate seats the width its band asked for"
+    );
+    let band_rect = Rect::new(
+        0,
+        0,
+        plate.width,
+        tairix_controls::TitleBar::band_height(g.scale, g.theme),
+    );
+    let title_box = band.layout(band_rect, g.scale, g.theme).title;
+    let font = tairix_font::BitmapFont::for_role(
+        g.theme.fonts(),
+        tairix_theme::TextRole::SectionHeader,
+        g.scale,
+    );
+    let (_, marked) = font.elide_to_width(TITLE, title_box.width);
+    assert!(!marked, "and draws the title without eliding it");
+}
