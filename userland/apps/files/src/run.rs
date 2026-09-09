@@ -108,15 +108,13 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::{FileKind, OpenFlags, FS_IO_MAX, FS_MODE_MASK, FS_NAME_MAX};
     use tairix_abi::input::{
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
     };
     use tairix_abi::seat::SEAT_PRIMARY;
-    use tairix_abi::window_ipc::{
-        MenuOutcome, PointerAction, WindowEvent, WindowRegion, WINDOW_ENDPOINT,
-    };
+    use tairix_abi::window_ipc::{MenuOutcome, PointerAction, WindowEvent, WindowRegion};
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, SpawnAttach, UnlinkFlags, WaitFlags,
         WaitSetOp, WaitSourceKind, WaitStatus, BUNDLE_SUFFIX, DOCUMENT_ROLE_ARG,
@@ -159,7 +157,8 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_theme::Theme;
+    use tairix_window::app::{self, Wake};
     use tairix_window::{
         pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
         EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowFrames,
@@ -188,57 +187,22 @@ mod program {
     /// value: the browser never shows a fabricated listing.
     const EXIT_NO_LISTING: i32 = 80;
 
-    /// Exit code when the memory a window's pixels need could not be had —
-    /// the shared frame region could not be created or granted to the window
-    /// endpoint, or the surface each frame is drawn in could not be
-    /// allocated. A reserved, fail-closed value.
-    const EXIT_NO_FRAMES: i32 = 81;
-
-    /// Exit code when the event mailbox could not be bound or observed
-    /// through the wait-set. A reserved, fail-closed value: the app
-    /// exits rather than degrade into a busy re-poll.
-    const EXIT_NO_EVENTS: i32 = 82;
-
-    /// Exit code when the desktop session refused the window create (no
-    /// graphical session, or the channel refused the geometry). A
-    /// reserved, fail-closed value.
-    const EXIT_NO_WINDOW: i32 = 83;
-
-    /// Exit code when a present was refused or the event channel died
-    /// (the session went away). A reserved, fail-closed value.
-    const EXIT_CHANNEL_LOST: i32 = 84;
-
     /// Exit code for a command line the program cannot act on: an unrecognised
     /// option, a second operand, or an argument vector that is not UTF-8. The
     /// conventional usage status the other command apps return, so a script
     /// sees the familiar value rather than one reserved to this app.
     const EXIT_USAGE: i32 = 2;
 
-    /// Frames in the shared region. The window protocol serialises a
-    /// present (the app is parked in the call while the session reads),
-    /// so a single frame is race-free; the constant names the choice.
-    const FRAME_COUNT: u32 = 1;
-
-    /// The wait-set token of the event-mailbox member.
-    const EVENT_TOKEN: u64 = 1;
-
     /// The wait-set token of the any-child member: a bundle the file manager
     /// launched has exited, so it is reaped promptly (never left a zombie,
     /// and never a busy-poll — the member is drained the instant it wakes).
-    const CHILD_TOKEN: u64 = 2;
-
-    /// The wait-set token of the memory-pressure member: the kernel wakes the
-    /// park when the machine's pressure band changes, so the decoded grid
-    /// artwork is handed back as memory tightens instead of being held until
-    /// something else is starved. The wake is the notification — nothing here
-    /// polls or times the band.
-    const PRESSURE_TOKEN: u64 = 3;
+    const CHILD_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
     /// The wait-set token of the reader's wake pipe: readable exactly when a
     /// directory listing, a batch of folder cues, or a bundle scan has come
     /// back, so the answer is adopted through the park the loop is already in
     /// rather than by polling for it.
-    const READS_TOKEN: u64 = 4;
+    const READS_TOKEN: u64 = CHILD_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -248,18 +212,6 @@ mod program {
     /// well-formed, assignable `u32` (non-numeric, empty, out of range, or the
     /// reserved "unchanged" sentinel).
     const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
-
-    /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
-    /// tightly-packed four-bytes-per-pixel row. One definition so the initial
-    /// window and every resize build the surface identically.
-    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
-        DisplayMode {
-            width_px,
-            height_px,
-            stride_bytes: width_px.saturating_mul(4),
-            format: DisplayFormat::Rgba8888,
-        }
-    }
 
     /// Re-map the window `window` onto a fresh frame region shaped as
     /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
@@ -274,17 +226,14 @@ mod program {
     /// adopting the new one, while every refusal drops the fresh region here
     /// instead and leaves the window on the geometry it had.
     fn resize_frames(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         window: u64,
         new_mode: &DisplayMode,
     ) -> Option<(WindowFrames, Surface)> {
-        let new_len = (new_mode.stride_bytes as usize)
-            .checked_mul(new_mode.height_px as usize)?
-            .checked_mul(FRAME_COUNT as usize)?;
-        let frames = WindowFrames::create(new_len)?;
+        let frames = WindowFrames::create(app::region_bytes(new_mode, app::FRAME_COUNT))?;
         let surface = Surface::new(new_mode.width_px, new_mode.height_px)?;
         client
-            .resize(window, frames.grant()?, FRAME_COUNT, new_mode)
+            .resize(window, frames.grant()?, app::FRAME_COUNT, new_mode)
             .ok()?;
         Some((frames, surface))
     }
@@ -330,6 +279,12 @@ mod program {
         code
     }
 
+    /// State a shared-shell bring-up refusal and hand its reserved code back.
+    fn fail_shell(err: app::ShellError) -> i32 {
+        let _ = writeln!(Stderr, "files: {err}");
+        err.code()
+    }
+
     /// Declare (or re-declare) this process's presence on the desktop's icon
     /// bar, as its `role` decides.
     ///
@@ -344,7 +299,7 @@ mod program {
     /// refused has no slot and no window, which is a desktop without its file
     /// manager: stated loudly, and still not fatal.
     fn declare_app_bar(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         endpoint: u64,
         role: Role,
         places: &Places,
@@ -371,18 +326,6 @@ mod program {
             Err(err) => report_error(&alloc::format!(
                 "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
             )),
-        }
-    }
-
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to
-    /// the reserved window endpoint per request. The session attests the
-    /// caller kernel-side on every request, so the transport carries no
-    /// claimed authority.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -467,7 +410,7 @@ mod program {
     /// lost channel and exits fail-loud.
     fn present_window(
         win: &mut OpenWindow,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         theme: &Theme,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
@@ -492,7 +435,7 @@ mod program {
         // Re-attached first if the session released it while the window was
         // hidden, so a paint after a release paints into a live region.
         let frame = client
-            .frame_pixels(&mut win.frames, win.window, FRAME_COUNT, &win.mode)
+            .frame_pixels(&mut win.frames, win.window, app::FRAME_COUNT, &win.mode)
             .ok_or(Errno::NotAttached)?;
         present_frame(
             &mut win.browser,
@@ -525,7 +468,7 @@ mod program {
     /// Whatever the present refuses.
     fn present_whole(
         win: &mut OpenWindow,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         theme: &Theme,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
@@ -559,7 +502,7 @@ mod program {
     ///
     /// The exit code naming what refused.
     fn open_window(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         event_endpoint: u64,
         desktop: &Desktop,
         places: &Places,
@@ -571,19 +514,19 @@ mod program {
             return Err(EXIT_NO_LISTING);
         };
         let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mode = mode_for(w, h);
-        let total = (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize;
+        let mode = app::mode_for(w, h);
+        let total = app::region_bytes(&mode, app::FRAME_COUNT);
         let Some(frames) = WindowFrames::create(total) else {
             report_error("shared frame region refused; no window opened");
-            return Err(EXIT_NO_FRAMES);
+            return Err(app::EXIT_NO_FRAMES);
         };
         let Some(grant) = frames.grant() else {
             report_error("frame region grant refused; no window opened");
-            return Err(EXIT_NO_FRAMES);
+            return Err(app::EXIT_NO_FRAMES);
         };
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             report_error("window surface refused; no window opened");
-            return Err(EXIT_NO_FRAMES);
+            return Err(app::EXIT_NO_FRAMES);
         };
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
@@ -591,13 +534,13 @@ mod program {
         let Ok((window, _)) = client.create(
             grant,
             event_endpoint,
-            FRAME_COUNT,
+            app::FRAME_COUNT,
             &mode,
             &title,
             WIN_SIZING,
         ) else {
             report_error("the desktop session refused the window");
-            return Err(EXIT_NO_WINDOW);
+            return Err(app::EXIT_NO_WINDOW);
         };
         Ok(OpenWindow {
             window,
@@ -623,7 +566,7 @@ mod program {
     fn close_window(
         windows: &mut alloc::vec::Vec<OpenWindow>,
         index: usize,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
     ) {
         if index >= windows.len() {
             return;
@@ -652,7 +595,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
     fn route_app_bar_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
@@ -748,7 +691,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
     fn route_event(
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
         places: &mut Places,
         theme: &Theme,
@@ -795,7 +738,7 @@ mod program {
         } = *event
         {
             let win = &mut windows[index];
-            let new_mode = mode_for(width_px, height_px);
+            let new_mode = app::mode_for(width_px, height_px);
             if let Some((frames, surface)) = resize_frames(client, win.window, &new_mode) {
                 // Adopting drops the old region, which unmaps it; the fresh
                 // drawing surface holds none of the last frame's pixels, so
@@ -804,7 +747,7 @@ mod program {
                 win.mode = new_mode;
                 win.surface = surface;
                 if present_whole(win, client, theme, icons, desktop.scale()).is_err() {
-                    return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
+                    return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
                 }
             }
             return None;
@@ -884,7 +827,7 @@ mod program {
         }
         let repaint = merge(repaint, whole_if(chrome_toggled));
         if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
-            return Some(fail(EXIT_CHANNEL_LOST, "present refused"));
+            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
         None
     }
@@ -923,7 +866,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The run's whole mutable state, threaded explicitly.
     fn open_more(
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
@@ -967,7 +910,7 @@ mod program {
     fn drain_open_targets(
         window_id: u64,
         windows: &mut alloc::vec::Vec<OpenWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
         theme: &Theme,
@@ -1805,13 +1748,13 @@ mod program {
     /// The same wait-set carries the any-child member ([`CHILD_TOKEN`]): a
     /// launched bundle exiting wakes the park, and the source reaps it in place
     /// before re-parking, so a child is never left a zombie and the wake never
-    /// degrades into a busy-poll. It also carries the memory-pressure member
-    /// ([`PRESSURE_TOKEN`]): a band change wakes the park and the retained
-    /// artwork is trimmed there and then, so memory goes back when the machine
-    /// asks for it rather than at whatever later moment the user next types.
-    /// The reader's wake ([`READS_TOKEN`]) is the one member the source cannot
-    /// serve itself: the answer is the loop's to adopt, so the wake is drained
-    /// here and the wait ends without an event.
+    /// degrades into a busy-poll. The shared shell's memory-pressure member
+    /// reports a [`Wake::PressureChanged`], and the retained artwork is trimmed
+    /// there and then, so memory goes back when the machine asks for it rather
+    /// than at whatever later moment the user next types. The reader's wake
+    /// ([`READS_TOKEN`]) is the one member the source cannot serve itself: the
+    /// answer is the loop's to adopt, so the wake is drained here and the wait
+    /// ends without an event.
     struct RtEventSource<'a> {
         /// The app's own event mailbox, which authenticates every frame it
         /// hands over.
@@ -1821,7 +1764,7 @@ mod program {
         /// The launched-bundle bookkeeping reaped on a [`CHILD_TOKEN`] wake,
         /// shared with the activation path that spawns.
         launcher: &'a RefCell<Launcher>,
-        /// The grid's artwork pipeline, trimmed on a [`PRESSURE_TOKEN`] wake,
+        /// The grid's artwork pipeline, trimmed on a [`Wake::PressureChanged`],
         /// shared with the present path that draws through it.
         icons: &'a RefCell<IconPipeline>,
         /// The reader's wake, drained on a [`READS_TOKEN`] wake. Its readiness
@@ -1843,42 +1786,38 @@ mod program {
             // the rate limiter is holding back only ever *tightens* the park
             // to the moment it may be sent; with nothing pending the park
             // stays indefinite.
-            let mut token = 0u64;
             let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
-            let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
-            if waited != 0 {
-                if Errno::from_syscall(waited) != Errno::TimedOut {
-                    return Err(Errno::NotFound);
-                }
-                // No member woke, so `token` names the *previous* wake's
-                // source and acting on it would reap or trim for nothing. The
-                // held-back report is the only bounded wait here.
+            let Some(wake) = app::park_until(self.set, timeout_ns)? else {
+                // No member woke. The held-back report is the only bounded
+                // wait here, so the deadline means exactly that it is due.
                 tairix_rt::cachereport::publish_if_due();
                 return Ok(Parked::Served);
-            }
-            // The reader answered. Draining is the whole of noticing it, and
-            // the answer is the loop's to adopt, so the wait ends here rather
-            // than parking again on a source that is still ready.
-            if token == READS_TOKEN {
-                self.reads.wake.drain();
-                return Ok(Parked::Interrupted);
-            }
-            // A child-exit wake reaps the exited bundle(s) in place, so a
-            // launched app is never left a zombie and the ready child member
-            // cannot spin the park (it is drained the instant it fires).
-            if token == CHILD_TOKEN {
-                self.launcher.borrow_mut().reap();
-            } else if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+            };
+            match wake {
+                // The reader answered. Draining is the whole of noticing it,
+                // and the answer is the loop's to adopt, so the wait ends here
+                // rather than parking again on a source that is still ready.
+                Wake::App(READS_TOKEN) => {
+                    self.reads.wake.drain();
+                    return Ok(Parked::Interrupted);
+                }
+                // A child-exit wake reaps the exited bundle(s) in place, so a
+                // launched app is never left a zombie and the ready child
+                // member cannot spin the park (it is drained the instant it
+                // fires).
+                Wake::App(CHILD_TOKEN) => self.launcher.borrow_mut().reap(),
                 // The machine's band moved: give back whatever the new band
                 // says the decoded artwork may no longer keep, here at the
-                // wake rather than at the next user input. A band that did not
-                // really move costs one read and no eviction work. A decode
-                // the old band refused to keep is offered again, since the
-                // band that refused it has changed. The glyph cache this
-                // window drew through gives back the same way.
-                self.icons.borrow_mut().trim();
-                self.reads.retry_declined_artwork();
-                tairix_font::trim_glyph_cache();
+                // wake rather than at the next user input. A decode the old
+                // band refused to keep is offered again, since the band that
+                // refused it has changed. The glyph cache this window drew
+                // through gives back the same way.
+                Wake::PressureChanged => {
+                    self.icons.borrow_mut().trim();
+                    self.reads.retry_declined_artwork();
+                    tairix_font::trim_glyph_cache();
+                }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => {}
             }
             Ok(Parked::Served)
         }
@@ -1967,7 +1906,7 @@ mod program {
     /// reuses an id, so anything else answers a gesture already settled.
     struct MenuLink<'a> {
         /// The window channel the open is sent over.
-        client: &'a mut WindowClient<RtWindowTransport>,
+        client: &'a mut WindowClient<app::RtWindowTransport>,
         /// The session's id for the window the chain belongs to.
         window: u64,
         /// The open id of this window's unanswered menu, if one is up.
@@ -5102,68 +5041,26 @@ mod program {
         }
     }
 
-    /// Bind the app's own event mailbox and add it to a fresh wait-set the
-    /// event loop parks on, returning `(endpoint, set)`.
+    /// Bind the app's own event mailbox through the shared shell and add this
+    /// app's own any-child member to the wait-set it built.
     ///
-    /// The endpoint id is unique by construction (the shared
-    /// `event_endpoint_for` naming rule: this task's never-reused kernel id
-    /// under a fixed tag) and never a reserved endpoint; the bind is refused
-    /// otherwise. On any refusal it states the reason on `stderr` and returns
-    /// the reserved fail-closed [`EXIT_NO_EVENTS`] code for `main` to exit
-    /// with, so the app exits rather than degrade into a busy re-poll.
+    /// A bundle the file manager launched exiting wakes the park so it is
+    /// reaped promptly (never left a zombie). Adding that member needs no
+    /// capability — a process may always wait on its own children — so a
+    /// refusal here is a genuine bring-up failure.
     fn bind_event_mailbox() -> Result<(u64, u64), i32> {
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return Err(fail(EXIT_NO_EVENTS, "own identity unavailable"));
-        };
-        let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || tairix_rt::port_bind(
-                event_endpoint,
-                WindowEvent::WIRE_LEN,
-                tairix_window::EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return Err(fail(EXIT_NO_EVENTS, "wait-set refused"));
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
+        let binding = app::bind_event_mailbox().map_err(fail_shell)?;
         if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            event_endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
-        }
-        // The any-child member: a bundle the file manager launched exiting
-        // wakes the park so it is reaped promptly (never left a zombie). Adding
-        // it needs no capability — a process may always wait on its own
-        // children — so a refusal here is a genuine bring-up failure.
-        if tairix_rt::waitset_ctl(
-            set,
+            binding.set(),
             WaitSetOp::Add,
             WaitSourceKind::Child,
             WAITSET_CHILD_ANY,
             CHILD_TOKEN,
         ) != 0
         {
-            return Err(fail(EXIT_NO_EVENTS, "child wait refused"));
+            return Err(fail(app::EXIT_NO_EVENTS, "child wait refused"));
         }
-        // The memory-pressure member: the kernel wakes the park when the
-        // machine's band changes, so the decoded grid artwork is handed back as
-        // memory tightens instead of held until something else is starved. This
-        // is the app's only pressure notification — it neither polls nor times
-        // the band.
-        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wait refused"));
-        }
-        Ok((event_endpoint, set))
+        Ok((binding.endpoint(), binding.set()))
     }
 
     /// The transient overlay/clipboard state the event loop threads, all
@@ -5353,26 +5250,16 @@ mod program {
         // is the identity it requires of every event's attested sender — and
         // it does so without a window, which is what lets a component declare
         // its slot and start answering it before it opens one.
-        let mut client = WindowClient::new(RtWindowTransport);
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                let _ = writeln!(Stderr, "files: desktop query refused: {err}");
-                return EXIT_NO_WINDOW;
-            }
+        let mut client = WindowClient::new(app::RtWindowTransport);
+        let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
+            Ok(pair) => pair,
+            Err(err) => return fail_shell(err),
         };
         let Some(server) = client.session() else {
             return fail(
-                EXIT_NO_WINDOW,
+                app::EXIT_NO_WINDOW,
                 "the desktop session did not identify itself",
             );
-        };
-        let mut desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "files: cannot draw this desktop: {err}");
-                return EXIT_NO_WINDOW;
-            }
         };
 
         // --- The event mailbox the app parks on, bound and added to a
@@ -5382,8 +5269,6 @@ mod program {
             Err(code) => return code,
         };
 
-        let mut themes = ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
         let mut theme = themes.active();
         // The places rail: the user's own shortcuts plus whatever is mounted
         // right now, read once here and re-read whenever the user refreshes.
@@ -5444,13 +5329,13 @@ mod program {
                 READS_TOKEN,
             ) != 0
             {
-                return fail(EXIT_NO_EVENTS, "reader wake wait refused");
+                return fail(app::EXIT_NO_EVENTS, "reader wake wait refused");
             }
         }
 
         let icons = {
             let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-            let nominal = mode_for(w, h);
+            let nominal = app::mode_for(w, h);
             RefCell::new(open_icons(
                 (nominal.stride_bytes as usize) * (nominal.height_px as usize),
                 &reads,
@@ -5480,7 +5365,7 @@ mod program {
                 Err(code) => return code,
             };
             if present_whole(&mut win, &mut client, theme, &icons, desktop.scale()).is_err() {
-                return fail(EXIT_CHANNEL_LOST, "first present refused");
+                return fail(app::EXIT_CHANNEL_LOST, "first present refused");
             }
             windows.push(win);
         }
@@ -5536,7 +5421,7 @@ mod program {
                 )
                 .is_err()
                 {
-                    return fail(EXIT_CHANNEL_LOST, "present refused");
+                    return fail(app::EXIT_CHANNEL_LOST, "present refused");
                 }
                 if finished {
                     // Re-list so the view reflects what actually remains — a
@@ -5557,7 +5442,7 @@ mod program {
                     )
                     .is_err()
                     {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                        return fail(app::EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
@@ -5632,7 +5517,7 @@ mod program {
                     // carries on (never guessed at).
                     Ok(None) | Err(EventError::Undecodable(_)) => {}
                     Err(EventError::Mailbox(_)) => {
-                        return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                        return fail(app::EXIT_CHANNEL_LOST, "event channel lost")
                     }
                 }
                 continue;
@@ -5675,7 +5560,7 @@ mod program {
                             if present_whole(win, &mut client, theme, &icons, desktop.scale())
                                 .is_err()
                             {
-                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
                             }
                         }
                         continue;
@@ -5689,7 +5574,7 @@ mod program {
                             if present_whole(win, &mut client, theme, &icons, desktop.scale())
                                 .is_err()
                             {
-                                return fail(EXIT_CHANNEL_LOST, "present refused");
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
                             }
                         }
                         continue;
@@ -5711,7 +5596,7 @@ mod program {
                 // refused and the app keeps waiting (never guessed at).
                 Err(EventError::Undecodable(_)) => continue,
                 Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                    return fail(app::EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
@@ -5724,7 +5609,7 @@ mod program {
                     for win in &mut windows {
                         if present_whole(win, &mut client, theme, &icons, desktop.scale()).is_err()
                         {
-                            return fail(EXIT_CHANNEL_LOST, "present refused");
+                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
                         }
                     }
                 }

@@ -39,55 +39,21 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::DamageRect;
     use tairix_abi::input::KeyInput;
     use tairix_abi::time::WallTimeState;
-    use tairix_abi::window_ipc::{AppBarClick, WindowEvent, WINDOW_ENDPOINT};
-    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
+    use tairix_abi::window_ipc::{AppBarClick, WindowEvent, WindowSizing};
+    use tairix_abi::Errno;
     use tairix_datetime::view;
     use tairix_datetime::{Editor, Status};
-    use tairix_display::{winframe, SERIAL};
     use tairix_geometry::Scale;
     use tairix_input::{InputEvent, Key, NamedKey};
-    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pointer_point, Desktop, EventDrain, EventError, EventMailbox, EventSource,
-        Parked, WindowClient, WindowEvents, WindowFrames, WindowSizing, WindowTransport,
+        key_input_event, pointer_point, EventDrain, EventError, EventMailbox, EventSource, Parked,
+        WindowClient, WindowEvents,
     };
-
-    /// Exit code when the shared frame region could not be created or granted
-    /// to the window endpoint. A reserved, fail-closed value.
-    const EXIT_NO_FRAMES: i32 = 81;
-
-    /// Exit code when the event mailbox could not be bound or observed through
-    /// the wait-set. A reserved, fail-closed value: the app exits rather than
-    /// degrade into a busy re-poll.
-    const EXIT_NO_EVENTS: i32 = 82;
-
-    /// Exit code when the desktop session refused the window create (no
-    /// graphical session, or the channel refused the geometry). A reserved,
-    /// fail-closed value.
-    const EXIT_NO_WINDOW: i32 = 83;
-
-    /// Exit code when a present was refused or the event channel died (the
-    /// session went away). A reserved, fail-closed value.
-    const EXIT_CHANNEL_LOST: i32 = 84;
-
-    /// Frames in the shared region. The window protocol serialises a present
-    /// (the app is parked in the call while the session reads), so a single
-    /// frame is race-free; the constant names the choice.
-    const FRAME_COUNT: u32 = 1;
-
-    /// The wait-set token of the event-mailbox member.
-    const EVENT_TOKEN: u64 = 1;
-
-    /// The wait-set token of the memory-pressure member: the kernel wakes the
-    /// park when the machine's pressure band changes, so the glyph cache is
-    /// trimmed as memory tightens instead of being held until something else
-    /// is starved.
-    const PRESSURE_TOKEN: u64 = 2;
 
     /// State a reason on `stderr`: an exit code alone is not a diagnosis, and
     /// a refused optional step still says so.
@@ -101,6 +67,12 @@ mod program {
         code
     }
 
+    /// State a shared-shell bring-up refusal and hand its reserved code back.
+    fn fail_shell(err: ShellError) -> i32 {
+        report(&alloc::format!("{err}"));
+        err.code()
+    }
+
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
     /// *Quit* — with the primary click left to the session so it raises the
@@ -112,7 +84,7 @@ mod program {
     /// A refused declaration is an answer, not a death: the app says so and
     /// carries on with no slot of its own — its window is still reachable
     /// through the one the session derives from it.
-    fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
+    fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
         match tairix_window::info_and_quit(endpoint, AppBarClick::Raise) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
@@ -125,18 +97,6 @@ mod program {
             Err(err) => report(&alloc::format!(
                 "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
             )),
-        }
-    }
-
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to the
-    /// reserved window endpoint per request. The session attests the caller
-    /// kernel-side on every request, so the transport carries no claimed
-    /// authority.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
         }
     }
 
@@ -161,104 +121,31 @@ mod program {
 
     impl EventSource for RtEventSource {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let mut token = 0u64;
-            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                return Err(Errno::NotFound);
-            }
-            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+            if app::park(self.set)? == Wake::PressureChanged {
                 tairix_font::trim_glyph_cache();
             }
             Ok(Parked::Served)
         }
     }
 
-    /// Bind the app's own event mailbox and add it to a fresh wait-set,
-    /// returning both. Fails closed with the reserved exit code on any refusal
-    /// rather than degrading into a re-poll.
-    fn bind_event_mailbox() -> Result<(u64, u64), i32> {
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return Err(fail(EXIT_NO_EVENTS, "own identity unavailable"));
-        };
-        let endpoint = tairix_window::event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(endpoint)
-            || tairix_rt::port_bind(
-                endpoint,
-                WindowEvent::WIRE_LEN,
-                tairix_window::EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return Err(fail(EXIT_NO_EVENTS, "wait-set refused"));
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
-        }
-        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wake refused"));
-        }
-        Ok((endpoint, set))
-    }
-
-    /// A `width_px` × `height_px` RGBA window mode, one frame's worth per row.
-    /// The one place this app's mode is shaped, so the create and every
-    /// present agree on stride and format.
-    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
-        DisplayMode {
-            width_px,
-            height_px,
-            stride_bytes: width_px.saturating_mul(4),
-            format: DisplayFormat::Rgba8888,
-        }
-    }
-
-    /// Total bytes a `FRAME_COUNT`-frame region shaped as `mode` needs.
-    fn region_bytes(mode: &DisplayMode) -> usize {
-        (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
-    }
-
-    /// Paint the editor and present the whole frame.
+    /// Paint the editor into the window's retained surface and present the
+    /// whole frame.
     ///
-    /// The pixels come through the client, which re-attaches the region first
-    /// if the session released it while the window was hidden.
-    fn repaint<T: WindowTransport>(
+    /// The form is small and repaints only on a keystroke or a pointer press,
+    /// so the whole window is the honest damage rectangle.
+    fn repaint(
+        window: &mut AppWindow,
         editor: &Editor,
-        theme: &Theme,
+        theme: &tairix_theme::Theme,
         scale: Scale,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frames: &mut WindowFrames,
-        mode: &DisplayMode,
     ) -> Result<(), Errno> {
-        let surface = view::render(editor, scale, theme).ok_or(Errno::NoSpace)?;
-        let pixels = client
-            .frame_pixels(frames, window, FRAME_COUNT, mode)
-            .ok_or(Errno::NotAttached)?;
-        present_surface(&surface, client, window, pixels, mode)
-    }
-
-    /// Copy `surface` into the shared window frame and present it whole.
-    fn present_surface<T: WindowTransport>(
-        surface: &Surface,
-        client: &mut WindowClient<T>,
-        window: u64,
-        frame: &mut [u8],
-        mode: &DisplayMode,
-    ) -> Result<(), Errno> {
+        let Some(mode) = window.mode() else {
+            return Ok(());
+        };
         let damage = DamageRect::full(mode);
-        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
-        client.present(window, 0, damage)
+        window.present(damage, |surface| {
+            view::render_into(surface, editor, scale, theme);
+        })
     }
 
     /// Read the machine's wall clock, or `None` when the read itself was
@@ -349,83 +236,44 @@ mod program {
         // light/dark appearance. Queried once, before any window is created,
         // so the first frame is correctly sized and themed at the real
         // screen's own scale.
-        let mut client = WindowClient::new(RtWindowTransport);
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                return fail(
-                    EXIT_NO_WINDOW,
-                    &alloc::format!("desktop query refused: {err}"),
-                )
-            }
+        let mut window = AppWindow::new();
+        let (mut desktop, mut themes) = match app::bring_up_desktop(window.client()) {
+            Ok(pair) => pair,
+            Err(err) => return fail_shell(err),
         };
-        let mut desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                return fail(
-                    EXIT_NO_WINDOW,
-                    &alloc::format!("cannot draw this desktop: {err}"),
-                )
-            }
-        };
-        let mut themes = ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
         let mut theme = themes.active();
 
-        // --- The shared window surface, shaped at the desktop's own scale.
-        let bounds = view::window_bounds(desktop.scale());
-        let mode = mode_for(bounds.width, bounds.height);
-        let Some(mut frames) = WindowFrames::create(region_bytes(&mode)) else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
-        let Some(grant) = frames.grant() else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
-
         // --- The event mailbox the app parks on.
-        let (event_endpoint, set) = match bind_event_mailbox() {
-            Ok(pair) => pair,
-            Err(code) => return code,
+        let binding = match app::bind_event_mailbox() {
+            Ok(binding) => binding,
+            Err(err) => return fail_shell(err),
         };
 
         // --- The icon-bar presence first: a declared presence belongs to the
         // process, so declaring it before this process owns a window is what
         // makes its slot carry this menu from the moment it appears.
-        declare_app_bar(&mut client, event_endpoint);
+        declare_app_bar(window.client(), binding.endpoint());
         // Fixed size: the window is a short form, and a resizable one would
         // only stretch six fields across empty space.
-        let Ok((window, server)) = client.create(
-            grant,
-            event_endpoint,
-            FRAME_COUNT,
-            &mode,
-            view::TITLE,
-            WindowSizing::Fixed,
-        ) else {
-            return fail(EXIT_NO_WINDOW, "desktop session refused the window");
-        };
-        if repaint(
-            &editor,
-            theme,
-            desktop.scale(),
-            &mut client,
-            window,
-            &mut frames,
-            &mode,
-        )
-        .is_err()
+        let bounds = view::window_bounds(desktop.scale());
+        let mode = app::mode_for(bounds.width, bounds.height);
+        let server = match window.open(binding.endpoint(), &mode, view::TITLE, WindowSizing::Fixed)
         {
+            Ok(server) => server,
+            Err(err) => return fail_shell(err),
+        };
+        if repaint(&mut window, &editor, theme, desktop.scale()).is_err() {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends the
         // app fail-loud; a clean close ends it at zero.
         let mut events = WindowEvents::new(RtEventSource {
-            mailbox: EventMailbox::new(event_endpoint, server),
-            set,
+            mailbox: EventMailbox::new(binding.endpoint(), server),
+            set: binding.set(),
         });
         loop {
-            let event = match events.wait(&mut client) {
+            let event = match events.wait(window.client()) {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event cannot arise here (this
                 // app parks on nothing of its own), and a malformed frame from
@@ -483,23 +331,13 @@ mod program {
                 // until the redraw request that follows the window being shown
                 // again, which re-attaches a fresh region.
                 WindowEvent::ContentReleased { .. } => {
-                    frames.release();
+                    window.release_frames();
                     continue;
                 }
                 _ => {}
             }
 
-            if repaint(
-                &editor,
-                theme,
-                desktop.scale(),
-                &mut client,
-                window,
-                &mut frames,
-                &mode,
-            )
-            .is_err()
-            {
+            if repaint(&mut window, &editor, theme, desktop.scale()).is_err() {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
         }

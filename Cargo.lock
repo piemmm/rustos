@@ -920,12 +920,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
- "tairix-display",
  "tairix-font",
  "tairix-fsmeta",
  "tairix-geometry",
  "tairix-input",
- "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
@@ -2677,7 +2675,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
- "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
@@ -5824,13 +5821,11 @@ dependencies = [
  "tairix-appdata",
  "tairix-browse",
  "tairix-controls",
- "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
  "tairix-log",
- "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-sandbox",
@@ -5865,12 +5860,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-controls",
- "tairix-display",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
- "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-theme",
@@ -5885,7 +5878,10 @@ dependencies = [
  "tairix-display",
  "tairix-geometry",
  "tairix-input",
+ "tairix-procinfo",
+ "tairix-raster",
  "tairix-rt",
+ "tairix-theme",
 ]
 
 [[package]]

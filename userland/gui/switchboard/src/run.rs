@@ -68,7 +68,6 @@ extern crate alloc;
 mod program {
     use alloc::boxed::Box;
 
-    use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -78,12 +77,11 @@ mod program {
         command_endpoint_for, decode_publish_reply, SwitchboardCommand, SwitchboardRequest,
         TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{PointerAction, WindowEvent};
     use tairix_abi::{
         CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
         SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
     };
-    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
@@ -107,15 +105,10 @@ mod program {
         SESSION_REFUSED, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
+    use tairix_window::app::{self, AppWindow};
     use tairix_window::{
-        pointer_point, present_damage, Desktop, EventError, EventMailbox, Repaint, WindowClient,
-        WindowEvents, WindowFrames, WindowTransport,
+        pointer_point, present_damage, Desktop, EventError, EventMailbox, Repaint, WindowEvents,
     };
-
-    /// Frames in the shared region. The window protocol serialises a
-    /// present (the app is parked in the call while the session reads), so
-    /// a single frame is race-free.
-    const FRAME_COUNT: u32 = 1;
 
     /// The command mailbox's bounded capacity: the session sends a panel
     /// open on a click and a seat report when the seat's health changes, so
@@ -214,23 +207,6 @@ mod program {
         }
     }
 
-    /// A display mode for a client area of `width_px` × `height_px`.
-    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
-        DisplayMode {
-            width_px,
-            height_px,
-            stride_bytes: width_px.saturating_mul(4),
-            format: DisplayFormat::Rgba8888,
-        }
-    }
-
-    /// Total bytes a `FRAME_COUNT`-frame region shaped as `mode` needs.
-    fn region_bytes(mode: &DisplayMode) -> usize {
-        (mode.stride_bytes as usize)
-            .saturating_mul(mode.height_px as usize)
-            .saturating_mul(FRAME_COUNT as usize)
-    }
-
     /// The panel's text font: the theme's ordinary interface-text role
     /// resolved through the one shared role-to-font conversion.
     ///
@@ -240,26 +216,6 @@ mod program {
     /// paths agrees on a font.
     fn panel_font(theme: &Theme, scale: Scale) -> BitmapFont {
         BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
-    }
-
-    /// The one open overview window: its session-side id, the identity that
-    /// serves it, the surface it is painted through, and the shared frames
-    /// the session blits from.
-    struct Window {
-        id: u64,
-        mode: DisplayMode,
-        surface: Surface,
-        frames: WindowFrames,
-    }
-
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to the
-    /// reserved window endpoint per request.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
     }
 
     /// The process's own effective capability set, read straight from the
@@ -279,10 +235,11 @@ mod program {
         set: u64,
         event_endpoint: u64,
         command_endpoint: u64,
-        client: WindowClient<RtWindowTransport>,
         desktop: Desktop,
         themes: ThemeRegistry,
-        window: Option<Window>,
+        /// The shared app shell: the channel to the session, the open window,
+        /// its retained surface, and the frame region behind it.
+        window: AppWindow,
         /// The open window's event stream. Created with the window from the
         /// identity the create reply attested, and dropped with it — the
         /// mailbox is the process's and outlives any one window, so a stream
@@ -331,6 +288,7 @@ mod program {
             desktop: Desktop,
             output_bytes: usize,
             reads: alloc::sync::Arc<Reads>,
+            window: AppWindow,
         ) -> Self {
             // The reclaim bookkeeping's audit sink. The shared constructor
             // takes a `'static` borrow, and the runtime sink owns nothing.
@@ -349,10 +307,9 @@ mod program {
                 set,
                 event_endpoint,
                 command_endpoint,
-                client: WindowClient::new(RtWindowTransport),
                 desktop,
                 themes: ThemeRegistry::with_builtins(),
-                window: None,
+                window,
                 events: None,
                 session: None,
                 artwork,
@@ -380,7 +337,7 @@ mod program {
 
         /// The open window's id, or `None` while none is open.
         fn window_id(&self) -> Option<u64> {
-            self.window.as_ref().map(|window| window.id)
+            self.window.window_id()
         }
 
         /// The next event the session delivered for the open window, with a
@@ -396,9 +353,9 @@ mod program {
         /// stream keyed to a window that has gone would authenticate the next
         /// one's events against the wrong identity.
         fn next_window_event(&mut self) -> Result<Option<WindowEvent>, EventError> {
-            let Self { events, client, .. } = self;
+            let Self { events, window, .. } = self;
             match events.as_mut() {
-                Some(events) => events.try_wait(client),
+                Some(events) => events.try_wait(window.client()),
                 None => Ok(None),
             }
         }
@@ -406,73 +363,40 @@ mod program {
         /// The open window's client bounds.
         fn bounds(&self) -> Option<Rect> {
             self.window
-                .as_ref()
-                .map(|window| Rect::new(0, 0, window.mode.width_px, window.mode.height_px))
+                .mode()
+                .map(|mode| Rect::new(0, 0, mode.width_px, mode.height_px))
         }
 
         /// Re-map the window's frame region onto `width_px` × `height_px`
         /// and adopt it.
         ///
-        /// The ordering is fail-closed: a fresh region is created and
-        /// granted first and adopted only if the session accepts the
-        /// re-map. On success the *old* region is unmapped (never before,
-        /// so a refused resize leaves the current surface intact); on
-        /// refusal the freshly allocated region is unmapped so nothing
-        /// leaks. A region that cannot be allocated at all keeps the
-        /// current size rather than tearing the window down.
+        /// A shape the window already has is not re-mapped at all, and a
+        /// refused re-map leaves the old geometry standing.
         fn resize(&mut self, width_px: u32, height_px: u32) {
-            let Some(window) = self.window.as_mut() else {
-                return;
-            };
-            let mode = mode_for(width_px, height_px);
-            if mode.width_px == window.mode.width_px && mode.height_px == window.mode.height_px {
-                return;
-            }
-            let Some(spare) = WindowFrames::create(region_bytes(&mode)) else {
-                return;
-            };
-            let Some(grant) = spare.grant() else {
-                return;
-            };
-            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                return;
-            };
-            if self
-                .client
-                .resize(window.id, grant, FRAME_COUNT, &mode)
-                .is_err()
-            {
+            let mode = app::mode_for(width_px, height_px);
+            let unchanged = self.window.mode().is_some_and(|open| {
+                open.width_px == mode.width_px && open.height_px == mode.height_px
+            });
+            if unchanged {
                 return;
             }
-            // Adopting drops the old region, which unmaps it; every early
-            // return above drops the spare instead, so no path can leave a
-            // region pinned or the surface half-replaced.
-            window.frames = spare;
-            window.surface = surface;
-            window.mode = mode;
+            self.window.resize(mode);
         }
     }
 
     impl ServiceHost for RtHost {
         fn open_window(&mut self) -> Result<(), Errno> {
             let (initial_w, initial_h) = self.desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-            let mode = mode_for(initial_w, initial_h);
-            let frames = WindowFrames::create(region_bytes(&mode)).ok_or(Errno::OutOfMemory)?;
-            let grant = frames.grant().ok_or(Errno::OutOfMemory)?;
-            let surface =
-                Surface::new(mode.width_px, mode.height_px).ok_or(Errno::LengthOutOfRange)?;
+            let mode = app::mode_for(initial_w, initial_h);
             // The window manager decorates and resizes the window server-side;
             // the app draws no chrome and only re-maps its region when a
             // `WindowEvent::Resized` arrives.
-            let created = self.client.create(
-                grant,
-                self.event_endpoint,
-                FRAME_COUNT,
-                &mode,
-                PANEL_TITLE,
-                WIN_SIZING,
-            );
-            let (id, server) = created?;
+            let server = self
+                .window
+                .open(self.event_endpoint, &mode, PANEL_TITLE, WIN_SIZING)
+                .map_err(|err| err.errno())?;
+            // The window's own event member is armed only while a window is
+            // open, so a closed window's channel is never left idly armed.
             if tairix_rt::waitset_ctl(
                 self.set,
                 WaitSetOp::Add,
@@ -481,15 +405,9 @@ mod program {
                 WaitToken::WindowEvent.as_u64(),
             ) != 0
             {
-                let _ = self.client.close(id);
+                let _ = self.window.close();
                 return Err(Errno::NotFound);
             }
-            self.window = Some(Window {
-                id,
-                mode,
-                surface,
-                frames,
-            });
             self.events = Some(WindowEvents::new(EventMailbox::new(
                 self.event_endpoint,
                 server,
@@ -498,9 +416,9 @@ mod program {
         }
 
         fn close_window(&mut self) -> Result<(), Errno> {
-            let Some(window) = self.window.take() else {
+            if !self.window.is_open() {
                 return Ok(());
-            };
+            }
             self.events = None;
             let disarmed = tairix_rt::waitset_ctl(
                 self.set,
@@ -509,7 +427,7 @@ mod program {
                 self.event_endpoint,
                 WaitToken::WindowEvent.as_u64(),
             );
-            let closed = self.client.close(window.id);
+            let closed = self.window.close();
             if disarmed != 0 {
                 return Err(Errno::NotFound);
             }
@@ -524,7 +442,6 @@ mod program {
         ) -> Result<(), Errno> {
             let bounds = self.bounds().ok_or(Errno::NotFound)?;
             let Self {
-                client,
                 desktop,
                 themes,
                 window,
@@ -532,49 +449,44 @@ mod program {
                 artwork_resolver,
                 ..
             } = self;
-            let window = window.as_mut().ok_or(Errno::NotFound)?;
             // A region the session released holds none of the pixels a partial
-            // present would leave standing, so it is re-attached and drawn
-            // whole.
-            let repaint = if window.frames.is_released() {
+            // present would leave standing, so it is drawn whole.
+            let repaint = if window.content_released() {
                 Repaint::Whole
             } else {
                 repaint
             };
-            let Some(rect) = present_damage(&window.mode, repaint, damage) else {
+            let mode = *window.mode().ok_or(Errno::NotFound)?;
+            let Some(rect) = present_damage(&mode, repaint, damage) else {
                 return Ok(());
             };
             themes.set_appearance(desktop.appearance());
             let theme = themes.active();
-            window
-                .surface
-                .with_clip(rect.x, rect.y, rect.width_px, rect.height_px, |surface| {
-                    let mut icons = IconArtworkSource::new(artwork, artwork_resolver.as_mut());
-                    panel.render(
-                        surface,
-                        bounds,
-                        desktop.scale(),
-                        theme,
-                        panel_font(theme, desktop.scale()),
-                        &mut icons,
-                    );
-                });
-            let pixels = client
-                .frame_pixels(&mut window.frames, window.id, FRAME_COUNT, &window.mode)
-                .ok_or(Errno::NotAttached)?;
-            winframe::encode(&window.surface, pixels, &window.mode, rect, &SERIAL)?;
-            client.present(window.id, 0, rect)
+            window.present(rect, |surface| {
+                let mut icons = IconArtworkSource::new(artwork, artwork_resolver.as_mut());
+                panel.render(
+                    surface,
+                    bounds,
+                    desktop.scale(),
+                    theme,
+                    panel_font(theme, desktop.scale()),
+                    &mut icons,
+                );
+            })
         }
 
         fn layout(&self) -> Option<PanelLayout<'_>> {
             // A released region holds none of the pixels a partial present
             // would leave standing, so it answers with no frame and the
             // refresh draws the client whole.
-            let window = self.window.as_ref().filter(|w| !w.frames.is_released())?;
+            if self.window.content_released() {
+                return None;
+            }
+            let mode = self.window.mode()?;
             let theme = self.themes.active();
             let scale = self.desktop.scale();
             Some(PanelLayout {
-                bounds: Rect::new(0, 0, window.mode.width_px, window.mode.height_px),
+                bounds: Rect::new(0, 0, mode.width_px, mode.height_px),
                 scale,
                 theme,
                 font: panel_font(theme, scale),
@@ -889,9 +801,7 @@ mod program {
             // the pages go only when both do; the redraw request that follows
             // the window being shown again re-attaches a fresh region.
             WindowEvent::ContentReleased { .. } => {
-                if let Some(window) = host.window.as_mut() {
-                    window.frames.release();
-                }
+                host.window.release_frames();
                 service.panel_mut().repaint_whole();
                 return;
             }
@@ -1468,22 +1378,16 @@ mod program {
         };
         let _reads_guard = ReadsGuard(alloc::sync::Arc::clone(&reads));
 
-        let mut client = WindowClient::new(RtWindowTransport);
         // The desktop this window will be shown on: the screen, the density,
         // and the appearance, before anything is sized or painted, so the
         // first frame is right rather than a guess corrected once the user
-        // has seen it.
-        let info = match client.desktop() {
-            Ok(info) => info,
+        // has seen it. The window this is asked through is the one the host
+        // then keeps, so no second channel is opened to hand over.
+        let mut shell = AppWindow::new();
+        let desktop = match app::bring_up_desktop(shell.client()) {
+            Ok((desktop, _)) => desktop,
             Err(err) => {
-                let _ = writeln!(Stderr, "switchboard: desktop query refused: {err}");
-                return EXIT_NO_WAIT_SOURCE;
-            }
-        };
-        let desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "switchboard: cannot draw this desktop: {err}");
+                let _ = writeln!(Stderr, "switchboard: {err}");
                 return EXIT_NO_WAIT_SOURCE;
             }
         };
@@ -1494,7 +1398,7 @@ mod program {
         // so it is derived from this desktop's own window frame through the
         // one sizing the window itself is opened with.
         let (frame_w, frame_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let output_bytes = region_bytes(&mode_for(frame_w, frame_h));
+        let output_bytes = app::region_bytes(&app::mode_for(frame_w, frame_h), app::FRAME_COUNT);
         let mut host = RtHost::new(
             set,
             events,
@@ -1502,8 +1406,8 @@ mod program {
             desktop,
             output_bytes,
             alloc::sync::Arc::clone(&reads),
+            shell,
         );
-        host.client = client;
         // The account this session runs as, read once: a task loaded from this
         // user's own program store draws that bundle's icon, and the system
         // stores are searched first so none of theirs can be shadowed.

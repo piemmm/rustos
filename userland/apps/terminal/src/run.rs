@@ -76,9 +76,9 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::window_ipc::{
-        AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion, WINDOW_ENDPOINT,
+        AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, WaitStatus};
     use tairix_display::{winframe, SERIAL};
@@ -107,51 +107,16 @@ mod program {
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
+    use tairix_window::app::{self, Wake};
     use tairix_window::{
-        damage_in, event_endpoint_for, key_input_event, pointer_input_events, pointer_point,
-        Desktop, EventError, EventMailbox, PopupSpec, WindowClient, WindowEvents, WindowFrames,
-        WindowTransport, EVENT_MAILBOX_CAPACITY,
+        damage_in, key_input_event, pointer_input_events, pointer_point, Desktop, EventError,
+        EventMailbox, PopupSpec, WindowClient, WindowEvents, WindowFrames, WindowTransport,
     };
-
-    /// Exit code when the event mailbox or a wait-set member could not be
-    /// established. A reserved, fail-closed value: the app exits rather
-    /// than degrade into a busy re-poll.
-    const EXIT_NO_EVENTS: i32 = 82;
-
-    /// Exit code when the desktop session refused the window create (no
-    /// graphical session, or the channel refused the geometry). A
-    /// reserved, fail-closed value.
-    const EXIT_NO_WINDOW: i32 = 83;
-
-    /// Exit code when a present was refused or a channel died (the
-    /// session went away). A reserved, fail-closed value.
-    const EXIT_CHANNEL_LOST: i32 = 84;
-
-    /// Frames in the shared region. The window protocol serialises a
-    /// present (the app is parked in the call while the session reads),
-    /// so a single frame is race-free; the constant names the choice.
-    const FRAME_COUNT: u32 = 1;
-
-    /// Bytes per pixel of the [`mode_for`] surface format: the one definition
-    /// the stride and the frame writer both take it from.
-    const BYTES_PER_PIXEL: u32 = 4;
-
-    /// The wait-set token of the one event-mailbox member. One mailbox
-    /// serves the whole process: every window's events and the
-    /// application-scoped icon-bar events arrive through it, demuxed on the
-    /// window id each carries (or its absence).
-    const EVENT_TOKEN: u64 = 1;
-
-    /// The wait-set token of the memory-pressure member: the kernel wakes the
-    /// park when the machine's pressure band changes, so the glyph cache is
-    /// trimmed as memory tightens instead of being held until something else
-    /// is starved.
-    const PRESSURE_TOKEN: u64 = 2;
 
     /// The wait-set token of the settings worker's wake pipe: readable exactly
     /// when a publish has answered, so the profile the store now holds is
     /// adopted through the park the loop is already in rather than by polling.
-    const PUBLISH_TOKEN: u64 = 3;
+    const PUBLISH_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
     /// Where the per-window token pairs begin, clear of the fixed tokens
     /// above.
@@ -173,18 +138,6 @@ mod program {
     /// a terminal with no animated effect never wakes at all.
     const FRAME_INTERVAL_NS: u64 = 50_000_000;
 
-    /// The RGBA8888 window surface `width_px` × `height_px`, its stride the
-    /// tightly-packed four-bytes-per-pixel row. One definition so the initial
-    /// window and every resize build the surface identically.
-    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
-        DisplayMode {
-            width_px,
-            height_px,
-            stride_bytes: width_px.saturating_mul(BYTES_PER_PIXEL),
-            format: DisplayFormat::Rgba8888,
-        }
-    }
-
     /// Re-map the window `window` onto a fresh frame region shaped as
     /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
     /// success — the old region (`old_base` / `old_len`) already unmapped —
@@ -198,16 +151,13 @@ mod program {
     /// dropped — and unmapped — by adopting the new one, while every refusal
     /// drops the fresh region here and leaves the window on its old geometry.
     fn resize_frames(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         window: u64,
         new_mode: &DisplayMode,
     ) -> Option<WindowFrames> {
-        let new_len = (new_mode.stride_bytes as usize)
-            .checked_mul(new_mode.height_px as usize)?
-            .checked_mul(FRAME_COUNT as usize)?;
-        let frames = WindowFrames::create(new_len)?;
+        let frames = WindowFrames::create(app::region_bytes(new_mode, app::FRAME_COUNT))?;
         client
-            .resize(window, frames.grant()?, FRAME_COUNT, new_mode)
+            .resize(window, frames.grant()?, app::FRAME_COUNT, new_mode)
             .ok()?;
         Some(frames)
     }
@@ -217,6 +167,12 @@ mod program {
     fn fail(code: i32, reason: &str) -> i32 {
         let _ = writeln!(Stderr, "terminal: {reason}");
         code
+    }
+
+    /// State a shared-shell bring-up refusal and hand its reserved code back.
+    fn fail_shell(err: app::ShellError) -> i32 {
+        let _ = writeln!(Stderr, "terminal: {err}");
+        err.code()
     }
 
     /// Report a non-fatal refusal on `stderr` and carry on.
@@ -238,18 +194,6 @@ mod program {
         let mut status = WaitStatus::Exited(0);
         let _ = tairix_rt::try_wait(shell_pid, &mut status);
         shell_load_failure(status)
-    }
-
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to
-    /// the reserved window endpoint per request. The session attests the
-    /// caller kernel-side on every request, so the transport carries no
-    /// claimed authority.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
     }
 
     /// The command word this application's bundle is installed under, which
@@ -333,7 +277,7 @@ mod program {
         }
 
         /// Close the popup; its frame region is unmapped by its own drop.
-        fn close(self, client: &mut WindowClient<RtWindowTransport>) {
+        fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
             let _ = client.close(self.window);
         }
     }
@@ -349,7 +293,7 @@ mod program {
     /// simply shows no overlay; nothing is left mapped and the terminal keeps
     /// running.
     fn open_popup(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         parent: u64,
         server: ProcId,
         event_endpoint: u64,
@@ -358,7 +302,7 @@ mod program {
     ) -> Option<(u64, WindowFrames)> {
         let Some(len) = (mode.stride_bytes as usize)
             .checked_mul(mode.height_px as usize)
-            .and_then(|frame| frame.checked_mul(FRAME_COUNT as usize))
+            .and_then(|frame| frame.checked_mul(app::FRAME_COUNT as usize))
         else {
             report("popup frame region larger than the address width");
             return None;
@@ -375,7 +319,7 @@ mod program {
             parent_window_id: parent,
             shm_handle: grant,
             event_endpoint,
-            frame_count: FRAME_COUNT,
+            frame_count: app::FRAME_COUNT,
             surface: *mode,
             offset_x: offset.0,
             offset_y: offset.1,
@@ -406,7 +350,7 @@ mod program {
     /// here. A refusal is an answer — it is reported and the terminal carries
     /// on with no menu, never drawing one of its own.
     fn open_window_menu(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         open: &mut TerminalWindow,
         at: Point,
     ) {
@@ -452,7 +396,7 @@ mod program {
     /// a refusal shows nothing and the terminal carries on.
     #[allow(clippy::too_many_arguments)] // Sizing a popup needs the whole drawing context.
     fn open_overlay(
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         parent: u64,
         server: ProcId,
         event_endpoint: u64,
@@ -475,7 +419,7 @@ mod program {
             report("settings sheet has no drawable extent; not shown");
             return None;
         }
-        let mode = mode_for(extent.0, extent.1);
+        let mode = app::mode_for(extent.0, extent.1);
         let Some(picture) = SheetScreen::new(extent.0, extent.1) else {
             report("settings sheet picture could not be allocated; not shown");
             return None;
@@ -509,7 +453,7 @@ mod program {
         overlay: &mut Overlay,
         theme: &Theme,
         scale: Scale,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Result<(), Errno> {
         if overlay.frames.is_released() {
             overlay.picture.invalidate();
@@ -525,7 +469,7 @@ mod program {
             .frame_pixels(
                 &mut overlay.frames,
                 overlay.window,
-                FRAME_COUNT,
+                app::FRAME_COUNT,
                 &overlay.mode,
             )
             .ok_or(Errno::NotAttached)?;
@@ -745,7 +689,7 @@ mod program {
         /// leaving a session-side window on screen for ever.
         fn set_overlay(
             &mut self,
-            client: &mut WindowClient<RtWindowTransport>,
+            client: &mut WindowClient<app::RtWindowTransport>,
             overlay: Option<Overlay>,
         ) {
             if let Some(held) = self.overlay.take() {
@@ -768,10 +712,13 @@ mod program {
         ///
         /// A region the session released while the window was hidden is
         /// re-attached first, so this paints into a live one.
-        fn present(&mut self, client: &mut WindowClient<RtWindowTransport>) -> Result<(), Errno> {
+        fn present(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+        ) -> Result<(), Errno> {
             let (mode, window) = (self.mode, self.window);
             let frame = client
-                .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
+                .frame_pixels(&mut self.frames, window, app::FRAME_COUNT, &mode)
                 .ok_or(Errno::NotAttached)?;
             present_frame(
                 &self.terminal,
@@ -791,7 +738,7 @@ mod program {
         /// because a process that keeps running must not hold a dead
         /// window's descriptors. Dropping it is what makes the shell observe
         /// end-of-file.
-        fn close(mut self, client: &mut WindowClient<RtWindowTransport>, set: u64) {
+        fn close(mut self, client: &mut WindowClient<app::RtWindowTransport>, set: u64) {
             if let Some(open) = self.overlay.take() {
                 open.close(client);
             }
@@ -820,7 +767,7 @@ mod program {
     /// Everything the bring-up of one window needs from the process it joins.
     struct WindowContext<'a> {
         /// The window channel.
-        client: &'a mut WindowClient<RtWindowTransport>,
+        client: &'a mut WindowClient<app::RtWindowTransport>,
         /// The one event mailbox every window reports through.
         event_endpoint: u64,
         /// The wait-set the process parks on.
@@ -866,10 +813,10 @@ mod program {
             return None;
         };
 
-        let mode = mode_for(w, h);
+        let mode = app::mode_for(w, h);
         let Some(total) = (mode.stride_bytes as usize)
             .checked_mul(mode.height_px as usize)
-            .and_then(|frame| frame.checked_mul(FRAME_COUNT as usize))
+            .and_then(|frame| frame.checked_mul(app::FRAME_COUNT as usize))
         else {
             report("frame region larger than the address width; no window opened");
             return None;
@@ -898,7 +845,7 @@ mod program {
         let created = ctx.client.create(
             grant,
             ctx.event_endpoint,
-            FRAME_COUNT,
+            app::FRAME_COUNT,
             &mode,
             "Terminal",
             win_sizing(min_width_px, min_height_px),
@@ -908,7 +855,7 @@ mod program {
             report("desktop session refused the window");
             return None;
         };
-        let close_window = |client: &mut WindowClient<RtWindowTransport>| {
+        let close_window = |client: &mut WindowClient<app::RtWindowTransport>| {
             let _ = client.close(window);
         };
 
@@ -1131,61 +1078,32 @@ mod program {
 
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
-        let mut client = WindowClient::new(RtWindowTransport);
+        let mut client = WindowClient::new(app::RtWindowTransport);
         let info = match client.desktop() {
             Ok(info) => info,
             Err(err) => {
                 let _ = writeln!(Stderr, "terminal: desktop query refused: {err}");
-                return EXIT_NO_WINDOW;
+                return app::EXIT_NO_WINDOW;
             }
         };
         let mut desktop = match Desktop::new(info) {
             Ok(desktop) => desktop,
             Err(err) => {
                 let _ = writeln!(Stderr, "terminal: cannot draw this desktop: {err}");
-                return EXIT_NO_WINDOW;
+                return app::EXIT_NO_WINDOW;
             }
         };
         let mut themes = ThemeRegistry::with_builtins();
         themes.set_appearance(desktop.appearance());
 
-        // --- The one event mailbox and the wait-set the process parks on.
-        // The mailbox id is unique by construction (the shared
-        // `event_endpoint_for` naming rule: this task's never-reused kernel
-        // id under a fixed tag) and never reserved; the bind is refused
-        // otherwise. One mailbox serves every window and the icon bar.
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return fail(EXIT_NO_EVENTS, "own identity unavailable");
+        // --- The one event mailbox and the wait-set the process parks on. One
+        // mailbox serves every window and the icon bar.
+        let binding = match app::bind_event_mailbox() {
+            Ok(binding) => binding,
+            Err(err) => return fail_shell(err),
         };
-        let event_endpoint = event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || tairix_rt::port_bind(
-                event_endpoint,
-                WindowEvent::WIRE_LEN,
-                EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return fail(EXIT_NO_EVENTS, "event mailbox bind refused");
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return fail(EXIT_NO_EVENTS, "wait-set refused");
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            event_endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return fail(EXIT_NO_EVENTS, "wait-set member refused");
-        }
-        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return fail(EXIT_NO_EVENTS, "memory-pressure wake refused");
-        }
+        let event_endpoint = binding.endpoint();
+        let set = binding.set();
         // The settings worker's wake. A refused add is fatal rather than
         // tolerated: a publish whose answer nobody collects would leave the
         // window showing settings the store may have refused.
@@ -1198,7 +1116,7 @@ mod program {
                 PUBLISH_TOKEN,
             ) != 0
             {
-                return fail(EXIT_NO_EVENTS, "settings wake refused");
+                return fail(app::EXIT_NO_EVENTS, "settings wake refused");
             }
         }
 
@@ -1249,7 +1167,7 @@ mod program {
             desktop: &desktop,
             env: &env,
         }) else {
-            return fail(EXIT_NO_WINDOW, "no terminal window could be opened");
+            return fail(app::EXIT_NO_WINDOW, "no terminal window could be opened");
         };
         next_slot += 1;
         let mut windows: Vec<TerminalWindow> = alloc::vec![first];
@@ -1275,24 +1193,23 @@ mod program {
             } else {
                 u64::MAX
             };
-            let mut token = 0u64;
-            let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
-            if waited != 0 {
-                if Errno::from_syscall(waited) == Errno::TimedOut {
+            let woke = match app::park_until(set, timeout) {
+                Ok(Some(wake)) => wake,
+                Ok(None) => {
                     // The frame deadline elapsed: advance every window's
                     // animation and repaint. Nothing else changed.
                     for open in &mut windows {
                         open.look.phase = open.look.phase.advance();
                         if open.present(&mut client).is_err() {
-                            return fail(EXIT_CHANNEL_LOST, "present refused");
+                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
                         }
                     }
                     continue;
                 }
-                return fail(EXIT_CHANNEL_LOST, "wait-set lost");
-            }
-            match token {
-                EVENT_TOKEN => {
+                Err(_) => return fail(app::EXIT_CHANNEL_LOST, "wait-set lost"),
+            };
+            match woke {
+                Wake::Event => {
                     let outcome = drain_events(
                         &mut windows,
                         &mut publication,
@@ -1330,10 +1247,10 @@ mod program {
                     ) {
                         Applied::Running => {}
                         Applied::Ended => return 0,
-                        Applied::Lost(reason) => return fail(EXIT_CHANNEL_LOST, reason),
+                        Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
                     }
                 }
-                PUBLISH_TOKEN => {
+                Wake::App(PUBLISH_TOKEN) => {
                     // The settings worker answered. Draining the nudge is the
                     // whole of noticing it; what it means is the one adopt
                     // path, so a publish the loop asked for and one it did
@@ -1357,10 +1274,10 @@ mod program {
                     ) {
                         Applied::Running => {}
                         Applied::Ended => return 0,
-                        Applied::Lost(reason) => return fail(EXIT_CHANNEL_LOST, reason),
+                        Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
                     }
                 }
-                PRESSURE_TOKEN if tairix_procinfo::pressure::refresh() => {
+                Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     // The passes' buffers are whole screens of per-pixel
                     // state that only matter while an effect is on, so they
@@ -1369,7 +1286,8 @@ mod program {
                         open.look.state.clear();
                     }
                 }
-                token => {
+                Wake::PressureUnchanged => {}
+                Wake::App(token) => {
                     // A per-window member: its shell wrote, or its shell
                     // exited. A token outside the live windows' pairs cannot
                     // occur (each is removed with its window), so an unknown
@@ -1387,7 +1305,7 @@ mod program {
                     };
                     match ended {
                         ShellEnd::Running => {}
-                        ShellEnd::Lost(reason) => return fail(EXIT_CHANNEL_LOST, reason),
+                        ShellEnd::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
                         ShellEnd::Exited(reason) => {
                             // The shell this window hosted is gone, so the
                             // window is: hosting it was the window's whole
@@ -1418,7 +1336,7 @@ mod program {
     /// Drain what `open`'s shell wrote and repaint that window.
     fn pump_shell(
         open: &mut TerminalWindow,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
     ) -> ShellEnd {
         match open.terminal.pump() {
             Ok(_) => {
@@ -1441,7 +1359,7 @@ mod program {
     /// back the terse reason to report when it never got off the ground.
     fn drain_and_reap(
         open: &mut TerminalWindow,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Option<&'static str> {
         let reason = reap_shell(open.shell_pid);
         while open.terminal.pump().is_ok() {}
@@ -1493,7 +1411,7 @@ mod program {
     /// applies, and repaint.
     fn adopt_published(
         windows: &mut [TerminalWindow],
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Applied {
         let Some(answer) = ctx.publisher.collect() else {
@@ -1548,7 +1466,7 @@ mod program {
     /// window whose pixels cannot be shown is not a window.
     fn apply_profile_change(
         windows: &mut [TerminalWindow],
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
         sheets: Sheets,
     ) -> Result<(), ()> {
@@ -1615,7 +1533,7 @@ mod program {
     /// `()` when a present was refused, as for [`apply_profile_change`].
     fn restyle_windows(
         windows: &mut [TerminalWindow],
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Result<(), ()> {
         let profile = *ctx.publication.live();
@@ -1681,7 +1599,7 @@ mod program {
     fn apply_outcome(
         outcome: EventOutcome,
         windows: &mut Vec<TerminalWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         mut ctx: AppContext<'_>,
     ) -> Applied {
         let applied = dispatch_outcome(outcome, windows, client, &mut ctx);
@@ -1705,7 +1623,7 @@ mod program {
     fn dispatch_outcome(
         outcome: EventOutcome,
         windows: &mut Vec<TerminalWindow>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
         ctx: &mut AppContext<'_>,
     ) -> Applied {
         // A window-scoped outcome names its window; one the list no longer
@@ -1874,7 +1792,7 @@ mod program {
                 if (snapped_w, snapped_h) == (open.mode.width_px, open.mode.height_px) {
                     return Applied::Running;
                 }
-                let new_mode = mode_for(snapped_w, snapped_h);
+                let new_mode = app::mode_for(snapped_w, snapped_h);
                 if let Some(frames) = resize_frames(client, open.window, &new_mode) {
                     // Adopting drops the old region, which unmaps it.
                     open.frames = frames;
@@ -2137,7 +2055,7 @@ mod program {
         desktop: &mut Desktop,
         theme: &Theme,
         events: &mut WindowEvents<EventMailbox>,
-        client: &mut WindowClient<RtWindowTransport>,
+        client: &mut WindowClient<app::RtWindowTransport>,
     ) -> EventOutcome {
         let scale = desktop.scale();
         let mut redrawn: Option<u64> = None;

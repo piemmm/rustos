@@ -145,6 +145,49 @@ server and every app's client can never drift apart.
   partially drawn frame, which is the same tearing it already accepts
   from rendering in place at all.
 
+- **The app-side shell** (`app`, bare-metal targets only): the bring-up
+  sequence every windowed `Run` binary repeated verbatim. `RtWindowTransport`
+  is the production `ipc_call` transport — it was byte-identical in all seven
+  app binaries before it moved here. `bind_event_mailbox` binds the process's
+  one event mailbox and builds the wait-set with the machine's
+  memory-pressure band already on it, reserving `EVENT_TOKEN` and
+  `PRESSURE_TOKEN` so an app numbering its own members from
+  `FIRST_APP_TOKEN` cannot collide; `park` / `park_until` wait on that set
+  and answer a typed `Wake`, so the *decision* about a band change has one
+  definition while the *response* (which caches to hand back) stays each
+  app's own. `bring_up_desktop` asks for the seat's desktop and primes a
+  `ThemeRegistry` from its appearance. `mode_for` / `region_bytes` /
+  `BYTES_PER_PIXEL` shape the window mode and its frame region once, so a
+  create, a resize, and every present agree. `ShellError` carries the
+  reserved exit code (81–84), the reason, and the typed `Errno` — leaving only
+  the application's own name for it to prefix. The errno is carried rather than
+  derived from the code, because one code covers several distinct refusals: a
+  window already being open and a surface that could not be allocated are both
+  `EXIT_NO_WINDOW`, so a service whose own contract answers in `Errno` (the
+  Switchboard host) would otherwise have to report an out-of-memory as a
+  programming mistake.
+
+  `AppWindow` is the retained-surface half for a **single-window** app: the
+  channel plus the open window's frame region, mode, and the surface every
+  frame is drawn into. `present` takes the paint as a closure — the shell
+  owns the frame-region and damage bookkeeping without owning a pixel of
+  anyone's window — and promotes the damage to the whole window when the
+  session has released its copy, since a released region holds none of the
+  pixels a partial present would leave standing (`content_released` exposes
+  the same fact to a caller that must resolve a reported damage set before
+  presenting). `close` answers what the session said and drops the pane either
+  way, so the region is unmapped even on a refusal and a caller with nothing to
+  report may ignore it while one that owes an outcome hands it on. `resize`'s
+  ordering is the load-bearing part: the spare region
+  and surface are allocated and the region granted *first*, and adopted only
+  once the session has accepted the resize, so a refusal drops the spare and
+  leaves the old geometry standing and drawable — it answers `false`, which
+  means "still at the old size", never "broken".
+
+  A **multi-window** app (the terminal emulator, the file manager) keeps its
+  own collection of panes and takes the shell's free functions alone; its
+  pane bookkeeping is a different shape, not a copy of `AppWindow`'s.
+
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an
 in-process loopback (a real `WindowServer` behind the client seams), so

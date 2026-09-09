@@ -73,13 +73,9 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.
 tairix-browse = { path = "../../../lib/browse", version = "=0.0.0", features = ["rt"] }
-# The window-frame pixel codec (`tairix_display::winframe`): the one
-# definition of the straight-alpha conversion between this program's own
-# surface and the shared frame the desktop session reads, so no app carries a
-# private copy of the channel-order decision.
-tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
-# The app half of the window channel: `WindowClient` (create / present /
-# close) and `WindowEvents` (the typed, parked event wait).
+# The app half of the window channel: the shared app shell (`app`) that owns
+# the transport, the parked event mailbox, the desktop query, and the retained
+# window surface, plus `WindowEvents` (the typed, parked event wait).
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers (`shm_create` /
@@ -98,10 +94,6 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # dependency stays host-neutral so host tests inject the mock transport
 # instead).
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
-# The System Information client the memory-pressure band is read through, so
-# the font client's glyph cache obeys the same band every other cache on the
-# machine does.
-tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 # The engine's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).

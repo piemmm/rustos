@@ -146,17 +146,12 @@ pub fn fields(editor: &Editor) -> Vec<TextField> {
         .collect()
 }
 
-/// Paint the whole window for `editor` at `scale` through `theme`.
-///
-/// `None` when a surface that size cannot be allocated — the caller keeps
-/// the frame already on screen rather than presenting nothing.
-#[must_use]
-pub fn render(editor: &Editor, scale: Scale, theme: &Theme) -> Option<Surface> {
+/// Paint the whole window for `editor` at `scale` through `theme` into
+/// `surface`, which the caller retains for the life of the window.
+pub fn render_into(surface: &mut Surface, editor: &Editor, scale: Scale, theme: &Theme) {
     let bounds = window_bounds(scale);
-    let mut surface = Surface::new(bounds.width, bounds.height)?;
-    dialog(editor).render(&mut surface, bounds, scale, theme);
+    dialog(editor).render(surface, bounds, scale, theme);
     for (field, control) in Field::ALL.into_iter().zip(fields(editor)) {
-        control.render(&mut surface, field_rect(scale, field), scale, theme);
+        control.render(surface, field_rect(scale, field), scale, theme);
     }
-    Some(surface)
 }

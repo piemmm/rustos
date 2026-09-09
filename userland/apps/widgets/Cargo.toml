@@ -47,11 +47,6 @@ tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # allocator, the syscall wrappers). These are bare-metal only; on the host
 # the binary is an inert stub with no dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
-# The window-frame pixel codec (`tairix_display::winframe`): the one
-# definition of the straight-alpha conversion between this program's own
-# surface and the shared frame the desktop session reads, so no app carries a
-# private copy of the channel-order decision.
-tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
@@ -59,10 +54,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # the runtime `ipc_call` transport; the base dependency stays host-neutral so
 # host tests inject the mock transport instead.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
-# The System Information client the memory-pressure band is read through, so
-# the font client's glyph cache obeys the same band every other cache on the
-# machine does.
-tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
 
 # The gallery model's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).

@@ -33,52 +33,27 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId};
-    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
-    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
+    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
         EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
-        WindowFrames, WindowSizing, WindowTransport,
     };
 
     /// The gallery window's logical width in physical pixels.
     const WIN_WIDTH: u32 = 820;
     /// The gallery window's logical height in physical pixels.
     const WIN_HEIGHT: u32 = 620;
-
-    /// Frames in the shared region. The window protocol serialises a present
-    /// (the app is parked in the call while the session reads), so a single
-    /// frame is race-free.
-    const FRAME_COUNT: u32 = 1;
-
-    /// The wait-set token of the event-mailbox member.
-    const EVENT_TOKEN: u64 = 1;
-
-    /// The wait-set token of the memory-pressure member: the kernel wakes the
-    /// park when the machine's pressure band changes, so the glyph cache is
-    /// trimmed as memory tightens instead of being held until something else
-    /// is starved.
-    const PRESSURE_TOKEN: u64 = 2;
-
-    /// Exit code when the shared frame region could not be created or granted.
-    const EXIT_NO_FRAMES: i32 = 81;
-    /// Exit code when the event mailbox could not be bound or observed.
-    const EXIT_NO_EVENTS: i32 = 82;
-    /// Exit code when the desktop session refused the window create.
-    const EXIT_NO_WINDOW: i32 = 83;
-    /// Exit code when a present was refused or the event channel died.
-    const EXIT_CHANNEL_LOST: i32 = 84;
 
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
@@ -89,7 +64,7 @@ mod program {
     /// so and carries on with no slot of its own — its window is still
     /// reachable through the one the session derives from it, though closing
     /// that one then leaves nothing to click.
-    fn declare_app_bar(client: &mut WindowClient<RtWindowTransport>, endpoint: u64) {
+    fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
         match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
@@ -117,14 +92,10 @@ mod program {
         code
     }
 
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to the
-    /// reserved window endpoint per request.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
+    /// State a shared-shell bring-up refusal and hand its reserved code back.
+    fn fail_shell(err: ShellError) -> i32 {
+        let _ = writeln!(Stderr, "widgets: {err}");
+        err.code()
     }
 
     /// The production [`EventSource`]: drain the app's own event mailbox,
@@ -146,31 +117,11 @@ mod program {
 
     impl EventSource for RtEventSource {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let mut token = 0u64;
-            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                return Err(Errno::NotFound);
-            }
-            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
+            if app::park(self.set)? == Wake::PressureChanged {
                 tairix_font::trim_glyph_cache();
             }
             Ok(Parked::Served)
         }
-    }
-
-    /// One open gallery window: its session-assigned id, the shared frame
-    /// region granted at create, and the surface it draws into.
-    ///
-    /// The surface is held rather than built per frame: a window-sized buffer
-    /// allocated and zeroed on every pointer sample is a whole-window pass of
-    /// its own, and holding it is what makes a clipped repaint sound — every
-    /// pixel outside the clip is the one already on screen.
-    struct Pane {
-        /// This app's window id, assigned by the session at create.
-        window: u64,
-        /// The shared region the session maps and this app paints through.
-        frames: WindowFrames,
-        /// The window-sized surface every frame is drawn into.
-        surface: Surface,
     }
 
     /// The app's channel to the desktop and the window it may or may not
@@ -180,10 +131,9 @@ mod program {
     /// closing one puts the app away and a click on its slot opens the next,
     /// so the channel outlives every window that crosses it.
     struct GalleryWindow {
-        /// The synchronous channel to the desktop session.
-        client: WindowClient<RtWindowTransport>,
-        /// The open window, or `None` while the gallery sits on the bar.
-        pane: Option<Pane>,
+        /// The shared app shell: the channel, the open window, its retained
+        /// surface, and the frame region behind it.
+        window: AppWindow,
     }
 
     impl GalleryWindow {
@@ -202,34 +152,12 @@ mod program {
             theme: &Theme,
             scale: Scale,
         ) -> Result<ProcId, i32> {
-            if self.pane.is_some() {
-                return Err(EXIT_NO_WINDOW);
-            }
-            let (mut frames, grant) = create_frame_region(mode)?;
             // Fixed size: the gallery is never resized, so it declares no
             // floor.
-            let Ok((window, server)) = self.client.create(
-                grant,
-                event_endpoint,
-                FRAME_COUNT,
-                mode,
-                "widgets",
-                WindowSizing::default(),
-            ) else {
-                return Err(fail(EXIT_NO_WINDOW, "desktop session refused the window"));
-            };
-            let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-                let _ = self.client.close(window);
-                return Err(fail(EXIT_NO_WINDOW, "no memory for the window surface"));
-            };
-            frames.release();
-            self.pane = Some(Pane {
-                window,
-                frames,
-                surface,
-            });
-            // The release above left the region detached, so the first
-            // present re-attaches it and carries the whole frame.
+            let server = self
+                .window
+                .open(event_endpoint, mode, "widgets", WindowSizing::default())
+                .map_err(fail_shell)?;
             if self
                 .present(gallery, theme, scale, mode, DamageRect::full(mode))
                 .is_err()
@@ -242,20 +170,16 @@ mod program {
 
         /// Close the open window, if any, leaving the app on the icon bar.
         fn close(&mut self) {
-            if let Some(pane) = self.pane.take() {
-                let _ = self.client.close(pane.window);
-            }
+            let _ = self.window.close();
         }
 
         /// Draw the gallery, convert `damage` into the shared window region
         /// (shaped as `mode`) and present that rectangle. With no window
         /// open there is nothing to draw and nothing to report.
         ///
-        /// The draw is clipped to `damage` too: everything outside it is already
-        /// in the surface from the last frame, and neither the conversion nor
-        /// the present would carry it. A region the session released while the
-        /// window was hidden is re-attached first, so the whole frame is what
-        /// the conversion then carries.
+        /// The draw is clipped to `damage` too: everything outside it is
+        /// already in the surface from the last frame, and neither the
+        /// conversion nor the present would carry it.
         fn present(
             &mut self,
             gallery: &Gallery,
@@ -264,29 +188,11 @@ mod program {
             mode: &DisplayMode,
             damage: DamageRect,
         ) -> Result<(), Errno> {
-            let Some(pane) = self.pane.as_mut() else {
-                return Ok(());
-            };
-            let damage = if pane.frames.is_released() {
-                DamageRect::full(mode)
-            } else {
-                damage
-            };
             let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
             let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-            pane.surface.with_clip(
-                damage.x,
-                damage.y,
-                damage.width_px,
-                damage.height_px,
-                |surface| gallery.render(surface, viewport, scale, theme, font),
-            );
-            let pixels = self
-                .client
-                .frame_pixels(&mut pane.frames, pane.window, FRAME_COUNT, mode)
-                .ok_or(Errno::NotAttached)?;
-            winframe::encode(&pane.surface, pixels, mode, damage, &SERIAL)?;
-            self.client.present(pane.window, 0, damage)
+            self.window.present(damage, |surface| {
+                gallery.render(surface, viewport, scale, theme, font);
+            })
         }
     }
 
@@ -405,92 +311,6 @@ mod program {
         acted
     }
 
-    /// Bind the app's own event mailbox and add it to a fresh wait-set the
-    /// event loop parks on, returning `(endpoint, set)`. On any refusal it
-    /// states the reason on `stderr` and returns the reserved fail-closed
-    /// [`EXIT_NO_EVENTS`] code for `main`.
-    fn bind_event_mailbox() -> Result<(u64, u64), i32> {
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return Err(fail(EXIT_NO_EVENTS, "own identity unavailable"));
-        };
-        let event_endpoint = tairix_window::event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(event_endpoint)
-            || tairix_rt::port_bind(
-                event_endpoint,
-                WindowEvent::WIRE_LEN,
-                tairix_window::EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return Err(fail(EXIT_NO_EVENTS, "wait-set refused"));
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            tairix_abi::WaitSetOp::Add,
-            tairix_abi::WaitSourceKind::Port,
-            event_endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
-        }
-        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wake refused"));
-        }
-        Ok((event_endpoint, set))
-    }
-
-    /// Ask the session for its desktop and build this app's local
-    /// [`Desktop`] model and [`ThemeRegistry`], with the session's current
-    /// appearance already applied: the screen, the density, and the look
-    /// are current before anything is sized or painted, so the first frame
-    /// is right rather than a guess corrected once the user has seen it.
-    ///
-    /// On any refusal states the reason on `stderr` and returns the
-    /// reserved [`EXIT_NO_WINDOW`] code for `main`.
-    fn bring_up_desktop(
-        client: &mut WindowClient<RtWindowTransport>,
-    ) -> Result<(Desktop, ThemeRegistry), i32> {
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                let _ = writeln!(Stderr, "widgets: desktop query refused: {err}");
-                return Err(EXIT_NO_WINDOW);
-            }
-        };
-        let desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "widgets: cannot draw this desktop: {err}");
-                return Err(EXIT_NO_WINDOW);
-            }
-        };
-        let mut themes = ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
-        Ok((desktop, themes))
-    }
-
-    /// Create and grant a `mode`-shaped frame region, returning `(base,
-    /// total, grant)`: the mapped base address, the region's byte length,
-    /// and the endpoint-directed grant handle. Fails closed with the
-    /// reserved [`EXIT_NO_FRAMES`] code for `main` on any refusal.
-    fn create_frame_region(mode: &DisplayMode) -> Result<(WindowFrames, u64), i32> {
-        let frame_len = (mode.stride_bytes as usize) * (mode.height_px as usize);
-        let total = frame_len * FRAME_COUNT as usize;
-        let Some(frames) = WindowFrames::create(total) else {
-            return Err(fail(EXIT_NO_FRAMES, "shared frame region refused"));
-        };
-        let Some(grant) = frames.grant() else {
-            return Err(fail(EXIT_NO_FRAMES, "frame region grant refused"));
-        };
-        Ok((frames, grant))
-    }
-
     /// The event loop: park, apply, repaint. A dead channel ends the app
     /// fail-loud; a clean close ends it at zero.
     fn run_event_loop(
@@ -503,7 +323,7 @@ mod program {
         mut events: WindowEvents<RtEventSource>,
     ) -> i32 {
         loop {
-            let event = match events.wait(&mut surface.client) {
+            let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event cannot arise here (this
                 // app parks on nothing of its own), and a malformed frame from
@@ -571,9 +391,7 @@ mod program {
             // the pages go only when both do — and paint nothing until the
             // redraw request that follows the window being shown again.
             if matches!(event, WindowEvent::ContentReleased { .. }) {
-                if let Some(pane) = surface.pane.as_mut() {
-                    pane.frames.release();
-                }
+                surface.window.release_frames();
                 continue;
             }
             // An adopted desktop change re-themes and re-densifies every pixel,
@@ -603,36 +421,33 @@ mod program {
         // naming the call that spent it; a shippable one arms nothing and
         // answers zero, which is why the result is not examined.
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
-        let mut client = WindowClient::new(RtWindowTransport);
+        let mut surface = GalleryWindow {
+            window: AppWindow::new(),
+        };
 
         // --- The desktop this window will be shown on, established before
         // anything is sized or painted so the first frame is right rather
         // than a guess corrected once the user has seen it.
-        let (mut desktop, mut themes) = match bring_up_desktop(&mut client) {
+        let (mut desktop, mut themes) = match app::bring_up_desktop(surface.window.client()) {
             Ok(pair) => pair,
-            Err(code) => return code,
+            Err(err) => return fail_shell(err),
         };
 
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mode = DisplayMode {
-            width_px: initial_w,
-            height_px: initial_h,
-            stride_bytes: initial_w * 4,
-            format: DisplayFormat::Rgba8888,
-        };
+        let mode = app::mode_for(initial_w, initial_h);
 
-        let (event_endpoint, set) = match bind_event_mailbox() {
-            Ok(pair) => pair,
-            Err(code) => return code,
+        let binding = match app::bind_event_mailbox() {
+            Ok(binding) => binding,
+            Err(err) => return fail_shell(err),
         };
+        let event_endpoint = binding.endpoint();
 
         // The icon-bar presence first: a declared presence belongs to the
         // process, so declaring it before this process owns a window is what
         // makes its slot carry this menu from the moment it appears rather
         // than being a slot the session derived from a window, which opens
         // nothing.
-        declare_app_bar(&mut client, event_endpoint);
-        let mut surface = GalleryWindow { client, pane: None };
+        declare_app_bar(surface.window.client(), event_endpoint);
         let mut gallery = Gallery::new();
         // The gallery was started to be looked at, so a first window that
         // will not open leaves it nothing to be and it ends fail-loud; every
@@ -650,7 +465,7 @@ mod program {
 
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
-            set,
+            set: binding.set(),
         });
         run_event_loop(
             &mut surface,

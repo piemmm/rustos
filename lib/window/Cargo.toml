@@ -22,13 +22,29 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # frame region per window. Optional so the server engine the session composes
 # stays free of the runtime.
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# The memory-pressure band the shared app shell puts on every app's wait-set,
+# so a cache is trimmed as memory tightens rather than held until something
+# else is starved. Optional with the rest of the app-side half.
+tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+# The retained window surface the shell draws each frame into, and the theme
+# registry it primes from the session's reported appearance. Optional with the
+# rest of the app-side half.
+tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
+tairix-theme = { path = "../theme", version = "=0.0.0", optional = true }
 
 [features]
 default = ["rt"]
-# The client-side frame region (`WindowFrames`), which calls the runtime's
-# shared-memory syscalls. Disable for the engine-only, syscall-free view a
-# host test or the server side takes.
-rt = ["dep:tairix-rt"]
+# The application's own half: the frame region (`WindowFrames`) and the shared
+# app shell (`app`), which call the runtime's syscalls. Disable for the
+# engine-only, syscall-free view a host test or the server side takes.
+rt = [
+    "dep:tairix-rt",
+    "dep:tairix-procinfo",
+    "dep:tairix-raster",
+    "dep:tairix-theme",
+]
 
 [lints]
 workspace = true

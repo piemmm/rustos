@@ -19,6 +19,15 @@
 //!   vocabulary the shared controls consume, so no app carries a private
 //!   copy of it.
 //!
+//! * `app` — the app-side *shell* the windowed `Run` binaries share: the
+//!   `ipc_call` transport, the bound event mailbox and its wait-set (with the
+//!   machine's memory-pressure band on it), the desktop query, and the
+//!   retained-surface present/resize pair whose fail-closed ordering leaves the
+//!   old geometry standing when a resize is refused. It links the production
+//!   pressure seam, which exists only on the bare-metal targets, so it compiles
+//!   only there — and is named here in prose rather than linked, because on a
+//!   host documentation build there is no such item to link to.
+//!
 //! The wire format itself lives in `tairix_abi::window_ipc`; this crate
 //! adds the behaviour. Window frames travel through one `shm_grant`ed
 //! region mapped once at create time — presents carry a frame index and
@@ -32,6 +41,8 @@
 
 extern crate alloc;
 
+#[cfg(all(freestanding, feature = "rt"))]
+pub mod app;
 pub mod appbar;
 pub mod client;
 pub mod desktop;

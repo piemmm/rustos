@@ -49,15 +49,14 @@ mod program {
 
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 
-    use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::KeyInput;
     use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
-    use tairix_abi::window_ipc::{WindowEvent, WINDOW_ENDPOINT};
+    use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Duration64, Errno, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
-    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::Region;
     use tairix_input::InputEvent;
@@ -67,7 +66,7 @@ mod program {
     use tairix_sandbox::imagerender::{render_wallpaper_for_screen, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::{TextRole, Theme, ThemeRegistry};
+    use tairix_theme::{TextRole, Theme};
     use tairix_wallpaper::{
         catalog_categories, catalog_entries, category_path, PinboardSettings, WallpaperFit,
         WallpaperPath, MAX_WALLPAPER_BYTES, PINBOARD_PUBLISHER, WALLPAPER_STORE,
@@ -76,48 +75,16 @@ mod program {
         candidates_from_catalog, events::RENDER_TIMED, ApplyOutcome, Chooser, ChooserAction, Style,
         MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WIN_HEIGHT, WIN_WIDTH,
     };
+    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
-        WindowFrames, WindowSizing, WindowTransport,
+        EventError, EventMailbox, EventSource, Parked, Repaint, WindowEvents,
     };
-
-    /// Exit code when the shared frame region could not be created or
-    /// granted to the window endpoint. A reserved, fail-closed value.
-    const EXIT_NO_FRAMES: i32 = 81;
-
-    /// Exit code when the event mailbox could not be bound or observed
-    /// through the wait-set. A reserved, fail-closed value: the app exits
-    /// rather than degrade into a busy re-poll.
-    const EXIT_NO_EVENTS: i32 = 82;
-
-    /// Exit code when the desktop session refused the window create (no
-    /// graphical session, or the channel refused the geometry). A
-    /// reserved, fail-closed value.
-    const EXIT_NO_WINDOW: i32 = 83;
-
-    /// Exit code when a present was refused or the event channel died
-    /// (the session went away). A reserved, fail-closed value.
-    const EXIT_CHANNEL_LOST: i32 = 84;
-
-    /// Frames in the shared region. The window protocol serialises a
-    /// present (the app is parked in the call while the session reads),
-    /// so a single frame is race-free; the constant names the choice.
-    const FRAME_COUNT: u32 = 1;
-
-    /// The wait-set token of the event-mailbox member.
-    const EVENT_TOKEN: u64 = 1;
-
-    /// The wait-set token of the memory-pressure member: the kernel wakes the
-    /// park when the machine's pressure band changes, so the glyph cache is
-    /// trimmed as memory tightens instead of being held until something else
-    /// is starved.
-    const PRESSURE_TOKEN: u64 = 2;
 
     /// The wait-set token of the applier's wake pipe: readable exactly when
     /// the desktop session has answered an apply, so the footer is written
     /// through the park the loop is already in rather than by waiting for it.
-    const APPLY_TOKEN: u64 = 3;
+    const APPLY_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
     /// The window title the desktop lists this app under.
     const TITLE: &str = "Wallpaper";
@@ -134,16 +101,10 @@ mod program {
         code
     }
 
-    /// The production [`WindowTransport`]: one synchronous `ipc_call` to
-    /// the reserved window endpoint per request. The session attests the
-    /// caller kernel-side on every request, so the transport carries no
-    /// claimed authority.
-    struct RtWindowTransport;
-
-    impl WindowTransport for RtWindowTransport {
-        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
-            tairix_rt::ipc_call(WINDOW_ENDPOINT, request, reply).map_err(Errno::from_syscall)
-        }
+    /// State a shared-shell bring-up refusal and hand its reserved code back.
+    fn fail_shell(err: ShellError) -> i32 {
+        report(&alloc::format!("{err}"));
+        err.code()
     }
 
     /// The production [`EventSource`]: drain the app's own event mailbox,
@@ -171,21 +132,21 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let mut token = 0u64;
-            if tairix_rt::waitset_wait(self.set, u64::MAX, &mut token) != 0 {
-                return Err(Errno::NotFound);
+            match app::park(self.set)? {
+                // The session answered the apply. Draining is the whole of
+                // noticing it, and the answer is the loop's to show, so the
+                // wait ends here rather than parking again on a source still
+                // ready.
+                Wake::App(APPLY_TOKEN) => {
+                    self.applier.wake().drain();
+                    Ok(Parked::Interrupted)
+                }
+                Wake::PressureChanged => {
+                    tairix_font::trim_glyph_cache();
+                    Ok(Parked::Served)
+                }
+                _ => Ok(Parked::Served),
             }
-            // The session answered the apply. Draining is the whole of
-            // noticing it, and the answer is the loop's to show, so the wait
-            // ends here rather than parking again on a source still ready.
-            if token == APPLY_TOKEN {
-                self.applier.wake().drain();
-                return Ok(Parked::Interrupted);
-            }
-            if token == PRESSURE_TOKEN && tairix_procinfo::pressure::refresh() {
-                tairix_font::trim_glyph_cache();
-            }
-            Ok(Parked::Served)
         }
     }
 
@@ -464,23 +425,6 @@ mod program {
     /// spot), submits, and shows the answer on the wake it nudges.
     type Applier = tairix_rt::work::Worker<PinboardDocument, ApplyOutcome>;
 
-    /// A `width_px` × `height_px` RGBA window mode, one frame's worth per
-    /// row. The one place the chooser's mode is shaped, so the create and
-    /// every resize agree on stride and format.
-    fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
-        DisplayMode {
-            width_px,
-            height_px,
-            stride_bytes: width_px.saturating_mul(4),
-            format: DisplayFormat::Rgba8888,
-        }
-    }
-
-    /// Total bytes a `FRAME_COUNT`-frame region shaped as `mode` needs.
-    fn region_bytes(mode: &DisplayMode) -> usize {
-        (mode.stride_bytes as usize) * (mode.height_px as usize) * FRAME_COUNT as usize
-    }
-
     /// The one style the chooser paints and hit-tests through: the active
     /// theme's interface face at the real desktop's own density and screen
     /// extent, exactly as the file manager and the control gallery resolve
@@ -506,11 +450,9 @@ mod program {
     /// is what makes a clipped repaint sound — every pixel outside the clip is
     /// the one already on screen.
     struct WindowSurface {
-        client: WindowClient<RtWindowTransport>,
-        window: u64,
-        frames: WindowFrames,
-        mode: DisplayMode,
-        canvas: Surface,
+        /// The shared app shell: the channel, the open window, its retained
+        /// surface, and the frame region behind it.
+        window: AppWindow,
     }
 
     impl WindowSurface {
@@ -527,63 +469,31 @@ mod program {
             desktop: &Desktop,
             damage: DamageRect,
         ) -> Result<(), Errno> {
-            let damage = if self.frames.is_released() {
-                DamageRect::full(&self.mode)
-            } else {
-                damage
-            };
             let style = style_for(theme, desktop);
-            self.canvas.with_clip(
-                damage.x,
-                damage.y,
-                damage.width_px,
-                damage.height_px,
-                |clipped| chooser.render_into(clipped, style),
-            );
-            let pixels = self
-                .client
-                .frame_pixels(&mut self.frames, self.window, FRAME_COUNT, &self.mode)
-                .ok_or(Errno::NotAttached)?;
-            winframe::encode(&self.canvas, pixels, &self.mode, damage, &SERIAL)?;
-            self.client.present(self.window, 0, damage)
+            self.window
+                .present(damage, |clipped| chooser.render_into(clipped, style))
         }
 
         /// Re-map the frame region onto `new_mode` and re-lay the chooser out
         /// at the new client size. The caller repaints the whole window, since
         /// nothing of the old picture survives a re-layout.
         ///
-        /// The ordering is fail-closed: a fresh region and a fresh surface are
-        /// allocated and the region granted first, then adopted only if the
-        /// session accepts the resize. On success the *old* region is unmapped
-        /// (never before, so a refused resize leaves the current surface
-        /// intact); on refusal the freshly-allocated region is unmapped so
-        /// nothing leaks. Anything that cannot be allocated at all keeps the
-        /// current size rather than ending the app.
+        /// A refused resize leaves the old geometry standing, so the chooser is
+        /// re-laid out only when the new one was actually adopted.
         fn resize(&mut self, new_mode: DisplayMode, chooser: &mut Chooser) {
-            let Some(spare) = WindowFrames::create(region_bytes(&new_mode)) else {
-                return;
-            };
-            let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
-                return;
-            };
-            let Some(grant) = spare.grant() else {
-                return;
-            };
-            if self
-                .client
-                .resize(self.window, grant, FRAME_COUNT, &new_mode)
-                .is_err()
-            {
-                return;
+            if self.window.resize(new_mode) {
+                chooser.relayout(new_mode.width_px, new_mode.height_px);
             }
-            // Adopting drops the old region, which unmaps it — and a refusal
-            // above drops the spare instead, so the ordering the surface
-            // depends on is the ownership rather than a sequence a later edit
-            // could reorder.
-            self.frames = spare;
-            self.mode = new_mode;
-            self.canvas = fresh;
-            chooser.relayout(self.mode.width_px, self.mode.height_px);
+        }
+
+        /// Resolve `repaint` against the reported `damage` and the window's
+        /// current shape, or `None` when nothing needs presenting.
+        fn present_damage(
+            &self,
+            repaint: Repaint,
+            damage: &tairix_geometry::Region,
+        ) -> Option<DamageRect> {
+            present_damage(self.window.mode()?, repaint, damage)
         }
     }
 
@@ -599,45 +509,6 @@ mod program {
             ChooserAction::None => first,
             asked => asked,
         }
-    }
-
-    /// Bind the app's own event mailbox and add it to a fresh wait-set,
-    /// returning both. Fails closed with the reserved exit code on any
-    /// refusal rather than degrading into a re-poll.
-    fn bind_event_mailbox() -> Result<(u64, u64), i32> {
-        let Ok(origin) = tairix_rt::self_origin() else {
-            return Err(fail(EXIT_NO_EVENTS, "own identity unavailable"));
-        };
-        let endpoint = tairix_window::event_endpoint_for(origin.pid());
-        if tairix_abi::ipc::is_reserved_endpoint(endpoint)
-            || tairix_rt::port_bind(
-                endpoint,
-                WindowEvent::WIRE_LEN,
-                tairix_window::EVENT_MAILBOX_CAPACITY,
-            ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox bind refused"));
-        }
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return Err(fail(EXIT_NO_EVENTS, "wait-set refused"));
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            endpoint,
-            EVENT_TOKEN,
-        ) != 0
-        {
-            return Err(fail(EXIT_NO_EVENTS, "event mailbox wait refused"));
-        }
-        if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return Err(fail(EXIT_NO_EVENTS, "memory-pressure wake refused"));
-        }
-        Ok((endpoint, set))
     }
 
     /// Render one outstanding picture — the preview panel first, then the
@@ -729,42 +600,27 @@ mod program {
         // or a default scale. A refused query, or a desktop this client
         // cannot draw at, is the same fail-closed outcome as a refused
         // window create.
-        let mut client = WindowClient::new(RtWindowTransport);
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                let _ = writeln!(Stderr, "wallpaper: desktop query refused: {err}");
-                return EXIT_NO_WINDOW;
-            }
+        let mut surface = WindowSurface {
+            window: AppWindow::new(),
         };
-        let mut desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "wallpaper: cannot draw this desktop: {err}");
-                return EXIT_NO_WINDOW;
-            }
+        let (mut desktop, mut themes) = match app::bring_up_desktop(surface.window.client()) {
+            Ok(pair) => pair,
+            Err(err) => return fail_shell(err),
         };
-        let mut themes = ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
         let mut theme = themes.active();
 
-        // --- The shared window surface: FRAME_COUNT frames shaped as the
-        // initial window mode (the desktop's own preferred size, capped to
-        // its screen), created here and granted to the session.
+        // --- The initial window mode: the desktop's own preferred size,
+        // capped to its screen.
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let mode = mode_for(initial_w, initial_h);
-        let Some(frames) = WindowFrames::create(region_bytes(&mode)) else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
-        let Some(grant) = frames.grant() else {
-            return fail(EXIT_NO_FRAMES, "shared frame region refused");
-        };
+        let mode = app::mode_for(initial_w, initial_h);
 
         // --- The event mailbox the app parks on.
-        let (event_endpoint, set) = match bind_event_mailbox() {
-            Ok(pair) => pair,
-            Err(code) => return code,
+        let binding = match app::bind_event_mailbox() {
+            Ok(binding) => binding,
+            Err(err) => return fail_shell(err),
         };
+        let event_endpoint = binding.endpoint();
+        let set = binding.set();
 
         // --- The applier. The session answers an *Apply* only once it has
         // written the store, so the click hands the round trip here and the
@@ -793,7 +649,7 @@ mod program {
                 APPLY_TOKEN,
             ) != 0
             {
-                return fail(EXIT_NO_EVENTS, "apply wake refused");
+                return fail(app::EXIT_NO_EVENTS, "apply wake refused");
             }
         }
 
@@ -804,25 +660,13 @@ mod program {
             min_width_px: MIN_WIN_WIDTH,
             min_height_px: MIN_WIN_HEIGHT,
         };
-        let Ok((window, server)) =
-            client.create(grant, event_endpoint, FRAME_COUNT, &mode, TITLE, sizing)
-        else {
-            return fail(EXIT_NO_WINDOW, "desktop session refused the window");
+        let server = match surface.window.open(event_endpoint, &mode, TITLE, sizing) {
+            Ok(server) => server,
+            Err(err) => return fail_shell(err),
         };
         chooser.relayout(mode.width_px, mode.height_px);
-        let Some(canvas) = Surface::new(mode.width_px, mode.height_px) else {
-            return fail(EXIT_NO_WINDOW, "no memory for the window surface");
-        };
-        let mut surface = WindowSurface {
-            client,
-            window,
-            frames,
-            mode,
-            canvas,
-        };
-        let first = DamageRect::full(&surface.mode);
         if surface
-            .present(&mut chooser, theme, &desktop, first)
+            .present(&mut chooser, theme, &desktop, DamageRect::full(&mode))
             .is_err()
         {
             return fail(EXIT_CHANNEL_LOST, "first present refused");
@@ -852,7 +696,7 @@ mod program {
             // lands rather than at whatever later input happens to arrive.
             if let Some(outcome) = applier.collect() {
                 chooser.set_apply_outcome(outcome, style_for(theme, &desktop), &mut damage);
-                if let Some(damage) = present_damage(&surface.mode, Repaint::Reported, &damage) {
+                if let Some(damage) = surface.present_damage(Repaint::Reported, &damage) {
                     if surface
                         .present(&mut chooser, theme, &desktop, damage)
                         .is_err()
@@ -862,7 +706,7 @@ mod program {
                 }
                 continue;
             }
-            let delivered = match events.try_wait(&mut surface.client) {
+            let delivered = match events.try_wait(surface.window.client()) {
                 Ok(Some(event)) => Ok(Some(event)),
                 Ok(None) => {
                     if resolve_one_render(&mut chooser, &mut sandbox, theme, &desktop, &mut damage)
@@ -871,8 +715,7 @@ mod program {
                         // box it fills, so the gallery fills in one tile at a
                         // time rather than repainting the window once per
                         // picture.
-                        let Some(damage) =
-                            present_damage(&surface.mode, Repaint::Reported, &damage)
+                        let Some(damage) = surface.present_damage(Repaint::Reported, &damage)
                         else {
                             continue;
                         };
@@ -884,7 +727,7 @@ mod program {
                         }
                         continue;
                     }
-                    events.wait(&mut surface.client)
+                    events.wait(surface.window.client())
                 }
                 Err(err) => Err(err),
             };
@@ -973,7 +816,7 @@ mod program {
                     height_px,
                     ..
                 } => {
-                    surface.resize(mode_for(width_px, height_px), &mut chooser);
+                    surface.resize(app::mode_for(width_px, height_px), &mut chooser);
                     resized = true;
                     ChooserAction::Changed
                 }
@@ -1019,7 +862,7 @@ mod program {
                 // until the redraw request that follows the window being shown
                 // again re-attaches a fresh region.
                 WindowEvent::ContentReleased { .. } => {
-                    surface.frames.release();
+                    surface.window.release_frames();
                     continue;
                 }
             };
@@ -1050,7 +893,7 @@ mod program {
                 // is unmapped by its own drop rather than left pinned for the
                 // runtime to reclaim.
                 ChooserAction::Close => {
-                    let _ = surface.client.close(surface.window);
+                    let _ = surface.window.close();
                     return 0;
                 }
             };
@@ -1062,7 +905,7 @@ mod program {
             } else {
                 repaint_kind
             };
-            let Some(damage) = present_damage(&surface.mode, repaint_kind, &damage) else {
+            let Some(damage) = surface.present_damage(repaint_kind, &damage) else {
                 continue;
             };
             if surface
