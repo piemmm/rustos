@@ -14,9 +14,9 @@
 
 use crate::{
     FirmwareClock, MailboxError, MailboxTransport, RtcRegister, CODE_RESPONSE_OK, PROPERTY_WORDS,
-    TAG_ALLOCATE, TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE,
-    TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT,
-    TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
+    SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION,
+    TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH,
+    TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
 };
 
 /// A mock firmware answering property messages with configured values.
@@ -129,7 +129,13 @@ impl MockFirmware {
                     8
                 }
                 TAG_SET_CLOCK_RATE => {
-                    message[at + 4] = self.set_clock_rate(message[at + 3], message[at + 4]);
+                    // The documented request is three words; one that
+                    // declares a shorter value buffer supplies no turbo word,
+                    // which reads as the firmware's default of *setting*
+                    // turbo.
+                    let skip_turbo = buf_words >= 3 && message[at + 5] == SKIP_SETTING_TURBO;
+                    message[at + 4] =
+                        self.set_clock_rate(message[at + 3], message[at + 4], skip_turbo);
                     8
                 }
                 // Set-tags echo their request values unchanged.
@@ -178,11 +184,23 @@ impl MockFirmware {
     /// firmware actually adopted: clamped to its range and rounded down to
     /// `arm_clock_grain_hz`. An unmodelled clock adopts nothing and answers
     /// zero.
-    fn set_clock_rate(&mut self, selector: u32, rate_hz: u32) -> u32 {
+    ///
+    /// `skip_turbo` carries the request's third word. Without it the firmware
+    /// performs the turbo transition the word exists to inhibit, which takes
+    /// the part to its turbo operating point whatever rate was asked for — the
+    /// on-metal defect of a Pi that would not clock down. Modelling it is what
+    /// lets a caller that under-declares the request fail here rather than
+    /// only on real silicon.
+    fn set_clock_rate(&mut self, selector: u32, rate_hz: u32, skip_turbo: bool) -> u32 {
         if selector != FirmwareClock::Arm.as_u32() {
             return 0;
         }
-        let clamped = rate_hz.clamp(self.arm_clock_min_hz, self.arm_clock_max_hz);
+        let wanted = if skip_turbo {
+            rate_hz
+        } else {
+            self.arm_clock_max_hz
+        };
+        let clamped = wanted.clamp(self.arm_clock_min_hz, self.arm_clock_max_hz);
         let grain = self.arm_clock_grain_hz.max(1);
         self.arm_clock_hz = (clamped / grain) * grain;
         self.arm_clock_hz

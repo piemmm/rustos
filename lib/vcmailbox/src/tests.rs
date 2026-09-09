@@ -1083,19 +1083,55 @@ fn clock_rate_query_lays_out_each_get_tag() {
 #[test]
 fn clock_rate_write_lays_out_the_set_tag() {
     let words = encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000);
-    assert_eq!(words[0], 8 * 4, "message byte length");
+    assert_eq!(words[0], 9 * 4, "message byte length");
     assert_eq!(words[1], CODE_REQUEST);
     assert_eq!(
-        words[2..7],
+        words[2..8],
         [
             TAG_SET_CLOCK_RATE,
-            8,
+            12,
             0,
             FirmwareClock::Arm.as_u32(),
-            1_500_000_000
-        ]
+            1_500_000_000,
+            SKIP_SETTING_TURBO,
+        ],
+        "the tag documents a three-word request; a shorter one both \
+         under-declares the value buffer and clears the turbo word"
     );
-    assert_eq!(words[7], 0, "end tag");
+    assert_eq!(words[8], 0, "end tag");
+}
+
+#[test]
+fn a_set_without_the_turbo_word_cannot_lower_the_clock() {
+    // The reported defect. The request carried only its selector and rate, so
+    // the firmware ran the turbo transition the third word exists to inhibit
+    // and took the part to its turbo operating point: a Pi asking for its
+    // floor stayed at the ceiling. Nothing failed and nothing was logged,
+    // because the applied rate the firmware answers with *is* that ceiling.
+    let mut firmware = MockFirmware::healthy();
+    let floor = firmware.arm_clock_min_hz;
+    let ceiling = firmware.arm_clock_max_hz;
+    assert_ne!(floor, ceiling, "the modelled board must have a range");
+
+    let mut short = [0u32; PROPERTY_WORDS];
+    short[0] = 8 * 4;
+    short[1] = CODE_REQUEST;
+    short[2] = TAG_SET_CLOCK_RATE;
+    short[3] = 8;
+    short[5] = FirmwareClock::Arm.as_u32();
+    short[6] = floor;
+    firmware.exchange(&mut short).expect("the mock never fails");
+    assert_eq!(
+        decode_clock_rate_write_response(FirmwareClock::Arm, &short),
+        Ok(ceiling),
+        "a two-word request must not be able to lower the clock"
+    );
+
+    // The documented request does lower it.
+    assert_eq!(
+        set_clock_rate(&mut firmware, FirmwareClock::Arm, floor),
+        Ok(floor)
+    );
 }
 
 #[test]

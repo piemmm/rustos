@@ -158,6 +158,35 @@ fn the_rate_the_governor_asks_for_reaches_the_hardware() {
 }
 
 #[test]
+fn the_governor_can_lower_the_clock_as_well_as_raise_it() {
+    // Every other apply test asks for the ceiling, because the subsystem was
+    // built to raise a board the firmware had left at its floor — so nothing
+    // exercised the one direction that matters once the machine goes quiet,
+    // and a reduction the firmware answered with the ceiling looked like a
+    // success. A request framed without its turbo-skip word runs the
+    // firmware's turbo transition, which is exactly that.
+    let mut fw = pi4b_at_minimum();
+    fw.arm_clock_grain_hz = 1;
+    fw.arm_clock_hz = 1_500_000_000;
+    let driver = RpiCpuFreq::new(MockChannel::new(fw));
+    assert_eq!(
+        driver.current(),
+        Ok(1_500_000_000),
+        "as a board that has been busy is found"
+    );
+    assert_eq!(
+        driver.apply(600_000_000),
+        Ok(600_000_000),
+        "down to the floor"
+    );
+    assert_eq!(driver.current(), Ok(600_000_000));
+    // A governor walks back down a step at a time, so an intermediate rate
+    // has to stick too.
+    assert_eq!(driver.apply(1_000_000_000), Ok(1_000_000_000));
+    assert_eq!(driver.current(), Ok(1_000_000_000));
+}
+
+#[test]
 fn a_target_wider_than_the_firmware_rate_field_is_refused() {
     // The property interface carries a 32-bit rate; a target that does not
     // fit is refused rather than truncated into a rate the firmware would

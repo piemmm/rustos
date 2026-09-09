@@ -210,6 +210,26 @@ targets take over. Both read the ceiling from the firmware rather than
 assuming one, so a board whose `config.txt` raises `arm_freq` is driven over
 its own range.
 
+### Asking the firmware to *lower* the clock
+
+`RPI_FIRMWARE_SET_CLOCK_RATE` documents a three-word request: the clock
+selector, the rate, and **skip setting turbo**. That third word is not
+optional decoration. With it clear the firmware performs its turbo transition
+as part of the rate change and takes the part to its turbo operating point, so
+a request to lower the ARM clock is answered with the maximum — and answered
+*successfully*, because the applied rate the firmware reports back is that
+maximum. `clk-raspberrypi` sets the same word for the same reason
+(`raspberrypi_firmware_prop.disable_turbo`).
+
+Sending only the selector and the rate therefore both under-declares the
+tag's value buffer and asks for the turbo transition. It looks correct for as
+long as every request is for full speed — which is exactly how the subsystem
+was first exercised, since it exists to raise a board the firmware had left at
+its floor. The first request that tried to go *down* silently did not, and the
+board sat at its ceiling at one percent load. Both directions are now covered:
+`the_governor_can_lower_the_clock_as_well_as_raise_it` drives the driver
+against a firmware mock that models the turbo word.
+
 ## Measuring the live clock honestly
 
 The estimator divides a core-clock counter delta by a fixed-rate reference

@@ -898,6 +898,16 @@ const TAG_GET_MIN_CLOCK_RATE: u32 = 0x0003_0007;
 /// `RPI_FIRMWARE_SET_CLOCK_RATE`: ask the firmware to run a clock at a rate.
 const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
 
+/// The `skip setting turbo` word of a [`TAG_SET_CLOCK_RATE`] request, set so
+/// the firmware changes only the clock named.
+///
+/// With it clear the firmware performs its turbo transition as part of the
+/// rate change, which moves the part to its turbo operating point — so a
+/// request to *lower* the ARM clock leaves it at the maximum, and a governor
+/// asking for the floor is silently answered with the ceiling. `clk-raspberrypi`
+/// sets it for the same reason (its `raspberrypi_firmware_prop.disable_turbo`).
+pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
+
 /// Which clock a rate exchange names.
 ///
 /// The firmware owns every clock on the `SoC` and identifies each by this
@@ -967,10 +977,12 @@ pub fn encode_clock_rate_query(
 
 /// Encode a request to run `clock` at `rate_hz`.
 ///
-/// Two value words (selector, rate), as `clk-raspberrypi` spells it. The
-/// optional third "skip setting turbo" word is omitted, so the firmware
-/// applies the voltage settings that go with the rate rather than leaving the
-/// core under-volted at a rate it cannot hold.
+/// Three value words — selector, rate, and the skip-setting-turbo flag —
+/// which is the request length the tag documents and the shape
+/// `clk-raspberrypi` sends.
+/// Supplying only the first two both under-declares the value buffer and
+/// leaves the turbo word clear, which is how a request to lower the ARM clock
+/// came to be answered with the ceiling.
 #[must_use]
 pub fn encode_clock_rate_write(clock: FirmwareClock, rate_hz: u32) -> [u32; PROPERTY_WORDS] {
     let mut words = [0u32; PROPERTY_WORDS];
@@ -979,7 +991,7 @@ pub fn encode_clock_rate_write(clock: FirmwareClock, rate_hz: u32) -> [u32; PROP
         &mut words,
         at,
         TAG_SET_CLOCK_RATE,
-        &[clock.as_u32(), rate_hz],
+        &[clock.as_u32(), rate_hz, SKIP_SETTING_TURBO],
     );
     // End tag (a zero word) is already in place; account for it.
     at += 1;

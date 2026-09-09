@@ -166,7 +166,30 @@ It does **not** report the applied rate back. The firmware clamps and rounds,
 so the request is not the truth, and the kernel has a better witness: the
 per-CPU estimator measures the live core clock from the silicon's own
 counters, so a rate that never took effect shows up as a measured frequency
-that does not match the target.
+that does not match the target. That is the decision the turbo defect below
+tested, and it held — the estimator is what revealed it.
+
+**The request carries `skip setting turbo`, and must.**
+`RPI_FIRMWARE_SET_CLOCK_RATE` documents three request words: selector, rate,
+and skip-setting-turbo. With the third word clear the firmware runs its turbo
+transition as part of the rate change and takes the part to its turbo
+operating point, so a request to *lower* the ARM clock is answered with the
+maximum — and answered successfully, since the applied rate it reports is that
+maximum. `clk-raspberrypi` sets the same word
+(`raspberrypi_firmware_prop.disable_turbo`). Framing the request with only its
+first two words also under-declares the tag's value buffer, against the
+invariant `lib/vcmailbox`'s own `find_tag` documents (every tag is provisioned
+to `max(request, response)`).
+
+*Why it survived a release cycle.* The subsystem exists to raise a board the
+firmware had left at `arm_freq_min`, so every test asked for the ceiling —
+where the turbo transition is indistinguishable from correct behaviour. No
+test, at any level, ever asked the clock to go *down*. Both directions are
+covered now: the encoder's wire layout
+(`clock_rate_write_lays_out_the_set_tag`), the firmware semantics
+(`a_set_without_the_turbo_word_cannot_lower_the_clock`, the mock models the
+word), and the driver end to end
+(`the_governor_can_lower_the_clock_as_well_as_raise_it`).
 
 ## The seam
 
@@ -240,7 +263,13 @@ nothing rather than a noisy figure.
   reader.
 * **The System Information API reports the measured frequency only**, not the
   governor's target. The measurement is the honest answer to "how fast is this
-  core running"; a target would only tell a reader what was asked for.
+  core running"; a target would only tell a reader what was asked for. The
+  turbo defect is the case against that: neither number alone diagnosed it,
+  and only the *pair* — asked 600 MHz, measuring 1.5 GHz — says the mechanism
+  is not delivering. Reporting the published target beside the measurement
+  would make that readable from `sysinfo` instead of needing a human to
+  notice twice. Not staged: it is an ABI record field, a gather, and a client
+  rendering, and the measurement alone remains correct.
 * **On-metal acceptance.** QEMU models no `VideoCore`, so the firmware
   exchanges are proven against the mock. The live path — boot, idle, load,
   launch — is verified on a Pi 4B.
