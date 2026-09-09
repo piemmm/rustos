@@ -836,9 +836,15 @@ wait-queue or scheduler locks: the device-IRQ dispatcher and the timer
 one-shot only flag a pending wake (`WaitQueue::request_wake` /
 `timed_wake_sweep`), and the actual `wake_all` / deadline sweep + `unpark`
 runs at the next dispatcher-context `waitq::drain_pending_wakes` (between
-scheduler steps and before idle). The first consumer is the `hw_tree_wait`
-syscall, whose waiters `HW_TREE_WAITQ` holds and the discovered-hardware
-store wakes on every generation bump (`AGENTS.md` §18.4). Waking a parked
+scheduler steps and before idle). Which queues each path visits is one
+list — `DEFERRED_WAKE_QUEUES` for the flagged wakes, `TIMED_QUEUES` for the
+deadlines — folded over by both of that list's consumers, so a flagged wake
+the preemption gate cannot see (stranding its waiters on a lone-task CPU)
+and a swept deadline the one-shot arming does not count (losing its wake to
+another queue's later arming) are structurally impossible. The first
+consumer is the `hw_tree_wait` syscall, whose waiters `HW_TREE_WAITQ` holds
+and the discovered-hardware store wakes on every generation bump
+(`AGENTS.md` §18.4). Waking a parked
 waiter, reading the clock, and arming the one-shot all route through one
 boot-installed `WaitQueueArch` adapter over the live `Scheduler<A>` + arch,
 so the global wait-queue never names either concrete type (`AGENTS.md`

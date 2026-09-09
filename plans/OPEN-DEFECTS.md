@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 93 closed, 116 total.
+table normalises all three to **closed**. 23 open, 94 closed, 117 total.
 
 ### Open (23)
 
@@ -51,7 +51,7 @@ table normalises all three to **closed**. 23 open, 93 closed, 116 total.
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 
-### Closed (92)
+### Closed (94)
 
 | ID | Subject |
 |---|---|
@@ -148,6 +148,7 @@ table normalises all three to **closed**. 23 open, 93 closed, 116 total.
 | D114 | `mem_unmap` refused every release a shrinking heap arena asked for, so the switchboard spent whole frames re-asking |
 | D115 | the Switchboard memory composition read "unknown" under load, because it was built from a count of *mappings* rather than of RAM |
 | D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
+| D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
 
 ## Scope
 
@@ -6708,3 +6709,38 @@ signals. `resource_report_tests`: a storage device's trace is
 on both the rail entry and the hero. `model_tests`: the task and recovery
 traces carry `Workload` and `Recovery`.
 
+
+## D117 — a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set (FIXED)
+
+Caught by D90's shuffle gate. `waitq::the_frequency_queue_is_on_every_shared_path`
+opened on `!has_pending_deferred_wake() || CPUFREQ_WAITQ.wake_is_pending()` — a
+reading of *five* process-global flags, of which it owned one. Nothing consumes
+a flag in the host binary (the drain needs an installed arch), so the first
+`console::`, `fs::` or `syscalls::` test to push a byte, publish a write-back
+deadline or move a pressure band left the gate permanently true, and the
+assertion then failed for every order that ran one of them first
+(`cargo xtask test --shuffle-seed 6557463789261338282` replays it). The same
+test also registered on a global queue and ran `run_timed_sweep` at
+`now = 9_001`, which deregisters any *sibling's* waiter whose deadline had
+passed — so it could break tests as well as fail.
+
+**The duplication underneath it.** The property the test guarded — a named
+queue is only useful if every shared path names it — needed a test only because
+each set was hand-enumerated twice: `drain_pending_wakes` against
+`has_pending_deferred_wake`, and `run_timed_sweep` against
+`nearest_timed_deadline`. Each pair is the same set by definition, and the third
+copy, in `nearest_timed_deadline`'s prose, had already drifted (it omitted
+`CPUFREQ_WAITQ`). Each set is now one list — `DEFERRED_WAKE_QUEUES` and
+`TIMED_QUEUES` — that all four paths fold over, so the property is structural
+and the test is a deterministic membership assertion touching no sibling state.
+
+**Found on the way:** `CALL_WAITQ`'s rustdoc still claimed every waiter
+registers `NO_DEADLINE` and the timed sweep never touches it. The async
+`call_post` transport (`fs::blkclient`) and a `CallReply` wait-set member both
+register finite deadlines; only the comment inside `run_timed_sweep` said so,
+and this change removed it. Corrected on the queue itself.
+
+The rule the record keeps: a host test may read a process-global wait-queue
+flag only monotonically and only its own — set, then observe set. Registering
+on a global queue, sweeping one, or reading a flag it did not set is a race
+against whichever sibling owns it.

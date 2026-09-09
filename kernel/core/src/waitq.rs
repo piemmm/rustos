@@ -950,9 +950,13 @@ pub fn seat_input_wake() {
 
 /// The wait-queue holding `ipc_call` callers (Design D D2b). A caller parks
 /// here after posting its request to a [`tairix_kernel_ipc::call::CallEndpoint`]
-/// and is woken by [`call_wake`] when the bound server replies (no busy yield). `ipc_call` carries no timeout, so every waiter
-/// registers with [`NO_DEADLINE`] and is only ever released by an explicit
-/// wake, never the timed [`WaitQueue::sweep`].
+/// and is woken by [`call_wake`] when the bound server replies (no busy
+/// yield). `ipc_call` itself carries no timeout, so its waiters register
+/// with [`NO_DEADLINE`] and only an explicit wake releases them; the async
+/// `call_post` transport and a `CallReply` wait-set member do register a
+/// finite per-request deadline, which the timed [`WaitQueue::sweep`]
+/// releases so a caller whose device wedged observes the timeout instead of
+/// parking forever.
 pub static CALL_WAITQ: WaitQueue = WaitQueue::new();
 
 /// Wake every parked `ipc_call` caller because a [`CallEndpoint`] reply (or
@@ -1024,6 +1028,46 @@ pub fn port_room_wake_task(task: TaskId) {
     }
 }
 
+/// Every queue whose wake is *flagged* from a context that cannot take a
+/// lock ([`WaitQueue::request_wake`]) and performed later in dispatcher
+/// context.
+///
+/// One list, because the drain that consumes a flag
+/// ([`drain_pending_wakes`]) and the preemption gate that must reschedule
+/// so the drain is reached ([`has_pending_deferred_wake`]) have to name the
+/// same set: a queue on one and not the other either strands a flagged wake
+/// on a lone-task CPU or never consumes it at all.
+static DEFERRED_WAKE_QUEUES: &[&WaitQueue] = &[
+    &CONSOLE_WAITQ,
+    &IRQ_WAITQ,
+    &PRESSURE_WAITQ,
+    &WRITEBACK_WAITQ,
+    &CPUFREQ_WAITQ,
+];
+
+/// Every queue a park site can register a finite deadline on.
+///
+/// One list, because the sweep that releases an elapsed deadline
+/// ([`run_timed_sweep`]) and the arming that decides when the one-shot next
+/// fires ([`nearest_timed_deadline`]) have to name the same set: a queue
+/// swept but not counted loses its wake to another queue's later arming,
+/// and one counted but not swept re-arms the timer on a deadline nothing
+/// releases.
+///
+/// The per-key futex queues are created on demand, so both paths fold them
+/// through [`crate::futex`] rather than from here.
+static TIMED_QUEUES: &[&WaitQueue] = &[
+    &HW_TREE_WAITQ,
+    &IRQ_WAITQ,
+    &CONSOLE_WAITQ,
+    &USERS_DB_WAITQ,
+    &STREAM_WAITQ,
+    &CALL_WAITQ,
+    &WRITEBACK_WAITQ,
+    &FILE_LOCK_WAITQ,
+    &CPUFREQ_WAITQ,
+];
+
 /// Lock-free "the timed-wake one-shot fired and a deadline sweep is owed"
 /// flag, set by [`timed_wake_sweep`] in the timer ISR and consumed by
 /// [`drain_pending_wakes`] in dispatcher context (the
@@ -1064,38 +1108,15 @@ pub fn deadline_for(now_ns: u64, timeout_ns: u64) -> u64 {
 /// dispatcher context, out of [`drain_pending_wakes`].
 fn run_timed_sweep(arch: &dyn WaitQueueArch) {
     let now = arch.now_ns();
-    HW_TREE_WAITQ.sweep(arch, now);
-    IRQ_WAITQ.sweep(arch, now);
-    CONSOLE_WAITQ.sweep(arch, now);
-    USERS_DB_WAITQ.sweep(arch, now);
-    STREAM_WAITQ.sweep(arch, now);
-    // `CALL_WAITQ` holds callers awaiting a reply. Most register with
-    // `NO_DEADLINE` (`ipc_call`/`call_recv` — released only by the reply or
-    // teardown, so the sweep never touches them), but the async `call_post`
-    // path registers a finite per-request deadline: sweeping here releases a
-    // caller whose device wedged so its `call_reap` observes the timeout,
-    // rather than parking it forever.
-    CALL_WAITQ.sweep(arch, now);
-    // The write-back flusher's deadline is the soonest a mounted volume's
-    // open transaction ages out, so the sweep is what turns the batching
-    // window into a real bound on how stale a quiet volume may be.
-    WRITEBACK_WAITQ.sweep(arch, now);
-    // A timed `fs_lock` whose deadline passed leaves the wait and reports
-    // the timeout rather than holding its task past the bound it asked for.
-    FILE_LOCK_WAITQ.sweep(arch, now);
-    // The frequency governor's own review deadline: a quiescing machine steps
-    // its rate down here, so the sweep is what turns the response window into
-    // a real bound on how long a quiet machine runs fast.
-    CPUFREQ_WAITQ.sweep(arch, now);
-    // The futex queues are per-key and created on demand, so they are swept
-    // through their own module rather than named here (`plans/THREADS.md`
-    // decision 5): a timed `futex_wait` is released exactly like any other
-    // timed wait.
+    for queue in TIMED_QUEUES {
+        queue.sweep(arch, now);
+    }
+    // Per-key and created on demand, so swept through their own module
+    // (`plans/THREADS.md` decision 5): a timed `futex_wait` is released
+    // exactly like any other timed wait.
     crate::futex::sweep(arch, now);
-    // Re-arm to the soonest pending deadline across *every* timed
-    // wait-queue, so no finite timeout is dropped because another queue
-    // armed a later one-shot (the nearest armed
-    // wakeup).
+    // Re-arm to the soonest deadline *any* queue still needs, so no finite
+    // timeout is dropped because another queue armed a later one-shot.
     arch.set_wakeup(nearest_timed_deadline());
 }
 
@@ -1108,8 +1129,8 @@ fn run_timed_sweep(arch: &dyn WaitQueueArch) {
 /// flags a pending wake ([`WaitQueue::request_wake`] / [`timed_wake_sweep`])
 /// and the dispatch loop calls this between scheduler steps and before it
 /// idles, where taking those locks is safe. It performs the real
-/// [`WaitQueue::wake_all`] for every edge-flagged queue and the deadline
-/// `run_timed_sweep`, unparking the affected tasks.
+/// [`WaitQueue::wake_all`] for every flagged `DEFERRED_WAKE_QUEUES` entry
+/// and the deadline `run_timed_sweep`, unparking the affected tasks.
 ///
 /// Returns `true` if any wake was owed (a task may now be runnable), so
 /// the caller re-steps the scheduler rather than idling. A fail-safe
@@ -1119,34 +1140,11 @@ pub fn drain_pending_wakes() -> bool {
         return false;
     };
     let mut woke = false;
-    // Edge wakes flagged from a context that could not take a lock: a
-    // device IRQ, a UART receive, or the pressure gauge's band change
-    // inside an allocation path.
-    if CONSOLE_WAITQ.take_wake_pending() {
-        CONSOLE_WAITQ.wake_all(arch);
-        woke = true;
-    }
-    if IRQ_WAITQ.take_wake_pending() {
-        IRQ_WAITQ.wake_all(arch);
-        woke = true;
-    }
-    if PRESSURE_WAITQ.take_wake_pending() {
-        PRESSURE_WAITQ.wake_all(arch);
-        woke = true;
-    }
-    // A volume took on a sooner write-back deadline than the flusher is
-    // armed for, flagged from inside the driver under its mount lock.
-    if WRITEBACK_WAITQ.take_wake_pending() {
-        WRITEBACK_WAITQ.wake_all(arch);
-        woke = true;
-    }
-    // The machine's performance demand rose: work arrived on an idle CPU, or
-    // a program was launched. Flagged from the dispatch loop's idle bracket,
-    // which runs with device interrupts masked around its park, so the real
-    // unpark of the frequency mechanism happens here.
-    if CPUFREQ_WAITQ.take_wake_pending() {
-        CPUFREQ_WAITQ.wake_all(arch);
-        woke = true;
+    for queue in DEFERRED_WAKE_QUEUES {
+        if queue.take_wake_pending() {
+            queue.wake_all(arch);
+            woke = true;
+        }
     }
     // Deadline sweep flagged by the timer one-shot.
     if TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel) {
@@ -1156,10 +1154,8 @@ pub fn drain_pending_wakes() -> bool {
     woke
 }
 
-/// Non-consuming peek: whether an *edge-flagged* interrupt-context
-/// deferred wake (console RX, a device-IRQ [`irq_wake`], or a
-/// memory-pressure band change [`pressure_wake`]) is awaiting its
-/// dispatcher-context [`drain_pending_wakes`].
+/// Non-consuming peek: whether any `DEFERRED_WAKE_QUEUES` entry has a
+/// flagged wake awaiting its dispatcher-context [`drain_pending_wakes`].
 ///
 /// The preemption gate consults this so a timer tick on a CPU whose only
 /// task is the one about to be preempted still reschedules when a wake is
@@ -1176,11 +1172,9 @@ pub fn drain_pending_wakes() -> bool {
 /// elapsed), not by the flag alone.
 #[must_use]
 pub fn has_pending_deferred_wake() -> bool {
-    CONSOLE_WAITQ.wake_is_pending()
-        || IRQ_WAITQ.wake_is_pending()
-        || PRESSURE_WAITQ.wake_is_pending()
-        || WRITEBACK_WAITQ.wake_is_pending()
-        || CPUFREQ_WAITQ.wake_is_pending()
+    DEFERRED_WAKE_QUEUES
+        .iter()
+        .any(|queue| queue.wake_is_pending())
 }
 
 /// Whether a timed waiter's finite deadline has already elapsed, so the
@@ -1236,37 +1230,17 @@ pub fn console_deregister(task: TaskId, deadline_ns: u64) {
     }
 }
 
-/// The soonest finite deadline pending across **every** timed wait-queue
-/// (`HW_TREE_WAITQ`, `IRQ_WAITQ`, `CONSOLE_WAITQ`, `USERS_DB_WAITQ`,
-/// `STREAM_WAITQ`, `CALL_WAITQ`, `WRITEBACK_WAITQ`, `FILE_LOCK_WAITQ`, and
-/// the per-key futex queues), or [`None`] if none has one. A park site arms the one-shot to
-/// this so registering a *later* deadline never delays an already-pending
-/// earlier wake.
+/// The soonest finite deadline pending across every `TIMED_QUEUES` entry
+/// and the per-key futex queues, or [`None`] if none has one. A park site
+/// arms the one-shot to this so registering a *later* deadline never delays
+/// an already-pending earlier wake.
 #[must_use]
 pub fn nearest_timed_deadline() -> Option<u64> {
-    [
-        HW_TREE_WAITQ.earliest_deadline(),
-        IRQ_WAITQ.earliest_deadline(),
-        CONSOLE_WAITQ.earliest_deadline(),
-        USERS_DB_WAITQ.earliest_deadline(),
-        STREAM_WAITQ.earliest_deadline(),
-        // A finite per-request deadline armed by `call_post` (the async
-        // block transport). Infinite (`ipc_call`) registrations arm nothing.
-        CALL_WAITQ.earliest_deadline(),
-        // A timed `futex_wait` — a condition variable's bounded wait — over
-        // the per-key queues created on demand.
-        crate::futex::earliest_deadline(),
-        // The soonest write-back deadline any mounted volume published.
-        WRITEBACK_WAITQ.earliest_deadline(),
-        // A bounded wait for an advisory byte-range lock.
-        FILE_LOCK_WAITQ.earliest_deadline(),
-        // The frequency governor's next review. A machine settled at its
-        // minimum registers no deadline, so it arms nothing.
-        CPUFREQ_WAITQ.earliest_deadline(),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
+    TIMED_QUEUES
+        .iter()
+        .filter_map(|queue| queue.earliest_deadline())
+        .chain(crate::futex::earliest_deadline())
+        .min()
 }
 
 #[cfg(test)]
@@ -1323,49 +1297,49 @@ mod tests {
         }
     }
 
+    /// The defect this guards: a named queue is only useful if every shared
+    /// path folds over it. A `cpufreq_wake` whose flag no drain consumes
+    /// never reaches the mechanism, so a machine that had settled low would
+    /// stay there through the work that arrived; and a review deadline no
+    /// sweep visits and no arming counts would never fire, so a quiescing
+    /// machine would never step back down.
+    ///
+    /// Membership in the two shared lists is the whole property, since the
+    /// drain, the preemption gate, the sweep and the one-shot arming are
+    /// each a fold over one of them. Asserted structurally rather than by
+    /// driving the live paths: the queues are process-global and this
+    /// binary's tests run concurrently, so a registration or a sweep here
+    /// would perturb whichever sibling is using them, and reading another
+    /// queue's flag would be a race, not a test. The one live observation is
+    /// this hook's own flag, and monotonically — set, then observe set.
     #[test]
     fn the_frequency_queue_is_on_every_shared_path() {
-        // The defect this guards: a named queue is only useful if every
-        // shared path names it. A `cpufreq_wake` whose flag no drain
-        // consumes never reaches the mechanism, so a machine that had settled
-        // low would stay there through the work that arrived; and a review
-        // deadline no sweep visits and no arming counts would never fire, so
-        // a quiescing machine would never step back down.
-        //
-        // Checked structurally rather than through a live drain, because the
-        // drain needs the process-global installed arch these tests do not
-        // own — the flag and the deadline are the two things the paths must
-        // observe, and both are visible here.
-        CPUFREQ_WAITQ.deregister(4242);
-        assert!(!has_pending_deferred_wake() || CPUFREQ_WAITQ.wake_is_pending());
+        let cpufreq: *const WaitQueue = &raw const CPUFREQ_WAITQ;
+        assert!(
+            DEFERRED_WAKE_QUEUES
+                .iter()
+                .any(|queue| core::ptr::eq(*queue, cpufreq)),
+            "the drain must consume a flagged frequency wake and the preemption \
+             gate must see it, or a lone-task CPU never reschedules to reach the \
+             drain"
+        );
+        assert!(
+            TIMED_QUEUES
+                .iter()
+                .any(|queue| core::ptr::eq(*queue, cpufreq)),
+            "the timed sweep must release the governor's review deadline and the \
+             one-shot arming must count it, or the rate never steps down"
+        );
+
         cpufreq_wake();
         assert!(
-            has_pending_deferred_wake(),
-            "the preemption gate must see a flagged frequency wake, or a lone-task \
-             CPU never reschedules to reach the drain"
+            CPUFREQ_WAITQ.wake_is_pending(),
+            "the hook must flag the queue those paths fold over"
         );
         assert!(
             CPUFREQ_WAITQ.take_wake_pending(),
             "the flag must be the one the drain consumes"
         );
-
-        CPUFREQ_WAITQ.register(4242, 9_000);
-        assert_eq!(
-            nearest_timed_deadline().map(|d| d.min(9_000)),
-            Some(9_000),
-            "a review deadline must be counted when the one-shot is armed"
-        );
-
-        // …and the sweep the fired one-shot runs must actually release it,
-        // or the mechanism re-parks and the rate never steps down.
-        let arch = MockArch::new();
-        *arch.now.borrow_mut() = 9_001;
-        run_timed_sweep(&arch);
-        assert!(
-            arch.unparked.borrow().contains(&4242),
-            "the timed sweep must visit the frequency queue"
-        );
-        CPUFREQ_WAITQ.deregister(4242);
     }
 
     #[test]
