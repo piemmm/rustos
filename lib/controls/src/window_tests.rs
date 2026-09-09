@@ -2855,6 +2855,117 @@ fn a_plate_band_seats_no_commands_and_reports_none() {
     }
 }
 
+/// A band of `commands`, titled, rendered over a plate ground.
+fn band_over_plate(commands: TitleBarCommands, theme: &Theme) -> Surface {
+    let mut bar = match commands {
+        TitleBarCommands::Empty => TitleBar::plate(),
+        TitleBarCommands::Window => TitleBar::new(WindowFurnitureState::default()),
+    };
+    bar.set_title("Appearance");
+    let mut surface = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
+    surface.fill(Color::from(theme.palette().surface_raised));
+    bar.render(&mut surface, TITLE_BOUNDS, Scale::ONE, theme, None);
+    surface
+}
+
+#[test]
+fn a_plate_band_lays_its_own_ground_one_shade_off_the_plate() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let surface = band_over_plate(TitleBarCommands::Empty, &theme);
+        assert!(
+            has_pixel(&surface, premul(palette.surface_hover)),
+            "a heading band shades its own strip so the plate reads as titled"
+        );
+        assert!(
+            !has_pixel(&surface, premul(palette.surface_raised)),
+            "the band covers the plate ground it caps"
+        );
+    }
+}
+
+#[test]
+fn a_plate_band_sets_its_title_in_the_section_header_face() {
+    const TITLE: &str = "Appearance";
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let mut bar = TitleBar::plate();
+    bar.set_title(TITLE);
+    let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
+
+    // A plate band draws exactly two things: its own ground and its title. So
+    // the band composed with a given face is an exact reference — the header
+    // face must reproduce it and the window-title face must not.
+    let reference = |role: TextRole| {
+        let font = BitmapFont::for_role(theme.fonts(), role, Scale::ONE);
+        let mut surface = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
+        surface.fill(Color::from(palette.surface_raised));
+        let (x, y, w, h) = (
+            0,
+            0,
+            TITLE_BOUNDS.width,
+            TITLE_BOUNDS.height.min(TITLE_BOUNDS.height),
+        );
+        surface.fill_rect(
+            x,
+            y,
+            w,
+            h,
+            Color::from(crate::paint::ground_fill(
+                &theme,
+                palette.surface_hover,
+                crate::paint::ChromeLayer::Ground,
+            )),
+        );
+        let glyph_h = font.glyph_height();
+        let ty = layout.title.top()
+            + (i32::try_from(layout.title.height).unwrap_or(i32::MAX)
+                - i32::try_from(glyph_h).unwrap_or(i32::MAX))
+            .max(0)
+                / 2;
+        let (fitted, _) = font.elide_to_width(TITLE, layout.title.width);
+        font.draw_text(
+            &mut surface,
+            layout.title.left(),
+            ty,
+            fitted,
+            Color::from(palette.on_surface),
+        );
+        surface
+    };
+
+    let header = reference(TextRole::SectionHeader);
+    let window_title = reference(TextRole::WindowTitle);
+    assert_ne!(
+        header.pixels(),
+        window_title.pixels(),
+        "the two faces must differ for this probe to discriminate"
+    );
+
+    let painted = band_over_plate(TitleBarCommands::Empty, &theme);
+    assert_eq!(
+        painted.pixels(),
+        header.pixels(),
+        "a plate band's title is set in the ladder's heading face"
+    );
+}
+
+#[test]
+fn a_window_title_band_lays_no_ground_and_keeps_the_window_title_face() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let surface = band_over_plate(TitleBarCommands::Window, &theme);
+        assert!(
+            has_pixel(&surface, premul(palette.surface_raised)),
+            "a window bar shows the surface beneath it, exactly as before"
+        );
+        assert!(
+            !has_pixel(&surface, premul(palette.surface_hover)),
+            "the heading shade is the plate band's alone"
+        );
+    }
+}
+
 #[test]
 fn a_plate_bands_whole_span_drags() {
     let theme = Theme::dark();

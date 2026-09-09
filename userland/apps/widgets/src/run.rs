@@ -363,6 +363,9 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            // The gallery shows its own controls, so it declares no file
+            // association and has no document an open target could name.
+            | WindowEvent::OpenRequested { .. }
             // The desktop change is adopted by the caller before this match,
             // which is also where the repaint it needs is decided.
             | WindowEvent::DesktopChanged { .. } => Acted::Idle,

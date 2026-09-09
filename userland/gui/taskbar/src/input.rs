@@ -100,7 +100,7 @@ use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
 use crate::menu::MenuRequest;
 use crate::picker::{
-    PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS,
+    slot_has_picker, PickerEntry, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_OPEN_DELAY_NS,
 };
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::Taskbar;
@@ -803,14 +803,10 @@ impl TaskbarInput {
     }
 
     /// The strip index of the application whose picker the pointer's current
-    /// position asks for: a hovered slot owning more than one window.
+    /// position asks for: a hovered slot that has one, by the shared rule.
     fn picker_target(taskbar: &Taskbar) -> Option<usize> {
         let index = taskbar.apps().hover()?;
-        taskbar
-            .apps()
-            .get(index)
-            .is_some_and(|app| app.windows().len() >= PICKER_MIN_WINDOWS)
-            .then_some(index)
+        slot_has_picker(taskbar, index).then_some(index)
     }
 
     /// Arm — or resolve — the open dwell for the application at strip index

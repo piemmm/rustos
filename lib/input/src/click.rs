@@ -1,28 +1,29 @@
-//! Double-click detection: the one pure rule that turns a stream of primary
-//! pointer presses into single-click and double-click gestures the file
-//! manager and the trusted picker share (`plans/NEW-FILEMANAGER.md` `FM12`).
+//! Double-click detection: the one pure rule that turns a stream of pointer
+//! presses into single-click and double-click gestures.
 //!
-//! A pointer double-click is what *activating* an item means — the keyboard
-//! spelling is `Enter` on the selection
-//! ([`activate_selected`](crate::Browser::activate_selected)). It is two
-//! presses of the *same button* on the *same* item close enough together in
-//! time. The decision lives here, once, so a double-click can never open
-//! something a keyboard `Enter` would not: the app resolves the press to an
-//! item, asks this detector whether it completes a double-click, and — if it
-//! does — runs the very same [`Activation`](crate::Activation) dispatch.
+//! A double-click is two presses of the *same button* on the *same subject*
+//! close enough together in time. The decision lives here, once, so no surface
+//! can pair presses on terms of its own: the file manager and the trusted
+//! picker resolve a press to a row and ask this detector whether it completes a
+//! pair (`plans/NEW-FILEMANAGER.md` `FM12`), and the window manager asks the
+//! same question of a press on a window's title bar.
 //!
 //! The button is part of the pairing because the two buttons mean different
 //! things: a primary double-click activates in place, a secondary one activates
 //! and leaves. One press of each is therefore two gestures begun, never one
 //! completed.
 //!
+//! The *subject* is whatever the caller is pairing presses on, as an opaque
+//! `u64`: a row index in a listing, a window id on the screen. It is compared
+//! and nothing else, so a caller with a narrower key widens it and a caller
+//! with none pairs on a single constant.
+//!
 //! The detector holds no authority and does no I/O. It decides only *whether* a
-//! press is the second of a pair; the caller supplies the item index (from the
-//! shared pixel→index hit-test), the button, and a monotonic timestamp (the
-//! kernel monotonic clock, which needs no capability), and performs the
-//! activation itself under the user's own identity.
+//! press is the second of a pair; the caller supplies the subject, the button,
+//! and a monotonic timestamp (the kernel monotonic clock, which needs no
+//! capability), and performs the action itself under the user's own identity.
 
-use tairix_input::PointerButton;
+use crate::PointerButton;
 
 /// The default maximum interval between the two presses of a double-click, in
 /// nanoseconds (half a second).
@@ -36,22 +37,23 @@ pub const DOUBLE_CLICK_INTERVAL_NS: u64 = 500_000_000;
 /// What a press resolved to once the double-click rule was applied.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ClickKind {
-    /// A lone press so far: it selects the item under the pointer. A matching
-    /// press soon after on the same item will complete a [`Double`](Self::Double).
+    /// A lone press so far: it selects the subject under the pointer. A
+    /// matching press soon after on the same subject will complete a
+    /// [`Double`](Self::Double).
     Single,
-    /// The second press of a pair, same button and same item, within the
-    /// interval: the caller activates the item (descend / launch a bundle /
-    /// open a file).
+    /// The second press of a pair, same button and same subject, within the
+    /// interval: the caller acts on the subject (descend / launch a bundle /
+    /// open a file / toggle a window's size).
     Double,
 }
 
-/// One remembered press: the button, the item it landed on, and when.
+/// One remembered press: the button, the subject it landed on, and when.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct LastClick {
     /// The monotonic timestamp of the press, in nanoseconds.
     at_ns: u64,
-    /// The item index the press resolved to (the shared hit-test's result).
-    index: usize,
+    /// The subject the press resolved to.
+    subject: u64,
     /// The button that was pressed.
     button: PointerButton,
 }
@@ -60,12 +62,12 @@ struct LastClick {
 /// and reports whether the next one completes a double-click.
 ///
 /// A completed double-click *consumes* both presses — the state is cleared — so
-/// a third quick press on the same item begins a fresh single click rather than
-/// registering a second double from one rapid run (standard triple-click
+/// a third quick press on the same subject begins a fresh single click rather
+/// than registering a second double from one rapid run (standard triple-click
 /// semantics). Any press that is not the second of a pair becomes the new
 /// remembered press, so only *consecutive* presses of the *same button* on the
-/// *same* item can pair — a press of the other button in between breaks the run
-/// rather than being invisible to it.
+/// *same* subject can pair — a press of the other button in between breaks the
+/// run rather than being invisible to it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct DoubleClickTracker {
     last: Option<LastClick>,
@@ -78,12 +80,12 @@ impl DoubleClickTracker {
         Self { last: None }
     }
 
-    /// Register a `button` press on the item at `index` at monotonic time
-    /// `now_ns`, using the default [`DOUBLE_CLICK_INTERVAL_NS`] window, and
-    /// report whether it completes a double-click.
+    /// Register a `button` press on `subject` at monotonic time `now_ns`, using
+    /// the default [`DOUBLE_CLICK_INTERVAL_NS`] window, and report whether it
+    /// completes a double-click.
     #[must_use]
-    pub fn register(&mut self, now_ns: u64, index: usize, button: PointerButton) -> ClickKind {
-        self.register_within(now_ns, index, button, DOUBLE_CLICK_INTERVAL_NS)
+    pub fn register(&mut self, now_ns: u64, subject: u64, button: PointerButton) -> ClickKind {
+        self.register_within(now_ns, subject, button, DOUBLE_CLICK_INTERVAL_NS)
     }
 
     /// Register a press against an explicit `interval_ns` window — the one
@@ -94,17 +96,17 @@ impl DoubleClickTracker {
     pub fn register_within(
         &mut self,
         now_ns: u64,
-        index: usize,
+        subject: u64,
         button: PointerButton,
         interval_ns: u64,
     ) -> ClickKind {
         if let Some(prev) = self.last {
-            // Pair only a press of the same button on the same item that
+            // Pair only a press of the same button on the same subject that
             // follows the previous one within the window. `now_ns >=
             // prev.at_ns` guards a non-monotonic reading (a clock that
             // appeared to step back): such a press fails closed to a fresh
             // single rather than a spurious double.
-            if prev.index == index
+            if prev.subject == subject
                 && prev.button == button
                 && now_ns >= prev.at_ns
                 && now_ns - prev.at_ns <= interval_ns
@@ -115,7 +117,7 @@ impl DoubleClickTracker {
         }
         self.last = Some(LastClick {
             at_ns: now_ns,
-            index,
+            subject,
             button,
         });
         ClickKind::Single
@@ -125,8 +127,8 @@ impl DoubleClickTracker {
     ///
     /// The caller resets when an intervening interaction breaks the pair — a
     /// press that lands on chrome (a toolbar tool, the places rail) rather
-    /// than an item — so a click *through* the chrome and back onto the same
-    /// item is never mistaken for a double-click of that item.
+    /// than a subject — so a click *through* the chrome and back onto the same
+    /// subject is never mistaken for a double-click of it.
     pub fn reset(&mut self) {
         self.last = None;
     }
@@ -147,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn two_quick_presses_on_the_same_item_are_a_double_click() {
+    fn two_quick_presses_on_the_same_subject_are_a_double_click() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(tracker.register(1_000, 3, LEFT), ClickKind::Single);
         assert_eq!(
@@ -177,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quick_press_on_a_different_item_is_a_single() {
+    fn a_quick_press_on_a_different_subject_is_a_single() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
         assert_eq!(tracker.register(1, 4, LEFT), ClickKind::Single);
@@ -199,7 +201,7 @@ mod tests {
         assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
         tracker.reset();
         // Without the remembered first press, the next is a lone single even
-        // on the same item within the window.
+        // on the same subject within the window.
         assert_eq!(tracker.register(1, 3, LEFT), ClickKind::Single);
     }
 
@@ -233,7 +235,7 @@ mod tests {
     #[test]
     fn the_two_buttons_pair_independently_and_never_with_each_other() {
         let mut tracker = DoubleClickTracker::new();
-        // A left press then a right press on the same item is two gestures
+        // A left press then a right press on the same subject is two gestures
         // begun, not one completed.
         assert_eq!(tracker.register(0, 3, LEFT), ClickKind::Single);
         assert_eq!(tracker.register(1, 3, RIGHT), ClickKind::Single);
@@ -246,9 +248,21 @@ mod tests {
     }
 
     #[test]
-    fn a_right_double_click_on_a_different_item_is_a_single() {
+    fn a_right_double_click_on_a_different_subject_is_a_single() {
         let mut tracker = DoubleClickTracker::new();
         assert_eq!(tracker.register(0, 3, RIGHT), ClickKind::Single);
         assert_eq!(tracker.register(1, 4, RIGHT), ClickKind::Single);
+    }
+
+    #[test]
+    fn a_subject_wider_than_an_index_pairs_on_its_whole_value() {
+        let mut tracker = DoubleClickTracker::new();
+        // Two window ids that differ only above 32 bits must not pair: the
+        // subject is compared whole, so a truncating key cannot conflate them.
+        let a = 1_u64 << 33;
+        let b = (1_u64 << 34) | 1;
+        assert_eq!(tracker.register(0, a, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(1, b, LEFT), ClickKind::Single);
+        assert_eq!(tracker.register(2, b, LEFT), ClickKind::Double);
     }
 }

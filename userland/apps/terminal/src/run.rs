@@ -78,7 +78,7 @@ mod program {
 
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
     use tairix_abi::window_ipc::{
-        AppMenuItemId, MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
+        AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion, WINDOW_ENDPOINT,
     };
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, WaitStatus};
     use tairix_display::{winframe, SERIAL};
@@ -417,7 +417,7 @@ mod program {
                 return;
             }
         };
-        let anchor = match MenuAnchor::new(at.x, at.y, 0, 0) {
+        let anchor = match WindowRegion::new(at.x, at.y, 0, 0) {
             Ok(anchor) => anchor,
             Err(err) => {
                 report(&alloc::format!("menu anchor refused ({err}); not shown"));
@@ -2385,6 +2385,11 @@ mod program {
                 // stale answer is dropped rather than acted on. The
                 // terminal's menu declares no panel row, so no chain
                 // of its own ever asks it for a surface.
+                // An open target names a document, and a terminal window has
+                // none: it hosts a shell, which the user opens things from
+                // itself. The desktop never queues one for it — a terminal
+                // declares no file associations — and one that arrived would
+                // name nothing this window could act on.
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarDefault
                 | WindowEvent::AppBarMenu { .. }
@@ -2392,6 +2397,7 @@ mod program {
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Scrolled { .. }
                 | WindowEvent::Minimized { .. }
+                | WindowEvent::OpenRequested { .. }
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }

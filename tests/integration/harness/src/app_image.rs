@@ -42,10 +42,10 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{Signer, SigningKey};
 use tairix_abi::{
     digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId, LibraryCategory,
-    ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC,
-    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, MIME_ENTRY_LEN,
-    MIME_TYPE_MAX,
+    ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR,
+    APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
+    MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 
@@ -121,6 +121,10 @@ pub struct AppManifestSource {
     /// already reaches another way, whose slot would be a duplicate route
     /// (`plans/NEW-TASKBAR.md`).
     pub icon_bar: bool,
+    /// Whether a user may run more than one instance of this bundle at once.
+    /// Absent means `"single"`: relaunching asks the running instance to open
+    /// a window rather than starting a second process (`plans/APPS.md`).
+    pub multi_instance: bool,
 }
 
 impl AppManifestSource {
@@ -134,8 +138,8 @@ impl AppManifestSource {
     /// command word, an unknown `kind`, an unknown or duplicate `CAP_*`
     /// name, a capability list exceeding the manifest bound, an unknown
     /// library folder, an over-long `library-icon`, `purpose`, or `author`,
-    /// an `icon-bar` that is not a bare `true`/`false`, or a `library` on a
-    /// `service`.
+    /// an `icon-bar` that is not a bare `true`/`false`, an `instances` that is
+    /// neither `"single"` nor `"multiple"`, or a `library` on a `service`.
     pub fn parse(text: &str) -> Result<Self, AppImageError> {
         let ctx = APP_MANIFEST_SOURCE;
         let mut id = None;
@@ -149,6 +153,7 @@ impl AppManifestSource {
         let mut purpose = None;
         let mut author = None;
         let mut icon_bar = None;
+        let mut instances = None;
         for (index, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -177,6 +182,7 @@ impl AppManifestSource {
                 "purpose" => set(&at, key, &mut purpose, parse_string(&at, value)?)?,
                 "author" => set(&at, key, &mut author, parse_string(&at, value)?)?,
                 "icon-bar" => set(&at, key, &mut icon_bar, parse_bool(&at, value)?)?,
+                "instances" => set(&at, key, &mut instances, parse_instances(&at, value)?)?,
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -202,6 +208,9 @@ impl AppManifestSource {
             // opt-out is a deliberate line in a manifest rather than the
             // default a forgotten key falls into.
             icon_bar: icon_bar.unwrap_or(true),
+            // Absent means one instance per user, which is what a user means
+            // by clicking a program they already have open.
+            multi_instance: instances.unwrap_or(false),
         };
         manifest.validate()?;
         Ok(manifest)
@@ -318,6 +327,23 @@ fn parse_kind(at: &str, value: &str) -> Result<ProgramKind, AppImageError> {
     let name = parse_string(at, value)?;
     ProgramKind::from_key(&name)
         .ok_or_else(|| AppImageError::new(at, format!("unknown kind `{name}`")))
+}
+
+/// Parse the closed `instances` vocabulary, yielding whether the bundle is
+/// multi-instance.
+///
+/// `"single"` (the default when the key is absent) is one instance per user;
+/// `"multiple"` is the exception a bundle whose instances are genuinely
+/// independent declares.
+fn parse_instances(at: &str, value: &str) -> Result<bool, AppImageError> {
+    match parse_string(at, value)?.as_str() {
+        "single" => Ok(false),
+        "multiple" => Ok(true),
+        other => Err(AppImageError::new(
+            at,
+            format!("unknown instances `{other}` (expected `single` or `multiple`)"),
+        )),
+    }
 }
 
 /// Parse the closed program-library folder vocabulary
@@ -545,6 +571,21 @@ pub struct ComposedAppInfo {
     pub publisher_pubkey: [u8; 32],
 }
 
+/// The manifest's two independent flag bits, as the signed header carries
+/// them: each is set only when the source *declares* the exception, so a
+/// manifest that says nothing lands on both defaults (a slot on the icon bar,
+/// one instance per user).
+fn header_flags(manifest: &AppManifestSource) -> u32 {
+    let mut flags = 0;
+    if !manifest.icon_bar {
+        flags |= APPINFO_FLAG_NO_ICON_BAR;
+    }
+    if manifest.multi_instance {
+        flags |= APPINFO_FLAG_MULTI_INSTANCE;
+    }
+    flags
+}
+
 /// Compose and Ed25519-sign a bundle's wire `AppInfo` from its manifest
 /// source.
 ///
@@ -599,11 +640,7 @@ pub fn compose_signed_appinfo(
     let header = AppInfoHeader {
         magic: APPINFO_MAGIC,
         abi_version: ABI_VERSION_CURRENT,
-        flags: if manifest.icon_bar {
-            0
-        } else {
-            APPINFO_FLAG_NO_ICON_BAR
-        },
+        flags: header_flags(manifest),
         capability_count,
         mime_count,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
@@ -733,6 +770,53 @@ mod tests {
         assert_eq!(manifest.library, None, "listing is an explicit opt-in");
         assert_eq!(manifest.library_icon, None);
         assert!(manifest.icon_bar, "the icon bar is the default");
+        assert!(
+            !manifest.multi_instance,
+            "one instance per user is the default"
+        );
+    }
+
+    #[test]
+    fn a_bundle_may_declare_that_it_runs_more_than_one_instance() {
+        let many =
+            AppManifestSource::parse(&format!("{GOOD}instances = \"multiple\"\n")).expect("valid");
+        assert!(many.multi_instance);
+
+        let single =
+            AppManifestSource::parse(&format!("{GOOD}instances = \"single\"\n")).expect("valid");
+        assert!(!single.multi_instance, "the default may also be stated");
+
+        for bad in ["\"one\"", "\"many\"", "single", "true", "\"\""] {
+            assert!(
+                AppManifestSource::parse(&format!("{GOOD}instances = {bad}\n")).is_err(),
+                "`{bad}` is a packaging defect, not a value to coerce"
+            );
+        }
+    }
+
+    #[test]
+    fn the_instances_declaration_reaches_the_signed_header() {
+        let compose = |extra: &str| {
+            let composed = compose_signed_appinfo(
+                &[7u8; 32],
+                PublisherSource::SelfPublished,
+                &AppManifestSource::parse(&format!("{GOOD}{extra}")).expect("valid"),
+                [0u8; 32],
+                &[],
+            )
+            .expect("composes");
+            AppInfoHeader::from_bytes(&composed.bytes).expect("decodes")
+        };
+        assert!(!compose("instances = \"multiple\"\n").runs_one_instance());
+        assert!(compose("instances = \"single\"\n").runs_one_instance());
+        assert!(
+            compose("").runs_one_instance(),
+            "a manifest that says nothing is a singleton"
+        );
+        // The two flags are independent all the way to the header.
+        let both = compose("icon-bar = false\ninstances = \"multiple\"\n");
+        assert!(!both.presents_icon_bar_slot());
+        assert!(!both.runs_one_instance());
     }
 
     #[test]

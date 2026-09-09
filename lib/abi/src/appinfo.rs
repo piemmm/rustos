@@ -101,9 +101,25 @@ pub const LIBRARY_ICON_MAX: usize = 64;
 /// process must not be able to hide itself from the bar.
 pub const APPINFO_FLAG_NO_ICON_BAR: u32 = 1 << 0;
 
+/// [`AppInfoHeader::flags`] bit: a user may run **more than one** instance of
+/// this bundle at once.
+///
+/// Clear — the default — means one instance per user: launching a bundle that
+/// is already running does not start a second process, it asks the running one
+/// to open a window (or the document the launch named). That is what a user
+/// means by clicking a program they already have open, and it is the default
+/// because the exceptions are few: a bundle whose instances are genuinely
+/// independent says so.
+///
+/// The claim is in the *signed* manifest rather than on the window channel for
+/// the same reason [`APPINFO_FLAG_NO_ICON_BAR`] is: a running process must not
+/// be able to change how many of itself may exist. Only the desktop's launch
+/// gate reads it, so a command app never declares it.
+pub const APPINFO_FLAG_MULTI_INSTANCE: u32 = 1 << 1;
+
 /// Every [`AppInfoHeader::flags`] bit `abi-v1` defines. A manifest setting
 /// any other bit is refused rather than read as if the bit were clear.
-pub const APPINFO_FLAG_MASK: u32 = APPINFO_FLAG_NO_ICON_BAR;
+pub const APPINFO_FLAG_MASK: u32 = APPINFO_FLAG_NO_ICON_BAR | APPINFO_FLAG_MULTI_INSTANCE;
 
 /// A bundle identifier as a validated, inline, fixed-width field.
 ///
@@ -1144,6 +1160,16 @@ impl AppInfoHeader {
         self.flags & APPINFO_FLAG_NO_ICON_BAR == 0
     }
 
+    /// Whether one user may run only one instance of this bundle at a time.
+    ///
+    /// `true` unless the manifest sets [`APPINFO_FLAG_MULTI_INSTANCE`], so a
+    /// bundle that says nothing is a singleton: the desktop's launch gate asks
+    /// the running instance to open a window rather than starting a second.
+    #[must_use]
+    pub const fn runs_one_instance(&self) -> bool {
+        self.flags & APPINFO_FLAG_MULTI_INSTANCE == 0
+    }
+
     /// Classify how this manifest binds its build signing key to its
     /// publisher identity.
     ///
@@ -1405,10 +1431,10 @@ mod tests {
         body_len, digest_bundle_contents, mime_type_at, resolve_library, validate_bundle_layout,
         AppInfoHeader, BundleEntry, BundleFileDigest, BundleLayoutError, LibraryCategory,
         LibraryError, LibraryScope, ProgramKind, PublisherBinding, PublisherId, APPINFO_FLAG_MASK,
-        APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-        BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR,
-        HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT,
-        PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
+        APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC,
+        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
+        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
         PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
         SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
@@ -1793,6 +1819,43 @@ mod tests {
              behind a valid signature"
         );
         assert_ne!(bytes[8], plain.to_le_bytes()[8]);
+    }
+
+    #[test]
+    fn the_multi_instance_flag_round_trips_and_defaults_to_one_instance() {
+        let plain = sample();
+        assert!(
+            plain.runs_one_instance(),
+            "a manifest that says nothing is a singleton"
+        );
+
+        let mut many = sample();
+        many.flags = APPINFO_FLAG_MULTI_INSTANCE;
+        assert!(!many.runs_one_instance());
+        let bytes = many.to_le_bytes();
+        assert_eq!(AppInfoHeader::from_bytes(&bytes), Ok(many));
+        assert!(
+            AppInfoHeader::signed_range().contains(&8),
+            "the flag word is inside the signed prefix, so a running process \
+             cannot change how many of itself may exist"
+        );
+        assert_ne!(bytes[8], plain.to_le_bytes()[8]);
+    }
+
+    #[test]
+    fn the_two_flag_bits_are_independent() {
+        let mut both = sample();
+        both.flags = APPINFO_FLAG_NO_ICON_BAR | APPINFO_FLAG_MULTI_INSTANCE;
+        assert_eq!(AppInfoHeader::from_bytes(&both.to_le_bytes()), Ok(both));
+        assert!(!both.presents_icon_bar_slot());
+        assert!(!both.runs_one_instance());
+
+        let mut only_many = sample();
+        only_many.flags = APPINFO_FLAG_MULTI_INSTANCE;
+        assert!(
+            only_many.presents_icon_bar_slot(),
+            "declaring multiple instances says nothing about the icon bar"
+        );
     }
 
     #[test]

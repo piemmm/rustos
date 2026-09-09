@@ -233,11 +233,15 @@ fn start_at(operand: Option<&str>) -> Start {
 /// rule — which is what rejects `.`, `..`, a control character, and an
 /// over-long name.
 ///
+/// The one rule for every path this program is *given* — the command line's
+/// starting location, and an open target the desktop hands a running
+/// instance — so a launch and a relaunch accept exactly the same spellings.
+///
 /// # Errors
 ///
 /// The reason to state on the error stream, phrased for a user and naming the
 /// spelling only when it is short enough to be worth echoing.
-fn location_components(spelling: &str) -> Result<Vec<String>, String> {
+pub fn location_components(spelling: &str) -> Result<Vec<String>, String> {
     if spelling.len() > FS_PATH_MAX {
         return Err(format!(
             "starting location refused (longer than {FS_PATH_MAX} bytes); opening the home directory instead"

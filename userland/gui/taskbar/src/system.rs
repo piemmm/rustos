@@ -166,9 +166,6 @@ pub const ROWS: &[SystemRow] = &[
     },
 ];
 
-/// Why the appearance already in use cannot be chosen again.
-pub const REASON_ALREADY_IN_USE: &str = "Already in use";
-
 /// Why a launch row is offered but cannot act: the desktop found no such
 /// bundle installed, so choosing it could only fail.
 pub const REASON_NOT_INSTALLED: &str = "Not installed";
@@ -249,11 +246,11 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<(usize, MenuItem)>
             let item = match row.action {
                 // The two appearances are a group of alternatives exactly one
                 // of which holds, so the one in force is the group's chosen
-                // member: a bullet, disabled, with its reason.
+                // member: a bullet, disabled. The mark already says why it
+                // cannot be chosen again, so no reason is stated beside it.
                 SystemAction::Appearance(choice) if choice == permits.appearance => item
                     .with_mark(MenuMark::Radio)
-                    .with_state(ControlState::disabled())
-                    .with_reason(REASON_ALREADY_IN_USE),
+                    .with_state(ControlState::disabled()),
                 SystemAction::TaskShell if !permits.task_shell_installed => item
                     .with_state(ControlState::disabled())
                     .with_reason(REASON_NOT_INSTALLED),

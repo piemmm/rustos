@@ -48,6 +48,10 @@ tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # feature, added in the target section below, so the host view is the built-in
 # face and its metrics alone.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared pointer/keyboard vocabulary and the one double-click pairing rule
+# (`DoubleClickTracker`): the pure press-to-gesture decision in `src/gesture.rs`
+# is host-tested, so this is a host dependency rather than a bare-metal one.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # The one shared path grammar: the starting-location argument is diagnosed
 # against the same filename rule the browser spells every component with, so
 # this app carries no second path parser.
@@ -104,10 +108,6 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # so the artwork cache obeys the same band every other cache on the machine
 # does.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
-# The desktop input vocabulary (`Key`/`NamedKey`/`Modifiers`) the shared
-# controls consume; the binary maps the window channel's wire `KeyInput`
-# onto it to drive the rename editor.
-tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # The production font-service transport, added to the shared dependency
 # above: the `Run` binary reaches the sandboxed font service over the runtime
 # `ipc_call` transport, which only exists on the bare-metal targets, so no

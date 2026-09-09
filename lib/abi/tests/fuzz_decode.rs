@@ -86,8 +86,8 @@ use tairix_abi::users_admin::{
 use tairix_abi::window_ipc::{
     decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppBarClick,
     AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole,
-    AppMenuRow, AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, WindowEvent, WindowRequest,
-    WindowSizing, WindowTitle,
+    AppMenuRow, AppMenuShortcut, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
+    WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -1356,10 +1356,23 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
         },
         WindowRequest::OpenMenu {
             window_id: 3,
-            anchor: MenuAnchor::new(-12, 40, 96, 20).expect("a representable anchor"),
+            anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
             menu: fuzz_menu(AppMenu::titled(
                 AppMenuLabel::new("Edit").expect("a valid title"),
             )),
+        },
+        WindowRequest::TakeOpenTarget { window_id: 3 },
+        // Both tooltip shapes: one carrying text, and the empty one that
+        // withdraws a declaration, so a flip lands on each length prefix.
+        WindowRequest::SetTooltip {
+            window_id: 3,
+            region: WindowRegion::new(-12, 40, 96, 20).expect("a representable region"),
+            text: TooltipText::new("Copy the selection").expect("a valid tip"),
+        },
+        WindowRequest::SetTooltip {
+            window_id: 3,
+            region: WindowRegion::new(0, 0, 0, 0).expect("the point case"),
+            text: TooltipText::new("").expect("empty withdraws"),
         },
         WindowRequest::QueryDesktop,
     ];
@@ -1475,6 +1488,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
             item: AppMenuItemId::new(7).expect("a valid id"),
         }
         .to_le_bytes(),
+        WindowEvent::OpenRequested { window_id: 4 }.to_le_bytes(),
     ];
     for mut base in events {
         for byte in 0..base.len() {

@@ -37,6 +37,26 @@ This crate owns the device-level input types the desktop routes:
   holds the pointer, and a surface keeping its own copy would be a second
   answer that could disagree.
 
+## Gestures composed from those events
+
+- **Double-click detection** (`click`, `DoubleClickTracker`,
+  `plans/NEW-FILEMANAGER.md` FM12): the one pure rule that turns a stream of
+  presses into single-click and double-click gestures.
+  `register(now_ns, subject, button)` pairs a press with the previous one only
+  when it lands on the *same* subject with the *same* button within
+  `DOUBLE_CLICK_INTERVAL_NS` (half a second) — the two buttons mean different
+  gestures, so one press of each is two begun rather than one completed; a
+  completed double consumes both presses (a third quick press starts a fresh
+  single), a non-monotonic clock reading fails closed to a single, and `reset`
+  breaks the pair when an intervening chrome press interrupts it.
+- The **subject** is an opaque `u64` the caller compares presses on: a listing
+  row index in the file manager and the trusted picker, a window id on the
+  window manager's title bars. It lives here rather than in any one of those
+  surfaces because the subjects differ and the rule does not (§2.2).
+- It holds no authority and does no I/O — the caller supplies the subject, the
+  button, and the capability-free monotonic clock, and performs the action
+  itself.
+
 ## Where it sits
 
 These types were defined inside `userland/gui/wm`, but the taskbar must route

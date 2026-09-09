@@ -734,6 +734,39 @@ Shared **data** (not code) is what a resource-only bundle legitimately
 provides, reached through capability-gated file access (a manifest-declared or
 user-mediated file capability, §16.5), never through the dynamic loader.
 
+## 10.1 One instance per user is the default
+
+A user launching an application they already have running gets **that**
+instance asked to open, not a second process. The declaration is a manifest
+key, `instances = "single" | "multiple"`, carried in the signed
+`AppInfoHeader` as `APPINFO_FLAG_MULTI_INSTANCE` — in the *signed* manifest
+for the same reason the icon-bar opt-out is, so a running process cannot
+change how many of itself may exist. Absent means `single`.
+
+Only the desktop's launch gate reads it, so a command app declares nothing:
+the shell starts a process per invocation as it always has.
+
+The desktop resolves every launch through one funnel
+(`tairix_desktop_session::resolve_launch`): no live instance spawns without
+the manifest even being read; a live singleton is handed the launch's **open
+target** if it named one, else asked for its **icon-bar default** action, else
+has its most recent window **raised**; and an instance that cannot be reached
+at all is spawned as before, so a launch never silently does nothing.
+
+A relaunch that names a document reaches the instance as a **wake plus a
+pull** — `WindowEvent::OpenRequested` then `WindowRequest::TakeOpenTarget` —
+because an event frame is fixed-width and a path is far wider than one. The
+path confers no access: the application opens it under its own authority,
+exactly as it would an argument.
+
+**Open conflict.** `viewer.app` requests *no* filesystem capability by design
+(`plans/CAPABILITY_USE.md` CU6): it reads only the one file a trusted-picker
+delegation hands it. A *path* is therefore not something it can open, so the
+open-target channel as specified cannot serve it — it drains the queue, states
+the refusal, and offers its picker instead. Handing the viewer a **delegated
+descriptor** rather than a path is the shape that would work; that is not
+built and needs a decision.
+
 ## 11. Security summary
 
 Every mechanism here obeys the charter's fail-closed, least-authority model:

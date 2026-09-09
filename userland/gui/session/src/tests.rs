@@ -53,17 +53,18 @@ use tairix_wm::{
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
 use crate::shell::SettleWork;
 use crate::{
-    deliver_pending_open, desktop_info, drop_is_noteworthy, ensure_switchboard, load_icon_set,
-    load_library, load_programs, maybe_send_seat_report, open_tray, picker_cells,
+    deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
+    load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, DesktopSession, DesktopShell,
-    FrameContent, FramePacer, FrameReportGate, IconRasteriser, InputSource, LaunchTable,
-    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
-    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
-    ShellOutcome, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
-    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
-    MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    FrameContent, FramePacer, FrameReportGate, Handover, IconRasteriser, InputSource, Launch,
+    LaunchHost, LaunchTable, LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow,
+    PresentedOwners, ScreenFade, ScreenLock, SessionFileReader, SessionInputResponse,
+    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
+    BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS,
+    SWITCHBOARD_RUN_PATH,
 };
 use tairix_window::WindowSizing;
 
@@ -3082,6 +3083,58 @@ fn a_minimised_window_comes_back_by_being_chosen_in_the_picker() {
 }
 
 #[test]
+fn a_lone_minimised_window_is_recovered_through_its_own_picker() {
+    // The reported defect: with one window, minimised, the slot's picker
+    // needed two windows to open at all — and an app whose declared click
+    // opens a *new* window could not raise the hidden one either. The whole
+    // route back, driven end to end.
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = shell
+        .open_window(&mut comp, Point::new(300, 200), app_surface(), "Editor")
+        .expect("opens");
+    let task = shell.tasks().task_for(window).expect("tracked");
+    shell.set_apps(
+        &mut comp,
+        vec![tairix_taskbar::AppSlot::new("Editor", IconKind::AppBundle).with_windows(vec![task])],
+    );
+    assert!(shell.minimize_window(&mut comp, window));
+    assert!(shell.session().taskbar().tasks().is_minimised(task));
+
+    // Resting on the slot now opens a picker, which a lone *visible* window
+    // would not have.
+    let at = app_slot_point(&shell, 0);
+    shell.handle(moved(at.x, at.y), &mut comp, 0);
+    shell.tick_taskbar(&mut comp, PICKER_OPEN_DELAY_NS);
+    assert!(
+        shell.session().taskbar().picker().is_open(),
+        "a minimised sole window has something to recover, so it has a picker"
+    );
+
+    // Its one cell says the window is minimised...
+    let entries = shell.session().taskbar().picker().entries();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].is_minimised());
+
+    // ...and choosing it shows, raises and focuses the window.
+    let layout = shell
+        .session()
+        .taskbar()
+        .picker_layout(Scale::ONE)
+        .expect("open");
+    let cell = centre(layout.cells[0]);
+    shell.handle(moved(cell.x, cell.y), &mut comp, 0);
+    assert_eq!(
+        shell.handle(PRIMARY_PRESS, &mut comp, 0),
+        ShellOutcome::Taskbar(TaskbarResponse::WindowChosen { id: task })
+    );
+    assert!(comp.window(window).expect("tracked").is_visible());
+    assert_eq!(shell.router().focused(), Some(window));
+    assert!(!shell.session().taskbar().tasks().is_minimised(task));
+    assert!(!shell.session().taskbar().picker().is_open());
+}
+
+#[test]
 fn clicking_a_window_directly_moves_the_bar_highlight() {
     let mut shell = shell();
     let mut comp = compositor();
@@ -5831,50 +5884,70 @@ fn a_caller_launched_from_another_bundle_is_refused() {
     );
 }
 
-/// The press finds the recorded instance and starts nothing: one monitor
-/// per session is enforced at the spawn, not by refusing a running
-/// instance's calls.
+/// The monitor is deduplicated by the one launch rule every bundle goes
+/// through, not by a rule of its own: a recorded instance is found and
+/// nothing is started.
 #[test]
-fn ensuring_the_monitor_reuses_the_recorded_instance() {
-    let mut launched = monitor_launched();
-    let mut spawns = 0;
-
-    let live = ensure_switchboard(&mut launched, |_| {
-        spawns += 1;
-        Some(MONITOR_PID + 5)
-    });
-
+fn relaunching_the_monitor_reaches_the_recorded_instance() {
+    let launched = monitor_launched();
+    let mut host = CountingReach::default();
     assert_eq!(
-        live,
-        Some(MONITOR_PID),
+        resolve_launch(
+            &mut host,
+            launched.running_from(SWITCHBOARD_RUN_PATH),
+            true,
+            None
+        ),
+        Launch::Reused {
+            pid: MONITOR_PID,
+            by: Handover::Default
+        },
         "the recorded instance is the live one"
     );
-    assert_eq!(spawns, 0, "a recorded instance is never respawned");
     assert_eq!(launched.len(), 1);
 }
 
-/// With no instance recorded, the answer is the pid the spawn just
-/// recorded — never some other entry the table happens to hold.
+/// With no instance recorded there is nothing to reach, so the launch is a
+/// spawn — and no route is even tried.
 #[test]
-fn ensuring_the_monitor_answers_with_the_instance_it_started() {
+fn relaunching_the_monitor_with_none_live_spawns() {
     let mut launched = LaunchTable::new();
     launched.record(3, "Files", "/System/Applications/files.app/Run");
-
-    let live = ensure_switchboard(&mut launched, |launched| {
-        launched.record(90, "Switchboard", SWITCHBOARD_RUN_PATH);
-        Some(90)
-    });
-
-    assert_eq!(live, Some(90), "the instance just started is the live one");
+    let mut host = CountingReach::default();
+    assert_eq!(
+        resolve_launch(
+            &mut host,
+            launched.running_from(SWITCHBOARD_RUN_PATH),
+            true,
+            None
+        ),
+        Launch::Spawn
+    );
+    assert_eq!(host.asked, 0, "there is no instance to ask");
 }
 
-/// A refused spawn answers with nothing: the desktop runs without its
-/// monitor rather than naming an instance that does not exist.
-#[test]
-fn ensuring_the_monitor_answers_nothing_when_the_spawn_is_refused() {
-    let mut launched = LaunchTable::new();
-    assert_eq!(ensure_switchboard(&mut launched, |_| None), None);
-    assert!(launched.is_empty());
+/// A reach that counts what it was asked and refuses everything: the
+/// unreachable instance a launch must fall back to spawning for.
+#[derive(Default)]
+struct CountingReach {
+    asked: usize,
+}
+
+impl LaunchHost for CountingReach {
+    fn queue_open_target(&mut self, _pid: u64, _path: &str) -> bool {
+        self.asked += 1;
+        false
+    }
+
+    fn ask_default(&mut self, _pid: u64) -> bool {
+        self.asked += 1;
+        true
+    }
+
+    fn raise_recent_window(&mut self, _pid: u64) -> bool {
+        self.asked += 1;
+        false
+    }
 }
 
 /// A fixed owner→window map standing in for the session's live window

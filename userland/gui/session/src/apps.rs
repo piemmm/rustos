@@ -52,7 +52,7 @@ use tairix_icon::{
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
 use tairix_taskbar::{
-    AppIdentity, AppSlot, LibraryIconRequest, PickerEntry, TaskId, Taskbar, PICKER_MIN_WINDOWS,
+    slot_has_picker, AppIdentity, AppSlot, LibraryIconRequest, PickerEntry, TaskId, Taskbar,
 };
 
 use crate::assets::SessionFileReader;
@@ -91,6 +91,9 @@ struct BundleFacts {
     identity: AppIdentity,
     /// Whether the bar gives this bundle a slot at all.
     icon_bar: bool,
+    /// Whether one user may run only one instance of this bundle, which is
+    /// what a relaunch of an already-running bundle asks the desktop.
+    one_instance: bool,
 }
 
 /// One application holding a slot, before its identity is resolved: the
@@ -347,6 +350,27 @@ impl AppBarService {
             .map_or_else(AppIdentity::default, |facts| facts.identity.clone())
     }
 
+    /// Whether the bundle *directory* `bundle` runs one instance per user, as
+    /// its signed manifest attests.
+    ///
+    /// Cache-only, and deliberately — exactly as
+    /// [`attested_identity`](Self::attested_identity) is: this answers on a
+    /// launch gesture's own path, where reading a manifest would make a click
+    /// wait on the filesystem. Every bundle whose process holds a slot has
+    /// already been resolved by [`strip`](Self::strip), which is every bundle
+    /// with a window to be reached.
+    ///
+    /// A bundle the session has not resolved is treated as a singleton: it is
+    /// the default a manifest that says nothing means, and the conservative
+    /// answer — it starts no second process on the strength of a fact that
+    /// was never read.
+    #[must_use]
+    pub fn runs_one_instance(&self, bundle: &str) -> bool {
+        self.facts
+            .get(bundle)
+            .is_none_or(|facts| facts.one_instance)
+    }
+
     /// Read and remember what `bundle`'s signed manifest attests, unless it
     /// is already known.
     fn learn<R>(&mut self, bundle: &str, reader: &mut R)
@@ -415,6 +439,9 @@ where
                 ..AppIdentity::default()
             },
             icon_bar: true,
+            // A bundle with no readable manifest states nothing, and the
+            // default a manifest that says nothing means is one instance.
+            one_instance: true,
         };
     };
     BundleFacts {
@@ -425,6 +452,7 @@ where
             author: header.bundle_author().map(ToString::to_string),
         },
         icon_bar: header.presents_icon_bar_slot(),
+        one_instance: header.runs_one_instance(),
     }
 }
 
@@ -498,27 +526,26 @@ pub fn thumbnail(frame: &Surface, width: u32, height: u32) -> Option<Surface> {
 }
 
 /// The cells a hover picker shows for the application at strip index `app`:
-/// one per window, captioned with its title and carrying the window's last
-/// presented frame scaled to the cell.
+/// one per window, captioned with its title, stating whether it is minimised,
+/// and carrying the window's last presented frame scaled to the cell.
 ///
 /// `thumbnail_of` hands back the window's frame already scaled to the cell —
 /// the embedder prepared it while the pointer rested out its dwell, one
 /// window per turn of the serve loop, so no picker is built by scaling a
 /// screenful of frames in one go — and `None` leaves that cell on its
 /// application's glyph until the embedder fills it in. Refused, as an empty
-/// list, for an application with fewer than [`PICKER_MIN_WINDOWS`] windows:
-/// with one window there is nothing to choose, so the bar is asked to open
-/// nothing.
+/// list, for an application the shared [`slot_has_picker`] rule says has no
+/// picker: nothing to choose between and nothing to recover.
 pub fn picker_cells<F>(taskbar: &Taskbar, app: usize, mut thumbnail_of: F) -> Vec<PickerEntry>
 where
     F: FnMut(TaskId) -> Option<Surface>,
 {
+    if !slot_has_picker(taskbar, app) {
+        return Vec::new();
+    }
     let Some(slot) = taskbar.apps().get(app) else {
         return Vec::new();
     };
-    if slot.windows().len() < PICKER_MIN_WINDOWS {
-        return Vec::new();
-    }
     slot.windows()
         .iter()
         .map(|&window| {
@@ -528,7 +555,8 @@ where
                 .iter()
                 .find(|entry| entry.id == window)
                 .map_or("", |entry| entry.title.as_str());
-            let entry = PickerEntry::new(window, title);
+            let entry =
+                PickerEntry::new(window, title).minimised(taskbar.tasks().is_minimised(window));
             match thumbnail_of(window) {
                 Some(scaled) => entry.with_thumbnail(scaled),
                 None => entry,
@@ -694,6 +722,12 @@ pub trait AppBarBridge {
     /// it. Never reads one here: bringing a menu chain up may not wait on the
     /// filesystem.
     fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity>;
+
+    /// Whether the bundle *directory* `bundle` runs one instance per user, as
+    /// its signed manifest attests. Cache-only for the same reason
+    /// [`attested_identity`](Self::attested_identity) is: a launch gesture
+    /// may not wait on the filesystem either.
+    fn runs_one_instance(&self, bundle: &str) -> bool;
 }
 
 impl AppBarBridge for AppBarService {
@@ -707,5 +741,9 @@ impl AppBarBridge for AppBarService {
 
     fn attested_identity(&self, owner: ProcId) -> Option<AppIdentity> {
         Self::attested_identity(self, owner).cloned()
+    }
+
+    fn runs_one_instance(&self, bundle: &str) -> bool {
+        Self::runs_one_instance(self, bundle)
     }
 }

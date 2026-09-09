@@ -395,7 +395,10 @@ colour role from the `Palette`. Its last argument is the caller's
 - each **picker cell** is one shared `tairix-controls` `WindowPreview`: a
   captioned thumbnail of that window's last presented frame, scaled by the
   session to the cell's own thumbnail rectangle, falling back to the
-  application's class glyph when a window has no frame yet;
+  application's class glyph when a window has no frame yet, and leading its
+  caption with the desktop's own **minimise mark** when the window it stands
+  for is minimised (the one definition of that mark, shared with the title
+  bar's minimise command);
 - each notification icon slot draws a **scalable vector glyph** (see
   *Notification icons* below), tinted in the **muted** foreground colour;
 - the **Switchboard capsule** is the shared `tairix-controls` `TraySignal`
@@ -678,17 +681,27 @@ with no slot at all, by cycling the task list from the Switchboard capsule.
 
 ## The hover window picker
 
-`WindowPicker` is the surface that chooses between one application's windows.
-Resting the pointer on a slot whose application owns at least
-`PICKER_MIN_WINDOWS` (two) windows reports `ShowWindowPicker { app }`; the
-session — which owns the windows' pixels — answers with one `PickerEntry` per
-window through `Taskbar::show_window_picker`, and the bar lays out a grid of
-captioned thumbnail cells opening outward from the slot, clamped onto the
-screen.
+`WindowPicker` is the surface that chooses between one application's windows —
+and the way back to a window that is hidden. Resting the pointer on a slot
+that *has* a picker reports `ShowWindowPicker { app }`; the session — which
+owns the windows' pixels — answers with one `PickerEntry` per window through
+`Taskbar::show_window_picker`, and the bar lays out a grid of captioned
+thumbnail cells opening outward from the slot, clamped onto the screen.
 
-**It opens only above one window.** With a single window there is nothing to
-choose, and the slot's own click already reaches it, so sweeping the pointer
-along a bar of ordinary single-window applications pops nothing up.
+**A slot has a picker when it has something to choose between, or something to
+recover.** That is one predicate, `has_picker` — at least
+`PICKER_MIN_WINDOWS` (two) windows, *or* any window minimised — read by every
+consult there is: the dwell that arms a picker, the bar that closes a stale
+one, the cells the session builds, and `WindowPicker::open` itself. A second
+copy of the rule anywhere would be a defect.
+
+With a single *visible* window there is nothing to choose and the slot's own
+click already reaches it, so sweeping the pointer along a bar of ordinary
+single-window applications pops nothing up. With a single *minimised* one
+there is something to recover: the window is hidden, and an application whose
+declared click opens a new window rather than raising one would otherwise
+leave it unreachable. Restoring it removes the only reason the picker existed,
+so the next time the session hands the bar its slots the picker closes.
 
 ### Both edges are timed, and the clock resolves them
 

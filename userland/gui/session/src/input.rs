@@ -329,7 +329,7 @@ impl SessionInputRouter {
         // event: it is seat state, so it always reaches the window manager,
         // which holds the one copy the desktop stamps onto what it routes.
         if matches!(event, InputEvent::ModifiersChanged { .. }) {
-            return wm_response(self.wm.handle(event, compositor));
+            return wm_response(self.wm.handle(event, compositor, now_ns));
         }
         // The keyboard has a focus of its own, and the pointer does not decide
         // it: a pointer resting on the bar must never divert a keystroke from
@@ -342,7 +342,7 @@ impl SessionInputRouter {
             if modal(taskbar) {
                 return taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns));
             }
-            return wm_response(self.wm.handle(event, compositor));
+            return wm_response(self.wm.handle(event, compositor, now_ns));
         }
         // The device moved the pointer: the seat owns that position, and every
         // resolution below is against the new one.
@@ -363,7 +363,7 @@ impl SessionInputRouter {
             PointerOwner::Chrome => {
                 taskbar_response(self.taskbar.handle(event, taskbar, scale, now_ns))
             }
-            PointerOwner::Windows => wm_response(self.wm.handle(event, compositor)),
+            PointerOwner::Windows => wm_response(self.wm.handle(event, compositor, now_ns)),
         };
         // The last button coming up releases the pointer, which is very often
         // not over the surface the gesture started on — a window dragged so

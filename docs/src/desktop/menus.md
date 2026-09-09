@@ -11,7 +11,10 @@ A menu is a **chain of session-owned plates**.
 
 - A **plate** is one column of rows under a **title band**: a centred title and
   nothing else — no window commands, no resize edge. The band is the plate's
-  drag handle.
+  drag handle, and it reads as a *heading* over the rows: it shades its own
+  strip one step off the plate ground and sets its title in the type ladder's
+  bold heading face, so a plate is a titled block rather than a column of rows
+  with an odd centred one on top.
 - A **chain** is a root plate and the descendants open beneath it. A child is
   placed edge-adjacent to its parent at its parent row's top, flipped to the
   parent's other side when the screen edge leaves no room, and slid to stay on
@@ -33,7 +36,8 @@ A plate's title is derived, never a new field on the wire:
 
 A plate is **one** ground: the chain lays it once for the band and the rows
 together, and the rows are painted into it (`Menu::render_rows`) rather than
-laying a second plate of their own — which would rim the plate twice and notch
+laying a second plate of their own — the band shades a strip of that one
+ground rather than laying a plate of its own either — which would rim the plate twice and notch
 its ground where the rows' own corners rounded. A menu drawn on its own still
 lays its plate and its rows in the one call.
 
@@ -60,7 +64,9 @@ The band is `lib/controls`' `TitleBar` seating no commands
 (`TitleBarCommands::Empty`), never a second title-bar control. Two properties
 follow from that emptiness rather than from knobs of their own: with no command
 clusters the drag span is the whole band, and with no leading cluster to
-justify against the title centres.
+justify against the title centres. The heading treatment follows from the same
+emptiness rather than from a field of its own, so a window's bar reading as a
+heading — or a plate's band not — is unrepresentable.
 
 ## Placement
 

@@ -31,7 +31,8 @@
 //! ([`DoubleClickTracker`]) — keyed on the button as well as the item, so a
 //! left press and a right press are never mistaken for one gesture.
 
-use tairix_browse::{BundleIntent, ClickKind, DoubleClickTracker, PointerButton};
+use tairix_browse::BundleIntent;
+use tairix_input::{ClickKind, DoubleClickTracker, PointerButton};
 
 /// The bundle intent a gesture with (or without) shift held means.
 ///
@@ -99,7 +100,8 @@ pub fn primary_press(
         tracker.reset();
         return PrimaryPress::Chrome;
     };
-    match tracker.register(now_ns, index, PointerButton::Primary) {
+    let subject = u64::try_from(index).unwrap_or(u64::MAX);
+    match tracker.register(now_ns, subject, PointerButton::Primary) {
         ClickKind::Double => PrimaryPress::Activate { index },
         ClickKind::Single => PrimaryPress::Select { index },
     }
@@ -108,7 +110,8 @@ pub fn primary_press(
 #[cfg(test)]
 mod tests {
     use super::{bundle_intent, primary_press, PrimaryPress};
-    use tairix_browse::{BundleIntent, DoubleClickTracker};
+    use tairix_browse::BundleIntent;
+    use tairix_input::DoubleClickTracker;
 
     #[test]
     fn a_lone_left_click_selects_and_a_quick_second_activates() {

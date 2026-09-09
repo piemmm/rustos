@@ -80,7 +80,10 @@ use crate::{Compositor, PointerTarget};
 // manager. It therefore lives in `lib/input`; the
 // compositor re-exports it so callers keep referring to
 // `tairix_wm::{InputEvent, PointerButton}` (one definition).
-pub use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
+pub use tairix_input::{
+    ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PointerButton,
+    PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
+};
 
 /// What the [`InputRouter`] did with an [`InputEvent`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -378,6 +381,10 @@ pub struct InputRouter {
     /// the desktop side — and it is what qualifies a *pointer* gesture as a
     /// shift-click.
     modifiers: Modifiers,
+    /// The double-click pairing state for presses on window *title bars*,
+    /// keyed on the window so two windows never pair with each other. The
+    /// rule is the shared one every other surface pairs presses under.
+    title_clicks: DoubleClickTracker,
 }
 
 impl InputRouter {
@@ -535,10 +542,20 @@ impl InputRouter {
     /// Process one input `event` against `compositor`, returning what
     /// changed.
     ///
+    /// `now_ns` is the seat's monotonic clock reading for the event, which the
+    /// double-click rule on a title bar pairs presses within. It is the
+    /// caller's because only the seat knows when the device reported the
+    /// event; the router never reads a clock of its own.
+    ///
     /// Repainting is the compositor's: every furniture control this event
     /// reaches reports its own repainted bounds where the frame is mutated, so
     /// the router carries no damage of its own.
-    pub fn handle(&mut self, event: InputEvent, compositor: &mut Compositor) -> InputResponse {
+    pub fn handle(
+        &mut self,
+        event: InputEvent,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> InputResponse {
         match event {
             InputEvent::PointerMoved { to } => {
                 self.pointer = to;
@@ -557,7 +574,7 @@ impl InputRouter {
             InputEvent::PointerScrolled { dx, dy } => self.wheel(dx, dy, compositor),
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
-            } => self.press_primary(compositor),
+            } => self.press_primary(compositor, now_ns),
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => self.release_primary(compositor),
@@ -713,13 +730,19 @@ impl InputRouter {
     /// changes nothing: that gesture holds the pointer until its own button is
     /// released, so this press must not restack, refocus, or start a second
     /// interaction under the window being dragged.
-    fn press_primary(&mut self, compositor: &mut Compositor) -> InputResponse {
+    fn press_primary(&mut self, compositor: &mut Compositor, now_ns: u64) -> InputResponse {
         if self.grab.is_some() {
             return InputResponse::Ignored;
         }
         // A fresh press supersedes any prior client grab; it is re-armed below
         // only when this press lands on client content.
         self.client_grab = None;
+        // Only a press on a title bar can pair into a double-click, so every
+        // other press breaks a pending pair: a click through the client and
+        // back onto the bar is never one gesture. The pending state is taken
+        // here and restored by that one arm alone.
+        let pending_title_click = self.title_clicks;
+        self.title_clicks.reset();
         // One resolution in stacking order: a window's own pixels and the
         // outward half of its invisible resize border compete as equals, so
         // the front window's edge stays grabbable where it overlaps the one
@@ -747,6 +770,20 @@ impl InputRouter {
         if let Some(part) = compositor.frame_hit(window, self.pointer) {
             match part {
                 FurniturePart::TitleBar => {
+                    self.title_clicks = pending_title_click;
+                    if self
+                        .title_clicks
+                        .register(now_ns, window.0, PointerButton::Primary)
+                        == ClickKind::Double
+                    {
+                        // The second press of a pair asks to toggle the size
+                        // rather than to move: it starts no move-grab, so the
+                        // window cannot drift under the gesture.
+                        return InputResponse::WindowControl {
+                            window,
+                            control: WindowControlKind::SizeToggle,
+                        };
+                    }
                     self.begin_move(compositor);
                     return InputResponse::FurniturePressed { window };
                 }

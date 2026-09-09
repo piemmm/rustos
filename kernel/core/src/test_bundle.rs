@@ -466,6 +466,7 @@ pub(crate) fn composed_bundle_published_by(
         purpose: None,
         author: None,
         icon_bar: true,
+        multi_instance: false,
     };
     let composed = compose_signed_appinfo(
         seed,

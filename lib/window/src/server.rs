@@ -34,7 +34,8 @@
 //!   host, so an exited app never leaks a mapped grant or a ghost
 //!   taskbar entry.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
@@ -43,20 +44,34 @@ use tairix_abi::origin::ProcId;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 pub use tairix_abi::window_ipc::WindowSizing;
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
-    WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_MINTED_ID_REPLY_LEN,
+    encode_create_reply, encode_desktop_reply, encode_minted_id_reply, encode_open_target_reply,
+    AppBar, AppMenu, WindowEvent, WindowRegion, WindowRequest, WindowTitle,
+    WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
-/// so one fixed buffer holds every outcome: the create frame, the desktop
-/// frame, or the status frame that fits inside either.
-pub const WINDOW_REPLY_MAX: usize = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_REPLY_LEN {
-    WINDOW_CREATE_REPLY_LEN
-} else {
-    WINDOW_DESKTOP_REPLY_LEN
+/// so one fixed buffer holds every outcome: the open-target frame (the
+/// widest, since a path is), the create frame, the desktop frame, or the
+/// status frame that fits inside any of them.
+///
+/// A caller holds this buffer **once** for the life of its serve loop rather
+/// than taking one per request: it is sized to the widest reply the channel
+/// has, and a per-request array would cost a present — the hottest operation
+/// and one of the shortest — the whole of the widest one's clearing.
+pub const WINDOW_REPLY_MAX: usize = {
+    let widest = if WINDOW_CREATE_REPLY_LEN > WINDOW_DESKTOP_REPLY_LEN {
+        WINDOW_CREATE_REPLY_LEN
+    } else {
+        WINDOW_DESKTOP_REPLY_LEN
+    };
+    if WINDOW_OPEN_TARGET_REPLY_MAX > widest {
+        WINDOW_OPEN_TARGET_REPLY_MAX
+    } else {
+        widest
+    }
 };
 
 /// The minted-id reply a menu open answers with is the shortest of the three,
@@ -290,10 +305,37 @@ pub trait WindowHost {
         &mut self,
         window_id: u64,
         open_id: u64,
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<(), Errno> {
         let _ = (window_id, open_id, anchor, menu);
+        Err(Errno::NotSupported)
+    }
+
+    /// A validated `SetTooltip`: the attested owner of live window
+    /// `window_id` declared that `region` of its own client pixels is
+    /// explained by `text`, or — with `text` empty — withdrew whatever it
+    /// had declared.
+    ///
+    /// Everything a tooltip *does* is the host's: the dwell before it
+    /// appears, where the plate goes so it stays on screen, and every
+    /// reason it comes down again. The engine only validates the window and
+    /// the bounds and relays the declaration.
+    ///
+    /// The default refuses: a host with no seat to hover on cannot honour a
+    /// tip, and saying so is more honest than accepting one nothing draws.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot hold a declaration for; the refusal is
+    /// relayed to the client, which reports it and carries on.
+    fn tooltip_declared(
+        &mut self,
+        window_id: u64,
+        region: WindowRegion,
+        text: &str,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, region, text);
         Err(Errno::NotSupported)
     }
 
@@ -470,6 +512,14 @@ struct WindowRecord<R> {
     /// is closed when the window it hangs from closes, so the link lives
     /// beside the window it binds.
     parent: Option<u64>,
+    /// Paths queued for this window to open, oldest first.
+    ///
+    /// Filled by the session when a user launches a bundle that is already
+    /// running and names a document, drained by the application pulling with
+    /// `TakeOpenTarget`. Bounded by [`WINDOW_MAX_OPEN_TARGETS`], and it dies
+    /// with the window: a target queued for a window that closes is reachable
+    /// by nothing and is dropped with the record.
+    open_targets: VecDeque<String>,
 }
 
 impl<R> WindowRecord<R> {
@@ -660,6 +710,10 @@ impl<M: ShmMapper> WindowServer<M> {
                 anchor,
                 ref menu,
             } => minted_id_reply(reply, self.open_menu(host, caller, window_id, anchor, menu)),
+            WindowRequest::TakeOpenTarget { window_id } => {
+                let taken = self.take_open_target(caller, window_id);
+                open_target_reply(reply, taken.as_ref().map(|path| path.as_deref()))
+            }
             ref other => self.dispatch_status_op(host, caller, other, reply),
         }
     }
@@ -689,6 +743,14 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::PickFile { window_id } => {
                 status(reply, self.pick_file(host, caller, window_id))
             }
+            WindowRequest::SetTooltip {
+                window_id,
+                region,
+                text,
+            } => status(
+                reply,
+                self.set_tooltip(host, caller, window_id, region, text.as_str()),
+            ),
             WindowRequest::Resize {
                 window_id,
                 shm_handle,
@@ -731,6 +793,10 @@ impl<M: ShmMapper> WindowServer<M> {
             }
             // Likewise a menu open, which mints an open id.
             WindowRequest::OpenMenu { .. } => minted_id_reply(reply, Err(Errno::NotSupported)),
+            // ...and a target pull, which answers with its own frame.
+            WindowRequest::TakeOpenTarget { .. } => {
+                open_target_reply(reply, Err(&Errno::NotSupported))
+            }
         }
     }
 
@@ -795,6 +861,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: None,
+                open_targets: VecDeque::new(),
             },
         );
         Ok(window_id)
@@ -859,6 +926,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 pick_pending: false,
                 menu_open: None,
                 parent: Some(spec.parent_window_id),
+                open_targets: VecDeque::new(),
             },
         );
         Ok(window_id)
@@ -975,6 +1043,97 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
+    /// Relay `caller`'s tooltip declaration for its own window `window_id`.
+    ///
+    /// The window and the bounds are the engine's to check; the declaration
+    /// itself is the host's to hold and act on. A window the caller does not
+    /// own answers exactly like one that never existed, so a client learns
+    /// nothing about another application's windows.
+    fn set_tooltip(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        region: WindowRegion,
+        text: &str,
+    ) -> Result<(), Errno> {
+        if !self.owns(caller, window_id) {
+            return Err(Errno::NotFound);
+        }
+        host.tooltip_declared(window_id, region, text)
+    }
+
+    /// Pop the oldest path queued for `caller`'s own window `window_id`, or
+    /// `None` once the queue is drained.
+    ///
+    /// Popping is what makes a target one-shot: there is no id to mint or
+    /// validate, and the ordering is the protocol. A window the caller does
+    /// not own answers like one that never existed.
+    fn take_open_target(
+        &mut self,
+        caller: ProcId,
+        window_id: u64,
+    ) -> Result<Option<String>, Errno> {
+        let record = self
+            .windows
+            .get_mut(&window_id)
+            .filter(|record| record.owner == caller)
+            .ok_or(Errno::NotFound)?;
+        Ok(record.open_targets.pop_front())
+    }
+
+    /// Hand `path` to window `window_id` to open: queue it, then wake its
+    /// owner with a [`WindowEvent::OpenRequested`].
+    ///
+    /// The session's side of the channel, and **one** operation because the
+    /// two halves are one invariant: a queued target the owner was never
+    /// woken for would sit unreachable, so a refused wake takes the target
+    /// back off the queue rather than leaving it stranded. The caller may
+    /// therefore read the answer as "the instance has it", and fall back to
+    /// starting a fresh process when it does not.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such live window.
+    /// * [`Errno::LengthOutOfRange`] — an empty path, or one longer than the
+    ///   filesystem admits.
+    /// * [`Errno::NoSpace`] — the window already holds
+    ///   [`WINDOW_MAX_OPEN_TARGETS`] targets. The newest is refused with the
+    ///   refusal stated rather than an older one dropped silently, or the
+    ///   queue grown without bound.
+    /// * Whatever the wake's delivery refused with.
+    pub fn hand_over_open_target(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        path: &str,
+    ) -> Result<(), Errno> {
+        if path.is_empty() || path.len() > tairix_abi::FS_PATH_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        if record.open_targets.len() >= WINDOW_MAX_OPEN_TARGETS {
+            return Err(Errno::NoSpace);
+        }
+        record.open_targets.push_back(String::from(path));
+        let woken = self.deliver_event(sink, &WindowEvent::OpenRequested { window_id });
+        if let Err(err) = woken {
+            // Nothing was announced, so nothing may be left queued.
+            if let Some(record) = self.windows.get_mut(&window_id) {
+                record.open_targets.pop_back();
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Whether `caller` is the attested owner of live window `window_id`.
+    fn owns(&self, caller: ProcId, window_id: u64) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|record| record.owner == caller)
+    }
+
     /// Accept a menu open for `caller`'s window `window_id`, returning the
     /// minted open id its one outcome will name.
     ///
@@ -988,7 +1147,7 @@ impl<M: ShmMapper> WindowServer<M> {
         host: &mut dyn WindowHost,
         caller: ProcId,
         window_id: u64,
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<u64, Errno> {
         let open_id = self.next_menu_open;
@@ -1271,6 +1430,26 @@ fn status(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<(), Errno>) -> usiz
 }
 
 /// Write a minted-id reply into `reply`, returning its length.
+/// Write a `TakeOpenTarget` outcome into `reply`, answering its length.
+///
+/// The frame is only as long as the answer: the drained queue costs its
+/// header, not the widest path.
+fn open_target_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<Option<&str>, &Errno>,
+) -> usize {
+    let mut frame = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+    let len = encode_open_target_reply(
+        &mut frame,
+        match result {
+            Ok(path) => Ok(path.map(str::as_bytes)),
+            Err(&err) => Err(err),
+        },
+    );
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
 fn minted_id_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
     reply[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
     WINDOW_MINTED_ID_REPLY_LEN

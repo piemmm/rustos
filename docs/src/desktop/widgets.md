@@ -78,6 +78,24 @@ unreachable and the app reports the refusal on the standard error stream and
 exits. It needs only `CAP_CONSOLE_WRITE` (fail-loud diagnostics) and `CAP_SHM`
 (the window frame region).
 
+## Tooltips are the seat's, not a control's
+
+`Tooltip` draws the plate, and that is *all* it does: a control never shows
+its own tip. An application declares one — `WindowRequest::SetTooltip`, a
+window-local `WindowRegion` and one short `TooltipText` — and the desktop
+session owns everything else, because everything else belongs to the seat: the
+dwell before it appears, where the plate goes so it stays on screen, and every
+reason it comes down again.
+
+That split is not a convenience. An application is never told where its window
+sits on screen and never learns a pointer position inside the seat, so it
+could not place a plate truthfully or time a dwell even if it owned them. A
+window holds at most one declaration, so a second replaces the first, and
+empty text withdraws it — one operation, with no second "hide" to fall out of
+step with. The plate is drawn in an **input-transparent** compositor window,
+so the tip that appears under the pointer cannot take the hover it exists to
+explain. See `plans/TOOLTIPS.md` and [the window manager](./wm.md).
+
 ## Container pointer routing
 
 A container (`Toolbar`, `ActionRail`, `Panel`, `Dialog`, and a `Card`'s

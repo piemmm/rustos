@@ -13,6 +13,7 @@
 //! damage rectangle it just changed — never pixel bytes. The session
 //! reads the pixels through its own mapping of the granted region.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
@@ -22,9 +23,10 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, AppBar, AppMenu, MenuAnchor,
-    PointerAction, WindowEvent, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
+    decode_create_reply, decode_desktop_reply, decode_minted_id_reply, decode_open_target_reply,
+    AppBar, AppMenu, PointerAction, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_OPEN_TARGET_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -311,6 +313,11 @@ pub struct WindowClient<T: WindowTransport> {
     /// — the hottest operation and one of the shortest — the whole of the
     /// widest one's clearing.
     frame: [u8; WindowRequest::MAX_WIRE_LEN],
+    /// The scratch an open-target pull is answered into, held once for the
+    /// same reason [`Self::frame`] is: the reply carries a path, so a per-call
+    /// array would put four kibibytes of clearing on a path that only runs
+    /// when the user opens something.
+    target_reply: [u8; WINDOW_OPEN_TARGET_REPLY_MAX],
     /// The serving session's attested identity, as the last reply that
     /// carried it stated. `None` until one has.
     session: Option<ProcId>,
@@ -323,6 +330,7 @@ impl<T: WindowTransport> WindowClient<T> {
             transport,
             presented: Vec::new(),
             frame: [0; WindowRequest::MAX_WIRE_LEN],
+            target_reply: [0; WINDOW_OPEN_TARGET_REPLY_MAX],
             session: None,
         }
     }
@@ -672,7 +680,7 @@ impl<T: WindowTransport> WindowClient<T> {
     pub fn open_menu(
         &mut self,
         window_id: u64,
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<u64, Errno> {
         let request = WindowRequest::OpenMenu {
@@ -683,6 +691,67 @@ impl<T: WindowTransport> WindowClient<T> {
         let mut reply = [0u8; WINDOW_MINTED_ID_REPLY_LEN];
         let len = self.call(&request, &mut reply)?;
         decode_minted_id_reply(&reply[..len])
+    }
+
+    /// Take the next path queued for `window_id` to open, or `None` once the
+    /// queue is drained.
+    ///
+    /// The answer to a [`WindowEvent::OpenRequested`] wake, which says only
+    /// that *at least one* target is waiting: drain in a loop until this
+    /// answers `None`, since one event may cover several targets and another
+    /// may arrive while this one is still being drained.
+    ///
+    /// The path is the file or folder the user asked this application to
+    /// open. It confers no access — the application opens it under its own
+    /// authority, exactly as it would a path in its own argument list.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window, or not this caller's.
+    /// * [`Errno::NotSupported`] — the session serves no open targets.
+    /// * Any transport refusal, or a malformed reply (fail closed, never a
+    ///   guessed path).
+    pub fn take_open_target(&mut self, window_id: u64) -> Result<Option<String>, Errno> {
+        let request = WindowRequest::TakeOpenTarget { window_id };
+        let len = request.encode(&mut self.frame)?;
+        let n = self
+            .transport
+            .call(&self.frame[..len], &mut self.target_reply)?;
+        let path = decode_open_target_reply(&self.target_reply[..n])?;
+        match path {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(String::from(
+                core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?,
+            ))),
+        }
+    }
+
+    /// Declare — or withdraw — the tooltip for `region` of `window_id`.
+    ///
+    /// The application says only what is being explained and where; the dwell
+    /// before the tip appears, where its plate goes, what it is drawn with,
+    /// and every reason it comes down are the desktop's. A window holds at
+    /// most one declaration, so this replaces any previous one, and empty
+    /// `text` withdraws it — taking a tip that is on screen down with it.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window, or not this caller's.
+    /// * [`Errno::NotSupported`] — the session shows no tooltips. The tip is
+    ///   incidental to the application's purpose, so the caller reports it
+    ///   and carries on rather than ending.
+    /// * Any transport or encode refusal.
+    pub fn set_tooltip(
+        &mut self,
+        window_id: u64,
+        region: WindowRegion,
+        text: TooltipText,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SetTooltip {
+            window_id,
+            region,
+            text,
+        })
     }
 
     /// Declare this **application's** presence on the desktop's icon bar:

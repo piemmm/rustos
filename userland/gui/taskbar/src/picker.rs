@@ -41,6 +41,7 @@ use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::edge::Edge;
+use crate::taskbar::Taskbar;
 use crate::tasks::TaskId;
 
 /// Logical width of one picker cell at the reference density.
@@ -77,18 +78,37 @@ pub const PICKER_CLOSE_GRACE_NS: u64 = 200_000_000;
 pub struct PickerEntry {
     window: TaskId,
     title: String,
+    minimised: bool,
     thumbnail: Option<Surface>,
 }
 
 impl PickerEntry {
-    /// An entry for `window`, captioned with its title, with no thumbnail.
+    /// An entry for `window`, captioned with its title, with no thumbnail and
+    /// not minimised.
     #[must_use]
     pub fn new(window: TaskId, title: impl Into<String>) -> Self {
         Self {
             window,
             title: title.into(),
+            minimised: false,
             thumbnail: None,
         }
+    }
+
+    /// This entry for a window that is minimised, which its cell states.
+    ///
+    /// A minimised window is why a slot with one window still has a picker:
+    /// the cell is the only way back to it.
+    #[must_use]
+    pub fn minimised(mut self, minimised: bool) -> Self {
+        self.minimised = minimised;
+        self
+    }
+
+    /// Whether this entry's window is minimised.
+    #[must_use]
+    pub const fn is_minimised(&self) -> bool {
+        self.minimised
     }
 
     /// This entry showing `thumbnail` — the window's last presented frame,
@@ -172,11 +192,54 @@ pub fn thumbnail_size(scale: Scale, theme: &Theme) -> (u32, u32) {
 }
 
 /// The smallest number of windows an application must own for its slot to
-/// open a picker on hover.
+/// open a picker on hover *to choose between them*.
 ///
-/// Two: with one window there is nothing to choose, and the slot's own click
-/// already reaches it.
+/// Two: with one visible window there is nothing to choose, and the slot's own
+/// click already reaches it. A slot below this count can still have a picker
+/// when it has something to *recover* — see [`has_picker`].
 pub const PICKER_MIN_WINDOWS: usize = 2;
+
+/// Whether a slot owning `windows` windows, `any_minimised` of which are
+/// minimised, has a hover picker at all.
+///
+/// The one predicate every consult reads, so the dwell that arms a picker, the
+/// bar that closes a stale one, the cells the session builds, and the picker's
+/// own open cannot disagree about whether a slot has one.
+///
+/// A slot has a picker when it has something to **choose** between
+/// ([`PICKER_MIN_WINDOWS`] or more windows) *or* something to **recover** (a
+/// minimised window). The second is not a nicety: a minimised sole window is
+/// hidden, and a slot whose declared click opens a *new* window rather than
+/// raising one would otherwise leave it unreachable.
+#[must_use]
+pub const fn has_picker(windows: usize, any_minimised: bool) -> bool {
+    windows >= PICKER_MIN_WINDOWS || (windows > 0 && any_minimised)
+}
+
+/// [`has_picker`] read off the entries a picker would offer.
+#[must_use]
+pub fn entries_have_picker(entries: &[PickerEntry]) -> bool {
+    has_picker(entries.len(), entries.iter().any(PickerEntry::is_minimised))
+}
+
+/// [`has_picker`] read off the application slot at strip index `app`.
+///
+/// The slot names its windows and the task list says which of them are
+/// minimised, so this is the whole answer for every consult that has a
+/// [`Taskbar`] rather than a built list of entries. An index no slot exists
+/// at has no picker (fail closed).
+#[must_use]
+pub fn slot_has_picker(taskbar: &Taskbar, app: usize) -> bool {
+    taskbar.apps().get(app).is_some_and(|slot| {
+        let windows = slot.windows();
+        has_picker(
+            windows.len(),
+            windows
+                .iter()
+                .any(|&window| taskbar.tasks().is_minimised(window)),
+        )
+    })
+}
 
 impl Default for WindowPicker {
     fn default() -> Self {
@@ -234,9 +297,10 @@ impl WindowPicker {
     /// Open the picker over the application at strip index `app`, anchored
     /// at its slot, offering `entries`.
     ///
-    /// Refused — and the picker left exactly as it was — for fewer than
-    /// [`PICKER_MIN_WINDOWS`] entries: a picker with nothing to choose is
-    /// not a picker. Returns whether it is now open over `app`.
+    /// Refused — and the picker left exactly as it was — for entries the
+    /// shared [`has_picker`] rule says are not a picker: nothing to choose
+    /// between and nothing to recover. Returns whether it is now open over
+    /// `app`.
     pub(crate) fn open(
         &mut self,
         app: usize,
@@ -244,7 +308,7 @@ impl WindowPicker {
         icon: IconKind,
         entries: Vec<PickerEntry>,
     ) -> bool {
-        if entries.len() < PICKER_MIN_WINDOWS {
+        if !entries_have_picker(&entries) {
             return false;
         }
         let same = self.app == Some(app) && self.entries.len() == entries.len();
@@ -542,6 +606,7 @@ impl WindowPicker {
         };
         Some(
             WindowPreview::new(entry.title.clone(), self.icon)
+                .minimised(entry.minimised)
                 .with_state(ControlState::idle().with_pointer(pointer)),
         )
     }

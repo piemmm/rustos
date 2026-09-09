@@ -659,6 +659,27 @@ mod program {
         // declaration never carried names no command (fail closed).
         match event {
             WindowEvent::AppBarDefault => return ViewerOutcome::OPEN,
+            WindowEvent::OpenRequested { window_id } => {
+                // The desktop queued a *path* for this instance. The viewer
+                // holds no filesystem capability at all — it reads exactly
+                // the one file a trusted-picker delegation hands it — so a
+                // path is not something it can open. Drain the queue so
+                // nothing is left stranded, state the refusal, and offer the
+                // one thing the viewer can do instead.
+                let mut refused = 0usize;
+                while let Ok(Some(_)) = surface.client.take_open_target(window_id) {
+                    refused = refused.saturating_add(1);
+                }
+                if refused > 0 {
+                    let _ = writeln!(
+                        Stderr,
+                        "viewer: cannot open a path directly ({refused} refused); \
+                         it reads only a file the picker delegates"
+                    );
+                    return ViewerOutcome::OPEN;
+                }
+                return ViewerOutcome::IDLE;
+            }
             WindowEvent::AppBarMenu { item } => {
                 return if tairix_window::is_quit(item) {
                     ViewerOutcome::QUIT
@@ -773,6 +794,7 @@ mod program {
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
+            | WindowEvent::OpenRequested { .. }
             | WindowEvent::RedrawRequested { .. } => ViewerOutcome::IDLE,
             // Nobody can see the window, so the session gave its copy of the
             // pixels back and unmapped the region. Let go of this side too —

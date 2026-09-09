@@ -282,19 +282,20 @@ impl Taskbar {
     /// windows, and declarations) whenever a process starts, exits, opens or
     /// closes a window, or re-declares its icon-bar presence.
     ///
-    /// A picker open over an application the new set no longer has more than
-    /// one window for is closed with it, so the bar can never show a picker
-    /// for windows that are gone. The strip draws on the bar itself, so this
+    /// A picker open over an application the new set no longer has one for is
+    /// closed with it, so the bar can never show a picker for windows that are
+    /// gone — or for a window that has stopped being the minimised one the
+    /// picker existed to recover. The strip draws on the bar itself, so this
     /// latches [`bar`](TaskbarRepaint::bar) (and the picker when one closes).
     pub fn set_apps(&mut self, apps: Vec<AppSlot>) {
-        let stale = self.picker.app().is_none_or(|index| {
-            apps.get(index)
-                .is_none_or(|app| app.windows().len() < crate::picker::PICKER_MIN_WINDOWS)
-        });
-        if stale {
+        self.apps.set_apps(apps);
+        if self
+            .picker
+            .app()
+            .is_none_or(|index| !crate::picker::slot_has_picker(self, index))
+        {
             self.close_picker();
         }
-        self.apps.set_apps(apps);
         self.repaint |= TaskbarRepaint::BAR;
     }
 

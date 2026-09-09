@@ -44,6 +44,68 @@ own seat, names no other principal's data, and grants no authority. See
 [Variable DPI and UI scale](./dpi.md) and
 [Desktop session glue](./session.md).
 
+## One instance per user, unless the manifest says otherwise
+
+Launching an application that the user already has running does **not** start
+a second process: the desktop asks the running one to open. That is what a
+user means by clicking a program they already have open, so it is the
+*default* — a bundle whose instances are genuinely independent declares
+`instances = "multiple"` in its manifest, which the signed
+`AppInfoHeader` carries as `APPINFO_FLAG_MULTI_INSTANCE`. The claim is in the
+signed manifest rather than on the window channel for the same reason the
+icon-bar opt-out is: a running process must not be able to change how many of
+itself may exist. Only the desktop's launch gate reads it, so a command app
+declares nothing.
+
+The desktop resolves every launch through **one funnel**
+(`tairix_desktop_session::resolve_launch`), which in order:
+
+1. looks the bundle's entry path up in the launch table. **No live instance
+   means spawn** — and the manifest is not even read, because there is
+   nothing to reach, so the answer cannot depend on what it says;
+2. reads whether the bundle runs one instance, from the same
+   one-read-per-bundle cache the icon-bar identity comes from. It is
+   cache-only, deliberately: a launch is a click, and a click may not wait on
+   the filesystem (`AGENTS.md` §28). A bundle the session has not resolved is
+   treated as a singleton, the conservative answer;
+3. hands the request to the live instance, trying each route in turn — the
+   **open target** the launch named, then the instance's **icon-bar default**
+   action (a new window), then **raising** its most recent window;
+4. **fails closed to spawning.** An instance that cannot be reached at all —
+   no window, no icon-bar presence, a mailbox that has gone — is spawned as
+   before, so a launch never silently does nothing.
+
+## Handing a document to a running instance
+
+A relaunch that names a folder or a file reaches the running instance through
+a **wake plus a pull**, because a `WindowEvent` is a fixed 40-byte frame and
+every event pays the widest event's width — a path is far wider than one.
+
+- `WindowEvent::OpenRequested { window_id }` is the wake. It says only *you
+  have at least one target waiting*, and it is window-scoped so it reaches any
+  application that owns a window, whether or not it declared an icon-bar
+  presence. It is delivered to the instance's most recent window.
+- `WindowRequest::TakeOpenTarget { window_id }` is the pull. The reply is the
+  oldest queued path, or the empty answer once the queue is drained. Popping
+  is what makes a target one-shot, so no id is minted or validated and the
+  ordering is the protocol. An application drains in a loop: one event may
+  cover several targets, and another may arrive mid-drain.
+- The queue lives in the window engine beside the pending pick and the
+  unanswered menu open, bounded per window by `WINDOW_MAX_OPEN_TARGETS` — a
+  containment bound, not a capacity (`AGENTS.md` §24.4). Reaching it refuses
+  the newest target with the refusal stated rather than dropping an older one
+  silently. It dies with the window.
+- Queueing and waking are **one** operation (`hand_over_open_target`),
+  because they are one invariant: a queued target the owner was never woken
+  for would sit unreachable, so a refused wake takes the target back off the
+  queue. The caller may therefore read the answer as "the instance has it".
+- The path confers **no access**. The application opens it under its own
+  authority, exactly as it would a path in its own argument list — which is
+  why `files.app` puts every open target through the very same
+  `location_components` rule its command line's starting location goes
+  through, and why `viewer.app`, which requests no filesystem capability at
+  all, cannot act on one (see *File viewer* below).
+
 ## An overlay is a popup surface, never pixels in the app's own window
 
 A menu, a settings sheet, a tooltip, or any other transient overlay drawn

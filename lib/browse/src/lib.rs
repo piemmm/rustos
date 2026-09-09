@@ -34,10 +34,6 @@
 //!   [`resolve_target`] rule a relative one is reached through.
 //! * [`activate`](mod@activate) — the [`Activation`] dispatch-by-kind decision
 //!   (descend / launch a bundle / open a file) the manager and picker share.
-//! * [`click`](mod@click) — the [`DoubleClickTracker`] pure double-click
-//!   detector: the one rule that turns primary presses into single/double
-//!   clicks so a pointer double-click activates an item exactly as `Enter`
-//!   does (`plans/NEW-FILEMANAGER.md` `FM12`).
 //! * [`chrome`](mod@chrome) — the file-manager frame model: the [`ToolbarModel`]
 //!   command enable/pressed state, the [`ContextMenuModel`] right-click command
 //!   enable state, and the manager-only [`ManagerTool`]
@@ -121,7 +117,6 @@ extern crate alloc;
 pub mod activate;
 pub mod browser;
 pub mod chrome;
-pub mod click;
 pub mod clipboard;
 pub mod delete;
 pub mod desk;
@@ -153,7 +148,6 @@ pub use chrome::{
     ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand, ToolbarModel, CONTEXT_COMMANDS,
     MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
-pub use click::{ClickKind, DoubleClickTracker, DOUBLE_CLICK_INTERVAL_NS};
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
@@ -188,10 +182,10 @@ pub use select::Selection;
 pub use sort::{sort_entries, SortDirection, SortKey, SortMode};
 pub use source::{DirectorySource, Listing, Probe};
 pub use tairix_abi::window_ipc::WindowSizing;
-/// The pointer button [`DoubleClickTracker::register`] pairs on. Re-exported
-/// because it is part of this engine's own surface: a consumer that reports a
-/// press has to name the button, and should not need a dependency of its own to
-/// do it.
+/// The pointer button a consumer names when it reports a press. Re-exported
+/// because it is part of this engine's own surface and should not need a
+/// dependency of its own. The double-click rule those presses pair under is
+/// `tairix_input`'s, not this engine's (`plans/NEW-FILEMANAGER.md` `FM12`).
 pub use tairix_input::PointerButton;
 /// The one shared path-spelling rules a consumer of this engine needs beside
 /// it: the final component of a path, and the `parent`/`name` join. Re-exported

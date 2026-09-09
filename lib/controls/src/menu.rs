@@ -28,7 +28,7 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{glyph_mask, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
@@ -390,6 +390,24 @@ impl MenuItem {
         self.state.is_actionable()
     }
 
+    /// The emphasis colour this row's highlight must be drawn in rather than a
+    /// shade of the plate ground, if any.
+    ///
+    /// Only a warning or a danger takes one: those have to read as such
+    /// whatever the wallpaper behind the plate, so they stay solid. Every other
+    /// role highlights by shade, which is also what tells the foreground
+    /// whether it sits on an emphasis fill.
+    fn emphasis_fill(&self, palette: &Palette) -> Option<Rgba> {
+        if !self.is_actionable() {
+            return None;
+        }
+        match self.role {
+            ControlRole::Destructive => Some(palette.danger),
+            ControlRole::Recovery => Some(palette.recovery),
+            _ => None,
+        }
+    }
+
     /// Paint this row into `surface` at `rect` for the active theme.
     ///
     /// `current` marks the highlighted row; `focused` additionally marks that
@@ -414,24 +432,21 @@ impl MenuItem {
         let border = plate_border(theme, scale);
         let actionable = self.is_actionable();
 
-        // The row highlight for the current item. An actionable row lifts to
-        // its emphasis colour (danger for a destructive item, else accent); a
-        // non-actionable current row (denied, disabled, pending) shows only a
-        // quiet pressed tint so it never masquerades as an available action.
-        //
-        // The emphasis colour is the statement itself, so it stays solid even
-        // on floating chrome, where a wallpaper reading through it could leave
-        // the highlighted command the same weight as the rest. The quiet tint
-        // is only a background and takes the surface's own alpha.
+        // The row highlight for the current item. An ordinary row changes the
+        // *shade* of the ground it already sits on — the same wash a list row
+        // takes under the pointer, so the desktop has one highlight vocabulary
+        // rather than two. A warning or a danger keeps its solid emphasis
+        // colour, which has to read as one whatever the wallpaper behind the
+        // plate. A non-actionable current row (denied, disabled, pending)
+        // shades to the quieter pressed tint so it never masquerades as an
+        // available action.
         if current {
-            let fill = if actionable {
-                match self.role {
-                    ControlRole::Destructive => palette.danger,
-                    ControlRole::Recovery => palette.recovery,
-                    _ => palette.accent,
+            let fill = match self.emphasis_fill(palette) {
+                Some(emphasis) => emphasis,
+                None if actionable => {
+                    ground_fill(theme, palette.surface_hover, ChromeLayer::Ground)
                 }
-            } else {
-                ground_fill(theme, palette.surface_pressed, ChromeLayer::Ground)
+                None => ground_fill(theme, palette.surface_pressed, ChromeLayer::Ground),
             };
             surface.fill_rect(x, y, w, h, Color::from(fill));
         }
@@ -477,13 +492,14 @@ impl MenuItem {
         let (x, y, w, h) = rect;
         let palette = theme.palette();
         let disposition = self.state.disposition();
-        let actionable = self.is_actionable();
         let border = plate_border(theme, scale);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
 
-        // Foreground colours: an actionable current row reads on its emphasis
-        // fill; a disabled row mutes; everything else is the normal foreground.
-        let (label_color, muted_color) = if current && actionable {
+        // Foreground colours: only a row highlighted with an emphasis fill
+        // reads on it. A shade-highlighted row keeps the plate's own
+        // foreground, since the ground beneath it has only changed shade. A
+        // disabled row mutes; everything else is the normal foreground.
+        let (label_color, muted_color) = if current && self.emphasis_fill(palette).is_some() {
             (palette.on_accent, palette.on_accent)
         } else if disposition == ControlDisposition::DisabledByState {
             (palette.on_surface_muted, palette.on_surface_muted)

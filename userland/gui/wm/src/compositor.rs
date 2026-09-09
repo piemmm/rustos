@@ -1335,7 +1335,7 @@ impl Compositor {
         self.windows
             .iter()
             .rev()
-            .find(|w| w.is_visible() && w.bounds().contains(point))
+            .find(|w| w.catches_pointer() && w.bounds().contains(point))
             .map(Window::id)
     }
 
@@ -1345,6 +1345,26 @@ impl Compositor {
     /// `id` returns `false`).
     pub fn move_window(&mut self, id: WindowId, origin: Point) -> bool {
         self.mutate(id, |w| w.set_origin(origin))
+    }
+
+    /// Make the pointer pass straight through a window, or stop it doing so.
+    ///
+    /// An input-transparent window is composited exactly as before but is
+    /// never resolved to by [`pointer_target`](Self::pointer_target) or
+    /// [`window_at`](Self::window_at), so it neither takes the pointer nor
+    /// shadows the window beneath it. That is what a non-interactive overlay
+    /// is: a tooltip plate appears *under* the pointer by construction, and
+    /// one that became the target would fight the hover it explains.
+    ///
+    /// Its pixels do not change, so no damage is marked. Returns `false` for
+    /// an unknown `id`; setting the state it already has returns `true`.
+    pub fn set_input_transparent(&mut self, id: WindowId, transparent: bool) -> bool {
+        // The closure's answer is "did the pixels change", and they did not:
+        // a hit-testing property is invisible, so nothing is marked dirty.
+        self.mutate(id, |window| {
+            window.set_input_transparent(transparent);
+            false
+        })
     }
 
     /// Set a window's opacity (`255` opaque); its bounds are marked dirty.
@@ -2095,7 +2115,7 @@ impl Compositor {
     #[must_use]
     pub fn pointer_target(&self, point: Point) -> Option<PointerTarget> {
         self.windows.iter().rev().find_map(|window| {
-            if !window.is_visible() {
+            if !window.catches_pointer() {
                 return None;
             }
             if window.bounds().contains(point) {

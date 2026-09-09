@@ -18,8 +18,8 @@ use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction, WindowEvent,
-    WindowRequest, WINDOW_TITLE_MAX,
+    AppMenuRowView, MenuOutcome, MenuRefusal, PointerAction, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::Errno;
 use tairix_display::{FrameRegion, ShmMapper};
@@ -142,7 +142,9 @@ struct RecordingHost {
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<u64>,
-    menu_opens: Vec<(u64, u64, MenuAnchor, AppMenu)>,
+    menu_opens: Vec<(u64, u64, WindowRegion, AppMenu)>,
+    tooltips: Vec<(u64, WindowRegion, String)>,
+    refuse_tooltip: Option<Errno>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     app_bars: Vec<(ProcId, AppBar)>,
@@ -169,6 +171,8 @@ impl Default for RecordingHost {
             closed: Vec::new(),
             picks: Vec::new(),
             menu_opens: Vec::new(),
+            tooltips: Vec::new(),
+            refuse_tooltip: None,
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             app_bars: Vec::new(),
@@ -270,13 +274,26 @@ impl WindowHost for RecordingHost {
         &mut self,
         window_id: u64,
         open_id: u64,
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<(), Errno> {
         if let Some(err) = self.refuse_menu_open {
             return Err(err);
         }
         self.menu_opens.push((window_id, open_id, anchor, *menu));
+        Ok(())
+    }
+
+    fn tooltip_declared(
+        &mut self,
+        window_id: u64,
+        region: WindowRegion,
+        text: &str,
+    ) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_tooltip {
+            return Err(err);
+        }
+        self.tooltips.push((window_id, region, String::from(text)));
         Ok(())
     }
 
@@ -2047,8 +2064,8 @@ fn sample_open_menu() -> AppMenu {
 
 /// The anchor a right-click hands back: the window-local point the app was
 /// given, with no extent.
-fn sample_menu_anchor() -> MenuAnchor {
-    MenuAnchor::new(12, 30, 0, 0).expect("a representable anchor")
+fn sample_menu_anchor() -> WindowRegion {
+    WindowRegion::new(12, 30, 0, 0).expect("a representable anchor")
 }
 
 /// One accepted open is answered exactly once, and its answer names the open
@@ -2763,4 +2780,265 @@ fn a_whole_round_presents_the_window_whatever_was_reported() {
         present_damage(&SURFACE, Repaint::Whole, &damage),
         Some(DamageRect::full(&SURFACE))
     );
+}
+
+// ---- the open-target channel and the tooltip declaration ---------------
+
+#[test]
+fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // Nothing queued is the honest empty answer, not an error.
+    assert_eq!(client.take_open_target(window), Ok(None));
+
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, window, "Users:/ada/Documents")
+        .expect("the window takes it");
+    assert_eq!(
+        client.take_open_target(window),
+        Ok(Some(String::from("Users:/ada/Documents")))
+    );
+    assert_eq!(
+        client.take_open_target(window),
+        Ok(None),
+        "popping is what makes a target one-shot"
+    );
+}
+
+#[test]
+fn handing_over_a_target_wakes_its_owner() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, window, "Users:/ada/report")
+        .expect("the window takes it");
+    let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
+    assert_eq!(endpoint, EVENTS_A);
+    assert_eq!(
+        WindowEvent::from_bytes(&bytes),
+        Ok(WindowEvent::OpenRequested { window_id: window }),
+        "the wake is window-scoped and carries no path"
+    );
+    assert!(sink.delivered.is_empty(), "one target, one wake");
+}
+
+#[test]
+fn a_refused_wake_takes_the_target_back_off_the_queue() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    // Nothing was announced, so nothing may be left queued: a target the
+    // owner was never woken for would sit unreachable, and the caller must
+    // be free to read the refusal as "the instance does not have it".
+    assert_eq!(
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut FullSink,
+            window,
+            "Users:/ada/report"
+        ),
+        Err(Errno::WouldBlock)
+    );
+    assert_eq!(
+        client.take_open_target(window),
+        Ok(None),
+        "a refused hand-over strands no target"
+    );
+}
+
+#[test]
+fn queued_targets_are_pulled_oldest_first() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    for path in ["Users:/one", "Users:/two", "Users:/three"] {
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, window, path)
+            .expect("room");
+    }
+    for path in ["Users:/one", "Users:/two", "Users:/three"] {
+        assert_eq!(
+            client.take_open_target(window),
+            Ok(Some(String::from(path))),
+            "the ordering is the protocol"
+        );
+    }
+    assert_eq!(client.take_open_target(window), Ok(None));
+}
+
+#[test]
+fn a_pull_from_a_non_owner_is_refused_like_a_window_that_never_existed() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, window, "Users:/ada/secret")
+        .expect("room");
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.take_open_target(window), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    // And the refusal took nothing: the owner still finds its target.
+    assert_eq!(
+        client.take_open_target(window),
+        Ok(Some(String::from("Users:/ada/secret")))
+    );
+}
+
+#[test]
+fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    for index in 0..WINDOW_MAX_OPEN_TARGETS {
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, window, &alloc::format!("Users:/{index}"))
+            .expect("within the bound");
+    }
+    assert_eq!(
+        loopback.borrow_mut().server.hand_over_open_target(
+            &mut sink,
+            window,
+            "Users:/one-too-many"
+        ),
+        Err(Errno::NoSpace),
+        "the newest is refused rather than an older one dropped silently"
+    );
+    // The oldest is still first: a refusal at the far end disturbs nothing.
+    assert_eq!(
+        client.take_open_target(window),
+        Ok(Some(String::from("Users:/0")))
+    );
+
+    // An empty or over-long path is refused too, and no unknown window
+    // accepts one.
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, window, ""),
+        Err(Errno::LengthOutOfRange)
+    );
+    let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, window, &long),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, 9_999, "Users:/nowhere"),
+        Err(Errno::NotFound)
+    );
+}
+
+#[test]
+fn a_windows_queued_targets_die_with_the_window() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, window, "Users:/ada/report")
+        .expect("room");
+
+    client.close(window).expect("the owner closes it");
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, window, "Users:/ada/report"),
+        Err(Errno::NotFound),
+        "a target queued for a window that closed is reachable by nothing"
+    );
+    assert_eq!(client.take_open_target(window), Err(Errno::NotFound));
+}
+
+#[test]
+fn a_tooltip_declaration_reaches_the_host_and_replaces_rather_than_appends() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let region = sample_menu_anchor();
+    let other = WindowRegion::new(4, 8, 20, 12).expect("a second region");
+
+    // A window the caller does not own answers like one that never existed,
+    // and the host is never told.
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.set_tooltip(window, region, tip("Copy")),
+        Err(Errno::NotFound)
+    );
+    assert!(loopback.borrow().host.tooltips.is_empty());
+    loopback.borrow_mut().ticket = TICKET_A;
+
+    client
+        .set_tooltip(window, region, tip("Copy"))
+        .expect("the owner may declare one");
+    client
+        .set_tooltip(window, other, tip("Paste"))
+        .expect("and re-declare it");
+    client
+        .set_tooltip(window, other, tip(""))
+        .expect("and withdraw it");
+    {
+        let host = &loopback.borrow().host;
+        assert_eq!(
+            host.tooltips.len(),
+            3,
+            "each declaration is relayed; the host holds at most one at a time"
+        );
+        assert_eq!(host.tooltips[0], (window, region, String::from("Copy")));
+        assert_eq!(host.tooltips[1], (window, other, String::from("Paste")));
+        assert_eq!(
+            host.tooltips[2],
+            (window, other, String::new()),
+            "empty text is the withdrawal"
+        );
+    }
+}
+
+#[test]
+fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().host.refuse_tooltip = Some(Errno::NotSupported);
+    assert_eq!(
+        client.set_tooltip(window, sample_menu_anchor(), tip("Copy")),
+        Err(Errno::NotSupported),
+        "a refused tip is an answer the app reports and carries on from"
+    );
+    assert!(loopback.borrow().host.tooltips.is_empty());
+}
+
+/// A tooltip's text, which the tests state as a plain literal.
+fn tip(text: &str) -> TooltipText {
+    TooltipText::new(text).expect("a valid tip")
 }

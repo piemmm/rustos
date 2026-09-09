@@ -439,7 +439,8 @@ impl MenuChain {
         };
         let local = Rect::new(0, 0, plate.rect.width, plate.rect.height);
         let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
-        // The band lays no ground of its own, so the plate's is laid first.
+        // The plate's ground is laid first: the band shades its own strip off
+        // it, and the rows take it as it is.
         lay_plate(surface, (local.width, local.height), geom);
         plate.band.render(
             surface,

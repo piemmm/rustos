@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::DesktopInfo;
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
-use tairix_abi::window_ipc::{AppBar, AppMenu, MenuAnchor, MenuRefusal, WindowEvent};
+use tairix_abi::window_ipc::{AppBar, AppMenu, MenuRefusal, WindowEvent, WindowRegion};
 use tairix_abi::{Errno, ProcId};
 use tairix_controls::{ChainModel, PlatePlacement};
 use tairix_display::winframe;
@@ -860,7 +860,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         &mut self,
         window_id: u64,
         open_id: u64,
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         menu: &AppMenu,
     ) -> Result<(), Errno> {
         // An application is never told where its window sits, so the anchor it
@@ -1056,6 +1056,10 @@ mod tests {
 
         fn attested_identity(&self, _owner: ProcId) -> Option<tairix_taskbar::AppIdentity> {
             None
+        }
+
+        fn runs_one_instance(&self, _bundle: &str) -> bool {
+            true
         }
 
         fn app_bar_withdrawn(&mut self, owner: ProcId) {

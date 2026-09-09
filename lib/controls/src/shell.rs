@@ -25,16 +25,17 @@ use crate::button::{icon_content_side, Button, ButtonAction};
 use crate::collection::{Card, CardAction};
 use crate::damage;
 use crate::paint::{
-    authority_rgba, foreground, inset, key_activation, paint_bead, paint_count_badge,
-    paint_icon_slot, paint_plate, paint_surface_plate, paint_text_line, plate_border,
-    pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail, role_font,
-    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
-    ChromeLayer, PlateStyle, FULL_COLOUR,
+    authority_rgba, foreground, heavy_contrast, inset, key_activation, paint_bead,
+    paint_count_badge, paint_icon_slot, paint_plate, paint_surface_plate, paint_text_line,
+    plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame, resolve_rail,
+    role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld,
+    BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
     RenderInvariant, ValidationState,
 };
+use crate::window::paint_minimise_mark;
 
 // --- Notification ------------------------------------------------------
 
@@ -538,13 +539,19 @@ pub enum WindowPreviewAction {
 /// pixels the owner released under memory pressure) draws its application's
 /// class glyph in the thumbnail's place, so a cell can never come up blank.
 ///
+/// A window that is *minimised* draws the desktop's own minimise mark beside
+/// its caption, so the cell that is the only way back to a hidden window says
+/// which one that is.
+///
 /// Equal previews draw the same pixels, so a picker may use `==` as its
-/// repaint gate: the caption, the glyph, and the visible state compare. The
-/// pointer coordinate and press latch do not — no render path reads either.
+/// repaint gate: the caption, the glyph, the minimised mark, and the visible
+/// state compare. The pointer coordinate and press latch do not — no render
+/// path reads either.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowPreview {
     caption: String,
     icon: IconKind,
+    minimised: bool,
     state: ControlState,
     /// The last pointer position — hit-testing input, never drawn.
     pointer: RenderInvariant<Point>,
@@ -560,10 +567,25 @@ impl WindowPreview {
         Self {
             caption: caption.into(),
             icon,
+            minimised: false,
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
         }
+    }
+
+    /// This preview for a window that is minimised, which draws the desktop's
+    /// minimise mark beside the caption.
+    #[must_use]
+    pub fn minimised(mut self, minimised: bool) -> Self {
+        self.minimised = minimised;
+        self
+    }
+
+    /// Whether this preview's window is minimised.
+    #[must_use]
+    pub const fn is_minimised(&self) -> bool {
+        self.minimised
     }
 
     /// This preview with the given composed state.
@@ -697,14 +719,34 @@ impl WindowPreview {
         let pad = scale.scale_length(metrics.control_inset);
         let font = role_font(theme, scale, TextRole::Body);
         let caption_y = u32::try_from(ty).unwrap_or(0).saturating_add(th);
+        let caption_x = u32::try_from(tx).unwrap_or(0);
+        // A minimised window leads its caption with the mark, and the caption
+        // gives up exactly that much width, so the two never overlap.
+        let mark = if self.minimised {
+            font.glyph_height().min(tw)
+        } else {
+            0
+        };
+        if mark > 0 {
+            paint_minimise_mark(
+                surface,
+                (caption_x, caption_y.saturating_add(pad), mark, mark),
+                frame.label,
+                heavy_contrast(theme),
+            );
+        }
         paint_text_line(
             surface,
             &self.caption,
             (
-                u32::try_from(tx).unwrap_or(0),
+                caption_x.saturating_add(mark),
                 caption_y.saturating_add(pad),
             ),
-            (y.saturating_add(h).saturating_sub(border), tw, 0),
+            (
+                y.saturating_add(h).saturating_sub(border),
+                tw.saturating_sub(mark),
+                0,
+            ),
             font,
             frame.label,
         );

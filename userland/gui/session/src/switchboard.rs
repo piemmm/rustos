@@ -223,23 +223,6 @@ fn attested_switchboard(launched: &LaunchTable, pid: u64) -> bool {
         .is_some_and(|app| app.run_path == SWITCHBOARD_RUN_PATH)
 }
 
-/// The session's one Switchboard instance: the one already recorded, or
-/// the one `spawn` starts and records now.
-///
-/// One monitor per session is enforced here, at the spawn, so a second is
-/// never started rather than started and then refused. `spawn` answers
-/// with the pid it recorded, or `None` when the launch was refused — in
-/// which case the desktop simply runs without its monitor.
-pub fn ensure_switchboard(
-    launched: &mut LaunchTable,
-    spawn: impl FnOnce(&mut LaunchTable) -> Option<u64>,
-) -> Option<u64> {
-    match launched.running_from(SWITCHBOARD_RUN_PATH) {
-        Some(live) => Some(live),
-        None => spawn(launched),
-    }
-}
-
 /// Whether a refused send of `command` is worth a `stderr` line.
 ///
 /// A dropped frame reading is not news. The readings are best-effort

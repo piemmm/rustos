@@ -869,8 +869,15 @@ What now stands:
   name. Choosing a row answers `AppMenuChosen { app, item }` and the session
   relays the id straight back — the bar never interprets one. An application
   that declared no menu asks for **nothing**.
-- **The hover window picker** (`WindowPicker`) opens at
-  `PICKER_MIN_WINDOWS` (two) windows and no fewer, and both its edges are
+- **The hover window picker** (`WindowPicker`) opens when a slot has
+  something to *choose* between (`PICKER_MIN_WINDOWS`, two, windows) **or**
+  something to *recover* (any window minimised) — one predicate, `has_picker`,
+  read by the dwell, the staleness check, the session's cells, and
+  `WindowPicker::open` alike. A minimised sole window is why the second half
+  exists: it is hidden, and an application whose declared click opens a *new*
+  window rather than raising one would otherwise leave it unreachable. Its
+  cell states that it is minimised, with the desktop's own minimise mark.
+  Both the picker's edges are
   timed by the clock rather than by the pointer: it opens once the pointer has
   **rested** on the slot for `PICKER_OPEN_DELAY_NS` (one second), and closes
   `PICKER_CLOSE_GRACE_NS` (200 ms) after the pointer comes to rest on neither

@@ -115,7 +115,7 @@ mod program {
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
-        MenuAnchor, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
+        MenuOutcome, PointerAction, WindowEvent, WindowRegion, WINDOW_ENDPOINT,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, SpawnAttach, UnlinkFlags, WaitFlags,
@@ -136,11 +136,11 @@ mod program {
         trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation, Browser,
         BundleIntent, BundleSource, Clipboard, ClipboardOp, ContextCommand, ContextMenuModel,
         CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan,
-        DeleteWalk, DirectorySource, DoubleClickTracker, Entry, EntryKind, Listing, ListingDesk,
-        ManagerChrome, ManagerTool, ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem,
-        PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError,
-        RtLinkReader, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode,
-        Volume, VolumeId, MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
+        DeleteWalk, DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome,
+        ManagerTool, ManagerToolModel, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy,
+        Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RtLinkReader,
+        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, ViewMode, Volume, VolumeId,
+        MANAGER_TOOLS, WIN_HEIGHT, WIN_SIZING, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -152,7 +152,7 @@ mod program {
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
         ArtworkReader, ArtworkResolver, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
     };
-    use tairix_input::{Key, Modifiers, NamedKey};
+    use tairix_input::{DoubleClickTracker, Key, Modifiers, NamedKey};
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
     use tairix_rt::io::{self, Stderr, Stdout, Write};
@@ -681,6 +681,24 @@ mod program {
                 );
                 BarRouted::Handled
             }
+            WindowEvent::OpenRequested { window_id } => {
+                // A wake, not a path: the desktop queued at least one folder
+                // for this instance, so drain until the queue answers empty.
+                // One event may cover several, and another may arrive while
+                // this drain is still running.
+                drain_open_targets(
+                    window_id,
+                    windows,
+                    client,
+                    desktop,
+                    places,
+                    theme,
+                    icons,
+                    reads,
+                    event_endpoint,
+                );
+                BarRouted::Handled
+            }
             // A component's rows are its places: open a window at the one
             // chosen. A stale row — the rail was re-read since the menu was
             // declared — names nothing and does nothing, rather than opening
@@ -934,6 +952,57 @@ mod program {
             return;
         }
         windows.push(win);
+    }
+
+    /// Drain every folder the desktop has queued for `window_id`, opening a
+    /// window at each.
+    ///
+    /// How a *relaunch* that names a folder reaches this already-running
+    /// instance: the desktop asks the running process to open it rather than
+    /// starting a second. The path goes through the very same
+    /// [`location_components`](crate::command::location_components) rule the
+    /// command line's own starting location does, so a refused spelling is
+    /// stated and skipped rather than opening a window somewhere else.
+    #[allow(clippy::too_many_arguments)] // The window set's whole surround, threaded explicitly.
+    fn drain_open_targets(
+        window_id: u64,
+        windows: &mut alloc::vec::Vec<OpenWindow>,
+        client: &mut WindowClient<RtWindowTransport>,
+        desktop: &Desktop,
+        places: &Places,
+        theme: &Theme,
+        icons: &RefCell<IconPipeline>,
+        reads: &alloc::sync::Arc<Reads>,
+        event_endpoint: u64,
+    ) {
+        loop {
+            let path = match client.take_open_target(window_id) {
+                Ok(Some(path)) => path,
+                Ok(None) => return,
+                Err(err) => {
+                    let _ = writeln!(Stderr, "files: cannot take an open target: {err}");
+                    return;
+                }
+            };
+            match crate::command::location_components(&path) {
+                Ok(location) => open_more(
+                    windows,
+                    client,
+                    desktop,
+                    places,
+                    theme,
+                    icons,
+                    reads,
+                    event_endpoint,
+                    Some(location),
+                ),
+                // Stated and skipped: the *next* target may well be fine, so
+                // one bad spelling must not abandon the drain.
+                Err(reason) => {
+                    let _ = writeln!(Stderr, "files: {reason}");
+                }
+            }
+        }
     }
 
     /// The file manager's launched children: the application bundles it
@@ -2464,6 +2533,10 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            // An open target opens a *new* window rather than moving this
+            // one, so it is answered where the window set is (`bar_routed`)
+            // and repaints nothing here.
+            | WindowEvent::OpenRequested { .. }
             | WindowEvent::DesktopChanged { .. } => (Repaint::Nothing, false),
         }
     }
@@ -4067,7 +4140,7 @@ mod program {
                 return (true, false);
             }
         };
-        let anchor = match MenuAnchor::new(point.x, point.y, 0, 0) {
+        let anchor = match WindowRegion::new(point.x, point.y, 0, 0) {
             Ok(anchor) => anchor,
             Err(err) => {
                 report_error(&alloc::format!("menu anchor refused ({err}); not shown"));

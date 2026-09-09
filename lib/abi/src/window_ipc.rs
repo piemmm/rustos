@@ -88,6 +88,25 @@ pub const WINDOW_MAX_REQUEST: usize = WindowRequest::MAX_WIRE_LEN;
 /// Maximum encoded length, in bytes, of a window title.
 pub const WINDOW_TITLE_MAX: usize = 64;
 
+/// Maximum encoded length, in bytes, of a tooltip's text
+/// ([`WindowRequest::SetTooltip`]).
+///
+/// A tooltip is one short line explaining the affordance under the pointer,
+/// so this is a validation bound on untrusted display text rather than a
+/// capacity: an application with more to say has a window to say it in, and
+/// a plate the width of the screen is not a tooltip.
+pub const TOOLTIP_TEXT_MAX: usize = 96;
+
+/// Most open targets one window may have queued for it at once
+/// ([`WindowRequest::TakeOpenTarget`]).
+///
+/// A containment bound, not a capacity: it caps what a burst of relaunches
+/// can make the session hold on one application's behalf while that
+/// application is not draining. Reaching it refuses the newest target with
+/// the refusal stated, rather than dropping one silently or growing without
+/// bound.
+pub const WINDOW_MAX_OPEN_TARGETS: usize = 8;
+
 /// Widest backdrop-blur radius a window may request, in **logical** pixels
 /// ([`WindowRequest::SetBackdropBlur`]).
 ///
@@ -866,37 +885,44 @@ const PARENT_NONE: u8 = u8::MAX;
 /// so the row bound has to leave it a value of its own.
 const _: () = assert!(APP_MENU_MAX_TOTAL_ROWS < PARENT_NONE as usize);
 
-/// Where a per-gesture menu chain's root plate is anchored, in the
-/// requesting window's own client pixels ([`WindowRequest::OpenMenu`]).
+/// A rectangle of a window's own client pixels, as the window's application
+/// states it.
+///
+/// One type for every window-local region an application names: where a
+/// per-gesture menu chain's root plate hangs ([`WindowRequest::OpenMenu`]),
+/// and what a tooltip explains ([`WindowRequest::SetTooltip`]). The two ask
+/// the same question of the session — *this part of my window* — so a second
+/// type would be the same 16 bytes under another name.
 ///
 /// **Window-local, never seat-global.** An application is never told where
 /// its window sits on screen, and never learns a pointer position inside a
-/// menu, so window-local is the only anchor it can state truthfully — and it
+/// menu, so window-local is the only region it can state truthfully — and it
 /// is exactly the coordinate space [`WindowEvent::Pointer`] already hands it,
-/// so an application anchoring a context menu at the press it just received
-/// passes back the very numbers it was given. The session resolves the point
-/// against the window's live position and places the chain itself.
+/// so an application naming the control it just received a press on passes
+/// back the very numbers it was given. The session resolves the region
+/// against the window's live position itself.
 ///
-/// It is a **region**, not a point, because that is what the placement rule
-/// reads: a plate hangs clear of the control that opened it and flips to the
-/// region's other side when the screen edge leaves no room. A zero-extent
-/// anchor is the point case — the region is one pixel position — so a
-/// context gesture and a menu-bar button share one placement rule rather
-/// than needing two.
+/// It is a **region**, not a point, because that is what both readers need: a
+/// plate hangs clear of the control that opened it and flips to the region's
+/// other side when the screen edge leaves no room, and a tooltip's dwell is
+/// armed while the pointer is *inside* the thing being explained. A
+/// zero-extent region is the point case — one pixel position — so a context
+/// gesture and a menu-bar button share one placement rule rather than
+/// needing two.
 ///
 /// The origin is deliberately unconstrained: any signed offset is a
 /// legitimate ask about a control that is partly scrolled out of view, and
-/// the session clamps the chain onto the screen. Only the far edge is
-/// checked, so the placement arithmetic has no unrepresentable input.
+/// the session clamps what it places onto the screen. Only the far edge is
+/// checked, so the arithmetic downstream has no unrepresentable input.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct MenuAnchor {
+pub struct WindowRegion {
     x: i32,
     y: i32,
     width_px: u32,
     height_px: u32,
 }
 
-impl MenuAnchor {
+impl WindowRegion {
     /// An anchor region whose top-left is `x`/`y` client pixels from the
     /// window's own origin. A zero extent anchors at that single point.
     ///
@@ -1092,6 +1118,16 @@ impl WindowTitle {
         Ok(Self { bytes: *bytes, len })
     }
 }
+
+/// A tooltip's text: at most [`TOOLTIP_TEXT_MAX`] bytes of well-formed UTF-8
+/// with no control characters, bounded and validated exactly as a
+/// [`WindowTitle`] is.
+///
+/// **Empty withdraws the tip.** The minimum is zero so one operation both
+/// declares and retracts a tooltip: an application that no longer has
+/// anything to explain sets empty text rather than reaching for a second
+/// "hide" operation there would be no way to keep in step with the first.
+pub type TooltipText = BoundedText<0, TOOLTIP_TEXT_MAX>;
 
 impl core::fmt::Debug for WindowTitle {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1427,9 +1463,59 @@ pub enum WindowRequest {
         window_id: u64,
         /// Where the root plate is anchored, in that window's client
         /// pixels.
-        anchor: MenuAnchor,
+        anchor: WindowRegion,
         /// The rows to open, and the title of the root plate's band.
         menu: AppMenu,
+    },
+    /// Take the next path queued for this window to open, if any.
+    ///
+    /// The answer to a [`WindowEvent::OpenRequested`] wake: that event says
+    /// only *you have at least one target waiting*, and the application pulls
+    /// them one at a time until the queue answers empty. The path is not in
+    /// the event because every event pays the widest event's width, and a
+    /// path is far wider than one.
+    ///
+    /// Popping is what makes a target one-shot, so no id is minted or
+    /// validated and the ordering is the protocol: the reply is the oldest
+    /// queued path, or the empty answer once the queue is drained. A pull
+    /// from a window the caller does not own is refused, as every
+    /// window-scoped operation is.
+    ///
+    /// It carries no capability: the window the caller already owns is the
+    /// scope. The path names a file or folder the *user* asked to open; it
+    /// confers no access, and the application opens it under its own
+    /// authority like any other path it is given.
+    TakeOpenTarget {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+    },
+    /// Declare — or withdraw — the tooltip for a region of this window.
+    ///
+    /// The application says only *what* is being explained and *where*: the
+    /// region in its own client pixels, and one short line. Everything else
+    /// is the desktop's, because everything else is the seat's: the dwell
+    /// before the tip appears, where the plate is placed so it stays on
+    /// screen, what it is drawn with, and every reason it goes away again.
+    /// An application is never told where its window sits, so it could not
+    /// place a plate truthfully even if it owned one.
+    ///
+    /// **Idempotent replace, and empty withdraws.** A window has at most one
+    /// declared tooltip, so a second declaration replaces the first rather
+    /// than joining it, and [`TooltipText`] empty retracts it — one
+    /// operation, with no second "hide" to fall out of step with. A
+    /// tooltip on screen when its declaration is withdrawn comes down.
+    ///
+    /// It carries no capability: the window the caller already owns is the
+    /// scope, exactly as [`OpenMenu`](Self::OpenMenu). The text is untrusted
+    /// display text, bounded and control-character-refusing like a
+    /// [`WindowTitle`], and never a credential.
+    SetTooltip {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+        /// What the tip explains, in that window's client pixels.
+        region: WindowRegion,
+        /// The one line to show. Empty withdraws the declaration.
+        text: TooltipText,
     },
 }
 
@@ -1455,6 +1541,10 @@ const OP_SET_TITLE: u16 = 12;
 const OP_SET_APP_BAR: u16 = 13;
 /// Wire operation discriminant of [`WindowRequest::OpenMenu`].
 const OP_OPEN_MENU: u16 = 14;
+/// Wire operation discriminant of [`WindowRequest::TakeOpenTarget`].
+const OP_TAKE_OPEN_TARGET: u16 = 15;
+/// Wire operation discriminant of [`WindowRequest::SetTooltip`].
+const OP_SET_TOOLTIP: u16 = 16;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -1530,6 +1620,16 @@ const SET_TITLE_TEXT_OFFSET: usize = SET_TITLE_LEN_OFFSET + 1;
 /// Encoded size of a [`WindowRequest::SetTitle`].
 const SET_TITLE_WIRE_LEN: usize = SET_TITLE_TEXT_OFFSET + WINDOW_TITLE_MAX;
 
+/// Byte offset of a [`WindowRequest::SetTooltip`]'s region, immediately
+/// after the window it belongs to.
+const SET_TOOLTIP_REGION_OFFSET: usize = 16;
+/// Byte offset of the length of a [`WindowRequest::SetTooltip`]'s text.
+const SET_TOOLTIP_LEN_OFFSET: usize = SET_TOOLTIP_REGION_OFFSET + WINDOW_REGION_WIRE_LEN;
+/// Byte offset of a [`WindowRequest::SetTooltip`]'s text bytes.
+const SET_TOOLTIP_TEXT_OFFSET: usize = SET_TOOLTIP_LEN_OFFSET + 1;
+/// Encoded size of a [`WindowRequest::SetTooltip`].
+const SET_TOOLTIP_WIRE_LEN: usize = SET_TOOLTIP_TEXT_OFFSET + TOOLTIP_TEXT_MAX;
+
 /// Byte offset of a [`WindowRequest::SetAppBar`]'s [`AppBarClick`] byte,
 /// immediately after the event endpoint it routes to.
 const APP_BAR_CLICK_OFFSET: usize = 16;
@@ -1585,15 +1685,15 @@ const fn app_bar_wire_len(rows: usize, text: usize) -> usize {
 /// [`APP_MENU_TEXT_BYTES`].
 const APP_BAR_MAX_WIRE_LEN: usize = app_bar_wire_len(APP_MENU_MAX_TOTAL_ROWS, APP_MENU_TEXT_BYTES);
 
-/// Encoded size of a [`MenuAnchor`]: the signed origin then the extent, as
-/// [`MenuAnchor::write_to`] lays them out.
-const MENU_ANCHOR_WIRE_LEN: usize = 16;
+/// Encoded size of a [`WindowRegion`]: the signed origin then the extent, as
+/// [`WindowRegion::write_to`] lays them out.
+const WINDOW_REGION_WIRE_LEN: usize = 16;
 
 /// Byte offset of a [`WindowRequest::OpenMenu`]'s anchor, immediately after
 /// the window the chain belongs to.
 const OPEN_MENU_ANCHOR_OFFSET: usize = 16;
 /// Byte offset of the length of an open's root-plate title.
-const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + MENU_ANCHOR_WIRE_LEN;
+const OPEN_MENU_TITLE_LEN_OFFSET: usize = OPEN_MENU_ANCHOR_OFFSET + WINDOW_REGION_WIRE_LEN;
 /// Byte offset of an open's declared row count.
 const OPEN_MENU_ROW_COUNT_OFFSET: usize = OPEN_MENU_TITLE_LEN_OFFSET + 1;
 /// Byte offset of the length of an open's rows' text block.
@@ -1675,7 +1775,9 @@ impl WindowRequest {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
             Self::Present { .. } => PRESENT_WIRE_LEN,
-            Self::Close { .. } | Self::PickFile { .. } => WINDOW_ID_WIRE_LEN,
+            Self::Close { .. } | Self::PickFile { .. } | Self::TakeOpenTarget { .. } => {
+                WINDOW_ID_WIRE_LEN
+            }
             Self::Resize { .. } => RESIZE_WIRE_LEN,
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
@@ -1688,6 +1790,7 @@ impl WindowRequest {
                 menu.text_len as usize,
                 menu.title.len_byte() as usize,
             ),
+            Self::SetTooltip { .. } => SET_TOOLTIP_WIRE_LEN,
         }
     }
 
@@ -1750,6 +1853,8 @@ impl WindowRequest {
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
+            Self::TakeOpenTarget { .. } => OP_TAKE_OPEN_TARGET,
+            Self::SetTooltip { .. } => OP_SET_TOOLTIP,
         }
     }
 
@@ -1771,7 +1876,9 @@ impl WindowRequest {
                 put_u32(out, 28, damage.width_px);
                 put_u32(out, 32, damage.height_px);
             }
-            Self::Close { window_id } | Self::PickFile { window_id } => {
+            Self::Close { window_id }
+            | Self::PickFile { window_id }
+            | Self::TakeOpenTarget { window_id } => {
                 put_u64(out, 8, window_id);
             }
             Self::Resize {
@@ -1795,6 +1902,17 @@ impl WindowRequest {
                 .write_to(out);
             }
             Self::SetTitle { window_id, title } => encode_set_title(out, window_id, &title),
+            Self::SetTooltip {
+                window_id,
+                region,
+                text,
+            } => {
+                put_u64(out, 8, window_id);
+                region.write_to(out, SET_TOOLTIP_REGION_OFFSET);
+                out[SET_TOOLTIP_LEN_OFFSET] = text.len_byte();
+                out[SET_TOOLTIP_TEXT_OFFSET..SET_TOOLTIP_WIRE_LEN]
+                    .copy_from_slice(text.raw_bytes());
+            }
             Self::SetBackdropBlur {
                 window_id,
                 radius_px,
@@ -1958,6 +2076,12 @@ impl WindowRequest {
                 })
             }
             OP_SET_TITLE => read_set_title(bytes),
+            OP_TAKE_OPEN_TARGET => {
+                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+                let window_id = nonzero_id(read_u64(bytes, 8))?;
+                Ok(Self::TakeOpenTarget { window_id })
+            }
+            OP_SET_TOOLTIP => read_set_tooltip(bytes),
             OP_SET_APP_BAR => read_app_bar(bytes),
             OP_OPEN_MENU => read_open_menu(bytes),
             OP_SET_BACKDROP_BLUR => {
@@ -2007,6 +2131,21 @@ fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// retitled and its new title, validated by the same [`WindowTitle`] wire
 /// decode a `Create` title goes through, with the reserved tail required
 /// zero.
+/// Decode a [`WindowRequest::SetTooltip`] from its exact-length frame.
+fn read_set_tooltip(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, SET_TOOLTIP_WIRE_LEN)?;
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let region = WindowRegion::read_at(bytes, SET_TOOLTIP_REGION_OFFSET)?;
+    let mut text_bytes = [0u8; TOOLTIP_TEXT_MAX];
+    text_bytes.copy_from_slice(&bytes[SET_TOOLTIP_TEXT_OFFSET..SET_TOOLTIP_WIRE_LEN]);
+    let text = TooltipText::from_wire(bytes[SET_TOOLTIP_LEN_OFFSET], &text_bytes)?;
+    Ok(WindowRequest::SetTooltip {
+        window_id,
+        region,
+        text,
+    })
+}
+
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, SET_TITLE_WIRE_LEN)?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
@@ -2133,7 +2272,7 @@ fn read_app_bar(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 /// The title trails the rows' text so the shared block keeps one layout;
 /// where a declaration's block simply ends, an open's carries the title
 /// after it.
-fn write_open_menu(out: &mut [u8], window_id: u64, anchor: MenuAnchor, menu: &AppMenu) {
+fn write_open_menu(out: &mut [u8], window_id: u64, anchor: WindowRegion, menu: &AppMenu) {
     put_u64(out, 8, window_id);
     anchor.write_to(out, OPEN_MENU_ANCHOR_OFFSET);
     out[OPEN_MENU_TITLE_LEN_OFFSET] = menu.title.len_byte();
@@ -2170,7 +2309,7 @@ fn read_open_menu(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }
     exact_len(bytes, open_menu_wire_len(count, text_len, title_len))?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
-    let anchor = MenuAnchor::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?;
+    let anchor = WindowRegion::read_at(bytes, OPEN_MENU_ANCHOR_OFFSET)?;
     // The title trails the whole menu block, whose length the counts above
     // already state, so it is read before the rows the menu is then filled
     // with rather than needing a second pass to find.
@@ -2548,6 +2687,101 @@ pub fn encode_create_reply(
 /// session's [`ProcId`].
 pub const WINDOW_DESKTOP_REPLY_LEN: usize = 4 + DesktopInfo::WIRE_LEN + crate::PROC_ID_LEN;
 
+/// Encoded length of a [`WindowRequest::TakeOpenTarget`] reply: a status
+/// word, the path's length, then room for the widest path the filesystem
+/// admits.
+///
+/// The path is at [`crate::FS_PATH_MAX`] because that is what a path is; the
+/// frame is *variable* length on the wire ([`encode_open_target_reply`]
+/// writes only what the answer holds), so the empty answer costs six bytes
+/// rather than four kibibytes. Both sides hold their buffer once for the life
+/// of the connection rather than taking one per call.
+pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = 6 + crate::FS_PATH_MAX;
+
+/// Byte offset of the path length in a [`WindowRequest::TakeOpenTarget`]
+/// reply.
+const OPEN_TARGET_REPLY_LEN_OFFSET: usize = 4;
+/// Byte offset of the path bytes in a [`WindowRequest::TakeOpenTarget`]
+/// reply.
+const OPEN_TARGET_REPLY_PATH_OFFSET: usize = OPEN_TARGET_REPLY_LEN_OFFSET + 2;
+
+/// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
+/// the number of bytes written.
+///
+/// `Ok(None)` is the drained queue: a zero length and no path, which is the
+/// honest "nothing waiting" rather than an error. `Ok(Some(path))` carries
+/// the popped path. A refusal is the shared status frame, so a client issues
+/// one receive whatever the answer.
+///
+/// # Panics
+///
+/// Never: `out` is required to be [`WINDOW_OPEN_TARGET_REPLY_MAX`] bytes, and
+/// a path longer than [`crate::FS_PATH_MAX`] cannot be constructed by the
+/// filesystem ABI, so the copy is always in range.
+#[must_use]
+pub fn encode_open_target_reply(
+    out: &mut [u8; WINDOW_OPEN_TARGET_REPLY_MAX],
+    result: Result<Option<&[u8]>, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_OPEN_TARGET_REPLY_MAX];
+    match result {
+        Ok(path) => {
+            let path = path.unwrap_or(&[]);
+            let Ok(len) = u16::try_from(path.len()) else {
+                out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(
+                    Errno::LengthOutOfRange,
+                )));
+                return 4;
+            };
+            if path.len() > crate::FS_PATH_MAX {
+                out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(
+                    Errno::LengthOutOfRange,
+                )));
+                return 4;
+            }
+            put_u16(out, OPEN_TARGET_REPLY_LEN_OFFSET, len);
+            out[OPEN_TARGET_REPLY_PATH_OFFSET..OPEN_TARGET_REPLY_PATH_OFFSET + path.len()]
+                .copy_from_slice(path);
+            OPEN_TARGET_REPLY_PATH_OFFSET + path.len()
+        }
+        Err(err) => {
+            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+            4
+        }
+    }
+}
+
+/// Decode a [`WindowRequest::TakeOpenTarget`] reply.
+///
+/// `Ok(None)` is the drained queue. The length is checked against the frame
+/// it arrived in, so a reply claiming more path than it carries is refused
+/// rather than read past.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame too short to hold its own header.
+/// * [`Errno::LengthOutOfRange`] for a length past the frame or past
+///   [`crate::FS_PATH_MAX`].
+pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<&[u8]>, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < OPEN_TARGET_REPLY_PATH_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = usize::from(read_u16(bytes, OPEN_TARGET_REPLY_LEN_OFFSET));
+    if len == 0 {
+        return Ok(None);
+    }
+    if len > crate::FS_PATH_MAX || OPEN_TARGET_REPLY_PATH_OFFSET + len > bytes.len() {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(Some(
+        &bytes[OPEN_TARGET_REPLY_PATH_OFFSET..OPEN_TARGET_REPLY_PATH_OFFSET + len],
+    ))
+}
+
 /// Byte offset of the serving session's [`ProcId`] in a desktop reply.
 const DESKTOP_REPLY_SERVER_OFFSET: usize = 4 + DesktopInfo::WIRE_LEN;
 
@@ -2660,6 +2894,8 @@ const EV_APP_BAR_MENU: u16 = 14;
 const EV_CONTENT_RELEASED: u16 = 15;
 /// Wire event discriminant of [`WindowEvent::MenuClosed`].
 const EV_MENU_CLOSED: u16 = 16;
+/// Wire kind discriminant of [`WindowEvent::OpenRequested`].
+const EV_OPEN_REQUESTED: u16 = 17;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -2916,6 +3152,27 @@ pub enum WindowEvent {
         /// What became of the chain.
         outcome: MenuOutcome,
     },
+    /// At least one path is queued for this window to open.
+    ///
+    /// A **wake**, not the path: the application answers by pulling with
+    /// [`WindowRequest::TakeOpenTarget`] until the queue is empty. Every
+    /// event pays the widest event's width, and a path is far wider than one
+    /// — so the wake is what crosses in the event and the path is pulled.
+    ///
+    /// It is window-scoped so it reaches any application that owns a window,
+    /// whether or not it declared an icon-bar presence. The desktop delivers
+    /// it to the instance's most recent window when a user launches a bundle
+    /// that is already running and names a document: the running instance
+    /// opens it rather than a second process starting.
+    ///
+    /// More than one target may be queued and this event may arrive once for
+    /// several, or again while the application is still draining, so an
+    /// application drains in a loop rather than assuming one event is one
+    /// path.
+    OpenRequested {
+        /// The window the targets are queued for.
+        window_id: u64,
+    },
 }
 
 impl WindowEvent {
@@ -2944,7 +3201,8 @@ impl WindowEvent {
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
             | Self::DesktopChanged { window_id, .. }
-            | Self::MenuClosed { window_id, .. } => Some(window_id),
+            | Self::MenuClosed { window_id, .. }
+            | Self::OpenRequested { window_id } => Some(window_id),
             Self::AppBarDefault | Self::AppBarMenu { .. } => None,
         }
     }
@@ -3020,6 +3278,9 @@ impl WindowEvent {
             }
             Self::RedrawRequested { .. } => {
                 put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
+            }
+            Self::OpenRequested { .. } => {
+                put_u16(&mut out, 6, EV_OPEN_REQUESTED);
             }
             Self::ContentReleased { .. } => {
                 put_u16(&mut out, 6, EV_CONTENT_RELEASED);
@@ -3226,6 +3487,7 @@ fn read_id_only_event(
         EV_MINIMIZED => WindowEvent::Minimized { window_id },
         EV_REDRAW_REQUESTED => WindowEvent::RedrawRequested { window_id },
         EV_CONTENT_RELEASED => WindowEvent::ContentReleased { window_id },
+        EV_OPEN_REQUESTED => WindowEvent::OpenRequested { window_id },
         _ => return None,
     };
     Some(event_reserved_zero(bytes, 16).map(|()| event))
@@ -3278,8 +3540,8 @@ mod tests {
         encode_create_reply, encode_desktop_reply, encode_minted_id_reply, open_menu_wire_len,
         put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuItem,
         AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow,
-        AppMenuRowView, AppMenuShortcut, MenuAnchor, MenuOutcome, MenuRefusal, PointerAction,
-        WindowEvent, WindowRequest, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
+        AppMenuRowView, AppMenuShortcut, MenuOutcome, MenuRefusal, PointerAction, TooltipText,
+        WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
         APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
         APP_BAR_TEXT_LEN_OFFSET, APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU,
         APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS,
@@ -3292,9 +3554,11 @@ mod tests {
         MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END, OPEN_MENU_ANCHOR_OFFSET,
         OPEN_MENU_MAX_WIRE_LEN, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
         OPEN_MENU_TITLE_LEN_OFFSET, PRESENT_WIRE_LEN, REQUEST_HEADER_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, WINDOW_BACKDROP_BLUR_MAX_PX,
-        WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC,
-        WINDOW_MAX_FRAMES, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN, WINDOW_DESKTOP_REPLY_LEN,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
+        WINDOW_MINTED_ID_REPLY_LEN, WINDOW_REQUEST_MAGIC, WINDOW_TITLE_MAX,
     };
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -3597,8 +3861,8 @@ mod tests {
 
     /// The anchor the open tests use: a region, so the placement rule has an
     /// extent to hang a plate clear of.
-    fn sample_anchor() -> MenuAnchor {
-        MenuAnchor::new(-8, 24, 96, 20).expect("a representable anchor")
+    fn sample_anchor() -> WindowRegion {
+        WindowRegion::new(-8, 24, 96, 20).expect("a representable anchor")
     }
 
     /// An open of `menu` for a window the caller owns, at [`sample_anchor`].
@@ -3655,6 +3919,22 @@ mod tests {
         visit(opening(&sample_titled_menu()));
         visit(opening(&one_of_each_bare_row()));
         visit(opening(&widest_open_menu()));
+        visit(WindowRequest::TakeOpenTarget { window_id: 9 });
+        visit(WindowRequest::SetTooltip {
+            window_id: 3,
+            region: sample_anchor(),
+            text: TooltipText::new("Copy").expect("a valid tip"),
+        });
+        visit(WindowRequest::SetTooltip {
+            window_id: 3,
+            region: WindowRegion::new(0, 0, 0, 0).expect("the point case"),
+            text: TooltipText::new("").expect("empty withdraws the tip"),
+        });
+        visit(WindowRequest::SetTooltip {
+            window_id: 3,
+            region: sample_anchor(),
+            text: TooltipText::new(&"t".repeat(TOOLTIP_TEXT_MAX)).expect("the widest tip"),
+        });
         visit(WindowRequest::QueryDesktop);
     }
 
@@ -3773,10 +4053,10 @@ mod tests {
     /// the placement arithmetic has no unrepresentable input.
     #[test]
     fn menu_anchors_admit_any_origin_and_refuse_an_unrepresentable_edge() {
-        let point = MenuAnchor::new(-4096, -1, 0, 0).expect("a point off the client origin");
+        let point = WindowRegion::new(-4096, -1, 0, 0).expect("a point off the client origin");
         assert_eq!((point.x(), point.y()), (-4096, -1));
         assert_eq!((point.width_px(), point.height_px()), (0, 0));
-        let region = MenuAnchor::new(i32::MIN, 0, u32::MAX, 0).expect("a region that fits");
+        let region = WindowRegion::new(i32::MIN, 0, u32::MAX, 0).expect("a region that fits");
         assert_eq!(region.width_px(), u32::MAX);
 
         for (x, y, width_px, height_px) in [
@@ -3786,7 +4066,7 @@ mod tests {
             (1, 1, 0, u32::MAX),
         ] {
             assert_eq!(
-                MenuAnchor::new(x, y, width_px, height_px).unwrap_err(),
+                WindowRegion::new(x, y, width_px, height_px).unwrap_err(),
                 Errno::LengthOutOfRange,
                 "an unrepresentable far edge must be refused: {x},{y} {width_px}x{height_px}"
             );
@@ -5227,6 +5507,134 @@ mod tests {
             assert_eq!(event.window_id(), None);
             assert_eq!(&bytes[8..16], &[0u8; 8]);
         }
+    }
+
+    #[test]
+    fn an_open_requested_event_names_the_window_the_targets_wait_for() {
+        let event = WindowEvent::OpenRequested { window_id: 4 };
+        let bytes = event.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+        assert_eq!(
+            event.window_id(),
+            Some(4),
+            "window-scoped, so it reaches an app that declared no icon-bar presence"
+        );
+        // It carries only the wake: the reserved tail must stay zero, so a
+        // path smuggled into it is refused rather than read.
+        assert_eq!(&bytes[16..], &[0u8; WindowEvent::WIRE_LEN - 16]);
+        let mut smuggled = bytes;
+        smuggled[16] = 1;
+        assert_eq!(
+            WindowEvent::from_bytes(&smuggled),
+            Err(Errno::BadMagic),
+            "the wake has no payload; a byte in its block is a malformed frame"
+        );
+    }
+
+    #[test]
+    fn taking_an_open_target_is_scoped_by_the_window_alone() {
+        let request = WindowRequest::TakeOpenTarget { window_id: 9 };
+        assert_eq!(request.wire_len(), WINDOW_ID_WIRE_LEN);
+        let frame = request.frame();
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(request));
+
+        // A zero window names nothing and is refused, never read as "any".
+        let mut zero = frame;
+        zero[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_tooltip_declaration_round_trips_and_empty_withdraws_it() {
+        let region = sample_anchor();
+        let stated = WindowRequest::SetTooltip {
+            window_id: 3,
+            region,
+            text: TooltipText::new("Copy the selection").expect("a valid tip"),
+        };
+        assert_eq!(stated.wire_len(), SET_TOOLTIP_WIRE_LEN);
+        assert_eq!(WindowRequest::from_bytes(&stated.frame()), Ok(stated));
+
+        let withdrawn = WindowRequest::SetTooltip {
+            window_id: 3,
+            region,
+            text: TooltipText::new("").expect("empty withdraws"),
+        };
+        assert_eq!(
+            WindowRequest::from_bytes(&withdrawn.frame()),
+            Ok(withdrawn),
+            "empty text is the withdrawal, not a malformed declaration"
+        );
+        assert_ne!(&*stated.frame(), &*withdrawn.frame());
+    }
+
+    #[test]
+    fn a_tooltip_frame_is_refused_when_it_is_not_exactly_its_own_length() {
+        let request = WindowRequest::SetTooltip {
+            window_id: 3,
+            region: sample_anchor(),
+            text: TooltipText::new("Copy").expect("a valid tip"),
+        };
+        let frame = request.frame();
+        assert_eq!(
+            WindowRequest::from_bytes(&frame.over_long(0)),
+            Err(Errno::BadMagic),
+            "a trailing byte is a field smuggled past the operation's end"
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&frame.truncated()),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn a_tooltip_refuses_a_control_character_and_an_over_long_length() {
+        assert_eq!(TooltipText::new("bad\u{7}"), Err(Errno::OutOfRange));
+        assert_eq!(TooltipText::new("line\nbreak"), Err(Errno::OutOfRange));
+        assert_eq!(
+            TooltipText::new(&"t".repeat(TOOLTIP_TEXT_MAX + 1)),
+            Err(Errno::LengthOutOfRange)
+        );
+
+        // And the decode re-checks: a length prefix past the field, and a
+        // control character inside a well-sized one, are both refused.
+        let base = WindowRequest::SetTooltip {
+            window_id: 3,
+            region: sample_anchor(),
+            text: TooltipText::new("ok").expect("a valid tip"),
+        }
+        .frame();
+        let mut long = base;
+        long[SET_TOOLTIP_LEN_OFFSET] = u8::try_from(TOOLTIP_TEXT_MAX).expect("fits") + 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&long),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut control = base;
+        control[SET_TOOLTIP_TEXT_OFFSET] = 0x07;
+        assert_eq!(WindowRequest::from_bytes(&control), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_tooltip_region_is_checked_at_its_far_edge_like_a_menu_anchor() {
+        // The one region type, so the far-edge rule is the anchor's rule.
+        assert!(WindowRegion::new(i32::MAX, 0, 1, 0).is_err());
+        let frame = WindowRequest::SetTooltip {
+            window_id: 3,
+            region: sample_anchor(),
+            text: TooltipText::new("ok").expect("a valid tip"),
+        }
+        .frame();
+        let mut overflowing = frame;
+        overflowing[SET_TOOLTIP_REGION_OFFSET..SET_TOOLTIP_REGION_OFFSET + 4]
+            .copy_from_slice(&i32::MAX.to_le_bytes());
+        overflowing[SET_TOOLTIP_REGION_OFFSET + 8..SET_TOOLTIP_REGION_OFFSET + 12]
+            .copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&overflowing),
+            Err(Errno::LengthOutOfRange),
+            "a region whose far edge is unrepresentable is refused at decode too"
+        );
     }
 
     #[test]

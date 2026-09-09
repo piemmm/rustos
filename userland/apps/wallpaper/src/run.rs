@@ -1009,6 +1009,9 @@ mod program {
                 | WindowEvent::RedrawRequested { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                // The chooser offers the shipped wallpapers, so it declares
+                // no file association and has no document to be handed one.
+                | WindowEvent::OpenRequested { .. }
                 | WindowEvent::DesktopChanged { .. } => ChooserAction::None,
                 // Nobody can see the window, so the session gave its copy of
                 // the pixels back and unmapped the region. Let go of this side

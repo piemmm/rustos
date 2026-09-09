@@ -66,8 +66,8 @@ use alloc::vec::Vec;
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
-    AppAssociation, ClickKind, DirectorySource, DoubleClickTracker, Entry, EntryKind, GridFill,
-    GridFlow, GridView, LinkTarget, Listing, SortDirection, SortKey, SortMode,
+    AppAssociation, DirectorySource, Entry, EntryKind, GridFill, GridFlow, GridView, LinkTarget,
+    Listing, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
@@ -77,7 +77,7 @@ use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{IconFlow, IconSort, PinboardSettings};
-use tairix_wm::{Key, NamedKey, PointerButton};
+use tairix_wm::{ClickKind, DoubleClickTracker, Key, NamedKey, PointerButton};
 
 use crate::library::catalogued;
 use crate::pinboard::PinboardCommand;
@@ -620,7 +620,12 @@ impl<S: DirectorySource> Desktop<S> {
         };
         self.selected = Some(index);
         Self::mark_cell(layout, self.selected, damage);
-        if self.clicks.register(now_ns, index, PointerButton::Primary) == ClickKind::Double {
+        let subject = u64::try_from(index).unwrap_or(u64::MAX);
+        if self
+            .clicks
+            .register(now_ns, subject, PointerButton::Primary)
+            == ClickKind::Double
+        {
             return self.activate(index, apps);
         }
         DesktopOutcome::ignored()

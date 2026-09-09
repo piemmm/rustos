@@ -1490,6 +1490,7 @@ You are not exempt from any rule above. In addition:
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
     | Compositor window decorations: server-side window furniture (title bar, frame, controls, resize grabber) | `plans/COMPOSITOR-WORK.md` |
     | Menus: who owns a menu's pixels and behaviour, the one-menu-at-a-time rule, the app's request/outcome contract | `plans/NEW-MENUS.md` |
+    | Tooltips: what an app declares (a window-local region and one line) versus what the seat owns (the dwell, the placement, the pixels, the lifetime), and the input-transparent overlay a plate is drawn in | `plans/TOOLTIPS.md` |
     | Display / GPU acceleration: hardware layer compositing, the `AcceleratedDisplay`/`AccelLayer` ABI, virtio-gpu, HVS, zero-copy layers, damage, vsync flips | `plans/FIX-DISPLAY-ACCELERATION.md` |
     | Desktop redraw speed without hardware acceleration: compositor occlusion/opaque runs, per-control damage, the frosted-backdrop cache, present batching, frame pacing, and CPU-dispatched raster kernels | `plans/FIX-DESKTOP-SPEEDUP.md` |
     | Civil time zones: the vendored IANA rules, the compiled zone store, the `lib/tz` engine, the `TZ`/machine-setting/UTC resolution order, and local rendering | `plans/TIMEZONES.md` |

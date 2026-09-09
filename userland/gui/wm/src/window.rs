@@ -25,6 +25,39 @@ use crate::viewport::RootViewport;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct WindowId(pub(crate) u64);
 
+/// How a window takes part in the seat: whether it is composited at all, and
+/// whether the pointer is caught by it or passes straight through.
+///
+/// The two are independent facts rather than a state machine — a
+/// non-interactive overlay is drawn *and* transparent to the pointer — and
+/// they travel together because every hit-test asks both.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Participation {
+    /// Whether the window participates in composition.
+    visible: bool,
+    /// Whether the pointer passes straight through it.
+    ///
+    /// A non-interactive overlay — a tooltip plate, a drag hint — is drawn
+    /// but must never *take* the pointer: it appears under it by
+    /// construction, so a window that became the pointer target the moment it
+    /// opened would fight the very hover it exists to explain.
+    input_transparent: bool,
+}
+
+impl Participation {
+    /// Composited, and catching the pointer: what a window is when it opens.
+    const DRAWN: Self = Self {
+        visible: true,
+        input_transparent: false,
+    };
+
+    /// Whether a pointer inside the window's bounds resolves to it: it must
+    /// be composited *and* not transparent to the pointer.
+    const fn catches_pointer(self) -> bool {
+        self.visible && !self.input_transparent
+    }
+}
+
 /// A window: a [`Surface`] placed at a screen [`Point`] with a
 /// per-window opacity, corner style, and pointer-cursor hint.
 ///
@@ -71,7 +104,7 @@ pub struct Window {
     /// once per frame while it rations backdrop retention.
     frosted: bool,
     corners: Corners,
-    visible: bool,
+    participation: Participation,
     cursor: CursorKind,
     viewport: Option<RootViewport>,
     frame: Option<WindowFrame>,
@@ -147,7 +180,7 @@ impl Window {
             blur_radius: 0,
             frosted: false,
             corners: Corners::Square,
-            visible: true,
+            participation: Participation::DRAWN,
             cursor: CursorKind::Arrow,
             viewport: None,
             frame: None,
@@ -266,7 +299,25 @@ impl Window {
     /// `true` if the window participates in composition.
     #[must_use]
     pub const fn is_visible(&self) -> bool {
-        self.visible
+        self.participation.visible
+    }
+
+    /// `true` if the pointer passes straight through this window: it is
+    /// composited, but never resolved to as a pointer target and never
+    /// shadows the window beneath it.
+    #[must_use]
+    pub const fn is_input_transparent(&self) -> bool {
+        self.participation.input_transparent
+    }
+
+    /// `true` if a pointer inside this window's bounds resolves to it.
+    ///
+    /// The one answer to that question, so the two hit-test paths — the
+    /// window under a point and the pointer target that also weighs resize
+    /// bands — cannot disagree about which windows are reachable.
+    #[must_use]
+    pub const fn catches_pointer(&self) -> bool {
+        self.participation.catches_pointer()
     }
 
     /// Whether the window is restored or maximized.
@@ -536,7 +587,7 @@ impl Window {
         y: i32,
         chrome: Option<&'a WindowChrome>,
     ) -> Option<WindowRow<'a>> {
-        if !self.visible {
+        if !self.participation.visible {
             return None;
         }
         let ly = u32::try_from(i64::from(y) - i64::from(self.origin.y)).ok()?;
@@ -802,10 +853,22 @@ impl Window {
 
     /// Show or hide the window, returning whether it actually changed.
     pub(crate) fn set_visible(&mut self, visible: bool) -> bool {
-        if visible == self.visible {
+        if visible == self.participation.visible {
             return false;
         }
-        self.visible = visible;
+        self.participation.visible = visible;
+        true
+    }
+
+    /// Make the pointer pass through — or stop passing through — this
+    /// window, returning whether it actually changed.
+    ///
+    /// Nothing about the window's *pixels* changes, so this marks no damage.
+    pub(crate) fn set_input_transparent(&mut self, transparent: bool) -> bool {
+        if transparent == self.participation.input_transparent {
+            return false;
+        }
+        self.participation.input_transparent = transparent;
         true
     }
 

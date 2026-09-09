@@ -569,6 +569,20 @@ one invariant:
   memory pressure, or whose app ignores the redraw request, reads as an empty
   window rather than a hole.
 
+## 2.x Input-transparent overlays (landed)
+
+`Compositor::set_input_transparent(id, bool)` marks a window the pointer
+passes straight through: it is composited exactly as before but is never
+resolved to by `pointer_target` or `window_at`, so it neither takes the
+pointer nor shadows the window beneath it. Its pixels do not change, so the
+change marks no damage.
+
+A non-interactive overlay is a real compositor concept, not a tooltip special
+case — it is what a tooltip plate, a drag hint, or a snap preview needs. A
+tooltip appears *under* the pointer by construction, so a plate that became
+the pointer target would fight the very hover it exists to explain
+(`plans/TOOLTIPS.md`).
+
 ## 3. Definition of done
 
 - Files — and every other windowed app — is drawn with a title bar

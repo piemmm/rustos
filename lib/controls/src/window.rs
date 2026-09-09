@@ -34,9 +34,10 @@ use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    authority_rgba, draw_outline, heavy_contrast, icon_slot_side, inset, key_activation,
-    paint_bead, paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
-    resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, PlateBleed, PlateStyle,
+    authority_rgba, draw_outline, ground_fill, heavy_contrast, icon_slot_side, inset,
+    key_activation, paint_bead, paint_flush_plate, paint_icon_slot, plate_border,
+    pointer_activation, resolve_bead, resolve_tinted_frame, role_font, surface_rect, to_i32,
+    withheld, ChromeLayer, PlateBleed, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
@@ -199,6 +200,27 @@ impl Glyph {
     }
 }
 
+/// Paint the desktop's minimise mark centred in the content rectangle
+/// `(x, y, w, h)`, in `color`.
+///
+/// The one definition of that mark: the title bar's minimise command draws it
+/// as its glyph, and a window preview draws it beside the caption of a window
+/// that *is* minimised. Two would drift.
+pub(crate) fn paint_minimise_mark(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    color: Color,
+    heavy: bool,
+) {
+    let (x, y, w, h) = rect;
+    let side = w.min(h);
+    if side == 0 {
+        return;
+    }
+    let origin = (x + (w - side) / 2, y + (h - side) / 2);
+    Glyph::new(origin, side, if heavy { 20 } else { 12 }).bar(surface, 20, 80, 62, color);
+}
+
 /// Paint the command glyph for `kind` centred in the content rectangle
 /// `(x, y, w, h)`, in `color`. A [`WindowControlKind::SizeToggle`] draws the
 /// glyph for the action it will perform *next* (`next` — maximize while
@@ -226,7 +248,7 @@ fn paint_command_glyph(
             glyph.diagonal(surface, (22, 22), (78, 78), color);
             glyph.diagonal(surface, (78, 22), (22, 78), color);
         }
-        WindowControlKind::Minimize => glyph.bar(surface, 20, 80, 62, color),
+        WindowControlKind::Minimize => paint_minimise_mark(surface, rect, color, heavy),
         WindowControlKind::SizeToggle => match next {
             SizeAction::Maximize => glyph.square(surface, (22, 22), (78, 78), color),
             SizeAction::Restore => {
@@ -1113,6 +1135,16 @@ impl TitleBar {
             .saturating_add(m.extent)
     }
 
+    /// Whether this band is a heading over the rows beneath it rather than a
+    /// window's furniture.
+    ///
+    /// Read off the seating rather than a field of its own, so a window bar
+    /// that reads as a heading — or a plate band that does not — is
+    /// unrepresentable.
+    const fn is_heading(&self) -> bool {
+        matches!(self.commands, TitleBarCommands::Empty)
+    }
+
     /// Which commands this band seats.
     #[must_use]
     pub const fn commands(&self) -> TitleBarCommands {
@@ -1293,8 +1325,18 @@ impl TitleBar {
         if withheld(surface, bounds) {
             return;
         }
-        // Window furniture is titling text, not interface body text.
-        let font = role_font(theme, scale, TextRole::WindowTitle);
+        let heading = self.is_heading();
+        // A window's furniture is titling text; a plate's band is the heading
+        // over the rows beneath it, so it takes the ladder's bold role.
+        let font = role_font(
+            theme,
+            scale,
+            if heading {
+                TextRole::SectionHeader
+            } else {
+                TextRole::WindowTitle
+            },
+        );
         let palette = theme.palette();
         let layout = self.layout(bounds, scale, theme);
 
@@ -1309,6 +1351,16 @@ impl TitleBar {
         } else {
             IDENTITY_SATURATION_INACTIVE
         };
+
+        // A heading band lays its own ground, one shade off the plate it caps,
+        // so a plate reads as a titled block rather than as a column of rows
+        // with an odd centred one on top.
+        if heading {
+            if let Some((bx, by, bw, bh)) = surface_rect(bounds) {
+                let fill = ground_fill(theme, palette.surface_hover, ChromeLayer::Ground);
+                surface.fill_rect(bx, by, bw, bh, Color::from(fill));
+            }
+        }
 
         // The band's own wash goes down first, so everything else — the icon,
         // the title, a lit command — reads on top of it rather than through it.

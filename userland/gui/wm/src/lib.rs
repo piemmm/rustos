@@ -90,7 +90,8 @@ pub use corner::Corners;
 pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{
-    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton, PointerFocus,
+    ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
+    NamedKey, PointerButton, PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
 };
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
 pub use stats::FrameStats;

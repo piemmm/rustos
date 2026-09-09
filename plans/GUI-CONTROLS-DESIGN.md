@@ -1004,7 +1004,7 @@ The title bar combines application identity, title text, a stable drag region, a
 - Everything in the band that is not a control drags the window — the identity slot and the title text included — so the drag region does not have to be reserved against the text.
 - Pressing an inactive title bar activates the window. Movement beyond the theme drag threshold begins a move and captures the pointer until release or cancel.
 - A title-bar drag follows the pointer without easing. Snap previews may appear as container-owned overlays without moving the pointer target.
-- A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required.
+- A double-click or equivalent gesture may invoke `SizeToggle` only when session policy enables it. The explicit size-toggle button remains required. **Implemented**: two primary presses on a window's title bar within `DOUBLE_CLICK_INTERVAL_NS` report `WindowControl { SizeToggle }` and start no move-grab; the pairing is the shared `tairix_input::DoubleClickTracker` keyed on the window id, and a press anywhere but a title bar in between breaks the pair.
 - The title bar exposes the application name and current window title to accessibility tools even when the visible title is truncated.
 - Window titles are untrusted application data: the window manager bounds their length, renders them as plain text, rejects or replaces control characters, and applies the text engine's directional-isolation rules rather than interpreting markup.
 - Attention state is shown with a bounded bead or rim segment, not a decorative loop.

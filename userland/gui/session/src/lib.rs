@@ -203,6 +203,7 @@ pub mod switchboard;
 pub mod switchuser;
 pub mod tasks;
 pub mod thumbs;
+pub mod tip;
 pub mod vigil;
 pub mod wallpaper;
 pub mod windows;
@@ -252,7 +253,8 @@ pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyboardInputSource};
 pub use launch::{
-    admitted_pid, launch_argv, launch_failure_report, reap_launched, LaunchTable, LaunchedApp,
+    admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch, Handover,
+    Launch, LaunchHost, LaunchTable, LaunchedApp,
 };
 pub use library::{catalogued, load_library, load_programs, LoadedLibrary, LoadedPrograms};
 pub use lock::{LockOutcome, LockedDrain, ScreenLock};
@@ -270,10 +272,10 @@ pub use settings::{
 };
 pub use shell::{DesktopShell, InputSource, ShellOutcome};
 pub use switchboard::{
-    deliver_pending_open, drop_is_noteworthy, ensure_switchboard, maybe_send_seat_report,
-    open_tray, relay_power, serve_switchboard_request, FrameContent, FrameReportGate,
-    OwnerBundleGate, OwnerWindow, PresentedOwners, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
+    deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,
+    serve_switchboard_request, FrameContent, FrameReportGate, OwnerBundleGate, OwnerWindow,
+    PresentedOwners, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,

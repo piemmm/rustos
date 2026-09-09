@@ -186,7 +186,8 @@ owns:
   states what the session attested through `SystemPermits`, so a row whose
   backing is missing is non-actionable with its reason rather than offered and
   then failing; the appearance already in use is its group's chosen member — a
-  bullet, disabled, with its reason. *Switch User…* is the one exception and is
+  bullet, disabled, and no reason beside it, since the mark already says it.
+  *Switch User…* is the one exception and is
   **absent** rather than refused: a desktop whose session authority never
   gave it a wake mailbox cannot be resumed, so there is no facility to
   explain the absence of (`set_switch_user_available`, `plans/NEW-DESKTOP-LOGIN.md`

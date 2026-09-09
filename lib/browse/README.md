@@ -173,20 +173,12 @@ can never diverge in navigation semantics, listing policy, or look.
   a name that cannot be spelled fails closed. The engine holds no launch or
   open authority of its own — it decides *what* and *what should happen*, never
   performs the spawn or the `fs_open` (so the read-only picker never launches).
-- **Double-click detection** (`click`, `DoubleClickTracker`,
-  `plans/NEW-FILEMANAGER.md` FM12): the one pure rule that turns a stream of
-  presses into single-click and double-click gestures, so a pointer
-  double-click on an item runs the very same `Activation` a keyboard `Enter`
-  does (§2.2). `register(now_ns, index, button)` pairs a press with the
-  previous one only when it lands on the *same* item with the *same* button
-  within `DOUBLE_CLICK_INTERVAL_NS` (half a second) — the two buttons mean
-  different gestures, so one press of each is two begun rather than one
-  completed; a completed double consumes both presses (a third quick press
-  starts a fresh single), a non-monotonic clock reading fails closed to a
-  single, and `reset` breaks the pair when an intervening chrome click
-  interrupts it. It holds no authority and does no I/O — the app supplies the
-  hit-test index, the button, and the capability-free monotonic clock and
-  performs the activation itself.
+- **Double-click detection is not here.** The pairing rule a pointer
+  double-click runs an `Activation` through (`plans/NEW-FILEMANAGER.md` FM12)
+  is `tairix_input`'s `DoubleClickTracker`, because its subjects are not only
+  this engine's rows — the window manager pairs presses on a window's title
+  bar with the same rule. A consumer imports it from `lib/input` and hands
+  this engine the item the second press resolved to.
 - **"Open With…" association** (`open_with`, `plans/NEW-FILEMANAGER.md` FM6b):
   the pure type→bundle model behind offering a file to a chosen application.
   A file's content type is the shared registry's (`media_for_name`), so the

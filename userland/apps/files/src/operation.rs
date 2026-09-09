@@ -83,9 +83,12 @@ pub fn operation_control(
         // is ignored while the panel is up rather than deferred. An icon-bar
         // click or any menu outcome names a gesture, and acting on it
         // would take the running operation somewhere the user cannot see, so
-        // it too waits for the panel to go. The rest is input that must not
-        // navigate behind the modal panel.
+        // it too waits for the panel to go. An open target waits too: the
+        // queue keeps it, so the drain happens when the panel is down rather
+        // than navigating the listing this operation is walking.
+        // The rest is input that must not navigate behind the modal panel.
         WindowEvent::AlternateCloseRequested { .. }
+        | WindowEvent::OpenRequested { .. }
         | WindowEvent::AppBarDefault
         | WindowEvent::AppBarMenu { .. }
         | WindowEvent::MenuClosed { .. }

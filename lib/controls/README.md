@@ -104,7 +104,11 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 
 - `menu` — `MenuItem` rows and the elevated `Menu` plate (icon column, shortcut
   or disabled-row reason, submenu chevron, destructive danger rail, §13 Signal
-  Bead; current-row highlight distinct from a keyboard focus ring). The `Menu`
+  Bead; current-row highlight distinct from a keyboard focus ring). An ordinary
+  row's highlight changes the *shade* of the ground it sits on — the same
+  `surface_hover` wash a list row takes, so the desktop has one highlight
+  vocabulary — while a destructive or recovery row keeps its solid hue, which
+  has to read as a warning whatever is behind the plate. The `Menu`
   owns Up/Down/Home/End/Right/Enter/Space/Escape and pointer hover/click, sizes
   itself (`preferred_width`/`preferred_height`), and emits a typed `MenuAction`.
   It also carries `plate_rect` — the one rule that places a plate against a
@@ -192,7 +196,8 @@ of it (a list row, a menu row, a scrollbar channel), so a resting row is exactly
 its ground rather than a patch on it; `Plate`, a step more solid, for a control
 raised on it (a button, a text field, a card), furniture on the glass rather
 than a hole cut in it. Only backgrounds pass through it — a semantic mark (a
-role fill, a menu's highlighted command, a pressure rail, a bead, a focus ring,
+role fill, a menu's *warning* or *danger* command, a pressure rail, a bead, a
+focus ring,
 a control's own Signal Rim) stays solid, because it must read against whatever
 wallpaper is behind it; a *surface's* rim is its edge rather than a mark on it,
 so it takes the surface's own weight and reads as the same glass a step lighter

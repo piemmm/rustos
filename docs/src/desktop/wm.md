@@ -448,6 +448,25 @@ actions, reporting each through `InputResponse`:
   window whose bounds contain a point, walking the z-order from the top
   down. Rounded corners are cosmetic and do not carve holes out of a
   window's input region (`AGENTS.md` §2.2).
+- **Input-transparent overlays** — a window marked
+  `Compositor::set_input_transparent` is composited exactly as before but is
+  never resolved to by `window_at` or `pointer_target`, so it neither takes
+  the pointer nor shadows the window beneath it. That is what a
+  *non-interactive* overlay is: a tooltip plate appears under the pointer by
+  construction, and one that became the target would fight the hover it
+  exists to explain (`plans/TOOLTIPS.md`). Its pixels do not change, so the
+  change marks no damage.
+- **Double-clicking a title bar toggles the window's size** — two primary
+  presses on the same window's title bar within
+  `DOUBLE_CLICK_INTERVAL_NS` report
+  `WindowControl { control: SizeToggle }` and start **no** move-grab, so the
+  window cannot drift under the gesture. The first press is the move gesture
+  it has always been, and a press anywhere but a title bar in between breaks
+  the pair. The pairing rule is the shared one every other surface uses
+  (`tairix_input`'s `DoubleClickTracker`, keyed on the window id), so a
+  title-bar double-click and a file-manager double-click cannot diverge. A
+  window that cannot be resized fails the size request closed, so the
+  gesture changes nothing there.
 - **Click-to-activate** — a primary-button press over a window raises it
   to the top of the z-order and gives it focus, returning
   `Activated { window, local }` with the press position in the window's

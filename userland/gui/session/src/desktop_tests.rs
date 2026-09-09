@@ -812,7 +812,7 @@ fn two_slow_clicks_are_two_clicks_not_an_activation() {
     let late = desktop.press(
         at,
         &layout,
-        tairix_browse::DOUBLE_CLICK_INTERVAL_NS + 1,
+        tairix_wm::DOUBLE_CLICK_INTERVAL_NS + 1,
         &[],
         &mut Region::new(),
     );

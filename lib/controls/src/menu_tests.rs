@@ -206,18 +206,99 @@ fn menu_paints_the_elevated_plate_and_rim() {
 // --- Current-row highlight ---------------------------------------------
 
 #[test]
-fn current_actionable_row_fills_with_the_accent() {
+fn current_neutral_row_shades_the_ground_rather_than_taking_the_accent() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let menu = three_item_menu().with_current(1);
+        let h = menu.preferred_height(Scale::ONE, &theme);
+        let surface = render(&menu, &theme, h);
+        let top = BORDER + ROW_H;
+        let band = ((BORDER + 2, W - BORDER - 2), (top + 2, top + ROW_H - 2));
+        assert!(
+            region_has(&surface, band.0, band.1, premul(palette.surface_hover)),
+            "an ordinary highlighted row takes the shared row-hover wash"
+        );
+        assert!(
+            !region_has(&surface, band.0, band.1, premul(palette.accent)),
+            "the highlight changes the ground's shade, never its hue"
+        );
+        assert_ne!(
+            premul(palette.surface_hover),
+            premul(palette.surface_raised),
+            "the wash has to differ from the resting plate ground to read at all"
+        );
+    }
+}
+
+#[test]
+fn current_warning_and_danger_rows_keep_their_hue() {
     let theme = Theme::dark();
+    let palette = theme.palette();
+    for (role, want) in [
+        (ControlRole::Destructive, palette.danger),
+        (ControlRole::Recovery, palette.recovery),
+    ] {
+        let menu = Menu::new(vec![
+            MenuItem::new("Ok"),
+            MenuItem::new("Act").with_role(role),
+        ])
+        .with_current(1);
+        let h = menu.preferred_height(Scale::ONE, &theme);
+        let surface = render(&menu, &theme, h);
+        let top = BORDER + ROW_H;
+        assert!(
+            region_has(
+                &surface,
+                (BORDER + 2, W - BORDER - 2),
+                (top + 2, top + ROW_H - 2),
+                premul(want),
+            ),
+            "a {role:?} row stays solid: it must read as a warning whatever is \
+             behind the plate"
+        );
+    }
+}
+
+#[test]
+fn shade_highlighted_row_keeps_the_plain_foreground() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
     let menu = three_item_menu().with_current(1);
     let h = menu.preferred_height(Scale::ONE, &theme);
     let surface = render(&menu, &theme, h);
     let top = BORDER + ROW_H;
-    assert!(region_has(
-        &surface,
-        (BORDER + 2, W - BORDER - 2),
-        (top + 2, top + ROW_H - 2),
-        premul(theme.palette().accent),
-    ));
+    let band = ((BORDER, W - BORDER), (top, top + ROW_H));
+    assert!(
+        region_has(&surface, band.0, band.1, premul(palette.on_surface)),
+        "the label reads on the plate's own foreground"
+    );
+    assert!(
+        !region_has(&surface, band.0, band.1, premul(palette.on_accent)),
+        "on_accent belongs to an emphasis fill, and this row has none"
+    );
+}
+
+#[test]
+fn current_destructive_row_reads_on_its_emphasis_fill() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let menu = Menu::new(vec![
+        MenuItem::new("Ok"),
+        MenuItem::new("Delete").with_role(ControlRole::Destructive),
+    ])
+    .with_current(1);
+    let h = menu.preferred_height(Scale::ONE, &theme);
+    let surface = render(&menu, &theme, h);
+    let top = BORDER + ROW_H;
+    assert!(
+        region_has(
+            &surface,
+            (BORDER, W - BORDER),
+            (top, top + ROW_H),
+            premul(palette.on_accent),
+        ),
+        "a solid emphasis fill carries the on-emphasis foreground"
+    );
 }
 
 #[test]

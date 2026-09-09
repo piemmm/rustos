@@ -16,6 +16,7 @@ use tairix_controls::damage::Repaint;
 use tairix_controls::{
     ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState, MenuItem,
     MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
+    WindowPreview,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -174,7 +175,10 @@ use crate::menu::{EntryRow, MenuRequest, MenuSubject};
 use crate::notifications::{
     IconId, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
-use crate::picker::{PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS};
+use crate::picker::{
+    has_picker, slot_has_picker, PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
+    PICKER_OPEN_DELAY_NS,
+};
 use crate::render::{icon_cache, IconEpoch, TaskbarRenderer};
 use crate::repaint::TaskbarRepaint;
 use crate::taskbar::{Taskbar, TaskbarConfig};
@@ -2407,8 +2411,9 @@ fn the_picker_refuses_fewer_cells_than_a_choice() {
     ]);
     let _ = bar.take_repaint();
 
-    // Fewer than PICKER_MIN_WINDOWS cells: a picker with nothing to choose
-    // is not a picker, so it is refused and nothing repaints.
+    // Fewer than PICKER_MIN_WINDOWS cells, none of them minimised: a picker
+    // with nothing to choose *and* nothing to recover is not a picker, so it
+    // is refused and nothing repaints.
     assert_eq!(PICKER_MIN_WINDOWS, 2);
     bar.show_window_picker(
         0,
@@ -2430,6 +2435,150 @@ fn the_picker_refuses_fewer_cells_than_a_choice() {
         Scale::ONE,
     );
     assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn a_lone_minimised_window_still_opens_a_picker() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.tasks_mut().minimise(TaskId(1));
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)])
+    ]);
+
+    // There is nothing to *choose*, but there is something to *recover*: a
+    // minimised sole window is hidden and the slot's own click cannot bring
+    // it back, so the picker is the only route to it.
+    bar.show_window_picker(
+        0,
+        alloc::vec![PickerEntry::new(TaskId(1), "Only").minimised(true)],
+        Scale::ONE,
+    );
+    assert!(bar.picker().is_open());
+}
+
+#[test]
+fn a_lone_visible_window_opens_no_picker() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)])
+    ]);
+
+    assert!(
+        !slot_has_picker(&bar, 0),
+        "one window that is already on screen has nothing to choose or recover"
+    );
+    bar.show_window_picker(
+        0,
+        alloc::vec![PickerEntry::new(TaskId(1), "Only")],
+        Scale::ONE,
+    );
+    assert!(!bar.picker().is_open());
+}
+
+#[test]
+fn one_predicate_answers_whether_a_slot_has_a_picker() {
+    // The rule itself, over every shape a slot can be in, so the four
+    // consults cannot disagree about any of them.
+    assert!(!has_picker(0, false), "no windows, nothing to show");
+    assert!(!has_picker(0, true), "no windows is no windows");
+    assert!(!has_picker(1, false), "one visible window needs no picker");
+    assert!(
+        has_picker(1, true),
+        "one minimised window must be recoverable"
+    );
+    assert!(has_picker(2, false), "two windows are a choice");
+    assert!(has_picker(2, true));
+}
+
+#[test]
+fn the_slot_predicate_reads_the_minimised_state_off_the_task_list() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1)])
+    ]);
+    assert!(!slot_has_picker(&bar, 0));
+
+    bar.tasks_mut().minimise(TaskId(1));
+    assert!(
+        slot_has_picker(&bar, 0),
+        "minimising the sole window is what gives the slot a picker"
+    );
+    assert!(
+        !slot_has_picker(&bar, 9),
+        "an index no slot exists at has no picker (fail closed)"
+    );
+}
+
+#[test]
+fn a_minimised_cell_states_it_and_a_visible_one_does_not() {
+    let minimised = PickerEntry::new(TaskId(1), "Hidden").minimised(true);
+    let visible = PickerEntry::new(TaskId(2), "Shown");
+    assert!(minimised.is_minimised());
+    assert!(!visible.is_minimised());
+
+    // And the cell's control carries the fact through to what it draws: the
+    // two previews are unequal, which is the picker's own repaint gate.
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Hidden");
+    bar.tasks_mut().add(TaskId(2), "Shown");
+    bar.set_apps(alloc::vec![
+        app("Editor").with_windows(alloc::vec![TaskId(1), TaskId(2)])
+    ]);
+    bar.show_window_picker(0, alloc::vec![minimised, visible], Scale::ONE);
+    let first = bar.picker().preview(0).expect("a first cell");
+    let second = bar.picker().preview(1).expect("a second cell");
+    assert!(first.is_minimised());
+    assert!(!second.is_minimised());
+    assert_ne!(
+        first, second,
+        "the minimised mark is a compared field, so a picker repaints for it"
+    );
+}
+
+#[test]
+fn a_minimised_cell_draws_the_desktops_own_minimise_mark() {
+    let theme = Theme::dark().floating();
+    let bounds = Rect::new(0, 0, 200, 140);
+    let render = |minimised: bool| {
+        let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+        WindowPreview::new("Report", IconKind::AppBundle)
+            .minimised(minimised)
+            .render(&mut surface, bounds, Scale::ONE, &theme, None, None);
+        surface
+    };
+    assert_ne!(
+        render(true).pixels(),
+        render(false).pixels(),
+        "a minimised cell must be distinguishable from a visible one"
+    );
+}
+
+#[test]
+fn a_picker_open_only_to_recover_closes_once_the_window_is_back() {
+    let mut bar = bottom_bar();
+    bar.tasks_mut().add(TaskId(1), "Only");
+    bar.tasks_mut().minimise(TaskId(1));
+    let slots = alloc::vec![app("Editor").with_windows(alloc::vec![TaskId(1)])];
+    bar.set_apps(slots.clone());
+    bar.show_window_picker(
+        0,
+        alloc::vec![PickerEntry::new(TaskId(1), "Only").minimised(true)],
+        Scale::ONE,
+    );
+    assert!(bar.picker().is_open());
+
+    // Restoring the window removes the only reason the picker existed, so the
+    // next time the session hands the bar its slots it goes.
+    bar.tasks_mut().set_focused(Some(TaskId(1)));
+    assert!(!bar.tasks().is_minimised(TaskId(1)));
+    bar.set_apps(slots);
+    assert!(
+        !bar.picker().is_open(),
+        "with nothing to choose and nothing left to recover the picker closes"
+    );
 }
 
 #[test]
@@ -7347,7 +7496,12 @@ fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable()
             !active.state().is_actionable(),
             "the appearance already in use cannot be chosen again ({appearance:?})"
         );
-        assert_eq!(active.reason(), Some("Already in use"));
+        assert_eq!(
+            active.reason(),
+            None,
+            "the radio mark says the appearance is in force; a reason beside it \
+             only repeats it ({appearance:?})"
+        );
 
         let inactive = offered_row(&request, inactive_row);
         assert!(

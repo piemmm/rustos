@@ -1398,8 +1398,17 @@ fn theme_corner_radius_shapes_windows() {
 // ---- input routing ---------------------------------------------------
 
 use crate::input::{
-    InputEvent, InputResponse, InputRouter, Key, Modifiers, NamedKey, PointerButton, PointerFocus,
+    ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
+    NamedKey, PointerButton, PointerFocus, DOUBLE_CLICK_INTERVAL_NS,
 };
+
+/// The clock reading an event is delivered at when its *time* is immaterial,
+/// which is every case below but the title-bar double-click.
+///
+/// Two title-bar presses at this one reading **do** pair, since no time
+/// passes between them: a test whose meaning depends on timing passes its own
+/// readings, and a new test that presses a title bar twice must too.
+const T0: u64 = 0;
 
 fn press_primary() -> InputEvent {
     InputEvent::PointerPressed {
@@ -1461,7 +1470,7 @@ fn press_activates_raises_and_focuses() {
     // over client content is delivered to that window (undecorated test
     // windows are all client) so its in-content controls can track the
     // pointer.
-    let r = router.handle(moved(5, 5), &mut c);
+    let r = router.handle(moved(5, 5), &mut c, T0);
     assert_eq!(
         r,
         InputResponse::ClientPointerMoved {
@@ -1469,7 +1478,7 @@ fn press_activates_raises_and_focuses() {
             local: Point::new(5, 5),
         }
     );
-    let r = router.handle(press_primary(), &mut c);
+    let r = router.handle(press_primary(), &mut c, T0);
     assert_eq!(
         r,
         InputResponse::Activated {
@@ -1496,9 +1505,9 @@ fn secondary_press_activates_and_delivers_to_the_client() {
     // the client as a secondary press — the event a client uses to open its
     // context menu (undecorated test windows have no furniture, so the client
     // area is the whole window).
-    router.handle(moved(5, 5), &mut c);
+    router.handle(moved(5, 5), &mut c, T0);
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::SecondaryActivated {
             window: bottom,
             local: Point::new(5, 5),
@@ -1518,9 +1527,9 @@ fn secondary_press_on_desktop_is_reported_to_the_desktop_and_changes_nothing() {
 
     // A right-click on the bare desktop is the desktop's own question to
     // answer: the window manager reports it and synthesises no menu itself.
-    router.handle(moved(30, 30), &mut c);
+    router.handle(moved(30, 30), &mut c, T0);
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::DesktopSecondaryPressed
     );
     // Unlike the primary press, it activates nothing: the focused window
@@ -1530,22 +1539,65 @@ fn secondary_press_on_desktop_is_reported_to_the_desktop_and_changes_nothing() {
 }
 
 #[test]
+fn an_input_transparent_window_never_takes_the_pointer() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let under = c.add_window(Point::new(10, 10), opaque(40, 40, RED));
+    let overlay = c.add_window(Point::new(15, 15), opaque(20, 20, GREEN));
+    let at = Point::new(20, 20);
+
+    // Stacked above, the overlay is the target — until it is made
+    // input-transparent, when the pointer passes straight through it.
+    assert_eq!(c.window_at(at), Some(overlay));
+    assert!(c.set_input_transparent(overlay, true));
+    assert_eq!(
+        c.window_at(at),
+        Some(under),
+        "a non-interactive overlay must not shadow the window beneath it"
+    );
+    assert_eq!(
+        c.pointer_target(at),
+        Some(PointerTarget::Window(under)),
+        "and it is never resolved to as a pointer target either"
+    );
+
+    // It is still composited: transparency to *input* says nothing about
+    // pixels.
+    assert!(c.window(overlay).expect("still tracked").is_visible());
+    assert!(c.set_input_transparent(overlay, false));
+    assert_eq!(c.window_at(at), Some(overlay), "and it is reversible");
+    assert!(
+        !c.set_input_transparent(WindowId(9_999), true),
+        "an unknown window is refused rather than silently accepted"
+    );
+
+    // A press therefore activates the window beneath, not the overlay — the
+    // press raises it, so this is checked last.
+    assert!(c.set_input_transparent(overlay, true));
+    let mut router = InputRouter::new();
+    router.handle(moved(at.x, at.y), &mut c, T0);
+    assert!(matches!(
+        router.handle(press_primary(), &mut c, T0),
+        InputResponse::Activated { window, .. } if window == under
+    ));
+}
+
+#[test]
 fn press_on_desktop_clears_focus() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let win = c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
-    router.handle(moved(5, 5), &mut c);
+    router.handle(moved(5, 5), &mut c, T0);
     assert!(matches!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::Activated { window, .. } if window == win
     ));
     assert_eq!(router.focused(), Some(win));
 
     // Click the background.
-    router.handle(moved(30, 30), &mut c);
+    router.handle(moved(30, 30), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::DesktopPressed
     );
     assert_eq!(router.focused(), None);
@@ -1587,7 +1639,7 @@ fn key_is_delivered_to_the_focused_window() {
     assert!(router.focus(win, &c));
 
     assert_eq!(
-        router.handle(key_pressed(Key::Char('k')), &mut c),
+        router.handle(key_pressed(Key::Char('k')), &mut c, T0),
         InputResponse::Key {
             window: win,
             key: Key::Char('k'),
@@ -1604,7 +1656,8 @@ fn key_is_delivered_to_the_focused_window() {
                     ..Modifiers::default()
                 },
             },
-            &mut c
+            &mut c,
+            T0
         ),
         InputResponse::Key {
             window: win,
@@ -1626,7 +1679,7 @@ fn key_without_focus_goes_to_the_desktop_not_to_a_window() {
 
     assert_eq!(router.focused(), None);
     assert_eq!(
-        router.handle(key_pressed(Key::Char('a')), &mut c),
+        router.handle(key_pressed(Key::Char('a')), &mut c, T0),
         InputResponse::DesktopKey {
             key: Key::Char('a'),
             modifiers: Modifiers::default(),
@@ -1644,7 +1697,7 @@ fn key_to_a_vanished_focus_falls_back_to_the_desktop_and_drops_focus() {
 
     assert!(c.remove(win), "the focused window is removed");
     assert_eq!(
-        router.handle(key_pressed(Key::Char('a')), &mut c),
+        router.handle(key_pressed(Key::Char('a')), &mut c, T0),
         InputResponse::DesktopKey {
             key: Key::Char('a'),
             modifiers: Modifiers::default(),
@@ -1667,12 +1720,13 @@ fn an_unhandled_button_does_not_change_focus() {
     c.add_window(Point::new(0, 0), opaque(10, 10, RED));
     let mut router = InputRouter::new();
 
-    router.handle(moved(5, 5), &mut c);
+    router.handle(moved(5, 5), &mut c, T0);
     let r = router.handle(
         InputEvent::PointerPressed {
             button: PointerButton::Middle,
         },
         &mut c,
+        T0,
     );
     assert_eq!(r, InputResponse::Ignored);
     assert_eq!(router.focused(), None);
@@ -1686,14 +1740,14 @@ fn move_grab_drags_focused_window() {
 
     // Activate, then begin a move-grab (as decorations would on a
     // title-bar press) and drag.
-    router.handle(moved(15, 12), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(15, 12), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert!(router.begin_move(&c));
     assert!(router.is_moving());
 
     // Pointer moves by (+20, +8); window tracks it, grab offset (5, 2)
     // preserved.
-    let r = router.handle(moved(35, 20), &mut c);
+    let r = router.handle(moved(35, 20), &mut c, T0);
     assert_eq!(
         r,
         InputResponse::Moved {
@@ -1708,12 +1762,12 @@ fn move_grab_drags_focused_window() {
 
     // Release ends the grab; further motion no longer moves the window.
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::MoveEnded { window: win }
     );
     assert!(!router.is_moving());
     assert_eq!(
-        router.handle(moved(60, 60), &mut c),
+        router.handle(moved(60, 60), &mut c, T0),
         InputResponse::DesktopPointerMoved
     );
     assert_eq!(
@@ -1738,13 +1792,13 @@ fn drag_ends_if_grabbed_window_removed() {
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
-    router.handle(moved(15, 15), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(15, 15), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert!(router.begin_move(&c));
 
     assert!(c.remove(win));
     assert_eq!(
-        router.handle(moved(40, 40), &mut c),
+        router.handle(moved(40, 40), &mut c, T0),
         InputResponse::MoveEnded { window: win }
     );
     assert!(!router.is_moving());
@@ -1759,7 +1813,7 @@ fn client_hover_moves_route_to_the_window_under_the_pointer() {
     // A hover over client content is delivered window-local so the client's
     // in-content controls (a scrollbar, a menu) can track the pointer.
     assert_eq!(
-        router.handle(moved(15, 12), &mut c),
+        router.handle(moved(15, 12), &mut c, T0),
         InputResponse::ClientPointerMoved {
             window: win,
             local: Point::new(5, 2),
@@ -1768,7 +1822,7 @@ fn client_hover_moves_route_to_the_window_under_the_pointer() {
     // A hover over the desktop belongs to no client — it belongs to the
     // desktop layer's owner, which is told rather than left guessing.
     assert_eq!(
-        router.handle(moved(50, 50), &mut c),
+        router.handle(moved(50, 50), &mut c, T0),
         InputResponse::DesktopPointerMoved
     );
 }
@@ -1781,9 +1835,9 @@ fn client_press_captures_the_pointer_until_release() {
 
     // Press on the client content: activates the window and takes the
     // implicit pointer grab.
-    router.handle(moved(15, 15), &mut c);
+    router.handle(moved(15, 15), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::Activated {
             window: win,
             local: Point::new(5, 5),
@@ -1795,14 +1849,14 @@ fn client_press_captures_the_pointer_until_release() {
     // is clamped into the client so the drag keeps tracking rather than
     // wrapping or jumping.
     assert_eq!(
-        router.handle(moved(25, 25), &mut c),
+        router.handle(moved(25, 25), &mut c, T0),
         InputResponse::ClientPointerMoved {
             window: win,
             local: Point::new(15, 15),
         }
     );
     assert_eq!(
-        router.handle(moved(100, 100), &mut c),
+        router.handle(moved(100, 100), &mut c, T0),
         InputResponse::ClientPointerMoved {
             window: win,
             local: Point::new(19, 19),
@@ -1812,14 +1866,14 @@ fn client_press_captures_the_pointer_until_release() {
     // The release completes the in-content click/drag on the grabbed window
     // and ends the grab; a later move is a plain hover again.
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::ClientPointerReleased {
             window: win,
             local: Point::new(19, 19),
         }
     );
     assert_eq!(
-        router.handle(moved(15, 15), &mut c),
+        router.handle(moved(15, 15), &mut c, T0),
         InputResponse::ClientPointerMoved {
             window: win,
             local: Point::new(5, 5),
@@ -1833,15 +1887,18 @@ fn client_grab_ends_if_grabbed_window_removed() {
     let win = c.add_window(Point::new(10, 10), opaque(20, 20, RED));
     let mut router = InputRouter::new();
 
-    router.handle(moved(15, 15), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(15, 15), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert!(c.remove(win));
     // With the grabbed window gone, the drag fails closed rather than naming
     // a window that no longer exists: neither the motion nor the release
     // names a recipient.
-    assert_eq!(router.handle(moved(20, 20), &mut c), InputResponse::Ignored);
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(moved(20, 20), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert_eq!(
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::Ignored
     );
 }
@@ -1851,7 +1908,7 @@ fn pointer_position_tracks_motion() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     assert_eq!(router.pointer(), Point::ORIGIN);
-    router.handle(moved(7, 9), &mut c);
+    router.handle(moved(7, 9), &mut c, T0);
     assert_eq!(router.pointer(), Point::new(7, 9));
 }
 
@@ -2065,14 +2122,14 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
     let mut router = InputRouter::new();
 
     // Over the desktop background: the plain arrow.
-    router.handle(moved(50, 50), &mut c);
+    router.handle(moved(50, 50), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Arrow
     );
 
     // Over a default window: still the arrow.
-    router.handle(moved(15, 15), &mut c);
+    router.handle(moved(15, 15), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Arrow
@@ -2086,7 +2143,7 @@ fn desired_cursor_reflects_the_window_under_the_pointer() {
     );
 
     // Moving back to the background returns to the arrow.
-    router.handle(moved(50, 50), &mut c);
+    router.handle(moved(50, 50), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Arrow
@@ -2103,14 +2160,14 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
     let mid_y = i32::midpoint(bounds.top(), bounds.bottom());
     let mut router = InputRouter::new();
 
-    router.handle(moved(bounds.left() - 1, mid_y), &mut c);
+    router.handle(moved(bounds.left() - 1, mid_y), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::ResizeHorizontal,
         "the band beside the edge shows the axis it moves along"
     );
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id },
         "and the press is the frame's, not the desktop's"
     );
@@ -2121,25 +2178,25 @@ fn the_overhang_announces_itself_and_a_press_there_resizes() {
     // Arming it against the window rectangle instead left every press out
     // here holding a grab that no motion could advance — a resize cursor
     // over an edge that could not be dragged.
-    let response = router.handle(moved(bounds.left() - 21, mid_y), &mut c);
+    let response = router.handle(moved(bounds.left() - 21, mid_y), &mut c, T0);
     assert!(matches!(response, InputResponse::Resized { window } if window == id));
     let widened = c.window(id).unwrap().bounds();
     assert_eq!(widened.left(), bounds.left() - 20);
     assert_eq!(widened.width, bounds.width + 20);
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::ResizeEnded { window: id }
     );
 
     // Clear of the band the desktop has it back.
     let mut router = InputRouter::new();
-    router.handle(moved(widened.left() - 64, mid_y), &mut c);
+    router.handle(moved(widened.left() - 64, mid_y), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Arrow
     );
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::DesktopPressed
     );
 }
@@ -2170,11 +2227,11 @@ fn each_band_s_outward_half_drags_and_cancels() {
         );
 
         let mut router = InputRouter::new();
-        router.handle(moved(at.x, at.y), &mut c);
-        router.handle(press_primary(), &mut c);
+        router.handle(moved(at.x, at.y), &mut c, T0);
+        router.handle(press_primary(), &mut c, T0);
         assert_eq!(router.resizing_edge(), Some(edge));
 
-        let response = router.handle(moved(at.x + delta.0, at.y + delta.1), &mut c);
+        let response = router.handle(moved(at.x + delta.0, at.y + delta.1), &mut c, T0);
         assert!(
             matches!(response, InputResponse::Resized { window } if window == id),
             "{edge:?}: a drag from the outward half resizes"
@@ -2188,7 +2245,7 @@ fn each_band_s_outward_half_drags_and_cancels() {
 
         // Escape reaches a gesture that really began, and restores exactly.
         assert_eq!(
-            router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c),
+            router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c, T0),
             InputResponse::ResizeEnded { window: id },
             "{edge:?}: Escape cancels"
         );
@@ -2220,8 +2277,8 @@ fn move_grab_outranks_the_window_hint() {
     let mut router = InputRouter::new();
     assert!(c.set_window_cursor(win, CursorKind::Text));
 
-    router.handle(moved(15, 15), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(15, 15), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert!(router.begin_move(&c));
 
     // While dragging, the move cursor wins over the window's text hint.
@@ -2231,7 +2288,7 @@ fn move_grab_outranks_the_window_hint() {
         CursorKind::Move
     );
 
-    router.handle(release_primary(), &mut c);
+    router.handle(release_primary(), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Text
@@ -2272,7 +2329,7 @@ fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
         // Clear of every edge the window's own hint is back in charge.
         (middle, CursorKind::Text),
     ] {
-        router.handle(moved(point.x, point.y), &mut c);
+        router.handle(moved(point.x, point.y), &mut c, T0);
         assert_eq!(
             desired_cursor(router.pointer(), &router, &c),
             expected,
@@ -2292,7 +2349,7 @@ fn an_undecorated_window_has_no_resize_edges_to_point_at() {
     let bounds = c.window(win).unwrap().bounds();
     let mut router = InputRouter::new();
 
-    router.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut c);
+    router.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::Text
@@ -2307,8 +2364,8 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
     let bounds = c.window(id).unwrap().bounds();
     let corner = Point::new(bounds.right() - 1, bounds.bottom() - 1);
 
-    router.handle(moved(corner.x, corner.y), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert_eq!(
         router.resizing_edge(),
         Some(ResizeEdge::BottomRight),
@@ -2321,13 +2378,13 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
 
     // Mid-drag the pointer is deep inside the window it is stretching, but the
     // gesture — not what lies under the pointer — owns the shape.
-    router.handle(moved(bounds.left() + 5, bounds.top() + 5), &mut c);
+    router.handle(moved(bounds.left() + 5, bounds.top() + 5), &mut c, T0);
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
         CursorKind::ResizeDiagonalFalling
     );
 
-    router.handle(release_primary(), &mut c);
+    router.handle(release_primary(), &mut c, T0);
     assert!(router.resizing_edge().is_none());
     assert_eq!(
         desired_cursor(router.pointer(), &router, &c),
@@ -2344,7 +2401,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
     let mut ctrl = CursorController::new(test_cursor_cache());
 
     // First refresh over the desktop installs the arrow.
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Arrow);
     assert!(c.cursor_bounds().is_some());
@@ -2353,7 +2410,7 @@ fn controller_installs_and_switches_the_cursor_shape() {
     assert!(!ctrl.refresh(router.pointer(), &router, &mut c));
 
     // Moving over the text window switches the shape.
-    router.handle(moved(20, 20), &mut c);
+    router.handle(moved(20, 20), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
 }
@@ -2367,15 +2424,15 @@ fn controller_reuses_a_cached_kind_when_it_recurs() {
     let mut ctrl = CursorController::new(test_cursor_cache());
 
     // Arrow over the background, then Text over the window.
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let arrow_bounds = c.cursor_bounds().expect("arrow shown");
-    router.handle(moved(20, 20), &mut c);
+    router.handle(moved(20, 20), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
 
     // Returning to the background re-shows the cached arrow unchanged: same
     // kind and same footprint as the first time it was rasterised.
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Arrow);
     assert_eq!(
@@ -2408,7 +2465,7 @@ fn controller_re_renders_on_scale_change() {
     // Show a cursor at 1:1, then raise the output scale: a refresh sees the
     // new density and re-rasterises, so the footprint enlarges even though
     // the chosen kind is unchanged.
-    router.handle(moved(10, 10), &mut c);
+    router.handle(moved(10, 10), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let small = c.cursor_bounds().expect("cursor shown");
     let bigger = Scale::from_percent(200).expect("valid scale");
@@ -2425,7 +2482,7 @@ fn controller_re_renders_on_registry_swap() {
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
-    router.handle(moved(10, 10), &mut c);
+    router.handle(moved(10, 10), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
 
     // A registry that selects an alternative set re-renders the cursor.
@@ -3014,17 +3071,17 @@ fn wheel_scrolls_the_viewport_under_the_pointer() {
     let mut router = InputRouter::new();
 
     // Pointer over the client: a wheel tick moves one line step per tick.
-    router.handle(moved(10, 10), &mut c);
+    router.handle(moved(10, 10), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(0, 3), &mut c),
+        router.handle(scrolled(0, 3), &mut c, T0),
         InputResponse::Scrolled { window: id }
     );
     assert_eq!(vertical_offset(&c, id), 30);
 
     // Pointer off the window: the wheel has no viewport to scroll.
-    router.handle(moved(150, 150), &mut c);
+    router.handle(moved(150, 150), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(0, 5), &mut c),
+        router.handle(scrolled(0, 5), &mut c, T0),
         InputResponse::Ignored
     );
     assert_eq!(vertical_offset(&c, id), 30);
@@ -3039,9 +3096,9 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
 
     // A wheel over it consumes no furniture; the ticks belong to the app,
     // reported verbatim (both axes, signed) for the session to forward.
-    router.handle(moved(10, 10), &mut c);
+    router.handle(moved(10, 10), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(-2, 3), &mut c),
+        router.handle(scrolled(-2, 3), &mut c, T0),
         InputResponse::AppScroll {
             window: id,
             dx: -2,
@@ -3050,9 +3107,9 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
     );
 
     // Off the window there is nothing to forward.
-    router.handle(moved(150, 150), &mut c);
+    router.handle(moved(150, 150), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(0, 5), &mut c),
+        router.handle(scrolled(0, 5), &mut c, T0),
         InputResponse::Ignored
     );
 }
@@ -3065,18 +3122,18 @@ fn furniture_press_is_not_delivered_to_the_client() {
 
     // A press in the reserved vertical gutter (x in [86, 100)) is furniture,
     // never an Activated delivered to the client.
-    router.handle(moved(93, 5), &mut c);
+    router.handle(moved(93, 5), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     // But the press still focused the window (it is the window's furniture).
     assert_eq!(router.focused(), Some(id));
 
     // A press in the client area is a normal activation.
-    router.handle(moved(10, 10), &mut c);
+    router.handle(moved(10, 10), &mut c, T0);
     assert!(matches!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::Activated { window, .. } if window == id
     ));
 }
@@ -3088,9 +3145,9 @@ fn thumb_drag_captures_tracks_and_releases() {
     let mut router = InputRouter::new();
 
     // Grab the thumb near its top (offset 0 → thumb starts at 0).
-    router.handle(moved(93, 5), &mut c);
+    router.handle(moved(93, 5), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     assert!(router.is_scrolling());
@@ -3099,16 +3156,19 @@ fn thumb_drag_captures_tracks_and_releases() {
 
     // Dragging down scrolls forward, tracking the pointer.
     assert_eq!(
-        router.handle(moved(93, 45), &mut c),
+        router.handle(moved(93, 45), &mut c, T0),
         InputResponse::Scrolled { window: id }
     );
     let dragged = vertical_offset(&c, id);
     assert!(dragged > 0, "drag moved the offset forward");
 
     // Release ends the capture; a later move no longer scrolls.
-    router.handle(release_primary(), &mut c);
+    router.handle(release_primary(), &mut c, T0);
     assert!(!router.is_scrolling());
-    assert_eq!(router.handle(moved(93, 80), &mut c), InputResponse::Ignored);
+    assert_eq!(
+        router.handle(moved(93, 80), &mut c, T0),
+        InputResponse::Ignored
+    );
     assert_eq!(vertical_offset(&c, id), dragged, "no scroll after release");
 }
 
@@ -3118,15 +3178,15 @@ fn content_shrinking_mid_drag_reclamps_the_offset() {
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
-    router.handle(moved(93, 5), &mut c);
-    router.handle(press_primary(), &mut c);
-    router.handle(moved(93, 45), &mut c);
+    router.handle(moved(93, 5), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(93, 45), &mut c, T0);
     assert!(vertical_offset(&c, id) > 100);
 
     // Content shrinks under the live drag: the viewport re-expresses its
     // range, and the next drag move produces a valid, clamped offset.
     c.scroll_root(id, |vp| vp.resize(ScrollOrientation::Vertical, 200, 100));
-    router.handle(moved(93, 90), &mut c);
+    router.handle(moved(93, 90), &mut c, T0);
     assert!(
         vertical_offset(&c, id) <= 100,
         "offset stays within the new 200-100 range"
@@ -3141,9 +3201,9 @@ fn track_press_below_the_thumb_pages_forward() {
 
     // The thumb sits at the top (offset 0); a press well below it is the
     // after-thumb region and pages one page (100) forward.
-    router.handle(moved(93, 80), &mut c);
+    router.handle(moved(93, 80), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     assert!(!router.is_scrolling(), "a track press does not capture");
@@ -3907,15 +3967,15 @@ fn a_title_bar_drag_moves_the_window() {
     let start = c.window(id).unwrap().origin();
     let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
 
-    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     assert!(router.is_moving(), "a title-bar press begins a move-grab");
 
     // Motion drags the window's outer origin; the press is never the client's.
-    let response = router.handle(moved(drag.x + 15, drag.y + 10), &mut c);
+    let response = router.handle(moved(drag.x + 15, drag.y + 10), &mut c, T0);
     assert!(matches!(response, InputResponse::Moved { window, .. } if window == id));
     assert_eq!(
         c.window(id).unwrap().origin(),
@@ -3923,10 +3983,165 @@ fn a_title_bar_drag_moves_the_window() {
     );
 
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::MoveEnded { window: id }
     );
     assert!(!router.is_moving());
+}
+
+// ---- double-clicking a title bar toggles the window's size --------------
+
+/// One whole click of the primary button at `at`, delivered at the clock
+/// reading `at_ns`, returning the *press*'s response — which is where a
+/// completed pair is decided.
+fn click_at(router: &mut InputRouter, c: &mut Compositor, at: Point, at_ns: u64) -> InputResponse {
+    router.handle(moved(at.x, at.y), c, at_ns);
+    let response = router.handle(press_primary(), c, at_ns);
+    router.handle(release_primary(), c, at_ns);
+    response
+}
+
+fn title_point(c: &Compositor, id: WindowId) -> Point {
+    scan_title(c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("a title-bar point")
+}
+
+#[test]
+fn two_quick_presses_on_a_title_bar_ask_to_toggle_the_size() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 1_000),
+        InputResponse::FurniturePressed { window: id },
+        "the first press is the move gesture it has always been"
+    );
+    assert_eq!(
+        click_at(
+            &mut router,
+            &mut c,
+            bar,
+            1_000 + DOUBLE_CLICK_INTERVAL_NS / 2
+        ),
+        InputResponse::WindowControl {
+            window: id,
+            control: WindowControlKind::SizeToggle,
+        },
+        "the second asks for the size toggle instead"
+    );
+    assert!(
+        !router.is_moving(),
+        "the toggle starts no move-grab, so the window cannot drift under it"
+    );
+}
+
+#[test]
+fn two_slow_presses_on_a_title_bar_are_two_separate_moves() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 0),
+        InputResponse::FurniturePressed { window: id }
+    );
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, DOUBLE_CLICK_INTERVAL_NS + 1),
+        InputResponse::FurniturePressed { window: id },
+        "past the window the second press is a fresh gesture"
+    );
+}
+
+#[test]
+fn presses_on_two_windows_title_bars_never_pair() {
+    let mut c = new_compositor(mode(320, 400), BLUE).expect("compositor");
+    let first = c.add_window(Point::new(20, 20), opaque(240, 100, RED));
+    assert!(c.set_window_frame(first, WindowFrame::new(decorated())));
+    let second = c.add_window(Point::new(20, 220), opaque(240, 100, GREEN));
+    assert!(c.set_window_frame(second, WindowFrame::new(decorated())));
+    let mut router = InputRouter::new();
+
+    let one = title_point(&c, first);
+    let two = title_point(&c, second);
+    assert_eq!(
+        click_at(&mut router, &mut c, one, 0),
+        InputResponse::FurniturePressed { window: first }
+    );
+    assert_eq!(
+        click_at(&mut router, &mut c, two, 1),
+        InputResponse::FurniturePressed { window: second },
+        "a press on another window's bar is a different subject, never a pair"
+    );
+}
+
+#[test]
+fn a_press_that_is_not_on_a_title_bar_breaks_a_pending_pair() {
+    let (mut c, id) = decorated_compositor();
+    let client = centre(c.window_client_rect(id).unwrap());
+    let control =
+        scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
+    let bounds = c.window(id).unwrap().bounds();
+    let edge = Point::new(bounds.left(), i32::midpoint(bounds.top(), bounds.bottom()));
+
+    // Each intervening press lands somewhere that is *not* a title bar, so a
+    // click through it and back onto the bar is never one gesture.
+    for (name, between) in [("client", client), ("control", control), ("edge", edge)] {
+        let mut router = InputRouter::new();
+        let bar = title_point(&c, id);
+        assert_eq!(
+            click_at(&mut router, &mut c, bar, 0),
+            InputResponse::FurniturePressed { window: id }
+        );
+        click_at(&mut router, &mut c, between, 1);
+        assert_eq!(
+            click_at(&mut router, &mut c, bar, 2),
+            InputResponse::FurniturePressed { window: id },
+            "a press on the {name} in between must break the pair"
+        );
+    }
+}
+
+#[test]
+fn a_double_click_on_a_window_that_cannot_maximize_changes_nothing() {
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    let fixed = WindowFurnitureState {
+        resizable: false,
+        ..decorated()
+    };
+    assert!(c.set_window_frame(id, WindowFrame::new(fixed)));
+    let mut router = InputRouter::new();
+    let bar = title_point(&c, id);
+    let before = c.window(id).unwrap().bounds();
+
+    click_at(&mut router, &mut c, bar, 0);
+    assert_eq!(
+        click_at(&mut router, &mut c, bar, 1),
+        InputResponse::WindowControl {
+            window: id,
+            control: WindowControlKind::SizeToggle,
+        },
+        "the gesture is the router's to report either way"
+    );
+    // ...and the size request itself fails closed on a window that cannot be
+    // resized, so nothing on screen moved.
+    assert_eq!(c.toggle_window_size(id, c.screen_rect()), None);
+    assert_eq!(c.window(id).unwrap().bounds(), before);
+}
+
+#[test]
+fn a_title_bar_double_click_keys_on_the_whole_window_id() {
+    // The router keys the pair on the window id, which the shared rule
+    // compares as a whole `u64`; two ids are two subjects.
+    let mut tracker = DoubleClickTracker::new();
+    assert_eq!(
+        tracker.register(0, WindowId(1).0, PointerButton::Primary),
+        ClickKind::Single
+    );
+    assert_eq!(
+        tracker.register(1, WindowId(1).0, PointerButton::Primary),
+        ClickKind::Double
+    );
 }
 
 fn release_secondary() -> InputEvent {
@@ -3944,9 +4159,9 @@ fn a_secondary_title_bar_drag_moves_the_window_without_restacking_it() {
 
     let drag = scan_title(&c, lower, |p| matches!(p, FurniturePart::TitleBar)).expect("drag");
     let origin = c.window(lower).map(super::window::Window::origin);
-    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::FurniturePressed { window: lower }
     );
     // The gesture drags and focuses, but `upper` is still the top of the
@@ -3955,7 +4170,7 @@ fn a_secondary_title_bar_drag_moves_the_window_without_restacking_it() {
     assert_eq!(router.focused(), Some(lower));
     assert_eq!(c.window_at(Point::new(150, 150)), Some(upper));
 
-    let moved_to = router.handle(moved(drag.x + 12, drag.y + 7), &mut c);
+    let moved_to = router.handle(moved(drag.x + 12, drag.y + 7), &mut c, T0);
     assert_eq!(
         moved_to,
         InputResponse::Moved {
@@ -3968,12 +4183,12 @@ fn a_secondary_title_bar_drag_moves_the_window_without_restacking_it() {
     );
     // A primary release belongs to no gesture here and must not end this one.
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::Ignored
     );
     assert!(router.is_moving());
     assert_eq!(
-        router.handle(release_secondary(), &mut c),
+        router.handle(release_secondary(), &mut c, T0),
         InputResponse::MoveEnded { window: lower }
     );
     assert!(!router.is_moving());
@@ -3992,24 +4207,24 @@ fn a_secondary_press_off_the_title_bar_still_raises() {
     // A right-click on client content opens a context menu, which is a normal
     // activation: only the title-bar drag opts out of the raise.
     let client = c.window_client_rect(upper).expect("client");
-    router.handle(moved(centre(client).x, centre(client).y), &mut c);
-    router.handle(press_secondary(), &mut c);
+    router.handle(moved(centre(client).x, centre(client).y), &mut c, T0);
+    router.handle(press_secondary(), &mut c, T0);
     assert!(!router.is_moving());
     assert_eq!(c.window_at(centre(client)), Some(upper));
 
     let drag = scan_title(&c, lower, |p| matches!(p, FurniturePart::TitleBar)).expect("drag");
-    router.handle(moved(drag.x, drag.y), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
     assert!(router.is_moving());
     // A secondary press arriving mid-drag changes nothing: the gesture holds
     // the pointer until the button that started it comes up.
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::Ignored
     );
     assert!(router.is_moving());
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::MoveEnded { window: lower }
     );
 }
@@ -4027,7 +4242,11 @@ fn the_router_holds_the_seats_modifiers_from_every_edge() {
     // A bare modifier edge is the only report of a held modifier: no key
     // reaches a surface for it, and nothing on screen changes.
     assert_eq!(
-        router.handle(InputEvent::ModifiersChanged { modifiers: shift }, &mut c),
+        router.handle(
+            InputEvent::ModifiersChanged { modifiers: shift },
+            &mut c,
+            T0
+        ),
         InputResponse::Ignored
     );
     assert_eq!(router.modifiers(), shift);
@@ -4043,6 +4262,7 @@ fn the_router_holds_the_seats_modifiers_from_every_edge() {
             modifiers: ctrl,
         },
         &mut c,
+        T0,
     );
     assert_eq!(router.modifiers(), ctrl);
     router.handle(
@@ -4050,6 +4270,7 @@ fn the_router_holds_the_seats_modifiers_from_every_edge() {
             modifiers: Modifiers::default(),
         },
         &mut c,
+        T0,
     );
     assert_eq!(router.modifiers(), Modifiers::default());
 }
@@ -4062,8 +4283,8 @@ fn a_title_bar_drag_keeps_a_grabbable_patch_of_the_bar_on_screen() {
     let screen = c.screen_rect();
     let mut router = InputRouter::new();
     let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
-    router.handle(moved(drag.x, drag.y), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
 
     // The last pair is a pointer sample at the far end of the coordinate
     // space: the clamp must saturate rather than overflow into a window
@@ -4075,7 +4296,7 @@ fn a_title_bar_drag_keeps_a_grabbable_patch_of_the_bar_on_screen() {
         (0, 4000),
         (i32::MIN / 2, i32::MAX / 2),
     ] {
-        router.handle(moved(drag.x + dx, drag.y + dy), &mut c);
+        router.handle(moved(drag.x + dx, drag.y + dy), &mut c, T0);
         let surface = c.window_drag_surface(id).expect("decorated");
         assert!(
             surface.top() >= screen.top() && surface.bottom() <= screen.bottom(),
@@ -4111,9 +4332,9 @@ fn a_title_bar_drag_still_hangs_the_window_off_an_edge() {
     let (mut c, id) = decorated_compositor();
     let mut router = InputRouter::new();
     let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("drag region");
-    router.handle(moved(drag.x, drag.y), &mut c);
-    router.handle(press_primary(), &mut c);
-    router.handle(moved(drag.x - 60, drag.y), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(drag.x - 60, drag.y), &mut c, T0);
 
     let bounds = c.window(id).expect("window").bounds();
     assert!(
@@ -4136,7 +4357,7 @@ fn a_pointer_that_left_puts_out_a_command_it_never_moved_off() {
     let mut router = InputRouter::new();
     let close = command_rect(&c, id, WindowControlKind::Close);
     let over = inside(close);
-    router.handle(moved(over.x, over.y), &mut c);
+    router.handle(moved(over.x, over.y), &mut c, T0);
     assert_eq!(composite_checked(&mut c).rects(), [close]);
 
     // The pointer has not moved: it is still inside the Close command.
@@ -4187,7 +4408,7 @@ fn hovering_a_window_command_lights_it_and_leaving_puts_it_out() {
     let close = command_rect(&c, id, WindowControlKind::Close);
     let over = inside(close);
     assert_eq!(
-        router.handle(moved(over.x, over.y), &mut c),
+        router.handle(moved(over.x, over.y), &mut c, T0),
         InputResponse::Ignored,
         "a hover over furniture is no client's"
     );
@@ -4200,7 +4421,7 @@ fn hovering_a_window_command_lights_it_and_leaving_puts_it_out() {
     // Moving along the bar puts it out again, and costs only that control.
     let drag = title_layout(&c, id).drag;
     let away = Point::new(drag.left() + 1, i32::midpoint(drag.top(), drag.bottom()));
-    router.handle(moved(away.x, away.y), &mut c);
+    router.handle(moved(away.x, away.y), &mut c, T0);
     assert_eq!(
         composite_checked(&mut c).rects(),
         [close],
@@ -4208,7 +4429,7 @@ fn hovering_a_window_command_lights_it_and_leaving_puts_it_out() {
     );
 
     // And a sample that stays on the drag region costs nothing at all.
-    router.handle(moved(away.x + 1, away.y), &mut c);
+    router.handle(moved(away.x + 1, away.y), &mut c, T0);
     assert!(!c.has_damage());
     assert!(c.chrome_resident(id));
 }
@@ -4223,12 +4444,12 @@ fn a_hover_leaving_a_window_for_another_puts_the_first_one_out() {
 
     let lit = command_rect(&c, first, WindowControlKind::Close);
     let over = inside(lit);
-    router.handle(moved(over.x, over.y), &mut c);
+    router.handle(moved(over.x, over.y), &mut c, T0);
     composite_checked(&mut c);
 
     let next = command_rect(&c, second, WindowControlKind::Close);
     let onto = inside(next);
-    router.handle(moved(onto.x, onto.y), &mut c);
+    router.handle(moved(onto.x, onto.y), &mut c, T0);
     let region = composite_checked(&mut c);
     assert!(
         region.rects().contains(&lit) && region.rects().contains(&next),
@@ -4243,9 +4464,9 @@ fn a_resize_grab_resizes_the_window_from_the_corner() {
     let before = c.window(id).unwrap().bounds();
     let corner = Point::new(before.right() - 1, before.bottom() - 1);
 
-    router.handle(moved(corner.x, corner.y), &mut c);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     assert!(
@@ -4254,14 +4475,14 @@ fn a_resize_grab_resizes_the_window_from_the_corner() {
     );
 
     // Dragging out grows the window's outer bounds by the pointer delta.
-    let response = router.handle(moved(corner.x + 40, corner.y + 30), &mut c);
+    let response = router.handle(moved(corner.x + 40, corner.y + 30), &mut c, T0);
     assert!(matches!(response, InputResponse::Resized { window } if window == id));
     let grown = c.window(id).unwrap().bounds();
     assert_eq!(grown.width, before.width + 40);
     assert_eq!(grown.height, before.height + 30);
 
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::ResizeEnded { window: id }
     );
     assert!(router.resizing_edge().is_none());
@@ -4275,11 +4496,11 @@ fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
     let floor = c.window_min_outer_size(id).expect("decorated");
     let corner = Point::new(before.right() - 1, before.bottom() - 1);
 
-    router.handle(moved(corner.x, corner.y), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
 
     // Dragging far past the top-left cannot shrink the window below the floor.
-    router.handle(moved(before.left(), before.top()), &mut c);
+    router.handle(moved(before.left(), before.top()), &mut c, T0);
     let shrunk = c.window(id).unwrap().bounds();
     assert!(shrunk.width < before.width && shrunk.height < before.height);
     assert_eq!((shrunk.width, shrunk.height), floor);
@@ -4302,7 +4523,7 @@ fn a_resize_grab_clamps_where_the_title_bar_still_works_and_escape_restores() {
 
     // Escape cancels the gesture and restores the exact pre-drag geometry.
     assert_eq!(
-        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c),
+        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c, T0),
         InputResponse::ResizeEnded { window: id }
     );
     assert_eq!(c.window(id).unwrap().bounds(), before);
@@ -4327,9 +4548,9 @@ fn an_application_s_declared_minimum_raises_the_resize_floor() {
     let mut router = InputRouter::new();
     let before = c.window(id).unwrap().bounds();
     let corner = Point::new(before.right() - 1, before.bottom() - 1);
-    router.handle(moved(corner.x, corner.y), &mut c);
-    router.handle(press_primary(), &mut c);
-    router.handle(moved(before.left(), before.top()), &mut c);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(moved(before.left(), before.top()), &mut c, T0);
 
     let shrunk = c.window(id).unwrap().bounds();
     assert_eq!((shrunk.width, shrunk.height), raised);
@@ -4370,12 +4591,12 @@ fn a_resize_grab_leaves_the_clients_own_pixels_alone() {
     let mut router = InputRouter::new();
     let outer = c.window(id).expect("window").bounds();
     let corner = Point::new(outer.right() - 1, outer.bottom() - 1);
-    router.handle(moved(corner.x, corner.y), &mut c);
-    router.handle(press_primary(), &mut c);
+    router.handle(moved(corner.x, corner.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
 
     // Shrunk well inside the client, then grown past it again.
     for delta in [-40, -80, 20] {
-        router.handle(moved(corner.x + delta, corner.y + delta), &mut c);
+        router.handle(moved(corner.x + delta, corner.y + delta), &mut c, T0);
         let window = c.window(id).expect("window");
         assert_ne!(
             window.client_size(),
@@ -4394,7 +4615,7 @@ fn a_resize_grab_leaves_the_clients_own_pixels_alone() {
         );
     }
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::ResizeEnded { window: id },
         "the drag settles, which is when the client is told its new size"
     );
@@ -4561,15 +4782,15 @@ fn a_command_control_click_emits_its_typed_action() {
         other => panic!("expected a control, found {other:?}"),
     };
 
-    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(moved(control.x, control.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
     // Releasing over the same control completes the click (a click activates on
     // release), emitting the typed command — never delivered to the client.
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::WindowControl {
             window: id,
             control: kind,
@@ -4589,9 +4810,9 @@ fn a_secondary_press_on_a_command_control_reports_the_alternate_gesture() {
     };
     let bounds = c.window(id).expect("window").bounds();
 
-    router.handle(moved(control.x, control.y), &mut c);
+    router.handle(moved(control.x, control.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::WindowControlAlternate {
             window: id,
             control: kind,
@@ -4606,9 +4827,9 @@ fn a_secondary_press_on_a_command_control_reports_the_alternate_gesture() {
         WindowSizeState::Restored
     );
     // A following primary click on the same control still means the command.
-    router.handle(press_primary(), &mut c);
+    router.handle(press_primary(), &mut c, T0);
     assert_eq!(
-        router.handle(release_primary(), &mut c),
+        router.handle(release_primary(), &mut c, T0),
         InputResponse::WindowControl {
             window: id,
             control: kind,
@@ -4622,9 +4843,9 @@ fn a_secondary_press_elsewhere_on_the_frame_is_still_consumed() {
     let mut router = InputRouter::new();
     let drag = scan_title(&c, id, |p| matches!(p, FurniturePart::TitleBar)).expect("a title band");
 
-    router.handle(moved(drag.x, drag.y), &mut c);
+    router.handle(moved(drag.x, drag.y), &mut c, T0);
     assert_eq!(
-        router.handle(press_secondary(), &mut c),
+        router.handle(press_secondary(), &mut c, T0),
         InputResponse::FurniturePressed { window: id }
     );
 }
@@ -4637,18 +4858,18 @@ fn the_keyboard_reaches_the_command_controls() {
         scan_title(&c, id, |p| matches!(p, FurniturePart::WindowControl(_))).expect("a control");
 
     // A control press hands the frame furniture the keyboard.
-    router.handle(moved(control.x, control.y), &mut c);
-    router.handle(press_primary(), &mut c);
-    router.handle(release_primary(), &mut c);
+    router.handle(moved(control.x, control.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(release_primary(), &mut c, T0);
 
     // The arrow keys move focus between the controls and Enter activates the
     // focused one, so the group is fully usable without a pointer.
     assert_eq!(
-        router.handle(key_pressed(Key::Named(NamedKey::Right)), &mut c),
+        router.handle(key_pressed(Key::Named(NamedKey::Right)), &mut c, T0),
         InputResponse::Ignored,
         "the arrow moves furniture focus and is consumed, not sent to the client"
     );
-    let response = router.handle(key_pressed(Key::Named(NamedKey::Enter)), &mut c);
+    let response = router.handle(key_pressed(Key::Named(NamedKey::Enter)), &mut c, T0);
     assert!(matches!(
         response,
         InputResponse::WindowControl { window, .. } if window == id
@@ -4664,18 +4885,18 @@ fn a_client_press_returns_the_keyboard_to_the_client() {
     let client_point = centre(c.window_client_rect(id).unwrap());
 
     // Take furniture keyboard focus via a control, then press the client.
-    router.handle(moved(control.x, control.y), &mut c);
-    router.handle(press_primary(), &mut c);
-    router.handle(release_primary(), &mut c);
-    router.handle(moved(client_point.x, client_point.y), &mut c);
+    router.handle(moved(control.x, control.y), &mut c, T0);
+    router.handle(press_primary(), &mut c, T0);
+    router.handle(release_primary(), &mut c, T0);
+    router.handle(moved(client_point.x, client_point.y), &mut c, T0);
     assert!(matches!(
-        router.handle(press_primary(), &mut c),
+        router.handle(press_primary(), &mut c, T0),
         InputResponse::Activated { window, .. } if window == id
     ));
 
     // Keys now reach the client again — the furniture released the keyboard.
     assert!(matches!(
-        router.handle(key_pressed(Key::Char('x')), &mut c),
+        router.handle(key_pressed(Key::Char('x')), &mut c, T0),
         InputResponse::Key { window, .. } if window == id
     ));
 }
@@ -5124,15 +5345,15 @@ fn a_re_shown_cursor_kind_is_rasterised_once_per_epoch() {
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     let after_first = ctrl.cache_stats().misses();
 
     // Moving onto the window and back re-shows the arrow: the second
     // showing must come from the cache, not a fresh rasterisation.
-    router.handle(moved(20, 20), &mut c);
+    router.handle(moved(20, 20), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(
         ctrl.cache_stats().misses(),
@@ -5148,7 +5369,7 @@ fn a_scale_change_invalidates_every_cached_cursor() {
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
 
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
 
@@ -5180,7 +5401,7 @@ fn no_band_drops_the_cursor_cache_below_its_reserve() {
         &TEST_SINK,
     ));
 
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
     assert!(ctrl.cache_bytes() > 0);
@@ -5204,7 +5425,7 @@ fn no_band_drops_the_cursor_cache_below_its_reserve() {
 
     // A different shape is still drawn correctly, and still retained: the
     // reserve is fillable, not merely keepable.
-    router.handle(moved(20, 20), &mut c);
+    router.handle(moved(20, 20), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
     assert!(c.cursor_bounds().is_some());
@@ -5230,7 +5451,7 @@ fn the_cursor_cache_budget_follows_the_output_it_was_built_for() {
     ));
     NORMAL_PRESSURE.report(PressureBand::Normal);
 
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(
         ctrl.refresh(router.pointer(), &router, &mut c),
         "the cursor is still drawn"
@@ -5249,7 +5470,7 @@ fn teardown_releases_every_cached_cursor() {
     let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
     let mut router = InputRouter::new();
     let mut ctrl = CursorController::new(test_cursor_cache());
-    router.handle(moved(70, 70), &mut c);
+    router.handle(moved(70, 70), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.cache_len(), 1);
 

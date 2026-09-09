@@ -368,7 +368,7 @@ the chosen appearance as a typed response and the session glue
 re-themed in place and the window manager's desktop background is re-coloured
 through the compositor's runtime `set_background` (full-screen damage, so the
 next present repaints every pixel over the new colour). The active appearance is the
-group's chosen member in the menu — a bullet, disabled, with its reason — so the
+group's chosen member in the menu — a bullet, disabled — so the
 menu can never ask for the appearance already in use. See
 [Desktop session glue](./session.md) and [Taskbar](./taskbar.md).
 

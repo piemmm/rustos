@@ -35,6 +35,105 @@ use tairix_abi::{load_failure_reason, WaitStatus};
 
 use crate::apps::BUNDLE_RUN_SUFFIX;
 
+/// How the desktop asks a live instance to open, once a launch has resolved
+/// to reuse it rather than start a second process.
+///
+/// Attempted in this order, because each step is the honest answer for one
+/// less capable instance than the last: the target is the specific thing the
+/// user asked for, the icon-bar default is what the application itself says a
+/// bare launch means, and raising its most recent window is all a desktop can
+/// do for an application that says nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Handover {
+    /// Queue the launch's named path for the instance and wake it.
+    OpenTarget,
+    /// Ask the instance for its icon-bar default action — a new window.
+    Default,
+    /// Raise the instance's most recent window: it declared no icon-bar
+    /// presence, so it has no default action to be asked for.
+    Raise,
+}
+
+/// What a launch of a bundle resolved to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Launch {
+    /// Start a fresh process from the bundle's `Run` binary.
+    Spawn,
+    /// The live instance `pid` took the request through `by`.
+    Reused {
+        /// The instance that took it.
+        pid: u64,
+        /// How it was reached.
+        by: Handover,
+    },
+}
+
+/// The effects a launch needs, so the rule below is one host-testable
+/// decision and the syscalls stay in the `Run` binary.
+///
+/// Each method answers whether the *engine* accepted the hand-over, which is
+/// load-bearing rather than advisory: the desktop re-routes a launch only
+/// when something actually took it, and falls back to spawning when nothing
+/// did. Every one of them is a message to a live process; none waits on it.
+pub trait LaunchHost {
+    /// Queue `path` for the live instance `pid` to open and wake it.
+    fn queue_open_target(&mut self, pid: u64, path: &str) -> bool;
+
+    /// Ask the live instance `pid` for its icon-bar default action.
+    /// `false` when it declared no icon-bar presence to ask.
+    fn ask_default(&mut self, pid: u64) -> bool;
+
+    /// Raise the live instance `pid`'s most recent window. `false` when it
+    /// owns none.
+    fn raise_recent_window(&mut self, pid: u64) -> bool;
+}
+
+/// Resolve a launch of the bundle whose entry binary is `run_path`.
+///
+/// `running` is the live instance the [`LaunchTable`] holds for that path, and
+/// `one_instance` what the bundle's signed manifest attests. `target` is the
+/// document or folder the launch named, if any.
+///
+/// Singleton is the default, so this is what a user means by clicking a
+/// program they already have open: the running instance is asked to open,
+/// rather than a second process starting. A bundle that declares itself
+/// multi-instance, or has no live instance, spawns.
+///
+/// **Fails closed to the old behaviour.** An instance that cannot be reached
+/// at all — no window, no icon-bar presence, a mailbox that has gone — is
+/// spawned instead, so a launch never silently does nothing.
+pub fn resolve_launch<H: LaunchHost>(
+    host: &mut H,
+    running: Option<u64>,
+    one_instance: bool,
+    target: Option<&str>,
+) -> Launch {
+    let Some(pid) = running.filter(|_| one_instance) else {
+        return Launch::Spawn;
+    };
+    if let Some(path) = target {
+        if host.queue_open_target(pid, path) {
+            return Launch::Reused {
+                pid,
+                by: Handover::OpenTarget,
+            };
+        }
+    }
+    if host.ask_default(pid) {
+        return Launch::Reused {
+            pid,
+            by: Handover::Default,
+        };
+    }
+    if host.raise_recent_window(pid) {
+        return Launch::Reused {
+            pid,
+            by: Handover::Raise,
+        };
+    }
+    Launch::Spawn
+}
+
 /// The label used for a reaped child the launcher did not record (it should
 /// not happen — every desktop child is recorded at launch — but a diagnosis
 /// must never be dropped for want of a name).
@@ -227,13 +326,171 @@ pub fn reap_launched<R, P, T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        admitted_pid, launch_argv, launch_failure_report, reap_launched, LaunchTable, UNKNOWN_LABEL,
+        admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch, Handover,
+        Launch, LaunchHost, LaunchTable, UNKNOWN_LABEL,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
     use tairix_abi::{
         Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
     };
+
+    /// A host recording every hand-over attempt, each of which may be
+    /// configured to refuse — which is what an unreachable instance is.
+    #[derive(Default)]
+    struct FakeHost {
+        queued: Vec<(u64, String)>,
+        defaults: Vec<u64>,
+        raises: Vec<u64>,
+        takes_target: bool,
+        takes_default: bool,
+        has_window: bool,
+    }
+
+    impl FakeHost {
+        /// A host whose instance takes everything asked of it.
+        fn reachable() -> Self {
+            Self {
+                takes_target: true,
+                takes_default: true,
+                has_window: true,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl LaunchHost for FakeHost {
+        fn queue_open_target(&mut self, pid: u64, path: &str) -> bool {
+            self.queued.push((pid, String::from(path)));
+            self.takes_target
+        }
+
+        fn ask_default(&mut self, pid: u64) -> bool {
+            self.defaults.push(pid);
+            self.takes_default
+        }
+
+        fn raise_recent_window(&mut self, pid: u64) -> bool {
+            self.raises.push(pid);
+            self.has_window
+        }
+    }
+
+    #[test]
+    fn a_singleton_relaunch_reaches_the_running_instance_rather_than_spawning() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), true, None),
+            Launch::Reused {
+                pid: 42,
+                by: Handover::Default
+            },
+            "an argument-less relaunch asks the instance for a new window"
+        );
+        assert_eq!(host.defaults, [42]);
+        assert!(host.queued.is_empty(), "no document was named");
+        assert!(
+            host.raises.is_empty(),
+            "the default answered, so nothing else"
+        );
+    }
+
+    #[test]
+    fn a_document_relaunch_queues_the_target_rather_than_asking_for_a_window() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
+            Launch::Reused {
+                pid: 42,
+                by: Handover::OpenTarget
+            }
+        );
+        assert_eq!(host.queued, [(42, String::from("Users:/ada/report"))]);
+        assert!(
+            host.defaults.is_empty(),
+            "the target is the specific thing asked for; a new window is not"
+        );
+    }
+
+    #[test]
+    fn an_instance_with_no_icon_bar_presence_has_its_window_raised() {
+        let mut host = FakeHost {
+            has_window: true,
+            ..FakeHost::default()
+        };
+        assert_eq!(
+            resolve_launch(&mut host, Some(7), true, None),
+            Launch::Reused {
+                pid: 7,
+                by: Handover::Raise
+            }
+        );
+        assert_eq!(host.defaults, [7], "the default is tried first");
+        assert_eq!(host.raises, [7]);
+    }
+
+    #[test]
+    fn a_multi_instance_bundle_spawns_again_however_many_are_running() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), false, None),
+            Launch::Spawn
+        );
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), false, Some("Users:/ada/report")),
+            Launch::Spawn
+        );
+        assert!(
+            host.queued.is_empty() && host.defaults.is_empty() && host.raises.is_empty(),
+            "a bundle that declares independent instances is never asked"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_no_live_instance_spawns_without_asking_anything() {
+        let mut host = FakeHost::reachable();
+        assert_eq!(resolve_launch(&mut host, None, true, None), Launch::Spawn);
+        assert_eq!(
+            resolve_launch(&mut host, None, true, Some("Users:/ada/report")),
+            Launch::Spawn
+        );
+        assert!(
+            host.queued.is_empty() && host.defaults.is_empty(),
+            "there is no instance to ask, so the manifest is never even needed"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_instance_spawns_rather_than_silently_doing_nothing() {
+        // No window, no icon-bar presence, and a queue that will not take a
+        // target: every route refused, so the launch falls back to what it
+        // did before the channel existed.
+        let mut host = FakeHost::default();
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
+            Launch::Spawn
+        );
+        assert_eq!(host.queued.len(), 1, "each route is tried once");
+        assert_eq!(host.defaults, [42]);
+        assert_eq!(host.raises, [42]);
+    }
+
+    #[test]
+    fn a_document_launch_falls_back_through_the_same_ladder() {
+        // The queue refused but the instance is otherwise live: the user's
+        // launch still reaches it, as a new window rather than as nothing.
+        let mut host = FakeHost {
+            takes_default: true,
+            ..FakeHost::default()
+        };
+        assert_eq!(
+            resolve_launch(&mut host, Some(42), true, Some("Users:/ada/report")),
+            Launch::Reused {
+                pid: 42,
+                by: Handover::Default
+            }
+        );
+    }
 
     #[test]
     fn every_reserved_status_reports_its_reason_named_by_label() {

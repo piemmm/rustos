@@ -119,20 +119,20 @@ mod program {
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info,
-        drop_is_noteworthy, ensure_switchboard, launch_argv, load_pinboard as read_pinboard_store,
-        load_programs, maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched,
-        relay_power, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        drop_is_noteworthy, launch_argv, load_pinboard as read_pinboard_store, load_programs,
+        maybe_send_seat_report, open_tray, parse, publish_pinboard, reap_launched, relay_power,
+        resolve_launch, resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
         window_control_alternate_event, window_control_event, Answer, AppBarBridge, AppBarService,
         ArtworkFileReader, ArtworkSandbox, CliError, Command, ConcludedPick, ConfirmPrompt,
         Delivery, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
         DeviceInputSource, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
         FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, InputSource,
-        KeyboardInputSource, LaunchTable, LoadedPinboard, LoadedPrograms, LockedDrain,
-        OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners, PromptOutcome,
-        ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX, CONTENT_RELEASED,
-        CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
+        KeyboardInputSource, Launch, LaunchHost, LaunchTable, LoadedPinboard, LoadedPrograms,
+        LockedDrain, OwnerBundleGate, OwnerWindow, PickConclusion, Prepared, PresentedOwners,
+        PromptOutcome, ScreenFade, ScreenLock, SeatEventReader, SeatInputChannel, SessionClock,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperSource, BUNDLE_RUN_SUFFIX,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, MENU_SHOWN, MENU_SHOWN_MESSAGE,
         MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH, USAGE, WALLPAPER_LABEL,
@@ -438,6 +438,17 @@ mod program {
                 .iter()
                 .find(|(_, proc_id)| **proc_id == id)
                 .map(|(pid, _)| *pid)
+        }
+
+        /// The attested client that ran as child `pid`, *without* forgetting
+        /// it — the inverse of [`pid_of`](Self::pid_of).
+        ///
+        /// How a relaunch reaches the instance it found in the launch table:
+        /// the table names a pid, and an application-scoped event names a
+        /// `ProcId`. Read-only, unlike [`take_by_pid`](Self::take_by_pid),
+        /// which forgets because a reaped child is gone.
+        fn proc_id_of(&self, pid: u64) -> Option<ProcId> {
+            self.peers.get(&pid).copied()
         }
     }
 
@@ -1079,21 +1090,26 @@ mod program {
     /// record it in the launch table like any other desktop child,
     /// answering with the pid of the instance now live.
     ///
-    /// An instance already recorded is that instance: one monitor per
-    /// session, so a second is never started. The kernel intersects the
-    /// monitor's manifest with the user's ceiling, so its view follows the
-    /// seat user's authority. A refused spawn answers `None` and leaves
-    /// the capsule calm: the desktop runs without its monitor rather than
-    /// failing over it.
-    fn spawn_switchboard(launched: &mut LaunchTable) -> Option<u64> {
-        ensure_switchboard(launched, |launched| {
-            record_launch(
-                launched,
-                spawn_app(SWITCHBOARD_RUN_PATH.as_bytes(), &[]),
-                SWITCHBOARD_LABEL,
-                SWITCHBOARD_RUN_PATH,
-            )
-        })
+    /// An instance already recorded is that instance: the monitor's manifest
+    /// declares it single-instance like any other bundle, so the one launch
+    /// funnel is what keeps a second from starting — this bundle has no rule
+    /// of its own. The kernel intersects the monitor's manifest with the
+    /// user's ceiling, so its view follows the seat user's authority. A
+    /// refused spawn answers `None` and leaves the capsule calm: the desktop
+    /// runs without its monitor rather than failing over it.
+    fn spawn_switchboard(
+        launch: &mut LaunchCtx<'_>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<u64> {
+        launch.launch(
+            shell,
+            compositor,
+            SWITCHBOARD_RUN_PATH,
+            SWITCHBOARD_LABEL,
+            &[],
+            None,
+        )
     }
 
     /// Start the desktop's file manager in its **core** role as this
@@ -1114,15 +1130,18 @@ mod program {
     /// which puts the desktop's own component ahead of whatever the user
     /// starts. A refused spawn is reported by the reap like any other and
     /// leaves the desktop running without it.
+    ///
+    /// Spawned outright rather than through the launch funnel: this runs
+    /// before the session has served anything, so the launch table is empty
+    /// and there is nothing for the funnel to find — and the role switch
+    /// makes it a different program from the quittable file manager a later
+    /// launch would reach.
     fn spawn_files(launched: &mut LaunchTable) {
-        let _ = record_launch(
+        let _ = spawn_and_record(
             launched,
-            spawn_app(
-                FILES_RUN_PATH.as_bytes(),
-                &[tairix_window::DESKTOP_ROLE_SWITCH.as_bytes()],
-            ),
-            FILES_LABEL,
             FILES_RUN_PATH,
+            FILES_LABEL,
+            &[tairix_window::DESKTOP_ROLE_SWITCH.as_bytes()],
         );
     }
 
@@ -2050,7 +2069,11 @@ mod program {
         // refusal, and the serve arm attests its calls against this entry
         // — and the very same bring-up serves a later tray press that
         // finds no instance live.
-        let mut switchboard_pid = spawn_switchboard(&mut launched);
+        // Spawned outright rather than through the launch funnel, for the
+        // same reason the file manager below is: the table is empty here, so
+        // there is no instance for the funnel to find.
+        let mut switchboard_pid =
+            spawn_and_record(&mut launched, SWITCHBOARD_RUN_PATH, SWITCHBOARD_LABEL, &[]);
         // Which window owners the live monitor has been told the bundle of, so
         // a launch costs one send and a fresh instance is told everything.
         let mut owner_bundles = OwnerBundleGate::new();
@@ -2144,6 +2167,10 @@ mod program {
         // array would cost every present — the hottest and one of the
         // shortest — the whole of the widest one's clearing.
         let mut request = [0u8; WINDOW_MAX_REQUEST];
+        // Held for the same reason, and it matters more: the widest reply
+        // carries a path, so a per-request array would put four kibibytes of
+        // clearing on every present.
+        let mut reply = [0u8; WINDOW_REPLY_MAX];
         loop {
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
@@ -2272,7 +2299,6 @@ mod program {
                 // the wake and re-parks.
                 let mut ticket = 0u64;
                 if let Ok(len) = tairix_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
-                    let mut reply = [0u8; WINDOW_REPLY_MAX];
                     // Read before the bridge borrows the picker: a menu may
                     // not be drawn over a lock screen or the trusted picker,
                     // and an accepted open is answered `SeatBusy` instead.
@@ -2326,6 +2352,7 @@ mod program {
                         &mut sink,
                         &mut picker,
                         &mut apps.service,
+                        &identity,
                         &mut DesktopMenuDesk {
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
@@ -2815,6 +2842,7 @@ mod program {
                         &mut sink,
                         &mut picker,
                         &mut apps.service,
+                        &identity,
                         &mut DesktopMenuDesk {
                             pinboard: &mut pinboard,
                             wallpapers: &wallpapers,
@@ -2854,7 +2882,14 @@ mod program {
                         &windows,
                         &mut menu,
                         seat_held(&lock, &picker),
-                        &mut launched,
+                        &mut LaunchCtx {
+                            launched: &mut launched,
+                            apps: &apps.service,
+                            server: &mut server,
+                            sink: &mut sink,
+                            windows: &windows,
+                            identity: &identity,
+                        },
                         &mut associations,
                         now_ns,
                     );
@@ -2875,6 +2910,7 @@ mod program {
                         &mut menu,
                         account,
                         shown_name,
+                        &identity,
                         &mut launched,
                         &mut apps,
                         &mut switchboard_pid,
@@ -2933,7 +2969,14 @@ mod program {
                                 &windows,
                                 &mut menu,
                                 seat_held(&lock, &picker),
-                                &mut launched,
+                                &mut LaunchCtx {
+                                    launched: &mut launched,
+                                    apps: &apps.service,
+                                    server: &mut server,
+                                    sink: &mut sink,
+                                    windows: &windows,
+                                    identity: &identity,
+                                },
                                 &mut associations,
                                 now_ns,
                             );
@@ -2954,6 +2997,7 @@ mod program {
                                 &mut menu,
                                 account,
                                 shown_name,
+                                &identity,
                                 &mut launched,
                                 &mut apps,
                                 &mut switchboard_pid,
@@ -4001,6 +4045,7 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        identity: &RtWindowIdentity,
         desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) -> Drained {
@@ -4027,8 +4072,8 @@ mod program {
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps, desk,
-                        now_ns,
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                        identity, desk, now_ns,
                     );
                     if !menu.is_open() {
                         break;
@@ -4050,8 +4095,8 @@ mod program {
                         menu.handle(&event, at, &geom)
                     };
                     settle_menu_chain(
-                        &acted, menu, shell, compositor, windows, server, sink, picker, apps, desk,
-                        now_ns,
+                        &acted, menu, shell, compositor, windows, server, sink, picker, apps,
+                        identity, desk, now_ns,
                     );
                     if !menu.is_open() {
                         break;
@@ -4077,6 +4122,7 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        identity: &RtWindowIdentity,
         desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) {
@@ -4087,7 +4133,7 @@ mod program {
             }
         }
         answer_menu_chain(
-            menu, shell, compositor, windows, server, sink, picker, apps, desk, now_ns,
+            menu, shell, compositor, windows, server, sink, picker, apps, identity, desk, now_ns,
         );
     }
 
@@ -4108,6 +4154,7 @@ mod program {
         sink: &mut RtEventSink,
         picker: &mut SessionPicker<S, F>,
         apps: &mut dyn AppBarBridge,
+        identity: &RtWindowIdentity,
         desk: &mut DesktopMenuDesk<'_, S>,
         now_ns: u64,
     ) {
@@ -4124,7 +4171,20 @@ mod program {
             let (window_id, open_id) = match owner {
                 ChainOwner::Window { window_id, open_id } => (window_id, open_id),
                 ChainOwner::Backdrop => {
-                    answer_backdrop_menu(outcome, shell, compositor, desk, now_ns);
+                    answer_backdrop_menu(
+                        outcome,
+                        shell,
+                        compositor,
+                        desk,
+                        &mut LaunchReach {
+                            apps,
+                            server,
+                            sink,
+                            windows,
+                            identity,
+                        },
+                        now_ns,
+                    );
                     continue;
                 }
                 ChainOwner::Bar(subject) => {
@@ -4227,6 +4287,7 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         desk: &mut DesktopMenuDesk<'_, S>,
+        reach: &mut LaunchReach<'_>,
         now_ns: u64,
     ) {
         let command = match outcome {
@@ -4250,7 +4311,14 @@ mod program {
                 desk.desktop,
                 shell,
                 compositor,
-                desk.launched,
+                &mut LaunchCtx {
+                    launched: desk.launched,
+                    apps: reach.apps,
+                    server: reach.server,
+                    sink: reach.sink,
+                    windows: reach.windows,
+                    identity: reach.identity,
+                },
                 now_ns,
             );
         if acted.relisted {
@@ -4506,6 +4574,7 @@ mod program {
         menu: &mut MenuChain,
         account: &str,
         shown_name: &str,
+        identity: &RtWindowIdentity,
         launched: &mut LaunchTable,
         apps: &mut AppBarPanel,
         switchboard: &mut Option<u64>,
@@ -4926,7 +4995,19 @@ mod program {
                 // popup was handed and spawn its `Run` binary: admitted
                 // immediately, loaded on its own task, refusal reported
                 // (synchronously here or by the reap), desktop carries on.
-                launch_library_entry(shell, &entry, launched);
+                launch_library_entry(
+                    shell,
+                    compositor,
+                    &entry,
+                    &mut LaunchCtx {
+                        launched,
+                        apps: &apps.service,
+                        server,
+                        sink,
+                        windows,
+                        identity,
+                    },
+                );
             }
             ShellOutcome::Taskbar(TaskbarResponse::OpenMenu(request)) => {
                 // The bar draws no menu: it hands over a model and an anchor,
@@ -5009,7 +5090,20 @@ mod program {
                     section,
                     *switchboard,
                     &mut RtSwitchboardMailbox,
-                    || spawn_switchboard(launched),
+                    || {
+                        spawn_switchboard(
+                            &mut LaunchCtx {
+                                launched,
+                                apps: &apps.service,
+                                server,
+                                sink,
+                                windows,
+                                identity,
+                            },
+                            shell,
+                            compositor,
+                        )
+                    },
                 ) {
                     *switchboard = Some(revived);
                 }
@@ -5337,7 +5431,7 @@ mod program {
         windows: &SessionWindows,
         menu: &mut MenuChain,
         seat_held: bool,
-        launched: &mut LaunchTable,
+        launch: &mut LaunchCtx<'_>,
         associations: &mut alloc::vec::Vec<AppAssociation>,
         now_ns: u64,
     ) {
@@ -5389,8 +5483,7 @@ mod program {
         // changes that genuinely repaint the whole layer.
         let whole = acted.relisted
             | apply_desktop_action(
-                action, publisher, pinboard, wallpapers, desktop, shell, compositor, launched,
-                now_ns,
+                action, publisher, pinboard, wallpapers, desktop, shell, compositor, launch, now_ns,
             );
         if acted.relisted {
             // The user's own files demonstrably changed under the desktop, so
@@ -5498,16 +5591,18 @@ mod program {
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        launched: &mut LaunchTable,
+        launch: &mut LaunchCtx<'_>,
         now_ns: u64,
     ) -> bool {
         match action {
             Some(DesktopAction::Activate(DesktopActivation::OpenFolder { path })) => {
-                let _ = record_launch(
-                    launched,
-                    spawn_app(FILES_RUN_PATH.as_bytes(), &[path.as_bytes()]),
-                    FILES_LABEL,
+                let _ = launch.launch(
+                    shell,
+                    compositor,
                     FILES_RUN_PATH,
+                    FILES_LABEL,
+                    &[path.as_bytes()],
+                    Some(&path),
                 );
                 false
             }
@@ -5520,11 +5615,13 @@ mod program {
                     .iter()
                     .map(alloc::string::String::as_bytes)
                     .collect();
-                let _ = record_launch(
-                    launched,
-                    spawn_app(run_path.as_bytes(), &args),
-                    &label,
+                let _ = launch.launch(
+                    shell,
+                    compositor,
                     &run_path,
+                    &label,
+                    &args,
+                    argument.as_deref(),
                 );
                 false
             }
@@ -5543,11 +5640,13 @@ mod program {
                 settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             ),
             Some(DesktopAction::ChangeBackground) => {
-                let _ = record_launch(
-                    launched,
-                    spawn_app(WALLPAPER_RUN_PATH.as_bytes(), &[]),
-                    WALLPAPER_LABEL,
+                let _ = launch.launch(
+                    shell,
+                    compositor,
                     WALLPAPER_RUN_PATH,
+                    WALLPAPER_LABEL,
+                    &[],
+                    None,
                 );
                 false
             }
@@ -5739,9 +5838,10 @@ mod program {
     /// `Run` binary; spawn it and record the launch under the entry's
     /// display name.
     fn launch_library_entry(
-        shell: &DesktopShell,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
         entry: &tairix_proglib::EntryId,
-        launched: &mut LaunchTable,
+        launch: &mut LaunchCtx<'_>,
     ) {
         let catalog = shell.session().taskbar().library().catalog();
         let chosen = match catalogued(catalog, entry) {
@@ -5752,13 +5852,10 @@ mod program {
             }
         };
         let run_path = alloc::format!("{}/Run", chosen.bundle().as_str());
-        let label = chosen.name().as_str();
-        let _ = record_launch(
-            launched,
-            spawn_app(run_path.as_bytes(), &[]),
-            label,
-            &run_path,
-        );
+        // Owned before the launch, which needs the shell mutably: the chosen
+        // entry borrows the catalog the shell holds.
+        let label = alloc::string::String::from(chosen.name().as_str());
+        let _ = launch.launch(shell, compositor, &run_path, &label, &[], None);
     }
 
     /// The session's live file-reading seam: whole-file reads through the
@@ -5832,6 +5929,160 @@ mod program {
             SPAWN_UID_INHERIT,
             &launch_argv(path, args),
             &env,
+        )
+    }
+
+    /// Everything a launch is *decided* with, bundled so it threads to each
+    /// launch site without four more parameters each: the table the running
+    /// instances are found in, and the manifest facts that say whether the
+    /// bundle runs one of itself.
+    ///
+    /// The routes a live instance is reached *by* are not here: they need the
+    /// shell and the compositor, which every launch site already holds, so
+    /// they are bound at the call ([`LaunchCtx::launch`]) rather than
+    /// borrowed for the life of this.
+    struct LaunchCtx<'a> {
+        launched: &'a mut LaunchTable,
+        apps: &'a dyn AppBarBridge,
+        server: &'a mut WindowServer<RtShmMapper>,
+        sink: &'a mut RtEventSink,
+        windows: &'a SessionWindows,
+        identity: &'a RtWindowIdentity,
+    }
+
+    /// The routes half of a [`LaunchCtx`]: everything a launch needs *apart*
+    /// from the table, so a function that already holds the table takes one
+    /// parameter rather than four to reach a live instance.
+    struct LaunchReach<'a> {
+        apps: &'a dyn AppBarBridge,
+        server: &'a mut WindowServer<RtShmMapper>,
+        sink: &'a mut RtEventSink,
+        windows: &'a SessionWindows,
+        identity: &'a RtWindowIdentity,
+    }
+
+    /// The three routes a launch may reach a live instance by, over the
+    /// session's real window channel.
+    ///
+    /// Bound for one launch: it holds the shell and compositor the raise
+    /// needs, which are the caller's for the rest of the round.
+    struct Reach<'a, 'b> {
+        ctx: &'a mut LaunchCtx<'b>,
+        shell: &'a mut DesktopShell,
+        compositor: &'a mut Compositor,
+    }
+
+    impl Reach<'_, '_> {
+        /// The instance `pid`'s most recent window, as both ids.
+        fn recent_window(&self, pid: u64) -> Option<(u64, tairix_wm::WindowId)> {
+            let wm = window_of_pid(pid, self.ctx.server, self.ctx.windows, self.ctx.identity)?;
+            Some((self.ctx.windows.ipc_id(wm)?, wm))
+        }
+    }
+
+    impl LaunchHost for Reach<'_, '_> {
+        fn queue_open_target(&mut self, pid: u64, path: &str) -> bool {
+            let Some((window_id, _)) = self.recent_window(pid) else {
+                return false;
+            };
+            match self
+                .ctx
+                .server
+                .hand_over_open_target(self.ctx.sink, window_id, path)
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    // Stated, and answered honestly: the engine strands
+                    // nothing, so the launch falls back to a fresh process.
+                    let _ = writeln!(Stderr, "desktop: cannot hand over an open target ({err:?})");
+                    false
+                }
+            }
+        }
+
+        fn ask_default(&mut self, pid: u64) -> bool {
+            let Some(app) = self.ctx.identity.proc_id_of(pid) else {
+                return false;
+            };
+            self.ctx
+                .server
+                .deliver_app_event(self.ctx.sink, app, &WindowEvent::AppBarDefault)
+                .is_ok()
+        }
+
+        fn raise_recent_window(&mut self, pid: u64) -> bool {
+            let Some((_, wm)) = self.recent_window(pid) else {
+                return false;
+            };
+            self.shell.raise_window(self.compositor, wm)
+        }
+    }
+
+    impl LaunchCtx<'_> {
+        /// The desktop's one launch funnel: resolve a launch of the bundle
+        /// whose entry binary is `run_path` and carry it out.
+        ///
+        /// `args` are the arguments a *fresh* process is given; `target` is
+        /// the document or folder the launch named, which a *running*
+        /// instance is handed instead. Answers the pid a spawn was admitted
+        /// as, or the live instance a relaunch reached.
+        ///
+        /// Singleton is the default, so relaunching a bundle that is already
+        /// running asks the running instance to open rather than starting a
+        /// second process. A bundle with no live instance is spawned without
+        /// its manifest even being read: there is nothing to reach, so the
+        /// answer cannot depend on what the manifest says.
+        fn launch(
+            &mut self,
+            shell: &mut DesktopShell,
+            compositor: &mut Compositor,
+            run_path: &str,
+            label: &str,
+            args: &[&[u8]],
+            target: Option<&str>,
+        ) -> Option<u64> {
+            let plan = match self.launched.running_from(run_path) {
+                None => Launch::Spawn,
+                Some(pid) => {
+                    let one_instance = self.apps.runs_one_instance(bundle_of_run_path(run_path));
+                    let mut reach = Reach {
+                        ctx: self,
+                        shell,
+                        compositor,
+                    };
+                    resolve_launch(&mut reach, Some(pid), one_instance, target)
+                }
+            };
+            match plan {
+                Launch::Spawn => spawn_and_record(self.launched, run_path, label, args),
+                Launch::Reused { pid, .. } => Some(pid),
+            }
+        }
+    }
+
+    /// The bundle *directory* an entry-point `Run` path names.
+    ///
+    /// The launch table records the `Run` path (the child's attested bundle
+    /// identity) and the manifest lives beside it, so this is the one
+    /// conversion between them.
+    fn bundle_of_run_path(run_path: &str) -> &str {
+        run_path.strip_suffix(BUNDLE_RUN_SUFFIX).unwrap_or(run_path)
+    }
+
+    /// Spawn `run_path` and record the launch: the half of a launch that
+    /// starts a process, shared by the funnel and by the two bring-up
+    /// launches that run before any instance exists.
+    fn spawn_and_record(
+        launched: &mut LaunchTable,
+        run_path: &str,
+        label: &str,
+        args: &[&[u8]],
+    ) -> Option<u64> {
+        record_launch(
+            launched,
+            spawn_app(run_path.as_bytes(), args),
+            label,
+            run_path,
         )
     }
 

@@ -108,8 +108,8 @@ pub use notifications::{
     IconId, NotificationArea, NotifySeverity, StatusKind, StatusSignal, TransientNotification,
 };
 pub use picker::{
-    PickerEntry, PickerLayout, WindowPicker, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
-    PICKER_OPEN_DELAY_NS,
+    entries_have_picker, has_picker, slot_has_picker, PickerEntry, PickerLayout, WindowPicker,
+    PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS, PICKER_OPEN_DELAY_NS,
 };
 pub use render::{icon_cache, IconEpoch, TaskbarRenderer};
 pub use repaint::TaskbarRepaint;

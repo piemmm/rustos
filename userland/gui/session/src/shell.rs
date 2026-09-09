@@ -1544,7 +1544,7 @@ impl DesktopShell {
             TaskbarResponse::DismissNotification { producer, key } => {
                 self.session.taskbar_mut().clear_notification(producer, key);
             }
-            // The pointer finished its dwell on a multi-window slot: the
+            // The pointer finished its dwell on a slot that has a picker: the
             // shell holds the thumbnails it scaled while that dwell ran, so
             // it opens the picker itself.
             TaskbarResponse::ShowWindowPicker { app } => {
