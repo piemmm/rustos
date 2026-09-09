@@ -156,7 +156,16 @@ holds exactly, is that a lazy read equals a commit at the same instant.
 ### 3. The mechanism (`drivers/cpufreq/rpi/`)
 
 A user-space driver `devmgr` autoloads on a discovered
-`raspberrypi,firmware-clocks` node. It maps no MMIO and takes no interrupt:
+`raspberrypi,firmware-clocks` node. **`CAP_CPUFREQ` must be in the autoload
+gate's delegatable set** (`unlock_service::autoload_caps`) or the matched
+driver is refused for capability escalation and never loads — the board then
+runs at whatever rate the boot floor left, with the refusal visible only as
+`id=7006` in the boot log. That grant was missing when the subsystem first
+shipped: the capability was defined and enforced with no principal able to
+hand it over, which is the failure the charter's capability-minimalism rule
+names. The general drift check is `plans/CAPABILITY_USE.md` CU8; the driver's
+own set is one definition (`REQUIRED_CAPABILITIES`) that both its signed
+manifest and the program read. It maps no MMIO and takes no interrupt:
 its only path to the clock is the `vcmailbox` service. It reports the range
 the firmware declares — never a board constant, so an overclocked board is
 driven over its own range — takes the mechanism role, and parks in the kernel

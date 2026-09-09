@@ -528,6 +528,7 @@ mod tests {
             CapabilityId::HW_EMIT,
             CapabilityId::DRV_LOAD,
             CapabilityId::DRV_KERNEL,
+            CapabilityId::CPUFREQ,
         ] {
             assert!(!set.contains(cap), "{cap:?} must not be in a ceiling");
         }

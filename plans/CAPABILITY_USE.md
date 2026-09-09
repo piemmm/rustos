@@ -751,6 +751,40 @@ there).**
 
 ---
 
+### CU8 — driver-bundle entitlement audit (the autoload delegatable set)
+
+**Status: planned.**
+
+- **The defect this stage fixes:** a driver bundle may request a capability
+  the autoload gate cannot delegate, and nothing says so until the board is
+  running. The gate intersects each manifest with
+  `unlock_service::autoload_caps()` and refuses a request that is not a
+  subset (`drvhost`'s `CapabilityEscalation`), so the driver is simply never
+  loaded. `CAP_CPUFREQ` shipped exactly that way: defined in `lib/abi`,
+  enforced at `cpufreq_bind`, requested by the `drivers/cpufreq/rpi` bundle,
+  and delegatable by nobody — so the matched driver was refused at every boot
+  and the board ran at whatever rate the boot floor had left. The refusal is
+  logged (`id=7006`), but only a boot log read on real hardware shows it. This
+  is the same class CU7 fixed for *session tool* manifests, for *driver*
+  manifests.
+- The check is a subset assertion over two lists that already exist, so it
+  cannot drift: every shipped bundle's requested set ⊆ the delegatable set.
+  `tools/xtask` already depends on `tairix-users`, so the natural home is a
+  delegatable-resource list in `tairix_users::grants` that
+  `autoload_caps()` composes with the unlock kthread's own `service_caps()`,
+  plus an xtask test walking the bundles.
+- The blocker is that the bundles' requested sets are inline literals inside
+  each `build_*_bundle` function in `tools/xtask/src/commands/image_drivers.rs`,
+  so they are not addressable as data. Each driver crate must export its set
+  the way `drivers/cpufreq/rpi` now exports `REQUIRED_CAPABILITIES` — the same
+  single-source pattern `BIND_KEYS` already uses for the match table, and the
+  reason the manifest and the program can no longer disagree. Mechanical, but
+  it touches every driver crate.
+- Until it lands, adding a capability to a driver manifest means checking
+  `autoload_caps()` by hand in the same change.
+
+---
+
 ## 7. Deliberately not done (and why)
 
 - **No setuid / setuid-self / capability raise at runtime** — the only

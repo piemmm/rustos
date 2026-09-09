@@ -839,7 +839,7 @@ pub fn build_rpi_cpufreq_bundle(
         ctx,
         arch,
         "tairix-drv-cpufreq-rpi",
-        &[CapabilityId::MAILBOX, CapabilityId::CPUFREQ],
+        tairix_drv_cpufreq_rpi::REQUIRED_CAPABILITIES,
         tairix_drv_cpufreq_rpi::BIND_KEYS,
         profile,
     )

@@ -84,6 +84,16 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     },
 )];
 
+/// The capabilities the driver needs, and the single definition of them.
+///
+/// The installed bundle's signed manifest is built from this and the program
+/// re-checks itself against it, exactly as [`BIND_KEYS`] serves the manifest
+/// and the autoload match — so neither can drift from the driver. The mailbox
+/// channel is its only path to the clock; the mechanism role is what lets it
+/// take the machine's DVFS seam. The autoload gate must be able to delegate
+/// both, or the matched driver is refused for escalation.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[CapabilityId::MAILBOX, CapabilityId::CPUFREQ];
+
 /// Granularity the governor is asked to quantise its targets to, in Hz.
 ///
 /// The firmware accepts any rate and rounds, so this is not a hardware

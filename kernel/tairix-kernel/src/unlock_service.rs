@@ -348,6 +348,15 @@ pub fn autoload_caps() -> CapabilitySet {
     // extra (the per-driver manifest intersection still binds, so no ambient
     // authority).
     caps.insert(CapabilityId::SYSINFO_HW);
+    // The `cpufreq` mechanism driver (`drivers/cpufreq/rpi`) takes the
+    // machine's one frequency-mechanism role and parks in the kernel applying
+    // the governor's targets, both gated on `CAP_CPUFREQ`. The delegatable set
+    // carries it so such a signed driver can be granted it; a driver that does
+    // not request it receives nothing extra (the per-driver manifest
+    // intersection still binds, so no ambient authority). Without it the
+    // matched driver was refused at the load gate for escalation and the board
+    // ran at whatever rate the boot floor had left.
+    caps.insert(CapabilityId::CPUFREQ);
     caps
 }
 
@@ -1035,6 +1044,11 @@ mod tests {
             // signed manifest that requests it, never held by the kthread
             // itself (no ambient authority).
             CapabilityId::SCHED_REALTIME,
+            // The frequency mechanism driver takes the machine's DVFS role
+            // and applies the governor's targets (`CAP_CPUFREQ`) —
+            // delegatable to a signed manifest that requests it, never held
+            // by the kthread itself (no ambient authority).
+            CapabilityId::CPUFREQ,
             // An autoloaded user-space driver emits its structured
             // diagnostics through `log_emit` (`CAP_LOG_EMIT`) — delegatable
             // to a signed manifest that requests it, never held by the

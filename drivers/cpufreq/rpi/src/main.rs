@@ -45,7 +45,6 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::cpufreq::CpuFreqTarget;
-    use tairix_abi::CapabilityId;
     use tairix_caps::CapabilitySet;
     use tairix_drv_cpufreq_rpi::RpiCpuFreq;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -89,12 +88,14 @@ mod program {
     const APPLY_FAILURE_BUDGET: u32 = 4;
 
     /// The capability set the host re-checks before marshalling a property
-    /// exchange, plus the mechanism role this driver takes. The kernel is the
+    /// exchange, plus the mechanism role this driver takes — read from the one
+    /// definition the signed manifest is also built from. The kernel is the
     /// authority and re-checks every trap.
     fn driver_caps() -> CapabilitySet {
         let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MAILBOX);
-        caps.insert(CapabilityId::CPUFREQ);
+        for cap in tairix_drv_cpufreq_rpi::REQUIRED_CAPABILITIES {
+            caps.insert(*cap);
+        }
         caps
     }
 
