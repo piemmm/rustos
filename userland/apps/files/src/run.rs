@@ -143,7 +143,6 @@ mod program {
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{TextAction, TextField};
-    use tairix_display::{winframe, SERIAL};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
@@ -158,11 +157,10 @@ mod program {
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_theme::Theme;
-    use tairix_window::app::{self, Wake};
+    use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
-        EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowFrames,
-        WindowTransport,
+        EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents, WindowTransport,
     };
 
     use crate::appbar;
@@ -212,31 +210,6 @@ mod program {
     /// well-formed, assignable `u32` (non-numeric, empty, out of range, or the
     /// reserved "unchanged" sentinel).
     const OWNER_ID_HINT: &str = "Enter a valid numeric id.";
-
-    /// Re-map the window `window` onto a fresh frame region shaped as
-    /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
-    /// success — the old region (`old_base` / `old_len`) already unmapped — or
-    /// `None` when the region could not be allocated or the session refused the
-    /// re-map, in which case the old region is left intact and still mapped so
-    /// the current surface stays valid (never a crash or a blank window).
-    ///
-    /// The ordering is fail-closed by ownership: the fresh region is created
-    /// and granted first and returned only once [`WindowClient::resize`] has
-    /// accepted it, so the caller's old region is dropped — and unmapped — by
-    /// adopting the new one, while every refusal drops the fresh region here
-    /// instead and leaves the window on the geometry it had.
-    fn resize_frames(
-        client: &mut WindowClient<app::RtWindowTransport>,
-        window: u64,
-        new_mode: &DisplayMode,
-    ) -> Option<(WindowFrames, Surface)> {
-        let frames = WindowFrames::create(app::region_bytes(new_mode, app::FRAME_COUNT))?;
-        let surface = Surface::new(new_mode.width_px, new_mode.height_px)?;
-        client
-            .resize(window, frames.grant()?, app::FRAME_COUNT, new_mode)
-            .ok()?;
-        Some((frames, surface))
-    }
 
     /// What a router that only answers "did anything change" concludes: it
     /// moved pixels it cannot name, so the window is drawn whole.
@@ -329,21 +302,16 @@ mod program {
         }
     }
 
-    /// The window surface one present writes into, threaded through the
-    /// present path as one value: the channel half and the window the frame is
-    /// presented over, the mapped frame bytes, the pixel layout those bytes are
-    /// shaped as, and the title the session was last told. Bundling them keeps
-    /// a frame inseparable from the mode that describes it and the window it
-    /// belongs to.
+    /// What one present writes through, threaded as one value: the channel
+    /// half, the window's pane, the surface the frame is drawn in, and the
+    /// title the session was last told. Bundling them keeps a frame
+    /// inseparable from the window it belongs to.
     struct FrameTarget<'a, T: WindowTransport> {
         /// The app half of the window channel the present goes out over.
         client: &'a mut WindowClient<T>,
-        /// The window the frame belongs to — the one the present names.
-        window: u64,
-        /// The mapped shared-memory bytes of the frame being painted.
-        frame: &'a mut [u8],
-        /// The pixel layout `frame` is shaped as.
-        mode: &'a DisplayMode,
+        /// The pane the frame is presented over, which names the window and
+        /// the layout the frame is shaped as.
+        pane: &'a mut WindowPane,
         /// The title the window currently carries, owned by the run so it
         /// outlives one frame: the location is only sent again when it moves.
         title: &'a mut String,
@@ -363,8 +331,9 @@ mod program {
     /// artwork cache (one decode serves every window), the launched-bundle
     /// bookkeeping, and the desktop's own theme and density.
     struct OpenWindow {
-        /// The session's id for this window.
-        window: u64,
+        /// This window's channel-side state: its id, its shared frame region,
+        /// and the layout both are shaped as.
+        pane: WindowPane,
         /// The listing this window shows.
         browser: Browser<DeferredSource>,
         /// The overlays open over it.
@@ -376,11 +345,6 @@ mod program {
         /// Which of its own chrome bands this window is showing. Per window
         /// like the rail above, so one window's chrome is not another's.
         chrome: Chrome,
-        /// The pixel layout its frame region is shaped as.
-        mode: DisplayMode,
-        /// The live frame region this window presents from, released when the
-        /// session releases its side and re-attached by the next paint.
-        frames: WindowFrames,
         /// The title the session was last told. Kept so a frame retitles only
         /// when the location actually moves.
         title: String,
@@ -399,10 +363,6 @@ mod program {
     }
 
     /// Paint `win`'s current state and present it.
-    ///
-    /// The one place the window's mapped frame region becomes a slice, so the
-    /// `unsafe` that reconstructs it is written once rather than at every
-    /// present in the loop.
     ///
     /// # Errors
     ///
@@ -424,19 +384,14 @@ mod program {
         }
         // A region the session released holds none of the pixels a partial
         // present would leave standing, so it is re-attached and drawn whole.
-        let repaint = if win.frames.is_released() {
+        let repaint = if win.pane.content_released() {
             Repaint::Whole
         } else {
             repaint
         };
-        let Some(damage) = present_damage(&win.mode, repaint, damage) else {
+        let Some(damage) = present_damage(win.pane.mode(), repaint, damage) else {
             return Ok(());
         };
-        // Re-attached first if the session released it while the window was
-        // hidden, so a paint after a release paints into a live region.
-        let frame = client
-            .frame_pixels(&mut win.frames, win.window, app::FRAME_COUNT, &win.mode)
-            .ok_or(Errno::NotAttached)?;
         present_frame(
             &mut win.browser,
             &win.overlays,
@@ -445,9 +400,7 @@ mod program {
             theme,
             &mut FrameTarget {
                 client,
-                window: win.window,
-                frame,
-                mode: &win.mode,
+                pane: &mut win.pane,
                 title: &mut win.title,
                 surface: &mut win.surface,
                 damage,
@@ -515,41 +468,28 @@ mod program {
         };
         let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = app::mode_for(w, h);
-        let total = app::region_bytes(&mode, app::FRAME_COUNT);
-        let Some(frames) = WindowFrames::create(total) else {
-            report_error("shared frame region refused; no window opened");
-            return Err(app::EXIT_NO_FRAMES);
-        };
-        let Some(grant) = frames.grant() else {
-            report_error("frame region grant refused; no window opened");
-            return Err(app::EXIT_NO_FRAMES);
-        };
+        // Allocated before the session is asked, so a window this app could
+        // not draw into is never put on the desktop.
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             report_error("window surface refused; no window opened");
-            return Err(app::EXIT_NO_FRAMES);
+            return Err(app::EXIT_NO_WINDOW);
         };
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
         let title = location_title(&browser);
-        let Ok((window, _)) = client.create(
-            grant,
-            event_endpoint,
-            app::FRAME_COUNT,
-            &mode,
-            &title,
-            WIN_SIZING,
-        ) else {
-            report_error("the desktop session refused the window");
-            return Err(app::EXIT_NO_WINDOW);
+        let pane = match WindowPane::open(client, event_endpoint, &mode, &title, WIN_SIZING) {
+            Ok((pane, _)) => pane,
+            Err(err) => {
+                report_error(&alloc::format!("{err}; no window opened"));
+                return Err(err.code());
+            }
         };
         Ok(OpenWindow {
-            window,
+            pane,
             browser,
             overlays: initial_overlays(),
             places: places.clone(),
             chrome: Chrome::HIDDEN,
-            mode,
-            frames,
             title,
             surface,
             menu: None,
@@ -572,7 +512,7 @@ mod program {
             return;
         }
         let closed = windows.remove(index);
-        let _ = client.close(closed.window);
+        let _ = closed.pane.close(client);
     }
 
     /// What routing an icon-bar event did.
@@ -673,7 +613,7 @@ mod program {
                     return BarRouted::Handled;
                 }
                 for win in windows.drain(..) {
-                    let _ = client.close(win.window);
+                    let _ = win.pane.close(client);
                 }
                 BarRouted::Ends(0)
             }
@@ -720,7 +660,7 @@ mod program {
         }
         let index = event
             .window_id()
-            .and_then(|id| windows.iter().position(|win| win.window == id))?;
+            .and_then(|id| windows.iter().position(|win| win.pane.id() == id))?;
 
         // The window manager resized (or maximized/restored) this window.
         // Re-map its frame region at the new client size and repaint so the
@@ -739,15 +679,17 @@ mod program {
         {
             let win = &mut windows[index];
             let new_mode = app::mode_for(width_px, height_px);
-            if let Some((frames, surface)) = resize_frames(client, win.window, &new_mode) {
-                // Adopting drops the old region, which unmaps it; the fresh
-                // drawing surface holds none of the last frame's pixels, so
-                // the repaint that follows can only be a whole one.
-                win.frames = frames;
-                win.mode = new_mode;
-                win.surface = surface;
-                if present_whole(win, client, theme, icons, desktop.scale()).is_err() {
-                    return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+            // The fresh surface is allocated before the session is asked and
+            // adopted only once the pane has taken the new region, so a
+            // refusal at either step leaves the window drawable at the size it
+            // already had. The surface holds none of the last frame's pixels,
+            // so the repaint that follows can only be a whole one.
+            if let Some(surface) = Surface::new(new_mode.width_px, new_mode.height_px) {
+                if win.pane.resize(client, &new_mode) {
+                    win.surface = surface;
+                    if present_whole(win, client, theme, icons, desktop.scale()).is_err() {
+                        return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+                    }
                 }
             }
             return None;
@@ -759,7 +701,7 @@ mod program {
         // follows the window being shown again is what re-attaches a fresh
         // region and fills it.
         if matches!(event, WindowEvent::ContentReleased { .. }) {
-            windows[index].frames.release();
+            windows[index].pane.release_frames();
             return None;
         }
 
@@ -771,7 +713,7 @@ mod program {
         let chrome_toggled = chrome_toggle(win, event);
         let canvas = Canvas {
             theme,
-            mode: &win.mode,
+            mode: win.pane.mode(),
             scale: desktop.scale(),
             chrome: win.chrome,
         };
@@ -801,7 +743,7 @@ mod program {
         // and listing for the marks they move themselves, report into this
         // one, which is what the present is clipped to.
         let mut damage = damage::sink();
-        let window_id = win.window;
+        let window_id = win.pane.id();
         let (repaint, close) = apply_event(
             &mut WindowState {
                 browser: &mut win.browser,
@@ -890,7 +832,7 @@ mod program {
         // takes it back down and says so, rather than leaving an empty frame
         // on the desktop.
         if present_whole(&mut win, client, theme, icons, desktop.scale()).is_err() {
-            let _ = client.close(win.window);
+            let _ = win.pane.close(client);
             report_error("the new window could not be painted; it was closed again");
             return;
         }
@@ -2072,7 +2014,7 @@ mod program {
         let properties = overlays.properties.as_ref();
         let owner = overlays.owner.as_ref();
         let can_chown = overlays.can_chown;
-        let mode = target.mode;
+        let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
         // The rail owns the window's leading edge, so every overlay drawn over
         // the view is placed within what is left — the one shared inset the
@@ -2089,7 +2031,7 @@ mod program {
         // moved. A refused retitle leaves the remembered text alone rather than
         // claiming a title the session does not carry: the next frame retries.
         if let Some(title) = retitle(browser, target.title) {
-            if target.client.set_title(target.window, &title).is_ok() {
+            if target.client.set_title(target.pane.id(), &title).is_ok() {
                 *target.title = title;
             }
         }
@@ -2171,9 +2113,7 @@ mod program {
                 }
             },
         );
-        winframe::encode(surface, target.frame, mode, damage, &SERIAL)?;
-        let window = target.window;
-        target.client.present(window, 0, damage)
+        target.pane.present(target.client, surface, damage)
     }
 
     /// Apply one delivered event to the browser, reporting whether the
@@ -5470,11 +5410,11 @@ mod program {
                                 );
                             }
                         }
-                        if event.window_id() == Some(windows[busy].window) {
+                        if event.window_id() == Some(windows[busy].pane.id()) {
                             let win = &mut windows[busy];
                             let canvas = Canvas {
                                 theme,
-                                mode: &win.mode,
+                                mode: win.pane.mode(),
                                 scale: desktop.scale(),
                                 chrome: win.chrome,
                             };

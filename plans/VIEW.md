@@ -40,6 +40,45 @@ and never a fabricated image.
 
 Associations are **pictures and PDF only**. Text is `edit.app`'s.
 
+Each new format is a private module in `lib/image`'s existing shape: `probe`
+returning declared geometry; `decode` weighing `DecodeLimits` **before**
+allocating a scanline, palette, or output pixel; format-namespaced
+`DecodeError` variants; `#[cfg(test)] #[path = "<mod>_tests.rs"] mod tests;`
+with every input synthesised in test code (the crate ships no fixtures).
+`no_std`, `forbid(unsafe_code)`, fallible allocation through
+`tairix_util::fallible`, checked arithmetic on every untrusted value. Each
+gains a structure-aware generator in `lib/image/tests/fuzz_image.rs`, so the
+already-registered `fuzz_image` target covers it with no new harness.
+
+What "complete" means, per format:
+
+- **GIF** — LZW in GIF's variable-code-width dialect with deferred clear,
+  interlacing, global and local palettes, transparent index, the full
+  frame-disposal model, and the `NETSCAPE2.0` loop count.
+- **BMP + ICO** — BMP written once and shared: `BITMAPCOREHEADER` through
+  `BITMAPV5HEADER`, 1/2/4/8/16/24/32 bpp, RLE4/RLE8, bitfield masks, top-down
+  and bottom-up rows. ICO/CUR is the directory over it, per entry, including
+  PNG-compressed entries and the 1-bpp AND mask.
+- **TIFF** — both byte orders; the IFD chain; strips *and* tiles; planar and
+  chunky; bit depths 1/2/4/8/16/32 across the integer and float sample
+  formats; photometric WhiteIsZero / BlackIsZero / RGB / palette /
+  transparency-mask / CMYK / YCbCr; the horizontal and floating-point
+  predictors; associated and unassociated extra-sample alpha; compressions
+  none, PackBits, LZW (TIFF's dialect and the classic off-by-one variant),
+  Deflate/AdobeDeflate through `tairix_compress::inflate`, CCITT G3 1D/2D and
+  G4, and JPEG-in-TIFF through the existing `jpeg` module.
+- **WEBP** — the RIFF container; `VP8 ` lossy (bool decoder, intra
+  prediction, DCT/WHT, loop filter, YUV to RGB); `VP8L` lossless
+  (meta-Huffman, colour cache, all four transforms); `ALPH` including its
+  filtering methods; `VP8X`-extended files; `ANIM`/`ANMF` animation.
+- **RISC OS Sprite** — the sprite-area header and control blocks, left/right
+  wastage, old-style mode numbers, type-1 sprite mode words, the RISC OS 5
+  extended mode words, 1/2/4/8/16/24/32 bpp, sprite palettes including
+  full-palette entries, and both mask forms (classic 1-bit and alpha).
+  `plans/RISCOS-EMULATOR.md` already specifies a sandboxed sprite *data*
+  decode for `!Sprites22`/`!Sprites` icon loading, so this decoder has a
+  second planned consumer and belongs in the shared crate.
+
 ## Where each piece lives, and why there
 
 | Piece | Home |
@@ -55,8 +94,10 @@ Associations are **pictures and PDF only**. Text is `edit.app`'s.
 
 `lib/image` is already *the* raster registry: `ImageFormat`/`sniff`/`probe`/
 `decode` dispatch, and `DecodeLimits`/`RasterImage`/`DecodeError` carry the
-fail-closed discipline. Sibling crates would duplicate all of it, and the icon
-and wallpaper pipelines gain every new format for free the moment it lands.
+fail-closed discipline. Sibling crates would duplicate all of it, and a format
+that lands here needs no second decoder for any other consumer that later
+admits it — though admitting one stays that consumer's decision: the icon
+pipeline deliberately takes only PNG and SVG (`plans/ICONS.md`).
 
 The rotation is a pixel permutation, so it belongs to the one rasterisation
 path the charter allows; an app-local copy would be a second one.
@@ -83,7 +124,15 @@ A GIF or animated WEBP frame is composited **onto its predecessors** under the
 format's disposal model, so a per-index decode would be both wrong and O(n²).
 The sequence decoder therefore holds the composition canvas and yields
 composited frames in order: stepping is O(1) amortised. Page-addressed formats
-(TIFF, ICO, PDF) expose the same shape with independent entries.
+(TIFF, ICO, PDF) expose the same shape with independent entries, and add
+addressed access when the first of them lands.
+
+The canvas is why a refusal is **remembered**: a frame that stopped part-way
+has already had its predecessor's disposal applied and may hold part of its
+own pixels, so nothing on the canvas describes a whole frame any more.
+`next_frame` therefore answers the same refusal until `rewind`, and the app's
+playback loop rewinds (or stops and states the reason) rather than stepping
+on. No pixels ever cross a refusal.
 
 ### Animation is one-shot and tickless
 
@@ -154,8 +203,17 @@ belongs beside it rather than in an eighth copy.
 
 Shared: the transport; the base park (event mailbox + memory-pressure band) an
 app's own `EventSource` calls; `bind_event_mailbox`; `bring_up_desktop`;
-`mode_for`/`region_bytes`; the four reserved exit codes and `fail`; and the
-retained-`Surface` `present`/`resize` pair.
+`mode_for`/`region_bytes`; the four reserved exit codes and `fail`; one
+window's `WindowPane`; and the single-window `AppWindow` that pairs a pane
+with the retained `Surface` and takes the paint as a closure.
+
+`WindowPane` is **one window**, however many the app has: its id, its shared
+frame region, and the layout both are shaped as, with the create dance
+(`open`, `open_popup`), `present`, `resize`, `release_frames`, and `close`. It
+holds **no picture** — a plain `Surface` for most apps, a screen model
+carrying its own cell diff for the terminal — because a pane that owned a
+surface would force a second window-sized allocation on every app whose
+retained picture is not literally one.
 
 The **resize ordering is the load-bearing part**: allocate the spare surface,
 create the new frame region, grant it, ask the server to resize, and only then
@@ -173,22 +231,27 @@ clients, and their exit-code sets are their own.
 ## Status
 
 - `plans/VIEW.md` and the jump-sheet row — **done**.
-- `lib/window::app` shared shell, and the migration of all six other app-side
-  consumers — **done**. `datetime`, `widgets`, `wallpaper`, and `switchboard`
+- `lib/window::app` shared shell, and the migration of every other app-side
+  consumer — **done**. `datetime`, `widgets`, `wallpaper`, and `switchboard`
   are single-window and took `AppWindow` whole; `datetime` additionally stopped
   allocating a window-sized surface per paint, because painting into the
   retained one is what the shell offers. `files` and `terminal` are
-  multi-window and took the free functions only.
-  - **Outstanding, and deliberately not forced:** the two multi-window apps
-    still hold their own per-pane present/resize. `AppWindow` is single-window,
-    so making them use it would have been the wrong shape rather than a
-    de-duplication. The correct fix is to split a public `WindowPane` (id +
-    frames + mode + surface, with `present`/`resize` taking the client) out of
-    `AppWindow`, which both a single-window `AppWindow` and a multi-window
-    app's `Vec<WindowPane>` then compose. That is the next piece of this step,
-    not a permanent state.
-- `lib/image` sequence API and the page-source-facing surface — planned.
-- `lib/image` GIF, BMP/ICO, Sprite, TIFF, WEBP — planned.
+  multi-window and hold `WindowPane`s — one per window, and per popup for the
+  terminal's settings sheet — beside their own retained pictures, which is why
+  the pane owns no surface.
+- `lib/image` sequence API (`Sequence`/`SequenceInfo`/`SequenceKind`/`Frame`),
+  with the still picture as its one-entry case — **done**. Forward-only with a
+  rewind, because disposal makes an animation exactly that; page-addressed
+  formats add addressed access when the first of them lands, rather than
+  ahead of one.
+- `lib/image` GIF — **done**, complete as specified above, with the whole
+  disposal model, the deferred clear, interlacing, and a structure-aware fuzz
+  generator. `decode` on a GIF answers its first composited frame, which is
+  what a still consumer wants; whether the icon or wallpaper pipeline admits
+  the format stays their own decision, and neither does today.
+- `lib/image` BMP/ICO, Sprite, TIFF, WEBP — planned, in that order (TIFF's
+  CCITT and LZW codecs and WEBP's VP8 lossy decoder are each a change in their
+  own right).
 - `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.

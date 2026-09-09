@@ -81,7 +81,6 @@ mod program {
         AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, WaitStatus};
-    use tairix_display::{winframe, SERIAL};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
@@ -107,10 +106,10 @@ mod program {
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
-    use tairix_window::app::{self, Wake};
+    use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         damage_in, key_input_event, pointer_input_events, pointer_point, Desktop, EventError,
-        EventMailbox, PopupSpec, WindowClient, WindowEvents, WindowFrames, WindowTransport,
+        EventMailbox, WindowClient, WindowEvents, WindowTransport,
     };
 
     /// The wait-set token of the settings worker's wake pipe: readable exactly
@@ -137,30 +136,6 @@ mod program {
     /// motion rather than as a stutter. The park is a one-shot deadline, so
     /// a terminal with no animated effect never wakes at all.
     const FRAME_INTERVAL_NS: u64 = 50_000_000;
-
-    /// Re-map the window `window` onto a fresh frame region shaped as
-    /// `new_mode`, fail-closed. Returns the adopted region's `(base, len)` on
-    /// success — the old region (`old_base` / `old_len`) already unmapped —
-    /// or `None` when the region could not be allocated or the session
-    /// refused the re-map, in which case the old region is left intact and
-    /// still mapped so the current surface stays valid (never a crash or a
-    /// blank window).
-    ///
-    /// The fresh region is created and granted first and returned only once
-    /// [`WindowClient::resize`] has accepted it, so the caller's old region is
-    /// dropped — and unmapped — by adopting the new one, while every refusal
-    /// drops the fresh region here and leaves the window on its old geometry.
-    fn resize_frames(
-        client: &mut WindowClient<app::RtWindowTransport>,
-        window: u64,
-        new_mode: &DisplayMode,
-    ) -> Option<WindowFrames> {
-        let frames = WindowFrames::create(app::region_bytes(new_mode, app::FRAME_COUNT))?;
-        client
-            .resize(window, frames.grant()?, app::FRAME_COUNT, new_mode)
-            .ok()?;
-        Some(frames)
-    }
 
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
@@ -247,13 +222,11 @@ mod program {
         /// what it reported; a drag would otherwise re-derive the whole sheet
         /// per pointer sample.
         picture: SheetScreen,
-        /// The popup's window-channel id, which its events arrive under.
-        window: u64,
-        /// The popup's own shared frame region.
-        frames: WindowFrames,
-        /// The geometry the region is shaped as; also the popup-local
-        /// viewport the overlay is laid out and hit-tested in.
-        mode: DisplayMode,
+        /// The popup's own channel-side state: the window-channel id its
+        /// events arrive under, its shared frame region, and the geometry both
+        /// are shaped as — which is also the popup-local viewport the overlay
+        /// is laid out and hit-tested in.
+        pane: WindowPane,
         /// Set once the overlay has asked to go. The loop closes the popup
         /// and releases the region; the routing itself holds no window
         /// client.
@@ -273,70 +246,13 @@ mod program {
 
         /// The popup-local viewport the overlay occupies.
         fn viewport(&self) -> Rect {
-            Rect::new(0, 0, self.mode.width_px, self.mode.height_px)
+            let mode = self.pane.mode();
+            Rect::new(0, 0, mode.width_px, mode.height_px)
         }
 
         /// Close the popup; its frame region is unmapped by its own drop.
         fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
-            let _ = client.close(self.window);
-        }
-    }
-
-    /// Open a popup window of `mode` at `offset` from `parent`'s client
-    /// origin, with its own shared frame region granted to the window
-    /// endpoint.
-    ///
-    /// Returns `None` — stating why on `stderr` — when the region could not be
-    /// created or granted, when the session refused the popup, or when the
-    /// reply names a server other than the one that opened the parent window
-    /// (an imposter reply is refused rather than trusted). The caller then
-    /// simply shows no overlay; nothing is left mapped and the terminal keeps
-    /// running.
-    fn open_popup(
-        client: &mut WindowClient<app::RtWindowTransport>,
-        parent: u64,
-        server: ProcId,
-        event_endpoint: u64,
-        mode: &DisplayMode,
-        offset: (i32, i32),
-    ) -> Option<(u64, WindowFrames)> {
-        let Some(len) = (mode.stride_bytes as usize)
-            .checked_mul(mode.height_px as usize)
-            .and_then(|frame| frame.checked_mul(app::FRAME_COUNT as usize))
-        else {
-            report("popup frame region larger than the address width");
-            return None;
-        };
-        let Some(frames) = WindowFrames::create(len) else {
-            report("popup frame region refused");
-            return None;
-        };
-        let Some(grant) = frames.grant() else {
-            report("popup frame region grant refused");
-            return None;
-        };
-        let created = client.create_popup(&PopupSpec {
-            parent_window_id: parent,
-            shm_handle: grant,
-            event_endpoint,
-            frame_count: app::FRAME_COUNT,
-            surface: *mode,
-            offset_x: offset.0,
-            offset_y: offset.1,
-        });
-        // Every refusal below drops `frames`, which unmaps it, so no path
-        // leaves a popup region pinned.
-        match created {
-            Ok((window, replied)) if replied == server => Some((window, frames)),
-            Ok((window, _)) => {
-                let _ = client.close(window);
-                report("popup reply came from another sender; not shown");
-                None
-            }
-            Err(err) => {
-                report(&alloc::format!("popup refused ({err}); not shown"));
-                None
-            }
+            let _ = self.pane.close(client);
         }
     }
 
@@ -368,7 +284,7 @@ mod program {
                 return;
             }
         };
-        match client.open_menu(open.window, anchor, &model) {
+        match client.open_menu(open.pane.id(), anchor, &model) {
             Ok(open_id) => open.menu = Some(open_id),
             Err(err) => report(&alloc::format!("menu refused ({err}); not shown")),
         }
@@ -424,13 +340,18 @@ mod program {
             report("settings sheet picture could not be allocated; not shown");
             return None;
         };
-        let (window, frames) = open_popup(client, parent, server, event_endpoint, &mode, offset)?;
+        let pane =
+            match WindowPane::open_popup(client, parent, server, event_endpoint, &mode, offset) {
+                Ok(pane) => pane,
+                Err(err) => {
+                    report(&alloc::format!("{err}; settings sheet not shown"));
+                    return None;
+                }
+            };
         let mut overlay = Overlay {
             sheet,
             picture,
-            window,
-            frames,
-            mode,
+            pane,
             dismissed: false,
         };
         if present_overlay(&mut overlay, theme, scale, client).is_err() {
@@ -455,7 +376,7 @@ mod program {
         scale: Scale,
         client: &mut WindowClient<app::RtWindowTransport>,
     ) -> Result<(), Errno> {
-        if overlay.frames.is_released() {
+        if overlay.pane.content_released() {
             overlay.picture.invalidate();
         }
         let viewport = overlay.viewport();
@@ -465,45 +386,16 @@ mod program {
         if painted.is_empty() {
             return Ok(());
         }
-        let frame = client
-            .frame_pixels(
-                &mut overlay.frames,
-                overlay.window,
-                app::FRAME_COUNT,
-                &overlay.mode,
-            )
-            .ok_or(Errno::NotAttached)?;
-        let Some(damage) = write_frame(overlay.picture.surface(), frame, &overlay.mode, painted)?
-        else {
+        let Some(damage) = damage_in(overlay.pane.mode(), painted) else {
             // Nothing of the paint survives the clip, so these pixels were
             // never shown: cover the sheet next time rather than leave the
             // picture silently ahead of the screen.
             overlay.picture.invalidate();
             return Ok(());
         };
-        client.present(overlay.window, 0, damage)
-    }
-
-    /// Copy `area` of `surface` into the shared `frame` shaped as `mode`,
-    /// answering the rectangle actually written so a present carries exactly
-    /// that, or `None` when nothing of `area` survives the clip.
-    ///
-    /// `area` is clipped through the one shared window-clip rule, so a caller
-    /// may name a rectangle the screen has since outgrown; the conversion
-    /// itself is the one shared window-frame codec, on this thread (a terminal
-    /// presents only what its grid changed, so there is nothing here worth
-    /// another core).
-    fn write_frame(
-        surface: &Surface,
-        frame: &mut [u8],
-        mode: &DisplayMode,
-        area: Rect,
-    ) -> Result<Option<DamageRect>, Errno> {
-        let Some(damage) = damage_in(mode, area) else {
-            return Ok(None);
-        };
-        winframe::encode(surface, frame, mode, damage, &SERIAL)?;
-        Ok(Some(damage))
+        overlay
+            .pane
+            .present(client, overlay.picture.surface(), damage)
     }
 
     /// One window's shell channel: the master end of its own kernel
@@ -650,8 +542,10 @@ mod program {
     /// event mailbox they share. So a shell exiting, a resize, or an overlay
     /// opening reaches exactly one of them.
     struct TerminalWindow {
-        /// The window-channel id its events arrive under.
-        window: u64,
+        /// Its channel-side state: the window-channel id its events arrive
+        /// under, its shared frame region, and the geometry both are shaped
+        /// as.
+        pane: WindowPane,
         /// This process's slot for the window, naming its two wait-set
         /// tokens.
         slot: u64,
@@ -666,11 +560,6 @@ mod program {
         screen: Screen,
         /// How this window's screen currently looks.
         look: Look,
-        /// The geometry its frame region is shaped as.
-        mode: DisplayMode,
-        /// Its shared frame region, released when the session releases its
-        /// side and re-attached by the next present.
-        frames: WindowFrames,
         /// Its one open settings sheet, if any.
         overlay: Option<Overlay>,
         /// The open id of this window's unanswered menu, if one is up.
@@ -716,18 +605,12 @@ mod program {
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
         ) -> Result<(), Errno> {
-            let (mode, window) = (self.mode, self.window);
-            let frame = client
-                .frame_pixels(&mut self.frames, window, app::FRAME_COUNT, &mode)
-                .ok_or(Errno::NotAttached)?;
             present_frame(
                 &self.terminal,
                 &mut self.look,
                 &mut self.screen,
                 client,
-                window,
-                frame,
-                &mode,
+                &mut self.pane,
             )
         }
 
@@ -742,13 +625,16 @@ mod program {
             if let Some(open) = self.overlay.take() {
                 open.close(client);
             }
-            let _ = client.close(self.window);
+            // Read before the pane is consumed, which moves it out of `self`.
+            let (shell_token, child_token) = (self.shell_token(), self.child_token());
+            let (pty_master, shell_pid) = (self.pty_master, self.shell_pid);
+            let _ = self.pane.close(client);
             let _ = tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Del,
                 WaitSourceKind::Stream,
-                u64::from(self.pty_master),
-                self.shell_token(),
+                u64::from(pty_master),
+                shell_token,
             );
             let _ = tairix_rt::waitset_ctl(
                 set,
@@ -756,11 +642,11 @@ mod program {
                 WaitSourceKind::Child,
                 #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
                 {
-                    self.shell_pid as u64
+                    shell_pid as u64
                 },
-                self.child_token(),
+                child_token,
             );
-            let _ = tairix_rt::fs_close(self.pty_master);
+            let _ = tairix_rt::fs_close(pty_master);
         }
     }
 
@@ -784,8 +670,61 @@ mod program {
         env: &'a [Vec<u8>],
     }
 
-    /// Open one terminal window: its screen model and retained picture, its
-    /// shared frame region, the desktop window itself, and then its
+    /// One window's pseudo-terminal, the shell hosted on it, and the screen
+    /// model over the master end.
+    struct HostedShell {
+        /// The screen model, driven by the shell's cooked output.
+        terminal: Terminal<PtyShell>,
+        /// The pty master descriptor, kept so a resize can tell the shell its
+        /// new window size and a close can release it.
+        pty_master: u32,
+        /// The hosted shell's PID, for the reap.
+        pid: i64,
+    }
+
+    /// Create a pty at `cols` × `rows`, build the screen model over its
+    /// master end, and spawn the shell on its slave.
+    ///
+    /// The pty is created at the grid the window will actually show, so
+    /// `terminal_size` reports it, and the shell's fd 0/1/2 are the slave — a
+    /// console-class tty — so it runs its full interactive editor exactly as
+    /// on the hardware console (`plans/PTY.md`).
+    ///
+    /// The grid is allocated *before* the spawn, so a refused allocation costs
+    /// no process load and leaves no shell behind to reap. Every refusal
+    /// states its reason and closes what it had opened, so the caller has only
+    /// its window to take back down.
+    fn open_shell(cols: u16, rows: u16, env: &[Vec<u8>]) -> Option<HostedShell> {
+        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
+            report("pty refused; no window opened");
+            return None;
+        };
+        let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
+            let _ = tairix_rt::fs_close(pty_master);
+            let _ = tairix_rt::fs_close(pty_slave);
+            report("screen grid refused; no window opened");
+            return None;
+        };
+        let attach = shell_wires(pty_slave);
+        let env: Vec<&[u8]> = env.iter().map(Vec::as_slice).collect();
+        let pid = tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
+        // Close this process's own slave end either way: the spawn cloned it
+        // into the shell, and keeping it here would mask the shell's exit.
+        let _ = tairix_rt::fs_close(pty_slave);
+        if pid < 0 {
+            let _ = tairix_rt::fs_close(pty_master);
+            report("shell spawn refused; no window opened");
+            return None;
+        }
+        Some(HostedShell {
+            terminal,
+            pty_master,
+            pid,
+        })
+    }
+
+    /// Open one terminal window: its screen model and retained picture, the
+    /// desktop window and its shared frame region, and then its
     /// pseudo-terminal, hosted shell, and two wait-set members.
     ///
     /// The desktop is asked for the window before anything is spawned, so a
@@ -796,8 +735,6 @@ mod program {
     /// `None` with the reason already on `stderr`. Every refusal unwinds what
     /// it had allocated, so a window that could not be opened leaves nothing
     /// mapped, nothing spawned, and no member on the wait-set.
-    #[allow(clippy::too_many_lines)]
-    // One linear bring-up whose every refusal unwinds what it had; splitting it would separate an allocation from its release.
     #[allow(clippy::needless_pass_by_value)] // The context is a bundle of borrows, moved so the caller cannot reuse a stale one.
     fn open_window(ctx: WindowContext<'_>) -> Option<(TerminalWindow, ProcId)> {
         let look = Look::resolve(ctx.profile, ctx.theme, ctx.desktop);
@@ -814,21 +751,6 @@ mod program {
         };
 
         let mode = app::mode_for(w, h);
-        let Some(total) = (mode.stride_bytes as usize)
-            .checked_mul(mode.height_px as usize)
-            .and_then(|frame| frame.checked_mul(app::FRAME_COUNT as usize))
-        else {
-            report("frame region larger than the address width; no window opened");
-            return None;
-        };
-        let Some(frames) = WindowFrames::create(total) else {
-            report("shared frame region refused; no window opened");
-            return None;
-        };
-        let Some(grant) = frames.grant() else {
-            report("frame region grant refused; no window opened");
-            return None;
-        };
 
         // The desktop is asked *before* a pty is created or a shell spawned,
         // because the session can refuse (it bounds the windows one client
@@ -841,78 +763,47 @@ mod program {
         // that is where the terminal's own snap to whole cells bottoms out,
         // so one cell of the face it opens in is its declared floor.
         let (min_width_px, min_height_px) = grid_size(1, 1, look.font);
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        let created = ctx.client.create(
-            grant,
+        let (pane, server) = match WindowPane::open(
+            ctx.client,
             ctx.event_endpoint,
-            app::FRAME_COUNT,
             &mode,
             "Terminal",
             win_sizing(min_width_px, min_height_px),
-        );
-        let Ok((window, server)) = created else {
-            // `frames` drops here, which unmaps it.
-            report("desktop session refused the window");
-            return None;
-        };
-        let close_window = |client: &mut WindowClient<app::RtWindowTransport>| {
-            let _ = client.close(window);
+        ) {
+            Ok(opened) => opened,
+            Err(err) => {
+                report(&alloc::format!("{err}; no window opened"));
+                return None;
+            }
         };
 
-        // The pty is created at the grid the window will actually show, so
-        // `terminal_size` reports it. The shell's fd 0/1/2 are the slave, a
-        // console-class tty, so it runs its full interactive editor exactly
-        // as on the hardware console (`plans/PTY.md`).
-        let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
-            close_window(ctx.client);
-            report("pty refused; no window opened");
-            return None;
-        };
-        let attach = shell_wires(pty_slave);
-        let env: Vec<&[u8]> = ctx.env.iter().map(Vec::as_slice).collect();
-        let shell_pid =
-            tairix_rt::spawn_attached(DEFAULT_SHELL.as_bytes(), &attach, &[b"elsh"], &env);
-        // Close this process's own slave end either way: the spawn cloned it
-        // into the shell, and keeping it here would mask the shell's exit.
-        let _ = tairix_rt::fs_close(pty_slave);
-        if shell_pid < 0 {
-            let _ = tairix_rt::fs_close(pty_master);
-            close_window(ctx.client);
-            report("shell spawn refused; no window opened");
-            return None;
-        }
-
-        let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
-            let _ = tairix_rt::fs_close(pty_master);
-            close_window(ctx.client);
-            report("screen grid refused; no window opened");
+        let Some(shell) = open_shell(cols, rows, ctx.env) else {
+            let _ = pane.close(ctx.client);
             return None;
         };
 
         let mut opened = TerminalWindow {
-            window,
+            pane,
             slot: ctx.slot,
-            pty_master,
-            shell_pid,
-            terminal,
+            pty_master: shell.pty_master,
+            shell_pid: shell.pid,
+            terminal: shell.terminal,
             screen,
             look,
-            mode,
-            frames,
             overlay: None,
             menu: None,
         };
         let members = [
             (
                 WaitSourceKind::Stream,
-                u64::from(pty_master),
+                u64::from(opened.pty_master),
                 opened.shell_token(),
             ),
             (
                 WaitSourceKind::Child,
-                #[allow(clippy::cast_sign_loss)] // `shell_pid >= 0` checked above; it is a PID.
+                #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
                 {
-                    shell_pid as u64
+                    opened.shell_pid as u64
                 },
                 opened.child_token(),
             ),
@@ -924,7 +815,7 @@ mod program {
                 return None;
             }
         }
-        apply_blur(ctx.client, window, ctx.profile);
+        apply_blur(ctx.client, opened.pane.id(), ctx.profile);
         if opened.present(ctx.client).is_err() {
             report("first present refused; no window opened");
             opened.close(ctx.client, ctx.set);
@@ -957,17 +848,17 @@ mod program {
         look: &mut Look,
         screen: &mut Screen,
         client: &mut WindowClient<T>,
-        window: u64,
-        frame: &mut [u8],
-        mode: &DisplayMode,
+        pane: &mut WindowPane,
     ) -> Result<(), Errno>
     where
         S: ShellSource,
         T: WindowTransport,
     {
-        // `mode` is the one truth about the window's extent, so the picture
-        // is reconciled to it here rather than at each site that changes it:
-        // a surface and a frame region of different shapes cannot arise.
+        // The pane's mode is the one truth about the window's extent, so the
+        // picture is reconciled to it here rather than at each site that
+        // changes it: a surface and a frame region of different shapes cannot
+        // arise.
+        let mode = *pane.mode();
         let shaped = screen.surface().width() == mode.width_px
             && screen.surface().height() == mode.height_px;
         if !shaped && !screen.resize(mode.width_px, mode.height_px) {
@@ -979,14 +870,14 @@ mod program {
             if damage.is_empty() {
                 return Ok(());
             }
-            let Some(rect) = write_frame(screen.surface(), frame, mode, damage)? else {
+            let Some(rect) = damage_in(&mode, damage) else {
                 // The damage lies outside the window the session knows about,
                 // so these pixels were never shown: repaint whole next frame
                 // rather than leave the surface silently ahead of the screen.
                 screen.invalidate();
                 return Ok(());
             };
-            return client.present(window, 0, rect);
+            return pane.present(client, screen.surface(), rect);
         }
         // Reused between frames, so an animated terminal allocates once
         // rather than once a frame; a resize is what makes it stale.
@@ -1000,13 +891,7 @@ mod program {
         // A refused buffer costs the effect, never the terminal: present the
         // plain screen rather than exiting over decoration.
         let Some(mut effected) = held else {
-            let _ = write_frame(
-                clean,
-                frame,
-                mode,
-                Rect::new(0, 0, mode.width_px, mode.height_px),
-            )?;
-            return client.present(window, 0, DamageRect::full(mode));
+            return pane.present(client, clean, DamageRect::full(&mode));
         };
         effected.overwrite(0, 0, clean);
         look.effects.apply(
@@ -1015,15 +900,9 @@ mod program {
             look.phase,
             look.scale.percent(),
         );
-        let written = write_frame(
-            &effected,
-            frame,
-            mode,
-            Rect::new(0, 0, mode.width_px, mode.height_px),
-        );
+        let presented = pane.present(client, &effected, DamageRect::full(&mode));
         look.effected = Some(effected);
-        let _ = written?;
-        client.present(window, 0, DamageRect::full(mode))
+        presented
     }
 
     /// Tell the session how far to blur what is behind this window.
@@ -1482,11 +1361,11 @@ mod program {
                 open.look.adopt(changed, &profile, theme, ctx.desktop);
             }
             if changed.blur() {
-                apply_blur(client, open.window, &profile);
+                apply_blur(client, open.pane.id(), &profile);
             }
             if changed.metrics() {
-                let (cols, rows) =
-                    grid_dims(open.mode.width_px, open.mode.height_px, open.look.font);
+                let mode = *open.pane.mode();
+                let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
                 let _ = open.terminal.resize(cols, rows);
                 let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
             }
@@ -1544,8 +1423,9 @@ mod program {
         let scale = ctx.desktop.scale();
         for open in windows.iter_mut() {
             open.look.refresh(&profile, theme, ctx.desktop);
-            apply_blur(client, open.window, &profile);
-            let (cols, rows) = grid_dims(open.mode.width_px, open.mode.height_px, open.look.font);
+            apply_blur(client, open.pane.id(), &profile);
+            let mode = *open.pane.mode();
+            let (cols, rows) = grid_dims(mode.width_px, mode.height_px, open.look.font);
             let _ = open.terminal.resize(cols, rows);
             let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
             open.screen.invalidate();
@@ -1630,7 +1510,7 @@ mod program {
         // holds is an outcome for a window that has just closed, and there is
         // nothing left to apply it to (fail closed).
         let index = |windows: &[TerminalWindow], window: u64| {
-            windows.iter().position(|open| open.window == window)
+            windows.iter().position(|open| open.pane.id() == window)
         };
         match outcome {
             EventOutcome::Continue => Applied::Running,
@@ -1686,7 +1566,7 @@ mod program {
                 let Some(index) = index(windows, window) else {
                     return Applied::Running;
                 };
-                let mode = windows[index].mode;
+                let mode = *windows[index].pane.mode();
                 let sheet = Box::new(Settings::new(ctx.publication.live()));
                 let opened = open_overlay(
                     client,
@@ -1789,14 +1669,12 @@ mod program {
                 // snapped size is the one already in force.
                 let open = &mut windows[index];
                 let (snapped_w, snapped_h) = snap_to_cells(width_px, height_px, open.look.font);
-                if (snapped_w, snapped_h) == (open.mode.width_px, open.mode.height_px) {
+                let current = *open.pane.mode();
+                if (snapped_w, snapped_h) == (current.width_px, current.height_px) {
                     return Applied::Running;
                 }
                 let new_mode = app::mode_for(snapped_w, snapped_h);
-                if let Some(frames) = resize_frames(client, open.window, &new_mode) {
-                    // Adopting drops the old region, which unmaps it.
-                    open.frames = frames;
-                    open.mode = new_mode;
+                if open.pane.resize(client, &new_mode) {
                     let (cols, rows) = grid_dims(snapped_w, snapped_h, open.look.font);
                     let _ = open.terminal.resize(cols, rows);
                     let _ = tairix_rt::pty_set_size(open.pty_master, rows, cols);
@@ -2111,17 +1989,17 @@ mod program {
                 continue;
             };
             let Some(index) = windows.iter().position(|open| {
-                open.window == window_id
+                open.pane.id() == window_id
                     || open
                         .overlay
                         .as_ref()
-                        .is_some_and(|held| held.window == window_id)
+                        .is_some_and(|held| held.pane.id() == window_id)
             }) else {
                 continue;
             };
             let open = &mut windows[index];
-            let window = open.window;
-            let for_popup = open.window != window_id;
+            let window = open.pane.id();
+            let for_popup = window != window_id;
             match event {
                 WindowEvent::Key { key, .. } if for_popup => {
                     let Some(held) = open.overlay.as_mut() else {
@@ -2247,7 +2125,7 @@ mod program {
                 // only the top-level window's region is released here.
                 WindowEvent::ContentReleased { .. } => {
                     if !for_popup {
-                        open.frames.release();
+                        open.pane.release_frames();
                     }
                 }
                 // The window manager resized the window (a live

@@ -9,13 +9,20 @@
 //! rest of the app half of the channel so there is one of each rather than one
 //! per bundle.
 //!
+//! # One window or many
+//!
+//! [`WindowPane`] is one window's channel-side state — its id, its region, its
+//! layout — and the protocol over it. [`AppWindow`] pairs one with the retained
+//! surface and takes the paint as a closure, which is what a single-window app
+//! wants; an app that opens a window per document, or a popup above one, holds
+//! panes itself and keeps whatever retained picture it actually paints from.
+//!
 //! # What stays with the application
 //!
 //! Its own wait-set members and the tokens for them ([`FIRST_APP_TOKEN`]
 //! onward), what it *does* about a pressure-band change, and what it paints.
-//! [`AppWindow::present`] takes the paint as a closure precisely so the shell
-//! owns the frame-region and damage bookkeeping without owning a single pixel
-//! of anyone's window.
+//! The shell owns the frame-region and damage bookkeeping without owning a
+//! single pixel of anyone's window.
 
 use core::fmt;
 
@@ -29,6 +36,7 @@ use tairix_theme::ThemeRegistry;
 use crate::client::{WindowClient, WindowTransport};
 use crate::desktop::Desktop;
 use crate::frames::WindowFrames;
+use crate::server::PopupSpec;
 
 /// Exit code when the shared frame region could not be created or granted to
 /// the window endpoint. A reserved, fail-closed value.
@@ -318,10 +326,19 @@ pub fn mode_for(width_px: u32, height_px: u32) -> DisplayMode {
     }
 }
 
-/// Total bytes a `frame_count`-frame region shaped as `mode` needs.
+/// Total bytes a `frame_count`-frame region shaped as `mode` needs, or `None`
+/// when that product does not fit an address.
+///
+/// Checked rather than saturating, because either failure mode is fatal to the
+/// caller: a wrapped length asks for a region too small for the window it
+/// describes, and a saturated one for a region no machine can map. On a 32-bit
+/// target the product of two `u32` dimensions genuinely does not fit.
 #[must_use]
-pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> usize {
-    (mode.stride_bytes as usize) * (mode.height_px as usize) * (frame_count as usize)
+pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> Option<usize> {
+    usize::try_from(mode.stride_bytes)
+        .ok()?
+        .checked_mul(usize::try_from(mode.height_px).ok()?)?
+        .checked_mul(usize::try_from(frame_count).ok()?)
 }
 
 /// Frames in a window's shared region.
@@ -330,113 +347,39 @@ pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> usize {
 /// while the session reads — so a single frame is race-free; the constant names
 /// the choice.
 pub const FRAME_COUNT: u32 = 1;
-
-/// One open window: its id, its shared frame region, its current mode, and the
-/// retained surface every frame is drawn into.
+/// One open window's channel-side state: the id the session knows it by, the
+/// shared frame region every present crosses, and the pixel layout both are
+/// shaped as.
 ///
-/// The surface is held for the life of the window because allocating and
-/// zeroing one per present would be a whole-window pass of its own, and holding
-/// it is what makes a clipped repaint sound — every pixel outside the clip is
-/// the one already on screen.
-struct Pane {
+/// It holds no picture. What a window *looks* like is the application's — a
+/// plain [`Surface`] for most, a screen model carrying its own cell diff for a
+/// terminal — and a pane that owned a surface would force a second
+/// window-sized allocation on every app whose retained picture is not literally
+/// one. So the pane owns the protocol: attach, encode, present, re-map, close.
+///
+/// A single-window app composes one inside [`AppWindow`], which pairs it with
+/// the retained surface and takes the paint as a closure. An app that opens a
+/// window per document, or a popup above one, holds them itself.
+///
+/// Dropping a pane unmaps its region but tells the session nothing, so a caller
+/// that means to take a window off the screen calls [`Self::close`].
+pub struct WindowPane {
     window: u64,
     frames: WindowFrames,
     mode: DisplayMode,
-    surface: Surface,
 }
 
-/// The live window channel an app owns, and the window it may or may not have
-/// open.
-///
-/// An app is on the icon bar whether or not a window is open, so the channel
-/// outlives every window that crosses it.
-pub struct AppWindow {
-    client: WindowClient<RtWindowTransport>,
-    pane: Option<Pane>,
-}
-
-impl AppWindow {
-    /// A channel with no window open yet.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            client: WindowClient::new(RtWindowTransport),
-            pane: None,
-        }
-    }
-
-    /// The channel itself, for the requests the shell does not wrap (the
-    /// app-bar declaration, a pick, a menu, a tooltip, a retitle).
-    pub fn client(&mut self) -> &mut WindowClient<RtWindowTransport> {
-        &mut self.client
-    }
-
-    /// Whether a window is open.
-    #[must_use]
-    pub const fn is_open(&self) -> bool {
-        self.pane.is_some()
-    }
-
-    /// The open window's id, or `None` with none open.
-    #[must_use]
-    pub const fn window_id(&self) -> Option<u64> {
-        match &self.pane {
-            Some(pane) => Some(pane.window),
-            None => None,
-        }
-    }
-
-    /// Whether the session has released its copy of the window's pixels and
-    /// this side has given the region back.
-    ///
-    /// A released region holds none of the pixels a partial present would
-    /// leave standing, so a caller that resolves a *reported* damage set
-    /// before presenting promotes it to the whole window when this is true —
-    /// otherwise a round that reports nothing would leave the window blank.
-    /// [`Self::present`] performs the same promotion for the rectangle it is
-    /// handed; this is for the callers that must decide earlier.
-    #[must_use]
-    pub const fn content_released(&self) -> bool {
-        match &self.pane {
-            Some(pane) => pane.frames.is_released(),
-            None => false,
-        }
-    }
-
-    /// The open window's current shape, or `None` with none open.
-    #[must_use]
-    pub const fn mode(&self) -> Option<&DisplayMode> {
-        match &self.pane {
-            Some(pane) => Some(&pane.mode),
-            None => None,
-        }
-    }
-
-    /// Open a window of `mode`, titled `title`, sized as `sizing` allows, and
-    /// answer the serving session's [`ProcId`] from the create reply.
-    ///
-    /// # Errors
-    ///
-    /// [`EXIT_NO_FRAMES`] when the shared region could not be created or
-    /// granted, and [`EXIT_NO_WINDOW`] when the drawing surface could not be
-    /// allocated or the session refused the create. A window already being open
-    /// is likewise [`EXIT_NO_WINDOW`]: an app that asks for a second through
-    /// this one channel has lost track of the first.
-    pub fn open(
-        &mut self,
-        event_endpoint: u64,
-        mode: &DisplayMode,
-        title: &str,
-        sizing: WindowSizing,
-    ) -> Result<ProcId, ShellError> {
-        if self.pane.is_some() {
+impl WindowPane {
+    /// Create and grant a `mode`-shaped frame region.
+    fn region(mode: &DisplayMode) -> Result<(WindowFrames, u64), ShellError> {
+        let Some(len) = region_bytes(mode, FRAME_COUNT) else {
             return Err(ShellError::new(
-                EXIT_NO_WINDOW,
-                "a window is already open",
-                Errno::AlreadyExists,
+                EXIT_NO_FRAMES,
+                "frame region larger than the address width",
+                Errno::OutOfRange,
             ));
-        }
-        let Some(frames) = WindowFrames::create(region_bytes(mode, FRAME_COUNT)) else {
+        };
+        let Some(frames) = WindowFrames::create(len) else {
             return Err(ShellError::new(
                 EXIT_NO_FRAMES,
                 "shared frame region refused",
@@ -450,6 +393,306 @@ impl AppWindow {
                 Errno::OutOfMemory,
             ));
         };
+        Ok((frames, grant))
+    }
+
+    /// Open a top-level window of `mode`, titled `title`, sized as `sizing`
+    /// allows, and answer it with the serving session's [`ProcId`].
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_FRAMES`] when the shared region could not be sized, created,
+    /// or granted, and [`EXIT_NO_WINDOW`] when the session refused the create.
+    /// Every refusal unmaps whatever it had allocated.
+    pub fn open<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        title: &str,
+        sizing: WindowSizing,
+    ) -> Result<(Self, ProcId), ShellError> {
+        let (frames, grant) = Self::region(mode)?;
+        let (window, server) = client
+            .create(grant, event_endpoint, FRAME_COUNT, mode, title, sizing)
+            .map_err(|err| {
+                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the window", err)
+            })?;
+        Ok((
+            Self {
+                window,
+                frames,
+                mode: *mode,
+            },
+            server,
+        ))
+    }
+
+    /// Open an undecorated popup of `mode` at `offset` from `parent`'s client
+    /// origin, refusing a create reply that did not come from `server` — the
+    /// session that opened the parent.
+    ///
+    /// A reply naming another sender is something else answering for the window
+    /// endpoint, so the window it named is closed and the region dropped rather
+    /// than drawn into.
+    ///
+    /// A negative offset is legitimate: the session resolves it against the
+    /// parent's screen position and clamps the popup on screen, so a popup
+    /// larger than its parent still shows whole.
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_FRAMES`] for the region, [`EXIT_NO_WINDOW`] for a refused
+    /// create, and [`Errno::PermissionDenied`] under [`EXIT_NO_WINDOW`] for the
+    /// imposter reply above.
+    pub fn open_popup<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        parent: u64,
+        server: ProcId,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        offset: (i32, i32),
+    ) -> Result<Self, ShellError> {
+        let (frames, grant) = Self::region(mode)?;
+        let (window, replied) = client
+            .create_popup(&PopupSpec {
+                parent_window_id: parent,
+                shm_handle: grant,
+                event_endpoint,
+                frame_count: FRAME_COUNT,
+                surface: *mode,
+                offset_x: offset.0,
+                offset_y: offset.1,
+            })
+            .map_err(|err| {
+                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the popup", err)
+            })?;
+        if replied != server {
+            let _ = client.close(window);
+            return Err(ShellError::new(
+                EXIT_NO_WINDOW,
+                "popup reply came from another sender",
+                Errno::PermissionDenied,
+            ));
+        }
+        Ok(Self {
+            window,
+            frames,
+            mode: *mode,
+        })
+    }
+
+    /// The session's id for this window, which its delivered events name.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.window
+    }
+
+    /// The layout the region and every present are shaped as.
+    #[must_use]
+    pub const fn mode(&self) -> &DisplayMode {
+        &self.mode
+    }
+
+    /// Whether the session has released its copy of the window's pixels and
+    /// this side has given the region back.
+    ///
+    /// A released region holds none of the pixels a partial present would leave
+    /// standing, so a caller resolving a *reported* damage set promotes it to
+    /// the whole window when this is true — otherwise a round that reported
+    /// nothing would leave the window blank.
+    #[must_use]
+    pub const fn content_released(&self) -> bool {
+        self.frames.is_released()
+    }
+
+    /// Copy `damage` of `surface` into the shared frame and present exactly
+    /// that rectangle.
+    ///
+    /// A region the session released is re-attached first, so a paint after a
+    /// release lands in a live one. Covering the whole window when
+    /// [`Self::content_released`] said so is the caller's, because only the
+    /// caller knows what it painted.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotAttached`] when the region could not be re-attached,
+    /// whatever the frame codec refuses (a rectangle outside the surface or
+    /// past the region), and otherwise the session's refusal of the present.
+    pub fn present<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        surface: &Surface,
+        damage: DamageRect,
+    ) -> Result<(), Errno> {
+        let mode = self.mode;
+        let window = self.window;
+        let pixels = client
+            .frame_pixels(&mut self.frames, window, FRAME_COUNT, &mode)
+            .ok_or(Errno::NotAttached)?;
+        winframe::encode(surface, pixels, &mode, damage, &SERIAL)?;
+        client.present(window, 0, damage)
+    }
+
+    /// Re-map the frame region onto `new_mode`, answering whether the new
+    /// geometry was adopted.
+    ///
+    /// Fail-closed by ordering: the fresh region is created and granted first
+    /// and adopted only once the session has accepted the resize, so the old
+    /// region stays mapped — and the window drawable at its current size —
+    /// through every refusal, while the fresh one is unmapped by its own drop.
+    ///
+    /// `false` therefore means "still at the old size, and still drawable",
+    /// never "broken".
+    pub fn resize<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        new_mode: &DisplayMode,
+    ) -> bool {
+        let Some(len) = region_bytes(new_mode, FRAME_COUNT) else {
+            return false;
+        };
+        let Some(spare) = WindowFrames::create(len) else {
+            return false;
+        };
+        let Some(grant) = spare.grant() else {
+            return false;
+        };
+        if client
+            .resize(self.window, grant, FRAME_COUNT, new_mode)
+            .is_err()
+        {
+            return false;
+        }
+        self.frames = spare;
+        self.mode = *new_mode;
+        true
+    }
+
+    /// Answer the session's release of its own copy by giving this side's
+    /// region back, so the pages are actually freed.
+    ///
+    /// The pages only go when both halves let go, which is the whole point.
+    pub fn release_frames(&mut self) {
+        self.frames.release();
+    }
+
+    /// Close the window and answer what the session said.
+    ///
+    /// The pane is consumed either way — so the frame region is unmapped and
+    /// nothing is left pinned even when the session refuses — which is why a
+    /// caller with nothing to report may ignore the answer.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal, which for a window it no longer knows about means
+    /// the teardown this call was asking for has already happened.
+    pub fn close<T: WindowTransport>(self, client: &mut WindowClient<T>) -> Result<(), Errno> {
+        client.close(self.window)
+    }
+}
+
+/// A single-window app's open window: the pane and the surface every frame is
+/// drawn into.
+///
+/// The surface is held for the life of the window because allocating and
+/// zeroing one per present would be a whole-window pass of its own, and holding
+/// it is what makes a clipped repaint sound — every pixel outside the clip is
+/// the one already on screen.
+struct Retained {
+    pane: WindowPane,
+    surface: Surface,
+}
+
+/// The live window channel an app owns, and the one window it may or may not
+/// have open.
+///
+/// An app is on the icon bar whether or not a window is open, so the channel
+/// outlives every window that crosses it. An app that opens more than one holds
+/// [`WindowPane`]s itself instead.
+pub struct AppWindow {
+    client: WindowClient<RtWindowTransport>,
+    retained: Option<Retained>,
+}
+
+impl AppWindow {
+    /// A channel with no window open yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            client: WindowClient::new(RtWindowTransport),
+            retained: None,
+        }
+    }
+
+    /// The channel itself, for the requests the shell does not wrap (the
+    /// app-bar declaration, a pick, a menu, a tooltip, a retitle).
+    pub fn client(&mut self) -> &mut WindowClient<RtWindowTransport> {
+        &mut self.client
+    }
+
+    /// Whether a window is open.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.retained.is_some()
+    }
+
+    /// The open window's id, or `None` with none open.
+    #[must_use]
+    pub const fn window_id(&self) -> Option<u64> {
+        match &self.retained {
+            Some(held) => Some(held.pane.id()),
+            None => None,
+        }
+    }
+
+    /// Whether the session has released its copy of the window's pixels.
+    ///
+    /// [`Self::present`] performs the whole-window promotion itself for the
+    /// rectangle it is handed; this is for the callers that must decide
+    /// earlier.
+    #[must_use]
+    pub const fn content_released(&self) -> bool {
+        match &self.retained {
+            Some(held) => held.pane.content_released(),
+            None => false,
+        }
+    }
+
+    /// The open window's current shape, or `None` with none open.
+    #[must_use]
+    pub const fn mode(&self) -> Option<&DisplayMode> {
+        match &self.retained {
+            Some(held) => Some(held.pane.mode()),
+            None => None,
+        }
+    }
+
+    /// Open a window of `mode`, titled `title`, sized as `sizing` allows, and
+    /// answer the serving session's [`ProcId`] from the create reply.
+    ///
+    /// The drawing surface is allocated before the session is asked, so a
+    /// window the app could not draw into is never put on screen.
+    ///
+    /// # Errors
+    ///
+    /// [`EXIT_NO_WINDOW`] when the surface could not be allocated or the
+    /// session refused the create, [`EXIT_NO_FRAMES`] for the shared region,
+    /// and [`EXIT_NO_WINDOW`] again when a window is already open: an app that
+    /// asks for a second through this one channel has lost track of the first.
+    pub fn open(
+        &mut self,
+        event_endpoint: u64,
+        mode: &DisplayMode,
+        title: &str,
+        sizing: WindowSizing,
+    ) -> Result<ProcId, ShellError> {
+        if self.retained.is_some() {
+            return Err(ShellError::new(
+                EXIT_NO_WINDOW,
+                "a window is already open",
+                Errno::AlreadyExists,
+            ));
+        }
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             return Err(ShellError::new(
                 EXIT_NO_WINDOW,
@@ -457,25 +700,16 @@ impl AppWindow {
                 Errno::OutOfMemory,
             ));
         };
-        let (window, server) = self
-            .client
-            .create(grant, event_endpoint, FRAME_COUNT, mode, title, sizing)
-            .map_err(|err| {
-                ShellError::new(EXIT_NO_WINDOW, "desktop session refused the window", err)
-            })?;
-        self.pane = Some(Pane {
-            window,
-            frames,
-            mode: *mode,
-            surface,
-        });
+        let (pane, server) =
+            WindowPane::open(&mut self.client, event_endpoint, mode, title, sizing)?;
+        self.retained = Some(Retained { pane, surface });
         Ok(server)
     }
 
     /// Draw `damage` of the window through `paint` and present that rectangle.
     ///
     /// A region the session released while the window was hidden is re-attached
-    /// first and presented whole, because it holds none of the pixels a partial
+    /// and presented whole, because it holds none of the pixels a partial
     /// present would leave standing. With no window open this is a no-op, so a
     /// loop need not sort its repaints by whether one is showing.
     ///
@@ -488,72 +722,49 @@ impl AppWindow {
         damage: DamageRect,
         paint: impl FnOnce(&mut Surface),
     ) -> Result<(), Errno> {
-        let Some(pane) = self.pane.as_mut() else {
+        let Some(held) = self.retained.as_mut() else {
             return Ok(());
         };
-        let damage = if pane.frames.is_released() {
-            DamageRect::full(&pane.mode)
+        let damage = if held.pane.content_released() {
+            DamageRect::full(held.pane.mode())
         } else {
             damage
         };
-        pane.surface
+        held.surface
             .with_clip(damage.x, damage.y, damage.width_px, damage.height_px, paint);
-        let pixels = self
-            .client
-            .frame_pixels(&mut pane.frames, pane.window, FRAME_COUNT, &pane.mode)
-            .ok_or(Errno::NotAttached)?;
-        winframe::encode(&pane.surface, pixels, &pane.mode, damage, &SERIAL)?;
-        self.client.present(pane.window, 0, damage)
+        held.pane.present(&mut self.client, &held.surface, damage)
     }
 
     /// Re-map the frame region onto `new_mode`, answering whether the new
     /// geometry was adopted.
     ///
-    /// The ordering is fail-closed: a fresh region and a fresh drawing surface
-    /// are allocated and the region granted **first**, and adopted only if the
-    /// session accepts the resize. On success the old region is unmapped by
-    /// being dropped — never before, so a refused resize leaves the current
-    /// surface intact; on refusal the freshly-allocated region is unmapped so
-    /// nothing leaks. Anything that cannot be allocated at all keeps the
-    /// current size rather than crashing or presenting nothing.
+    /// The fresh surface is allocated before the session is asked, and the pane
+    /// adopts the fresh region only once the session has accepted it, so every
+    /// refusal leaves the current geometry standing and still drawable.
     ///
     /// `false` therefore means "still at the old size, and still drawable", not
     /// "broken". The caller repaints the whole window either way, since even a
     /// refused resize leaves the reported client size unchanged and the current
     /// picture already matches it.
     pub fn resize(&mut self, new_mode: DisplayMode) -> bool {
-        let Some(pane) = self.pane.as_mut() else {
-            return false;
-        };
-        let Some(spare) = WindowFrames::create(region_bytes(&new_mode, FRAME_COUNT)) else {
+        let Some(held) = self.retained.as_mut() else {
             return false;
         };
         let Some(surface) = Surface::new(new_mode.width_px, new_mode.height_px) else {
             return false;
         };
-        let Some(grant) = spare.grant() else {
-            return false;
-        };
-        if self
-            .client
-            .resize(pane.window, grant, FRAME_COUNT, &new_mode)
-            .is_err()
-        {
+        if !held.pane.resize(&mut self.client, &new_mode) {
             return false;
         }
-        pane.frames = spare;
-        pane.mode = new_mode;
-        pane.surface = surface;
+        held.surface = surface;
         true
     }
 
     /// Answer the session's release of its own copy by giving this side's
     /// region back, so the pages are actually freed.
-    ///
-    /// The pages only go when both halves let go, which is the whole point.
     pub fn release_frames(&mut self) {
-        if let Some(pane) = self.pane.as_mut() {
-            pane.frames.release();
+        if let Some(held) = self.retained.as_mut() {
+            held.pane.release_frames();
         }
     }
 
@@ -570,8 +781,8 @@ impl AppWindow {
     /// The session's refusal, which for a window it no longer knows about means
     /// the teardown this call was asking for has already happened.
     pub fn close(&mut self) -> Result<(), Errno> {
-        match self.pane.take() {
-            Some(pane) => self.client.close(pane.window),
+        match self.retained.take() {
+            Some(held) => held.pane.close(&mut self.client),
             None => Ok(()),
         }
     }

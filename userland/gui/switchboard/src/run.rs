@@ -1398,7 +1398,18 @@ mod program {
         // so it is derived from this desktop's own window frame through the
         // one sizing the window itself is opened with.
         let (frame_w, frame_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
-        let output_bytes = app::region_bytes(&app::mode_for(frame_w, frame_h), app::FRAME_COUNT);
+        // A frame region that cannot be sized is a window that can never open,
+        // so this is stated here rather than surfacing later as a refused
+        // create with no reason attached.
+        let Some(output_bytes) =
+            app::region_bytes(&app::mode_for(frame_w, frame_h), app::FRAME_COUNT)
+        else {
+            let _ = writeln!(
+                Stderr,
+                "switchboard: window frame larger than the address width"
+            );
+            return app::EXIT_NO_FRAMES;
+        };
         let mut host = RtHost::new(
             set,
             events,

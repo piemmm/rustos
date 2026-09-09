@@ -8,17 +8,27 @@ bundle's icon artwork (SVG or PNG) and the desktop wallpaper (a shipped
 master, or a photograph the user picked) are each decoded inside a
 minimum-capability parser sandbox before they ever reach the compositor,
 because neither ships from the system. This crate is the raster half of
-that pipeline (the vector half is `lib/svg`).
+that pipeline (the vector half is `lib/svg`). The picture viewer
+(`plans/VIEW.md`) is the crate's other consumer, and every format it claims
+lands here rather than beside it — being the one raster registry is what
+keeps a format's decoder in a single place. *Admitting* a format is still each
+consumer's own decision: the icon pipeline deliberately takes only PNG and
+SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 
 ## Formats
 
-`ImageFormat` is a deliberately closed enum: `Png` and `Jpeg`.
+`ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, and `Gif`.
 `sniff(bytes) -> Option<ImageFormat>` identifies a format from its leading
 signature, and both `decode` and `decode_fitted` dispatch on it, refusing
 an unrecognised signature before any format-specific parsing runs. A
 further format is added only when a real consumer needs it — never
-speculatively — exactly as PNG was added for the icon pipeline and JPEG for
-the pinboard's wallpaper masters.
+speculatively — exactly as PNG was added for the icon pipeline, JPEG for
+the pinboard's wallpaper masters, and GIF for the viewer.
+
+A format this crate claims is decoded **completely** — every bit depth,
+compression, colour handling, and structural variant the format defines, not
+the subset a common file happens to use. A format that could only be
+half-decoded is not claimed at all.
 
 ### PNG
 
@@ -114,6 +124,79 @@ rather than a best effort: arithmetic coding, lossless and hierarchical
 (differential) frames, 12-bit precision, 2- or 4-component images, a height
 deferred to a `DNL` marker, and any malformed stream.
 
+### GIF
+
+The GIF decoder is complete against the GIF89a specification and its GIF87a
+subset: the signature and both versions; the Logical Screen Descriptor;
+global and local colour tables at every declared size; the whole block chain
+(Image Descriptor, Graphic Control Extension, Application Extension,
+Comment, Plain Text, trailer, and any extension a later specification adds,
+all framed as data sub-blocks); the variable-code-width LZW dialect of
+Appendix F with its clear/end codes, the not-yet-defined-code case, and the
+deferred clear a full table without a clear code relies on; four-pass
+interlacing; the transparent colour index; the full frame-disposal model
+(keep, clear, restore-to-previous); and the de-facto `NETSCAPE2.0`
+animation-loop count.
+
+Two places it does not read the specification literally, both stated in the
+module's own rustdoc. *Restore to background* clears the frame's area to
+fully transparent rather than to the logical screen's declared background
+colour: every producer means "clear it" and every other decoder does this,
+and restoring an opaque colour would flash a coloured box through nearly
+every real animation. And a frame's delay is reported exactly as the file
+gives it, including zero — clamping a too-fast animation is a *playback*
+decision, and the thing that plays frames is the one that knows how fast its
+screen can show them.
+
+Everything else is a typed refusal: a reserved disposal method (`4`..=`7`),
+a frame reaching outside the logical screen, a frame with neither a local
+nor a global colour table, an index past the end of the table in force, an
+out-of-range LZW minimum code size, a code the table cannot resolve, an LZW
+stream that ends before its frame's last pixel, and a chain declaring more
+frames than the decoder's fixed containment bound accepts.
+
+## Sequences and pages
+
+Some containers hold more than one picture. `Sequence` is the one shape for
+all of them:
+
+- `Sequence::open(bytes, limits)` validates the structure — for GIF, one
+  pass that walks the whole block chain, counts the frames, and reads the
+  loop count — and decodes no pixels.
+- `Sequence::info()` answers a `SequenceInfo`: the format, the geometry every
+  entry's pixels are, the entry count, and a `SequenceKind` of either
+  `Animation { loop_count }` or `Pages`.
+- `Sequence::next_frame()` decodes the next entry, lending a `Frame` carrying
+  its index, geometry, declared delay in nanoseconds, and pixels.
+- `Sequence::rewind()` restarts, which is how a loop plays again — and what
+  makes it safe to step on after a refusal.
+
+A refusal hands out no pixels and is **remembered**: stepping again answers
+the same one until a rewind. An animation's frame that stopped part-way has
+already had its predecessor's disposal applied and may hold part of its own
+pixels, so the canvas describes no whole frame — and remembering the refusal
+is what keeps a later frame from ever being composited onto it. A caller that
+means to continue rewinds; one that does not simply reports the reason.
+
+It is **forward-only with a rewind**, because that is what an animation *is*.
+A GIF frame composites onto whatever its predecessors left on the logical
+screen under the disposal method declared for each, so a decoder that could
+be asked for frame *n* directly would have to re-composite every frame
+before it — wrong per-index, and quadratic over a walk. Holding the canvas
+and stepping makes each frame cost its own decode and no more, and the pixels
+a `Frame` lends are the canvas *after* compositing, so a consumer shows the
+whole picture without knowing the format's disposal model at all.
+
+The pixels are borrowed rather than owned for the same reason: the canvas has
+to be retained for the next frame to composite onto, so handing out an owned
+buffer per step would copy the whole canvas every frame for nothing.
+
+A still picture is the **one-entry case** of the same shape — count `1`, kind
+`Pages`, delay `0` — so a consumer that shows both pictures and animations
+needs one path rather than two. `decode` on a multi-frame container answers
+its first composited frame, which is the picture the format shows first and
+exactly what a still consumer (an icon, a wallpaper) wants.
+
 ## Reduced-scale decode (`decode_fitted`) is a JPEG property
 
 `decode_fitted(bytes, limits, fit)` returns an image no smaller than it has
@@ -146,16 +229,16 @@ refusal still names the real reason.
 `decode` has no such freedom and keeps none: it always means natural size,
 and is refused outright when that size breaches the limits.
 
-### PNG
+### PNG and GIF
 
-PNG has no reduced-scale decode process — its filtered, zlib-compressed
-scanlines do not separate into scale-selectable passes — so `decode_fitted`
-on a PNG *is* `decode`, at natural size, and has no scale to degrade to.
-That asymmetry is an honest property of the two formats rather than a gap in
-this crate: a caller that wants a smaller PNG resamples the decoded image
-through `lib/raster`'s one shared resampler, exactly as it must to hit any
-size no JPEG scale lands on. `decode` keeps its meaning for both formats:
-natural size.
+Neither has a reduced-scale decode process — filtered zlib-compressed
+scanlines and an LZW code stream do not separate into scale-selectable passes
+— so `decode_fitted` on either *is* `decode`, at natural size, with no scale
+to degrade to. That asymmetry is an honest property of the formats rather
+than a gap in this crate: a caller that wants a smaller PNG or GIF resamples
+the decoded image through `lib/raster`'s one shared resampler, exactly as it
+must to hit any size no JPEG scale lands on. `decode` keeps its meaning for
+every format: natural size.
 
 ## Security
 
@@ -188,6 +271,13 @@ the store is allocated; over it, the decode is refused with
 bound, not a growable capacity: the decoder never enlarges it to make a
 stream fit. A caller that decodes only PNG or baseline/extended sequential
 JPEG passes `0`, refusing every progressive stream outright.
+
+A GIF's frame count carries its own **fixed containment bound** of 16 384: a
+frame block costs about ten bytes, so a small file can declare enormous
+numbers of them, and no viewer has use for an animation longer than that. It
+bounds the count the structural pass accepts and nothing is allocated per
+frame — like every other bound here it is a security bound rather than a
+growable capacity, and the decoder never enlarges it to make a stream fit.
 
 Every public entry point is total: malformed, truncated, or adversarial
 input returns a typed `DecodeError`, never a panic. All size and offset
@@ -234,14 +324,20 @@ rather than of the input, so the same image may decode later.
   max_progressive_coefficient_bytes)` and its four accessors.
 - `RasterImage::{width, height, pixels, into_pixels}` — row-major,
   4-byte-per-pixel, straight-alpha RGBA8.
-- `ImageFormat::{Png, Jpeg}` — the closed format enum.
+- `Sequence::{open, info, next_frame, rewind}` with `SequenceInfo::{format,
+  width, height, count, kind}`, `SequenceKind::{Animation, Pages}`, and
+  `Frame::{index, width, height, delay_ns, pixels}` — the multi-entry shape,
+  of which a still picture is the one-entry case.
+- `ImageFormat::{Png, Jpeg, Gif}` — the closed format enum.
 - `DecodeError` — every fail-closed refusal reason: PNG framing and
   chunk-ordering violations, `IHDR`/`PLTE`/`tRNS` validation, a
   `CompressedData` variant wrapping `tairix_compress::zlib::Error`, and the
   `Jpeg*` family covering signature, marker, segment, quantisation- and
   Huffman-table, entropy-data, scan-header, restart-marker,
-  unsupported-mode, and progressive-coefficient-store refusals, plus
-  `OutOfMemory` for a buffer the allocator refused.
+  unsupported-mode, and progressive-coefficient-store refusals; the `Gif*`
+  family covering signature, version, block framing, extension, disposal,
+  frame-geometry, colour-table, LZW code-size and code, and frame-count
+  refusals; plus `OutOfMemory` for a buffer the allocator refused.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by
@@ -251,9 +347,16 @@ reference the test file restates from the standard's own definition, over
 many pseudo-random full coefficient blocks (asserting no more than a
 one-level per-sample difference). A further test asserts the property a
 scaled transform must have and a magnified corner crop cannot: reducing a
-block preserves its mean. Both formats are fuzzed by
-`tests/fuzz_image.rs` — random
-bytes, random bytes behind each valid signature, and structurally mutated
-valid fixtures, baseline and progressive — registered with
-`cargo xtask fuzz`. Stability tier: experimental
+block preserves its mean. The GIF tests build their streams block by block
+through one code-stream writer that mirrors the width schedule a conforming
+decoder reads at, and cover every structural variant, the whole disposal
+model with hand-verified canvases, an exhaustive check that the four
+interlace passes cover every row exactly once, a compressed stream matched
+against the literal stream of the same pixels, and every refusal — including
+every prefix of a valid file being refused rather than half-decoded. Every
+format is fuzzed by `tests/fuzz_image.rs` — random bytes, random bytes behind
+each valid signature, and structurally mutated valid fixtures (PNG chunks,
+JPEG baseline and progressive marker segments, and GIF blocks), each walked
+through `decode`, `decode_fitted`, and a full `Sequence` pass with a rewind —
+registered with `cargo xtask fuzz`. Stability tier: experimental
 (`lib/image/README.md`).

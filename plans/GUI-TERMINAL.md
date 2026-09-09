@@ -605,3 +605,20 @@ Nothing in the sections above. Recognised later work, none of it blocking:
   *user's* profile. Named profiles a user could switch a single window to
   would be a registry of documents under the same store directory.
 
+**Open defect — a user-closed window leaves its shell unreaped.** Closing a
+window drops the pty master (so the shell sees end-of-file and exits) and
+deletes the window's child wait-set member in the same step, so nothing is
+left watching for that exit and nothing reaps it. The kernel holds a zombie
+row and withholds the PID number until this process exits, so a session that
+opens and closes many windows accumulates one per closed window. The
+shell-*exited* path is unaffected: it reaps before closing.
+
+The fix is to keep the child member armed across the close instead: `close`
+hands back the `(pid, child_token)` of a shell still running, the loop holds
+those in a small list, and the child wake that follows reaps and deletes the
+member — event-driven, with no poll and no wait on the close path. It touches
+teardown at every `close` call site, and its regression test is a QEMU
+vertical asserting through the System Information API that a closed window
+leaves no zombie, which is why it is staged here rather than folded into an
+unrelated change.
+

@@ -221,6 +221,7 @@ const SOURCES: &[&str] = &[
     "TCP",
     "Ethernet",
     "PNG",
+    "GIF",
     "T.81",
     "ext4",
 ];
@@ -756,6 +757,7 @@ mod tests {
             "// the spec §13 authority treatment",
             "//! Reference: NXP PCF8523 data sheet, §8 (register overview).",
             "//! Reference: Maxim DS3231 data sheet, §9 (register map).",
+            "/// The Logical Screen Descriptor's fixed length (`GIF89a` §18).",
         ] {
             assert!(
                 reasons(body).is_empty(),

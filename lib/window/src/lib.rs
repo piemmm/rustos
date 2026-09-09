@@ -21,12 +21,14 @@
 //!
 //! * `app` — the app-side *shell* the windowed `Run` binaries share: the
 //!   `ipc_call` transport, the bound event mailbox and its wait-set (with the
-//!   machine's memory-pressure band on it), the desktop query, and the
-//!   retained-surface present/resize pair whose fail-closed ordering leaves the
-//!   old geometry standing when a resize is refused. It links the production
-//!   pressure seam, which exists only on the bare-metal targets, so it compiles
-//!   only there — and is named here in prose rather than linked, because on a
-//!   host documentation build there is no such item to link to.
+//!   machine's memory-pressure band on it), the desktop query, one window's
+//!   pane (its id, region, and layout, with the present/resize pair whose
+//!   fail-closed ordering leaves the old geometry standing when a resize is
+//!   refused), and the single-window pairing of a pane with the retained
+//!   surface it is painted from. It links the production pressure seam, which
+//!   exists only on the bare-metal targets, so it compiles only there — and is
+//!   named here in prose rather than linked, because on a host documentation
+//!   build there is no such item to link to.
 //!
 //! The wire format itself lives in `tairix_abi::window_ipc`; this crate
 //! adds the behaviour. Window frames travel through one `shm_grant`ed

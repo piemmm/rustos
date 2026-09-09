@@ -6,19 +6,35 @@
 //! ships from whoever authored the `.app`, not from the system), and the
 //! desktop pinboard decodes a wallpaper — a shipped master or a file the
 //! user picked — the same way. This crate is the raster half of both
-//! pipelines: complete, `no_std` + `alloc`, `unsafe`-free PNG and JPEG
-//! decoders that turn an untrusted byte stream into a validated,
-//! straight-alpha RGBA8 pixel buffer, or a typed refusal — never a panic,
-//! and never more memory than the caller allows.
+//! pipelines: complete, `no_std` + `alloc`, `unsafe`-free decoders that turn
+//! an untrusted byte stream into a validated, straight-alpha RGBA8 pixel
+//! buffer, or a typed refusal — never a panic, and never more memory than the
+//! caller allows.
 //!
 //! # Design
 //!
 //! [`decode`] and [`decode_fitted`] dispatch on the format [`sniff`]
-//! recognises from a byte signature: PNG ([`ImageFormat::Png`]), decoded by
-//! the private `png` module, and JPEG ([`ImageFormat::Jpeg`]), decoded by
-//! the private `jpeg` module. [`ImageFormat`] stays closed and grows only
-//! with a real consumer, exactly as PNG was added for the icon pipeline and
-//! JPEG for the wallpaper masters.
+//! recognises from a byte signature: PNG ([`ImageFormat::Png`]), JPEG
+//! ([`ImageFormat::Jpeg`]), and GIF ([`ImageFormat::Gif`]), each decoded by
+//! its own private module. [`ImageFormat`] stays closed and grows only with a
+//! real consumer, exactly as PNG was added for the icon pipeline, JPEG for
+//! the wallpaper masters, and GIF for the picture viewer. Being the one raster
+//! registry is what keeps a format's decoder in a single place: a consumer
+//! that decides to admit a further one needs no decoder of its own — though
+//! admitting it is that consumer's decision, and the icon pipeline
+//! deliberately admits only PNG and SVG.
+//!
+//! # Sequences and pages
+//!
+//! Some containers hold more than one picture. [`Sequence`] is the one shape
+//! for all of them: [`Sequence::open`] validates the structure and reports
+//! [`SequenceInfo`], and [`Sequence::next_frame`] decodes the entries in
+//! order. It is forward-only with [`Sequence::rewind`], because that is what
+//! an animation *is* — a frame composites onto its predecessors under the
+//! container's own disposal model, so being able to ask for frame *n*
+//! directly would mean re-compositing every frame before it. A still picture
+//! is the one-entry case of the same shape, so a consumer that shows both
+//! pictures and animations needs one path rather than two.
 //!
 //! [`RasterImage`] is the one output shape every format decodes into: a
 //! row-major, 4-byte-per-pixel, **straight-alpha** RGBA8 buffer (not
@@ -81,6 +97,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 mod crc32;
+mod gif;
 mod jpeg;
 mod png;
 
@@ -269,12 +286,58 @@ pub enum DecodeError {
     /// The coefficient store a progressive scan must buffer would exceed
     /// [`DecodeLimits::max_progressive_coefficient_bytes`].
     JpegProgressiveCoefficientStoreExceedsLimit,
+
+    /// The file did not begin with the three-byte `GIF` magic.
+    GifBadSignature,
+    /// The version field was neither `87a` nor `89a`.
+    GifUnknownVersion,
+    /// A block's header, declared payload, or data sub-block chain ran past
+    /// the end of the input.
+    GifTruncated,
+    /// A block introducer was none of the image separator, the extension
+    /// introducer, or the trailer.
+    GifUnknownBlock,
+    /// An extension block declared a block size the specification fixes at
+    /// another value, or omitted its terminator.
+    GifMalformedExtension,
+    /// A Graphic Control Extension declared a disposal method in the
+    /// specification's reserved range (`4`..=`7`).
+    GifReservedDisposal,
+    /// An Image Descriptor declared a zero width or height.
+    GifZeroFrame,
+    /// An Image Descriptor placed a frame partly or wholly outside the
+    /// logical screen.
+    GifFrameOutsideScreen,
+    /// The block chain reached its trailer without a single image block.
+    GifNoFrames,
+    /// The block chain declared more frames than the decoder's fixed
+    /// containment bound accepts.
+    GifTooManyFrames,
+    /// A frame carried no local colour table and the stream carried no global
+    /// one, so its indices name no colours at all.
+    GifMissingColourTable,
+    /// A frame's pixel referenced a colour-table entry beyond the end of the
+    /// table in force for it.
+    GifPaletteIndexOutOfRange,
+    /// An Image Descriptor's LZW minimum code size was outside `2`..=`8`.
+    GifInvalidCodeSize,
+    /// An LZW code was neither in the table nor the one the reading step
+    /// would itself define.
+    GifInvalidCode,
+    /// A frame's LZW stream ended before it had produced every pixel the
+    /// Image Descriptor declares.
+    GifTruncatedImageData,
 }
 
 impl DecodeError {
     /// This error's fixed message. [`DecodeError::CompressedData`] is the
     /// one variant whose message is a prefix rather than the whole line,
     /// since it carries an inner error that completes it.
+    // One exhaustive table for a flat error enum, so the compiler is what
+    // catches a variant with no message. Splitting it per format would need
+    // each part to fall through for the others' variants, trading that check
+    // for a line count.
+    #[allow(clippy::too_many_lines)]
     fn message(&self) -> &'static str {
         match self {
             Self::UnknownFormat => "unrecognised image format",
@@ -371,6 +434,25 @@ impl DecodeError {
             Self::JpegProgressiveCoefficientStoreExceedsLimit => {
                 "JPEG's progressive coefficient store exceeds the caller's limit"
             }
+            Self::GifBadSignature => "not a GIF file (bad signature)",
+            Self::GifUnknownVersion => "GIF declares a version other than 87a or 89a",
+            Self::GifTruncated => "GIF block runs past the end of the input",
+            Self::GifUnknownBlock => "GIF has an unrecognised block introducer",
+            Self::GifMalformedExtension => "GIF extension block is malformed",
+            Self::GifReservedDisposal => "GIF frame declares a reserved disposal method",
+            Self::GifZeroFrame => "GIF frame declares a zero width or height",
+            Self::GifFrameOutsideScreen => "GIF frame reaches outside the logical screen",
+            Self::GifNoFrames => "GIF has no image blocks",
+            Self::GifTooManyFrames => "GIF declares more frames than the decoder accepts",
+            Self::GifMissingColourTable => {
+                "GIF frame has neither a local nor a global colour table"
+            }
+            Self::GifPaletteIndexOutOfRange => {
+                "GIF pixel references a colour-table entry out of range"
+            }
+            Self::GifInvalidCodeSize => "GIF frame declares an out-of-range LZW code size",
+            Self::GifInvalidCode => "GIF LZW stream holds a code its table cannot resolve",
+            Self::GifTruncatedImageData => "GIF LZW stream ends before its frame's last pixel",
         }
     }
 }
@@ -555,6 +637,10 @@ pub enum ImageFormat {
     /// sequential, and progressive DCT frames with Huffman coding
     /// (ITU-T T.81), framed as JFIF or Adobe.
     Jpeg,
+    /// The Graphics Interchange Format (`GIF89a`, and the `GIF87a` subset): a
+    /// palette-indexed LZW sequence over one logical screen, with the
+    /// format's full frame-disposal model.
+    Gif,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -566,6 +652,12 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 /// colliding with any other two-byte-prefixed format.
 const JPEG_SIGNATURE: [u8; 3] = [0xFF, 0xD8, 0xFF];
 
+/// The three magic bytes every GIF opens with (`GIF89a` §17). The version
+/// field that follows is the format's own business, so a recognisably-GIF
+/// file with an unknown version reaches the decoder and is refused there
+/// with the reason, rather than being reported as no format at all.
+const GIF_SIGNATURE: [u8; 3] = *b"GIF";
+
 /// Identify the format of `bytes` from its leading signature, or `None` if
 /// no supported format is recognised.
 #[must_use]
@@ -575,6 +667,9 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     }
     if bytes.starts_with(&JPEG_SIGNATURE) {
         return Some(ImageFormat::Jpeg);
+    }
+    if bytes.starts_with(&GIF_SIGNATURE) {
+        return Some(ImageFormat::Gif);
     }
     None
 }
@@ -632,6 +727,7 @@ pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
     let (width, height) = match format {
         ImageFormat::Png => png::probe(bytes)?,
         ImageFormat::Jpeg => jpeg::probe(bytes)?,
+        ImageFormat::Gif => gif::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -686,6 +782,7 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, Decode
     match sniff(bytes) {
         Some(ImageFormat::Png) => png::decode(bytes, limits),
         Some(ImageFormat::Jpeg) => jpeg::decode(bytes, limits),
+        Some(ImageFormat::Gif) => gif::decode(bytes, limits),
         None => Err(DecodeError::UnknownFormat),
     }
 }
@@ -717,13 +814,13 @@ pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, Decode
 /// [`decode`] has no such freedom and keeps none: it always means natural
 /// size, and is refused outright when that size breaches `limits`.
 ///
-/// # PNG
+/// # PNG and GIF
 ///
-/// PNG has no reduced-scale decode process — its entropy coding does not
-/// separate into scale-selectable passes the way a block transform does —
-/// so for PNG this is exactly [`decode`], always at natural size, and the
-/// degradation above cannot apply. That is an honest property of the
-/// format, not a gap this crate is missing.
+/// Neither has a reduced-scale decode process — LZW and DEFLATE entropy
+/// coding does not separate into scale-selectable passes the way a block
+/// transform does — so for both this is exactly [`decode`], always at
+/// natural size, and the degradation above cannot apply. That is an honest
+/// property of those formats, not a gap this crate is missing.
 ///
 /// The format is chosen by [`sniff`]; an unrecognised signature is refused
 /// as [`DecodeError::UnknownFormat`] before any format-specific parsing
@@ -740,7 +837,285 @@ pub fn decode_fitted(
     match sniff(bytes) {
         Some(ImageFormat::Png) => png::decode(bytes, limits),
         Some(ImageFormat::Jpeg) => jpeg::decode_fitted(bytes, limits, fit),
+        Some(ImageFormat::Gif) => gif::decode(bytes, limits),
         None => Err(DecodeError::UnknownFormat),
+    }
+}
+
+/// What a container's entries are, which is what decides whether they are
+/// *played* or *chosen between*.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SequenceKind {
+    /// Frames composited in order over one canvas, played `loop_count` times
+    /// — `None` for ever. Each frame's pixels are the canvas *after* it has
+    /// been composited, so a consumer shows the whole thing rather than
+    /// having to know the format's disposal model.
+    Animation {
+        /// How many times the container asks for the sequence to be played.
+        loop_count: Option<u32>,
+    },
+    /// Independent pages, each a picture in its own right. A still image is
+    /// the one-page case, not a special case.
+    Pages,
+}
+
+/// What a container declares about its entries as a whole.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SequenceInfo {
+    format: ImageFormat,
+    width: u32,
+    height: u32,
+    count: u32,
+    kind: SequenceKind,
+}
+
+impl SequenceInfo {
+    /// The format the header identifies.
+    #[must_use]
+    pub const fn format(&self) -> ImageFormat {
+        self.format
+    }
+
+    /// The width every entry's pixels are, in pixels: the animation canvas,
+    /// or the still picture's own width.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// The height every entry's pixels are, in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// How many entries the container holds; `1` for a still picture.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Whether the entries are frames to play or pages to choose between.
+    #[must_use]
+    pub const fn kind(&self) -> SequenceKind {
+        self.kind
+    }
+}
+
+/// One entry of a sequence: the pixels to show, and what the container says
+/// about showing them.
+///
+/// The pixels are borrowed from the decoder rather than copied, because an
+/// animation's canvas has to be retained for the next frame to composite
+/// onto: handing out an owned buffer per step would copy the whole canvas
+/// every frame for nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Frame<'a> {
+    index: u32,
+    width: u32,
+    height: u32,
+    delay_ns: u64,
+    pixels: &'a [u8],
+}
+
+impl<'a> Frame<'a> {
+    /// This entry's zero-based position in the container.
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The width of [`Self::pixels`], in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// The height of [`Self::pixels`], in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// How long the container asks for this frame to be shown, in
+    /// nanoseconds; `0` where it declares nothing.
+    ///
+    /// Reported exactly as the file gives it. Clamping a too-fast animation
+    /// to a minimum interval is a playback decision, and the thing that plays
+    /// frames is the one that knows how fast its screen can show them.
+    #[must_use]
+    pub const fn delay_ns(&self) -> u64 {
+        self.delay_ns
+    }
+
+    /// The row-major RGBA8 pixels (straight alpha), exactly
+    /// `width * height * 4` bytes.
+    #[must_use]
+    pub const fn pixels(&self) -> &'a [u8] {
+        self.pixels
+    }
+}
+
+/// Where a sequence's entries come from.
+enum Entries<'a> {
+    /// A single-image format: decoded on the first step and lent as the one
+    /// entry a still picture has. A rewind costs nothing, because the decode
+    /// is kept.
+    Still {
+        bytes: &'a [u8],
+        limits: DecodeLimits,
+        decoded: Option<RasterImage>,
+        served: bool,
+    },
+    /// A GIF's block chain, composited onto its retained canvas.
+    Gif(gif::Frames<'a>),
+}
+
+/// A container's frames or pages, decoded in order.
+///
+/// Stepping is forward-only with a restart, because that is what an
+/// animation is: a frame composites onto its predecessors under the
+/// container's disposal model, so a decoder that could be asked for frame
+/// *n* directly would have to re-composite every frame before it. Holding
+/// the canvas and stepping makes each frame cost its own decode and no more.
+///
+/// A still picture is the one-entry case of the same shape, so a consumer
+/// that shows pictures and animations needs one path rather than two.
+pub struct Sequence<'a> {
+    info: SequenceInfo,
+    entries: Entries<'a>,
+}
+
+impl<'a> Sequence<'a> {
+    /// Validate `bytes`' structure and prepare to decode its entries,
+    /// decoding no pixels.
+    ///
+    /// The geometry every entry will be produced at is weighed against
+    /// `limits` here, before any canvas is allocated, so a container that
+    /// lies about its size cannot make this reserve memory proportional to
+    /// the lie — and a caller learns it cannot afford the picture before it
+    /// has laid anything out for it.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::UnknownFormat`] for an unrecognised signature, a limit
+    /// refusal for a geometry the caller will not allow, and otherwise
+    /// whichever structural refusal the format's own parser raises.
+    pub fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
+        match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+            ImageFormat::Gif => {
+                let frames = gif::Frames::open(bytes, limits)?;
+                Ok(Self {
+                    info: SequenceInfo {
+                        format: ImageFormat::Gif,
+                        width: frames.width(),
+                        height: frames.height(),
+                        count: frames.count(),
+                        kind: SequenceKind::Animation {
+                            loop_count: frames.loop_count(),
+                        },
+                    },
+                    entries: Entries::Gif(frames),
+                })
+            }
+            format => {
+                let (width, height) = match format {
+                    ImageFormat::Png => png::probe(bytes)?,
+                    ImageFormat::Jpeg => jpeg::probe(bytes)?,
+                    ImageFormat::Gif => return Err(DecodeError::UnknownFormat),
+                };
+                limits.check(width, height)?;
+                Ok(Self {
+                    info: SequenceInfo {
+                        format,
+                        width,
+                        height,
+                        count: 1,
+                        kind: SequenceKind::Pages,
+                    },
+                    entries: Entries::Still {
+                        bytes,
+                        limits: *limits,
+                        decoded: None,
+                        served: false,
+                    },
+                })
+            }
+        }
+    }
+
+    /// What the container declares about its entries as a whole.
+    #[must_use]
+    pub const fn info(&self) -> SequenceInfo {
+        self.info
+    }
+
+    /// Decode the next entry, or answer `None` once they are exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Whichever refusal the entry's own decode raises. No pixels are handed
+    /// out with it, and the refusal is **remembered**: stepping again answers
+    /// the same one until [`Self::rewind`]. An animation's frame that stopped
+    /// part-way leaves the composition canvas describing no whole frame, and
+    /// this is what keeps a later frame from ever being composited onto it. A
+    /// caller that means to continue rewinds; one that does not simply
+    /// reports the reason.
+    pub fn next_frame(&mut self) -> Result<Option<Frame<'_>>, DecodeError> {
+        let (width, height) = (self.info.width, self.info.height);
+        match &mut self.entries {
+            Entries::Still {
+                bytes,
+                limits,
+                decoded,
+                served,
+            } => {
+                if *served {
+                    return Ok(None);
+                }
+                if decoded.is_none() {
+                    *decoded = Some(decode(bytes, limits)?);
+                }
+                *served = true;
+                let Some(image) = decoded.as_ref() else {
+                    return Ok(None);
+                };
+                Ok(Some(Frame {
+                    index: 0,
+                    width: image.width(),
+                    height: image.height(),
+                    delay_ns: 0,
+                    pixels: image.pixels(),
+                }))
+            }
+            Entries::Gif(frames) => {
+                let index = frames.index();
+                if !frames.step()? {
+                    return Ok(None);
+                }
+                Ok(Some(Frame {
+                    index,
+                    width,
+                    height,
+                    delay_ns: frames.delay_ns(),
+                    pixels: frames.canvas(),
+                }))
+            }
+        }
+    }
+
+    /// Restart at the first entry, clearing a remembered refusal.
+    ///
+    /// This is how a loop plays again: an animation's canvas is cleared and
+    /// its cursor returns to the first frame, so the composition starts from
+    /// the same blank canvas it did the first time — which is also what makes
+    /// it safe to step on after a refusal.
+    pub fn rewind(&mut self) {
+        match &mut self.entries {
+            Entries::Still { served, .. } => *served = false,
+            Entries::Gif(frames) => frames.rewind(),
+        }
     }
 }
 
@@ -764,6 +1139,16 @@ mod tests {
         let mut bytes = super::JPEG_SIGNATURE.to_vec();
         bytes.extend_from_slice(b"anything after the signature");
         assert_eq!(sniff(&bytes), Some(ImageFormat::Jpeg));
+    }
+
+    #[test]
+    fn sniff_recognises_the_gif_signature() {
+        let mut bytes = super::GIF_SIGNATURE.to_vec();
+        bytes.extend_from_slice(b"89a and whatever follows");
+        assert_eq!(sniff(&bytes), Some(ImageFormat::Gif));
+        // The version is the decoder's business, so a recognisably-GIF file
+        // with an unknown one reaches it and is refused with the reason.
+        assert_eq!(sniff(b"GIF99a"), Some(ImageFormat::Gif));
     }
 
     #[test]
@@ -807,7 +1192,10 @@ mod tests {
     /// A minimal, valid 2x2 8-bit greyscale PNG (a single stored-deflate
     /// `IDAT` block), built directly here rather than reaching into
     /// `png_tests.rs`'s own private fixture helpers.
-    fn minimal_png() -> Vec<u8> {
+    ///
+    /// The GIF tests borrow it as the still picture a sequence's one-page
+    /// case is proved against.
+    pub(crate) fn minimal_png() -> Vec<u8> {
         fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
             let mut out = Vec::new();
             let len = u32::try_from(payload.len()).expect("fits");

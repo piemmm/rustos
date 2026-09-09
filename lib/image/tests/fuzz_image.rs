@@ -1,15 +1,15 @@
-//! Deterministic fuzz harness for both image decoders (PNG and JPEG).
+//! Deterministic fuzz harness for every image decoder (PNG, JPEG, and GIF).
 //!
-//! Invariants, for any bytes an untrusted bundle icon or wallpaper may
-//! carry:
+//! Invariants, for any bytes an untrusted bundle icon, wallpaper, or opened
+//! picture may carry:
 //!
-//! 1. [`decode`] and [`decode_fitted`] never panic for any input, and never
-//!    report a decoded image whose width, height, or pixel count exceeds the
-//!    [`DecodeLimits`] they were given.
+//! 1. [`decode`], [`decode_fitted`], and a full walk of [`Sequence`] never
+//!    panic for any input, and never report a frame whose width, height, or
+//!    pixel count exceeds the [`DecodeLimits`] they were given.
 //! 2. Structure-aware mutations of a valid, builder-made file — bit flips,
-//!    length/CRC tweaks, and reordering of PNG chunks or JPEG marker
-//!    segments — never panic: the mutated bytes either decode within the
-//!    limits or are refused with a typed error.
+//!    length/CRC tweaks, and reordering of PNG chunks, JPEG marker segments,
+//!    or GIF blocks — never panic: the mutated bytes either decode within
+//!    the limits or are refused with a typed error.
 //! 3. The generators are not degenerate: every pristine fixture each one
 //!    produces actually decodes (a corpus that never round-trips would
 //!    leave invariant 2 exercising only the trivial "refused immediately"
@@ -18,15 +18,15 @@
 //!    than stopping at the sniffer, so the entropy/scanline paths are fuzzed
 //!    and not just the format dispatch.
 //!
-//! Both generators, and their chunk/zlib and marker/Huffman framing
-//! helpers, are deliberately self-contained: this harness only calls
+//! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
+//! framing helpers, are deliberately self-contained: this harness only calls
 //! `tairix_image`'s public API (exactly what a real consumer — the desktop
 //! image sandbox — would do), never the crate's own chunk reader, CRC
-//! table, or Huffman builder, so a bug in any of those is still caught
-//! here.
+//! table, Huffman builder, or code-stream writer, so a bug in any of those is
+//! still caught here.
 
 use tairix_fuzzseed::Lcg;
-use tairix_image::{decode, decode_fitted, sniff, DecodeLimits, FitBox};
+use tairix_image::{decode, decode_fitted, sniff, DecodeLimits, FitBox, Sequence};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -583,6 +583,229 @@ fn mutate_jpeg(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------
+// GIF fixtures
+// -----------------------------------------------------------------------
+
+/// The three magic bytes every GIF opens with, restated here for the same
+/// reason the PNG signature is.
+const GIF_MAGIC: [u8; 3] = *b"GIF";
+
+/// Wrap a code stream in GIF data sub-blocks, terminator included.
+fn gif_sub_blocks(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for block in data.chunks(255) {
+        out.push(u8::try_from(block.len()).unwrap_or(255));
+        out.extend_from_slice(block);
+    }
+    out.push(0);
+    out
+}
+
+/// A GIF LZW code stream of root codes only, written at the widths a
+/// conforming decoder will read it at.
+///
+/// A decoder adds one dictionary entry per code after the first since a
+/// clear and widens its reads once that fills the code space, whether or not
+/// the writer used the table — so the schedule is the writer's obligation
+/// even for a stream that compresses nothing.
+fn gif_lzw(indices: &[u8], min_code_size: u8) -> Vec<u8> {
+    let root_bits = u32::from(min_code_size);
+    let clear = 1u16 << root_bits;
+    let mut bytes = Vec::new();
+    let mut accumulator = 0u32;
+    let mut held = 0u32;
+    let mut width = root_bits + 1;
+    let mut next = clear + 2;
+    let mut since_clear = 0u32;
+    let mut push = |code: u16, width: u32, bytes: &mut Vec<u8>| {
+        accumulator |= u32::from(code) << held;
+        held += width;
+        while held >= 8 {
+            bytes.push(u8::try_from(accumulator & 0xFF).unwrap_or(0));
+            accumulator >>= 8;
+            held -= 8;
+        }
+    };
+    push(clear, width, &mut bytes);
+    for &index in indices {
+        push(u16::from(index), width, &mut bytes);
+        since_clear += 1;
+        if since_clear >= 2 && next < 4096 {
+            next += 1;
+            if u32::from(next) >= (1u32 << width) && width < 12 {
+                width += 1;
+            }
+        }
+    }
+    push(clear + 1, width, &mut bytes);
+    if held > 0 {
+        bytes.push(u8::try_from(accumulator & 0xFF).unwrap_or(0));
+    }
+    gif_sub_blocks(&bytes)
+}
+
+/// Build one structurally valid, randomised GIF: randomised screen size,
+/// global-table presence, frame count, per-frame sub-rectangle,
+/// interlacing, local tables, disposal method, transparency, delay, the
+/// animation-loop extension, and interleaved comment blocks.
+fn build_valid_gif(rng: &mut Lcg) -> Vec<u8> {
+    let width = u16::try_from(rng.below(20) + 1).unwrap_or(1);
+    let height = u16::try_from(rng.below(20) + 1).unwrap_or(1);
+    // A frame with no table at all is refused, so at least one of the global
+    // table and every frame's local table has to be there.
+    let global = rng.below(4) != 0;
+    let table_bits = u8::try_from(rng.below(3)).unwrap_or(0);
+    let entries = 2usize << table_bits;
+    let min_code_size = (table_bits + 1).max(2);
+    let table: Vec<u8> = (0..entries * 3)
+        .map(|at| u8::try_from(at % 251).unwrap_or(0))
+        .collect();
+
+    let mut out = GIF_MAGIC.to_vec();
+    out.extend_from_slice(if rng.below(4) == 0 { b"87a" } else { b"89a" });
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.push((if global { 0x80 } else { 0 }) | table_bits);
+    out.push(u8::try_from(rng.below(entries)).unwrap_or(0));
+    out.push(0);
+    if global {
+        out.extend_from_slice(&table);
+    }
+    if rng.below(2) == 0 {
+        out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+        out.extend_from_slice(b"NETSCAPE2.0");
+        out.extend_from_slice(&[0x03, 0x01]);
+        out.extend_from_slice(&u16::try_from(rng.below(4)).unwrap_or(0).to_le_bytes());
+        out.push(0);
+    }
+    for _ in 0..=rng.below(3) {
+        if rng.below(3) == 0 {
+            out.extend_from_slice(&[0x21, 0xFE, 0x03, b'h', b'e', b'y', 0x00]);
+        }
+        let frame_w = u16::try_from(rng.below(usize::from(width)) + 1).unwrap_or(1);
+        let frame_h = u16::try_from(rng.below(usize::from(height)) + 1).unwrap_or(1);
+        let left = u16::try_from(rng.below(usize::from(width - frame_w) + 1)).unwrap_or(0);
+        let top = u16::try_from(rng.below(usize::from(height - frame_h) + 1)).unwrap_or(0);
+        let local = !global || rng.below(3) == 0;
+        // Disposal 0..=3 only: 4..=7 are reserved and a decoder refuses them,
+        // which would make the corpus degenerate.
+        let disposal = u8::try_from(rng.below(4)).unwrap_or(0);
+        let transparent =
+            (rng.below(2) == 0).then(|| u8::try_from(rng.below(entries)).unwrap_or(0));
+        out.extend_from_slice(&[0x21, 0xF9, 0x04]);
+        out.push((disposal << 2) | u8::from(transparent.is_some()));
+        out.extend_from_slice(&u16::try_from(rng.below(8)).unwrap_or(0).to_le_bytes());
+        out.push(transparent.unwrap_or(0));
+        out.push(0);
+
+        out.push(0x2C);
+        out.extend_from_slice(&left.to_le_bytes());
+        out.extend_from_slice(&top.to_le_bytes());
+        out.extend_from_slice(&frame_w.to_le_bytes());
+        out.extend_from_slice(&frame_h.to_le_bytes());
+        let interlaced = rng.below(3) == 0;
+        out.push((if local { 0x80 } else { 0 }) | (if interlaced { 0x40 } else { 0 }) | table_bits);
+        if local {
+            out.extend_from_slice(&table);
+        }
+        out.push(min_code_size);
+        let pixels = usize::from(frame_w) * usize::from(frame_h);
+        let indices: Vec<u8> = (0..pixels)
+            .map(|_| u8::try_from(rng.below(entries)).unwrap_or(0))
+            .collect();
+        out.extend_from_slice(&gif_lzw(&indices, min_code_size));
+    }
+    out.push(0x3B);
+    out
+}
+
+/// The `(start, end)` byte range of every GIF block after the global colour
+/// table, found by a best-effort forward walk that stops at the first block
+/// running past the end of `bytes`.
+fn gif_block_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    if bytes.len() < 13 || !bytes.starts_with(&GIF_MAGIC) {
+        return bounds;
+    }
+    let packed = bytes[10];
+    let mut pos = 13usize;
+    if packed & 0x80 != 0 {
+        pos += 3 << ((packed & 0x07) + 1);
+    }
+    // Walk a data sub-block chain, answering the offset past its terminator.
+    let sub_blocks = |mut at: usize| -> Option<usize> {
+        loop {
+            let len = usize::from(*bytes.get(at)?);
+            at = at.checked_add(1)?.checked_add(len)?;
+            if at > bytes.len() {
+                return None;
+            }
+            if len == 0 {
+                return Some(at);
+            }
+        }
+    };
+    while let Some(&introducer) = bytes.get(pos) {
+        let start = pos;
+        let end = match introducer {
+            0x2C => {
+                let Some(&fields) = bytes.get(pos + 9) else {
+                    break;
+                };
+                let mut at = pos + 10;
+                if fields & 0x80 != 0 {
+                    at += 3 << ((fields & 0x07) + 1);
+                }
+                // Past the minimum code size, then the code stream.
+                match at.checked_add(1).and_then(sub_blocks) {
+                    Some(end) => end,
+                    None => break,
+                }
+            }
+            0x21 => match pos.checked_add(2).and_then(sub_blocks) {
+                Some(end) => end,
+                None => break,
+            },
+            // The trailer, and anything a mutation left that this walk cannot
+            // frame: either way there is no further block to bound.
+            _ => break,
+        };
+        if end > bytes.len() {
+            break;
+        }
+        bounds.push((start, end));
+        pos = end;
+    }
+    bounds
+}
+
+/// Structurally mutate a pristine GIF: maybe reorder two blocks, maybe
+/// overwrite one sub-block's declared length or one packed-fields byte, then
+/// flip a handful of random bits.
+fn mutate_gif(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    let bounds = gif_block_bounds(&bytes);
+    if rng.below(2) == 0 {
+        if let Some(rebuilt) = swap_two_ranges(rng, &bytes, &bounds) {
+            bytes = rebuilt;
+        }
+    }
+    if rng.below(2) == 0 {
+        // Every payload bound in the parser is measured against a declared
+        // block or sub-block length, so those are worth corrupting on purpose
+        // rather than only when a bit flip happens to land on one.
+        if let Some(&(start, end)) = bounds.get(rng.below(bounds.len().max(1))) {
+            let at = start + rng.below((end - start).max(1));
+            if let Some(slot) = bytes.get_mut(at) {
+                *slot = u8::try_from(rng.below(256)).unwrap_or(0);
+            }
+        }
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
+// -----------------------------------------------------------------------
 // Mutation and invariants
 // -----------------------------------------------------------------------
 
@@ -674,8 +897,13 @@ fn limits() -> DecodeLimits {
     DecodeLimits::new(64, 64, 64 * 64, 8 * 1024)
 }
 
-/// Assert neither decode entry point panics, and that any image either of
-/// them returns actually respects the limits it was decoded under.
+/// A sequence walk this harness will not run past, so a fixture declaring a
+/// great many frames cannot turn one fuzz iteration into a long one. The
+/// decoder has its own, far larger containment bound on the count itself.
+const SEQUENCE_STEPS: u32 = 64;
+
+/// Assert no decode entry point panics, and that any image or frame they
+/// return actually respects the limits it was decoded under.
 fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     let limits = limits();
     let decoded = [
@@ -690,6 +918,36 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
         assert!(image.height() <= limits.max_height());
         assert!(u64::from(image.width()) * u64::from(image.height()) <= limits.max_pixels());
         assert_eq!(image.pixels().len(), image.into_pixels().len());
+    }
+    // The sequence walk is what reaches a multi-frame container's
+    // composition and disposal paths at all: `decode` stops at the first
+    // frame. A rewind and a second walk cover the restart too.
+    if let Ok(mut sequence) = Sequence::open(bytes, &limits) {
+        let info = sequence.info();
+        assert!(info.width() <= limits.max_width());
+        assert!(info.height() <= limits.max_height());
+        for pass in 0..2 {
+            let mut steps = 0u32;
+            while steps < SEQUENCE_STEPS {
+                match sequence.next_frame() {
+                    Ok(Some(frame)) => {
+                        assert_eq!(frame.width(), info.width());
+                        assert_eq!(frame.height(), info.height());
+                        assert_eq!(
+                            frame.pixels().len(),
+                            usize::try_from(u64::from(info.width()) * u64::from(info.height()) * 4)
+                                .unwrap_or(usize::MAX)
+                        );
+                        assert!(frame.index() < info.count());
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+                steps += 1;
+            }
+            if pass == 0 {
+                sequence.rewind();
+            }
+        }
     }
     let _ = sniff(bytes);
 }
@@ -733,7 +991,7 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
             body.clear();
             body.resize(rng.below(300), 0);
             rng.fill(&mut body);
-            for prefix in [&SIGNATURE[..], &[0xFF, SOI][..]] {
+            for prefix in [&SIGNATURE[..], &[0xFF, SOI][..], &GIF_MAGIC[..]] {
                 buf.clear();
                 buf.extend_from_slice(prefix);
                 buf.extend_from_slice(&body);
@@ -781,6 +1039,50 @@ fn mutated_valid_jpeg_fixtures_never_panic() {
         if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
+    }
+}
+
+#[test]
+fn mutated_valid_gif_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_gif_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = build_valid_gif(&mut rng);
+            let mutated = mutate_gif(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_gif_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_gif_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = limits();
+    for _ in 0..DRAWS {
+        let gif = build_valid_gif(&mut rng);
+        let mut sequence =
+            Sequence::open(&gif, &limits).expect("a pristine generated fixture failed to open");
+        let count = sequence.info().count();
+        let mut seen = 0u32;
+        while sequence
+            .next_frame()
+            .expect("a pristine generated fixture failed to decode a frame")
+            .is_some()
+        {
+            seen += 1;
+        }
+        assert_eq!(seen, count, "a fixture decoded a different frame count");
     }
 }
 
