@@ -54,6 +54,10 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # Integer screen geometry (`Rect`): the wallpaper placement a prepared
 # source is held with is expressed in this one shared rectangle type.
 tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# Fallible allocation (`try_reserve` behind one shared helper), so a
+# document upload and a render buffer answer a refusal rather than
+# aborting when the memory is not there.
+tairix-util = { path = "../util", version = "=0.0.0" }
 # The wallpaper placement geometry (`place`, `Placement`, `WallpaperFit`)
 # and the `MAX_WALLPAPER_BYTES` source-size bound the sandboxed wallpaper
 # service places an untrusted desktop wallpaper through.

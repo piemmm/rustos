@@ -1189,8 +1189,8 @@ fn the_pages_walk_survives_a_page_that_will_not_decode() {
     let broken = grey(2, 1, vec![1]);
     let bytes = build(false, &[grey(2, 1, vec![1, 2]), broken]);
     let mut walk = pages(&bytes, &limits()).expect("the chain opens");
-    assert!(walk.step().expect("the first page decodes"));
-    assert_eq!(walk.step(), Err(DecodeError::TiffStripTruncated));
+    assert!(walk.step(&bytes).expect("the first page decodes"));
+    assert_eq!(walk.step(&bytes), Err(DecodeError::TiffStripTruncated));
 }
 
 // --- Refusals -------------------------------------------------------------

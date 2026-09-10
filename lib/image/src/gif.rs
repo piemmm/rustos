@@ -193,15 +193,17 @@ struct Descriptor<'a> {
 }
 
 /// The logical screen every frame composites onto (`GIF89a` §18).
-struct Screen<'a> {
+struct Screen {
     width: u32,
     height: u32,
-    palette: Option<&'a [u8]>,
+    /// Where the global colour table lies in the stream, so a chain can name
+    /// it without holding the bytes it walks.
+    palette: Option<Range<usize>>,
 }
 
 /// Read the signature and Logical Screen Descriptor, answering the screen and
 /// the offset of the first block after the global colour table.
-fn read_screen(bytes: &[u8]) -> Result<(Screen<'_>, usize), DecodeError> {
+fn read_screen(bytes: &[u8]) -> Result<(Screen, usize), DecodeError> {
     let mut reader = Reader::new(bytes, 0);
     if reader.take(MAGIC.len())? != MAGIC {
         return Err(DecodeError::GifBadSignature);
@@ -220,7 +222,10 @@ fn read_screen(bytes: &[u8]) -> Result<(Screen<'_>, usize), DecodeError> {
     let palette = if packed & 0x80 == 0 {
         None
     } else {
-        Some(reader.take(palette_len(packed))?)
+        let at = reader.pos;
+        let len = palette_len(packed);
+        reader.take(len)?;
+        Some(at..at + len)
     };
     Ok((
         Screen {
@@ -242,7 +247,7 @@ const fn palette_len(packed: u8) -> usize {
 /// the reader at the first data sub-block.
 fn read_descriptor<'a>(
     reader: &mut Reader<'a>,
-    screen: &Screen<'_>,
+    screen: &Screen,
 ) -> Result<Descriptor<'a>, DecodeError> {
     let fields = reader.take(IMAGE_DESCRIPTOR_LEN)?;
     let rect = Rect {
@@ -350,7 +355,7 @@ struct Layout {
 /// Every declared length is checked against the bytes actually present, so a
 /// stream that lies about a block's size is refused here rather than at the
 /// step that would have read it.
-fn scan(bytes: &[u8], screen: &Screen<'_>, first_block: usize) -> Result<Layout, DecodeError> {
+fn scan(bytes: &[u8], screen: &Screen, first_block: usize) -> Result<Layout, DecodeError> {
     let mut reader = Reader::new(bytes, first_block);
     let mut frames = 0u32;
     // Absent, the format plays a sequence exactly once.
@@ -540,11 +545,10 @@ fn interlaced_row(stream_row: u32, height: u32) -> u32 {
 }
 
 /// A GIF stream's block chain, composited onto its retained canvas.
-pub(crate) struct Chain<'a> {
-    bytes: &'a [u8],
+pub(crate) struct Chain {
     width: u32,
     height: u32,
-    global_palette: Option<&'a [u8]>,
+    global_palette: Option<Range<usize>>,
     first_block: usize,
     cursor: usize,
     count: u32,
@@ -561,14 +565,14 @@ pub(crate) struct Chain<'a> {
     lzw: Lzw,
 }
 
-impl<'a> Chain<'a> {
+impl Chain {
     /// Validate a stream's structure and prepare its canvas, decoding no
     /// pixels.
     ///
     /// The screen geometry is weighed against `limits` before the canvas is
     /// allocated, so a stream that lies about its size cannot make this
     /// reserve memory proportional to the lie.
-    fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
+    fn open(bytes: &[u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
         let (screen, first_block) = read_screen(bytes)?;
         limits.check(screen.width, screen.height)?;
         let layout = scan(bytes, &screen, first_block)?;
@@ -580,7 +584,6 @@ impl<'a> Chain<'a> {
         )
         .map_err(|_| DecodeError::DimensionsOverflow)?;
         Ok(Self {
-            bytes,
             width: screen.width,
             height: screen.height,
             global_palette: screen.palette,
@@ -598,23 +601,23 @@ impl<'a> Chain<'a> {
 
     /// Composite the next frame onto the canvas, answering the delay it
     /// declares.
-    fn composite_next(&mut self) -> Result<u64, DecodeError> {
+    fn composite_next(&mut self, bytes: &[u8]) -> Result<u64, DecodeError> {
         self.dispose();
         let mut control = Control::DEFAULT;
-        let mut reader = Reader::new(self.bytes, self.cursor);
+        let mut reader = Reader::new(bytes, self.cursor);
         loop {
             match reader.byte()? {
                 IMAGE_SEPARATOR => {
                     let screen = Screen {
                         width: self.width,
                         height: self.height,
-                        palette: self.global_palette,
+                        palette: self.global_palette.clone(),
                     };
                     let descriptor = read_descriptor(&mut reader, &screen)?;
                     if control.disposal == Disposal::Previous {
                         self.save(descriptor.rect)?;
                     }
-                    self.cursor = self.draw(&descriptor, control)?;
+                    self.cursor = self.draw(bytes, &descriptor, control)?;
                     self.pending = Some((control.disposal, descriptor.rect));
                     return Ok(control.delay_ns);
                 }
@@ -732,12 +735,17 @@ impl<'a> Chain<'a> {
     /// answering the offset of the block that follows it.
     fn draw(
         &mut self,
+        bytes: &[u8],
         descriptor: &Descriptor<'_>,
         control: Control,
     ) -> Result<usize, DecodeError> {
         let palette = descriptor
             .palette
-            .or(self.global_palette)
+            .or_else(|| {
+                self.global_palette
+                    .clone()
+                    .and_then(|table| bytes.get(table))
+            })
             .ok_or(DecodeError::GifMissingColourTable)?;
         let rect = descriptor.rect;
         let pixels = usize::try_from(u64::from(rect.width) * u64::from(rect.height))
@@ -751,7 +759,7 @@ impl<'a> Chain<'a> {
                 .get_mut(..pixels)
                 .ok_or(DecodeError::OutOfMemory)?;
             expand(
-                self.bytes,
+                bytes,
                 descriptor.data,
                 descriptor.min_code_size,
                 &mut self.lzw,
@@ -795,7 +803,7 @@ impl<'a> Chain<'a> {
     }
 }
 
-impl FrameSource for Chain<'_> {
+impl FrameSource for Chain {
     fn width(&self) -> u32 {
         self.width
     }
@@ -816,8 +824,8 @@ impl FrameSource for Chain<'_> {
         &self.canvas
     }
 
-    fn advance(&mut self, _index: u32) -> Result<u64, DecodeError> {
-        self.composite_next()
+    fn advance(&mut self, bytes: &[u8], _index: u32) -> Result<u64, DecodeError> {
+        self.composite_next(bytes)
     }
 
     fn restart(&mut self) {
@@ -828,10 +836,7 @@ impl FrameSource for Chain<'_> {
 }
 
 /// Validate a stream's structure and prepare to composite its frames.
-pub(crate) fn frames<'a>(
-    bytes: &'a [u8],
-    limits: &DecodeLimits,
-) -> Result<Animation<Chain<'a>>, DecodeError> {
+pub(crate) fn frames(bytes: &[u8], limits: &DecodeLimits) -> Result<Animation<Chain>, DecodeError> {
     Ok(Animation::new(Chain::open(bytes, limits)?))
 }
 
@@ -841,7 +846,7 @@ pub(crate) fn frames<'a>(
 /// composited frame is the one the format shows first.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let mut frames = frames(bytes, limits)?;
-    if !frames.step()? {
+    if !frames.step(bytes)? {
         return Err(DecodeError::GifNoFrames);
     }
     let (width, height) = (frames.width(), frames.height());

@@ -1729,8 +1729,7 @@ fn header(file: &[u8]) -> Result<(Endian, usize), DecodeError> {
 ///
 /// The offset of the page last located is kept, so a sequential walk costs
 /// one link per page rather than re-walking the chain for each.
-pub(crate) struct Chain<'a> {
-    file: &'a [u8],
+pub(crate) struct Chain {
     endian: Endian,
     first: usize,
     count: u32,
@@ -1738,14 +1737,14 @@ pub(crate) struct Chain<'a> {
     scratch: Scratch,
 }
 
-impl<'a> Chain<'a> {
+impl Chain {
     /// Validate the chain and measure its pages, decoding none of them.
     ///
     /// A directory that will not parse is fatal, because the chain is what
     /// finds the next page. A page whose *geometry* will not read is not: it
     /// is passed over here and refused only if it is asked for, exactly as
     /// one page of an icon file is.
-    fn open(file: &'a [u8]) -> Result<(Self, Measured), DecodeError> {
+    fn open(file: &[u8]) -> Result<(Self, Measured), DecodeError> {
         let (endian, first) = header(file)?;
         // A directory cannot be shorter than its own count and link, so a
         // chain longer than the file has room for must be revisiting one.
@@ -1790,7 +1789,6 @@ impl<'a> Chain<'a> {
         let canvas = canvas.unwrap_or(geometry);
         Ok((
             Self {
-                file,
                 endian,
                 first,
                 count,
@@ -1806,14 +1804,14 @@ impl<'a> Chain<'a> {
     }
 
     /// Where the directory of the page at `index` begins.
-    fn locate(&mut self, index: u32) -> Result<usize, DecodeError> {
+    fn locate(&mut self, file: &[u8], index: u32) -> Result<usize, DecodeError> {
         let (mut from, mut at) = if index >= self.located.0 {
             self.located
         } else {
             (0, self.first)
         };
         while from < index {
-            let (_, next) = Ifd::read(self.file, self.endian, at)?;
+            let (_, next) = Ifd::read(file, self.endian, at)?;
             if next == 0 {
                 return Err(DecodeError::TiffNoPages);
             }
@@ -1825,15 +1823,20 @@ impl<'a> Chain<'a> {
     }
 }
 
-impl PageSource for Chain<'_> {
+impl PageSource for Chain {
     fn count(&self) -> u32 {
         self.count
     }
 
-    fn decode(&mut self, index: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-        let at = self.locate(index)?;
-        let page = Page::read(self.file, self.endian, at)?;
-        decode_page(self.file, &page, limits, &mut self.scratch)
+    fn decode(
+        &mut self,
+        file: &[u8],
+        index: u32,
+        limits: &DecodeLimits,
+    ) -> Result<RasterImage, DecodeError> {
+        let at = self.locate(file, index)?;
+        let page = Page::read(file, self.endian, at)?;
+        decode_page(file, &page, limits, &mut self.scratch)
     }
 }
 
@@ -1848,14 +1851,11 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 /// a reduced copy of another.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let (mut chain, measured) = Chain::open(bytes)?;
-    chain.decode(measured.primary, limits)
+    chain.decode(bytes, measured.primary, limits)
 }
 
 /// Validate the chain and measure its pages, decoding none of them.
-pub(crate) fn pages<'a>(
-    bytes: &'a [u8],
-    limits: &DecodeLimits,
-) -> Result<Pages<Chain<'a>>, DecodeError> {
+pub(crate) fn pages(bytes: &[u8], limits: &DecodeLimits) -> Result<Pages<Chain>, DecodeError> {
     let (chain, measured) = Chain::open(bytes)?;
     Ok(Pages::new(
         chain,

@@ -26,13 +26,16 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use tairix_image::ImageFormat;
+use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
 };
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imagerender::{
-    rasterise_icon, render_wallpaper, ImageRenderService, MAX_ICON_SIDE, MAX_WALLPAPER_WIDTH,
+    close_view, open_view, rasterise_icon, render_page, render_wallpaper, select_page,
+    send_document, ImageRenderService, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
 use tairix_sandbox::loopback::LoopbackLauncher;
 use tairix_sandbox::proto::Channel;
@@ -384,9 +387,88 @@ fn fuzz_wallpaper_iteration(
     // Also exercise a destination one past the ceiling: always refused
     // locally, before any request is even sent, so this is cheap to run
     // every iteration unlike a genuine ceiling-sized render.
-    let _ = render_wallpaper(honest, MAX_WALLPAPER_WIDTH + 1, height, fit, &png);
+    let _ = render_wallpaper(honest, MAX_DESTINATION_WIDTH + 1, height, fit, &png);
     (width, height, fit)
 }
+
+/// Fuzz one iteration's document-viewing coverage: a PNG document,
+/// mutated, a random truncation, and pure `noise`, opened through the
+/// honest worker and driven page-by-page and band-by-band at a random
+/// small destination and crop.
+///
+/// The view is a *session*, so what this reaches that the one-shot
+/// surfaces cannot is the order requests arrive in: a render before a
+/// page, a band before a render, a page past the count, a crop that
+/// wanders outside the picture. Every one of those must be a typed
+/// refusal rather than anything else.
+fn fuzz_view_iteration(
+    honest: &mut HonestIconSandbox,
+    noise: &[u8],
+    next: &mut impl FnMut() -> u64,
+) {
+    let mut png = png_template();
+    for _ in 0..bounded(next(), 6) {
+        let pos = bounded(next(), png.len() - 1);
+        png[pos] ^= low_byte(next() >> 17);
+    }
+    let cut = bounded(next(), png.len());
+    for document in [png.as_slice(), &png[..cut], noise] {
+        // A page and a band before anything is open, so the out-of-order
+        // paths are reached whether or not this document opens at all.
+        let _ = select_page(honest, u32::try_from(bounded(next(), 4)).unwrap_or(0));
+        let _ = render_page(honest, whole(1, 1), 1, 1, &mut [0u8; 4]);
+        if send_document(honest, document).is_err() {
+            continue;
+        }
+        let named = NAMED_FORMATS[bounded(next(), NAMED_FORMATS.len() - 1)];
+        let Ok(opened) = open_view(honest, named) else {
+            continue;
+        };
+        let index = u32::try_from(bounded(next(), 4)).unwrap_or(0);
+        let Ok(page) = select_page(honest, index % opened.count.max(1)) else {
+            continue;
+        };
+        let source = Region {
+            x: u32::try_from(bounded(next(), 3)).unwrap_or(0),
+            y: u32::try_from(bounded(next(), 3)).unwrap_or(0),
+            width: u32::try_from(bounded(next(), 3)).unwrap_or(0) + 1,
+            height: u32::try_from(bounded(next(), 3)).unwrap_or(0) + 1,
+        };
+        let dest_w = u32::try_from(bounded(next(), 7)).unwrap_or(0) + 1;
+        let dest_h = u32::try_from(bounded(next(), 7)).unwrap_or(0) + 1;
+        let mut out = vec![0u8; (dest_w as usize) * (dest_h as usize) * 4];
+        // The crop is deliberately not clamped to the page: a rectangle
+        // that runs off it must be refused, never read past the pixels.
+        let _ = render_page(honest, source, dest_w, dest_h, &mut out);
+        let _ = render_page(
+            honest,
+            whole(page.width, page.height),
+            dest_w,
+            dest_h,
+            &mut out,
+        );
+        let _ = close_view(honest);
+    }
+}
+
+/// The whole of a `width`×`height` picture.
+fn whole(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+}
+
+/// The formats a view open may be asked to read a document as, including
+/// reading its own signature.
+const NAMED_FORMATS: [Option<ImageFormat>; 4] = [
+    None,
+    Some(ImageFormat::Png),
+    Some(ImageFormat::Sprite),
+    Some(ImageFormat::Tiff),
+];
 
 /// Launches [`HostileChannel`] workers with fresh noise per launch.
 struct HostileLauncher {
@@ -506,6 +588,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let side = fuzz_icon_iteration(&mut honest_icon, &noise, &mut next);
         let (wallpaper_w, wallpaper_h, fit) =
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut next);
+        fuzz_view_iteration(&mut honest_icon, &noise, &mut next);
 
         // 7. NTP server replies through the honest worker, in its own helper
         //    to keep this loop's body a readable, bounded size. Returns the
@@ -522,6 +605,12 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE);
         let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
+        if send_document(&mut hostile, &png_template()).is_ok() {
+            let _ = open_view(&mut hostile, None);
+            let _ = select_page(&mut hostile, 0);
+            let _ = render_page(&mut hostile, whole(1, 1), 1, 1, &mut [0u8; 4]);
+            let _ = close_view(&mut hostile);
+        }
         let hostile_txn = tairix_net::ntp::Transaction {
             server: 0,
             nonce: tairix_net::ntp::NtpTimestamp::from_raw(nonce),

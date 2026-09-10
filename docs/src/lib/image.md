@@ -500,8 +500,27 @@ all of them:
 - `Sequence::next_frame()` decodes the next entry, lending a `Frame` carrying
   its index, geometry, declared delay in nanoseconds, and pixels.
 - `Sequence::page(index)` decodes one entry directly.
+- `Sequence::current()` lends the entry most recently decoded, decoding
+  nothing — so a caller can hold a page and draw it repeatedly (a band at a
+  time, or again at another size) without paying for the decode each time.
 - `Sequence::rewind()` restarts, which is how a loop plays again — and what
   makes it safe to step on after a refusal.
+
+### The document is held, not borrowed
+
+`Sequence<B>` owns whatever it reads: `B` is anything the bytes come back
+out of, so `&[u8]` keeps a borrowing caller zero-copy and `Vec<u8>` lets the
+walk outlive whatever produced the bytes. Nothing inside the walk borrows
+them — every format's chain holds offsets and is handed the document per
+call — which is what makes the owning case expressible at all, since a
+struct holding both a buffer and a borrow of it is not something safe Rust
+can write.
+
+That is not a detail: it is what lets a **sandboxed viewer hold a file open
+across requests**. The alternative — rebuilding the walk from the bytes for
+each request — would re-composite every frame of an animation before the one
+asked for, so playing a hundred-frame animation through would cost five
+thousand frame decodes rather than a hundred.
 
 A refusal hands out no pixels and is **remembered**: stepping again answers
 the same one until a rewind. An animation's frame that stopped part-way has
@@ -510,14 +529,15 @@ pixels, so the canvas describes no whole frame — and remembering the refusal
 is what keeps a later frame from ever being composited onto it. A caller that
 means to continue rewinds; one that does not simply reports the reason.
 
-It is **forward-only with a rewind**, because that is what an animation *is*.
-A GIF frame composites onto whatever its predecessors left on the logical
-screen under the disposal method declared for each, so a decoder that could
-be asked for frame *n* directly would have to re-composite every frame
-before it — wrong per-index, and quadratic over a walk. Holding the canvas
-and stepping makes each frame cost its own decode and no more, and the pixels
-a `Frame` lends are the canvas *after* compositing, so a consumer shows the
-whole picture without knowing the format's disposal model at all.
+An animation is walked over a **retained canvas**, because that is what an
+animation *is*. A GIF frame composites onto whatever its predecessors left
+on the logical screen under the disposal method declared for each, so a
+decoder that re-derived frame *n* from nothing would have to composite every
+frame before it — quadratic over a walk. Holding the canvas makes each frame
+cost its own decode and no more, whether it is reached by stepping or by
+address, and the pixels a `Frame` lends are the canvas *after* compositing,
+so a consumer shows the whole picture without knowing the format's disposal
+model at all.
 
 The pixels are borrowed rather than owned for the same reason: the canvas has
 to be retained for the next frame to composite onto, so handing out an owned
@@ -527,9 +547,13 @@ A **page** container's entries are independent pictures rather than one
 canvas, so `page(index)` decodes any of them directly, in any order, and a
 page that refuses disturbs no other. An icon file is the case that matters:
 its pages are one picture at several sizes, and choosing between them is the
-whole point of the format. Addressing a frame of an *animation* is still
-defined — it restarts the composition and steps to that frame — but costs
-exactly what a rewind and that many steps would, which is why a player steps.
+whole point of the format. Addressing a frame of an *animation* is defined
+too: frame *n* is the canvas with every frame up to it composited on.
+Reaching a *later* frame composites only the ones in between, since the
+canvas already holds the frame before the cursor — so walking an animation
+through by address costs each frame one decode, exactly as stepping does.
+Only going back restarts the composition, and so does a remembered refusal,
+which left the canvas describing no whole frame at all.
 For the same reason a page container weighs nothing against the caller's
 limits when it opens: it allocates nothing until a page is asked for, and a
 caller may well want a small page out of a file whose largest it could never

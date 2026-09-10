@@ -550,6 +550,51 @@ clients, and their exit-code sets are their own.
   shape; the SVG fuzz harness drives both viewports and asserts they can
   disagree *only* about complexity.
 
+### Outstanding: SVG is not yet a view backend — blocked on a decision
+
+The wire protocol is source-neutral by design — open, page, render, band —
+but the worker currently has exactly **one** backend behind it, the
+`lib/image` `Sequence`. So the eight raster formats open and SVG does not:
+`tairix_image::sniff` never answers `Svg`, and an SVG document handed to
+`OP_VIEW_OPEN` is refused as an unrecognised format. `Viewport::Natural`
+therefore still has **no** production caller; the note above that it gained
+one here was wrong.
+
+Adding SVG is the second backend, and it is not a patch. Three things have
+to be decided rather than guessed:
+
+- **A view format vocabulary.** `ViewDocument::format` is
+  `tairix_image::ImageFormat`, which is a *raster* registry and must not
+  grow an `Svg` variant it cannot decode. The wire needs its own enum over
+  the raster formats plus the vector one.
+- **How a vector crop is drawn.** `Surface::fill_contours` stretches the
+  design grid across the whole surface it is given, so it renders a
+  drawing, not a *rectangle* of one. Rasterising the whole drawing at the
+  zoom factor and taking the sub-rectangle is trivial and allocates the
+  full zoomed picture — which at a viewer's zoom is exactly the unbounded
+  cost the crop-based render exists to avoid. Transforming the contours
+  per render is bounded but needs the placement to live in one shared
+  place rather than beside the icon path's copy.
+- **A non-square vector rasterise.** `VectorIcon::rasterise(side)` is
+  square because every icon slot is. A picture is not.
+
+Until that is settled the viewer claims eight formats, not nine. This is
+recorded rather than stubbed: nothing in the tree pretends to open an SVG
+document.
+
+### `MAX_VIEW_DECODE_PIXELS` is set by what a viewer must open
+
+A viewer's page bound is deliberately *not* sized to a particular machine:
+sixty-four megapixels sits above the top of the current 35 mm camera range,
+so no photograph a user owns is refused for being a photograph. What a small
+machine can actually hold is enforced where it belongs — the decode
+allocates fallibly and answers a typed refusal the viewer draws — rather
+than by a ceiling a larger machine would outgrow. A page beyond the bound is
+refused with a stated reason rather than served at a reduced scale, which is
+the fail-closed answer; serving it softer would need a *fitted* page decode,
+and `decode_fitted`'s reduced scales are a JPEG property that a TIFF page or
+an icon entry has no equivalent of.
+
 ### The two eight-case maps are not one, and that is deliberate
 
 `lib/image`'s `orientation` and `lib/raster`'s `Reorient` both express the
@@ -567,7 +612,63 @@ depends on two crates and runs inside a sandbox — or a third crate holding
 ten lines of index arithmetic. Both are worse than two small, separately
 exhaustive tests. A future reader tempted to "fix" this duplication should
 read this paragraph first; the rustdoc on both types points here.
-- `lib/sandbox::imagerender` view operations — planned.
+- `lib/sandbox::imagerender` view operations — **done**. The view is a
+  *session*, not a one-shot render, because a viewer holds a file open and
+  moves about inside it: `OP_VIEW_OPEN` answers what the container
+  declares, `OP_VIEW_PAGE` decodes one entry and the worker holds it,
+  `OP_VIEW_RENDER` fixes which *rectangle* of that held page is drawn onto
+  which destination, `OP_VIEW_BAND` returns exactly the destination rows
+  asked for, and `OP_VIEW_RELEASE` drops both. Two properties fall out of
+  that shape, and both are the point of it: a zoomed-in viewer sends the
+  crop it is showing, so the work and the reply are bounded by the window
+  rather than by the picture; and the decoded page stays in the worker, so
+  panning and zooming re-draw rather than re-decode.
+
+  Holding the walk across requests is what made this change larger than
+  the protocol. `Sequence<'a>` borrowed the document, and a worker cannot
+  own both a buffer and a borrow of it — not in safe Rust, and both crates
+  forbid `unsafe`. Rebuilding the walk per request was the alternative and
+  is not one: an animation's frames composite onto their predecessors, so
+  playing a hundred-frame animation through would have cost five thousand
+  frame decodes. So `Sequence<B: AsRef<[u8]>>` now **owns** what it reads —
+  `&[u8]` keeps a borrowing caller zero-copy, `Vec<u8>` lets the walk
+  outlive whatever produced the bytes — and no format's chain holds a
+  borrow any more: each holds offsets and is handed the document per call.
+  `Sequence::current()` came with it, lending the entry already decoded so
+  a band draws the page the walk holds rather than a second copy of it.
+
+  Addressing a frame stopped being quadratic in the same change.
+  `page(index)` rewound and replayed unconditionally; the canvas already
+  holds the frame before the cursor, so reaching a later one now composites
+  only the frames in between, and walking an animation through by address
+  costs what stepping does. Only going back restarts, and so does a
+  remembered refusal — which is what keeps a later frame from ever being
+  composited onto a canvas holding part of a refused one.
+
+  **The viewer's own rotation and flip are not in the sandbox**, and the
+  earlier note in this plan that they would be is wrong. They are a
+  permutation of pixels the caller already holds and has validated, not a
+  decode, so they belong to whatever holds the picture: `Surface`'s own
+  rustdoc says a viewer should turn what it *displays*, and what it
+  displays is a premultiplied `Surface`, where the wire is straight alpha —
+  turning in the worker would mean a lossy round trip through premultiply
+  and back for no gain. `Reorient`/`Surface::reoriented` therefore get
+  their production caller in the app (step 7), not here.
+
+  One defect was found and fixed on the way. Every untrusted file now
+  reaches this service one way — `OP_DOC_BEGIN` declares a length and
+  `OP_DOC_PUSH` carries it in pieces of at most `MAX_DOCUMENT_CHUNK`,
+  derived from `MAX_FRAME` rather than chosen — and the wallpaper prepare,
+  which used to carry its whole source inline, was moved onto it.
+  `MAX_WALLPAPER_BYTES` and `MAX_FRAME` are both exactly 8 MiB, so a
+  wallpaper in the top 22 byte-lengths of its own documented bound was
+  admitted by the caller's check and then refused by the transport: the
+  user got the backdrop colour instead of the picture they chose. Deriving
+  the chunk size from the frame bound is what makes that unrepresentable,
+  and a second upload path beside it would have been the duplication the
+  charter forbids anyway. The destination bound was unified for the same
+  reason: `MAX_DESTINATION_WIDTH`/`_HEIGHT`/`_PIXELS` is one figure every
+  consumer of this service asks the same question of.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.
 - Deletion of `userland/apps/viewer` and the reference sweep — planned.
 - `lib/pdf` behind the page source — next change. Encrypted PDFs need MD5/RC4/
@@ -576,6 +677,20 @@ read this paragraph first; the rustdoc on both types points here.
   take then.
 
 ## Noticed and not yet fixed
+
+- **`lib/sandbox` allocates its bounded buffers infallibly.** Every band,
+  destination, and frame buffer in the crate is `vec![0u8; n]`
+  (`proto.rs`, `decode.rs`, `imagerender.rs`), which aborts rather than
+  answering when the memory is not there. Inside a worker that is
+  contained — the sandbox reports a typed failure and replaces it — but
+  `render_wallpaper`'s parent-side assembly allocates the whole
+  destination, up to 33 MiB, *in the calling desktop session*, so a
+  session under memory pressure dies rather than falling back to its
+  backdrop colour. The view's own parent side already avoids this by
+  taking the caller's buffer (`render_page`), and the document upload
+  reserves fallibly; the rest is a crate-wide allocation-discipline
+  change spanning four modules and is not smuggled into this one. It
+  carries its regression test when it lands.
 
 - **WEBP does not apply an EXIF `Orientation` either.** The container reads
   past its `EXIF` chunk, exactly as `jpeg` used to read past `APP1`. Now

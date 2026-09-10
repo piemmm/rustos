@@ -2177,7 +2177,7 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
 
 /// Walk a sequence twice, checking every frame against the limits it was
 /// opened under; the second pass covers the restart.
-fn walk(mut sequence: Sequence<'_>, limits: &DecodeLimits) {
+fn walk<B: AsRef<[u8]>>(mut sequence: Sequence<B>, limits: &DecodeLimits) {
     let info = sequence.info();
     for pass in 0..2 {
         let mut steps = 0u32;

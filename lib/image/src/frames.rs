@@ -6,6 +6,9 @@
 //! Only advancing the canvas by one frame differs between them, which is
 //! what [`FrameSource`] is; the cursor, the remembered refusal, and the delay
 //! most recently declared are shared.
+//!
+//! The document is handed to each call rather than held, so a walk borrows
+//! nothing and a caller can own both it and the bytes it reads.
 
 use crate::DecodeError;
 
@@ -28,14 +31,14 @@ pub(crate) trait FrameSource {
     /// `width * height * 4` bytes.
     fn canvas(&self) -> &[u8];
 
-    /// Composite the frame at `index` onto the canvas and answer the delay
-    /// it declares, in nanoseconds.
+    /// Composite the frame at `index` of `bytes` onto the canvas and answer
+    /// the delay it declares, in nanoseconds.
     ///
     /// Called in order and only while frames remain, so an implementor never
     /// answers for the end of the chain. A source that walks a chain already
     /// knows where it is and ignores `index`; one that indexes a table of
     /// frames reads it rather than keeping a second cursor.
-    fn advance(&mut self, index: u32) -> Result<u64, DecodeError>;
+    fn advance(&mut self, bytes: &[u8], index: u32) -> Result<u64, DecodeError>;
 
     /// Clear the canvas and return to the first frame.
     fn restart(&mut self);
@@ -96,18 +99,28 @@ impl<S: FrameSource> Animation<S> {
         self.source.canvas()
     }
 
+    /// Which frame the canvas holds, or `None` where it holds no whole one
+    /// — before the first step, and after a refusal left part of a frame on
+    /// it.
+    pub(crate) fn held(&self) -> Option<u32> {
+        if self.failed.is_some() {
+            return None;
+        }
+        self.cursor.checked_sub(1)
+    }
+
     /// Composite the next frame, answering `false` once they are exhausted.
     ///
     /// A refusal is remembered and repeated until [`Self::rewind`], which is
     /// the same contract every container's walk keeps.
-    pub(crate) fn step(&mut self) -> Result<bool, DecodeError> {
+    pub(crate) fn step(&mut self, bytes: &[u8]) -> Result<bool, DecodeError> {
         if let Some(failed) = &self.failed {
             return Err(failed.clone());
         }
         if self.cursor >= self.source.count() {
             return Ok(false);
         }
-        match self.source.advance(self.cursor) {
+        match self.source.advance(bytes, self.cursor) {
             Ok(delay_ns) => {
                 self.delay_ns = delay_ns;
                 self.cursor += 1;
@@ -124,12 +137,19 @@ impl<S: FrameSource> Animation<S> {
     /// there is none.
     ///
     /// A frame composites onto its predecessors, so frame `index` *is* the
-    /// canvas after `index + 1` steps from a cleared one; there is nothing
-    /// cheaper to do and nothing else it could mean.
-    pub(crate) fn frame(&mut self, index: u32) -> Result<bool, DecodeError> {
-        self.rewind();
-        for _ in 0..=index {
-            if !self.step()? {
+    /// canvas after compositing every frame up to it. The canvas already
+    /// holds the frame before the cursor, so reaching a later one only
+    /// composites the frames in between: playing an animation through by
+    /// address costs each frame one decode rather than one per frame that
+    /// precedes it. Only going back needs the canvas cleared and the walk
+    /// replayed, and so does a remembered refusal, which left the canvas
+    /// describing no whole frame at all.
+    pub(crate) fn frame(&mut self, bytes: &[u8], index: u32) -> Result<bool, DecodeError> {
+        if self.failed.is_some() || self.cursor > index.saturating_add(1) {
+            self.rewind();
+        }
+        while self.cursor <= index {
+            if !self.step(bytes)? {
                 return Ok(false);
             }
         }
@@ -145,3 +165,7 @@ impl<S: FrameSource> Animation<S> {
         self.failed = None;
     }
 }
+
+#[cfg(test)]
+#[path = "frames_tests.rs"]
+mod tests;

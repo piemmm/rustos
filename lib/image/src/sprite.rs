@@ -699,13 +699,12 @@ struct Measured {
 /// The control blocks form a chain rather than a table, so the last one
 /// located is kept: a sequential walk then costs one step per page instead
 /// of re-walking the chain for each.
-pub(crate) struct Area<'a> {
-    bytes: &'a [u8],
+pub(crate) struct Area {
     header: AreaHeader,
     located: (u32, u32),
 }
 
-impl<'a> Area<'a> {
+impl Area {
     /// Validate the area's chain and measure its sprites, decoding none.
     ///
     /// A control block that will not parse is fatal, because the chain is
@@ -714,7 +713,7 @@ impl<'a> Area<'a> {
     /// asked for, exactly as one page of an icon file is. Where no sprite
     /// could be measured, the first refusal one raised is the answer,
     /// because that names a real reason.
-    fn open(bytes: &'a [u8]) -> Result<(Self, Measured), DecodeError> {
+    fn open(bytes: &[u8]) -> Result<(Self, Measured), DecodeError> {
         let header = read_area(bytes)?;
         let mut at = header.first;
         let mut measured: Option<Measured> = None;
@@ -742,7 +741,6 @@ impl<'a> Area<'a> {
         let measured = measured.ok_or_else(|| refusal.unwrap_or(DecodeError::SpriteNoSprites))?;
         Ok((
             Self {
-                bytes,
                 header,
                 located: (0, header.first),
             },
@@ -751,14 +749,14 @@ impl<'a> Area<'a> {
     }
 
     /// Where the control block of the sprite at `index` begins.
-    fn locate(&mut self, index: u32) -> Result<u32, DecodeError> {
+    fn locate(&mut self, bytes: &[u8], index: u32) -> Result<u32, DecodeError> {
         let (mut from, mut at) = if index >= self.located.0 {
             self.located
         } else {
             (0, self.header.first)
         };
         while from < index {
-            at = next_sprite(self.bytes, &self.header, at)?;
+            at = next_sprite(bytes, &self.header, at)?;
             from += 1;
         }
         self.located = (index, at);
@@ -766,14 +764,19 @@ impl<'a> Area<'a> {
     }
 }
 
-impl PageSource for Area<'_> {
+impl PageSource for Area {
     fn count(&self) -> u32 {
         self.header.count
     }
 
-    fn decode(&mut self, index: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-        let at = self.locate(index)?;
-        decode_sprite(self.bytes, at, limits)
+    fn decode(
+        &mut self,
+        bytes: &[u8],
+        index: u32,
+        limits: &DecodeLimits,
+    ) -> Result<RasterImage, DecodeError> {
+        let at = self.locate(bytes, index)?;
+        decode_sprite(bytes, at, limits)
     }
 }
 
@@ -793,14 +796,11 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 /// walks the sequence.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let (mut area, measured) = Area::open(bytes)?;
-    area.decode(measured.largest, limits)
+    area.decode(bytes, measured.largest, limits)
 }
 
 /// Validate the area and measure its sprites, decoding none of them.
-pub(crate) fn pages<'a>(
-    bytes: &'a [u8],
-    limits: &DecodeLimits,
-) -> Result<Pages<Area<'a>>, DecodeError> {
+pub(crate) fn pages(bytes: &[u8], limits: &DecodeLimits) -> Result<Pages<Area>, DecodeError> {
     let (area, measured) = Area::open(bytes)?;
     Ok(Pages::new(area, limits, measured.width, measured.height))
 }

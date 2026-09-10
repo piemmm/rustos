@@ -46,6 +46,7 @@
 //! colour-manages and the output is RGBA8 in the file's own primaries.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_util::fallible;
 
@@ -195,12 +196,16 @@ impl<'a> Picture<'a> {
 
 /// One animation frame: where it goes, how long it shows, and how it meets
 /// what is already on the canvas.
-struct Frame<'a> {
+struct Frame {
     rect: Rect,
     duration_ms: u32,
     blend: bool,
     dispose: bool,
-    picture: Picture<'a>,
+    /// Where the frame's picture chunks lie in the whole document, so a
+    /// chain can name them without holding the bytes it walks. Re-reading
+    /// two chunk headers costs nothing beside decoding the frame they
+    /// introduce.
+    picture: Range<usize>,
 }
 
 /// A chunk of the RIFF form.
@@ -208,12 +213,17 @@ struct Frame<'a> {
 struct Chunk<'a> {
     id: [u8; 4],
     payload: &'a [u8],
+    /// Where [`Self::payload`] begins in the whole document, so a chunk can
+    /// be named to a later call rather than held.
+    at: usize,
 }
 
 /// The chunks of one RIFF region, walked in order.
 struct Chunks<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// Where [`Self::bytes`] begins in the whole document.
+    base: usize,
 }
 
 impl<'a> Chunks<'a> {
@@ -237,13 +247,19 @@ impl<'a> Chunks<'a> {
         Ok(Self {
             bytes: bytes.get(..end).ok_or(DecodeError::WebpTruncated)?,
             pos: FORM_AT + WEBP_FORM.len(),
+            base: 0,
         })
     }
 
     /// Walk a chunk's own payload as a chunk region, which is what an
-    /// animation frame's payload is.
-    fn nested(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+    /// animation frame's payload is. `base` is where that payload begins in
+    /// the whole document.
+    fn nested(bytes: &'a [u8], base: usize) -> Self {
+        Self {
+            bytes,
+            pos: 0,
+            base,
+        }
     }
 
     fn next(&mut self) -> Result<Option<Chunk<'a>>, DecodeError> {
@@ -268,7 +284,11 @@ impl<'a> Chunks<'a> {
         self.pos = end
             .checked_add(size % 2)
             .ok_or(DecodeError::WebpTruncated)?;
-        Ok(Some(Chunk { id, payload }))
+        Ok(Some(Chunk {
+            id,
+            payload,
+            at: self.base.saturating_add(start),
+        }))
     }
 }
 
@@ -281,7 +301,7 @@ enum Layout<'a> {
     Animation {
         canvas: (u32, u32),
         loop_count: Option<u32>,
-        frames: Vec<Frame<'a>>,
+        frames: Vec<Frame>,
     },
 }
 
@@ -309,7 +329,7 @@ fn le_u24(bytes: &[u8], at: usize) -> u32 {
 }
 
 /// Read one animation frame's header and its payload's chunks.
-fn read_frame(payload: &[u8], canvas: (u32, u32)) -> Result<Frame<'_>, DecodeError> {
+fn read_frame(payload: &[u8], at: usize, canvas: (u32, u32)) -> Result<Frame, DecodeError> {
     let head = payload
         .get(..FRAME_HEADER)
         .ok_or(DecodeError::WebpTruncated)?;
@@ -335,19 +355,35 @@ fn read_frame(payload: &[u8], canvas: (u32, u32)) -> Result<Frame<'_>, DecodeErr
     if right > canvas.0 || bottom > canvas.1 {
         return Err(DecodeError::WebpFrameOutsideCanvas);
     }
-    let mut chunks = Chunks::nested(
+    let picture = at
+        .checked_add(FRAME_HEADER)
+        .ok_or(DecodeError::WebpTruncated)?
+        ..at.checked_add(payload.len())
+            .ok_or(DecodeError::WebpTruncated)?;
+    // Parsed here and discarded: a frame whose chunk layout will not read
+    // refuses the whole container when it opens, as every other structural
+    // fault does, rather than only when it is stepped to.
+    read_picture(
         payload
             .get(FRAME_HEADER..)
             .ok_or(DecodeError::WebpTruncated)?,
-    );
-    let first = chunks.next()?.ok_or(DecodeError::WebpInvalidChunkLayout)?;
+        picture.start,
+    )?;
     Ok(Frame {
         rect,
         duration_ms: le_u24(head, 12),
         blend: head[15] & 0x02 == 0,
         dispose: head[15] & 0x01 != 0,
-        picture: Picture::read(&mut chunks, first)?,
+        picture,
     })
+}
+
+/// Read the picture the chunk region `region` describes, `base` being where
+/// that region begins in the whole document.
+fn read_picture(region: &[u8], base: usize) -> Result<Picture<'_>, DecodeError> {
+    let mut chunks = Chunks::nested(region, base);
+    let first = chunks.next()?.ok_or(DecodeError::WebpInvalidChunkLayout)?;
+    Picture::read(&mut chunks, first)
 }
 
 /// Read a file's chunk chain and answer the form it declares.
@@ -372,7 +408,7 @@ fn layout(bytes: &[u8]) -> Result<Layout<'_>, DecodeError> {
         .first()
         .is_some_and(|flags| flags & FLAG_ANIMATION != 0);
     let mut loop_count = None;
-    let mut frames: Vec<Frame<'_>> = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
     while let Some(chunk) = chunks.next()? {
         match chunk.id {
             ANIMATION => {
@@ -390,7 +426,7 @@ fn layout(bytes: &[u8]) -> Result<Layout<'_>, DecodeError> {
                 if !fallible::reserve(&mut frames, 1) {
                     return Err(DecodeError::OutOfMemory);
                 }
-                frames.push(read_frame(chunk.payload, canvas)?);
+                frames.push(read_frame(chunk.payload, chunk.at, canvas)?);
             }
             ALPHA | VP8_LOSSY | VP8_LOSSLESS => {
                 if animated {
@@ -558,7 +594,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
             frames,
         } => {
             let mut animation = Animation::new(Chain::new(canvas, loop_count, frames, limits)?);
-            if !animation.step()? {
+            if !animation.step(bytes)? {
                 return Err(DecodeError::WebpNoFrames);
             }
             let pixels =
@@ -571,14 +607,14 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
 
 /// What [`open`] found: a still picture's geometry, or an animation ready to
 /// step.
-pub(crate) enum Opened<'a> {
+pub(crate) enum Opened {
     Still { width: u32, height: u32 },
-    Animation(Animation<Chain<'a>>),
+    Animation(Animation<Chain>),
 }
 
 /// Validate a file's structure and prepare whichever kind it is, decoding no
 /// pixels.
-pub(crate) fn open<'a>(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Opened<'a>, DecodeError> {
+pub(crate) fn open(bytes: &[u8], limits: &DecodeLimits) -> Result<Opened, DecodeError> {
     match layout(bytes)? {
         Layout::Still { canvas, picture } => {
             let (width, height) = picture.bitstream.geometry()?;
@@ -598,8 +634,8 @@ pub(crate) fn open<'a>(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Opened<
 }
 
 /// An animation's frames, composited onto the canvas the container declares.
-pub(crate) struct Chain<'a> {
-    frames: Vec<Frame<'a>>,
+pub(crate) struct Chain {
+    frames: Vec<Frame>,
     limits: DecodeLimits,
     width: u32,
     height: u32,
@@ -611,11 +647,11 @@ pub(crate) struct Chain<'a> {
     pending: Option<Rect>,
 }
 
-impl<'a> Chain<'a> {
+impl Chain {
     fn new(
         canvas: (u32, u32),
         loop_count: Option<u32>,
-        frames: Vec<Frame<'a>>,
+        frames: Vec<Frame>,
         limits: &DecodeLimits,
     ) -> Result<Self, DecodeError> {
         limits.check(canvas.0, canvas.1)?;
@@ -723,7 +759,7 @@ fn blend(target: &mut [u8], incoming: &[u8]) {
     target[3] = u8::try_from(alpha).unwrap_or(u8::MAX);
 }
 
-impl FrameSource for Chain<'_> {
+impl FrameSource for Chain {
     fn width(&self) -> u32 {
         self.width
     }
@@ -744,20 +780,21 @@ impl FrameSource for Chain<'_> {
         &self.canvas
     }
 
-    fn advance(&mut self, index: u32) -> Result<u64, DecodeError> {
+    fn advance(&mut self, bytes: &[u8], index: u32) -> Result<u64, DecodeError> {
         self.dispose();
         let frame = self
             .frames
             .get(usize::try_from(index).unwrap_or(usize::MAX))
             .ok_or(DecodeError::WebpNoFrames)?;
-        let (rect, duration, dispose, blend_over, picture) = (
+        let (rect, duration, dispose, blend_over, at) = (
             frame.rect,
             frame.duration_ms,
             frame.dispose,
             frame.blend,
-            frame.picture,
+            frame.picture.clone(),
         );
-        let decoded = picture.decode(&self.limits)?;
+        let region = bytes.get(at.clone()).ok_or(DecodeError::WebpTruncated)?;
+        let decoded = read_picture(region, at.start)?.decode(&self.limits)?;
         if decoded.width() != rect.width || decoded.height() != rect.height {
             return Err(DecodeError::WebpFrameGeometryMismatch);
         }

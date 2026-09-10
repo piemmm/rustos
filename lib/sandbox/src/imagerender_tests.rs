@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use tairix_icon::MAX_ARTWORK_BYTES;
 use tairix_log::{Event, Sink};
+use tairix_raster::Region;
 use tairix_wallpaper::WallpaperFit;
 
 use super::{
@@ -738,7 +739,7 @@ fn wallpaper_row_budget_requires_banding_at_4k_but_not_1080p() {
     // 3840-wide (4K) row does not fit the whole 2160-row height in one
     // band, exactly as `plans/PINBOARD.md` describes.
     assert!(u64::from(super::rows_per_band(1920)) >= 1080);
-    assert!(u64::from(super::rows_per_band(super::MAX_WALLPAPER_WIDTH)) < 2160);
+    assert!(u64::from(super::rows_per_band(super::MAX_DESTINATION_WIDTH)) < 2160);
 }
 
 #[test]
@@ -747,15 +748,15 @@ fn a_4k_wallpaper_assembles_identically_across_many_bands() {
     let source = solid_png(2, 2, WALLPAPER_COLOUR);
     let pixels = render_wallpaper(
         &mut sandbox,
-        super::MAX_WALLPAPER_WIDTH,
-        super::MAX_WALLPAPER_HEIGHT,
+        super::MAX_DESTINATION_WIDTH,
+        super::MAX_DESTINATION_HEIGHT,
         WallpaperFit::Stretch,
         &source,
     )
     .expect("renders");
     assert_eq!(
         pixels.len(),
-        (super::MAX_WALLPAPER_WIDTH as usize) * (super::MAX_WALLPAPER_HEIGHT as usize) * 4
+        (super::MAX_DESTINATION_WIDTH as usize) * (super::MAX_DESTINATION_HEIGHT as usize) * 4
     );
     // A uniform-colour `Stretch` fills every pixel identically, so the
     // several-band assembly this destination requires must be
@@ -773,8 +774,8 @@ fn a_wallpaper_far_larger_than_the_destination_prepares_at_a_reduced_scale() {
     // A synthetic master well beyond our new 8.3-megapixel shipped masters
     // (this one is over three times the pixels of a 4K destination)
     // so the reduced-scale path is exercised even though every
-    // shipped master now fits within `MAX_WALLPAPER_WIDTH`/
-    // `MAX_WALLPAPER_HEIGHT`. Asking the decoder for the destination extent
+    // shipped master now fits within `MAX_DESTINATION_WIDTH`/
+    // `MAX_DESTINATION_HEIGHT`. Asking the decoder for the destination extent
     // rather than the natural size is what would let the desktop show a
     // user-picked wallpaper this large at all: a full decode of one costs
     // its large pixel count in held RGBA and breaches `MAX_WALLPAPER_DECODE_PIXELS`.
@@ -860,7 +861,7 @@ fn an_oversize_destination_is_refused_before_any_request() {
     assert_eq!(
         render_wallpaper(
             &mut sandbox,
-            super::MAX_WALLPAPER_WIDTH + 1,
+            super::MAX_DESTINATION_WIDTH + 1,
             100,
             WallpaperFit::Fill,
             &png
@@ -873,7 +874,7 @@ fn an_oversize_destination_is_refused_before_any_request() {
         render_wallpaper(
             &mut sandbox,
             100,
-            super::MAX_WALLPAPER_HEIGHT + 1,
+            super::MAX_DESTINATION_HEIGHT + 1,
             WallpaperFit::Fill,
             &png
         ),
@@ -954,4 +955,1051 @@ fn every_wallpaper_refusal_has_non_empty_terse_display_text() {
     ] {
         assert!(!format!("{refusal}").is_empty());
     }
+}
+
+// ---- document upload -----------------------------------------------------
+
+/// A tiny PNG grown to exactly `total` bytes by a private ancillary
+/// chunk, so the file is large without the picture in it being.
+///
+/// Padding after `IEND` would not do: the decoder refuses trailing bytes,
+/// which is what a well-formed PNG has none of. An ancillary chunk a
+/// decoder is required to skip is the format's own way to carry bytes it
+/// does not read.
+fn png_padded_to(total: usize) -> Vec<u8> {
+    const PADDING: [u8; 4] = *b"paDd";
+    let base = png_with(2, 2, |_, _| [9, 8, 7, 255]);
+    let overhead = base.len() + chunk(PADDING, &[]).len();
+    let mut out = PNG_SIGNATURE.to_vec();
+    out.extend(chunk(IHDR, &ihdr_payload(2, 2)));
+    out.extend(chunk(PADDING, &vec![0u8; total - overhead]));
+    let mut raw = Vec::new();
+    for _ in 0..2 {
+        raw.extend_from_slice(&[0, 9, 8, 7, 255, 9, 8, 7, 255]);
+    }
+    out.extend(chunk(IDAT, &zlib_wrap(&raw)));
+    out.extend(chunk(IEND, &[]));
+    out
+}
+
+/// A small test coordinate as the pixel byte it stands for.
+fn byte(value: u32) -> u8 {
+    u8::try_from(value).expect("test coordinates stay inside a byte")
+}
+
+/// Frame one request from its opcode and payload bytes.
+fn request(op: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![op];
+    out.extend_from_slice(payload);
+    out
+}
+
+/// An `OP_DOC_BEGIN` request declaring `len` bytes.
+fn begin(len: u64) -> Vec<u8> {
+    request(super::OP_DOC_BEGIN, &len.to_le_bytes())
+}
+
+/// An `OP_DOC_PUSH` request carrying `chunk`.
+fn push(chunk: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(super::OP_DOC_PUSH);
+    w.bytes(chunk);
+    w.finish()
+}
+
+/// Load `service` with `bytes` as a complete document.
+fn load(service: &mut ImageRenderService, bytes: &[u8]) {
+    assert_eq!(
+        service.handle(&begin(bytes.len() as u64)),
+        vec![super::REPLY_DOC_BEGUN]
+    );
+    for chunk in bytes.chunks(super::MAX_DOCUMENT_CHUNK) {
+        let reply = service.handle(&push(chunk));
+        assert_eq!(reply.first().copied(), Some(super::REPLY_DOC_PUSHED));
+    }
+}
+
+#[test]
+fn a_document_pushed_in_pieces_reassembles_byte_for_byte() {
+    let mut service = ImageRenderService::default();
+    assert_eq!(service.handle(&begin(6)), vec![super::REPLY_DOC_BEGUN]);
+    service.handle(&push(b"abc"));
+    service.handle(&push(b"def"));
+    let held = service.document.as_ref().expect("the document is held");
+    assert_eq!(held.bytes, b"abcdef".to_vec());
+    assert!(held.is_complete());
+}
+
+#[test]
+fn a_push_answers_the_running_total_it_now_holds() {
+    let mut service = ImageRenderService::default();
+    service.handle(&begin(5));
+    let mut w = Writer::new();
+    w.u8(super::REPLY_DOC_PUSHED);
+    w.u64(3);
+    assert_eq!(service.handle(&push(b"abc")), w.finish());
+}
+
+#[test]
+fn a_chunk_past_the_declared_length_is_refused() {
+    let mut service = ImageRenderService::default();
+    service.handle(&begin(4));
+    assert_eq!(
+        service.handle(&push(b"abcde")),
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_OVERRUN]
+    );
+}
+
+#[test]
+fn a_chunk_before_any_begin_is_refused() {
+    let mut service = ImageRenderService::default();
+    assert_eq!(
+        service.handle(&push(b"abc")),
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_NOT_BEGUN]
+    );
+}
+
+#[test]
+fn a_document_larger_than_the_containment_bound_is_refused_before_it_is_reserved() {
+    let mut service = ImageRenderService::default();
+    assert_eq!(
+        service.handle(&begin(super::MAX_DOCUMENT_BYTES as u64 + 1)),
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_TOO_LARGE]
+    );
+    assert!(service.document.is_none());
+}
+
+#[test]
+fn a_zero_length_document_is_refused() {
+    let mut service = ImageRenderService::default();
+    assert_eq!(
+        service.handle(&begin(0)),
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_MALFORMED_REQUEST]
+    );
+}
+
+#[test]
+fn trailing_bytes_on_a_begin_are_refused() {
+    let mut service = ImageRenderService::default();
+    let mut payload = 4u64.to_le_bytes().to_vec();
+    payload.push(0);
+    assert_eq!(
+        service.handle(&request(super::OP_DOC_BEGIN, &payload)),
+        vec![super::REPLY_ERROR, super::REFUSAL_DOC_MALFORMED_REQUEST]
+    );
+}
+
+#[test]
+fn beginning_a_fresh_document_drops_whatever_was_open_over_the_old_one() {
+    let mut service = ImageRenderService::default();
+    load(&mut service, &png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    assert_eq!(
+        service.handle(&request(super::OP_VIEW_OPEN, &[0]))[0],
+        super::REPLY_VIEW_OPENED
+    );
+    assert!(service.view.is_some());
+    service.handle(&begin(3));
+    assert!(
+        service.view.is_none(),
+        "a view over the previous document cannot answer about the new one"
+    );
+}
+
+#[test]
+fn a_maximal_chunk_is_exactly_what_one_protocol_frame_carries() {
+    // The bound the framing imposes, derived rather than chosen: a source
+    // ceiling picked independently of it can sit just above what a frame
+    // holds, and every request at that size is then refused by the
+    // transport instead of being served.
+    assert_eq!(
+        super::MAX_DOCUMENT_CHUNK + super::DOC_PUSH_OVERHEAD,
+        crate::proto::MAX_FRAME
+    );
+    let mut w = Writer::new();
+    w.u8(super::OP_DOC_PUSH);
+    w.bytes(&vec![0u8; super::MAX_DOCUMENT_CHUNK]);
+    assert_eq!(w.finish().len(), crate::proto::MAX_FRAME);
+}
+
+#[test]
+fn a_source_filling_the_whole_wallpaper_bound_is_placed_rather_than_refused_by_the_framing() {
+    // A wallpaper of exactly `MAX_WALLPAPER_BYTES` used to be admitted by
+    // the caller's own bound and then refused by the transport, because the
+    // request carried the whole file and overflowed one frame. It is
+    // uploaded in chunks now, so the two bounds no longer collide.
+    let png = png_padded_to(tairix_wallpaper::MAX_WALLPAPER_BYTES);
+    assert_eq!(png.len(), tairix_wallpaper::MAX_WALLPAPER_BYTES);
+    let mut sandbox = sandbox();
+    let pixels = render_wallpaper(&mut sandbox, 2, 2, WallpaperFit::Stretch, &png)
+        .expect("a source at the bound is placed");
+    assert_eq!(pixels.len(), 2 * 2 * 4);
+}
+
+#[test]
+fn a_wallpaper_prepare_with_nothing_uploaded_is_refused() {
+    let mut service = ImageRenderService::default();
+    let mut w = Writer::new();
+    w.u8(super::OP_WALLPAPER_PREPARE);
+    for field in [4u32, 4, 4, 4] {
+        w.u32(field);
+    }
+    w.u8(0);
+    assert_eq!(
+        service.handle(&w.finish()),
+        vec![super::REPLY_ERROR, super::REFUSAL_WALLPAPER_NO_SOURCE]
+    );
+}
+
+// ---- fixtures for the two container shapes -------------------------------
+
+/// Build an ICO holding one PNG entry per `(side, pixel)`, which is the
+/// page-container shape: independent pictures of differing sizes.
+fn ico_of(entries: &[(u32, [u8; 4])]) -> Vec<u8> {
+    const DIRECTORY_ENTRY: usize = 16;
+    let payloads: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|(side, pixel)| png_with(*side, *side, |_, _| *pixel))
+        .collect();
+    let mut out = vec![0, 0, 1, 0];
+    out.extend_from_slice(
+        &u16::try_from(entries.len())
+            .expect("test entry count")
+            .to_le_bytes(),
+    );
+    let mut offset = 6 + DIRECTORY_ENTRY * entries.len();
+    for ((side, _), payload) in entries.iter().zip(&payloads) {
+        let dimension = u8::try_from(*side).expect("test icon side fits a byte");
+        out.extend_from_slice(&[dimension, dimension, 0, 0]);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("test payload")
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(&u32::try_from(offset).expect("test offset").to_le_bytes());
+        offset += payload.len();
+    }
+    for payload in &payloads {
+        out.extend_from_slice(payload);
+    }
+    out
+}
+
+/// One 1×1 GIF frame's LZW data sub-block: clear, the pixel's palette
+/// index, then end-of-information, at the three-bit width a minimum code
+/// size of two starts at, packed least-significant bit first.
+fn gif_frame_data(index: u8) -> [u8; 4] {
+    const CLEAR: u8 = 4;
+    const END: u8 = 5;
+    let first = CLEAR | (index << 3) | ((END & 0x03) << 6);
+    [2, first, END >> 2, 0]
+}
+
+/// Build a 1×1 animated GIF: one frame per `(palette index, delay in
+/// hundredths)`, over a two-colour global table, looping `loop_count`
+/// times (`0` for ever).
+fn gif_of(frames: &[(u8, u16)], loop_count: u16) -> Vec<u8> {
+    let mut out = b"GIF89a".to_vec();
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    // Global colour table present, two entries.
+    out.extend_from_slice(&[0x80, 0, 0]);
+    out.extend_from_slice(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    out.extend_from_slice(&[0x21, 0xFF, 0x0B]);
+    out.extend_from_slice(b"NETSCAPE2.0");
+    out.extend_from_slice(&[0x03, 0x01]);
+    out.extend_from_slice(&loop_count.to_le_bytes());
+    out.push(0x00);
+    for (index, delay) in frames {
+        out.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00]);
+        out.extend_from_slice(&delay.to_le_bytes());
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.push(0x2C);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.push(0x00);
+        out.push(0x02);
+        out.extend_from_slice(&gif_frame_data(*index));
+    }
+    out.push(0x3B);
+    out
+}
+
+// ---- viewing a document, end to end --------------------------------------
+
+/// Upload `bytes` and open them, answering what the container declares.
+fn open(
+    sandbox: &mut TestSandbox,
+    bytes: &[u8],
+) -> Result<super::ViewDocument, super::ViewFailure> {
+    super::send_document(sandbox, bytes).map_err(super::ViewFailure::Document)?;
+    super::open_view(sandbox, None)
+}
+
+#[test]
+fn a_still_picture_opens_as_the_one_page_case() {
+    let mut sandbox = sandbox();
+    let png = png_with(4, 3, |x, y| [byte(x), byte(y), 0, 255]);
+    let document = open(&mut sandbox, &png).expect("the picture opens");
+    assert_eq!(document.format, tairix_image::ImageFormat::Png);
+    assert!(!document.animated);
+    assert_eq!(document.loop_count, None);
+    assert_eq!((document.count, document.width, document.height), (1, 4, 3));
+}
+
+#[test]
+fn a_page_at_its_own_scale_comes_back_pixel_for_pixel() {
+    let mut sandbox = sandbox();
+    let png = png_with(4, 2, |x, y| [byte(x * 10), byte(y * 20), 7, 255]);
+    open(&mut sandbox, &png).expect("the picture opens");
+    let page = super::select_page(&mut sandbox, 0).expect("page 0 decodes");
+    assert_eq!((page.index, page.width, page.height), (0, 4, 2));
+    let mut out = vec![0u8; 4 * 2 * 4];
+    super::render_page(
+        &mut sandbox,
+        Region {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 2,
+        },
+        4,
+        2,
+        &mut out,
+    )
+    .expect("the page renders at its own size");
+    for y in 0..2u32 {
+        for x in 0..4u32 {
+            let at = ((y * 4 + x) * 4) as usize;
+            assert_eq!(
+                &out[at..at + 4],
+                &[byte(x * 10), byte(y * 20), 7, 255],
+                "pixel ({x}, {y}) survives a one-to-one render"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_crop_renders_only_the_part_of_the_page_it_names() {
+    let mut sandbox = sandbox();
+    // Four quadrants of a 2×2, so a 1×1 crop can only be one of them.
+    let png = png_with(2, 2, |x, y| [byte(x * 100), byte(y * 100), 0, 255]);
+    open(&mut sandbox, &png).expect("the picture opens");
+    super::select_page(&mut sandbox, 0).expect("page 0 decodes");
+    let mut out = vec![0u8; 4];
+    super::render_page(
+        &mut sandbox,
+        Region {
+            x: 1,
+            y: 1,
+            width: 1,
+            height: 1,
+        },
+        1,
+        1,
+        &mut out,
+    )
+    .expect("the crop renders");
+    assert_eq!(out, vec![100, 100, 0, 255]);
+}
+
+#[test]
+fn a_crop_may_be_drawn_larger_than_it_is_because_a_viewer_zooms_in() {
+    let mut sandbox = sandbox();
+    let png = png_with(2, 2, |_, _| [3, 4, 5, 255]);
+    open(&mut sandbox, &png).expect("the picture opens");
+    super::select_page(&mut sandbox, 0).expect("page 0 decodes");
+    let mut out = vec![0u8; 8 * 8 * 4];
+    super::render_page(
+        &mut sandbox,
+        Region {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        8,
+        8,
+        &mut out,
+    )
+    .expect("a single pixel magnifies");
+    assert!(
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [3, 4, 5, 255]),
+        "magnifying one flat pixel fills the destination with it"
+    );
+}
+
+#[test]
+fn a_page_container_addresses_its_pages_independently() {
+    let mut sandbox = sandbox();
+    let ico = ico_of(&[(2, [11, 0, 0, 255]), (4, [0, 22, 0, 255])]);
+    let document = open(&mut sandbox, &ico).expect("the icon file opens");
+    assert!(!document.animated);
+    assert_eq!(document.count, 2);
+    // The container's own geometry is its largest page.
+    assert_eq!((document.width, document.height), (4, 4));
+    let small = super::select_page(&mut sandbox, 0).expect("page 0 decodes");
+    assert_eq!((small.width, small.height), (2, 2));
+    let large = super::select_page(&mut sandbox, 1).expect("page 1 decodes");
+    assert_eq!((large.width, large.height), (4, 4));
+    // Backwards, because pages are independent and order is the caller's.
+    let again = super::select_page(&mut sandbox, 0).expect("page 0 decodes again");
+    assert_eq!((again.index, again.width), (0, 2));
+}
+
+#[test]
+fn an_animation_reports_its_loop_count_and_each_frames_own_delay() {
+    let mut sandbox = sandbox();
+    let gif = gif_of(&[(0, 10), (1, 25), (0, 5)], 3);
+    let document = open(&mut sandbox, &gif).expect("the animation opens");
+    assert_eq!(document.format, tairix_image::ImageFormat::Gif);
+    assert!(document.animated);
+    assert_eq!(document.loop_count, Some(3));
+    assert_eq!((document.count, document.width, document.height), (3, 1, 1));
+    for (index, hundredths) in [(0u32, 10u64), (1, 25), (2, 5)] {
+        let frame = super::select_page(&mut sandbox, index).expect("the frame composites");
+        assert_eq!(frame.index, index);
+        assert_eq!(frame.delay_ns, hundredths * 10_000_000);
+    }
+}
+
+#[test]
+fn an_animation_looping_for_ever_says_so_rather_than_naming_a_count() {
+    let mut sandbox = sandbox();
+    let document = open(&mut sandbox, &gif_of(&[(0, 4)], 0)).expect("the animation opens");
+    assert!(document.animated);
+    assert_eq!(document.loop_count, None);
+}
+
+#[test]
+fn an_animations_frames_composite_and_can_be_replayed_from_the_start() {
+    let mut sandbox = sandbox();
+    // Two frames of opposite palette entries, so the canvas differs.
+    let gif = gif_of(&[(0, 4), (1, 4)], 0);
+    open(&mut sandbox, &gif).expect("the animation opens");
+    let mut first = vec![0u8; 4];
+    let mut second = vec![0u8; 4];
+    let whole = Region {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    };
+    super::select_page(&mut sandbox, 0).expect("frame 0 composites");
+    super::render_page(&mut sandbox, whole, 1, 1, &mut first).expect("frame 0 renders");
+    super::select_page(&mut sandbox, 1).expect("frame 1 composites");
+    super::render_page(&mut sandbox, whole, 1, 1, &mut second).expect("frame 1 renders");
+    assert_eq!(first, vec![0x10, 0x20, 0x30, 255]);
+    assert_eq!(second, vec![0x40, 0x50, 0x60, 255]);
+    // Going back restarts the composition rather than answering the canvas
+    // as it stands.
+    let mut replayed = vec![0u8; 4];
+    super::select_page(&mut sandbox, 0).expect("frame 0 composites again");
+    super::render_page(&mut sandbox, whole, 1, 1, &mut replayed).expect("frame 0 renders again");
+    assert_eq!(replayed, first);
+}
+
+#[test]
+fn a_format_with_no_signature_is_reached_by_being_named() {
+    let mut sandbox = sandbox();
+    // A one-sprite area: count, first, end, then the control block. Not
+    // sniffable by construction, which is the point.
+    let png = png_with(2, 2, |_, _| [1, 1, 1, 255]);
+    super::send_document(&mut sandbox, &png).expect("the document uploads");
+    assert_eq!(
+        super::open_view(&mut sandbox, Some(tairix_image::ImageFormat::Sprite)),
+        Err(super::ViewFailure::Refused(
+            super::ViewRefusal::MalformedDocument
+        )),
+        "naming the wrong format is refused by that format's own parser, \
+         never read as the one the bytes really are"
+    );
+}
+
+#[test]
+fn bytes_of_no_recognised_format_are_refused_as_such() {
+    let mut sandbox = sandbox();
+    assert_eq!(
+        open(&mut sandbox, b"not a picture at all"),
+        Err(super::ViewFailure::Refused(
+            super::ViewRefusal::UnsupportedFormat
+        ))
+    );
+}
+
+#[test]
+fn releasing_a_view_drops_the_document_with_it() {
+    let mut sandbox = sandbox();
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    open(&mut sandbox, &png).expect("the picture opens");
+    super::close_view(&mut sandbox).expect("the view releases");
+    assert_eq!(
+        super::select_page(&mut sandbox, 0),
+        Err(super::ViewFailure::Refused(super::ViewRefusal::NotOpen))
+    );
+    assert_eq!(
+        super::open_view(&mut sandbox, None),
+        Err(super::ViewFailure::Refused(super::ViewRefusal::NoDocument)),
+        "the released document is gone, not left to be reopened"
+    );
+}
+
+// ---- view refusals, at the worker ----------------------------------------
+
+/// A service with `png` open and page 0 decoded, which is the state every
+/// render and band request is judged against.
+fn opened(png: &[u8]) -> ImageRenderService {
+    let mut service = ImageRenderService::default();
+    load(&mut service, png);
+    assert_eq!(
+        service.handle(&request(super::OP_VIEW_OPEN, &[0]))[0],
+        super::REPLY_VIEW_OPENED
+    );
+    service
+}
+
+/// An `OP_VIEW_RENDER` request over `source` onto `dest`.
+fn render_request(source: (u32, u32, u32, u32), dest: (u32, u32)) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(super::OP_VIEW_RENDER);
+    for field in [source.0, source.1, source.2, source.3, dest.0, dest.1] {
+        w.u32(field);
+    }
+    w.finish()
+}
+
+/// An `OP_VIEW_BAND` request over `first_row..first_row + rows`.
+fn band_request(first_row: u32, rows: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(super::OP_VIEW_BAND);
+    w.u32(first_row);
+    w.u32(rows);
+    w.finish()
+}
+
+/// An `OP_VIEW_PAGE` request for `index`.
+fn page_request(index: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(super::OP_VIEW_PAGE);
+    w.u32(index);
+    w.finish()
+}
+
+fn refused(reply: &[u8]) -> Option<super::ViewRefusal> {
+    match reply {
+        [super::REPLY_ERROR, code] => super::ViewRefusal::from_wire(*code),
+        _ => None,
+    }
+}
+
+#[test]
+fn opening_an_incomplete_document_is_refused_rather_than_decoded_short() {
+    let mut service = ImageRenderService::default();
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    service.handle(&begin(png.len() as u64));
+    service.handle(&push(&png[..png.len() - 1]));
+    assert_eq!(
+        refused(&service.handle(&request(super::OP_VIEW_OPEN, &[0]))),
+        Some(super::ViewRefusal::NoDocument)
+    );
+}
+
+#[test]
+fn naming_a_format_byte_no_format_uses_is_refused() {
+    let mut service = ImageRenderService::default();
+    load(&mut service, &png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    assert_eq!(
+        refused(&service.handle(&request(super::OP_VIEW_OPEN, &[0xEE]))),
+        Some(super::ViewRefusal::MalformedRequest)
+    );
+}
+
+#[test]
+fn every_view_request_before_an_open_is_refused_as_not_open() {
+    let mut service = ImageRenderService::default();
+    for probe in [
+        page_request(0),
+        render_request((0, 0, 1, 1), (1, 1)),
+        band_request(0, 1),
+    ] {
+        assert_eq!(
+            refused(&service.handle(&probe)),
+            Some(super::ViewRefusal::NotOpen)
+        );
+    }
+}
+
+#[test]
+fn a_page_past_the_last_entry_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    assert_eq!(
+        refused(&service.handle(&page_request(1))),
+        Some(super::ViewRefusal::NoSuchPage)
+    );
+}
+
+#[test]
+fn a_render_before_any_page_is_decoded_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    assert_eq!(
+        refused(&service.handle(&render_request((0, 0, 1, 1), (1, 1)))),
+        Some(super::ViewRefusal::NoPageDecoded)
+    );
+}
+
+#[test]
+fn a_source_rectangle_outside_the_page_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    for source in [
+        (0, 0, 3, 1),
+        (0, 0, 1, 3),
+        (2, 0, 1, 1),
+        (0, 2, 1, 1),
+        (0, 0, 0, 1),
+        (0, 0, 1, 0),
+        (u32::MAX, 0, 1, 1),
+    ] {
+        assert_eq!(
+            refused(&service.handle(&render_request(source, (1, 1)))),
+            Some(super::ViewRefusal::MalformedRequest),
+            "source {source:?} does not lie inside a 2x2 page"
+        );
+    }
+}
+
+#[test]
+fn a_destination_outside_the_service_bounds_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    for dest in [
+        (0, 1),
+        (1, 0),
+        (super::MAX_DESTINATION_WIDTH + 1, 1),
+        (1, super::MAX_DESTINATION_HEIGHT + 1),
+    ] {
+        assert_eq!(
+            refused(&service.handle(&render_request((0, 0, 1, 1), dest))),
+            Some(super::ViewRefusal::MalformedRequest),
+            "destination {dest:?} is outside what this service draws"
+        );
+    }
+}
+
+#[test]
+fn a_band_with_no_render_set_up_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    assert_eq!(
+        refused(&service.handle(&band_request(0, 1))),
+        Some(super::ViewRefusal::NoRender)
+    );
+}
+
+#[test]
+fn changing_page_drops_the_render_that_described_the_old_one() {
+    let mut service = opened(&ico_of(&[(4, [1, 0, 0, 255]), (2, [0, 1, 0, 255])]));
+    service.handle(&page_request(0));
+    assert_eq!(
+        service.handle(&render_request((0, 0, 4, 4), (4, 4)))[0],
+        super::REPLY_VIEW_RENDERED
+    );
+    // Page 1 is 2x2, so a source of 4x4 describes nothing of it.
+    service.handle(&page_request(1));
+    assert_eq!(
+        refused(&service.handle(&band_request(0, 1))),
+        Some(super::ViewRefusal::NoRender),
+        "a rectangle of the page just replaced is never drawn against its \
+         replacement"
+    );
+}
+
+#[test]
+fn a_band_outside_the_renders_destination_is_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    service.handle(&render_request((0, 0, 2, 2), (2, 2)));
+    for (first_row, rows) in [(0, 0), (0, 3), (2, 1), (1, 2), (u32::MAX, 1)] {
+        assert_eq!(
+            refused(&service.handle(&band_request(first_row, rows))),
+            Some(super::ViewRefusal::BandOutOfRange),
+            "rows {first_row}..+{rows} do not lie inside a 2-row destination"
+        );
+    }
+}
+
+#[test]
+fn trailing_bytes_on_any_view_request_are_refused() {
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    service.handle(&render_request((0, 0, 2, 2), (2, 2)));
+    for base in [
+        request(super::OP_VIEW_OPEN, &[0]),
+        page_request(0),
+        render_request((0, 0, 2, 2), (2, 2)),
+        band_request(0, 1),
+        request(super::OP_VIEW_RELEASE, &[]),
+    ] {
+        let mut probe = base.clone();
+        probe.push(0);
+        assert_eq!(
+            refused(&service.handle(&probe)),
+            Some(super::ViewRefusal::MalformedRequest),
+            "a request with a byte after its fields is not that request"
+        );
+    }
+}
+
+#[test]
+fn every_view_refusal_states_a_reason() {
+    for refusal in [
+        super::ViewRefusal::MalformedRequest,
+        super::ViewRefusal::NoDocument,
+        super::ViewRefusal::UnsupportedFormat,
+        super::ViewRefusal::MalformedDocument,
+        super::ViewRefusal::NotOpen,
+        super::ViewRefusal::NoSuchPage,
+        super::ViewRefusal::NoPageDecoded,
+        super::ViewRefusal::NoRender,
+        super::ViewRefusal::BandOutOfRange,
+        super::ViewRefusal::Unrenderable,
+    ] {
+        assert!(!format!("{refusal}").is_empty());
+        assert_eq!(
+            super::ViewRefusal::from_wire(refusal.to_wire()),
+            Some(refusal),
+            "every refusal survives the wire it is carried on"
+        );
+    }
+    for refusal in [
+        super::DocumentRefusal::MalformedRequest,
+        super::DocumentRefusal::TooLarge,
+        super::DocumentRefusal::NotBegun,
+        super::DocumentRefusal::Overrun,
+        super::DocumentRefusal::OutOfMemory,
+    ] {
+        assert!(!format!("{refusal}").is_empty());
+        assert_eq!(
+            super::DocumentRefusal::from_wire(refusal.to_wire()),
+            Some(refusal)
+        );
+    }
+}
+
+// ---- a worker that turns hostile part-way through a session --------------
+
+/// Serves honestly until the request naming `op`, whose reply it corrupts.
+///
+/// The view is a session, so a reply cannot be judged in isolation the way
+/// the icon path's can: the parent has to be walked all the way to the
+/// band before there is a band to lie about.
+struct TamperingWorker {
+    inner: ImageRenderService,
+    op: u8,
+    tamper: fn(Vec<u8>) -> Vec<u8>,
+}
+
+impl Service for TamperingWorker {
+    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+        let reply = self.inner.handle(request);
+        if request.first().copied() == Some(self.op) {
+            (self.tamper)(reply)
+        } else {
+            reply
+        }
+    }
+}
+
+fn tampering(
+    op: u8,
+    tamper: fn(Vec<u8>) -> Vec<u8>,
+) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> TamperingWorker>, NullSink> {
+    ParserSandbox::new(
+        LoopbackLauncher::new(move || TamperingWorker {
+            inner: ImageRenderService::default(),
+            op,
+            tamper,
+        }),
+        NullSink,
+    )
+}
+
+/// Walk a tampering sandbox through a whole render of a 2×2 picture,
+/// answering whatever the first step to fail reports.
+fn drive_tampered(
+    sandbox: &mut ParserSandbox<LoopbackLauncher<impl FnMut() -> TamperingWorker>, NullSink>,
+) -> Result<(), super::ViewFailure> {
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    super::send_document(sandbox, &png).map_err(super::ViewFailure::Document)?;
+    super::open_view(sandbox, None)?;
+    super::select_page(sandbox, 0)?;
+    let mut out = vec![0u8; 2 * 2 * 4];
+    super::render_page(
+        sandbox,
+        Region {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        },
+        2,
+        2,
+        &mut out,
+    )
+}
+
+#[test]
+fn a_band_echoing_a_row_range_that_was_not_asked_for_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+        // Bytes 1..5 are the echoed first row.
+        reply[1] = reply[1].wrapping_add(1);
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_band_carrying_the_wrong_number_of_pixels_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+        reply.push(0);
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_band_reply_cut_short_of_its_pixels_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+        reply.truncate(reply.len() - 1);
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_render_claiming_it_can_carry_no_rows_is_refused_rather_than_looped_on() {
+    let mut sandbox = tampering(super::OP_VIEW_RENDER, |mut reply| {
+        for byte in reply.iter_mut().skip(1) {
+            *byte = 0;
+        }
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed),
+        "a band size of zero would never reach the last row"
+    );
+}
+
+#[test]
+fn a_page_reply_about_some_other_page_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_PAGE, |mut reply| {
+        reply[1] = reply[1].wrapping_add(1);
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_page_reply_claiming_no_pixels_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_PAGE, |mut reply| {
+        // Bytes 5..9 are the page's width.
+        for byte in reply.iter_mut().skip(5).take(4) {
+            *byte = 0;
+        }
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn an_open_reply_naming_a_format_the_protocol_does_not_carry_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+        reply[1] = 0xEE;
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn an_open_reply_giving_a_page_container_a_loop_count_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+        // Byte 2 is `animated`, byte 3 whether a loop count follows.
+        reply[3] = 1;
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed),
+        "only something that is played can declare how often to play it"
+    );
+}
+
+#[test]
+fn an_open_reply_with_a_flag_byte_that_is_not_a_flag_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+        reply[2] = 2;
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn an_open_reply_declaring_an_empty_document_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+        // Bytes 8..12 are the entry count.
+        for byte in reply.iter_mut().skip(8).take(4) {
+            *byte = 0;
+        }
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_push_reply_disagreeing_about_how_much_arrived_is_refused() {
+    let mut sandbox = tampering(super::OP_DOC_PUSH, |mut reply| {
+        reply[1] = reply[1].wrapping_add(1);
+        reply
+    });
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::Document(
+            super::DocumentFailure::ReplyMalformed
+        ))
+    );
+}
+
+#[test]
+fn a_view_reply_with_an_unknown_tag_is_refused() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |_| vec![0xEE]);
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_refusal_code_no_refusal_uses_is_not_read_as_one() {
+    let mut sandbox = tampering(super::OP_VIEW_OPEN, |_| vec![super::REPLY_ERROR, 0xEE]);
+    assert_eq!(
+        drive_tampered(&mut sandbox),
+        Err(super::ViewFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn an_untampered_session_completes_so_the_tampering_is_what_is_being_tested() {
+    let mut sandbox = tampering(0xEE, |reply| reply);
+    assert_eq!(drive_tampered(&mut sandbox), Ok(()));
+}
+
+#[test]
+fn opening_early_leaves_an_unfinished_upload_where_it_was() {
+    let mut service = ImageRenderService::default();
+    let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
+    service.handle(&begin(png.len() as u64));
+    service.handle(&push(&png[..2]));
+    assert_eq!(
+        refused(&service.handle(&request(super::OP_VIEW_OPEN, &[0]))),
+        Some(super::ViewRefusal::NoDocument)
+    );
+    // Refusing an upload that has simply not finished must not throw away
+    // what has arrived: the rest can still be pushed.
+    service.handle(&push(&png[2..]));
+    assert_eq!(
+        service.handle(&request(super::OP_VIEW_OPEN, &[0]))[0],
+        super::REPLY_VIEW_OPENED
+    );
+}
+
+#[test]
+fn a_band_wider_than_a_reply_frame_carries_is_refused_before_it_is_drawn() {
+    // The largest destination this service draws needs several bands, so
+    // asking for all its rows at once names a reply no frame could hold.
+    let side = super::MAX_DESTINATION_WIDTH;
+    let rows = super::MAX_DESTINATION_HEIGHT;
+    let per_band = super::rows_per_band(side);
+    assert!(
+        per_band < rows,
+        "the largest destination must genuinely need more than one band \
+         for this to be testing anything"
+    );
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    assert_eq!(
+        service.handle(&render_request((0, 0, 2, 2), (side, rows)))[0],
+        super::REPLY_VIEW_RENDERED
+    );
+    assert_eq!(
+        refused(&service.handle(&band_request(0, per_band + 1))),
+        Some(super::ViewRefusal::BandOutOfRange)
+    );
+    // One band's worth is served, so the bound is the frame and not the
+    // destination.
+    assert_eq!(
+        service.handle(&band_request(0, per_band))[0],
+        super::REPLY_VIEW_BAND
+    );
+}
+
+#[test]
+fn a_wallpaper_band_wider_than_a_reply_frame_carries_is_refused_too() {
+    let width = super::MAX_DESTINATION_WIDTH;
+    let height = super::MAX_DESTINATION_HEIGHT;
+    let per_band = super::rows_per_band(width);
+    let mut service = ImageRenderService::default();
+    load(&mut service, &png_with(2, 2, |_, _| [4, 5, 6, 255]));
+    let mut w = Writer::new();
+    w.u8(super::OP_WALLPAPER_PREPARE);
+    for field in [width, height, width, height] {
+        w.u32(field);
+    }
+    w.u8(0);
+    assert_eq!(
+        service.handle(&w.finish())[0],
+        super::REPLY_WALLPAPER_PREPARED
+    );
+    let mut band = Writer::new();
+    band.u8(super::OP_WALLPAPER_BAND);
+    band.u32(0);
+    band.u32(per_band + 1);
+    assert_eq!(
+        service.handle(&band.finish()),
+        vec![
+            super::REPLY_ERROR,
+            super::REFUSAL_WALLPAPER_BAND_OUT_OF_RANGE
+        ]
+    );
 }

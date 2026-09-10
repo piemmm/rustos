@@ -248,34 +248,30 @@ pub(crate) fn decode_fitted(
 }
 
 /// An icon container's directory, as the pages a walk decodes.
-pub(crate) struct Directory<'a> {
-    bytes: &'a [u8],
+pub(crate) struct Directory {
     count: u16,
 }
 
-impl PageSource for Directory<'_> {
+impl PageSource for Directory {
     fn count(&self) -> u32 {
         u32::from(self.count)
     }
 
-    fn decode(&mut self, index: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-        decode_entry(entry(self.bytes, index)?, limits)
+    fn decode(
+        &mut self,
+        bytes: &[u8],
+        index: u32,
+        limits: &DecodeLimits,
+    ) -> Result<RasterImage, DecodeError> {
+        decode_entry(entry(bytes, index)?, limits)
     }
 }
 
 /// Validate the directory and measure its pages, decoding none of them.
-pub(crate) fn pages<'a>(
-    bytes: &'a [u8],
-    limits: &DecodeLimits,
-) -> Result<Pages<Directory<'a>>, DecodeError> {
+pub(crate) fn pages(bytes: &[u8], limits: &DecodeLimits) -> Result<Pages<Directory>, DecodeError> {
     let count = entry_count(bytes)?;
     let (_, width, height) = select(bytes, count, None, &PROBE_LIMITS)?;
-    Ok(Pages::new(
-        Directory { bytes, count },
-        limits,
-        width,
-        height,
-    ))
+    Ok(Pages::new(Directory { count }, limits, width, height))
 }
 
 #[cfg(test)]

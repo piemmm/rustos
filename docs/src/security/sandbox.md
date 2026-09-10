@@ -198,8 +198,13 @@ sandboxes a parse imports it:
   screenful of straight-alpha RGBA8 already exceeds it above 1080p, and
   `OP_WALLPAPER_PREPARE`'s reply names the row count a single
   `OP_WALLPAPER_BAND` reply can carry. The destination is bounded by
-  `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT` (4K) on both sides of the
-  seam, and the source byte length by `tairix_wallpaper::MAX_WALLPAPER_BYTES`.
+  `MAX_DESTINATION_WIDTH`×`MAX_DESTINATION_HEIGHT` (4K) on both sides of
+  the seam — one bound for every destination this service draws, since a
+  wallpaper models a screen and a viewer's picture area sits inside a
+  window on one — and the source byte length by
+  `tairix_wallpaper::MAX_WALLPAPER_BYTES`. The source itself arrives
+  through the shared document upload below rather than inside the prepare
+  request, so the wallpaper bound and the frame bound cannot collide.
   A tiled fit repeats the source at 1:1; every other fit resamples the
   placement's source rectangle into its destination rectangle through the
   same shared resampler the icon path uses. Wherever the placement does
@@ -214,6 +219,64 @@ sandboxes a parse imports it:
   call. A later prepare on the same (reused) worker replaces whatever an
   earlier one left held; `OP_RASTERISE` keeps working unchanged whether or
   not it is interleaved with a wallpaper sequence on the same worker.
+- **Handing over a file** (also `imagerender`): every untrusted file this
+  service is given arrives one way — `OP_DOC_BEGIN` declares its length
+  and the worker reserves it fallibly, then `OP_DOC_PUSH` carries it in
+  pieces of at most `MAX_DOCUMENT_CHUNK`, which is derived from `MAX_FRAME`
+  rather than chosen. There is deliberately no second way: a request
+  carrying a whole file inline is bounded by what one frame holds, and a
+  source ceiling set anywhere else can sit just above that, so every
+  request at that size is refused by the transport rather than served.
+  Streaming also means a caller reading a file need never hold it whole,
+  and a fresh `OP_DOC_BEGIN` drops whatever session stood over the old
+  document, since neither describes the new one. The total held is bounded
+  by `MAX_DOCUMENT_BYTES` — a containment bound on what one worker holds
+  resident, which is what an untrusted file costs before a pixel of it is
+  decoded.
+- **Document viewing** (also `imagerender`, the same worker): a picture or
+  document the user opened is sniffed, decoded, and drawn inside the
+  worker across four ops over an uploaded document. `OP_VIEW_OPEN`
+  validates its structure and answers what it declares — format, entry
+  count, whether the entries are frames to play or pages to choose
+  between, any loop count, and the picture the container as a whole is —
+  decoding no pixels; a caller may *name* the format instead of having it
+  sniffed, which is the only door to a RISC OS sprite area, and the named
+  format's own parser still validates the bytes so naming the wrong one is
+  refused rather than misread. `OP_VIEW_PAGE` decodes one entry and the
+  worker holds it; `OP_VIEW_RENDER` fixes which *rectangle* of that held
+  page is drawn onto which destination extent; `OP_VIEW_BAND` returns
+  exactly the destination rows asked for; `OP_VIEW_RELEASE` drops the
+  document and everything decoded from it.
+  Two properties follow from that shape. A zoomed-in viewer sends the crop
+  it is showing, so the work and the reply are bounded by the window
+  rather than by the picture — panning a hundred-megapixel page costs what
+  panning a small one does. And the decoded page stays in the worker
+  between requests, so panning and zooming re-draw rather than re-decode;
+  the walk owns the document for the same reason, since an animation's
+  frames composite onto their predecessors and a walk rebuilt per request
+  would re-composite every frame before the one asked for. Changing page
+  drops the render, because a rectangle of the page being replaced
+  describes nothing of its replacement. Pages are decoded under
+  `MAX_VIEW_DECODE_PIXELS`, set by what a viewer must be able to *open*
+  (above the top of the current camera range) rather than by what a
+  particular machine can afford — what a small machine can hold is
+  enforced by the decode allocating fallibly and answering a typed
+  refusal, not by a ceiling a larger machine would outgrow.
+  The parent side (`open_view`, `select_page`, `render_page`,
+  `close_view`) validates every reply fail-closed exactly as the wallpaper
+  path does: an echoed page index, an echoed band range, an exact pixel
+  length, a format byte the protocol carries, a flag byte that is a flag,
+  and a page container that declares no loop count. A refusal is typed and
+  says something a viewer can draw — the file is not a format it knows,
+  its structure will not read, the page will not decode, or it will not
+  fit in memory — so a document that cannot be shown produces a stated
+  reason rather than a blank window.
+  The viewer's *own* rotation and flip are deliberately not here: they are
+  a permutation of pixels the caller already holds and has validated, not
+  a decode, so they belong to whatever holds the picture — turning what is
+  displayed costs a window, turning what was decoded costs the whole page.
+  What the worker does apply is the orientation a file itself declares,
+  because reading that is part of reading the file.
 
 - **NTP response evaluation** (`timesync`): a network time server's reply
   is evaluated inside the worker (`tairix_net::ntp::evaluate`) because the

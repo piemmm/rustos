@@ -2565,6 +2565,7 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-svg",
+ "tairix-util",
  "tairix-vt",
  "tairix-wallpaper",
 ]

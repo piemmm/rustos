@@ -1524,44 +1524,52 @@ impl<'a> Frame<'a> {
 }
 
 /// Where a sequence's entries come from.
-enum Entries<'a> {
+enum Entries {
     /// A single-image format: decoded on the first step and lent as the one
     /// entry a still picture has. A rewind costs nothing, because the decode
     /// is kept.
     Still {
-        bytes: &'a [u8],
         limits: DecodeLimits,
         decoded: Option<RasterImage>,
         served: bool,
     },
     /// A GIF's block chain, composited onto its retained canvas.
-    Gif(frames::Animation<gif::Chain<'a>>),
+    Gif(frames::Animation<gif::Chain>),
     /// An animated WEBP's frame chain, composited onto its canvas.
-    Webp(frames::Animation<webp::Chain<'a>>),
+    Webp(frames::Animation<webp::Chain>),
     /// An icon container's directory of independent pictures.
-    Ico(pages::Pages<ico::Directory<'a>>),
+    Ico(pages::Pages<ico::Directory>),
     /// A RISC OS sprite area's chain of independent pictures.
-    Sprite(pages::Pages<sprite::Area<'a>>),
+    Sprite(pages::Pages<sprite::Area>),
     /// A TIFF's chain of independent pages.
-    Tiff(pages::Pages<tiff::Chain<'a>>),
+    Tiff(pages::Pages<tiff::Chain>),
 }
 
 /// A container's frames or pages, decoded in order.
 ///
-/// Stepping is forward-only with a restart, because that is what an
+/// An animation is walked over a retained canvas, because that is what an
 /// animation is: a frame composites onto its predecessors under the
-/// container's disposal model, so a decoder that could be asked for frame
-/// *n* directly would have to re-composite every frame before it. Holding
-/// the canvas and stepping makes each frame cost its own decode and no more.
+/// container's disposal model, so a decoder that re-derived frame *n* from
+/// nothing would have to composite every frame before it. Holding the
+/// canvas makes each frame cost its own decode and no more, whether it is
+/// reached by [`Self::next_frame`] or by [`Self::page`].
 ///
 /// A still picture is the one-entry case of the same shape, so a consumer
 /// that shows pictures and animations needs one path rather than two.
-pub struct Sequence<'a> {
+///
+/// The document is held rather than borrowed, so a caller may own both it
+/// and the walk over it — which is what a sandboxed viewer holding a file
+/// between requests needs, and what a walk borrowing its bytes could not
+/// give it without a self-reference. `B` is anything the bytes can be read
+/// back out of: `&[u8]` costs nothing and keeps a borrowing caller
+/// zero-copy, `Vec<u8>` lets the sequence outlive whatever produced them.
+pub struct Sequence<B> {
+    bytes: B,
     info: SequenceInfo,
-    entries: Entries<'a>,
+    entries: Entries,
 }
 
-impl<'a> Sequence<'a> {
+impl<B: AsRef<[u8]>> Sequence<B> {
     /// Validate `bytes`' structure and prepare to decode its entries,
     /// decoding no pixels.
     ///
@@ -1579,12 +1587,9 @@ impl<'a> Sequence<'a> {
     /// [`DecodeError::UnknownFormat`] for an unrecognised signature, a limit
     /// refusal for a geometry the caller will not allow, and otherwise
     /// whichever structural refusal the format's own parser raises.
-    pub fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
-        Self::open_as(
-            sniff(bytes).ok_or(DecodeError::UnknownFormat)?,
-            bytes,
-            limits,
-        )
+    pub fn open(bytes: B, limits: &DecodeLimits) -> Result<Self, DecodeError> {
+        let format = sniff(bytes.as_ref()).ok_or(DecodeError::UnknownFormat)?;
+        Self::open_as(format, bytes, limits)
     }
 
     /// Prepare to decode `bytes`' entries as `format`, rather than as
@@ -1601,38 +1606,60 @@ impl<'a> Sequence<'a> {
     /// naming the format removes.
     pub fn open_as(
         format: ImageFormat,
-        bytes: &'a [u8],
+        bytes: B,
         limits: &DecodeLimits,
     ) -> Result<Self, DecodeError> {
+        let read = bytes.as_ref();
         match format {
-            ImageFormat::Gif => Ok(Self::animated(
-                ImageFormat::Gif,
-                gif::frames(bytes, limits)?,
-                Entries::Gif,
-            )),
+            ImageFormat::Gif => {
+                let animation = gif::frames(read, limits)?;
+                Ok(Self::animated(
+                    ImageFormat::Gif,
+                    bytes,
+                    animation,
+                    Entries::Gif,
+                ))
+            }
             ImageFormat::Ico => {
-                let pages = ico::pages(bytes, limits)?;
-                Ok(Self::paged(ImageFormat::Ico, pages, Entries::Ico))
+                let pages = ico::pages(read, limits)?;
+                Ok(Self::paged(ImageFormat::Ico, bytes, pages, Entries::Ico))
             }
             ImageFormat::Sprite => {
-                let pages = sprite::pages(bytes, limits)?;
-                Ok(Self::paged(ImageFormat::Sprite, pages, Entries::Sprite))
+                let pages = sprite::pages(read, limits)?;
+                Ok(Self::paged(
+                    ImageFormat::Sprite,
+                    bytes,
+                    pages,
+                    Entries::Sprite,
+                ))
             }
             ImageFormat::Tiff => {
-                let pages = tiff::pages(bytes, limits)?;
-                Ok(Self::paged(ImageFormat::Tiff, pages, Entries::Tiff))
+                let pages = tiff::pages(read, limits)?;
+                Ok(Self::paged(ImageFormat::Tiff, bytes, pages, Entries::Tiff))
             }
-            ImageFormat::Png => Self::still(ImageFormat::Png, png::probe(bytes)?, bytes, limits),
-            ImageFormat::Jpeg => Self::still(ImageFormat::Jpeg, jpeg::probe(bytes)?, bytes, limits),
-            ImageFormat::Bmp => Self::still(ImageFormat::Bmp, bmp::probe(bytes)?, bytes, limits),
+            ImageFormat::Png => {
+                let geometry = png::probe(read)?;
+                Self::still(ImageFormat::Png, geometry, bytes, limits)
+            }
+            ImageFormat::Jpeg => {
+                let geometry = jpeg::probe(read)?;
+                Self::still(ImageFormat::Jpeg, geometry, bytes, limits)
+            }
+            ImageFormat::Bmp => {
+                let geometry = bmp::probe(read)?;
+                Self::still(ImageFormat::Bmp, geometry, bytes, limits)
+            }
             // The one format that is either kind, and says which.
-            ImageFormat::Webp => match webp::open(bytes, limits)? {
+            ImageFormat::Webp => match webp::open(read, limits)? {
                 webp::Opened::Still { width, height } => {
                     Self::still(ImageFormat::Webp, (width, height), bytes, limits)
                 }
-                webp::Opened::Animation(animation) => {
-                    Ok(Self::animated(ImageFormat::Webp, animation, Entries::Webp))
-                }
+                webp::Opened::Animation(animation) => Ok(Self::animated(
+                    ImageFormat::Webp,
+                    bytes,
+                    animation,
+                    Entries::Webp,
+                )),
             },
         }
     }
@@ -1640,8 +1667,9 @@ impl<'a> Sequence<'a> {
     /// An animation, whose geometry is the canvas its frames composite onto.
     fn animated<S: frames::FrameSource>(
         format: ImageFormat,
+        bytes: B,
         animation: frames::Animation<S>,
-        entries: impl FnOnce(frames::Animation<S>) -> Entries<'a>,
+        entries: impl FnOnce(frames::Animation<S>) -> Entries,
     ) -> Self {
         let info = SequenceInfo {
             format,
@@ -1653,6 +1681,7 @@ impl<'a> Sequence<'a> {
             },
         };
         Self {
+            bytes,
             info,
             entries: entries(animation),
         }
@@ -1661,8 +1690,9 @@ impl<'a> Sequence<'a> {
     /// A container of independent pages, whose geometry is its largest.
     fn paged<S: pages::PageSource>(
         format: ImageFormat,
+        bytes: B,
         pages: pages::Pages<S>,
-        entries: impl FnOnce(pages::Pages<S>) -> Entries<'a>,
+        entries: impl FnOnce(pages::Pages<S>) -> Entries,
     ) -> Self {
         let info = SequenceInfo {
             format,
@@ -1672,6 +1702,7 @@ impl<'a> Sequence<'a> {
             kind: SequenceKind::Pages,
         };
         Self {
+            bytes,
             info,
             entries: entries(pages),
         }
@@ -1681,11 +1712,12 @@ impl<'a> Sequence<'a> {
     fn still(
         format: ImageFormat,
         (width, height): (u32, u32),
-        bytes: &'a [u8],
+        bytes: B,
         limits: &DecodeLimits,
     ) -> Result<Self, DecodeError> {
         limits.check(width, height)?;
         Ok(Self {
+            bytes,
             info: SequenceInfo {
                 format,
                 width,
@@ -1694,12 +1726,17 @@ impl<'a> Sequence<'a> {
                 kind: SequenceKind::Pages,
             },
             entries: Entries::Still {
-                bytes,
                 limits: *limits,
                 decoded: None,
                 served: false,
             },
         })
+    }
+
+    /// The document being walked.
+    #[must_use]
+    pub fn document(&self) -> &[u8] {
+        self.bytes.as_ref()
     }
 
     /// What the container declares about its entries as a whole.
@@ -1720,9 +1757,9 @@ impl<'a> Sequence<'a> {
     /// caller that means to continue rewinds; one that does not simply
     /// reports the reason.
     pub fn next_frame(&mut self) -> Result<Option<Frame<'_>>, DecodeError> {
+        let bytes = self.bytes.as_ref();
         match &mut self.entries {
             Entries::Still {
-                bytes,
                 limits,
                 decoded,
                 served,
@@ -1745,11 +1782,11 @@ impl<'a> Sequence<'a> {
                     pixels: image.pixels(),
                 }))
             }
-            Entries::Gif(animation) => step_frame(animation),
-            Entries::Webp(animation) => step_frame(animation),
-            Entries::Ico(pages) => step_page(pages),
-            Entries::Sprite(pages) => step_page(pages),
-            Entries::Tiff(pages) => step_page(pages),
+            Entries::Gif(animation) => step_frame(animation, bytes),
+            Entries::Webp(animation) => step_frame(animation, bytes),
+            Entries::Ico(pages) => step_page(pages, bytes),
+            Entries::Sprite(pages) => step_page(pages, bytes),
+            Entries::Tiff(pages) => step_page(pages, bytes),
         }
     }
 
@@ -1762,22 +1799,22 @@ impl<'a> Sequence<'a> {
     /// that refuses says so without disturbing the others.
     ///
     /// An animation has no independent pages — a frame composites onto its
-    /// predecessors — so addressing frame `n` restarts the composition and
-    /// steps to it, costing exactly what [`Self::rewind`] and `n + 1` calls
-    /// to [`Self::next_frame`] would. That is why a player steps rather than
-    /// addressing, and why this clears a remembered refusal for an animation
-    /// but not for a page container, which never had one to clear.
+    /// predecessors — so addressing frame `n` is the canvas with every frame
+    /// up to it composited on. Reaching a *later* frame composites only the
+    /// ones in between, so playing an animation through by address costs
+    /// each frame one decode; going back restarts the composition, and so
+    /// does a remembered refusal, which this therefore clears for an
+    /// animation but not for a page container, which never had one to
+    /// clear.
     ///
     /// # Errors
     ///
     /// Whichever refusal the entry's own decode raises.
     pub fn page(&mut self, index: u32) -> Result<Option<Frame<'_>>, DecodeError> {
+        let bytes = self.bytes.as_ref();
         match &mut self.entries {
             Entries::Still {
-                bytes,
-                limits,
-                decoded,
-                ..
+                limits, decoded, ..
             } => {
                 if index != 0 {
                     return Ok(None);
@@ -1785,13 +1822,35 @@ impl<'a> Sequence<'a> {
                 if decoded.is_none() {
                     *decoded = Some(decode(bytes, limits)?);
                 }
-                Ok(page_frame(0, decoded.as_ref()))
+                Ok(page_frame(decoded.as_ref().map(|image| (0, image))))
             }
-            Entries::Gif(animation) => addressed_frame(animation, index),
-            Entries::Webp(animation) => addressed_frame(animation, index),
-            Entries::Ico(pages) => addressed_page(pages, index),
-            Entries::Sprite(pages) => addressed_page(pages, index),
-            Entries::Tiff(pages) => addressed_page(pages, index),
+            Entries::Gif(animation) => addressed_frame(animation, bytes, index),
+            Entries::Webp(animation) => addressed_frame(animation, bytes, index),
+            Entries::Ico(pages) => addressed_page(pages, bytes, index),
+            Entries::Sprite(pages) => addressed_page(pages, bytes, index),
+            Entries::Tiff(pages) => addressed_page(pages, bytes, index),
+        }
+    }
+
+    /// The entry most recently decoded, decoding nothing.
+    ///
+    /// This is what lets a caller *hold* a decoded page across whatever it
+    /// does with it — draw it a band at a time, draw it again at another
+    /// size — rather than paying for the decode each time it needs the
+    /// pixels. `None` before anything has been decoded, and for an
+    /// animation whose last step refused, since a canvas holding part of a
+    /// frame describes no entry at all.
+    #[must_use]
+    pub fn current(&self) -> Option<Frame<'_>> {
+        match &self.entries {
+            Entries::Still { decoded, .. } => page_frame(decoded.as_ref().map(|image| (0, image))),
+            Entries::Gif(animation) => animation.held().map(|index| canvas_frame(index, animation)),
+            Entries::Webp(animation) => {
+                animation.held().map(|index| canvas_frame(index, animation))
+            }
+            Entries::Ico(pages) => page_frame(pages.current()),
+            Entries::Sprite(pages) => page_frame(pages.current()),
+            Entries::Tiff(pages) => page_frame(pages.current()),
         }
     }
 
@@ -1814,22 +1873,24 @@ impl<'a> Sequence<'a> {
 }
 
 /// Composite an animation's next frame and lend the canvas.
-fn step_frame<S: frames::FrameSource>(
-    animation: &mut frames::Animation<S>,
-) -> Result<Option<Frame<'_>>, DecodeError> {
+fn step_frame<'a, S: frames::FrameSource>(
+    animation: &'a mut frames::Animation<S>,
+    bytes: &[u8],
+) -> Result<Option<Frame<'a>>, DecodeError> {
     let index = animation.index();
-    if !animation.step()? {
+    if !animation.step(bytes)? {
         return Ok(None);
     }
     Ok(Some(canvas_frame(index, animation)))
 }
 
 /// Composite forward to an animation's frame at `index` and lend the canvas.
-fn addressed_frame<S: frames::FrameSource>(
-    animation: &mut frames::Animation<S>,
+fn addressed_frame<'a, S: frames::FrameSource>(
+    animation: &'a mut frames::Animation<S>,
+    bytes: &[u8],
     index: u32,
-) -> Result<Option<Frame<'_>>, DecodeError> {
-    if !animation.frame(index)? {
+) -> Result<Option<Frame<'a>>, DecodeError> {
+    if !animation.frame(bytes, index)? {
         return Ok(None);
     }
     Ok(Some(canvas_frame(index, animation)))
@@ -1848,31 +1909,32 @@ fn canvas_frame<S: frames::FrameSource>(index: u32, animation: &frames::Animatio
 }
 
 /// Decode a page container's next page and lend it.
-fn step_page<S: pages::PageSource>(
-    pages: &mut pages::Pages<S>,
-) -> Result<Option<Frame<'_>>, DecodeError> {
-    let index = pages.index();
-    if !pages.step()? {
+fn step_page<'a, S: pages::PageSource>(
+    pages: &'a mut pages::Pages<S>,
+    bytes: &[u8],
+) -> Result<Option<Frame<'a>>, DecodeError> {
+    if !pages.step(bytes)? {
         return Ok(None);
     }
-    Ok(page_frame(index, pages.current()))
+    Ok(page_frame(pages.current()))
 }
 
 /// Decode the page a container holds at `index` and lend it.
-fn addressed_page<S: pages::PageSource>(
-    pages: &mut pages::Pages<S>,
+fn addressed_page<'a, S: pages::PageSource>(
+    pages: &'a mut pages::Pages<S>,
+    bytes: &[u8],
     index: u32,
-) -> Result<Option<Frame<'_>>, DecodeError> {
-    if !pages.page(index)? {
+) -> Result<Option<Frame<'a>>, DecodeError> {
+    if !pages.page(bytes, index)? {
         return Ok(None);
     }
-    Ok(page_frame(index, pages.current()))
+    Ok(page_frame(pages.current()))
 }
 
 /// Lend a decoded page as a frame. A page is a picture in its own right, so
 /// it carries its own geometry and declares no delay.
-fn page_frame(index: u32, image: Option<&RasterImage>) -> Option<Frame<'_>> {
-    image.map(|image| Frame {
+fn page_frame(entry: Option<(u32, &RasterImage)>) -> Option<Frame<'_>> {
+    entry.map(|(index, image)| Frame {
         index,
         width: image.width(),
         height: image.height(),
