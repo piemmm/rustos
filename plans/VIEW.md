@@ -71,13 +71,38 @@ What "complete" means, per format:
   prediction, DCT/WHT, loop filter, YUV to RGB); `VP8L` lossless
   (meta-Huffman, colour cache, all four transforms); `ALPH` including its
   filtering methods; `VP8X`-extended files; `ANIM`/`ANMF` animation.
-- **RISC OS Sprite** — the sprite-area header and control blocks, left/right
-  wastage, old-style mode numbers, type-1 sprite mode words, the RISC OS 5
-  extended mode words, 1/2/4/8/16/24/32 bpp, sprite palettes including
-  full-palette entries, and both mask forms (classic 1-bit and alpha).
+- **RISC OS Sprite** — the sprite-area header and control-block chain,
+  left/right wastage, old-style mode numbers, RISC OS 3.5 sprite mode words,
+  the RISC OS 5 extended mode words with their mode-flags channel order and
+  alpha, 1/2/4/8/16/24/32 bpp across the 1:5:5:5, 5:6:5, 4:4:4:4, 8:8:8 and
+  8:8:8:8 packings, sprite palettes including the full 256-entry form and the
+  short VIDC1 ones, and all three mask forms — an old-format mask at the
+  image's own depth, a new-format 1-bit mask, and a wide 8-bit alpha mask.
   `plans/RISCOS-EMULATOR.md` already specifies a sandboxed sprite *data*
   decode for `!Sprites22`/`!Sprites` icon loading, so this decoder has a
   second planned consumer and belongs in the shared crate.
+
+### A format with no signature is named, never guessed
+
+A RISC OS sprite area carries no magic number — its first word is the sprite
+count, and RISC OS types a file from its directory entry, not its content — so
+`sniff` cannot recognise one and **must not try**. A structural-plausibility
+heuristic would be a false-positive machine, and one the crate would then act
+on; both planned consumers already know the type without it (the emulator
+loads `!Sprites22`/`!Sprites` by name and filetype, and `lib/browse::media`
+already maps `.spr` to `image/x-riscos-sprite`).
+
+So `ImageFormat::Sprite` exists — the crate must be able to *name* what it
+decoded — and `sniff` never answers it. The caller that knows the type reaches
+the decoder through `probe_as` / `decode_as` / `Sequence::open_as`, which take
+the format in place of the sniff; the sniffing entry points are exactly those
+plus `sniff`, so there is one dispatch table rather than two. The named
+format's own parser still validates the bytes, so naming the wrong one is
+refused rather than misread.
+
+The sprite *name* is not surfaced. Nothing addresses a sprite by name yet, and
+a `Frame::name` would be `None` for every other format — speculative surface.
+Name-addressed lookup lands with the emulator, its first consumer.
 
 ## Where each piece lives, and why there
 
@@ -266,9 +291,30 @@ clients, and their exit-code sets are their own.
   weighs nothing against the caller's limits when it opens, because it
   allocates nothing until a page is asked for and a caller may want a small
   page out of a file whose largest it could never afford.
-- `lib/image` Sprite, TIFF, WEBP — planned, in that order (TIFF's CCITT and
-  LZW codecs and WEBP's VP8 lossy decoder are each a change in their own
-  right).
+- `lib/image` RISC OS Sprite — **done**, complete as specified above. The
+  format is reached only by being named, for the reason above. Two crate
+  units were lifted out of their single homes so the sprite decoder shares
+  them rather than carrying a second copy, and so the page-addressed formats
+  still to come do too: `channel` (a packed pixel's channel fields and the
+  sampler that widens one to eight bits, from `bmp`) and `pages` (the
+  `PageSource` trait plus the cursor, remembered refusal, and one retained
+  decode a page container's walk is, from `ico`). Three readings the format's
+  own text does not settle are stated in the module rustdoc and the crate
+  docs: a sprite with no palette is resolved against the palette the OS
+  assigns on entering a mode of that depth (at eight bits the screen-memory
+  byte's own tint arrangement, so it is exact); a palette shorter than the
+  depth needs is the VIDC1 arrangement, its last sixteen entries being the
+  hardware registers with a pixel's top four bits overriding supremacy bits;
+  and a mask supersedes a pixel's own alpha. Indexed pixels run least
+  significant first, the opposite of every other format here. The CMYK,
+  JPEG-data, and YCbCr sprite types are refused by name rather than
+  half-read, as are Teletext and third-party extension mode numbers. Because
+  the format has no signature, the fuzz harness drives *every* input it
+  already builds through the naming door as well, so the sprite decoder gets
+  the whole corpus rather than only its own.
+- `lib/image` TIFF, WEBP — planned, in that order (TIFF's CCITT and LZW
+  codecs and WEBP's VP8 lossy decoder are each a change in their own right).
+  TIFF is a page container and takes `pages` as it stands.
 - `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.

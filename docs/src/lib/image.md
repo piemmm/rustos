@@ -18,12 +18,26 @@ SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, `Gif`, `Bmp`,
-and `Ico`. `sniff(bytes) -> Option<ImageFormat>` identifies a format from its
-leading signature, and both `decode` and `decode_fitted` dispatch on it,
-refusing an unrecognised signature before any format-specific parsing runs. A
-further format is added only when a real consumer needs it — never
-speculatively — exactly as PNG was added for the icon pipeline, JPEG for
-the pinboard's wallpaper masters, and the rest for the viewer.
+`Ico`, and `Sprite`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
+from its leading signature, and `decode`, `decode_fitted`, and
+`Sequence::open` dispatch on it, refusing an unrecognised signature before any
+format-specific parsing runs. A further format is added only when a real
+consumer needs it — never speculatively — exactly as PNG was added for the
+icon pipeline, JPEG for the pinboard's wallpaper masters, and the rest for the
+viewer.
+
+Only a format that carries a signature can be recognised from content, and a
+RISC OS sprite area does not: its first word is the sprite count, and RISC OS
+types a file from its directory entry rather than from its bytes. So `sniff`
+never answers `Sprite`, and never guesses one from a structural coincidence —
+a heuristic there would be a false-positive machine, and one the crate would
+then act on. A caller that already knows the type, from an
+`acorn.filetype` attribute, a `lib/browse` media type, or the name a file was
+picked by, instead **names** the format: `probe_as`, `decode_as`, and
+`Sequence::open_as` take an `ImageFormat` in place of the sniff. The named
+format's own parser still validates the bytes, so naming the wrong one is
+refused rather than misread, and `probe`/`decode`/`Sequence::open` are exactly
+`sniff` plus these.
 
 A format this crate claims is decoded **completely** — every bit depth,
 compression, colour handling, and structural variant the format defines, not
@@ -224,6 +238,63 @@ answer the largest that does, and only where none parses is the first page's
 own refusal the answer. `Sequence` exposes every page, including the
 unreadable ones, each with its own result.
 
+### RISC OS sprite areas
+
+A sprite area is a container of independent, *named* pictures — an
+application's whole icon set in one file — so it decodes as a page container
+rather than as one picture. The file holds the area control block without its
+first word (the total size, which the file's own length already gives), so
+every offset a file states is four greater than the position it names; the
+sprites themselves form a chain of 44-byte control blocks rather than a table,
+which is why the walk keeps the last block it located and a sequential pass
+costs one step per page.
+
+Complete means: old-style screen mode numbers, RISC OS 3.5 sprite mode words,
+and the RISC OS 5 extended mode word with its mode-flags channel order and
+alpha; 1, 2, 4, 8, 16, 24, and 32 bits per pixel across the 1:5:5:5, 5:6:5,
+4:4:4:4, 8:8:8, and 8:8:8:8 packings; left- and right-hand wastage; sprite
+palettes including the full 256-entry form and the short VIDC1 ones; and all
+three mask forms. Indexed pixels run **least significant first** — the
+leftmost pixel of a row is the low bits of its first word, the opposite of
+every other format here.
+
+Three readings the format's own text does not settle, all stated in the
+module's own rustdoc:
+
+- **A sprite with no palette does not state its colours.** RISC OS resolves
+  those against whatever palette the display holds, so a file decoded away
+  from a display has none to resolve against; the decoder adopts the palette
+  the OS itself assigns on entering a mode of that depth. At eight bits that
+  is not a table at all but the arrangement the Programmer's Reference Manual
+  gives for a screen-memory byte — four bits per channel with the low two
+  shared as the tint — so an 8bpp sprite needs no palette of its own to decode
+  exactly.
+- **A short palette is the VIDC1 arrangement, not a truncated one.** VIDC
+  holds sixteen palette registers, so most 256-colour sprites carry sixteen
+  entries and those written by `*ScreenSave` carry sixty-four; RISC OS passes
+  the *last* sixteen to the hardware, and a pixel's top four bits then
+  override supremacy bits of the entry its low four selected. A palette long
+  enough for the depth is read straight through instead, which is what the
+  full 256-entry form is for.
+- **A mask supersedes a pixel's own alpha.** The mask is what the format calls
+  a sprite's transparency, so a file carrying both is contradicting itself;
+  taking the mask keeps one answer rather than inventing arithmetic over two.
+
+An old-format (numbered-mode) mask is the image's own depth and shares its row
+layout and wastage, and only whether a pixel's bits are all clear is read; a
+new-format mask is one bit per pixel from bit zero of rows of its own; and a
+wide mask — the mode word's top bit — is eight bits of alpha per pixel.
+
+Sprite names are read over rather than reported: nothing addresses a sprite by
+name yet, and a page index is what the shared sequence shape offers. The CMYK,
+JPEG-data, and YCbCr sprite types are refused by name rather than half-read,
+because none is a depth the decoder claims — as are Teletext and third-party
+extension mode numbers, whose depth only the module that defined them knows.
+As with an icon container, one unreadable sprite does not refuse the file: a
+sprite whose *mode* the decoder does not claim is passed over when the area is
+measured and refused only if it is asked for. A malformed *control block* is
+fatal, because the chain is what finds the next sprite.
+
 ## Sequences and pages
 
 Some containers hold more than one picture. `Sequence` is the one shape for
@@ -231,7 +302,10 @@ all of them:
 
 - `Sequence::open(bytes, limits)` validates the structure — for GIF, one
   pass that walks the whole block chain, counts the frames, and reads the
-  loop count — and decodes no pixels.
+  loop count; for a sprite area, one pass over the control-block chain that
+  measures every sprite — and decodes no pixels. `Sequence::open_as(format,
+  bytes, limits)` is the same with the format named rather than sniffed,
+  which for a sprite area is the only door.
 - `Sequence::info()` answers a `SequenceInfo`: the format, the geometry of the
   picture the container is, the entry count, and a `SequenceKind` of either
   `Animation { loop_count }` or `Pages`.
@@ -397,7 +471,7 @@ rather than of the input, so the same image may decode later.
 ## API shape
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — format identification from a
-  byte signature.
+  byte signature. Never answers `Sprite`, which carries none.
 - `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
   size from the header alone, decoding no pixels and allocating no pixel
   buffer. It is for the caller that cannot state its target size until it
@@ -413,18 +487,22 @@ rather than of the input, so the same image may decode later.
   decode at natural (full) size, dispatching on `sniff`.
 - `decode_fitted(&[u8], &DecodeLimits, FitBox) -> Result<RasterImage,
   DecodeError>` — decode at the smallest covering scale the format offers.
+- `probe_as(ImageFormat, &[u8])` and `decode_as(ImageFormat, &[u8],
+  &DecodeLimits)` — the same as `probe` and `decode` with the format named
+  rather than sniffed, which is the only door to a format that carries no
+  signature.
 - `FitBox::new(width, height)` with `width()`/`height()` — the caller's
   target output box, a small public copy type.
 - `DecodeLimits::new(max_width, max_height, max_pixels,
   max_progressive_coefficient_bytes)` and its four accessors.
 - `RasterImage::{width, height, pixels, into_pixels}` — row-major,
   4-byte-per-pixel, straight-alpha RGBA8.
-- `Sequence::{open, info, next_frame, page, rewind}` with
+- `Sequence::{open, open_as, info, next_frame, page, rewind}` with
   `SequenceInfo::{format, width, height, count, kind}`,
   `SequenceKind::{Animation, Pages}`, and
   `Frame::{index, width, height, delay_ns, pixels}` — the multi-entry shape,
   of which a still picture is the one-entry case.
-- `ImageFormat::{Png, Jpeg, Gif, Bmp, Ico}` — the closed format enum.
+- `ImageFormat::{Png, Jpeg, Gif, Bmp, Ico, Sprite}` — the closed format enum.
 - `DecodeError` — every fail-closed refusal reason: PNG framing and
   chunk-ordering violations, `IHDR`/`PLTE`/`tRNS` validation, a
   `CompressedData` variant wrapping `tairix_compress::zlib::Error`, and the
@@ -437,7 +515,10 @@ rather than of the input, so the same image may decode later.
   colour planes, bit count, compression, channel masks, colour table, pixel
   offset, pixel-array length, and run-length refusals; the `Ico*` family
   covering directory signature, truncation, an empty directory, and an odd
-  bitmap height; plus `OutOfMemory` for a buffer the allocator refused.
+  bitmap height; the `Sprite*` family covering a malformed area header or
+  control-block chain, truncation, an empty area, an invalid mode word, an
+  unsupported screen mode or sprite type, and used-bit fields leaving no whole
+  pixels; plus `OutOfMemory` for a buffer the allocator refused.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by

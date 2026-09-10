@@ -24,6 +24,7 @@
 //! an all-zero alpha channel counts as no alpha channel and hands the
 //! question back to the mask.
 
+use crate::pages::{PageSource, Pages};
 use crate::{bmp, png, DecodeError, DecodeLimits, FitBox, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
 /// The four leading bytes of an icon container: two reserved zero bytes,
@@ -58,10 +59,12 @@ fn field(bytes: &[u8], at: usize) -> Result<usize, DecodeError> {
 }
 
 /// One entry's picture, as the directory places it.
-fn entry(bytes: &[u8], index: u16) -> Result<&[u8], DecodeError> {
-    // A 16-bit index over 16-byte rows is at most a megabyte in, so the row's
-    // own offsets are far from any pointer width's ceiling.
-    let at = DIRECTORY_LEN + usize::from(index) * ENTRY_LEN;
+fn entry(bytes: &[u8], index: u32) -> Result<&[u8], DecodeError> {
+    let at = usize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_mul(ENTRY_LEN))
+        .and_then(|at| at.checked_add(DIRECTORY_LEN))
+        .ok_or(DecodeError::IcoTruncated)?;
     let len = field(bytes, at + ENTRY_BYTES_AT)?;
     let start = field(bytes, at + ENTRY_OFFSET_AT)?;
     let end = start.checked_add(len).ok_or(DecodeError::IcoTruncated)?;
@@ -114,11 +117,11 @@ fn select(
     count: u16,
     fit: Option<FitBox>,
     limits: &DecodeLimits,
-) -> Result<(u16, u32, u32), DecodeError> {
-    let mut covering: Option<(u16, u32, u32)> = None;
-    let mut biggest: Option<(u16, u32, u32)> = None;
+) -> Result<(u32, u32, u32), DecodeError> {
+    let mut covering: Option<(u32, u32, u32)> = None;
+    let mut biggest: Option<(u32, u32, u32)> = None;
     let mut refusal: Option<DecodeError> = None;
-    for index in 0..count {
+    for index in 0..u32::from(count) {
         let (width, height) = match entry(bytes, index).and_then(geometry) {
             Ok(geometry) => geometry,
             Err(err) => {
@@ -244,114 +247,35 @@ pub(crate) fn decode_fitted(
     decode_entry(entry(bytes, index)?, limits)
 }
 
-/// An icon container's pages, decoded one at a time.
-///
-/// Nothing is weighed against `limits` when the container opens, because
-/// nothing is allocated then: the pages are independent pictures and a
-/// caller may well want a small one out of a file whose largest it could
-/// never afford, so each page is weighed when it is asked for.
-pub(crate) struct Pages<'a> {
+/// An icon container's directory, as the pages a walk decodes.
+pub(crate) struct Directory<'a> {
     bytes: &'a [u8],
-    limits: DecodeLimits,
     count: u16,
-    width: u32,
-    height: u32,
-    cursor: u16,
-    /// The page most recently decoded, which is what a frame lends.
-    current: Option<RasterImage>,
-    /// The refusal a step stopped at, if one did.
-    failed: Option<DecodeError>,
 }
 
-impl<'a> Pages<'a> {
-    /// Validate the directory and measure its pages, decoding none of them.
-    pub(crate) fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
-        let count = entry_count(bytes)?;
-        let (_, width, height) = select(bytes, count, None, &PROBE_LIMITS)?;
-        Ok(Self {
-            bytes,
-            limits: *limits,
-            count,
-            width,
-            height,
-            cursor: 0,
-            current: None,
-            failed: None,
-        })
-    }
-
-    /// The largest page's width, which is the picture the container is.
-    pub(crate) const fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub(crate) const fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub(crate) fn count(&self) -> u32 {
+impl PageSource for Directory<'_> {
+    fn count(&self) -> u32 {
         u32::from(self.count)
     }
 
-    /// The page a step would decode next.
-    pub(crate) fn index(&self) -> u32 {
-        u32::from(self.cursor)
+    fn decode(&mut self, index: u32, limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+        decode_entry(entry(self.bytes, index)?, limits)
     }
+}
 
-    /// The page most recently decoded.
-    pub(crate) const fn current(&self) -> Option<&RasterImage> {
-        self.current.as_ref()
-    }
-
-    /// Decode the next page, answering `false` once they are exhausted.
-    ///
-    /// A refusal is remembered and repeated until [`Self::rewind`], which is
-    /// the same contract every container's walk keeps.
-    pub(crate) fn step(&mut self) -> Result<bool, DecodeError> {
-        if let Some(failed) = &self.failed {
-            return Err(failed.clone());
-        }
-        if self.cursor >= self.count {
-            return Ok(false);
-        }
-        match self.decode_at(self.cursor) {
-            Ok(()) => {
-                self.cursor += 1;
-                Ok(true)
-            }
-            Err(err) => {
-                self.failed = Some(err.clone());
-                Err(err)
-            }
-        }
-    }
-
-    /// Decode the page at `index`, answering `false` when there is none.
-    pub(crate) fn page(&mut self, index: u32) -> Result<bool, DecodeError> {
-        let Ok(index) = u16::try_from(index) else {
-            return Ok(false);
-        };
-        if index >= self.count {
-            return Ok(false);
-        }
-        self.decode_at(index)?;
-        Ok(true)
-    }
-
-    /// Restart at the first page, clearing a remembered refusal.
-    pub(crate) fn rewind(&mut self) {
-        self.cursor = 0;
-        self.current = None;
-        self.failed = None;
-    }
-
-    fn decode_at(&mut self, index: u16) -> Result<(), DecodeError> {
-        // The previous page's buffer is released before the next is
-        // reserved, so holding one page never costs two.
-        self.current = None;
-        self.current = Some(decode_entry(entry(self.bytes, index)?, &self.limits)?);
-        Ok(())
-    }
+/// Validate the directory and measure its pages, decoding none of them.
+pub(crate) fn pages<'a>(
+    bytes: &'a [u8],
+    limits: &DecodeLimits,
+) -> Result<Pages<Directory<'a>>, DecodeError> {
+    let count = entry_count(bytes)?;
+    let (_, width, height) = select(bytes, count, None, &PROBE_LIMITS)?;
+    Ok(Pages::new(
+        Directory { bytes, count },
+        limits,
+        width,
+        height,
+    ))
 }
 
 #[cfg(test)]

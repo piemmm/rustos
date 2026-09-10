@@ -27,6 +27,20 @@
 //! admitting it is that consumer's decision, and the icon pipeline
 //! deliberately admits only PNG and SVG.
 //!
+//! # Naming a format instead of sniffing it
+//!
+//! Only a format that carries a signature can be recognised from content, and
+//! a RISC OS sprite area ([`ImageFormat::Sprite`]) does not: its first word is
+//! the sprite count, and RISC OS types a file from its directory entry. So
+//! [`sniff`] never answers it and never guesses one from a structural
+//! coincidence — a heuristic there would be a false-positive machine, and one
+//! this crate would then act on. A caller that already knows the type instead
+//! names the format: [`probe_as`], [`decode_as`], and [`Sequence::open_as`]
+//! take an [`ImageFormat`] in place of the sniff, and the sniffing entry
+//! points are exactly [`sniff`] plus those. The named format's own parser
+//! still validates the bytes, so naming the wrong one is refused rather than
+//! misread.
+//!
 //! # Sequences and pages
 //!
 //! Some containers hold more than one picture. [`Sequence`] is the one shape
@@ -105,13 +119,16 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 mod bmp;
+mod channel;
 mod crc32;
 mod gif;
 mod ico;
 mod jpeg;
+mod pages;
 mod png;
 #[cfg(test)]
 mod png_fixture;
+mod sprite;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
 /// shape [`RasterImage`] and every format decoder here produce.
@@ -423,6 +440,29 @@ pub enum DecodeError {
     /// An entry's bitmap declared an odd height, so it cannot be the colour
     /// rows and the mask over them that an icon's is.
     IcoInvalidMaskHeight,
+
+    /// The sprite area's own header was malformed: its sprites start before
+    /// it ends, end past the input, or its chain of control blocks does not
+    /// advance within it.
+    SpriteBadArea,
+    /// A control block, palette, image, or mask ran past the end of the
+    /// input.
+    SpriteTruncated,
+    /// The area declared no sprites at all.
+    SpriteNoSprites,
+    /// A sprite's mode word was not a valid sprite mode word: a mode
+    /// selector pointer, a zero DPI field, a RISC OS 5 word whose fixed bits
+    /// are wrong, or a pixel format asked for alpha it has no room for.
+    SpriteInvalidModeWord,
+    /// A sprite declared a numbered screen mode this decoder has no pixel
+    /// format for: a Teletext mode, or a third-party extension mode.
+    SpriteUnknownMode,
+    /// A sprite declared a type outside the depths this decoder claims:
+    /// CMYK, JPEG data, YCbCr, or a reserved number.
+    SpriteUnsupportedType,
+    /// A sprite's first or last used bit was out of range, off a pixel
+    /// boundary, or left its rows holding no whole pixels.
+    SpriteInvalidWastage,
 }
 
 impl DecodeError {
@@ -572,6 +612,13 @@ impl DecodeError {
             Self::IcoTruncated => "icon entry runs past the end of the input",
             Self::IcoNoEntries => "icon directory declares no pictures",
             Self::IcoInvalidMaskHeight => "icon entry's bitmap declares an odd height",
+            Self::SpriteBadArea => "sprite area header or control-block chain is malformed",
+            Self::SpriteTruncated => "sprite runs past the end of the input",
+            Self::SpriteNoSprites => "sprite area declares no sprites",
+            Self::SpriteInvalidModeWord => "sprite declares an invalid mode word",
+            Self::SpriteUnknownMode => "sprite declares an unsupported screen mode",
+            Self::SpriteUnsupportedType => "sprite declares an unsupported sprite type",
+            Self::SpriteInvalidWastage => "sprite's used-bit fields leave no whole pixels",
         }
     }
 }
@@ -768,6 +815,14 @@ pub enum ImageFormat {
     /// independent pictures at different sizes, each a DIB with a 1-bit mask
     /// over it or a whole PNG file.
     Ico,
+    /// A RISC OS sprite area (Acorn filetype `&FF9`): a container of
+    /// independent, named pictures, at every depth and mode word the format
+    /// defines.
+    ///
+    /// [`sniff`] never answers this, because a sprite area carries no
+    /// signature to recognise; a caller that knows the type names it
+    /// ([`probe_as`], [`decode_as`], [`Sequence::open_as`]).
+    Sprite,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -787,6 +842,14 @@ const GIF_SIGNATURE: [u8; 3] = *b"GIF";
 
 /// Identify the format of `bytes` from its leading signature, or `None` if
 /// no supported format is recognised.
+///
+/// Only a format that carries a signature can be recognised from content.
+/// [`ImageFormat::Sprite`] does not — a RISC OS sprite area opens with its
+/// sprite count, and RISC OS types a file from its directory entry — so this
+/// never answers it, and never guesses one from a structural coincidence. A
+/// caller holding a file whose type it already knows, from a filetype or a
+/// media type, names the format instead ([`probe_as`], [`decode_as`],
+/// [`Sequence::open_as`]).
 #[must_use]
 pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     if bytes.starts_with(&PNG_SIGNATURE) {
@@ -856,13 +919,30 @@ impl ImageInfo {
 /// [`DecodeError::UnknownFormat`] for an unrecognised signature, and
 /// otherwise whichever header refusal the format's own parser raises.
 pub fn probe(bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
-    let format = sniff(bytes).ok_or(DecodeError::UnknownFormat)?;
+    probe_as(sniff(bytes).ok_or(DecodeError::UnknownFormat)?, bytes)
+}
+
+/// Read `bytes`' header as `format`, rather than as whichever format its
+/// signature names.
+///
+/// This is how a caller reaches a format [`sniff`] cannot recognise, and how
+/// one that already knows the type — from a RISC OS filetype, a media type,
+/// or the name a file was picked by — skips guessing at it. The format's own
+/// parser still validates the bytes, so naming the wrong one is refused
+/// rather than misread. See [`probe`] for what a probe does and does not
+/// guarantee.
+///
+/// # Errors
+///
+/// Whichever header refusal the named format's own parser raises.
+pub fn probe_as(format: ImageFormat, bytes: &[u8]) -> Result<ImageInfo, DecodeError> {
     let (width, height) = match format {
         ImageFormat::Png => png::probe(bytes)?,
         ImageFormat::Jpeg => jpeg::probe(bytes)?,
         ImageFormat::Gif => gif::probe(bytes)?,
         ImageFormat::Bmp => bmp::probe(bytes)?,
         ImageFormat::Ico => ico::probe(bytes)?,
+        ImageFormat::Sprite => sprite::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -914,13 +994,38 @@ impl FitBox {
 ///
 /// See [`DecodeError`] for every fail-closed refusal reason.
 pub fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-    match sniff(bytes) {
-        Some(ImageFormat::Png) => png::decode(bytes, limits),
-        Some(ImageFormat::Jpeg) => jpeg::decode(bytes, limits),
-        Some(ImageFormat::Gif) => gif::decode(bytes, limits),
-        Some(ImageFormat::Bmp) => bmp::decode(bytes, limits),
-        Some(ImageFormat::Ico) => ico::decode(bytes, limits),
-        None => Err(DecodeError::UnknownFormat),
+    decode_as(
+        sniff(bytes).ok_or(DecodeError::UnknownFormat)?,
+        bytes,
+        limits,
+    )
+}
+
+/// Decode `bytes` as `format` at its natural (full) size, rather than as
+/// whichever format its signature names.
+///
+/// This is how a caller reaches a format [`sniff`] cannot recognise (see
+/// [`probe_as`]). Where the named format is a container of independent
+/// pictures, this answers the largest, which for an icon file is the picture
+/// it is at its best size and for a sprite area is the only choice that
+/// never silently answers a thumbnail; [`Sequence::open_as`] is how a caller
+/// reaches the others.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub fn decode_as(
+    format: ImageFormat,
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<RasterImage, DecodeError> {
+    match format {
+        ImageFormat::Png => png::decode(bytes, limits),
+        ImageFormat::Jpeg => jpeg::decode(bytes, limits),
+        ImageFormat::Gif => gif::decode(bytes, limits),
+        ImageFormat::Bmp => bmp::decode(bytes, limits),
+        ImageFormat::Ico => ico::decode(bytes, limits),
+        ImageFormat::Sprite => sprite::decode(bytes, limits),
     }
 }
 
@@ -979,13 +1084,10 @@ pub fn decode_fitted(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<RasterImage, DecodeError> {
-    match sniff(bytes) {
-        Some(ImageFormat::Png) => png::decode(bytes, limits),
-        Some(ImageFormat::Jpeg) => jpeg::decode_fitted(bytes, limits, fit),
-        Some(ImageFormat::Gif) => gif::decode(bytes, limits),
-        Some(ImageFormat::Bmp) => bmp::decode(bytes, limits),
-        Some(ImageFormat::Ico) => ico::decode_fitted(bytes, limits, fit),
-        None => Err(DecodeError::UnknownFormat),
+    match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+        ImageFormat::Jpeg => jpeg::decode_fitted(bytes, limits, fit),
+        ImageFormat::Ico => ico::decode_fitted(bytes, limits, fit),
+        format => decode_as(format, bytes, limits),
     }
 }
 
@@ -1119,7 +1221,9 @@ enum Entries<'a> {
     /// A GIF's block chain, composited onto its retained canvas.
     Gif(gif::Frames<'a>),
     /// An icon container's directory of independent pictures.
-    Ico(ico::Pages<'a>),
+    Ico(pages::Pages<ico::Directory<'a>>),
+    /// A RISC OS sprite area's chain of independent pictures.
+    Sprite(pages::Pages<sprite::Area<'a>>),
 }
 
 /// A container's frames or pages, decoded in order.
@@ -1156,7 +1260,31 @@ impl<'a> Sequence<'a> {
     /// refusal for a geometry the caller will not allow, and otherwise
     /// whichever structural refusal the format's own parser raises.
     pub fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
-        match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+        Self::open_as(
+            sniff(bytes).ok_or(DecodeError::UnknownFormat)?,
+            bytes,
+            limits,
+        )
+    }
+
+    /// Prepare to decode `bytes`' entries as `format`, rather than as
+    /// whichever format its signature names.
+    ///
+    /// This is how a caller reaches a format [`sniff`] cannot recognise (see
+    /// [`probe_as`]) — for a RISC OS sprite area it is the only door, since
+    /// a container of an application's whole icon set is a sequence rather
+    /// than a picture.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`], less the unrecognised-signature refusal that
+    /// naming the format removes.
+    pub fn open_as(
+        format: ImageFormat,
+        bytes: &'a [u8],
+        limits: &DecodeLimits,
+    ) -> Result<Self, DecodeError> {
+        match format {
             ImageFormat::Gif => {
                 let frames = gif::Frames::open(bytes, limits)?;
                 Ok(Self {
@@ -1173,21 +1301,35 @@ impl<'a> Sequence<'a> {
                 })
             }
             ImageFormat::Ico => {
-                let pages = ico::Pages::open(bytes, limits)?;
-                Ok(Self {
-                    info: SequenceInfo {
-                        format: ImageFormat::Ico,
-                        width: pages.width(),
-                        height: pages.height(),
-                        count: pages.count(),
-                        kind: SequenceKind::Pages,
-                    },
-                    entries: Entries::Ico(pages),
-                })
+                let pages = ico::pages(bytes, limits)?;
+                Ok(Self::paged(ImageFormat::Ico, pages, Entries::Ico))
+            }
+            ImageFormat::Sprite => {
+                let pages = sprite::pages(bytes, limits)?;
+                Ok(Self::paged(ImageFormat::Sprite, pages, Entries::Sprite))
             }
             ImageFormat::Png => Self::still(ImageFormat::Png, png::probe(bytes)?, bytes, limits),
             ImageFormat::Jpeg => Self::still(ImageFormat::Jpeg, jpeg::probe(bytes)?, bytes, limits),
             ImageFormat::Bmp => Self::still(ImageFormat::Bmp, bmp::probe(bytes)?, bytes, limits),
+        }
+    }
+
+    /// A container of independent pages, whose geometry is its largest.
+    fn paged<S: pages::PageSource>(
+        format: ImageFormat,
+        pages: pages::Pages<S>,
+        entries: impl FnOnce(pages::Pages<S>) -> Entries<'a>,
+    ) -> Self {
+        let info = SequenceInfo {
+            format,
+            width: pages.width(),
+            height: pages.height(),
+            count: pages.count(),
+            kind: SequenceKind::Pages,
+        };
+        Self {
+            info,
+            entries: entries(pages),
         }
     }
 
@@ -1273,13 +1415,8 @@ impl<'a> Sequence<'a> {
                     pixels: frames.canvas(),
                 }))
             }
-            Entries::Ico(pages) => {
-                let index = pages.index();
-                if !pages.step()? {
-                    return Ok(None);
-                }
-                Ok(page_frame(index, pages.current()))
-            }
+            Entries::Ico(pages) => step_page(pages),
+            Entries::Sprite(pages) => step_page(pages),
         }
     }
 
@@ -1333,12 +1470,8 @@ impl<'a> Sequence<'a> {
                     pixels: frames.canvas(),
                 }))
             }
-            Entries::Ico(pages) => {
-                if !pages.page(index)? {
-                    return Ok(None);
-                }
-                Ok(page_frame(index, pages.current()))
-            }
+            Entries::Ico(pages) => addressed_page(pages, index),
+            Entries::Sprite(pages) => addressed_page(pages, index),
         }
     }
 
@@ -1353,8 +1486,31 @@ impl<'a> Sequence<'a> {
             Entries::Still { served, .. } => *served = false,
             Entries::Gif(frames) => frames.rewind(),
             Entries::Ico(pages) => pages.rewind(),
+            Entries::Sprite(pages) => pages.rewind(),
         }
     }
+}
+
+/// Decode a page container's next page and lend it.
+fn step_page<S: pages::PageSource>(
+    pages: &mut pages::Pages<S>,
+) -> Result<Option<Frame<'_>>, DecodeError> {
+    let index = pages.index();
+    if !pages.step()? {
+        return Ok(None);
+    }
+    Ok(page_frame(index, pages.current()))
+}
+
+/// Decode the page a container holds at `index` and lend it.
+fn addressed_page<S: pages::PageSource>(
+    pages: &mut pages::Pages<S>,
+    index: u32,
+) -> Result<Option<Frame<'_>>, DecodeError> {
+    if !pages.page(index)? {
+        return Ok(None);
+    }
+    Ok(page_frame(index, pages.current()))
 }
 
 /// Lend a decoded page as a frame. A page is a picture in its own right, so

@@ -1,5 +1,5 @@
 //! Deterministic fuzz harness for every image decoder (PNG, JPEG, GIF, BMP,
-//! and ICO/CUR).
+//! ICO/CUR, and RISC OS sprite areas).
 //!
 //! Invariants, for any bytes an untrusted bundle icon, wallpaper, or opened
 //! picture may carry:
@@ -19,6 +19,9 @@
 //! 4. Garbage carrying a valid signature reaches the format decoder rather
 //!    than stopping at the sniffer, so the entropy/scanline paths are fuzzed
 //!    and not just the format dispatch.
+//! 5. A sprite area has no signature to carry, so every input above is also
+//!    driven through the format-naming door, which is both its only way in
+//!    and free coverage from every other format's corpus.
 //!
 //! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
 //! framing helpers, are deliberately self-contained: this harness only calls
@@ -28,7 +31,10 @@
 //! still caught here.
 
 use tairix_fuzzseed::Lcg;
-use tairix_image::{decode, decode_fitted, sniff, DecodeLimits, FitBox, Sequence, SequenceKind};
+use tairix_image::{
+    decode, decode_as, decode_fitted, probe_as, sniff, DecodeLimits, FitBox, ImageFormat, Sequence,
+    SequenceKind,
+};
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -1142,6 +1148,189 @@ fn mutate_ico(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------
+// RISC OS sprite area fixtures
+// -----------------------------------------------------------------------
+
+/// A sprite area's own header, and one sprite's control block.
+const SPRITE_AREA_HEADER: usize = 12;
+const SPRITE_HEADER: usize = 44;
+
+/// The sprite types this generator draws from, with the bits per pixel each
+/// names. Restated here rather than asked of the crate under test.
+const SPRITE_TYPES: [(u32, u32); 9] = [
+    (1, 1),
+    (2, 2),
+    (3, 4),
+    (4, 8),
+    (5, 16),
+    (6, 32),
+    (8, 24),
+    (10, 16),
+    (16, 16),
+];
+
+/// Numbered screen modes at each depth the format defines.
+const SPRITE_MODES: [(u32, u32); 4] = [(0, 1), (1, 2), (12, 4), (15, 8)];
+
+/// One structurally valid sprite: a control block, an optional palette, the
+/// image rows, and an optional mask.
+fn build_valid_sprite(rng: &mut Lcg) -> Vec<u8> {
+    let width = u32::try_from(rng.below(16) + 1).unwrap_or(1);
+    let height = u32::try_from(rng.below(8) + 1).unwrap_or(1);
+    // A numbered mode allows left-hand wastage; a mode word never does, and
+    // type 16 exists only in a RISC OS 5 word.
+    let (mode, bits, left) = match rng.below(3) {
+        0 => {
+            let (mode, bits) = SPRITE_MODES[rng.below(SPRITE_MODES.len())];
+            (mode, bits, u32::try_from(rng.below(4)).unwrap_or(0) * bits)
+        }
+        1 => {
+            let (kind, bits) = SPRITE_TYPES[rng.below(SPRITE_TYPES.len() - 1)];
+            let wide = u32::from(rng.below(2) == 0) << 31;
+            (wide | (kind << 27) | (90 << 14) | (90 << 1) | 1, bits, 0)
+        }
+        _ => {
+            let (kind, bits) = SPRITE_TYPES[rng.below(SPRITE_TYPES.len())];
+            // Bits 8-15 carry mode flags; only the RGB family decodes, and
+            // alpha needs a fourth field, so the order bit alone is safe.
+            let flags = u32::from(rng.below(2) == 0) << 6;
+            let wide = u32::from(rng.below(2) == 0) << 31;
+            (
+                wide | (0xF << 27) | (kind << 20) | (flags << 8) | 1,
+                bits,
+                0,
+            )
+        }
+    };
+    let words = (left + width * bits).div_ceil(32);
+    let stride = words as usize * 4;
+    let rows = height as usize;
+
+    let entries = if bits <= 8 {
+        [0usize, 16, 64, 1usize << bits][rng.below(4)]
+    } else {
+        0
+    };
+    let mut palette = vec![0u8; entries * 8];
+    rng.fill(&mut palette);
+    let mut image = vec![0u8; stride * rows];
+    rng.fill(&mut image);
+    let mask = match rng.below(3) {
+        0 => None,
+        // A numbered mode's mask is the image's own depth and layout; a mode
+        // word's is one bit per pixel, or eight when its top bit is set.
+        _ => Some(if mode < 256 {
+            vec![0u8; stride * rows]
+        } else {
+            let bits = if mode >> 31 & 1 == 1 { 8 } else { 1 };
+            vec![0u8; (width * bits).div_ceil(32) as usize * 4 * rows]
+        }),
+    };
+
+    let image_at = SPRITE_HEADER + palette.len();
+    let mask_at = image_at + image.len();
+    let total = mask_at + mask.as_ref().map_or(0, Vec::len);
+    let mut out = Vec::new();
+    let word = |out: &mut Vec<u8>, value: u32| out.extend_from_slice(&value.to_le_bytes());
+    word(&mut out, u32::try_from(total).unwrap_or(0));
+    out.extend_from_slice(b"fuzz\0\0\0\0\0\0\0\0");
+    word(&mut out, words - 1);
+    word(&mut out, height - 1);
+    word(&mut out, left);
+    word(&mut out, (left + width * bits - 1) % 32);
+    word(&mut out, u32::try_from(image_at).unwrap_or(0));
+    word(
+        &mut out,
+        u32::try_from(if mask.is_some() { mask_at } else { image_at }).unwrap_or(0),
+    );
+    word(&mut out, mode);
+    out.extend_from_slice(&palette);
+    out.extend_from_slice(&image);
+    if let Some(mask) = &mask {
+        out.extend_from_slice(mask);
+    }
+    out
+}
+
+/// Build one structurally valid sprite area: a randomised count of sprites,
+/// each of a randomised depth, mode word form, palette length, and mask.
+fn build_valid_sprite_area(rng: &mut Lcg) -> Vec<u8> {
+    let sprites: Vec<Vec<u8>> = (0..=rng.below(3))
+        .map(|_| build_valid_sprite(rng))
+        .collect();
+    let total = SPRITE_AREA_HEADER + sprites.iter().map(Vec::len).sum::<usize>();
+    let mut out = Vec::new();
+    out.extend_from_slice(&u32::try_from(sprites.len()).unwrap_or(0).to_le_bytes());
+    // Every offset a file states is four greater than the position it names.
+    out.extend_from_slice(&(u32::try_from(SPRITE_AREA_HEADER).unwrap_or(0) + 4).to_le_bytes());
+    out.extend_from_slice(&(u32::try_from(total).unwrap_or(0) + 4).to_le_bytes());
+    for sprite in &sprites {
+        out.extend_from_slice(sprite);
+    }
+    out
+}
+
+/// The `(start, end)` byte range of every control block a best-effort walk
+/// of the chain finds.
+fn sprite_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let read = |at: usize| {
+        bytes
+            .get(at..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .map(|word| u32::from_le_bytes(*word) as usize)
+    };
+    let (Some(count), Some(first)) = (read(0), read(4)) else {
+        return Vec::new();
+    };
+    let mut at = first.saturating_sub(4);
+    let mut bounds = Vec::new();
+    for _ in 0..count.min(bytes.len() / SPRITE_HEADER) {
+        if at + SPRITE_HEADER > bytes.len() {
+            break;
+        }
+        bounds.push((at, at + SPRITE_HEADER));
+        match read(at) {
+            Some(length) if length >= SPRITE_HEADER => at += length,
+            _ => break,
+        }
+    }
+    bounds
+}
+
+/// Structurally mutate a pristine sprite area: maybe swap two control blocks
+/// (so every offset within one describes the wrong payload), maybe overwrite
+/// one field of one block, then flip a handful of random bits.
+fn mutate_sprite(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    let bounds = sprite_bounds(&bytes);
+    if rng.below(2) == 0 {
+        if let Some(rebuilt) = swap_two_ranges(rng, &bytes, &bounds) {
+            bytes = rebuilt;
+        }
+    }
+    if rng.below(2) == 0 {
+        if let Some(&(start, _)) = bounds.get(rng.below(bounds.len().max(1))) {
+            let at = start + rng.below(SPRITE_HEADER / 4) * 4;
+            let value = u32::try_from(rng.next_u64() & u64::from(u32::MAX)).unwrap_or(0);
+            if let Some(slot) = bytes.get_mut(at..at + 4) {
+                slot.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    // The area header decides where the chain starts and stops, so it is
+    // worth mutating on its own.
+    if rng.below(4) == 0 {
+        let at = rng.below(3) * 4;
+        let value = u32::try_from(rng.next_u64() & u64::from(u32::MAX)).unwrap_or(0);
+        if let Some(slot) = bytes.get_mut(at..at + 4) {
+            slot.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
+// -----------------------------------------------------------------------
 // Mutation and invariants
 // -----------------------------------------------------------------------
 
@@ -1258,41 +1447,60 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     // The sequence walk is what reaches a multi-frame container's
     // composition and disposal paths at all: `decode` stops at the first
     // frame. A rewind and a second walk cover the restart too.
-    if let Ok(mut sequence) = Sequence::open(bytes, &limits) {
-        let info = sequence.info();
-        for pass in 0..2 {
-            let mut steps = 0u32;
-            while steps < SEQUENCE_STEPS {
-                match sequence.next_frame() {
-                    Ok(Some(frame)) => {
-                        assert!(frame.width() <= limits.max_width());
-                        assert!(frame.height() <= limits.max_height());
-                        let pixels = u64::from(frame.width()) * u64::from(frame.height());
-                        assert!(pixels <= limits.max_pixels());
-                        assert_eq!(
-                            frame.pixels().len(),
-                            usize::try_from(pixels * 4).unwrap_or(usize::MAX)
-                        );
-                        assert!(frame.index() < info.count());
-                        if matches!(info.kind(), SequenceKind::Animation { .. }) {
-                            // An animation's frames are one canvas, so each
-                            // is the container's own size; a page container's
-                            // pages are pictures in their own right and carry
-                            // their own, so its geometry is only the largest.
-                            assert_eq!(frame.width(), info.width());
-                            assert_eq!(frame.height(), info.height());
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
-                }
-                steps += 1;
-            }
-            if pass == 0 {
-                sequence.rewind();
-            }
-        }
+    if let Ok(sequence) = Sequence::open(bytes, &limits) {
+        walk(sequence, &limits);
+    }
+    // A RISC OS sprite area carries no signature, so the sniffing doors
+    // above can never reach its decoder — and, for the same reason, any
+    // bytes at all are a candidate sprite area. Naming the format is both
+    // the only way in and free extra coverage for every fixture here.
+    let _ = probe_as(ImageFormat::Sprite, bytes);
+    if let Ok(image) = decode_as(ImageFormat::Sprite, bytes, &limits) {
+        assert!(image.width() <= limits.max_width());
+        assert!(image.height() <= limits.max_height());
+        assert!(u64::from(image.width()) * u64::from(image.height()) <= limits.max_pixels());
+    }
+    if let Ok(sequence) = Sequence::open_as(ImageFormat::Sprite, bytes, &limits) {
+        walk(sequence, &limits);
     }
     let _ = sniff(bytes);
+}
+
+/// Walk a sequence twice, checking every frame against the limits it was
+/// opened under; the second pass covers the restart.
+fn walk(mut sequence: Sequence<'_>, limits: &DecodeLimits) {
+    let info = sequence.info();
+    for pass in 0..2 {
+        let mut steps = 0u32;
+        while steps < SEQUENCE_STEPS {
+            match sequence.next_frame() {
+                Ok(Some(frame)) => {
+                    assert!(frame.width() <= limits.max_width());
+                    assert!(frame.height() <= limits.max_height());
+                    let pixels = u64::from(frame.width()) * u64::from(frame.height());
+                    assert!(pixels <= limits.max_pixels());
+                    assert_eq!(
+                        frame.pixels().len(),
+                        usize::try_from(pixels * 4).unwrap_or(usize::MAX)
+                    );
+                    assert!(frame.index() < info.count());
+                    if matches!(info.kind(), SequenceKind::Animation { .. }) {
+                        // An animation's frames are one canvas, so each is
+                        // the container's own size; a page container's pages
+                        // are pictures in their own right and carry their
+                        // own, so its geometry is only the largest.
+                        assert_eq!(frame.width(), info.width());
+                        assert_eq!(frame.height(), info.height());
+                    }
+                }
+                Ok(None) | Err(_) => break,
+            }
+            steps += 1;
+        }
+        if pass == 0 {
+            sequence.rewind();
+        }
+    }
 }
 
 #[test]
@@ -1554,5 +1762,49 @@ fn the_ico_generator_produces_a_valid_corpus() {
             seen += 1;
         }
         assert_eq!(seen, count, "a fixture decoded a different page count");
+    }
+}
+
+#[test]
+fn mutated_valid_sprite_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_sprite_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = build_valid_sprite_area(&mut rng);
+            let mutated = mutate_sprite(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_sprite_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_sprite_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = limits();
+    for _ in 0..DRAWS {
+        let bytes = build_valid_sprite_area(&mut rng);
+        let mut sequence = Sequence::open_as(ImageFormat::Sprite, &bytes, &limits)
+            .expect("a pristine generated fixture failed to open");
+        let count = sequence.info().count();
+        let mut seen = 0u32;
+        while sequence
+            .next_frame()
+            .expect("a pristine generated fixture failed to decode a sprite")
+            .is_some()
+        {
+            seen += 1;
+        }
+        assert_eq!(seen, count, "a fixture decoded a different sprite count");
     }
 }

@@ -3,9 +3,9 @@
 Stability tier: **experimental**.
 
 First-party TAIRiX raster-image decoding: complete, fail-closed PNG, JPEG,
-GIF, BMP, and ICO/CUR decoders that turn untrusted artwork into a validated,
-straight-alpha RGBA8 pixel buffer, or a typed refusal — never a panic, and
-never more memory than the caller allows.
+GIF, BMP, ICO/CUR, and RISC OS sprite decoders that turn untrusted artwork
+into a validated, straight-alpha RGBA8 pixel buffer, or a typed refusal —
+never a panic, and never more memory than the caller allows.
 
 ## Consumers
 
@@ -29,8 +29,10 @@ own decision: the icon pipeline deliberately takes only PNG and SVG
 
 ## Formats
 
-`ImageFormat` is a deliberately closed enum, and both entry points
-dispatch on the signature `sniff` recognises. A further format is added
+`ImageFormat` is a deliberately closed enum. `decode`, `decode_fitted`, and
+`Sequence::open` dispatch on the signature `sniff` recognises; a caller that
+already knows the type instead *names* the format, which is the only way to
+reach one that carries no signature (see below). A further format is added
 only when a real consumer needs it — never speculatively.
 
 - **PNG** (`ImageFormat::Png`, W3C PNG): every colour type and bit depth,
@@ -58,6 +60,15 @@ only when a real consumer needs it — never speculatively.
   containers): the directory of independent pictures at different sizes,
   each entry a DIB with its 1-bit AND mask or a whole PNG file, with
   addressed access to any page.
+- **RISC OS sprite areas** (`ImageFormat::Sprite`, Acorn filetype `&FF9`):
+  the area control block as a file holds it, the chain of 44-byte sprite
+  control blocks, left- and right-hand wastage, old-style screen mode
+  numbers, RISC OS 3.5 sprite mode words, the RISC OS 5 extended mode word
+  with its mode-flags channel order and alpha, 1/2/4/8/16/24/32 bits per
+  pixel across the 1:5:5:5, 5:6:5, 4:4:4:4, 8:8:8, and 8:8:8:8 packings,
+  sprite palettes including the full 256-entry form and the short VIDC1
+  ones, and all three mask forms — an old-format mask at the image's own
+  depth, a new-format 1-bit mask, and a wide 8-bit alpha mask.
 
 A format this crate claims is decoded **completely** — every bit depth,
 compression, colour handling, and structural variant the format defines, not
@@ -76,6 +87,25 @@ carries none at all, so its 1-bit mask is what says which pixels are absent.
 The OS/2 2.x header lengths are refused by name rather than half-read: they
 share the Windows prefix but read compression codes 3 and 4 as Huffman 1D and
 RLE24, two codecs with no other consumer here.
+
+A sprite area has **no signature at all** — its first word is the sprite
+count, and RISC OS types a file from its directory entry — so `sniff` never
+answers `ImageFormat::Sprite` and never guesses one from a structural
+coincidence. A caller that knows the type from a filetype, a media type, or
+the name a file was picked by reaches the decoder by naming the format
+(`probe_as` / `decode_as` / `Sequence::open_as`); the named format's own
+parser still validates the bytes, so naming the wrong one is refused rather
+than misread. The sprite decoder also takes three readings the format's own
+text does not settle, all stated in its module rustdoc: a sprite with no
+palette is resolved against the palette the OS assigns on entering a mode of
+that depth (at eight bits that is the screen-memory byte's own tint
+arrangement, so it is exact); a palette shorter than the depth needs is the
+VIDC1 arrangement, its last sixteen entries being the hardware registers and
+a pixel's top four bits overriding supremacy bits; and where a file carries
+both a mask and per-pixel alpha the mask wins, since it is what the format
+calls a sprite's transparency. Sprite names are read over rather than
+reported, and the CMYK, JPEG-data, and YCbCr sprite types are refused by
+name rather than half-read.
 
 GIF reads the specification literally but for two places, both stated in the
 module's own rustdoc: *restore to background* clears to fully transparent
@@ -123,7 +153,7 @@ from its plane.
 ## API shape
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — identify a format from its
-  leading signature.
+  leading signature. Never answers `Sprite`, which has none.
 - `probe(&[u8]) -> Result<ImageInfo, DecodeError>` — the format and natural
   size from the header alone, decoding no pixels. For the caller that cannot
   state its target size until it knows the source's. The reported geometry is
@@ -135,6 +165,10 @@ from its plane.
 - `decode_fitted(&[u8], &DecodeLimits, FitBox) -> Result<RasterImage,
   DecodeError>` — decode no smaller than it has to be to cover the
   caller's target box (see below).
+- `probe_as(ImageFormat, &[u8])` and `decode_as(ImageFormat, &[u8],
+  &DecodeLimits)` — the same two, for a caller that already knows the type
+  rather than having it sniffed. The only door to a format with no
+  signature; `probe` and `decode` are `sniff` plus these.
 - `FitBox::new(width, height)` plus `width()`/`height()` — a small public
   copy type carrying the largest output the caller intends to use.
 - `DecodeLimits::new(max_width, max_height, max_pixels,
@@ -143,9 +177,9 @@ from its plane.
   shape every format decodes into: row-major RGBA8, **straight**
   (non-premultiplied) alpha. `lib/raster`'s `Surface::from_rgba8` is where
   premultiplication happens, once, on the consumer side.
-- `Sequence::{open, info, next_frame, page, rewind}`, `SequenceInfo`,
-  `SequenceKind::{Animation, Pages}`, and `Frame` — the multi-entry shape
-  (see below).
+- `Sequence::{open, open_as, info, next_frame, page, rewind}`,
+  `SequenceInfo`, `SequenceKind::{Animation, Pages}`, and `Frame` — the
+  multi-entry shape (see below). `open_as` names the format, as above.
 - `DecodeError` — every fail-closed refusal reason, including a
   `CompressedData` variant wrapping `tairix_compress::zlib::Error`, the
   `Jpeg*` family covering signature, marker, segment, table, entropy,
@@ -301,11 +335,17 @@ valid file being refused rather than half-decoded. The BMP and icon tests
 build every header version, bit depth, encoding, row order, and mask layout
 the same way, and cover the run-length escapes, the alpha-versus-mask rule,
 page addressing, and a truncated container still answering a page it wholly
-holds. Every format is fuzzed by `tests/fuzz_image.rs` — random bytes, random
-bytes behind each valid signature, and structurally mutated valid fixtures
-(PNG chunks, JPEG baseline and progressive marker segments, GIF blocks, icon
-directory entries, and a BMP header's declared fields), each walked through
-`decode`, `decode_fitted`, and a full `Sequence` pass with a rewind — through
+holds. The sprite tests build every mode word form, depth, packing, palette
+arrangement, mask form, and wastage the same way, and cover the area chain,
+page addressing, and every refusal. Every format is fuzzed by
+`tests/fuzz_image.rs` — random bytes, random bytes behind each valid
+signature, and structurally mutated valid fixtures (PNG chunks, JPEG baseline
+and progressive marker segments, GIF blocks, icon directory entries, a BMP
+header's declared fields, and a sprite area's control-block chain), each
+walked through `decode`, `decode_fitted`, and a full `Sequence` pass with a
+rewind. Since a sprite area has no signature, *every* input is additionally
+driven through the format-naming door, so the sprite decoder gets the whole
+harness's corpus rather than only its own — through
 the shared `tests/fuzzseed` seed and budget seam, registered with
 `cargo xtask fuzz`.
 The subsystem page is `docs/src/lib/image.md`.

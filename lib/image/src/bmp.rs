@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
+use crate::channel::{Channel, Sampler};
 use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
 /// The two magic bytes every BMP file opens with.
@@ -103,83 +104,6 @@ enum Packing {
     /// A little-endian value of 2, 3, or 4 bytes, its channels cut out by
     /// the masks.
     Packed { bytes: u32 },
-}
-
-/// One colour channel's bits within a packed pixel.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Channel {
-    mask: u32,
-    shift: u32,
-    width: u32,
-}
-
-impl Channel {
-    /// A channel the pixel does not carry.
-    const ABSENT: Self = Self {
-        mask: 0,
-        shift: 0,
-        width: 0,
-    };
-
-    /// Resolve a mask, refusing one whose set bits are not contiguous: a
-    /// scattered field names no single sample value.
-    fn new(mask: u32) -> Result<Self, DecodeError> {
-        if mask == 0 {
-            return Ok(Self::ABSENT);
-        }
-        let shift = mask.trailing_zeros();
-        let width = mask.count_ones();
-        if mask >> shift != u32::MAX >> (u32::BITS - width) {
-            return Err(DecodeError::BmpInvalidMask);
-        }
-        Ok(Self { mask, shift, width })
-    }
-}
-
-/// A channel's raw values pre-scaled to eight bits.
-///
-/// Widening a channel is `raw * 255 / max`, so a megapixel image would pay
-/// four divisions per pixel to do it as it goes; tabulating costs 256
-/// divisions per channel per decode instead. A channel wider than eight bits
-/// is truncated to its top eight, which is exact at both ends of its range,
-/// so that extra shift folds into the sampler's own.
-struct Sampler {
-    mask: u32,
-    shift: u32,
-    table: [u8; 256],
-}
-
-impl Sampler {
-    /// An absent channel is opaque, which is right because alpha is the only
-    /// channel that can be absent: a zero mask always reads value zero, so a
-    /// saturated table answers full for every pixel with no branch.
-    fn new(channel: Channel) -> Self {
-        if channel.width == 0 {
-            return Self {
-                mask: 0,
-                shift: 0,
-                table: [u8::MAX; 256],
-            };
-        }
-        let max = u32::from(u8::MAX >> (8 - channel.width.min(8)));
-        let mut table = [0u8; 256];
-        for (raw, entry) in (0..).zip(table.iter_mut()) {
-            if raw > max {
-                break;
-            }
-            *entry = u8::try_from((raw * 255 + max / 2) / max).unwrap_or(u8::MAX);
-        }
-        Self {
-            mask: channel.mask,
-            shift: channel.shift + channel.width.saturating_sub(8),
-            table,
-        }
-    }
-
-    fn sample(&self, raw: u32) -> u8 {
-        let value = u8::try_from((raw & self.mask) >> self.shift & 0xFF).unwrap_or(0);
-        self.table[usize::from(value)]
-    }
 }
 
 /// A DIB's colour table: the entries present, and how wide each is.
@@ -272,7 +196,7 @@ impl Dib {
 
     /// Whether pixels carry an alpha channel of their own.
     pub(crate) const fn has_alpha(&self) -> bool {
-        self.channels[3].width != 0
+        self.channels[3].present()
     }
 
     /// Take a 32-bit `BI_RGB` pixel's fourth byte as alpha.
@@ -284,11 +208,7 @@ impl Dib {
             && matches!(self.packing, Packing::Packed { bytes: 4 })
             && !self.has_alpha()
         {
-            self.channels[3] = Channel {
-                mask: 0xFF00_0000,
-                shift: 24,
-                width: 8,
-            };
+            self.channels[3] = Channel::fixed(24, 8);
         }
         self
     }
@@ -309,18 +229,21 @@ pub(crate) fn stride(width: u32, bits: u32) -> Result<usize, DecodeError> {
 /// The channel layout a bit count implies with no masks to say otherwise:
 /// 5-5-5 at sixteen bits and 8-8-8 blue-first at twenty-four and thirty-two,
 /// with nothing addressing a thirty-two-bit pixel's fourth byte.
-fn default_channels(bits: u32) -> Result<[Channel; RGBA_BYTES], DecodeError> {
+fn default_channels(bits: u32) -> [Channel; RGBA_BYTES] {
     let (red, green, blue) = match bits {
-        16 => (0x7C00, 0x03E0, 0x001F),
-        24 | 32 => (0x00FF_0000, 0x0000_FF00, 0x0000_00FF),
-        _ => (0, 0, 0),
+        16 => (
+            Channel::fixed(10, 5),
+            Channel::fixed(5, 5),
+            Channel::fixed(0, 5),
+        ),
+        24 | 32 => (
+            Channel::fixed(16, 8),
+            Channel::fixed(8, 8),
+            Channel::fixed(0, 8),
+        ),
+        _ => (Channel::ABSENT, Channel::ABSENT, Channel::ABSENT),
     };
-    Ok([
-        Channel::new(red)?,
-        Channel::new(green)?,
-        Channel::new(blue)?,
-        Channel::ABSENT,
-    ])
+    [red, green, blue, Channel::ABSENT]
 }
 
 /// Resolve a bit count into the packing it names, refusing one the format
@@ -362,7 +285,7 @@ fn read_core(data: &[u8]) -> Result<Dib, DecodeError> {
         top_down: false,
         packing,
         compression: Compression::Rgb,
-        channels: default_channels(bits)?,
+        channels: default_channels(bits),
         palette_entries: if bits <= 8 { 1 << bits } else { 0 },
         palette_entry_len: CORE_PALETTE_ENTRY_LEN,
         palette_at: usize::try_from(CORE_HEADER_LEN).unwrap_or(usize::MAX),
@@ -411,7 +334,7 @@ fn read_info(data: &[u8], size: u32) -> Result<Dib, DecodeError> {
     let channels = if bitfields {
         read_masks(data, bits, alpha_mask)?
     } else {
-        default_channels(bits)?
+        default_channels(bits)
     };
     let masks_end = match (bitfields, alpha_mask) {
         (false, _) => size,
@@ -473,10 +396,10 @@ fn read_masks(
         seen |= mask;
     }
     Ok([
-        Channel::new(raw[0])?,
-        Channel::new(raw[1])?,
-        Channel::new(raw[2])?,
-        Channel::new(raw[3])?,
+        Channel::new(raw[0]).ok_or(DecodeError::BmpInvalidMask)?,
+        Channel::new(raw[1]).ok_or(DecodeError::BmpInvalidMask)?,
+        Channel::new(raw[2]).ok_or(DecodeError::BmpInvalidMask)?,
+        Channel::new(raw[3]).ok_or(DecodeError::BmpInvalidMask)?,
     ])
 }
 
