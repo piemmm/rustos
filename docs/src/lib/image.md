@@ -18,7 +18,7 @@ SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, `Gif`, `Bmp`,
-`Ico`, `Sprite`, and `Tiff`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
+`Ico`, `Sprite`, `Tiff`, and `Webp`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
 from its leading signature, and `decode`, `decode_fitted`, and
 `Sequence::open` dispatch on it, refusing an unrecognised signature before any
 format-specific parsing runs. A further format is added only when a real
@@ -371,6 +371,95 @@ sprite whose *mode* the decoder does not claim is passed over when the area is
 measured and refused only if it is asked for. A malformed *control block* is
 fatal, because the chain is what finds the next sprite.
 
+### WEBP
+
+A WEBP file is a RIFF form over one or both of two bitstreams, plus the
+container's own alpha plane and animation. Two forms exist: the simple one,
+a bare `VP8 ` or `VP8L` chunk, and the extended one, a `VP8X` header
+declaring a canvas over an optional alpha chunk and either a still bitstream
+or a chain of `ANMF` frames. Both are complete here, and so is each codec.
+
+The **lossy** bitstream (`VP8 `, RFC 6386) is complete for the keyframe the
+container mandates: the boolean entropy decoder; the segmentation,
+loop-filter and quantiser headers with their per-segment and per-mode
+deltas; the token-probability updates; the four whole-macroblock luma modes,
+the four chroma modes, and all ten subblock modes; the Walsh-Hadamard and
+DCT reconstructions; both the normal and the simple loop filter at
+macroblock and subblock edges; and the conversion to RGB. There is no inter
+coding at all — no reference frames, no motion vectors, no inter modes —
+because the container permits none, and a bitstream that declares itself an
+interframe is refused rather than half-read.
+
+The **lossless** bitstream (`VP8L`) is complete too: the prefix-coded image
+stream, the meta-Huffman arrangement that gives each region of the picture
+its own five prefix codes, the colour cache, the LZ77 backward references
+with their two-dimensional distance mapping, and all four transforms —
+predictor with each of its fourteen predictors, cross colour, subtract
+green, and colour indexing with its pixel bundling.
+
+`ALPH` carries a lossy picture's alpha channel and is complete at both
+compression methods and all four filtering methods. Its compressed method is
+a lossless stream over the plane, held in the stream's green channel, which
+is why the container reaches for the lossless codec on the *lossy* path: the
+two codecs know nothing of each other, and the container is what knows the
+rule.
+
+WEBP has a signature, but a two-part one — `RIFF` at 0 and `WEBP` at 8, with
+the RIFF size between — so the format's own module answers the test rather
+than the dispatch matching one constant. Nothing in the sniff order can
+shadow it or be shadowed by it: no other signature opens with `R`, and
+requiring both halves means a RIFF form of some other kind is not a WEBP.
+
+Five readings the specification leaves to the decoder:
+
+- **The canvas is authoritative and a disagreeing bitstream is refused.** A
+  `VP8X` canvas is a 24-bit declaration while a bitstream carries its own
+  14-bit one, so the two can disagree, and reconciling them would mean
+  cropping, padding, or scaling — none of which either declaration asks for.
+  A simple-format file has no container geometry, so there the bitstream's
+  own size *is* the canvas. `probe` and `SequenceInfo` therefore always
+  agree for a WEBP, where they may differ for a TIFF.
+- **Nothing is sized from an `ANMF`'s own declaration.** Its 24-bit frame
+  extent is checked to lie inside the canvas, which allocates nothing, and
+  the frame is then decoded at the size its *payload* declares and refused
+  unless the two match. A tile's extent is not bounded by the picture it
+  covers, and neither is a frame's.
+- **Which kind a file is comes from the file.** One carrying `ANIM` is an
+  animation, with that chunk's loop count (`0` meaning for ever) and the
+  retained-canvas stepping disposal forces. One without is a still picture —
+  the one-page case, exactly as a PNG is — because there is no loop count to
+  report and answering "for ever" would fabricate a declaration.
+- **The canvas clears and disposes to fully transparent**, ignoring `ANIM`'s
+  background colour. The specification makes that colour explicitly
+  optional, and a straight-alpha decoder's job is to carry a file's
+  transparency out to its consumer rather than pre-flatten it against a
+  colour the viewer will draw its own backdrop behind. It is the same reading
+  the GIF decoder takes of *restore to background*.
+- **`VP8X`'s alpha and metadata flags are hints; the chunks present are the
+  fact.** They say what a file "contains", and the decode is driven by the
+  chunks actually found — so a set alpha flag with no alpha chunk decodes,
+  and an alpha chunk with a clear flag decodes, rather than either being
+  refused over a disagreement that costs nothing. The **animation** flag is
+  not a hint: it is what says whether the file is an animation at all, so it
+  and the chunks must agree, and an animation chunk under a clear flag is
+  refused. The reserved bits and reserved field values are refused either
+  way.
+
+Colour profiles and metadata (`ICCP`, `EXIF`, `XMP `) are read past like any
+unknown chunk, because nothing in this crate colour-manages and the output is
+RGBA8 in the file's own primaries.
+
+Refused by name rather than half-read: a `VP8 ` interframe; an `ALPH` chunk
+beside a `VP8L` bitstream, which carries its own alpha; a `VP8L` version
+other than zero; a reserved alpha compression method, pre-processing value,
+or reserved bit; a reserved lossy colour space, whose one other value names a
+space this decoder cannot convert; and the extended form's own chunks in a
+simple-form file. The lossy bitstream's horizontal and vertical scale fields
+and the alpha chunk's pre-processing field are read, validated, and then not
+acted on: all three are display hints, the last is called informative, and
+applying a smoothing or an upscale would fabricate pixels the file does not
+hold.
+
 ## Sequences and pages
 
 Some containers hold more than one picture. `Sequence` is the one shape for
@@ -477,13 +566,18 @@ its own meaning there too — the picture the container is, which is its
 largest page — and is refused outright when that breaches the limits rather
 than quietly answering a smaller one.
 
-### PNG, GIF, BMP, Sprite, and TIFF
+### PNG, GIF, BMP, Sprite, TIFF, and WEBP
 
 None has a reduced-scale decode process — filtered zlib-compressed
 scanlines, an LZW code stream, a padded row array, and a grid of strips or
 tiles do not separate into scale-selectable passes — so `decode_fitted` on
 those *is* `decode`, at
-natural size, with no scale to degrade to. That asymmetry is an honest
+natural size, with no scale to degrade to. For WEBP the reason is sharper
+than "the coding does not separate": both its codecs *could* be given a
+coarser transform, and doing so would decode a **different** picture rather
+than a softer one, because VP8's intra prediction reads full-resolution
+neighbours and VP8L's spatial predictors and backward references read the
+pixels already produced. That asymmetry is an honest
 property of the formats rather than a gap in this crate: a caller that wants
 a smaller one resamples the decoded image through `lib/raster`'s one shared
 resampler, exactly as it must to hit any size no JPEG scale lands on.

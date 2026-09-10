@@ -105,10 +105,90 @@ What "complete" means, per format:
   extension, a bypass of the run coding rather than a part of it; and a
   predictor over subsampled blocks, which have no row of samples to run
   along.
-- **WEBP** — the RIFF container; `VP8 ` lossy (bool decoder, intra
-  prediction, DCT/WHT, loop filter, YUV to RGB); `VP8L` lossless
-  (meta-Huffman, colour cache, all four transforms); `ALPH` including its
-  filtering methods; `VP8X`-extended files; `ANIM`/`ANMF` animation.
+- **WEBP** — the RIFF container in both its simple and `VP8X`-extended
+  forms; `VP8 ` lossy (the bool decoder; the segmentation, loop-filter and
+  quantiser headers with their per-segment and per-mode deltas; the token
+  probability updates; the four whole-macroblock luma modes, the four chroma
+  modes, and all ten subblock modes; DCT and WHT reconstruction; both the
+  normal and the simple loop filter, at macroblock and at subblock edges;
+  and the conversion to RGB); `VP8L` lossless (the prefix-coded image
+  stream, meta-Huffman through the entropy image, the colour cache, the LZ77
+  backward references with their distance mapping, and all four transforms —
+  predictor with every one of its fourteen predictors, colour, subtract
+  green, and colour indexing with its pixel bundling); `ALPH` at both
+  compression methods and all four filtering methods; and `ANIM`/`ANMF`
+  animation under the container's own blend and dispose model.
+
+  Five readings the format leaves to the decoder:
+  - **The container's canvas is authoritative, and a frame whose own
+    bitstream disagrees with the rectangle it was given is refused.** A
+    `VP8X` canvas is a 24-bit declaration while a `VP8 `/`VP8L` bitstream
+    carries its own 14-bit one, so the two can disagree — and reconciling
+    them would mean cropping, padding, or scaling, none of which is what
+    either declaration says. Refusing is the only answer that invents no
+    pixels. A simple-format file has no container geometry at all, so there
+    its bitstream's own dimensions *are* the canvas. `probe` and
+    `SequenceInfo` therefore always agree for a WEBP, where they may differ
+    for a TIFF.
+  - **Nothing is sized from an `ANMF`'s own declaration.** Its 24-bit frame
+    extent is checked to lie inside the canvas — which allocates nothing —
+    and the frame is then decoded at the size its *payload* declares and
+    refused unless the two match. A tile's extent is not bounded by the
+    picture it covers, and neither is a frame's.
+  - **The kind a WEBP is comes from the file, not from the format.** A file
+    carrying `ANIM` is an animation, with `ANIM`'s loop count (`0` meaning
+    for ever) and the retained-canvas stepping disposal forces. One without
+    is a still picture — the one-page case, exactly as a PNG is — because
+    there is no loop count to report and answering "for ever" would be
+    fabricating a declaration the file does not make.
+  - **The canvas clears and disposes to fully transparent, ignoring `ANIM`'s
+    background colour.** The specification makes that colour explicitly
+    optional, and a straight-alpha decoder's job is to carry the file's
+    transparency out to its consumer rather than pre-flatten it against a
+    colour the viewer is going to draw its own checkerboard behind. This is
+    the same reading the GIF decoder already takes of *restore to
+    background*.
+  - **`VP8X`'s alpha and metadata flags are a demuxer's hints; the chunks
+    present are the fact.** The alpha, ICC, EXIF and XMP flags say what a
+    file "contains", and every real encoder sets them consistently, but the
+    decode is driven by the chunks actually found — so a set alpha flag with
+    no chunk decodes, and a chunk with a clear flag decodes, rather than
+    either being refused over a disagreement that costs nothing. The
+    **animation** flag is not a hint: it is what says whether the file is an
+    animation at all, so it and the chunks must agree. The reserved bits and
+    reserved field values are refused either way.
+
+  Colour profiles are read past, not applied: `ICCP`, `EXIF`, and `XMP `
+  are skipped like any unknown chunk, because no decoder in this crate
+  colour-manages and the output is RGBA8 in the file's own primaries.
+
+  Refused by name rather than half-read: a `VP8 ` **interframe**, since the
+  container specification requires the bitstream to be a keyframe, and an
+  interframe's prediction is against reference frames a WEBP never carries;
+  `ALPH` beside a `VP8L` bitstream, which carries its own alpha; a `VP8L`
+  version other than zero; an `ALPH` reserved compression method,
+  pre-processing value, or reserved bit; and an `ANIM`, `ANMF`, or `ALPH`
+  chunk in a file with no `VP8X`, which the extended form is what defines.
+  The lossy bitstream's `horizontal`/`vertical scale` fields and `ALPH`'s
+  pre-processing field are read, validated, and then not acted on: all three
+  are display hints, and the specification calls the last informative, so
+  applying a smoothing or an upscale would fabricate pixels the file does
+  not hold.
+
+  WEBP has a signature, so it enters `sniff` — but a two-part one, `RIFF`
+  at 0 and `WEBP` at 8 with the RIFF size between, which is why the format's
+  own module answers the test rather than `lib.rs` matching a constant.
+  Nothing in the sniff order can shadow it or be shadowed by it: no other
+  signature opens with `R`, and requiring both halves means a bare RIFF file
+  of some other form is not a WEBP.
+
+  Neither codec has a reduced-scale decode process, so `decode_fitted` on a
+  WEBP is exactly `decode`. That is not the absence of a JPEG-style
+  scaled-IDCT path but a property of the formats: VP8's intra prediction
+  reads full-resolution neighbours, so a coarser transform would change the
+  prediction and decode a *different* picture rather than a softer one, and
+  VP8L's spatial predictors and backward references have the same
+  dependency on the pixels already produced.
 - **RISC OS Sprite** — the sprite-area header and control-block chain,
   left/right wastage, old-style mode numbers, RISC OS 3.5 sprite mode words,
   the RISC OS 5 extended mode words with their mode-flags channel order and
@@ -161,6 +241,16 @@ fail-closed discipline. Sibling crates would duplicate all of it, and a format
 that lands here needs no second decoder for any other consumer that later
 admits it — though admitting one stays that consumer's decision: the icon
 pipeline deliberately takes only PNG and SVG (`plans/ICONS.md`).
+
+A format is one module, except where it is genuinely more than one codec.
+WEBP is three — `webp` for the container, the alpha plane, and the
+compositing, and `vp8` and `vp8l` for the two bitstreams — on the precedent
+the facsimile codec set: a self-contained codec with its own bitstream,
+tables, and refusals earns its own module. Neither codec module knows the
+container, and neither knows the other: `ALPH`'s compressed method *is* a
+lossless stream over the alpha plane, so the container is what reaches for
+`vp8l` on the lossy path, which keeps the container's rules in the container
+and leaves both codecs testable on their own.
 
 The rotation is a pixel permutation, so it belongs to the one rasterisation
 path the charter allows; an app-local copy would be a second one.
@@ -366,8 +456,42 @@ clients, and their exit-code sets are their own.
   the picture is, because a tile is not bounded by the image it covers — a
   fixed 256-pixel tile over a 16-pixel image is what a real writer produces —
   so without that nothing bounds the buffer behind one.
-- `lib/image` WEBP — planned (its VP8 lossy decoder is a change in its own
-  right).
+- `lib/image` WEBP — **done**, complete as specified above. Three modules,
+  because two of the three pieces are self-contained codecs: `webp` for the
+  container, the alpha plane and the compositing, `vp8` for the lossy
+  bitstream, and `vp8l` for the lossless one. Neither codec knows the
+  container and neither knows the other — the container is what reaches for
+  the lossless codec on the *lossy* path, because a compressed `ALPH` chunk
+  is a lossless stream over the alpha plane.
+
+  The container is the one format here that is either a still picture or an
+  animation, and the file says which: carrying `ANIM` makes it an animation
+  and it took the shared animation walk, while carrying none makes it the
+  one-page still case a PNG already is. That walk is the fourth crate unit
+  lifted out of its single home so a second format shares it rather than
+  copying it: `frames` (the cursor, the remembered refusal, the declared
+  geometry and the delay most recently read, from `gif`), leaving each
+  container only its own disposal model. A fifth was lifted for the same
+  reason: `huffman`, the canonical prefix-code assignment and the walk that
+  decodes one, which a JPEG Huffman table and a lossless WEBP's prefix codes
+  are the same construction of. It holds a code as its length counts and
+  nothing else, because a lossless WEBP carries one prefix code per channel
+  per meta-Huffman group and a file may declare tens of thousands of groups:
+  at that count a table of precomputed per-length values would cost hundreds
+  of times the bytes the stream declaring them occupies. The group count is
+  additionally held to what the remaining bits could describe, because a
+  sparse entropy image can name a high group while spending almost nothing.
+
+  What the tests turn on is that the fixtures are written from each
+  specification rather than by inverting the decoder beside them. The lossy
+  writer is RFC 6386's own *encoder*, checked by round-tripping several
+  hundred random probability-and-choice sequences, and on top of that the
+  tests pin absolute pixels: a flat keyframe fills at 128 and converts to
+  exactly 130 per channel, and one luma DC token of four spreads through the
+  Walsh-Hadamard transform to lift every sample by one. Four spec-table
+  transcription errors were caught mechanically by diffing against the
+  published tables rather than by any test — which is why the tables are
+  extracted rather than typed.
 - `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.

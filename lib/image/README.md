@@ -3,9 +3,9 @@
 Stability tier: **experimental**.
 
 First-party TAIRiX raster-image decoding: complete, fail-closed PNG, JPEG,
-GIF, BMP, ICO/CUR, RISC OS sprite and TIFF decoders that turn untrusted artwork
-into a validated, straight-alpha RGBA8 pixel buffer, or a typed refusal —
-never a panic, and never more memory than the caller allows.
+GIF, BMP, ICO/CUR, RISC OS sprite, TIFF and WEBP decoders that turn untrusted
+artwork into a validated, straight-alpha RGBA8 pixel buffer, or a typed
+refusal — never a panic, and never more memory than the caller allows.
 
 ## Consumers
 
@@ -136,6 +136,69 @@ JPEG and word-aligned CCITT; samples of mixed depth or sample format; a fill
 order of 2 at any depth but one; separate planes under JPEG or subsampled
 chrominance; T.4's uncompressed-mode extension; and a predictor over
 subsampled blocks.
+
+- **WEBP** (`ImageFormat::Webp`, WebP Container Specification): the RIFF
+  form in both its simple and extended shapes; the `VP8 ` lossy bitstream
+  (RFC 6386) complete for the keyframe the container mandates — the boolean
+  entropy decoder, the segmentation, loop-filter and quantiser headers with
+  their per-segment and per-mode deltas, the token-probability updates, the
+  four whole-macroblock luma modes, the four chroma modes and all ten
+  subblock modes, the Walsh-Hadamard and DCT reconstructions, both the normal
+  and the simple loop filter at macroblock and subblock edges, and the
+  conversion to RGB; the `VP8L` lossless bitstream complete — the
+  prefix-coded image stream, the meta-Huffman arrangement, the colour cache,
+  the LZ77 backward references with their distance mapping, and all four
+  transforms; `ALPH` at both compression methods and all four filtering
+  methods; and `ANIM` / `ANMF` animation under the container's blend and
+  dispose model.
+
+WEBP has a signature, but a two-part one — `RIFF` at 0 and `WEBP` at 8, with
+the RIFF size between them — so the format's own module answers the test
+rather than `lib.rs` matching a constant. Nothing in the sniff order can
+shadow it or be shadowed by it: no other signature opens with `R`, and
+requiring both halves means a RIFF form of some other kind is not a WEBP.
+
+The container takes five readings the specification leaves to the decoder,
+all stated in its module rustdoc. Its **canvas is authoritative and a
+disagreeing bitstream is refused**, because reconciling a 24-bit container
+declaration with a 14-bit bitstream one would mean cropping, padding, or
+scaling and none of those is what either says; a simple-format file has no
+container geometry, so there the bitstream's own size *is* the canvas.
+**Nothing is sized from an animation frame's own declaration** — its extent
+is checked to lie inside the canvas, which allocates nothing, and the frame
+is then decoded at the size its payload declares and refused unless the two
+agree. **Which kind a file is comes from the file**: one carrying `ANIM` is
+an animation with a loop count, one without is a still picture, because
+answering "for ever" would fabricate a declaration. **The canvas clears and
+disposes to fully transparent**, ignoring the explicitly-optional background
+colour, which is the reading the GIF decoder already takes of *restore to
+background*. And the extended header's **alpha and metadata flags are hints
+while the chunks present are the fact**, so a set alpha flag with no alpha
+chunk decodes and an alpha chunk with a clear flag decodes; the **animation**
+flag is not a hint, because it is what says whether the file is an animation
+at all, so it and the chunks must agree. The reserved bits and field values
+are refused either way.
+
+Refused by name rather than half-read: a `VP8 ` interframe, since the
+container requires a keyframe and an interframe predicts against reference
+frames a WEBP never carries; an `ALPH` chunk beside a `VP8L` bitstream, which
+carries its own alpha; a `VP8L` version other than zero; a reserved alpha
+compression method, pre-processing value, or reserved bit; a reserved lossy
+colour space, whose one other value names a space this decoder cannot
+convert; and the extended form's own chunks in a simple-form file. The lossy
+bitstream's scale fields and the alpha chunk's pre-processing field are read,
+validated, and then not acted on — all three are display hints, and the last
+is called informative, so applying a smoothing or an upscale would fabricate
+pixels the file does not hold. Colour profiles and metadata (`ICCP`, `EXIF`,
+`XMP `) are read past like any unknown chunk, because nothing here
+colour-manages and the output is RGBA8 in the file's own primaries.
+
+Neither WEBP codec has a reduced-scale decode process, so `decode_fitted` on
+one is exactly `decode`. That is a property of the formats rather than a gap:
+VP8's intra prediction reads full-resolution neighbours, so a coarser
+transform would decode a *different* picture rather than a softer one, and
+VP8L's spatial predictors and backward references have the same dependency on
+the pixels already produced.
 
 The LZW dictionary and expansion loop are shared with the GIF decoder
 (`src/lzw.rs`), since the two differ only in how codes are packed and when a
@@ -369,7 +432,8 @@ that sandbox, never the calling service.
 Host-unit-tested beside the code (`src/png_tests.rs`, `src/jpeg_tests.rs`,
 `src/gif_tests.rs`, `src/bmp_tests.rs`, `src/ico_tests.rs`,
 `src/sprite_tests.rs`, `src/tiff_tests.rs`, `src/ccitt_tests.rs`,
-`src/crc32.rs`)
+`src/vp8_tests.rs`, `src/vp8l_tests.rs`, `src/webp_tests.rs`,
+`src/huffman_tests.rs`, `src/crc32.rs`)
 with no external fixture files, the PNG writer they share living in
 `src/png_fixture.rs` because an icon entry may be a whole PNG file: the JPEG
 tests build their streams marker by marker, check a progressive stream
@@ -397,15 +461,38 @@ arrangement, predictor, orientation and compression, with the facsimile and
 LZW streams stated as the bit strings ITU-T T.4 gives rather than re-derived;
 the fax tables are additionally checked for being a prefix-free code holding
 exactly the runs the specification lists, which is the property a
-hand-transcribed table most easily breaks. Every format is fuzzed by
+hand-transcribed table most easily breaks. The WEBP tests write every
+bitstream from the two codecs' own fixture writers (`src/vp8_fixture.rs`,
+`src/vp8l_fixture.rs`), which follow each specification's own rules rather
+than inverting the decoder beside them: the lossy fixture is the *reference
+encoder* from RFC 6386, checked by round-tripping several hundred random
+probability-and-choice sequences through the decoder, and the lossless one
+re-derives the bit order, the canonical code assignment, and the length and
+distance prefix mapping. On top of that round trip the lossy tests pin
+absolute pixels — a flat keyframe's averaging prediction has nothing to
+average, so it fills at 128 and converts to exactly 130 per channel, and one
+luma DC token of four spreads through the Walsh-Hadamard transform to lift
+every sample by one — and the subblock tests pin where the picture *steps*,
+which is what proves the sixteen subblocks were predicted and reconstructed
+in scan order against the invented edge values. The lossless tests cover
+coded literals, backward references, the colour cache, the meta-prefix
+arrangement, and each transform; the container tests cover the chunk walk,
+the form rules, every alpha method and filter, the canvas agreement, and the
+blend and dispose model. Every format is fuzzed by
 `tests/fuzz_image.rs` — random bytes, random bytes behind each valid
 signature, and structurally mutated valid fixtures (PNG chunks, JPEG baseline
 and progressive marker segments, GIF blocks, icon directory entries, a BMP
-header's declared fields, a sprite area's control-block chain, and TIFF
+header's declared fields, a sprite area's control-block chain, TIFF
 directory entries including a rewrite that hands a payload to a compression
-it was not written for), each
+it was not written for, and WEBP chunks), each
 walked through `decode`, `decode_fitted`, and a full `Sequence` pass with a
-rewind. Since a sprite area has no signature, *every* input is additionally
+rewind. A lossy WEBP is generated as a valid uncompressed header over a
+*random* compressed partition: the compressed part is an arithmetic code, so
+any byte string decodes to some sequence of boolean choices, and a random
+partition therefore walks the whole header — segmentation, the deltas, every
+token-probability update flag, the mode trees, and the coefficient tokens —
+without the harness restating one of the format's probability tables.
+Since a sprite area has no signature, *every* input is additionally
 driven through the format-naming door, so the sprite decoder gets the whole
 harness's corpus rather than only its own — through
 the shared `tests/fuzzseed` seed and budget seam, registered with

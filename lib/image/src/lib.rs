@@ -86,7 +86,10 @@
 //! passes the way a block transform does, and neither does a sprite area or
 //! a TIFF's grid of strips and tiles — so for those [`decode_fitted`] is
 //! exactly [`decode`] and has no degradation to offer; that is an honest
-//! property of the formats, not a gap this crate is missing.
+//! property of the formats, not a gap this crate is missing. WEBP is the
+//! same, for a sharper reason: both its codecs read full-resolution
+//! neighbours, so a coarser transform would decode a *different* picture
+//! rather than a softer one.
 //!
 //! # Bounds and fail-closed policy
 //!
@@ -125,7 +128,9 @@ mod bmp;
 mod ccitt;
 mod channel;
 mod crc32;
+mod frames;
 mod gif;
+mod huffman;
 mod ico;
 mod jpeg;
 mod lzw;
@@ -135,10 +140,25 @@ mod png;
 mod png_fixture;
 mod sprite;
 mod tiff;
+mod vp8;
+mod vp8l;
+mod webp;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
 /// shape [`RasterImage`] and every format decoder here produce.
 pub(crate) const RGBA_BYTES: usize = 4;
+
+/// Frames one animation may declare.
+///
+/// A fixed containment bound rather than a capacity: an animation frame's
+/// header costs a handful of bytes in every container that has one, so a
+/// small file can declare enormous numbers of them, and no viewer has use
+/// for an animation longer than this. It bounds the count a structural pass
+/// accepts; nothing is allocated per frame. Shared, because how long an
+/// animation this crate will walk is not a question the container changes —
+/// unlike a page container's bound, where the pages are chosen between
+/// rather than played.
+pub(crate) const MAX_ANIMATION_FRAMES: u32 = 16_384;
 
 /// Limits a header probe holds a declared geometry to: none of its own.
 ///
@@ -580,6 +600,75 @@ pub enum DecodeError {
     /// A JPEG-compressed strip or tile decoded to a size other than the one
     /// the directory places it at.
     TiffJpegGeometryMismatch,
+
+    /// The file did not open with the `RIFF` and `WEBP` form identifiers.
+    WebpBadSignature,
+    /// A chunk header, a chunk's declared payload, or the `RIFF` region
+    /// itself ran past the end of the input.
+    WebpTruncated,
+    /// A chunk appeared where the form the file declares does not permit
+    /// one: twice, without the extended header that defines it, or beside a
+    /// bitstream that carries the same information itself.
+    WebpInvalidChunkLayout,
+    /// The extended header declared a zero-sided canvas or set a reserved
+    /// bit.
+    WebpInvalidCanvas,
+    /// An animation frame's rectangle is not wholly inside the canvas.
+    WebpFrameOutsideCanvas,
+    /// An animation frame's bitstream decoded to a size other than the
+    /// rectangle its own header declares.
+    WebpFrameGeometryMismatch,
+    /// An animation declared no frames.
+    WebpNoFrames,
+    /// An animation declared more frames than the decoder accepts.
+    WebpTooManyFrames,
+    /// An alpha chunk declared a reserved compression method,
+    /// pre-processing value, or reserved bit.
+    WebpUnsupportedAlpha,
+    /// An alpha plane decoded to a size other than the picture it belongs
+    /// to.
+    WebpAlphaGeometryMismatch,
+
+    /// A lossy bitstream did not carry the keyframe start code.
+    WebpLossyBadStartCode,
+    /// A lossy bitstream is an interframe, which predicts against reference
+    /// frames the container never carries.
+    WebpLossyInterframe,
+    /// A lossy bitstream declared a profile the format does not define.
+    WebpLossyUnsupportedProfile,
+    /// A lossy bitstream declared the reserved colour space, which names a
+    /// space this decoder cannot convert from.
+    WebpLossyReservedColourSpace,
+    /// A lossy bitstream ended before its header, partition table, or
+    /// coefficients were complete.
+    WebpLossyTruncated,
+    /// A lossy bitstream's residual partition table does not fit the bytes
+    /// it declares.
+    WebpLossyInvalidPartitions,
+    /// A lossy bitstream declared a zero-sided picture.
+    WebpLossyInvalidGeometry,
+
+    /// A lossless stream did not open with its signature byte.
+    WebpLosslessBadSignature,
+    /// A lossless stream declared a version other than zero.
+    WebpLosslessUnsupportedVersion,
+    /// A lossless stream ended before its pixels were complete.
+    WebpLosslessTruncated,
+    /// A lossless stream declared a prefix code that assigns no valid set
+    /// of codes, or used one its alphabet does not hold.
+    WebpLosslessInvalidCode,
+    /// A lossless stream repeated a transform, named one the format does
+    /// not define, or nested one inside another.
+    WebpLosslessInvalidTransform,
+    /// A lossless stream declared a colour cache wider than the format
+    /// permits.
+    WebpLosslessInvalidCacheBits,
+    /// A lossless backward reference reaches outside the pixels already
+    /// produced.
+    WebpLosslessInvalidReference,
+    /// A lossless stream declared a zero-sided picture, or one a transform
+    /// cannot cover.
+    WebpLosslessInvalidGeometry,
 }
 
 impl DecodeError {
@@ -770,6 +859,49 @@ impl DecodeError {
             Self::TiffFaxMissingSync => "TIFF fax row carries no end-of-line code",
             Self::TiffFaxUncompressedMode => "TIFF fax enters uncompressed mode",
             Self::TiffJpegGeometryMismatch => "TIFF JPEG strip or tile decodes to the wrong size",
+            Self::WebpBadSignature => "WEBP file carries no RIFF/WEBP form identifiers",
+            Self::WebpTruncated => "WEBP chunk or RIFF region runs past the end of the input",
+            Self::WebpInvalidChunkLayout => "WEBP chunk appears where the form does not permit one",
+            Self::WebpInvalidCanvas => "WEBP declares an invalid canvas",
+            Self::WebpFrameOutsideCanvas => "WEBP animation frame falls outside the canvas",
+            Self::WebpFrameGeometryMismatch => "WEBP animation frame decodes to the wrong size",
+            Self::WebpNoFrames => "WEBP animation declares no frames",
+            Self::WebpTooManyFrames => {
+                "WEBP animation declares more frames than the decoder accepts"
+            }
+            Self::WebpUnsupportedAlpha => "WEBP alpha chunk declares a reserved value",
+            Self::WebpAlphaGeometryMismatch => "WEBP alpha plane decodes to the wrong size",
+            Self::WebpLossyBadStartCode => "WEBP lossy bitstream carries no keyframe start code",
+            Self::WebpLossyInterframe => "WEBP lossy bitstream is an interframe",
+            Self::WebpLossyUnsupportedProfile => {
+                "WEBP lossy bitstream declares an undefined profile"
+            }
+            Self::WebpLossyReservedColourSpace => {
+                "WEBP lossy bitstream declares the reserved colour space"
+            }
+            Self::WebpLossyTruncated => "WEBP lossy bitstream ends before its picture is complete",
+            Self::WebpLossyInvalidPartitions => "WEBP lossy partition table does not fit its bytes",
+            Self::WebpLossyInvalidGeometry => "WEBP lossy bitstream declares an invalid size",
+            Self::WebpLosslessBadSignature => "WEBP lossless stream carries no signature byte",
+            Self::WebpLosslessUnsupportedVersion => {
+                "WEBP lossless stream declares an unknown version"
+            }
+            Self::WebpLosslessTruncated => {
+                "WEBP lossless stream ends before its picture is complete"
+            }
+            Self::WebpLosslessInvalidCode => {
+                "WEBP lossless stream holds an unassignable prefix code"
+            }
+            Self::WebpLosslessInvalidTransform => {
+                "WEBP lossless stream declares an invalid transform"
+            }
+            Self::WebpLosslessInvalidCacheBits => {
+                "WEBP lossless stream declares too wide a colour cache"
+            }
+            Self::WebpLosslessInvalidReference => {
+                "WEBP lossless reference reaches outside the picture"
+            }
+            Self::WebpLosslessInvalidGeometry => "WEBP lossless stream declares an invalid size",
         }
     }
 }
@@ -933,6 +1065,12 @@ impl RasterImage {
         &self.pixels
     }
 
+    /// Borrow the pixel bytes for writing, which is how a container that
+    /// carries its picture's alpha channel separately fills it in.
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
+
     /// Take ownership of the row-major RGBA8 pixel bytes (straight alpha).
     #[must_use]
     pub fn into_pixels(self) -> Vec<u8> {
@@ -978,6 +1116,9 @@ pub enum ImageFormat {
     /// or tiles over the sample layout, colour interpretation, predictor,
     /// and compression its own directory declares.
     Tiff,
+    /// A WEBP file: a RIFF form over the `VP8 ` lossy and `VP8L` lossless
+    /// bitstreams, the container's own alpha plane, and its animation.
+    Webp,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -1027,6 +1168,11 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
         .any(|signature| bytes.starts_with(signature))
     {
         return Some(ImageFormat::Tiff);
+    }
+    // Two parts with the RIFF size between them, so the format's own module
+    // answers this rather than `lib.rs` matching one constant.
+    if webp::has_signature(bytes) {
+        return Some(ImageFormat::Webp);
     }
     None
 }
@@ -1105,6 +1251,7 @@ pub fn probe_as(format: ImageFormat, bytes: &[u8]) -> Result<ImageInfo, DecodeEr
         ImageFormat::Ico => ico::probe(bytes)?,
         ImageFormat::Sprite => sprite::probe(bytes)?,
         ImageFormat::Tiff => tiff::probe(bytes)?,
+        ImageFormat::Webp => webp::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -1189,6 +1336,7 @@ pub fn decode_as(
         ImageFormat::Ico => ico::decode(bytes, limits),
         ImageFormat::Sprite => sprite::decode(bytes, limits),
         ImageFormat::Tiff => tiff::decode(bytes, limits),
+        ImageFormat::Webp => webp::decode(bytes, limits),
     }
 }
 
@@ -1227,13 +1375,17 @@ pub fn decode_as(
 /// is already the picture at that size, so nothing is scaled and nothing is
 /// resampled.
 ///
-/// # PNG, GIF, and BMP
+/// # Every other format
 ///
-/// None has a reduced-scale decode process — LZW and DEFLATE entropy coding
-/// and a padded row array do not separate into scale-selectable passes the
-/// way a block transform does — so for those this is exactly [`decode`],
-/// always at natural size, and the degradation above cannot apply. That is
-/// an honest property of those formats, not a gap this crate is missing.
+/// PNG, GIF, BMP, a sprite area, a TIFF's grid of strips and tiles, and both
+/// WEBP codecs have no reduced-scale decode process — entropy coding, a
+/// padded row array, and a tile grid do not separate into scale-selectable
+/// passes the way a block transform does — so for those this is exactly
+/// [`decode`], always at natural size, and the degradation above cannot
+/// apply. For WEBP the reason is sharper: both its codecs read
+/// full-resolution neighbours, so a coarser transform would decode a
+/// *different* picture rather than a softer one. That is an honest property
+/// of those formats, not a gap this crate is missing.
 ///
 /// The format is chosen by [`sniff`]; an unrecognised signature is refused
 /// as [`DecodeError::UnknownFormat`] before any format-specific parsing
@@ -1382,7 +1534,9 @@ enum Entries<'a> {
         served: bool,
     },
     /// A GIF's block chain, composited onto its retained canvas.
-    Gif(gif::Frames<'a>),
+    Gif(frames::Animation<gif::Chain<'a>>),
+    /// An animated WEBP's frame chain, composited onto its canvas.
+    Webp(frames::Animation<webp::Chain<'a>>),
     /// An icon container's directory of independent pictures.
     Ico(pages::Pages<ico::Directory<'a>>),
     /// A RISC OS sprite area's chain of independent pictures.
@@ -1450,21 +1604,11 @@ impl<'a> Sequence<'a> {
         limits: &DecodeLimits,
     ) -> Result<Self, DecodeError> {
         match format {
-            ImageFormat::Gif => {
-                let frames = gif::Frames::open(bytes, limits)?;
-                Ok(Self {
-                    info: SequenceInfo {
-                        format: ImageFormat::Gif,
-                        width: frames.width(),
-                        height: frames.height(),
-                        count: frames.count(),
-                        kind: SequenceKind::Animation {
-                            loop_count: frames.loop_count(),
-                        },
-                    },
-                    entries: Entries::Gif(frames),
-                })
-            }
+            ImageFormat::Gif => Ok(Self::animated(
+                ImageFormat::Gif,
+                gif::frames(bytes, limits)?,
+                Entries::Gif,
+            )),
             ImageFormat::Ico => {
                 let pages = ico::pages(bytes, limits)?;
                 Ok(Self::paged(ImageFormat::Ico, pages, Entries::Ico))
@@ -1480,6 +1624,36 @@ impl<'a> Sequence<'a> {
             ImageFormat::Png => Self::still(ImageFormat::Png, png::probe(bytes)?, bytes, limits),
             ImageFormat::Jpeg => Self::still(ImageFormat::Jpeg, jpeg::probe(bytes)?, bytes, limits),
             ImageFormat::Bmp => Self::still(ImageFormat::Bmp, bmp::probe(bytes)?, bytes, limits),
+            // The one format that is either kind, and says which.
+            ImageFormat::Webp => match webp::open(bytes, limits)? {
+                webp::Opened::Still { width, height } => {
+                    Self::still(ImageFormat::Webp, (width, height), bytes, limits)
+                }
+                webp::Opened::Animation(animation) => {
+                    Ok(Self::animated(ImageFormat::Webp, animation, Entries::Webp))
+                }
+            },
+        }
+    }
+
+    /// An animation, whose geometry is the canvas its frames composite onto.
+    fn animated<S: frames::FrameSource>(
+        format: ImageFormat,
+        animation: frames::Animation<S>,
+        entries: impl FnOnce(frames::Animation<S>) -> Entries<'a>,
+    ) -> Self {
+        let info = SequenceInfo {
+            format,
+            width: animation.width(),
+            height: animation.height(),
+            count: animation.count(),
+            kind: SequenceKind::Animation {
+                loop_count: animation.loop_count(),
+            },
+        };
+        Self {
+            info,
+            entries: entries(animation),
         }
     }
 
@@ -1545,7 +1719,6 @@ impl<'a> Sequence<'a> {
     /// caller that means to continue rewinds; one that does not simply
     /// reports the reason.
     pub fn next_frame(&mut self) -> Result<Option<Frame<'_>>, DecodeError> {
-        let (width, height) = (self.info.width, self.info.height);
         match &mut self.entries {
             Entries::Still {
                 bytes,
@@ -1571,19 +1744,8 @@ impl<'a> Sequence<'a> {
                     pixels: image.pixels(),
                 }))
             }
-            Entries::Gif(frames) => {
-                let index = frames.index();
-                if !frames.step()? {
-                    return Ok(None);
-                }
-                Ok(Some(Frame {
-                    index,
-                    width,
-                    height,
-                    delay_ns: frames.delay_ns(),
-                    pixels: frames.canvas(),
-                }))
-            }
+            Entries::Gif(animation) => step_frame(animation),
+            Entries::Webp(animation) => step_frame(animation),
             Entries::Ico(pages) => step_page(pages),
             Entries::Sprite(pages) => step_page(pages),
             Entries::Tiff(pages) => step_page(pages),
@@ -1609,7 +1771,6 @@ impl<'a> Sequence<'a> {
     ///
     /// Whichever refusal the entry's own decode raises.
     pub fn page(&mut self, index: u32) -> Result<Option<Frame<'_>>, DecodeError> {
-        let (width, height) = (self.info.width, self.info.height);
         match &mut self.entries {
             Entries::Still {
                 bytes,
@@ -1625,21 +1786,8 @@ impl<'a> Sequence<'a> {
                 }
                 Ok(page_frame(0, decoded.as_ref()))
             }
-            Entries::Gif(frames) => {
-                frames.rewind();
-                for _ in 0..=index {
-                    if !frames.step()? {
-                        return Ok(None);
-                    }
-                }
-                Ok(Some(Frame {
-                    index,
-                    width,
-                    height,
-                    delay_ns: frames.delay_ns(),
-                    pixels: frames.canvas(),
-                }))
-            }
+            Entries::Gif(animation) => addressed_frame(animation, index),
+            Entries::Webp(animation) => addressed_frame(animation, index),
             Entries::Ico(pages) => addressed_page(pages, index),
             Entries::Sprite(pages) => addressed_page(pages, index),
             Entries::Tiff(pages) => addressed_page(pages, index),
@@ -1655,11 +1803,46 @@ impl<'a> Sequence<'a> {
     pub fn rewind(&mut self) {
         match &mut self.entries {
             Entries::Still { served, .. } => *served = false,
-            Entries::Gif(frames) => frames.rewind(),
+            Entries::Gif(animation) => animation.rewind(),
+            Entries::Webp(animation) => animation.rewind(),
             Entries::Ico(pages) => pages.rewind(),
             Entries::Sprite(pages) => pages.rewind(),
             Entries::Tiff(pages) => pages.rewind(),
         }
+    }
+}
+
+/// Composite an animation's next frame and lend the canvas.
+fn step_frame<S: frames::FrameSource>(
+    animation: &mut frames::Animation<S>,
+) -> Result<Option<Frame<'_>>, DecodeError> {
+    let index = animation.index();
+    if !animation.step()? {
+        return Ok(None);
+    }
+    Ok(Some(canvas_frame(index, animation)))
+}
+
+/// Composite forward to an animation's frame at `index` and lend the canvas.
+fn addressed_frame<S: frames::FrameSource>(
+    animation: &mut frames::Animation<S>,
+    index: u32,
+) -> Result<Option<Frame<'_>>, DecodeError> {
+    if !animation.frame(index)? {
+        return Ok(None);
+    }
+    Ok(Some(canvas_frame(index, animation)))
+}
+
+/// Lend the composition canvas as a frame. Every frame of an animation is
+/// the whole canvas, so it carries the canvas geometry rather than its own.
+fn canvas_frame<S: frames::FrameSource>(index: u32, animation: &frames::Animation<S>) -> Frame<'_> {
+    Frame {
+        index,
+        width: animation.width(),
+        height: animation.height(),
+        delay_ns: animation.delay_ns(),
+        pixels: animation.canvas(),
     }
 }
 

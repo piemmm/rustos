@@ -1702,6 +1702,275 @@ fn mutate_tiff(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
     bytes
 }
 
+// ---------------------------------------------------------------------------
+// WEBP
+// ---------------------------------------------------------------------------
+
+/// The two halves of the WEBP form identifier, restated here because this
+/// harness only ever calls the crate's public API.
+const WEBP_RIFF: [u8; 4] = *b"RIFF";
+const WEBP_FORM: [u8; 4] = *b"WEBP";
+
+/// The byte a lossless bitstream opens with.
+const WEBP_LOSSLESS_SIGNATURE: u8 = 0x2F;
+
+/// The three bytes a lossy keyframe carries after its frame tag.
+const WEBP_START_CODE: [u8; 3] = [0x9D, 0x01, 0x2A];
+
+/// A bit stream written least significant bit first, as a lossless
+/// bitstream packs one.
+struct WebpBits {
+    bytes: Vec<u8>,
+    pos: usize,
+}
+
+impl WebpBits {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    fn put(&mut self, value: u32, count: u32) {
+        for index in 0..count {
+            if self.pos.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            let at = self.pos / 8;
+            self.bytes[at] |= u8::try_from((value >> index) & 1).unwrap_or(0) << (self.pos % 8);
+            self.pos += 1;
+        }
+    }
+}
+
+/// A prefix code naming exactly one symbol, which costs no bits to read.
+fn webp_lone(bits: &mut WebpBits, symbol: u32) {
+    bits.put(1, 1);
+    bits.put(0, 1);
+    if symbol < 2 {
+        bits.put(0, 1);
+        bits.put(symbol, 1);
+    } else {
+        bits.put(1, 1);
+        bits.put(symbol, 8);
+    }
+}
+
+/// The five prefix codes of one group, each naming a single symbol.
+fn webp_flat_group(bits: &mut WebpBits, colour: [u8; 4]) {
+    for value in [colour[1], colour[0], colour[2], colour[3]] {
+        webp_lone(bits, u32::from(value));
+    }
+    webp_lone(bits, 0);
+}
+
+/// A whole lossless bitstream of one colour.
+fn webp_lossless(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+    let mut bits = WebpBits::new();
+    bits.put(u32::from(WEBP_LOSSLESS_SIGNATURE), 8);
+    bits.put(width - 1, 14);
+    bits.put(height - 1, 14);
+    bits.put(0, 1);
+    bits.put(0, 3);
+    bits.put(0, 1);
+    bits.put(0, 1);
+    bits.put(0, 1);
+    let colour = [
+        u8::try_from(rng.below(256)).unwrap_or(0),
+        u8::try_from(rng.below(256)).unwrap_or(0),
+        u8::try_from(rng.below(256)).unwrap_or(0),
+        u8::try_from(rng.below(256)).unwrap_or(0),
+    ];
+    webp_flat_group(&mut bits, colour);
+    bits.bytes
+}
+
+/// A lossless bitstream over one plane, as a compressed alpha chunk carries
+/// one: no signature and no geometry of its own.
+fn webp_alpha_stream(value: u8) -> Vec<u8> {
+    let mut bits = WebpBits::new();
+    bits.put(0, 1);
+    bits.put(0, 1);
+    bits.put(0, 1);
+    webp_flat_group(&mut bits, [0, value, 0, 0]);
+    bits.bytes
+}
+
+/// A lossy keyframe whose uncompressed header is valid and whose
+/// compressed partition is random bytes.
+///
+/// The compressed part is an *arithmetic* code, so any byte string decodes
+/// to some sequence of boolean choices: a random partition therefore walks
+/// the whole header — segmentation, the loop-filter and quantiser deltas,
+/// every one of the token-probability update flags, the mode trees, and the
+/// coefficient tokens — without the harness needing to restate a single one
+/// of the format's probability tables. It reaches far more of the decoder
+/// than a flat frame would, and the picture it produces is one the decoder
+/// is free to refuse.
+fn webp_lossy(rng: &mut Lcg, width: u32, height: u32) -> Vec<u8> {
+    let mut partition = vec![0u8; 24 + rng.below(200)];
+    rng.fill(&mut partition);
+    let mut out = Vec::new();
+    // The frame tag: a keyframe, profile zero, shown, and the length of the
+    // first partition.
+    let split = 1 + rng.below(partition.len());
+    let tag = u32::try_from(split).unwrap_or(0) << 5 | (1 << 4);
+    out.push(u8::try_from(tag & 0xFF).unwrap_or(0));
+    out.push(u8::try_from((tag >> 8) & 0xFF).unwrap_or(0));
+    out.push(u8::try_from((tag >> 16) & 0xFF).unwrap_or(0));
+    out.extend_from_slice(&WEBP_START_CODE);
+    out.extend_from_slice(&u16::try_from(width).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&u16::try_from(height).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&partition);
+    out
+}
+
+/// One RIFF chunk, padded to an even length.
+fn webp_chunk(id: [u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = id.to_vec();
+    out.extend_from_slice(&u32::try_from(payload.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        out.push(0);
+    }
+    out
+}
+
+/// A whole RIFF form over the chunks given.
+fn webp_riff(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = WEBP_FORM.to_vec();
+    for chunk in chunks {
+        body.extend_from_slice(chunk);
+    }
+    let mut out = WEBP_RIFF.to_vec();
+    out.extend_from_slice(&u32::try_from(body.len()).unwrap_or(0).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The extended header's payload.
+fn webp_extended(flags: u8, width: u32, height: u32) -> Vec<u8> {
+    let mut out = vec![flags, 0, 0, 0];
+    out.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    out.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    out
+}
+
+/// Build one structurally valid, randomised WEBP that genuinely decodes: a
+/// simple lossless file, an extended still with an alpha plane, or an
+/// animation.
+fn build_valid_webp(rng: &mut Lcg) -> Vec<u8> {
+    let width = 8 + 8 * u32::try_from(rng.below(3)).unwrap_or(0);
+    let height = 8 + 8 * u32::try_from(rng.below(3)).unwrap_or(0);
+    match rng.below(4) {
+        0 => webp_riff(&[webp_chunk(*b"VP8L", &webp_lossless(rng, width, height))]),
+        1 => webp_riff(&[
+            webp_chunk(*b"VP8X", &webp_extended(0, width, height)),
+            webp_chunk(*b"VP8L", &webp_lossless(rng, width, height)),
+        ]),
+        2 => webp_riff(&[
+            webp_chunk(*b"VP8X", &webp_extended(0x2C, width, height)),
+            webp_chunk(*b"ICCP", &[1, 2, 3]),
+            webp_chunk(*b"VP8L", &webp_lossless(rng, width, height)),
+            webp_chunk(*b"XMP ", &[4]),
+        ]),
+        _ => {
+            let frames = 1 + rng.below(3);
+            let mut chunks = vec![
+                webp_chunk(*b"VP8X", &webp_extended(0x02, width, height)),
+                webp_chunk(
+                    *b"ANIM",
+                    &[0, 0, 0, 0, u8::try_from(rng.below(4)).unwrap_or(0), 0],
+                ),
+            ];
+            for _ in 0..frames {
+                let mut body = Vec::new();
+                let duration = u32::try_from(rng.below(100)).unwrap_or(0);
+                for value in [0u32, 0, width - 1, height - 1, duration] {
+                    body.extend_from_slice(&value.to_le_bytes()[..3]);
+                }
+                body.push(u8::try_from(rng.below(4)).unwrap_or(0));
+                body.extend_from_slice(&webp_chunk(*b"VP8L", &webp_lossless(rng, width, height)));
+                chunks.push(webp_chunk(*b"ANMF", &body));
+            }
+            webp_riff(&chunks)
+        }
+    }
+}
+
+/// Build a WEBP carrying a lossy bitstream, with or without an alpha plane.
+///
+/// Its picture is whatever the random partition decodes to, or a refusal, so
+/// this feeds the mutation sweep rather than the pristine corpus.
+fn build_lossy_webp(rng: &mut Lcg) -> Vec<u8> {
+    let width = 16 + 16 * u32::try_from(rng.below(2)).unwrap_or(0);
+    let height = 16 + 16 * u32::try_from(rng.below(2)).unwrap_or(0);
+    let bitstream = webp_chunk(*b"VP8 ", &webp_lossy(rng, width, height));
+    if rng.below(2) == 0 {
+        return webp_riff(&[bitstream]);
+    }
+    let value = u8::try_from(rng.below(256)).unwrap_or(0);
+    let filter = u8::try_from(rng.below(4)).unwrap_or(0);
+    let method = u8::try_from(rng.below(2)).unwrap_or(0);
+    let mut alpha = vec![method | (filter << 2)];
+    if method == 0 {
+        let count = usize::try_from(width * height).unwrap_or(0);
+        alpha.extend(core::iter::repeat_n(value, count));
+    } else {
+        alpha.extend_from_slice(&webp_alpha_stream(value));
+    }
+    webp_riff(&[
+        webp_chunk(*b"VP8X", &webp_extended(0x10, width, height)),
+        webp_chunk(*b"ALPH", &alpha),
+        bitstream,
+    ])
+}
+
+/// The byte range of every chunk of a WEBP form, for a swap that reorders
+/// two of them.
+///
+/// The chunks are contiguous, so the whole list satisfies
+/// [`swap_two_ranges`]' covering requirement.
+fn webp_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    let mut pos = WEBP_RIFF.len() + 4 + WEBP_FORM.len();
+    while pos + 8 <= bytes.len() {
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]);
+        let Some(end) = usize::try_from(size)
+            .ok()
+            .and_then(|size| pos.checked_add(8 + size + size % 2))
+        else {
+            break;
+        };
+        if end > bytes.len() {
+            break;
+        }
+        bounds.push((pos, end));
+        pos = end;
+    }
+    bounds
+}
+
+/// Structurally mutate a pristine WEBP: maybe reorder two chunks, then flip
+/// a handful of random bits.
+fn mutate_webp(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    let bounds = webp_bounds(&bytes);
+    if rng.below(2) == 0 {
+        if let Some(rebuilt) = swap_two_ranges(rng, &bytes, &bounds) {
+            bytes = rebuilt;
+        }
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
 // -----------------------------------------------------------------------
 // Mutation and invariants
 // -----------------------------------------------------------------------
@@ -1928,6 +2197,7 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
                 &CUR_HEADER[..],
             ];
             prefixes.extend(TIFF_HEADERS.iter().map(|header| &header[..]));
+            prefixes.push(&WEBP_SIGNATURE_PREFIX[..]);
             for prefix in prefixes {
                 buf.clear();
                 buf.extend_from_slice(prefix);
@@ -2229,5 +2499,61 @@ fn the_tiff_generator_produces_a_valid_corpus() {
             seen += 1;
         }
         assert_eq!(seen, count, "a fixture decoded a different page count");
+    }
+}
+
+/// A `RIFF` header whose declared region covers the rest of a 300-byte body,
+/// so random bytes behind it reach the container's chunk walk rather than
+/// being refused for a region that is not there.
+const WEBP_SIGNATURE_PREFIX: [u8; 12] = [
+    b'R', b'I', b'F', b'F', 0x2C, 0x01, 0, 0, b'W', b'E', b'B', b'P',
+];
+
+#[test]
+fn mutated_valid_webp_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_webp_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = if rng.below(2) == 0 {
+                build_valid_webp(&mut rng)
+            } else {
+                build_lossy_webp(&mut rng)
+            };
+            let mutated = mutate_webp(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_webp_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_webp_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = DecodeLimits::new(256, 256, 256 * 256, 1 << 16);
+    for _ in 0..DRAWS {
+        let bytes = build_valid_webp(&mut rng);
+        assert_eq!(sniff(&bytes), Some(ImageFormat::Webp));
+        let mut sequence =
+            Sequence::open(&bytes, &limits).expect("a pristine generated fixture failed to open");
+        let count = sequence.info().count();
+        let mut seen = 0u32;
+        while sequence
+            .next_frame()
+            .expect("a pristine generated fixture failed to decode a frame")
+            .is_some()
+        {
+            seen += 1;
+        }
+        assert_eq!(seen, count, "a fixture decoded a different frame count");
     }
 }

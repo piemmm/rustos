@@ -37,6 +37,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::huffman::{Canonical, MAX_CODE_BITS};
 use crate::{DecodeError, DecodeLimits, FitBox, RasterImage};
 
 // ---------------------------------------------------------------------
@@ -366,14 +367,12 @@ struct HuffmanTable {
     /// an indexed load the compiler can prove in range against the
     /// [`FAST_BITS`]-bit window that indexes it.
     fast: [u16; FAST_SLOTS],
-    /// The standard `mincode`/`maxcode`/`valptr` slow-path decode arrays
-    /// (ITU-T T.81 Annex F.2.2.3, Figure F.16), indexed by code length
-    /// `1..=16`; `maxcode[len] == -1` means no code of that length exists.
-    mincode: [i32; 17],
-    maxcode: [i32; 17],
-    valptr: [usize; 17],
-    /// The symbols (`HUFFVAL`), in the same code order [`Self::valptr`]
-    /// indexes into.
+    /// The canonical assignment the slow-path search walks (ITU-T T.81
+    /// Annex F.2.2.3, Figure F.16, which is the construction the shared
+    /// table performs).
+    codes: Canonical,
+    /// The symbols (`HUFFVAL`), in the code order [`Self::codes`] indexes
+    /// into.
     symbols: Vec<u8>,
 }
 
@@ -382,50 +381,36 @@ impl HuffmanTable {
     /// (`bits[i]` is the count of codes of length `i + 1`) and its symbol
     /// list, in code order (ITU-T T.81 Annex C.2).
     fn build(bits: &[u8; 16], symbols: &[u8]) -> Result<Self, DecodeError> {
-        let mut mincode = [0i32; 17];
-        let mut maxcode = [-1i32; 17];
-        let mut valptr = [0usize; 17];
-        let mut fast = [FAST_MISS; FAST_SLOTS];
-
-        let mut code: u32 = 0;
-        let mut k: usize = 0;
-        for len in 1u32..=16 {
-            let count = usize::from(bits[usize::try_from(len - 1).unwrap_or(0)]);
-            if count > 0 {
-                valptr[usize::try_from(len).unwrap_or(0)] = k;
-                mincode[usize::try_from(len).unwrap_or(0)] =
-                    i32::try_from(code).unwrap_or(i32::MAX);
-            }
-            for _ in 0..count {
-                let symbol = *symbols.get(k).ok_or(DecodeError::JpegInvalidHuffmanTable)?;
-                if len <= FAST_BITS {
-                    fill_fast_entries(&mut fast, code, len, symbol);
-                }
-                // A canonical code can never need more than 16 bits; a
-                // `code` that has already grown past what `len` bits can
-                // hold means `bits` describes an impossible assignment
-                // (too many codes of an early length starve the codes
-                // that must follow), which this decoder refuses rather
-                // than silently building a broken table.
-                if code >= (1u32 << len) {
-                    return Err(DecodeError::JpegInvalidHuffmanTable);
-                }
-                code += 1;
-                k += 1;
-            }
-            if count > 0 {
-                maxcode[usize::try_from(len).unwrap_or(0)] = i32::try_from(code - 1).unwrap_or(-1);
-            }
-            code <<= 1;
-        }
-        if k != symbols.len() {
+        let counts: [u32; 16] = core::array::from_fn(|len| u32::from(bits[len]));
+        // An assignment the code space cannot hold, or one whose symbol
+        // list does not match the counts it declares, is refused rather
+        // than silently building a broken table.
+        let codes = Canonical::build(&counts).ok_or(DecodeError::JpegInvalidHuffmanTable)?;
+        let total: u32 = counts.iter().sum();
+        if usize::try_from(total).unwrap_or(usize::MAX) != symbols.len() {
             return Err(DecodeError::JpegInvalidHuffmanTable);
+        }
+        let mut fast = [FAST_MISS; FAST_SLOTS];
+        for len in 1..=usize::try_from(FAST_BITS).unwrap_or(0) {
+            let Some(run) = codes.run(len) else {
+                continue;
+            };
+            for offset in 0..run.count {
+                let index = usize::try_from(run.first_symbol + offset).unwrap_or(usize::MAX);
+                let symbol = *symbols
+                    .get(index)
+                    .ok_or(DecodeError::JpegInvalidHuffmanTable)?;
+                fill_fast_entries(
+                    &mut fast,
+                    run.first_code + offset,
+                    u32::try_from(len).unwrap_or(FAST_BITS),
+                    symbol,
+                );
+            }
         }
         Ok(Self {
             fast,
-            mincode,
-            maxcode,
-            valptr,
+            codes,
             symbols: symbols.to_vec(),
         })
     }
@@ -445,17 +430,12 @@ impl HuffmanTable {
                 return Ok(symbol);
             }
         }
-        let mut code: i32 = 0;
-        for len in 1usize..=16 {
-            code = (code << 1) | i32::try_from(bits.next_bit()?).unwrap_or(0);
-            if self.maxcode[len] >= 0 && code <= self.maxcode[len] {
-                let offset = usize::try_from(code - self.mincode[len]).unwrap_or(usize::MAX);
-                let index = self.valptr[len]
-                    .checked_add(offset)
-                    .ok_or(DecodeError::JpegHuffmanCodeNotFound)?;
+        let mut walk = Canonical::walk();
+        while walk.len() < MAX_CODE_BITS {
+            if let Some(index) = walk.push(&self.codes, bits.next_bit()?) {
                 return self
                     .symbols
-                    .get(index)
+                    .get(usize::try_from(index).unwrap_or(usize::MAX))
                     .copied()
                     .ok_or(DecodeError::JpegHuffmanCodeNotFound);
             }

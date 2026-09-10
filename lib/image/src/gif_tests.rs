@@ -1007,7 +1007,7 @@ fn a_malformed_extension_block_size_is_refused() {
 fn more_frames_than_the_containment_bound_are_refused() {
     let body = FrameSpec::whole(1, 1, &[0u8]).bytes();
     let mut gif = header(1, 1, true);
-    for _ in 0..=super::MAX_FRAMES {
+    for _ in 0..=crate::MAX_ANIMATION_FRAMES {
         gif.extend_from_slice(&body);
     }
     gif.push(0x3B);

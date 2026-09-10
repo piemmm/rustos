@@ -31,6 +31,7 @@ use core::ops::Range;
 
 use tairix_util::fallible;
 
+use crate::frames::{Animation, FrameSource};
 use crate::lzw::{CodeSource, Lzw, Widen};
 use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
@@ -80,14 +81,6 @@ const PALETTE_ENTRY_LEN: usize = 3;
 
 /// Nanoseconds in the hundredth of a second a GIF delay counts in.
 const DELAY_TICK_NS: u64 = 10_000_000;
-
-/// Frames one stream may declare.
-///
-/// A fixed containment bound rather than a capacity: a frame block costs about
-/// ten bytes, so a small file can declare enormous numbers of them, and no
-/// viewer has use for an animation longer than this. It bounds the count the
-/// structural pass accepts; nothing is allocated per frame.
-const MAX_FRAMES: u32 = 16_384;
 
 /// A forward byte reader over the whole stream, refusing every read that
 /// would run past the end.
@@ -370,7 +363,7 @@ fn scan(bytes: &[u8], screen: &Screen<'_>, first_block: usize) -> Result<Layout,
                 reader.pos = descriptor.data;
                 reader.skip_sub_blocks()?;
                 frames = frames.saturating_add(1);
-                if frames > MAX_FRAMES {
+                if frames > crate::MAX_ANIMATION_FRAMES {
                     return Err(DecodeError::GifTooManyFrames);
                 }
             }
@@ -546,15 +539,14 @@ fn interlaced_row(stream_row: u32, height: u32) -> u32 {
     height.saturating_sub(1)
 }
 
-/// A GIF stream's frames, composited in order.
-pub(crate) struct Frames<'a> {
+/// A GIF stream's block chain, composited onto its retained canvas.
+pub(crate) struct Chain<'a> {
     bytes: &'a [u8],
     width: u32,
     height: u32,
     global_palette: Option<&'a [u8]>,
     first_block: usize,
     cursor: usize,
-    index: u32,
     count: u32,
     loop_count: Option<u32>,
     /// The composition canvas: straight-alpha RGBA8, screen-sized.
@@ -566,29 +558,17 @@ pub(crate) struct Frames<'a> {
     saved: Vec<u8>,
     /// The disposal the last frame drawn asks for, applied before the next.
     pending: Option<(Disposal, Rect)>,
-    /// The refusal a step stopped at, if one did.
-    ///
-    /// A part-way refusal leaves the previous frame's disposal applied, part
-    /// of the refused frame's pixels on the canvas, and its restore snapshot
-    /// taken from that state, so nothing there describes a whole frame. Every
-    /// refusal this decoder raises is deterministic, so a retry would re-read
-    /// and re-refuse the same frame anyway; recording it makes stepping after
-    /// a refusal fail closed by construction rather than by that argument —
-    /// which is what a format allocating per frame, and so able to refuse
-    /// mid-composite and then succeed, will need.
-    failed: Option<DecodeError>,
     lzw: Lzw,
-    delay_ns: u64,
 }
 
-impl<'a> Frames<'a> {
+impl<'a> Chain<'a> {
     /// Validate a stream's structure and prepare its canvas, decoding no
     /// pixels.
     ///
     /// The screen geometry is weighed against `limits` before the canvas is
     /// allocated, so a stream that lies about its size cannot make this
     /// reserve memory proportional to the lie.
-    pub(crate) fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
+    fn open(bytes: &'a [u8], limits: &DecodeLimits) -> Result<Self, DecodeError> {
         let (screen, first_block) = read_screen(bytes)?;
         limits.check(screen.width, screen.height)?;
         let layout = scan(bytes, &screen, first_block)?;
@@ -606,78 +586,19 @@ impl<'a> Frames<'a> {
             global_palette: screen.palette,
             first_block,
             cursor: first_block,
-            index: 0,
             count: layout.frames,
             loop_count: layout.loop_count,
             canvas: fallible::filled(canvas_len, 0u8).ok_or(DecodeError::OutOfMemory)?,
             indices: Vec::new(),
             saved: Vec::new(),
             pending: None,
-            failed: None,
             lzw: Lzw::new().ok_or(DecodeError::OutOfMemory)?,
-            delay_ns: 0,
         })
     }
 
-    pub(crate) const fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub(crate) const fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub(crate) const fn count(&self) -> u32 {
-        self.count
-    }
-
-    /// How many frames have been stepped to, which is the next one's index.
-    pub(crate) const fn index(&self) -> u32 {
-        self.index
-    }
-
-    pub(crate) const fn loop_count(&self) -> Option<u32> {
-        self.loop_count
-    }
-
-    /// The delay the frame most recently stepped to declares, in nanoseconds.
-    pub(crate) const fn delay_ns(&self) -> u64 {
-        self.delay_ns
-    }
-
-    /// The composited canvas as it stands.
-    pub(crate) fn canvas(&self) -> &[u8] {
-        &self.canvas
-    }
-
-    /// Restart at the first frame, clearing the canvas.
-    pub(crate) fn rewind(&mut self) {
-        self.canvas.fill(0);
-        self.cursor = self.first_block;
-        self.index = 0;
-        self.pending = None;
-        self.failed = None;
-        self.delay_ns = 0;
-    }
-
-    /// Composite the next frame onto the canvas, answering `false` once the
-    /// chain is exhausted.
-    ///
-    /// A refusal is remembered and repeated until [`Self::rewind`]: see
-    /// [`Self::failed`].
-    pub(crate) fn step(&mut self) -> Result<bool, DecodeError> {
-        if let Some(failed) = &self.failed {
-            return Err(failed.clone());
-        }
-        if self.index >= self.count {
-            return Ok(false);
-        }
-        self.advance()
-            .inspect_err(|err| self.failed = Some(err.clone()))
-    }
-
-    /// One step, with no memory of a refusal: [`Self::step`] records it.
-    fn advance(&mut self) -> Result<bool, DecodeError> {
+    /// Composite the next frame onto the canvas, answering the delay it
+    /// declares.
+    fn composite_next(&mut self) -> Result<u64, DecodeError> {
         self.dispose();
         let mut control = Control::DEFAULT;
         let mut reader = Reader::new(self.bytes, self.cursor);
@@ -694,10 +615,8 @@ impl<'a> Frames<'a> {
                         self.save(descriptor.rect)?;
                     }
                     self.cursor = self.draw(&descriptor, control)?;
-                    self.index += 1;
-                    self.delay_ns = control.delay_ns;
                     self.pending = Some((control.disposal, descriptor.rect));
-                    return Ok(true);
+                    return Ok(control.delay_ns);
                 }
                 EXTENSION_INTRODUCER => match reader.byte()? {
                     LABEL_GRAPHIC_CONTROL => control = read_graphic_control(&mut reader)?,
@@ -876,12 +795,52 @@ impl<'a> Frames<'a> {
     }
 }
 
+impl FrameSource for Chain<'_> {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn count(&self) -> u32 {
+        self.count
+    }
+
+    fn loop_count(&self) -> Option<u32> {
+        self.loop_count
+    }
+
+    fn canvas(&self) -> &[u8] {
+        &self.canvas
+    }
+
+    fn advance(&mut self, _index: u32) -> Result<u64, DecodeError> {
+        self.composite_next()
+    }
+
+    fn restart(&mut self) {
+        self.canvas.fill(0);
+        self.cursor = self.first_block;
+        self.pending = None;
+    }
+}
+
+/// Validate a stream's structure and prepare to composite its frames.
+pub(crate) fn frames<'a>(
+    bytes: &'a [u8],
+    limits: &DecodeLimits,
+) -> Result<Animation<Chain<'a>>, DecodeError> {
+    Ok(Animation::new(Chain::open(bytes, limits)?))
+}
+
 /// Decode a GIF's first frame at the logical screen's size.
 ///
 /// A still consumer — an icon, a wallpaper — wants one picture, and the first
 /// composited frame is the one the format shows first.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-    let mut frames = Frames::open(bytes, limits)?;
+    let mut frames = frames(bytes, limits)?;
     if !frames.step()? {
         return Err(DecodeError::GifNoFrames);
     }
