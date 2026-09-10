@@ -5,9 +5,10 @@ use tairix_reclaim::CachedBytes;
 use crate::color::{Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::Paint;
+use crate::resample::Region;
 use crate::round::round_rect_coverage;
-use crate::scan::FillRule;
-use crate::surface::{Surface, SUBPIXEL};
+use crate::scan::{FillRule, MAX_DRAWING_EXTENT};
+use crate::surface::{layered_factor, Surface, LAYERED_TARGET_SIDE, SUBPIXEL};
 
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
@@ -1914,6 +1915,221 @@ fn a_large_layered_composite_is_painted_without_enlargement() {
     let mut direct = Surface::new(300, 300).expect("allocates");
     paint(&mut direct);
     assert_eq!(layered, direct);
+}
+
+// ---- windowed vector artwork ----------------------------------------
+
+/// The whole rectangle of a `width`×`height` drawing.
+fn drawing(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+}
+
+/// One filled shape of a test motif: its contours, rule, and paint.
+type MotifLayer = (
+    alloc::vec::Vec<alloc::vec::Vec<(i32, i32)>>,
+    FillRule,
+    Paint,
+);
+
+/// Two overlapping shapes, one with a hole, so a windowed fill that got the
+/// placement or the fill rule wrong cannot match the whole by coincidence.
+fn motif() -> [MotifLayer; 2] {
+    let ring = alloc::vec![
+        alloc::vec![(2, 2), (18, 2), (18, 18), (2, 18)],
+        alloc::vec![(7, 7), (13, 7), (13, 13), (7, 13)],
+    ];
+    let wedge = alloc::vec![alloc::vec![(0, 20), (20, 6), (20, 20)]];
+    [
+        (ring, FillRule::EvenOdd, Paint::Solid(BLUE)),
+        (wedge, FillRule::NonZero, Paint::Solid(RED)),
+    ]
+}
+
+/// `motif` painted across `over` of whatever surface it is given.
+fn paint_motif(surface: &mut Surface, over: Region) {
+    for (contours, rule, paint) in &motif() {
+        surface.fill_contours_over(over, contours, 20, *rule, paint);
+    }
+}
+
+#[test]
+fn a_window_of_a_drawing_is_exactly_that_rectangle_of_the_whole() {
+    // The property a zoomed vector viewer rests on. Checked at a
+    // magnification whose window is larger than the seam-resolution
+    // threshold, so the whole and the window agree about the enlargement
+    // too.
+    // Both sides of the seam-resolution threshold, because a drawing under
+    // it is painted enlarged and averaged back down: the window has to
+    // agree with the whole through that too, which is what says the
+    // enlarged origin and drawing rectangle were scaled together.
+    for (width, height) in [(300u32, 260u32), (60u32, 48u32)] {
+        let whole = Surface::layered_window(
+            (width, height),
+            drawing(width, height),
+            motif().len(),
+            paint_motif,
+        )
+        .expect("allocates");
+        for window in [
+            Region {
+                x: 0,
+                y: 0,
+                width: 41,
+                height: 37,
+            },
+            Region {
+                x: width / 3,
+                y: height / 4,
+                width: 17,
+                height: 11,
+            },
+            Region {
+                x: width - 1,
+                y: height - 1,
+                width: 1,
+                height: 1,
+            },
+        ] {
+            let cut = Surface::layered_window((width, height), window, motif().len(), paint_motif)
+                .expect("allocates");
+            assert_eq!((cut.width(), cut.height()), (window.width, window.height));
+            for y in 0..window.height {
+                for x in 0..window.width {
+                    assert_eq!(
+                        cut.get(x, y),
+                        whole.get(window.x + x, window.y + y),
+                        "{width}x{height} {window:?} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn an_enlarged_drawing_stays_inside_the_placeable_range() {
+    // What lets `layered_window` check the drawing extent once rather than
+    // re-checking whatever the seam resolution scaled it to: the factor is
+    // the target side over the drawing's own, so the enlarged drawing never
+    // grows past that target.
+    for side in [0u32, 1, 2, 63, 64, 65, 127, 255, 256, 257, 4096, u32::MAX] {
+        let factor = layered_factor(side, 8);
+        assert!(
+            side.saturating_mul(factor) <= LAYERED_TARGET_SIDE.max(side),
+            "side {side} enlarged by {factor}"
+        );
+        assert!(side.saturating_mul(factor) <= MAX_DRAWING_EXTENT.max(side));
+    }
+}
+
+#[test]
+fn a_window_of_a_magnification_no_buffer_could_hold_still_draws() {
+    // A viewer zoomed to a picture of a hundred billion pixels: the window
+    // has to cost the window, so this can only succeed by never sizing
+    // anything from the drawing. The rectangle sits inside the wedge, which
+    // at that magnification covers it entirely.
+    let extent = 320_000;
+    let window = Region {
+        x: extent / 2,
+        y: extent - 64,
+        width: 48,
+        height: 16,
+    };
+    let cut = Surface::layered_window((extent, extent), window, motif().len(), paint_motif)
+        .expect("allocates");
+    for y in 0..window.height {
+        for x in 0..window.width {
+            assert_eq!(cut.get(x, y), Some(RED.premultiply()), "at ({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_window_outside_its_drawing_is_refused() {
+    for window in [
+        Region {
+            x: 4,
+            y: 0,
+            width: 7,
+            height: 4,
+        },
+        Region {
+            x: 0,
+            y: 4,
+            width: 10,
+            height: 1,
+        },
+        Region {
+            x: u32::MAX,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+    ] {
+        assert!(
+            Surface::layered_window((10, 4), window, 2, paint_motif).is_none(),
+            "{window:?}"
+        );
+    }
+}
+
+#[test]
+fn a_drawing_larger_than_the_converter_can_place_is_refused() {
+    // Past this the artwork's vertices would be clamped, so the answer
+    // would be a distorted picture rather than a refused one.
+    let window = Region {
+        x: 0,
+        y: 0,
+        width: 8,
+        height: 8,
+    };
+    assert!(
+        Surface::layered_window(
+            (MAX_DRAWING_EXTENT, MAX_DRAWING_EXTENT),
+            window,
+            2,
+            paint_motif
+        )
+        .is_some(),
+        "the bound itself is placeable"
+    );
+    assert!(Surface::layered_window(
+        (MAX_DRAWING_EXTENT + 1, MAX_DRAWING_EXTENT),
+        window,
+        2,
+        paint_motif
+    )
+    .is_none());
+    assert!(Surface::layered_window(
+        (MAX_DRAWING_EXTENT, MAX_DRAWING_EXTENT + 1),
+        window,
+        2,
+        paint_motif
+    )
+    .is_none());
+}
+
+#[test]
+fn a_whole_window_fill_is_the_plain_design_grid_fill() {
+    // `fill_contours` must stay exactly the case where the stated rectangle
+    // is the buffer's own, or the two paths could drift.
+    let triangle = alloc::vec![alloc::vec![(1, 1), (19, 5), (7, 18)]];
+    let mut stated = Surface::new(23, 17).expect("allocates");
+    stated.fill_contours_over(
+        drawing(23, 17),
+        &triangle,
+        20,
+        FillRule::NonZero,
+        &Paint::Solid(BLUE),
+    );
+    let mut plain = Surface::new(23, 17).expect("allocates");
+    plain.fill_contours(&triangle, 20, FillRule::NonZero, &Paint::Solid(BLUE));
+    assert_eq!(stated, plain);
 }
 
 // ---- row bands ------------------------------------------------------

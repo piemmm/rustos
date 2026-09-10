@@ -35,7 +35,7 @@ use crate::dither::DitherRow;
 use crate::paint::Paint;
 use crate::resample::{resample_pixels, Region, ResampleError};
 use crate::round::round_rect_coverage;
-use crate::scan::{FillRule, SampleSpace, ScanFill};
+use crate::scan::{FillRule, SampleSpace, ScanFill, MAX_DRAWING_EXTENT};
 
 /// Where one span of a rounded-rectangle paint lands and what it does there:
 /// the span's own position on the surface — which is where its ordered dither
@@ -281,8 +281,13 @@ impl Surface {
     /// stretches across whatever surface it is given. Enlarging is a quality
     /// improvement, not a requirement: a larger buffer that cannot be
     /// allocated simply degrades to painting at the plain size. `None` means
-    /// the plain surface itself could not be allocated, so the caller falls
-    /// back to a smaller size or omits the artwork rather than crashing.
+    /// the plain surface itself could not be allocated — or the requested
+    /// size is past [`MAX_DRAWING_EXTENT`], where a design-grid fill's
+    /// vertices would be clamped — so the caller falls back to a smaller size
+    /// or omits the artwork rather than being handed a distorted one.
+    ///
+    /// A zero side is a legal, empty surface, exactly as it is for
+    /// [`new`](Self::new).
     #[must_use]
     pub fn layered(
         width: u32,
@@ -290,20 +295,87 @@ impl Surface {
         layers: usize,
         paint: impl FnOnce(&mut Self),
     ) -> Option<Self> {
-        let factor = layered_factor(width.max(height), layers);
-        let enlarged = width
-            .checked_mul(factor)
-            .zip(height.checked_mul(factor))
-            .filter(|_| factor > 1)
-            .and_then(|(w, h)| Self::new(w, h));
-        if let Some(mut surface) = enlarged {
-            paint(&mut surface);
-            surface.averaged(factor)
-        } else {
-            let mut surface = Self::new(width, height)?;
-            paint(&mut surface);
-            Some(surface)
+        Self::layered_window(
+            (width, height),
+            Region {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            layers,
+            |surface, _| paint(surface),
+        )
+    }
+
+    /// Paint a stack of `layers` filled shapes into a fresh surface holding
+    /// `window` of a drawing that is `extent` pixels, resolving the seams
+    /// between them exactly as [`layered`](Self::layered) does.
+    ///
+    /// This is how a *zoomed* piece of vector artwork is drawn. Vector
+    /// artwork has no natural pixel size, so a viewer showing it magnified
+    /// asks for the drawing at the extent it is magnified to — which is
+    /// routinely far larger than the screen, and often larger than memory —
+    /// and for the one rectangle of it the window is showing. Rasterising
+    /// the whole drawing and cutting the rectangle out would cost the
+    /// magnification; this costs the rectangle, so the price of zooming in
+    /// is flat.
+    ///
+    /// `paint` is handed the surface and the drawing rectangle the artwork
+    /// fills, to pass to
+    /// [`fill_contours_over`](Self::fill_contours_over): both are already
+    /// scaled by whatever enlargement the seam resolution chose, so a caller
+    /// never computes either. Coordinates inside `paint` are the drawing's,
+    /// as [`with_origin`](Self::with_origin) states, and every write outside
+    /// the window is dropped.
+    ///
+    /// `None` when the window is not a rectangle of the extent, when the
+    /// extent is past [`MAX_DRAWING_EXTENT`] — where the artwork's vertices
+    /// would be clamped rather than placed — or when the window's own pixels
+    /// could not be allocated. A zero side is a legal, empty surface.
+    #[must_use]
+    pub fn layered_window(
+        extent: (u32, u32),
+        window: Region,
+        layers: usize,
+        paint: impl FnOnce(&mut Self, Region),
+    ) -> Option<Self> {
+        let (drawing_width, drawing_height) = extent;
+        if drawing_width > MAX_DRAWING_EXTENT
+            || drawing_height > MAX_DRAWING_EXTENT
+            || window.x.checked_add(window.width)? > drawing_width
+            || window.y.checked_add(window.height)? > drawing_height
+        {
+            return None;
         }
+        let whole = Region {
+            x: 0,
+            y: 0,
+            width: drawing_width,
+            height: drawing_height,
+        };
+        // Chosen from the *drawing*, never from the window: a seam is a
+        // feature of the picture, so how finely it must be resolved cannot
+        // depend on how much of that picture a caller asked for. Keying it
+        // to the window would make two windows of one drawing — and a
+        // window and the whole — disagree by an alpha level along every
+        // edge, which a viewer would show as a seam at each band boundary.
+        let factor = layered_factor(drawing_width.max(drawing_height), layers);
+        let enlarged = (factor > 1)
+            .then(|| scaled(whole, factor).zip(scaled(window, factor)))
+            .flatten()
+            .and_then(|(over, window)| {
+                Self::new(window.width, window.height).map(|surface| (surface, over, window))
+            });
+        let (mut surface, over, window, reduce) = match enlarged {
+            Some((surface, over, window)) => (surface, over, window, factor),
+            None => (Self::new(window.width, window.height)?, whole, window, 1),
+        };
+        surface.with_origin(window.x, window.y, |surface| paint(surface, over));
+        if reduce > 1 {
+            return surface.averaged(reduce);
+        }
+        Some(surface)
     }
 
     /// This surface reduced by an integer `factor`, each output pixel the mean
@@ -394,7 +466,7 @@ impl Surface {
     ///
     /// [`ResampleError::OutOfMemory`] when the destination could not be
     /// allocated, and every geometry refusal
-    /// [`resample_rows`](crate::resample_rows) states.
+    /// [`resample_window`](crate::resample_window) states.
     pub fn resampled(
         &self,
         region: Region,
@@ -456,6 +528,16 @@ impl Surface {
     /// buffer's own extent, at the stated origin.
     const fn space_rect(&self) -> (u32, u32, u32, u32) {
         (self.origin.x, self.origin.y, self.width, self.height)
+    }
+
+    /// [`space_rect`](Self::space_rect) as the crate's rectangle type.
+    const fn space_rect_region(&self) -> Region {
+        Region {
+            x: self.origin.x,
+            y: self.origin.y,
+            width: self.width,
+            height: self.height,
+        }
     }
 
     /// The rows of `[y, y+h)` a write reaches — the range intersected with the
@@ -915,7 +997,33 @@ impl Surface {
         rule: FillRule,
         paint: &Paint,
     ) {
-        let space = SampleSpace::design(design, self.space_rect());
+        self.fill_contours_over(self.space_rect_region(), contours, design, rule, paint);
+    }
+
+    /// Fill anti-aliased vector artwork whose design grid is stretched
+    /// across `over` — a rectangle of the drawing that may be far larger
+    /// than this buffer — keeping only the pixels this buffer holds.
+    ///
+    /// [`fill_contours`](Self::fill_contours) is the case where `over` is
+    /// this buffer's own rectangle of the drawing, which is what an icon
+    /// filling its slot wants. A viewer showing one window of a magnified
+    /// drawing wants this: the cost is the buffer's own area, so the
+    /// magnified picture is never allocated and never scanned.
+    ///
+    /// Nothing outside the buffer is written whatever `over` says, so a
+    /// stated rectangle can never reach past the pixels this surface owns.
+    /// An `over` reaching past [`MAX_DRAWING_EXTENT`] has no representable
+    /// geometry and draws nothing rather than a distorted shape;
+    /// [`layered_window`](Self::layered_window) refuses one up front.
+    pub fn fill_contours_over(
+        &mut self,
+        over: Region,
+        contours: &[Vec<(i32, i32)>],
+        design: u32,
+        rule: FillRule,
+        paint: &Paint,
+    ) {
+        let space = SampleSpace::design(design, (over.x, over.y, over.width, over.height));
         self.fill_scan(contours, space, rule, paint);
     }
 
@@ -1654,7 +1762,7 @@ impl ExactSizeIterator for RowBands<'_> {}
 /// needs to be — a large icon needs none. Aiming at a fixed drawn side rather
 /// than fixing the factor is also what bounds the transient buffer whatever
 /// side a caller asks for.
-const LAYERED_TARGET_SIDE: u32 = 256;
+pub(crate) const LAYERED_TARGET_SIDE: u32 = 256;
 
 /// The most [`Surface::layered`] ever enlarges a composite.
 ///
@@ -1662,10 +1770,26 @@ const LAYERED_TARGET_SIDE: u32 = 256;
 /// quadratically for a difference no display shows.
 const LAYERED_MAX_FACTOR: u32 = 4;
 
+/// `rect` scaled by `factor`, or `None` when any edge leaves what a `u32`
+/// holds.
+fn scaled(rect: Region, factor: u32) -> Option<Region> {
+    Some(Region {
+        x: rect.x.checked_mul(factor)?,
+        y: rect.y.checked_mul(factor)?,
+        width: rect.width.checked_mul(factor)?,
+        height: rect.height.checked_mul(factor)?,
+    })
+}
+
 /// How much a `layers`-deep composite `side` pixels across is enlarged by.
 ///
 /// One layer covers each pixel exactly on its own, so it is never enlarged.
-fn layered_factor(side: u32, layers: usize) -> u32 {
+///
+/// An enlarged side never exceeds [`LAYERED_TARGET_SIDE`], because the factor
+/// is that target over the side. That is what lets
+/// [`Surface::layered_window`] check its drawing against
+/// [`MAX_DRAWING_EXTENT`] once rather than re-checking the enlarged one.
+pub(crate) fn layered_factor(side: u32, layers: usize) -> u32 {
     if layers < 2 || side == 0 {
         return 1;
     }

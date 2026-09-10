@@ -1230,6 +1230,16 @@ fn gif_of(frames: &[(u8, u16)], loop_count: u16) -> Vec<u8> {
 
 // ---- viewing a document, end to end --------------------------------------
 
+/// The window covering the whole of a `width`×`height` scaling.
+fn whole(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+}
+
 /// Upload `bytes` and open them, answering what the container declares.
 fn open(
     sandbox: &mut TestSandbox,
@@ -1244,7 +1254,7 @@ fn a_still_picture_opens_as_the_one_page_case() {
     let mut sandbox = sandbox();
     let png = png_with(4, 3, |x, y| [byte(x), byte(y), 0, 255]);
     let document = open(&mut sandbox, &png).expect("the picture opens");
-    assert_eq!(document.format, tairix_image::ImageFormat::Png);
+    assert_eq!(document.format, super::ViewFormat::Png);
     assert!(!document.animated);
     assert_eq!(document.loop_count, None);
     assert_eq!((document.count, document.width, document.height), (1, 4, 3));
@@ -1258,19 +1268,8 @@ fn a_page_at_its_own_scale_comes_back_pixel_for_pixel() {
     let page = super::select_page(&mut sandbox, 0).expect("page 0 decodes");
     assert_eq!((page.index, page.width, page.height), (0, 4, 2));
     let mut out = vec![0u8; 4 * 2 * 4];
-    super::render_page(
-        &mut sandbox,
-        Region {
-            x: 0,
-            y: 0,
-            width: 4,
-            height: 2,
-        },
-        4,
-        2,
-        &mut out,
-    )
-    .expect("the page renders at its own size");
+    super::render_page(&mut sandbox, (4, 2), whole(4, 2), &mut out)
+        .expect("the page renders at its own size");
     for y in 0..2u32 {
         for x in 0..4u32 {
             let at = ((y * 4 + x) * 4) as usize;
@@ -1284,31 +1283,30 @@ fn a_page_at_its_own_scale_comes_back_pixel_for_pixel() {
 }
 
 #[test]
-fn a_crop_renders_only_the_part_of_the_page_it_names() {
+fn a_window_renders_only_the_part_of_the_page_it_names() {
     let mut sandbox = sandbox();
-    // Four quadrants of a 2×2, so a 1×1 crop can only be one of them.
+    // Four quadrants of a 2×2, so a 1×1 window can only be one of them.
     let png = png_with(2, 2, |x, y| [byte(x * 100), byte(y * 100), 0, 255]);
     open(&mut sandbox, &png).expect("the picture opens");
     super::select_page(&mut sandbox, 0).expect("page 0 decodes");
     let mut out = vec![0u8; 4];
     super::render_page(
         &mut sandbox,
+        (2, 2),
         Region {
             x: 1,
             y: 1,
             width: 1,
             height: 1,
         },
-        1,
-        1,
         &mut out,
     )
-    .expect("the crop renders");
+    .expect("the window renders");
     assert_eq!(out, vec![100, 100, 0, 255]);
 }
 
 #[test]
-fn a_crop_may_be_drawn_larger_than_it_is_because_a_viewer_zooms_in() {
+fn a_window_of_a_magnification_is_drawn_because_a_viewer_zooms_in() {
     let mut sandbox = sandbox();
     let png = png_with(2, 2, |_, _| [3, 4, 5, 255]);
     open(&mut sandbox, &png).expect("the picture opens");
@@ -1316,23 +1314,57 @@ fn a_crop_may_be_drawn_larger_than_it_is_because_a_viewer_zooms_in() {
     let mut out = vec![0u8; 8 * 8 * 4];
     super::render_page(
         &mut sandbox,
+        (16, 16),
         Region {
             x: 0,
             y: 0,
-            width: 1,
-            height: 1,
+            width: 8,
+            height: 8,
         },
-        8,
-        8,
         &mut out,
     )
-    .expect("a single pixel magnifies");
+    .expect("the top-left quarter of an eightfold magnification draws");
     assert!(
         out.as_chunks::<4>()
             .0
             .iter()
             .all(|pixel| *pixel == [3, 4, 5, 255]),
-        "magnifying one flat pixel fills the destination with it"
+        "magnifying a flat picture fills the window with it"
+    );
+}
+
+#[test]
+fn panning_a_zoom_moves_by_one_screen_pixel_rather_than_by_the_zoom_factor() {
+    // The reason a render names a rectangle of the *scaling* rather than
+    // of the page: at eight times, an integer page rectangle could only
+    // move the picture eight screen pixels at a time.
+    let mut sandbox = sandbox();
+    let png = png_with(4, 1, |x, _| [byte(x * 60), 0, 0, 255]);
+    open(&mut sandbox, &png).expect("the picture opens");
+    super::select_page(&mut sandbox, 0).expect("page 0 decodes");
+    let mut read = |x: u32| {
+        let mut out = vec![0u8; 8 * 4];
+        super::render_page(
+            &mut sandbox,
+            (32, 8),
+            Region {
+                x,
+                y: 4,
+                width: 8,
+                height: 1,
+            },
+            &mut out,
+        )
+        .expect("the window renders");
+        out
+    };
+    let left = read(8);
+    let right = read(9);
+    assert_ne!(left, right, "one screen pixel of pan changes the picture");
+    assert_eq!(
+        left[4..],
+        right[..left.len() - 4],
+        "and changes it by exactly one screen pixel"
     );
 }
 
@@ -1359,7 +1391,7 @@ fn an_animation_reports_its_loop_count_and_each_frames_own_delay() {
     let mut sandbox = sandbox();
     let gif = gif_of(&[(0, 10), (1, 25), (0, 5)], 3);
     let document = open(&mut sandbox, &gif).expect("the animation opens");
-    assert_eq!(document.format, tairix_image::ImageFormat::Gif);
+    assert_eq!(document.format, super::ViewFormat::Gif);
     assert!(document.animated);
     assert_eq!(document.loop_count, Some(3));
     assert_eq!((document.count, document.width, document.height), (3, 1, 1));
@@ -1386,23 +1418,18 @@ fn an_animations_frames_composite_and_can_be_replayed_from_the_start() {
     open(&mut sandbox, &gif).expect("the animation opens");
     let mut first = vec![0u8; 4];
     let mut second = vec![0u8; 4];
-    let whole = Region {
-        x: 0,
-        y: 0,
-        width: 1,
-        height: 1,
-    };
     super::select_page(&mut sandbox, 0).expect("frame 0 composites");
-    super::render_page(&mut sandbox, whole, 1, 1, &mut first).expect("frame 0 renders");
+    super::render_page(&mut sandbox, (1, 1), whole(1, 1), &mut first).expect("frame 0 renders");
     super::select_page(&mut sandbox, 1).expect("frame 1 composites");
-    super::render_page(&mut sandbox, whole, 1, 1, &mut second).expect("frame 1 renders");
+    super::render_page(&mut sandbox, (1, 1), whole(1, 1), &mut second).expect("frame 1 renders");
     assert_eq!(first, vec![0x10, 0x20, 0x30, 255]);
     assert_eq!(second, vec![0x40, 0x50, 0x60, 255]);
     // Going back restarts the composition rather than answering the canvas
     // as it stands.
     let mut replayed = vec![0u8; 4];
     super::select_page(&mut sandbox, 0).expect("frame 0 composites again");
-    super::render_page(&mut sandbox, whole, 1, 1, &mut replayed).expect("frame 0 renders again");
+    super::render_page(&mut sandbox, (1, 1), whole(1, 1), &mut replayed)
+        .expect("frame 0 renders again");
     assert_eq!(replayed, first);
 }
 
@@ -1414,7 +1441,7 @@ fn a_format_with_no_signature_is_reached_by_being_named() {
     let png = png_with(2, 2, |_, _| [1, 1, 1, 255]);
     super::send_document(&mut sandbox, &png).expect("the document uploads");
     assert_eq!(
-        super::open_view(&mut sandbox, Some(tairix_image::ImageFormat::Sprite)),
+        super::open_view(&mut sandbox, Some(super::ViewFormat::Sprite)),
         Err(super::ViewFailure::Refused(
             super::ViewRefusal::MalformedDocument
         )),
@@ -1451,6 +1478,298 @@ fn releasing_a_view_drops_the_document_with_it() {
     );
 }
 
+// ---- viewing a vector document -------------------------------------------
+
+/// A drawing whose left half is opaque red, in a `view_w`×`view_h`
+/// coordinate box.
+///
+/// The one edge is at exactly half the width, so at any even extent it
+/// falls on a pixel boundary: a rasterisation at that extent is fully
+/// covered on one side and untouched on the other, where a resampling of
+/// some other extent would leave a soft column.
+fn svg_half(view_w: u32, view_h: u32) -> Vec<u8> {
+    let half = f64::from(view_w) / 2.0;
+    format!(
+        r##"<svg viewBox="0 0 {view_w} {view_h}"><polygon points="0,0 {half},0 {half},{view_h} 0,{view_h}" fill="#ff0000"/></svg>"##
+    )
+    .into_bytes()
+}
+
+/// Open `svg`, select its one page, and answer the sandbox.
+fn opened_vector(svg: &[u8]) -> TestSandbox {
+    let mut sandbox = sandbox();
+    open(&mut sandbox, svg).expect("the drawing opens");
+    super::select_page(&mut sandbox, 0).expect("the one page selects");
+    sandbox
+}
+
+/// Render `window` of `svg` scaled to `extent`.
+fn vector_pixels(sandbox: &mut TestSandbox, extent: (u32, u32), window: Region) -> Vec<u8> {
+    let mut out = vec![0u8; (window.width as usize) * (window.height as usize) * 4];
+    super::render_page(sandbox, extent, window, &mut out).expect("the window renders");
+    out
+}
+
+#[test]
+fn a_drawing_opens_as_the_one_page_case_at_the_size_it_declares() {
+    let mut sandbox = sandbox();
+    let document = open(&mut sandbox, &svg_half(40, 25)).expect("the drawing opens");
+    assert_eq!(document.format, super::ViewFormat::Svg);
+    assert!(!document.animated);
+    assert_eq!(document.loop_count, None);
+    // One user unit is one pixel, so the coordinate box is the size the
+    // picture is shown at unzoomed.
+    assert_eq!(
+        (document.count, document.width, document.height),
+        (1, 40, 25)
+    );
+    let page = super::select_page(&mut sandbox, 0).expect("the one page selects");
+    assert_eq!(
+        (page.index, page.width, page.height, page.delay_ns),
+        (0, 40, 25, 0)
+    );
+}
+
+#[test]
+fn a_drawing_holds_exactly_one_page() {
+    let mut sandbox = sandbox();
+    open(&mut sandbox, &svg_half(4, 4)).expect("the drawing opens");
+    assert_eq!(
+        super::select_page(&mut sandbox, 1),
+        Err(super::ViewFailure::Refused(super::ViewRefusal::NoSuchPage))
+    );
+}
+
+#[test]
+fn a_render_before_the_drawings_page_is_selected_is_refused() {
+    // The vector backing keeps the same state machine a raster container
+    // has, so an app drives one flow rather than two.
+    let mut sandbox = sandbox();
+    open(&mut sandbox, &svg_half(4, 4)).expect("the drawing opens");
+    let mut out = vec![0u8; 4];
+    assert_eq!(
+        super::render_page(&mut sandbox, (1, 1), whole(1, 1), &mut out),
+        Err(super::ViewFailure::Refused(
+            super::ViewRefusal::NoPageDecoded
+        ))
+    );
+}
+
+#[test]
+fn a_drawing_is_rasterised_afresh_at_whatever_extent_a_render_asks_for() {
+    // The whole point of a vector backing: every zoom level is drawn at
+    // full precision rather than resampled from one decode. A resample
+    // would leave the edge soft at some extents; a rasterisation puts it
+    // exactly on the boundary at all of them.
+    let mut sandbox = opened_vector(&svg_half(2, 1));
+    for scale in [4u32, 8, 32, 100] {
+        let (width, height) = (scale * 2, scale);
+        let pixels = vector_pixels(&mut sandbox, (width, height), whole(width, height));
+        for y in 0..height {
+            for x in 0..width {
+                let at = ((y * width + x) * 4) as usize;
+                let expected = if x < scale {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 0, 0]
+                };
+                assert_eq!(
+                    pixels[at..at + 4],
+                    expected,
+                    "at {width}x{height}, pixel ({x}, {y}) is exact"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_window_of_a_drawings_zoom_is_that_rectangle_of_the_whole() {
+    let mut sandbox = opened_vector(&svg_half(3, 2));
+    let extent = (33u32, 22u32);
+    let full = vector_pixels(&mut sandbox, extent, whole(extent.0, extent.1));
+    for window in [
+        Region {
+            x: 0,
+            y: 0,
+            width: 7,
+            height: 5,
+        },
+        Region {
+            x: 14,
+            y: 9,
+            width: 11,
+            height: 6,
+        },
+        Region {
+            x: extent.0 - 1,
+            y: extent.1 - 1,
+            width: 1,
+            height: 1,
+        },
+    ] {
+        let cut = vector_pixels(&mut sandbox, extent, window);
+        for y in 0..window.height {
+            let cut_row = ((y * window.width) * 4) as usize;
+            let full_row = (((window.y + y) * extent.0 + window.x) * 4) as usize;
+            let bytes = (window.width * 4) as usize;
+            assert_eq!(
+                cut[cut_row..cut_row + bytes],
+                full[full_row..full_row + bytes],
+                "{window:?} row {y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn windows_stacked_up_a_drawing_reassemble_into_the_one_they_partition() {
+    // The band offset arithmetic: a viewer collects a tall window in
+    // pieces, and a piece that read the wrong rows would tear the picture
+    // at every boundary.
+    let mut sandbox = opened_vector(&svg_half(2, 3));
+    let extent = (16u32, 12u32);
+    let whole_window = Region {
+        x: 2,
+        y: 1,
+        width: 9,
+        height: 8,
+    };
+    let full = vector_pixels(&mut sandbox, extent, whole_window);
+    let mut assembled = Vec::new();
+    for (first, rows) in [(0u32, 3u32), (3, 1), (4, 4)] {
+        assembled.extend_from_slice(&vector_pixels(
+            &mut sandbox,
+            extent,
+            Region {
+                x: whole_window.x,
+                y: whole_window.y + first,
+                width: whole_window.width,
+                height: rows,
+            },
+        ));
+    }
+    assert_eq!(assembled, full);
+}
+
+#[test]
+fn a_magnification_no_buffer_could_hold_still_renders_its_window() {
+    // Twenty billion pixels: the window can only be answered by never
+    // sizing anything from the magnification.
+    let mut sandbox = opened_vector(&svg_half(2, 1));
+    let extent = (200_000u32, 100_000u32);
+    let inside = vector_pixels(
+        &mut sandbox,
+        extent,
+        Region {
+            x: 1_000,
+            y: 50_000,
+            width: 16,
+            height: 8,
+        },
+    );
+    assert!(
+        inside
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [255, 0, 0, 255]),
+        "a window inside the drawn half is drawn"
+    );
+    let outside = vector_pixels(
+        &mut sandbox,
+        extent,
+        Region {
+            x: 150_000,
+            y: 50_000,
+            width: 16,
+            height: 8,
+        },
+    );
+    assert!(
+        outside
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [0, 0, 0, 0]),
+        "and one outside it is not"
+    );
+}
+
+#[test]
+fn a_drawing_is_reached_by_being_named_as_well_as_by_having_no_signature() {
+    let mut sandbox = sandbox();
+    super::send_document(&mut sandbox, &svg_half(6, 4)).expect("the document uploads");
+    let document = super::open_view(&mut sandbox, Some(super::ViewFormat::Svg))
+        .expect("naming the vector format opens the drawing");
+    assert_eq!(
+        (document.format, document.width, document.height),
+        (super::ViewFormat::Svg, 6, 4)
+    );
+}
+
+#[test]
+fn naming_the_vector_format_for_a_raster_file_is_unsupported_not_malformed() {
+    let mut sandbox = sandbox();
+    super::send_document(&mut sandbox, &png_with(2, 2, |_, _| [1, 2, 3, 255]))
+        .expect("the document uploads");
+    assert_eq!(
+        super::open_view(&mut sandbox, Some(super::ViewFormat::Svg)),
+        Err(super::ViewFailure::Refused(
+            super::ViewRefusal::UnsupportedFormat
+        )),
+        "bytes that are not a drawing at all are not a drawing this \
+         decoder refused"
+    );
+}
+
+#[test]
+fn a_drawing_outside_the_supported_subset_is_a_malformed_document() {
+    let mut sandbox = sandbox();
+    // Shaped like SVG — it has an `<svg>` root — but with no coordinate
+    // system to draw in, which is a decode failure rather than a file of
+    // some other kind.
+    assert_eq!(
+        open(&mut sandbox, br"<svg><circle cx='1' cy='1' r='1'/></svg>"),
+        Err(super::ViewFailure::Refused(
+            super::ViewRefusal::MalformedDocument
+        ))
+    );
+}
+
+#[test]
+fn a_picture_larger_than_a_view_opens_says_so_rather_than_calling_it_broken() {
+    // A user can act on "too large" and it says nothing is wrong with
+    // their file; "failed to decode" would tell them their photograph is
+    // broken when it is only big.
+    let mut vector = sandbox();
+    let at_bound = open(&mut vector, &svg_half(super::MAX_DRAWING_EXTENT, 4))
+        .expect("a drawing exactly at the bound opens");
+    assert_eq!(at_bound.width, super::MAX_DRAWING_EXTENT);
+
+    let mut vector = sandbox();
+    let huge = svg_half(super::MAX_DRAWING_EXTENT + 8, 4);
+    assert_eq!(
+        open(&mut vector, &huge),
+        Err(super::ViewFailure::Refused(super::ViewRefusal::TooLarge)),
+        "a drawing declaring a box no render could ask for"
+    );
+
+    let mut raster = sandbox();
+    // A well-formed header declaring far more pixels than a view decodes,
+    // weighed before a scanline is allocated.
+    let over = build_png(20_000, 20_000, &[]);
+    let refusal = match open(&mut raster, &over) {
+        Ok(_) => super::select_page(&mut raster, 0).map(|_| ()).unwrap_err(),
+        Err(err) => err,
+    };
+    assert_eq!(
+        refusal,
+        super::ViewFailure::Refused(super::ViewRefusal::TooLarge),
+        "a raster page over the decode bound"
+    );
+}
+
 // ---- view refusals, at the worker ----------------------------------------
 
 /// A service with `png` open and page 0 decoded, which is the state every
@@ -1465,11 +1784,12 @@ fn opened(png: &[u8]) -> ImageRenderService {
     service
 }
 
-/// An `OP_VIEW_RENDER` request over `source` onto `dest`.
-fn render_request(source: (u32, u32, u32, u32), dest: (u32, u32)) -> Vec<u8> {
+/// An `OP_VIEW_RENDER` request for `window` of a picture scaled to
+/// `extent`.
+fn render_request(extent: (u32, u32), window: (u32, u32, u32, u32)) -> Vec<u8> {
     let mut w = Writer::new();
     w.u8(super::OP_VIEW_RENDER);
-    for field in [source.0, source.1, source.2, source.3, dest.0, dest.1] {
+    for field in [extent.0, extent.1, window.0, window.1, window.2, window.3] {
         w.u32(field);
     }
     w.finish()
@@ -1526,7 +1846,7 @@ fn every_view_request_before_an_open_is_refused_as_not_open() {
     let mut service = ImageRenderService::default();
     for probe in [
         page_request(0),
-        render_request((0, 0, 1, 1), (1, 1)),
+        render_request((1, 1), (0, 0, 1, 1)),
         band_request(0, 1),
     ] {
         assert_eq!(
@@ -1549,16 +1869,16 @@ fn a_page_past_the_last_entry_is_refused() {
 fn a_render_before_any_page_is_decoded_is_refused() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     assert_eq!(
-        refused(&service.handle(&render_request((0, 0, 1, 1), (1, 1)))),
+        refused(&service.handle(&render_request((1, 1), (0, 0, 1, 1)))),
         Some(super::ViewRefusal::NoPageDecoded)
     );
 }
 
 #[test]
-fn a_source_rectangle_outside_the_page_is_refused() {
+fn a_window_outside_the_extent_it_names_is_refused() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     service.handle(&page_request(0));
-    for source in [
+    for window in [
         (0, 0, 3, 1),
         (0, 0, 1, 3),
         (2, 0, 1, 1),
@@ -1566,29 +1886,52 @@ fn a_source_rectangle_outside_the_page_is_refused() {
         (0, 0, 0, 1),
         (0, 0, 1, 0),
         (u32::MAX, 0, 1, 1),
+        (0, u32::MAX, 1, 1),
     ] {
         assert_eq!(
-            refused(&service.handle(&render_request(source, (1, 1)))),
+            refused(&service.handle(&render_request((2, 2), window))),
             Some(super::ViewRefusal::MalformedRequest),
-            "source {source:?} does not lie inside a 2x2 page"
+            "window {window:?} does not lie inside a 2x2 scaling"
         );
     }
 }
 
 #[test]
-fn a_destination_outside_the_service_bounds_is_refused() {
+fn a_window_outside_the_service_bounds_is_refused() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     service.handle(&page_request(0));
-    for dest in [
-        (0, 1),
-        (1, 0),
-        (super::MAX_DESTINATION_WIDTH + 1, 1),
-        (1, super::MAX_DESTINATION_HEIGHT + 1),
+    let over_wide = super::MAX_DESTINATION_WIDTH + 1;
+    let over_tall = super::MAX_DESTINATION_HEIGHT + 1;
+    for (extent, window) in [
+        ((over_wide, 1), (0, 0, over_wide, 1)),
+        ((1, over_tall), (0, 0, 1, over_tall)),
     ] {
         assert_eq!(
-            refused(&service.handle(&render_request((0, 0, 1, 1), dest))),
+            refused(&service.handle(&render_request(extent, window))),
             Some(super::ViewRefusal::MalformedRequest),
-            "destination {dest:?} is outside what this service draws"
+            "window {window:?} is larger than this service draws"
+        );
+    }
+}
+
+#[test]
+fn an_extent_past_what_the_rasteriser_places_is_refused() {
+    // Past this a vector document's contours would be clamped, so the
+    // answer would be a distorted picture rather than a refused request —
+    // and one render shape takes one bound whichever backing answers it.
+    let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
+    service.handle(&page_request(0));
+    let limit = tairix_raster::MAX_DRAWING_EXTENT;
+    assert_eq!(
+        service.handle(&render_request((limit, limit), (0, 0, 8, 8)))[0],
+        super::REPLY_VIEW_RENDERED,
+        "the bound itself renders"
+    );
+    for extent in [(limit + 1, limit), (limit, limit + 1)] {
+        assert_eq!(
+            refused(&service.handle(&render_request(extent, (0, 0, 8, 8)))),
+            Some(super::ViewRefusal::MalformedRequest),
+            "extent {extent:?} is past what the rasteriser places exactly"
         );
     }
 }
@@ -1608,10 +1951,11 @@ fn changing_page_drops_the_render_that_described_the_old_one() {
     let mut service = opened(&ico_of(&[(4, [1, 0, 0, 255]), (2, [0, 1, 0, 255])]));
     service.handle(&page_request(0));
     assert_eq!(
-        service.handle(&render_request((0, 0, 4, 4), (4, 4)))[0],
+        service.handle(&render_request((4, 4), (0, 0, 4, 4)))[0],
         super::REPLY_VIEW_RENDERED
     );
-    // Page 1 is 2x2, so a source of 4x4 describes nothing of it.
+    // A scaling of page 0 shows page 0, so it describes nothing of the
+    // page that replaces it.
     service.handle(&page_request(1));
     assert_eq!(
         refused(&service.handle(&band_request(0, 1))),
@@ -1625,7 +1969,7 @@ fn changing_page_drops_the_render_that_described_the_old_one() {
 fn a_band_outside_the_renders_destination_is_refused() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     service.handle(&page_request(0));
-    service.handle(&render_request((0, 0, 2, 2), (2, 2)));
+    service.handle(&render_request((2, 2), (0, 0, 2, 2)));
     for (first_row, rows) in [(0, 0), (0, 3), (2, 1), (1, 2), (u32::MAX, 1)] {
         assert_eq!(
             refused(&service.handle(&band_request(first_row, rows))),
@@ -1639,11 +1983,11 @@ fn a_band_outside_the_renders_destination_is_refused() {
 fn trailing_bytes_on_any_view_request_are_refused() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     service.handle(&page_request(0));
-    service.handle(&render_request((0, 0, 2, 2), (2, 2)));
+    service.handle(&render_request((2, 2), (0, 0, 2, 2)));
     for base in [
         request(super::OP_VIEW_OPEN, &[0]),
         page_request(0),
-        render_request((0, 0, 2, 2), (2, 2)),
+        render_request((2, 2), (0, 0, 2, 2)),
         band_request(0, 1),
         request(super::OP_VIEW_RELEASE, &[]),
     ] {
@@ -1670,6 +2014,7 @@ fn every_view_refusal_states_a_reason() {
         super::ViewRefusal::NoRender,
         super::ViewRefusal::BandOutOfRange,
         super::ViewRefusal::Unrenderable,
+        super::ViewRefusal::TooLarge,
     ] {
         assert!(!format!("{refusal}").is_empty());
         assert_eq!(
@@ -1741,18 +2086,7 @@ fn drive_tampered(
     super::open_view(sandbox, None)?;
     super::select_page(sandbox, 0)?;
     let mut out = vec![0u8; 2 * 2 * 4];
-    super::render_page(
-        sandbox,
-        Region {
-            x: 0,
-            y: 0,
-            width: 2,
-            height: 2,
-        },
-        2,
-        2,
-        &mut out,
-    )
+    super::render_page(sandbox, (2, 2), whole(2, 2), &mut out)
 }
 
 #[test]
@@ -1945,6 +2279,43 @@ fn opening_early_leaves_an_unfinished_upload_where_it_was() {
 }
 
 #[test]
+fn bands_of_one_vector_render_are_the_rows_of_it_they_claim_to_be() {
+    // A tall window arrives in pieces, and each piece rasterises its own
+    // rows of the magnification: a band that read from the window's top
+    // instead of from its own offset would repeat the same strip.
+    let mut service = ImageRenderService::default();
+    // Varying down the page, so two bands cannot agree by coincidence.
+    load(
+        &mut service,
+        br#"<svg viewBox="0 0 4 4"><polygon points="0,0 4,4 0,4"/></svg>"#,
+    );
+    assert_eq!(
+        service.handle(&request(super::OP_VIEW_OPEN, &[0]))[0],
+        super::REPLY_VIEW_OPENED
+    );
+    service.handle(&page_request(0));
+    assert_eq!(
+        service.handle(&render_request((12, 12), (2, 3, 6, 4)))[0],
+        super::REPLY_VIEW_RENDERED
+    );
+    let pixels = |reply: &[u8]| {
+        assert_eq!(reply.first().copied(), Some(super::REPLY_VIEW_BAND));
+        // Tag, echoed first row, echoed rows, and the pixel field's own
+        // length prefix.
+        reply[13..].to_vec()
+    };
+    let whole = pixels(&service.handle(&band_request(0, 4)));
+    let mut assembled = pixels(&service.handle(&band_request(0, 1)));
+    assembled.extend_from_slice(&pixels(&service.handle(&band_request(1, 3))));
+    assert_eq!(assembled, whole);
+    assert_ne!(
+        whole[..6 * 4],
+        whole[6 * 4..2 * 6 * 4],
+        "the drawing genuinely varies down the window"
+    );
+}
+
+#[test]
 fn a_band_wider_than_a_reply_frame_carries_is_refused_before_it_is_drawn() {
     // The largest destination this service draws needs several bands, so
     // asking for all its rows at once names a reply no frame could hold.
@@ -1959,7 +2330,7 @@ fn a_band_wider_than_a_reply_frame_carries_is_refused_before_it_is_drawn() {
     let mut service = opened(&png_with(2, 2, |_, _| [1, 2, 3, 255]));
     service.handle(&page_request(0));
     assert_eq!(
-        service.handle(&render_request((0, 0, 2, 2), (side, rows)))[0],
+        service.handle(&render_request((side, rows), (0, 0, side, rows)))[0],
         super::REPLY_VIEW_RENDERED
     );
     assert_eq!(

@@ -234,6 +234,7 @@ Name-addressed lookup lands with the emulator, its first consumer.
 | Multi-frame / multi-page decode | `lib/image` sequence API |
 | Exact 90° rotation and flip | `lib/raster::reorient` (`Surface::reoriented`) |
 | Viewport-targeted SVG rasterisation | `lib/svg`, `decode` evolved in place |
+| One rectangle of a scaled picture | `lib/raster` (`resample_window`, `Surface::layered_window`) |
 | Untrusted decode | `lib/sandbox::imagerender` |
 | The app-side window shell | `lib/window::app` |
 | The app | `userland/apps/view` |
@@ -550,38 +551,6 @@ clients, and their exit-code sets are their own.
   shape; the SVG fuzz harness drives both viewports and asserts they can
   disagree *only* about complexity.
 
-### Outstanding: SVG is not yet a view backend — blocked on a decision
-
-The wire protocol is source-neutral by design — open, page, render, band —
-but the worker currently has exactly **one** backend behind it, the
-`lib/image` `Sequence`. So the eight raster formats open and SVG does not:
-`tairix_image::sniff` never answers `Svg`, and an SVG document handed to
-`OP_VIEW_OPEN` is refused as an unrecognised format. `Viewport::Natural`
-therefore still has **no** production caller; the note above that it gained
-one here was wrong.
-
-Adding SVG is the second backend, and it is not a patch. Three things have
-to be decided rather than guessed:
-
-- **A view format vocabulary.** `ViewDocument::format` is
-  `tairix_image::ImageFormat`, which is a *raster* registry and must not
-  grow an `Svg` variant it cannot decode. The wire needs its own enum over
-  the raster formats plus the vector one.
-- **How a vector crop is drawn.** `Surface::fill_contours` stretches the
-  design grid across the whole surface it is given, so it renders a
-  drawing, not a *rectangle* of one. Rasterising the whole drawing at the
-  zoom factor and taking the sub-rectangle is trivial and allocates the
-  full zoomed picture — which at a viewer's zoom is exactly the unbounded
-  cost the crop-based render exists to avoid. Transforming the contours
-  per render is bounded but needs the placement to live in one shared
-  place rather than beside the icon path's copy.
-- **A non-square vector rasterise.** `VectorIcon::rasterise(side)` is
-  square because every icon slot is. A picture is not.
-
-Until that is settled the viewer claims eight formats, not nine. This is
-recorded rather than stubbed: nothing in the tree pretends to open an SVG
-document.
-
 ### `MAX_VIEW_DECODE_PIXELS` is set by what a viewer must open
 
 A viewer's page bound is deliberately *not* sized to a particular machine:
@@ -669,6 +638,65 @@ read this paragraph first; the rustdoc on both types points here.
   charter forbids anyway. The destination bound was unified for the same
   reason: `MAX_DESTINATION_WIDTH`/`_HEIGHT`/`_PIXELS` is one figure every
   consumer of this service asks the same question of.
+- **SVG as the second view backend — done.** The viewer claims all nine
+  formats. `ViewFormat` is the protocol's own vocabulary — the eight raster
+  formats plus `Svg` — because `tairix_image::ImageFormat` is a registry of
+  formats that decode to a fixed grid of pixels and an entry it could not
+  decode would be a name with nothing behind it. A document no raster
+  signature names is tried as a drawing (nothing in the sniff order opens
+  with `<` or whitespace, and a sprite area is reached only by being
+  named), so an SVG opens by signature as well as by being named.
+
+  A drawing's `source_extent()` rounded to pixels is what "actual size"
+  means for a picture with none of its own; one that declares a box past
+  `tairix_raster::MAX_DRAWING_EXTENT` is refused with a stated reason
+  rather than reported at a clamped size. `Viewport::Natural` now has its
+  production caller.
+
+  **The render request was reshaped, and that is the load-bearing part.**
+  It named an integer rectangle of the *page* and a destination extent,
+  which has nothing to say about a drawing that has no pixels to take a
+  rectangle of — and, for a raster page, quantised panning to the zoom
+  factor: at eight times the picture jumped eight screen pixels per step.
+  It now names the extent the whole picture is scaled to and the rectangle
+  of that scaling to draw. One shape for both backings, the shape a zoom
+  actually has, exact to the screen pixel at any magnification, and the
+  scaled picture is never allocated. That fixed the raster path's own
+  defect in the same change; there is no second render shape.
+
+  Two `lib/raster` primitives carry it, both the existing ones generalised
+  rather than new paths beside them:
+  - `resample_window` replaced `resample_rows`: a rectangle of the
+    destination on *both* axes, with the filter plans, row cache and output
+    all sized from the window. `Axis::plan` gained the window, computing
+    each sample's footprint from its position in the whole destination, so
+    a window's taps are exactly the whole plan's taps for those samples
+    while the memory is the window's. The wallpaper's row band is the
+    full-width case.
+  - `Surface::layered_window` / `fill_contours_over`: a design grid
+    stretched across a stated rectangle of the drawing, keeping only what
+    the buffer holds. `layered` and `fill_contours` are the case where that
+    rectangle is the buffer's own, so there is no second placement. The
+    seam-resolution enlargement is chosen from the **drawing**, never the
+    window — keying it to the window made two windows of one drawing
+    disagree by an alpha level along every edge, which a viewer would show
+    as a seam at each band boundary. `MAX_DRAWING_EXTENT` (a million
+    pixels, the converter's own coordinate range) is refused rather than
+    clamped, and is the one bound a render's extent is held to whichever
+    backing answers it.
+
+  `ViewRefusal::TooLarge` was added with it. The decoder's declared-limit
+  errors were folded into `MalformedDocument`, so a viewer told a user
+  their photograph was broken when it was only larger than the bound. A
+  user can act on "too large"; it is a different answer and is now given.
+
+  A vector document keeps the same state machine a raster container has —
+  one page, selected before a render — so an app drives one flow rather
+  than two, and each band rasterises its contours straight into the
+  rectangle it answers. Every zoom level is therefore drawn at full
+  precision rather than resampled from one, and a magnification larger
+  than memory costs the window.
+
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.
 - Deletion of `userland/apps/viewer` and the reference sweep — planned.
 - `lib/pdf` behind the page source — next change. Encrypted PDFs need MD5/RC4/
@@ -691,6 +719,21 @@ read this paragraph first; the rustdoc on both types points here.
   reserves fallibly; the rest is a crate-wide allocation-discipline
   change spanning four modules and is not smuggled into this one. It
   carries its regression test when it lands.
+
+- **A vector band's cost is edges × rows, because the scan converter has
+  no active-edge table.** `ScanFill::coverage_row` walks every edge whose
+  upper endpoint is above the row it is filling — the list is sorted by
+  that endpoint, so it stops early, but an edge already *passed* is still
+  visited and rejected by one comparison. A band deep in a tall window
+  therefore pays for the whole drawing's edges on every row. The vertex
+  budget is a total across layers, so the worst case is bounded at roughly
+  a hundred and forty million comparisons for a hostile
+  maximum-complexity drawing filling a 4K window — slow for a pathological
+  file, never unbounded, and the same property the icon path has always
+  had at its own smaller sizes. The fix is an active-edge table in
+  `lib/raster`'s scan converter, which every consumer of that converter
+  shares and which needs its own benchmarks; it is not smuggled into a
+  change about the view protocol. Recorded rather than deferred silently.
 
 - **WEBP does not apply an EXIF `Orientation` either.** The container reads
   past its `EXIF` chunk, exactly as `jpeg` used to read past `APP1`. Now

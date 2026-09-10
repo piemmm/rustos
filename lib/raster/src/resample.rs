@@ -58,7 +58,7 @@
 //! Both spaces a desktop actually holds pixels in are resampled by the one
 //! filter above, and each is read and written in its own space:
 //!
-//! - **Straight-alpha RGBA8** ([`resample`], [`resample_rows`]) is the
+//! - **Straight-alpha RGBA8** ([`resample`], [`resample_window`]) is the
 //!   interchange form a decoder produces. Its samples are premultiplied on
 //!   the way in and divided back out on the way out.
 //! - **Premultiplied [`Pixel`]s** ([`crate::Surface::resampled`]) are what
@@ -68,22 +68,30 @@
 //!   one filter pass, where routing it through the straight-alpha entry point
 //!   would copy and convert the whole frame twice over.
 //!
-//! # Bands
+//! # Windows
 //!
-//! [`resample_rows`] produces an arbitrary contiguous run of destination
-//! rows, so a caller that cannot hold (or cannot transport) a whole
-//! destination image at once can produce it a band at a time — each band is
-//! computed from the source and the plan alone, never from a previous band,
-//! so assembling bands yields byte-for-byte the image one call would have
-//! produced. [`resample`] is the whole-image case expressed through that
-//! same one implementation.
+//! [`resample_window`] produces an arbitrary *rectangle* of the
+//! destination, so a caller that cannot hold — or cannot transport, or does
+//! not want — the whole destination produces the part it needs. Each window
+//! is computed from the source and the plan alone, never from a previous
+//! one, so assembling windows yields byte-for-byte the image one call would
+//! have produced and two windows agree exactly where they meet.
+//! [`resample`] is the whole-image case expressed through that same one
+//! implementation.
 //!
-//! Scratch memory is a few destination-width rows regardless of how
-//! extreme the ratio is, so reducing a 4K photograph to a thumbnail costs
-//! no more working memory than reducing it to a screen.
+//! Both axes are windowed, which is what makes a *zoom* affordable: showing
+//! one screen-sized rectangle of a picture scaled to a hundred times its own
+//! size costs that rectangle, and the scaled picture is never allocated. It
+//! is also what makes panning exact — the destination is addressed in its
+//! own pixels, so moving by one costs one, where a caller forced to name an
+//! integer source rectangle could only move by the zoom factor.
+//!
+//! Scratch memory is a few window-width rows regardless of how extreme the
+//! ratio is, so reducing a 4K photograph to a thumbnail costs no more
+//! working memory than reducing it to a screen.
 //!
 //! Every entry point is total: degenerate geometry, a source region that
-//! does not lie inside its image, a mis-sized output buffer, a band that
+//! does not lie inside its image, a mis-sized output buffer, a window that
 //! runs past the destination, and a buffer the allocator refuses all return
 //! a typed refusal rather than panicking or writing a partial result.
 
@@ -141,9 +149,11 @@ pub enum ResampleError {
     SourceRegionOutOfBounds,
     /// The destination extent has a zero side.
     EmptyDestination,
-    /// The requested band is empty, or runs past the destination's last row.
-    BandOutOfBounds,
-    /// The output buffer is not exactly `rows * destination width * 4` bytes.
+    /// The requested window is empty, or runs past one of the
+    /// destination's own edges.
+    WindowOutOfBounds,
+    /// The output buffer is not exactly `window width * window height * 4`
+    /// bytes.
     OutputSizeMismatch,
     /// The destination's byte count does not fit `usize` on this target, so
     /// no buffer could ever describe it.
@@ -215,19 +225,22 @@ impl<'a> Rgba8Image<'a> {
     }
 }
 
-/// A rectangular region of a source image, in source pixels.
+/// A rectangle of an image, in that image's own pixels.
 ///
-/// Unsigned by construction because a region of an image can never begin
+/// The crate's one rectangle: a resample reads a region of its source and
+/// writes a window of its destination, and both are this.
+///
+/// Unsigned by construction because a rectangle of an image can never begin
 /// outside it; a resample validates that it also never *ends* outside it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Region {
-    /// Leftmost source column.
+    /// Leftmost column.
     pub x: u32,
-    /// Topmost source row.
+    /// Topmost row.
     pub y: u32,
-    /// Width in source pixels; never zero for an accepted region.
+    /// Width in pixels; never zero for an accepted rectangle.
     pub width: u32,
-    /// Height in source pixels; never zero for an accepted region.
+    /// Height in pixels; never zero for an accepted rectangle.
     pub height: u32,
 }
 
@@ -427,7 +440,7 @@ impl Rows for PixelImage<'_> {
 ///
 /// # Errors
 ///
-/// Every [`ResampleError`] [`resample_rows`] can raise, plus
+/// Every [`ResampleError`] [`resample_window`] can raise, plus
 /// [`ResampleError::DestinationTooLarge`] when the destination's byte count
 /// is unrepresentable on this target, and [`ResampleError::OutOfMemory`]
 /// when the allocator refuses the buffer.
@@ -439,46 +452,51 @@ pub fn resample(
 ) -> Result<Vec<u8>, ResampleError> {
     let len = pixel_bytes(dest_width, dest_height).ok_or(ResampleError::DestinationTooLarge)?;
     let mut out = fallible::filled(len, 0u8).ok_or(ResampleError::OutOfMemory)?;
-    resample_rows(
+    resample_window(
         src,
         region,
         dest_width,
         dest_height,
-        0,
-        dest_height,
+        whole(dest_width, dest_height),
         &mut out,
     )?;
     Ok(out)
 }
 
-/// Resample `region` of `src` into destination rows `first_row` through
-/// `first_row + rows`, of a destination that is `dest_width`×`dest_height`
-/// in full, writing exactly `rows * dest_width * 4` bytes into `out`.
+/// Resample `region` of `src` into `window` of a destination that is
+/// `dest_width`×`dest_height` in full, writing exactly
+/// `window.width * window.height * 4` bytes into `out`.
 ///
-/// The band is computed from the source and the filter plan alone, so bands
-/// are independent: producing a destination one band at a time yields
-/// byte-for-byte the same image as producing it in one call.
+/// Both axes are windowed, so a caller that wants a rectangle of a
+/// destination far larger than it can hold pays for the rectangle rather
+/// than for the destination: the filter plans, the row cache, and the
+/// output are all sized from the window. That is what lets a zoomed viewer
+/// send the crop it is showing — the picture it is a rectangle *of* is
+/// never allocated.
+///
+/// The window is computed from the source and the filter plan alone, so
+/// windows are independent: producing a destination a rectangle at a time
+/// yields byte-for-byte the same image as producing it in one call, and two
+/// windows of the same destination agree exactly where they meet.
 ///
 /// # Errors
 ///
 /// - [`ResampleError::SourceRegionOutOfBounds`] — an empty region, or one
 ///   reaching past the source image.
 /// - [`ResampleError::EmptyDestination`] — a zero-sided destination.
-/// - [`ResampleError::BandOutOfBounds`] — an empty band, or one running past
-///   the destination's last row.
+/// - [`ResampleError::WindowOutOfBounds`] — an empty window, or one running
+///   past the destination's own edges.
 /// - [`ResampleError::OutputSizeMismatch`] — a mis-sized `out`.
-pub fn resample_rows(
+pub fn resample_window(
     src: &Rgba8Image<'_>,
     region: Region,
     dest_width: u32,
     dest_height: u32,
-    first_row: u32,
-    rows: u32,
+    window: Region,
     out: &mut [u8],
 ) -> Result<(), ResampleError> {
     let band = Band {
-        first_row,
-        rows,
+        window,
         dest_width,
         dest_height,
     };
@@ -498,13 +516,13 @@ pub fn resample_rows(
 /// Resample `region` of the `width`×`height` premultiplied image `src` into
 /// the whole `dest_width`×`dest_height` premultiplied image `out`.
 ///
-/// The pixel-space counterpart of [`resample_rows`], reached through
+/// The pixel-space counterpart of [`resample_window`], reached through
 /// [`Surface::resampled`](crate::Surface::resampled) — the only caller that
 /// can hold both buffers.
 ///
 /// # Errors
 ///
-/// As [`resample_rows`], with [`ResampleError::SourceSizeMismatch`] for a
+/// As [`resample_window`], with [`ResampleError::SourceSizeMismatch`] for a
 /// `src` whose length does not match its declared geometry and
 /// [`ResampleError::OutputSizeMismatch`] for a mis-sized `out`.
 pub(crate) fn resample_pixels(
@@ -527,8 +545,7 @@ pub(crate) fn resample_pixels(
     };
     let (dest_width, dest_height) = dest;
     let band = Band {
-        first_row: 0,
-        rows: dest_height,
+        window: whole(dest_width, dest_height),
         dest_width,
         dest_height,
     };
@@ -539,25 +556,26 @@ pub(crate) fn resample_pixels(
     filter_band(&image, region, band, out)
 }
 
-/// One contiguous run of destination rows, of a destination of a stated size.
+/// The rectangle covering the whole of a `width`×`height` image.
+const fn whole(width: u32, height: u32) -> Region {
+    Region {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    }
+}
+
+/// One rectangle of a destination of a stated size.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Band {
-    first_row: u32,
-    rows: u32,
+    window: Region,
     dest_width: u32,
     dest_height: u32,
 }
 
-impl Band {
-    /// The destination row after the last this band writes, or `None` when
-    /// the sum does not fit.
-    fn last_row(self) -> Option<u32> {
-        self.first_row.checked_add(self.rows)
-    }
-}
-
-/// Check `region` against `src` and `band` against its destination,
-/// answering how many samples the band writes.
+/// Check `region` against `src` and `band`'s window against its
+/// destination, answering how many samples the window writes.
 ///
 /// The one validation both entry points share, so neither can accept
 /// geometry the other refuses; each then checks its own buffer's length in
@@ -567,11 +585,23 @@ fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, Resam
     if band.dest_width == 0 || band.dest_height == 0 {
         return Err(ResampleError::EmptyDestination);
     }
-    let last = band.last_row().ok_or(ResampleError::BandOutOfBounds)?;
-    if band.rows == 0 || last > band.dest_height {
-        return Err(ResampleError::BandOutOfBounds);
+    let window = band.window;
+    let right = window
+        .x
+        .checked_add(window.width)
+        .ok_or(ResampleError::WindowOutOfBounds)?;
+    let bottom = window
+        .y
+        .checked_add(window.height)
+        .ok_or(ResampleError::WindowOutOfBounds)?;
+    if window.width == 0
+        || window.height == 0
+        || right > band.dest_width
+        || bottom > band.dest_height
+    {
+        return Err(ResampleError::WindowOutOfBounds);
     }
-    sample_count(band.dest_width, band.rows).ok_or(ResampleError::OutputSizeMismatch)
+    sample_count(window.width, window.height).ok_or(ResampleError::OutputSizeMismatch)
 }
 
 /// Filter `band` of `region` into `out`, which [`validate`] has already
@@ -587,27 +617,39 @@ fn filter_band<R: Rows>(
     band: Band,
     out: &mut [<R::Space as Space>::Sample],
 ) -> Result<(), ResampleError> {
-    let columns =
-        Axis::plan(region.x, region.width, band.dest_width).ok_or(ResampleError::OutOfMemory)?;
-    let rows_plan =
-        Axis::plan(region.y, region.height, band.dest_height).ok_or(ResampleError::OutOfMemory)?;
+    let window = band.window;
+    let columns = Axis::plan(
+        region.x,
+        region.width,
+        band.dest_width,
+        window.x,
+        window.width,
+    )
+    .ok_or(ResampleError::OutOfMemory)?;
+    let rows_plan = Axis::plan(
+        region.y,
+        region.height,
+        band.dest_height,
+        window.y,
+        window.height,
+    )
+    .ok_or(ResampleError::OutOfMemory)?;
     if columns.is_identity() && rows_plan.is_identity() {
-        copy_rows(src, region, band, out);
+        copy_rows(src, &columns, &rows_plan, window, out);
         return Ok(());
     }
     let mut cache =
-        RowCache::new(band.dest_width, rows_plan.stride).ok_or(ResampleError::OutOfMemory)?;
-    let mut accumulator = fallible::filled(samples_per_row(band.dest_width), 0i64)
-        .ok_or(ResampleError::OutOfMemory)?;
-    let width = band.dest_width as usize;
-    let last = band.last_row().unwrap_or(band.dest_height);
-    for (dest_y, chunk) in (band.first_row..last).zip(out.chunks_exact_mut(width.max(1))) {
+        RowCache::new(window.width, rows_plan.stride).ok_or(ResampleError::OutOfMemory)?;
+    let mut accumulator =
+        fallible::filled(samples_per_row(window.width), 0i64).ok_or(ResampleError::OutOfMemory)?;
+    let width = window.width as usize;
+    for (row, chunk) in (0..window.height as usize).zip(out.chunks_exact_mut(width.max(1))) {
         // The first contributing tap *writes* the accumulator and the rest
         // add to it, so a destination row never pays to clear a buffer it
         // is about to overwrite — which for a resample near 1:1, where a
         // row has a single tap, is the whole of the accumulation cost.
         let mut started = false;
-        for tap in rows_plan.taps_of(dest_y as usize) {
+        for tap in rows_plan.taps_of(row) {
             if tap.weight == 0 {
                 continue;
             }
@@ -632,7 +674,8 @@ fn filter_band<R: Rows>(
     Ok(())
 }
 
-/// Copy `region` of `src` straight into `band`'s destination rows.
+/// Copy the source samples an identity plan pairs `window`'s pixels with
+/// straight into `out`.
 ///
 /// A resample whose two axis plans are both the identity *is* a copy:
 /// every destination sample draws one source sample at full weight, so the
@@ -643,23 +686,27 @@ fn filter_band<R: Rows>(
 /// wants — and paying a full separable filter to change nothing is work
 /// worth not doing.
 ///
-/// A source row the region names but the image does not hold is
-/// unreachable for a validated region; it leaves the destination row
-/// transparent rather than reporting samples it did not read.
+/// Where the copy reads is taken from the plans rather than recomputed, so
+/// a window cannot disagree with the filtered path about which source
+/// sample a destination pixel is.
+///
+/// A source row the plan names but the image does not hold is unreachable
+/// for a validated region; it leaves the destination row transparent
+/// rather than reporting samples it did not read.
 fn copy_rows<R: Rows>(
     src: &R,
-    region: Region,
-    band: Band,
+    columns: &Axis,
+    rows_plan: &Axis,
+    window: Region,
     out: &mut [<R::Space as Space>::Sample],
 ) {
-    let left = region.x as usize;
-    let right = left.saturating_add(region.width as usize);
-    let last = band.last_row().unwrap_or(band.dest_height);
+    let left = columns.first_source() as usize;
+    let right = left.saturating_add(window.width as usize);
     let blank = <R::Space as Space>::encode([0; CHANNELS]);
-    for (dest_y, chunk) in
-        (band.first_row..last).zip(out.chunks_exact_mut((region.width as usize).max(1)))
+    let top = rows_plan.first_source();
+    for (row, chunk) in (0..window.height).zip(out.chunks_exact_mut((window.width as usize).max(1)))
     {
-        let source_y = region.y.saturating_add(dest_y);
+        let source_y = top.saturating_add(row);
         match src.row(source_y).and_then(|row| row.get(left..right)) {
             Some(span) => chunk.copy_from_slice(span),
             None => chunk.fill(blank),
@@ -709,21 +756,27 @@ struct Axis {
 }
 
 impl Axis {
-    /// Plan `dest_extent` destination samples over the `extent` source
-    /// samples starting at `origin`, or `None` when the allocator refuses
-    /// the plan.
-    fn plan(origin: u32, extent: u32, dest_extent: u32) -> Option<Self> {
+    /// Plan destination samples `[first, first + count)` of a `dest_extent`
+    /// destination over the `extent` source samples starting at `origin`,
+    /// or `None` when the allocator refuses the plan.
+    ///
+    /// Every sample's footprint is computed from its position in the *whole*
+    /// destination, so a window's taps are exactly the taps the whole
+    /// destination's plan would hold for those samples — while the memory is
+    /// the window's. That is what keeps a rectangle of a large scaling
+    /// affordable and identical to the same rectangle of the whole.
+    fn plan(origin: u32, extent: u32, dest_extent: u32, first: u32, count: u32) -> Option<Self> {
         let reducing = extent > dest_extent;
         let width = if reducing {
             area_taps(extent, dest_extent)
         } else {
             CUBIC_TAPS
         };
-        let dest = dest_extent as usize;
-        let mut first = fallible::filled(dest, 0i64)?;
-        let mut weights = fallible::filled(dest.saturating_mul(width), 0i32)?;
-        for dest_sample in 0..dest_extent {
-            let span = dest_sample as usize * width;
+        let planned = count as usize;
+        let mut starts = fallible::filled(planned, 0i64)?;
+        let mut weights = fallible::filled(planned.saturating_mul(width), 0i32)?;
+        for (index, dest_sample) in (first..first.saturating_add(count)).enumerate() {
+            let span = index * width;
             let Some(row) = weights.get_mut(span..span + width) else {
                 continue;
             };
@@ -735,18 +788,18 @@ impl Axis {
             if let Some(slot) = row.get_mut(..written.max(1)) {
                 normalise(slot);
             }
-            if let Some(slot) = first.get_mut(dest_sample as usize) {
+            if let Some(slot) = starts.get_mut(index) {
                 *slot = start;
             }
         }
 
         let (lead, stride) = live_span(&weights, width);
         let mut taps = Vec::new();
-        if !fallible::reserve(&mut taps, dest.saturating_mul(stride)) {
+        if !fallible::reserve(&mut taps, planned.saturating_mul(stride)) {
             return None;
         }
-        for (dest_sample, row) in weights.chunks_exact(width).enumerate() {
-            let base = first.get(dest_sample).copied().unwrap_or(0);
+        for (index, row) in weights.chunks_exact(width).enumerate() {
+            let base = starts.get(index).copied().unwrap_or(0);
             for tap in lead..lead + stride {
                 let local = base.saturating_add(i64::try_from(tap).unwrap_or(i64::MAX));
                 taps.push(Tap {
@@ -758,13 +811,22 @@ impl Axis {
         Some(Self { taps, stride })
     }
 
-    /// The taps of destination sample `dest_sample`, or nothing when the
-    /// plan does not describe it.
-    fn taps_of(&self, dest_sample: usize) -> &[Tap] {
-        let start = dest_sample.saturating_mul(self.stride);
+    /// The taps of the plan's `index`-th destination sample — counted from
+    /// the window's own first, not from the destination's — or nothing when
+    /// the plan does not describe it.
+    fn taps_of(&self, index: usize) -> &[Tap] {
+        let start = index.saturating_mul(self.stride);
         self.taps
             .get(start..start.saturating_add(self.stride))
             .unwrap_or(&[])
+    }
+
+    /// The source sample the plan's first destination sample reads.
+    ///
+    /// Meaningful for an identity plan, which is the only caller: there the
+    /// one tap per destination sample *is* the sample it copies.
+    fn first_source(&self) -> u32 {
+        self.taps.first().map_or(0, |tap| tap.source)
     }
 
     /// Every destination sample's taps, in destination order.

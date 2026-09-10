@@ -48,14 +48,27 @@ const UNIT: i64 = 256;
 /// factor cancels here rather than being carried through every edge.
 const FULL: i64 = 2 * UNIT * UNIT;
 
-/// The furthest from the origin, in sub-units, a vertex may sit.
+/// The largest pixel extent a drawing may have for vector artwork to be
+/// placed in it exactly.
 ///
-/// A million pixels — no surface that can be allocated comes close to it, so a
-/// shape placed inside one is unaffected. Clamping to it bounds every product
-/// an intersection computes to roughly `2^58`, so the arithmetic stays exact
-/// in `i64` for any `i32` input a caller (or an attacker) supplies rather than
-/// overflowing.
-const COORD_LIMIT: i64 = 1 << 28;
+/// A million pixels — no surface that can be allocated comes close to it, so
+/// a shape placed inside one is unaffected, and a picture drawn this large is
+/// already two hundred and seventy times a 4K screen. A drawing stated larger
+/// would have its vertices clamped and be silently distorted, so an entry
+/// point that takes a drawing extent refuses one above this rather than
+/// clamping.
+///
+/// A fixed containment bound: it is what keeps the converter's arithmetic
+/// exact, not a capacity anything is sized from.
+pub const MAX_DRAWING_EXTENT: u32 = 1 << 20;
+
+/// [`MAX_DRAWING_EXTENT`] in sub-units: the furthest from the origin a vertex
+/// may sit.
+///
+/// Clamping to it bounds every product an intersection computes to roughly
+/// `2^58`, so the arithmetic stays exact in `i64` for any `i32` input a
+/// caller (or an attacker) supplies rather than overflowing.
+const COORD_LIMIT: i64 = MAX_DRAWING_EXTENT as i64 * UNIT;
 
 /// Which points enclosed by a set of contours count as inside.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]

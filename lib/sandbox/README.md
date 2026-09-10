@@ -56,8 +56,9 @@ imports this seam; a second per-app copy is forbidden.
   back to its own built-in glyph.
 - **The wallpaper-placement service** (also `imagerender`, the same
   worker): a desktop wallpaper — a shipped master or a file the user
-  picked, whatever `tairix-image` can decode (PNG and JPEG today; the
-  format list grows with `tairix-image` itself) — is sniffed, decoded, and
+  picked, whatever `tairix-image` can decode (every format its `sniff`
+  recognises; the list grows with `tairix-image` itself) — is sniffed,
+  decoded, and
   placed onto the session's screen size across a three-op sequence:
   `OP_WALLPAPER_PREPARE` decodes the source at the smallest scale its
   format offers that still covers the destination (`tairix-image`'s
@@ -69,8 +70,10 @@ imports this seam; a second per-app copy is forbidden.
   time, since a screenful of straight-alpha RGBA8 can exceed `MAX_FRAME`
   above 1080p and the frame bound is never raised to fit a larger reply;
   `OP_WALLPAPER_RELEASE` drops the held source. The destination is
-  bounded by `MAX_WALLPAPER_WIDTH`/`MAX_WALLPAPER_HEIGHT` (4K) on both
-  sides of the seam. A tiled fit repeats the decoded source at 1:1; every
+  bounded by `MAX_DESTINATION_WIDTH`/`MAX_DESTINATION_HEIGHT` (4K) on both
+  sides of the seam — one figure for every destination this worker draws,
+  since a wallpaper models a screen and a viewer's picture area sits inside
+  a window on one. A tiled fit repeats the decoded source at 1:1; every
   other fit resamples the placement's source rectangle into its destination
   rectangle through the same shared resampler the icon path uses, and any
   pixel the placement does not cover (a letterboxed fit, a source smaller
@@ -82,6 +85,33 @@ imports this seam; a second per-app copy is forbidden.
   the success path and on every error path alike. A prepare replaces any
   source (and placement) an earlier prepare left held on the same
   (reused) worker.
+- **The document-view service** (also `imagerender`, the same worker): a
+  picture or document the user opened is held as a *session* rather than
+  rendered once, because a viewer keeps a file open and moves about inside
+  it. The file arrives through the one chunked upload every untrusted
+  document here takes (`OP_DOC_BEGIN`/`OP_DOC_PUSH`, chunked at
+  `MAX_DOCUMENT_CHUNK`, derived from `MAX_FRAME` rather than chosen);
+  `OP_VIEW_OPEN` reads its structure and answers what it declares — format,
+  entry count, whether the entries are frames to play or pages to choose
+  between, and the picture the container as a whole is; `OP_VIEW_PAGE`
+  decodes one entry and the worker holds it; `OP_VIEW_RENDER` states the
+  extent the whole picture is scaled to and which rectangle of that scaling
+  to draw; `OP_VIEW_BAND` returns exactly the rows of that rectangle asked
+  for; `OP_VIEW_RELEASE` drops the document and everything decoded from it.
+  Naming the extent and a rectangle of it — rather than a rectangle of the
+  page and a destination size — is what makes a zoom cost the window
+  instead of the magnification, keeps panning exact to the screen pixel,
+  and gives one request grammar to both backings: a raster document
+  (`ViewFormat`'s eight, decoded to pixels once per page under
+  `MAX_VIEW_DECODE_PIXELS`) and a vector one (`ViewFormat::Svg`, decoded
+  once at open and rasterised afresh into each rectangle, so every zoom
+  level is drawn at full precision). A render's extent is held to
+  `tairix-raster`'s `MAX_DRAWING_EXTENT` for both, past which a drawing's
+  vertices would be clamped and the picture silently distorted. The
+  caller-side `open_view`/`select_page`/`render_page`/`close_view`
+  validates every reply fail-closed as the wallpaper path does, and
+  `render_page` draws into a buffer the caller already holds, so an
+  interactive re-render allocates nothing.
 - **The NTP-evaluation service** (`timesync`): a network time server's reply
   is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET` and must

@@ -268,9 +268,12 @@ sandboxes a parse imports it:
   length, a format byte the protocol carries, a flag byte that is a flag,
   and a page container that declares no loop count. A refusal is typed and
   says something a viewer can draw — the file is not a format it knows,
-  its structure will not read, the page will not decode, or it will not
-  fit in memory — so a document that cannot be shown produces a stated
-  reason rather than a blank window.
+  its structure will not read, the picture is larger than a view opens, or
+  it will not fit in memory — so a document that cannot be shown produces
+  a stated reason rather than a blank window. Those last two are told
+  apart deliberately: a user can act on "too large", and calling it a
+  decode failure would say their photograph is broken when it is only
+  big.
   The viewer's *own* rotation and flip are deliberately not here: they are
   a permutation of pixels the caller already holds and has validated, not
   a decode, so they belong to whatever holds the picture — turning what is

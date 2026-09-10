@@ -5,14 +5,27 @@
 //! coverage (so it blends rather than aliases, at ratios that are not whole
 //! numbers as much as at ratios that are), an enlargement interpolates
 //! instead of reproducing the source grid as blocks, a flat region survives
-//! exactly, alpha never bleeds, and a band is byte-for-byte the slice of the
-//! whole image it claims to be. The rest are the fail-closed refusals.
+//! exactly, alpha never bleeds, and a window is byte-for-byte the rectangle
+//! of the whole image it claims to be — on both axes, so a zoomed crop of a
+//! destination far larger than memory agrees with the destination it is a
+//! rectangle of. The rest are the fail-closed refusals.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{resample, resample_rows, Region, ResampleError, Rgba8Image};
+use super::{resample, resample_window, Region, ResampleError, Rgba8Image};
 use crate::Surface;
+
+/// The full-width window covering destination rows `[first, first + rows)`
+/// of a `width`-wide destination: the row band the wallpaper path asks for.
+fn rows_of(first: u32, rows: u32, width: u32) -> Region {
+    Region {
+        x: 0,
+        y: first,
+        width,
+        height: rows,
+    }
+}
 
 /// A `width`×`height` image whose every pixel is `pixel`.
 fn flat(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
@@ -110,13 +123,12 @@ fn a_one_to_one_band_is_the_slice_of_the_copy_it_claims_to_be() {
     let mut assembled = vec![0u8; whole.len()];
     for first_row in 0..5 {
         let row = &mut assembled[first_row * 16..(first_row + 1) * 16];
-        resample_rows(
+        resample_window(
             &src,
             src.whole(),
             4,
             5,
-            u32::try_from(first_row).expect("small"),
-            1,
+            rows_of(u32::try_from(first_row).expect("small"), 1, 4),
             row,
         )
         .expect("banded");
@@ -236,13 +248,129 @@ fn bands_reassemble_into_exactly_the_whole_image() {
             while first < dh {
                 let rows = band.min(dh - first);
                 let mut chunk = vec![0u8; rows as usize * dw as usize * 4];
-                resample_rows(&src, src.whole(), dw, dh, first, rows, &mut chunk)
-                    .expect("band resampled");
+                resample_window(
+                    &src,
+                    src.whole(),
+                    dw,
+                    dh,
+                    rows_of(first, rows, dw),
+                    &mut chunk,
+                )
+                .expect("band resampled");
                 assembled.extend_from_slice(&chunk);
                 first += rows;
             }
             assert_eq!(assembled, whole, "{dw}x{dh} in bands of {band} row(s)");
         }
+    }
+}
+
+#[test]
+fn every_window_is_exactly_that_rectangle_of_the_whole_destination() {
+    // The property the whole windowed form rests on, and the one a zoomed
+    // viewer's pan depends on: asking for a rectangle must give the same
+    // pixels as asking for everything and cutting it out. Checked across a
+    // reduction, 1:1, and an enlargement, because the two axis kernels and
+    // the identity fast path are three different code paths.
+    let (w, h) = (9u32, 7u32);
+    let pixels = gradient(w, h);
+    let src = Rgba8Image::new(w, h, &pixels).expect("well-formed");
+    for (dw, dh) in [(4u32, 3u32), (9u32, 7u32), (23u32, 19u32)] {
+        let whole = resample(&src, src.whole(), dw, dh).expect("resampled");
+        for x in 0..dw {
+            for y in 0..dh {
+                for width in 1..=dw - x {
+                    for height in 1..=dh - y {
+                        let window = Region {
+                            x,
+                            y,
+                            width,
+                            height,
+                        };
+                        let mut cut = vec![0u8; (width * height * 4) as usize];
+                        resample_window(&src, src.whole(), dw, dh, window, &mut cut)
+                            .expect("window resampled");
+                        let expected: Vec<u8> = (y..y + height)
+                            .flat_map(|row| {
+                                let start = ((row * dw + x) * 4) as usize;
+                                whole[start..start + (width * 4) as usize].to_vec()
+                            })
+                            .collect();
+                        assert_eq!(cut, expected, "{dw}x{dh} window {window:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_window_of_an_unallocatable_zoom_costs_only_the_window() {
+    // A viewer zoomed in far enough that the picture it is a rectangle of
+    // could never be held: sixteen gigapixels, forty times what a `Vec` of
+    // bytes could address on a 32-bit target and far past any machine's
+    // memory on a 64-bit one. The call has to succeed, which it can only do
+    // by never sizing anything from the destination.
+    let pixels = gradient(4, 4);
+    let src = Rgba8Image::new(4, 4, &pixels).expect("well-formed");
+    let zoom = 128 * 1024;
+    let read = |x: u32, y: u32| {
+        let window = Region {
+            x,
+            y,
+            width: 32,
+            height: 8,
+        };
+        let mut out = vec![0u8; (window.width * window.height * 4) as usize];
+        resample_window(&src, src.whole(), zoom, zoom, window, &mut out).expect("window resampled");
+        out
+    };
+    let near = read(zoom / 8, zoom / 8);
+    let far = read(zoom * 7 / 8, zoom * 7 / 8);
+    // Deep inside a smooth enlargement of an opaque source, so every pixel
+    // is opaque; two rectangles at opposite corners read different parts of
+    // the picture, which is what says the window was placed rather than
+    // merely produced.
+    assert!(near.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    assert!(far.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
+    assert_ne!(near, far);
+}
+
+#[test]
+fn adjacent_windows_of_one_zoom_agree_where_they_meet() {
+    // Panning re-asks for a shifted rectangle of the *same* zoom, so two
+    // rectangles that overlap must hold identical pixels in the overlap —
+    // otherwise the picture would shimmer as the user drags it.
+    let pixels = gradient(5, 5);
+    let src = Rgba8Image::new(5, 5, &pixels).expect("well-formed");
+    let (zoom, width, height) = (400u32, 16u32, 4u32);
+    let read = |x: u32| {
+        let mut out = vec![0u8; (width * height * 4) as usize];
+        resample_window(
+            &src,
+            src.whole(),
+            zoom,
+            zoom,
+            Region {
+                x,
+                y: 123,
+                width,
+                height,
+            },
+            &mut out,
+        )
+        .expect("window resampled");
+        out
+    };
+    let left = read(200);
+    let right = read(201);
+    for row in 0..height as usize {
+        let lead = row * width as usize * 4;
+        assert_eq!(
+            left[lead + 4..lead + width as usize * 4],
+            right[lead..lead + (width as usize - 1) * 4],
+            "row {row} of two windows one pixel apart"
+        );
     }
 }
 
@@ -369,7 +497,7 @@ fn a_region_outside_the_source_is_refused() {
 }
 
 #[test]
-fn a_degenerate_destination_and_a_bad_band_are_refused() {
+fn a_degenerate_destination_and_a_bad_window_are_refused() {
     let pixels = quad();
     let src = Rgba8Image::new(2, 2, &pixels).expect("well-formed");
     assert_eq!(
@@ -378,19 +506,55 @@ fn a_degenerate_destination_and_a_bad_band_are_refused() {
     );
     let mut out = vec![0u8; 16];
     assert_eq!(
-        resample_rows(&src, src.whole(), 2, 2, 0, 0, &mut out).unwrap_err(),
-        ResampleError::BandOutOfBounds,
-        "an empty band"
+        resample_window(&src, src.whole(), 2, 2, rows_of(0, 0, 2), &mut out).unwrap_err(),
+        ResampleError::WindowOutOfBounds,
+        "an empty window"
     );
     assert_eq!(
-        resample_rows(&src, src.whole(), 2, 2, 1, 2, &mut out).unwrap_err(),
-        ResampleError::BandOutOfBounds,
-        "a band running past the last row"
+        resample_window(&src, src.whole(), 2, 2, rows_of(1, 2, 2), &mut out).unwrap_err(),
+        ResampleError::WindowOutOfBounds,
+        "a window running past the last row"
     );
     assert_eq!(
-        resample_rows(&src, src.whole(), 2, 2, u32::MAX, 2, &mut out).unwrap_err(),
-        ResampleError::BandOutOfBounds,
-        "a band whose end overflows"
+        resample_window(&src, src.whole(), 2, 2, rows_of(u32::MAX, 2, 2), &mut out).unwrap_err(),
+        ResampleError::WindowOutOfBounds,
+        "a window whose end overflows"
+    );
+    assert_eq!(
+        resample_window(
+            &src,
+            src.whole(),
+            2,
+            2,
+            Region {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            &mut out,
+        )
+        .unwrap_err(),
+        ResampleError::WindowOutOfBounds,
+        "a window running past the last column"
+    );
+    assert_eq!(
+        resample_window(
+            &src,
+            src.whole(),
+            2,
+            2,
+            Region {
+                x: u32::MAX,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            &mut out,
+        )
+        .unwrap_err(),
+        ResampleError::WindowOutOfBounds,
+        "a window whose right edge overflows"
     );
 }
 
@@ -400,7 +564,7 @@ fn a_mis_sized_output_buffer_is_refused_before_a_byte_is_written() {
     let src = Rgba8Image::new(2, 2, &pixels).expect("well-formed");
     let mut out = vec![0xAAu8; 15];
     assert_eq!(
-        resample_rows(&src, src.whole(), 2, 2, 0, 2, &mut out).unwrap_err(),
+        resample_window(&src, src.whole(), 2, 2, rows_of(0, 2, 2), &mut out).unwrap_err(),
         ResampleError::OutputSizeMismatch
     );
     assert!(out.iter().all(|&b| b == 0xAA), "nothing was written");

@@ -85,18 +85,31 @@
 //! how many entries it holds, whether they are frames to play or pages to
 //! choose between, and the picture the container as a whole is.
 //! [`select_page`] decodes one entry and the worker holds it;
-//! [`render_page`] draws a *rectangle* of that held page onto a destination
-//! the caller sizes, band by band; [`close_view`] drops both.
+//! [`render_page`] says what extent the whole picture is scaled to and
+//! which *rectangle* of that scaling to draw, and collects it band by band;
+//! [`close_view`] drops both.
 //!
-//! Two things follow from that shape, and both are the point of it. A
-//! zoomed-in viewer sends the crop it is actually showing, so the work and
-//! the reply are bounded by the window rather than by the picture — a
-//! hundred-megapixel page costs the same to pan around as a small one. And
-//! the decoded page stays in the worker between requests, so panning and
+//! That render shape is a zoom's own shape, and three things follow from
+//! it. A zoomed-in viewer sends the rectangle it is actually showing, so
+//! the work and the reply are bounded by the window rather than by the
+//! picture — a hundred-megapixel page costs the same to pan around as a
+//! small one, and the scaled picture is never allocated at all. Panning is
+//! exact, because the rectangle is addressed in the destination's own
+//! pixels: moving by one screen pixel costs one, where naming an integer
+//! rectangle of the *page* would quantise a pan to the zoom factor. And the
+//! decoded page stays in the worker between requests, so panning and
 //! zooming re-draw it rather than decoding it again; the walk owns the
 //! document for the same reason, since an animation's frames composite onto
 //! their predecessors and a walk rebuilt per request would re-composite
 //! every frame before the one asked for.
+//!
+//! One shape, two backings ([`ViewFormat`]). A raster document is decoded
+//! to pixels once per page and a render resamples the rectangle out of
+//! them. A vector document has no pixels: the drawing is decoded once at
+//! open, and each band rasterises its contours straight into the rectangle
+//! it answers, so every zoom level is drawn at full precision rather than
+//! resampled from one — and a magnification no buffer could hold costs the
+//! window like any other.
 //!
 //! The viewer's own rotation and flip are deliberately *not* here. They are
 //! a permutation of pixels the caller has already been handed and validated,
@@ -115,7 +128,7 @@ use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{
     DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind,
 };
-use tairix_raster::{resample, resample_rows, Region, Rgba8Image, Surface};
+use tairix_raster::{resample, resample_window, Region, Rgba8Image, Surface, MAX_DRAWING_EXTENT};
 use tairix_svg::{SvgError, SvgImage};
 use tairix_util::fallible;
 use tairix_wallpaper::{Placement, WallpaperFit};
@@ -325,16 +338,22 @@ fn rasterise(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
     }
     match tairix_svg::decode(icon, tairix_svg::Viewport::Square) {
         Ok(image) => rasterise_svg(side, &image),
-        // These two reasons mean the bytes do not even look like an SVG
-        // document — not UTF-8, or no `<svg>` root at all — the same
-        // "this is not a format we recognise" verdict `sniff` gives PNG,
-        // just without a byte signature to check first. Every other
-        // `SvgError` means the bytes *are* shaped like SVG but violate the
-        // supported subset, which is a decode failure, not an
-        // unrecognised format.
-        Err(SvgError::NotUtf8 | SvgError::MissingRoot) => Err(IconRefusal::UnsupportedFormat),
+        Err(err) if unrecognised_svg(err) => Err(IconRefusal::UnsupportedFormat),
         Err(_) => Err(IconRefusal::MalformedImage),
     }
+}
+
+/// Whether `err` means the bytes are not an SVG document *at all*, rather
+/// than an SVG document this decoder will not draw.
+///
+/// Not UTF-8, or no `<svg>` root, is the same "this is not a format we
+/// recognise" verdict [`tairix_image::sniff`] gives a raster file, just
+/// without a byte signature to check first. Every other [`SvgError`] means
+/// the bytes *are* shaped like SVG but violate the supported subset, which
+/// is a decode failure. Both callers that admit SVG take the verdict from
+/// here, so neither can classify a file the other would not.
+fn unrecognised_svg(err: SvgError) -> bool {
+    matches!(err, SvgError::NotUtf8 | SvgError::MissingRoot)
 }
 
 /// Rasterise a decoded SVG icon directly onto a `side`×`side` surface and
@@ -357,6 +376,23 @@ fn straight_alpha_from_surface(surface: &Surface) -> Vec<u8> {
         out.push(colour.a);
     }
     out
+}
+
+/// Un-premultiply every pixel of a rendered [`Surface`] into `out`, which
+/// must hold exactly the surface's own pixels.
+///
+/// The band path writes into the buffer it is already going to send rather
+/// than building a second one beside it.
+fn write_straight_alpha(surface: &Surface, out: &mut [u8]) -> bool {
+    let (quads, tail) = out.as_chunks_mut::<4>();
+    if !tail.is_empty() || quads.len() != surface.pixels().len() {
+        return false;
+    }
+    for (pixel, slot) in surface.pixels().iter().zip(quads) {
+        let colour = pixel.unpremultiply();
+        *slot = [colour.r, colour.g, colour.b, colour.a];
+    }
+    true
 }
 
 /// Decode a PNG icon (bounded by [`tairix_icon::MAX_ARTWORK_SIDE`] /
@@ -1243,13 +1279,17 @@ fn write_resampled_band(
     let local_rows = band_end - band_start;
 
     let mut band_buf = vec![0u8; pixel_buffer_len(dest_rect.width, local_rows)];
-    resample_rows(
+    resample_window(
         &image,
         region,
         dest_rect.width,
         dest_rect.height,
-        local_first,
-        local_rows,
+        Region {
+            x: 0,
+            y: local_first,
+            width: dest_rect.width,
+            height: local_rows,
+        },
         &mut band_buf,
     )
     .map_err(|_| WallpaperRefusal::Unrenderable)?;
@@ -1858,6 +1898,7 @@ const REFUSAL_VIEW_NO_PAGE_DECODED: u8 = 7;
 const REFUSAL_VIEW_NO_RENDER: u8 = 8;
 const REFUSAL_VIEW_BAND_OUT_OF_RANGE: u8 = 9;
 const REFUSAL_VIEW_UNRENDERABLE: u8 = 10;
+const REFUSAL_VIEW_TOO_LARGE: u8 = 11;
 
 /// Why the service refused a view request, carried typed over the wire.
 ///
@@ -1892,6 +1933,14 @@ pub enum ViewRefusal {
     /// A buffer the decode or the render needed could not be allocated, or
     /// the held page could not be drawn into the requested band.
     Unrenderable,
+    /// The document, or the page asked for, declares more pixels than a
+    /// view will decode.
+    ///
+    /// Told apart from [`MalformedDocument`](Self::MalformedDocument)
+    /// because a user can act on it and it says nothing is wrong with
+    /// their file: the picture is real and simply larger than this viewer
+    /// opens.
+    TooLarge,
 }
 
 impl ViewRefusal {
@@ -1907,6 +1956,7 @@ impl ViewRefusal {
             Self::NoRender => REFUSAL_VIEW_NO_RENDER,
             Self::BandOutOfRange => REFUSAL_VIEW_BAND_OUT_OF_RANGE,
             Self::Unrenderable => REFUSAL_VIEW_UNRENDERABLE,
+            Self::TooLarge => REFUSAL_VIEW_TOO_LARGE,
         }
     }
 
@@ -1922,6 +1972,7 @@ impl ViewRefusal {
             REFUSAL_VIEW_NO_RENDER => Some(Self::NoRender),
             REFUSAL_VIEW_BAND_OUT_OF_RANGE => Some(Self::BandOutOfRange),
             REFUSAL_VIEW_UNRENDERABLE => Some(Self::Unrenderable),
+            REFUSAL_VIEW_TOO_LARGE => Some(Self::TooLarge),
             _ => None,
         }
     }
@@ -1940,6 +1991,7 @@ impl core::fmt::Display for ViewRefusal {
             Self::NoRender => f.write_str("no render is set up"),
             Self::BandOutOfRange => f.write_str("view band is out of range"),
             Self::Unrenderable => f.write_str("page could not be drawn into its band"),
+            Self::TooLarge => f.write_str("picture is larger than this viewer opens"),
         }
     }
 }
@@ -1975,7 +2027,7 @@ impl core::fmt::Display for ViewFailure {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ViewDocument {
     /// The format the document's header identifies.
-    pub format: ImageFormat,
+    pub format: ViewFormat,
     /// Whether the entries are frames to play or pages to choose between.
     pub animated: bool,
     /// How many times an animation asks to be played; `None` for ever, and
@@ -2005,71 +2057,170 @@ pub struct ViewPage {
     pub delay_ns: u64,
 }
 
-/// The wire byte for `format`, and its inverse.
+/// What a document a view opens is.
 ///
-/// A named format is how a caller reaches one [`tairix_image::sniff`]
-/// cannot recognise — a RISC OS sprite area carries no signature — so the
-/// mapping runs both ways rather than only outward.
-///
-/// `None` for a format the decoding crate has grown and this protocol has
-/// not: a document this service could decode but could not *name* to its
-/// caller is refused rather than labelled as some other format.
-const fn format_to_wire(format: ImageFormat) -> Option<u8> {
-    match format {
-        ImageFormat::Png => Some(1),
-        ImageFormat::Jpeg => Some(2),
-        ImageFormat::Gif => Some(3),
-        ImageFormat::Bmp => Some(4),
-        ImageFormat::Ico => Some(5),
-        ImageFormat::Sprite => Some(6),
-        ImageFormat::Tiff => Some(7),
-        ImageFormat::Webp => Some(8),
-        _ => None,
-    }
+/// The raster registry plus the vector format, because a viewer opens both
+/// and [`tairix_image::ImageFormat`] is a registry of formats that decode
+/// to a fixed grid of pixels — an entry it could not decode would be a name
+/// with nothing behind it. This is that registry's superset, owned by the
+/// protocol that needs it, and the wire byte is its own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ViewFormat {
+    /// Portable Network Graphics.
+    Png,
+    /// JPEG, baseline or progressive.
+    Jpeg,
+    /// Graphics Interchange Format, still or animated.
+    Gif,
+    /// Windows bitmap.
+    Bmp,
+    /// Windows icon or cursor: a directory of entries.
+    Ico,
+    /// RISC OS sprite area, which carries no signature and is reached only
+    /// by being named.
+    Sprite,
+    /// Tag Image File Format: a document of pages.
+    Tiff,
+    /// WEBP, still or animated.
+    Webp,
+    /// Scalable vector artwork, which has no pixels of its own: a render
+    /// rasterises it afresh at whatever extent it asks for.
+    Svg,
 }
 
-/// The format `raw` names, `None` for the zero byte that asks the service
-/// to read the document's own signature instead.
-const fn format_from_wire(raw: u8) -> Option<ImageFormat> {
-    match raw {
-        1 => Some(ImageFormat::Png),
-        2 => Some(ImageFormat::Jpeg),
-        3 => Some(ImageFormat::Gif),
-        4 => Some(ImageFormat::Bmp),
-        5 => Some(ImageFormat::Ico),
-        6 => Some(ImageFormat::Sprite),
-        7 => Some(ImageFormat::Tiff),
-        8 => Some(ImageFormat::Webp),
-        _ => None,
+impl ViewFormat {
+    /// The raster format this names, or `None` for the vector one.
+    #[must_use]
+    pub const fn raster(self) -> Option<ImageFormat> {
+        match self {
+            Self::Png => Some(ImageFormat::Png),
+            Self::Jpeg => Some(ImageFormat::Jpeg),
+            Self::Gif => Some(ImageFormat::Gif),
+            Self::Bmp => Some(ImageFormat::Bmp),
+            Self::Ico => Some(ImageFormat::Ico),
+            Self::Sprite => Some(ImageFormat::Sprite),
+            Self::Tiff => Some(ImageFormat::Tiff),
+            Self::Webp => Some(ImageFormat::Webp),
+            Self::Svg => None,
+        }
+    }
+
+    /// What `format` is called here, or `None` for a raster format the
+    /// decoding crate has grown and this protocol has not.
+    ///
+    /// A document this service could decode but could not *name* to its
+    /// caller is refused rather than labelled as some other format.
+    #[must_use]
+    pub const fn from_raster(format: ImageFormat) -> Option<Self> {
+        match format {
+            ImageFormat::Png => Some(Self::Png),
+            ImageFormat::Jpeg => Some(Self::Jpeg),
+            ImageFormat::Gif => Some(Self::Gif),
+            ImageFormat::Bmp => Some(Self::Bmp),
+            ImageFormat::Ico => Some(Self::Ico),
+            ImageFormat::Sprite => Some(Self::Sprite),
+            ImageFormat::Tiff => Some(Self::Tiff),
+            ImageFormat::Webp => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    /// This format's wire byte, which is never zero — that byte is what
+    /// asks the service to read the document's own signature instead.
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Png => 1,
+            Self::Jpeg => 2,
+            Self::Gif => 3,
+            Self::Bmp => 4,
+            Self::Ico => 5,
+            Self::Sprite => 6,
+            Self::Tiff => 7,
+            Self::Webp => 8,
+            Self::Svg => 9,
+        }
+    }
+
+    /// The format `raw` names, `None` for the zero byte and for any byte
+    /// this protocol does not define.
+    const fn from_wire(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Png),
+            2 => Some(Self::Jpeg),
+            3 => Some(Self::Gif),
+            4 => Some(Self::Bmp),
+            5 => Some(Self::Ico),
+            6 => Some(Self::Sprite),
+            7 => Some(Self::Tiff),
+            8 => Some(Self::Webp),
+            9 => Some(Self::Svg),
+            _ => None,
+        }
     }
 }
 
 /// The open document a worker holds between `OP_VIEW_OPEN` and
 /// `OP_VIEW_RELEASE`.
-///
-/// The walk owns the document rather than borrowing it, which is what lets
-/// a worker hold both across requests: an animation's frames composite onto
-/// a retained canvas, so a walk that had to be rebuilt per request would
-/// re-composite every frame before the one asked for.
-///
-/// The decoded page is held inside the walk, not copied out beside it, so a
-/// band draws the page the walk already has rather than a second copy of it.
 struct ViewSession {
-    sequence: Sequence<Vec<u8>>,
-    /// Which part of the decoded page is drawn onto what, as the most
+    backing: ViewBacking,
+    /// Which rectangle of the picture is drawn onto what, as the most
     /// recent `OP_VIEW_RENDER` set it up. Dropped when the page changes,
     /// because a rectangle of the old page describes nothing of the new one.
     render: Option<ViewRender>,
 }
 
+/// What the open document is made of, and therefore what a band draws from.
+///
+/// The wire is one shape over both — open, page, render, band — because a
+/// viewer's own model is: the difference is only whether a page is decoded
+/// once into pixels or rasterised afresh at each extent.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one of these exists per worker and is moved once, at open; boxing the walk would buy nothing and would add an infallible allocation to a path that otherwise reserves fallibly"
+)]
+enum ViewBacking {
+    /// A raster container, walked page by page.
+    ///
+    /// The walk owns the document rather than borrowing it, which is what
+    /// lets a worker hold both across requests: an animation's frames
+    /// composite onto a retained canvas, so a walk that had to be rebuilt
+    /// per request would re-composite every frame before the one asked for.
+    ///
+    /// The decoded page is held inside the walk, not copied out beside it,
+    /// so a band draws the page the walk already has rather than a second
+    /// copy of it.
+    Raster(Sequence<Vec<u8>>),
+    /// A vector drawing, held decoded.
+    ///
+    /// One page, and no pixels: a band rasterises the contours straight
+    /// into the rectangle it answers, so zooming costs the window rather
+    /// than the magnification and every zoom level is drawn at full
+    /// precision instead of resampled from one.
+    Vector {
+        drawing: SvgImage,
+        /// The pixel extent the document's own coordinate box declares:
+        /// what "actual size" means for a picture that has no pixels.
+        extent: (u32, u32),
+        /// Whether `OP_VIEW_PAGE` has selected the one page, so a render
+        /// before it is refused exactly as it is for a raster container.
+        selected: bool,
+    },
+}
+
 /// Where a render reads and how large it draws.
+///
+/// One shape for both backings, and the shape a *zoom* actually has: the
+/// picture scaled to `extent`, and the rectangle of that scaling the caller
+/// is showing. Naming an integer rectangle of the page instead would
+/// quantise panning to the zoom factor — at eight times, the picture would
+/// jump eight screen pixels per step — and would have nothing to say at all
+/// about a drawing that has no pixels to take a rectangle of.
 #[derive(Copy, Clone, Debug)]
 struct ViewRender {
-    /// The rectangle of the decoded page that is drawn.
-    source: Region,
-    /// The destination extent it is drawn onto.
-    dest_w: u32,
-    dest_h: u32,
+    /// The extent the whole picture is scaled to. Never allocated.
+    extent: (u32, u32),
+    /// The rectangle of that scaling this render draws.
+    window: Region,
 }
 
 impl ImageRenderService {
@@ -2096,46 +2247,44 @@ impl ImageRenderService {
         }
         let format = match named {
             0 => None,
-            raw => Some(format_from_wire(raw).ok_or(ViewRefusal::MalformedRequest)?),
+            raw => Some(ViewFormat::from_wire(raw).ok_or(ViewRefusal::MalformedRequest)?),
         };
-        // Taken rather than borrowed: the walk owns the document from here,
-        // so the bytes are never held twice.
+        // Taken rather than borrowed: the backing owns the document from
+        // here, so the bytes are never held twice.
         let document = self
             .document
             .take_if(|document| document.is_complete())
             .ok_or(ViewRefusal::NoDocument)?;
         self.view = None;
-        let limits = view_limits();
-        let sequence = match format {
-            Some(format) => Sequence::open_as(format, document.bytes, &limits),
-            None => Sequence::open(document.bytes, &limits),
-        }
-        .map_err(|err| view_decode_refusal(&err))?;
+        // Nothing in the raster sniff order opens with `<` or whitespace,
+        // so a document no signature names is either the vector format or
+        // nothing this service reads — and a sprite area, which carries no
+        // signature either, is reached only by being named.
+        let vector = match format {
+            Some(format) => format.raster().is_none(),
+            None => tairix_image::sniff(&document.bytes).is_none(),
+        };
+        let (opened, backing) = if vector {
+            open_vector(&document.bytes)?
+        } else {
+            open_raster(format, document.bytes)?
+        };
         // Everything the reply needs is settled before the view is
         // installed, so a refusal here cannot leave a document open that
         // the caller has been told did not open.
-        let info = sequence.info();
-        let (animated, loop_count) = match info.kind() {
-            SequenceKind::Animation { loop_count } => (true, loop_count),
-            SequenceKind::Pages => (false, None),
-            // A container shape this protocol cannot describe is refused
-            // rather than reported as one of the two it can.
-            _ => return Err(ViewRefusal::UnsupportedFormat),
-        };
-        let named = format_to_wire(info.format()).ok_or(ViewRefusal::UnsupportedFormat)?;
         self.view = Some(ViewSession {
-            sequence,
+            backing,
             render: None,
         });
         let mut w = Writer::new();
         w.u8(REPLY_VIEW_OPENED);
-        w.u8(named);
-        w.u8(u8::from(animated));
-        w.u8(u8::from(loop_count.is_some()));
-        w.u32(loop_count.unwrap_or(0));
-        w.u32(info.count());
-        w.u32(info.width());
-        w.u32(info.height());
+        w.u8(opened.format.to_wire());
+        w.u8(u8::from(opened.animated));
+        w.u8(u8::from(opened.loop_count.is_some()));
+        w.u32(opened.loop_count.unwrap_or(0));
+        w.u32(opened.count);
+        w.u32(opened.width);
+        w.u32(opened.height);
         Ok(w.finish())
     }
 
@@ -2150,59 +2299,76 @@ impl ImageRenderService {
         // one replacing it, so the render goes before the decode rather
         // than being left to be validated against the wrong geometry.
         view.render = None;
-        let frame = view
-            .sequence
-            .page(index)
-            .map_err(|err| view_decode_refusal(&err))?
-            .ok_or(ViewRefusal::NoSuchPage)?;
+        let page = match &mut view.backing {
+            ViewBacking::Raster(sequence) => {
+                let frame = sequence
+                    .page(index)
+                    .map_err(|err| view_decode_refusal(&err))?
+                    .ok_or(ViewRefusal::NoSuchPage)?;
+                ViewPage {
+                    index: frame.index(),
+                    width: frame.width(),
+                    height: frame.height(),
+                    delay_ns: frame.delay_ns(),
+                }
+            }
+            ViewBacking::Vector {
+                extent, selected, ..
+            } => {
+                if index != 0 {
+                    return Err(ViewRefusal::NoSuchPage);
+                }
+                // A drawing is decoded once at open, so selecting its one
+                // page decodes nothing; the flag is what keeps the state
+                // machine the same shape a raster container's is.
+                *selected = true;
+                ViewPage {
+                    index: 0,
+                    width: extent.0,
+                    height: extent.1,
+                    delay_ns: 0,
+                }
+            }
+        };
         let mut w = Writer::new();
         w.u8(REPLY_VIEW_PAGE);
-        w.u32(frame.index());
-        w.u32(frame.width());
-        w.u32(frame.height());
-        w.u64(frame.delay_ns());
+        w.u32(page.index);
+        w.u32(page.width);
+        w.u32(page.height);
+        w.u64(page.delay_ns);
         Ok(w.finish())
     }
 
-    /// `OP_VIEW_RENDER`: fix which part of the held page is drawn onto what,
-    /// and answer the band size a reply can carry. Nothing is drawn yet.
+    /// `OP_VIEW_RENDER`: fix which rectangle of which scaling of the held
+    /// page is drawn, and answer the band size a reply can carry. Nothing
+    /// is drawn yet.
     fn handle_view_render(&mut self, r: &mut Reader<'_>) -> Result<Vec<u8>, ViewRefusal> {
-        let source = Region {
+        let extent = (
+            r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
+            r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
+        );
+        let window = Region {
             x: r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
             y: r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
             width: r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
             height: r.u32().map_err(|_| ViewRefusal::MalformedRequest)?,
         };
-        let dest_w = r.u32().map_err(|_| ViewRefusal::MalformedRequest)?;
-        let dest_h = r.u32().map_err(|_| ViewRefusal::MalformedRequest)?;
-        if !r.is_exhausted() {
-            return Err(ViewRefusal::MalformedRequest);
-        }
-        if dest_w == 0
-            || dest_w > MAX_DESTINATION_WIDTH
-            || dest_h == 0
-            || dest_h > MAX_DESTINATION_HEIGHT
-        {
+        if !r.is_exhausted() || !renderable(extent, window) {
             return Err(ViewRefusal::MalformedRequest);
         }
         let view = self.view.as_mut().ok_or(ViewRefusal::NotOpen)?;
-        let page = view.sequence.current().ok_or(ViewRefusal::NoPageDecoded)?;
-        if !covers(source, page.width(), page.height()) {
-            return Err(ViewRefusal::MalformedRequest);
+        if !view.backing.has_page() {
+            return Err(ViewRefusal::NoPageDecoded);
         }
-        view.render = Some(ViewRender {
-            source,
-            dest_w,
-            dest_h,
-        });
+        view.render = Some(ViewRender { extent, window });
         let mut w = Writer::new();
         w.u8(REPLY_VIEW_RENDERED);
-        w.u32(rows_per_band(dest_w));
+        w.u32(rows_per_band(window.width));
         Ok(w.finish())
     }
 
-    /// `OP_VIEW_BAND`: draw and answer exactly the requested destination
-    /// rows of the render most recently set up.
+    /// `OP_VIEW_BAND`: draw and answer exactly the requested rows of the
+    /// window the render most recently set up.
     fn handle_view_band(&self, r: &mut Reader<'_>) -> Result<Vec<u8>, ViewRefusal> {
         let first_row = r.u32().map_err(|_| ViewRefusal::MalformedRequest)?;
         let rows = r.u32().map_err(|_| ViewRefusal::MalformedRequest)?;
@@ -2211,29 +2377,23 @@ impl ImageRenderService {
         }
         let view = self.view.as_ref().ok_or(ViewRefusal::NotOpen)?;
         let render = view.render.ok_or(ViewRefusal::NoRender)?;
-        let page = view.sequence.current().ok_or(ViewRefusal::NoPageDecoded)?;
         let last = first_row
             .checked_add(rows)
             .ok_or(ViewRefusal::BandOutOfRange)?;
-        // Bounded by what a reply frame carries as well as by the
-        // destination: a wider band would be drawn in full and only then
-        // found to be unsendable.
-        if rows == 0 || last > render.dest_h || rows > rows_per_band(render.dest_w) {
+        // Bounded by what a reply frame carries as well as by the window:
+        // a taller band would be drawn in full and only then found to be
+        // unsendable.
+        if rows == 0 || last > render.window.height || rows > rows_per_band(render.window.width) {
             return Err(ViewRefusal::BandOutOfRange);
         }
-        let source = Rgba8Image::new(page.width(), page.height(), page.pixels())
-            .map_err(|_| ViewRefusal::Unrenderable)?;
-        let mut pixels = vec![0u8; pixel_buffer_len(render.dest_w, rows)];
-        resample_rows(
-            &source,
-            render.source,
-            render.dest_w,
-            render.dest_h,
-            first_row,
-            rows,
-            &mut pixels,
-        )
-        .map_err(|_| ViewRefusal::Unrenderable)?;
+        let band = Region {
+            x: render.window.x,
+            y: render.window.y.saturating_add(first_row),
+            width: render.window.width,
+            height: rows,
+        };
+        let mut pixels = vec![0u8; pixel_buffer_len(render.window.width, rows)];
+        view.backing.draw(render.extent, band, &mut pixels)?;
         let mut w = Writer::new();
         w.u8(REPLY_VIEW_BAND);
         w.u32(first_row);
@@ -2256,19 +2416,175 @@ impl ImageRenderService {
     }
 }
 
-/// Whether `source` lies wholly inside a `width`×`height` page and is not
-/// empty.
-fn covers(source: Region, width: u32, height: u32) -> bool {
-    source.width != 0
-        && source.height != 0
-        && source
+/// Whether `window` lies wholly inside a `width`×`height` rectangle and is
+/// not empty.
+fn covers(window: Region, width: u32, height: u32) -> bool {
+    window.width != 0
+        && window.height != 0
+        && window
             .x
-            .checked_add(source.width)
+            .checked_add(window.width)
             .is_some_and(|right| right <= width)
-        && source
+        && window
             .y
-            .checked_add(source.height)
+            .checked_add(window.height)
             .is_some_and(|bottom| bottom <= height)
+}
+
+/// Whether a render may draw `window` of a picture scaled to `extent`.
+///
+/// The window is what is actually allocated and sent, so it is held to the
+/// destination bounds. The extent is never allocated — it is only a ratio
+/// the drawing is read through — so what bounds it is the largest drawing
+/// the shared rasteriser places exactly: past that a vector's contours
+/// would be clamped and the picture silently distorted, and one shape of
+/// request takes one bound whichever backing answers it.
+fn renderable(extent: (u32, u32), window: Region) -> bool {
+    extent.0 <= MAX_DRAWING_EXTENT
+        && extent.1 <= MAX_DRAWING_EXTENT
+        && window.width <= MAX_DESTINATION_WIDTH
+        && window.height <= MAX_DESTINATION_HEIGHT
+        && covers(window, extent.0, extent.1)
+}
+
+impl ViewBacking {
+    /// Whether a page has been selected, so a render has something to
+    /// describe a rectangle of.
+    fn has_page(&self) -> bool {
+        match self {
+            Self::Raster(sequence) => sequence.current().is_some(),
+            Self::Vector { selected, .. } => *selected,
+        }
+    }
+
+    /// Draw `band` of the held page scaled to `extent` into `out`, which
+    /// holds exactly the band's straight-alpha RGBA8 pixels.
+    fn draw(&self, extent: (u32, u32), band: Region, out: &mut [u8]) -> Result<(), ViewRefusal> {
+        match self {
+            Self::Raster(sequence) => {
+                let page = sequence.current().ok_or(ViewRefusal::NoPageDecoded)?;
+                let source = Rgba8Image::new(page.width(), page.height(), page.pixels())
+                    .map_err(|_| ViewRefusal::Unrenderable)?;
+                resample_window(&source, source.whole(), extent.0, extent.1, band, out)
+                    .map_err(|_| ViewRefusal::Unrenderable)
+            }
+            Self::Vector { drawing, .. } => {
+                let surface = Surface::layered_window(
+                    extent,
+                    band,
+                    drawing.layers().len(),
+                    |surface, over| {
+                        for layer in drawing.layers() {
+                            surface.fill_contours_over(
+                                over,
+                                &layer.contours,
+                                drawing.design(),
+                                layer.rule,
+                                &layer.paint,
+                            );
+                        }
+                    },
+                )
+                .ok_or(ViewRefusal::Unrenderable)?;
+                write_straight_alpha(&surface, out)
+                    .then_some(())
+                    .ok_or(ViewRefusal::Unrenderable)
+            }
+        }
+    }
+}
+
+/// Open `bytes` as a raster container, answering what it declares and the
+/// walk that reads it.
+fn open_raster(
+    format: Option<ViewFormat>,
+    bytes: Vec<u8>,
+) -> Result<(ViewDocument, ViewBacking), ViewRefusal> {
+    let limits = view_limits();
+    let sequence = match format.and_then(ViewFormat::raster) {
+        Some(format) => Sequence::open_as(format, bytes, &limits),
+        None => Sequence::open(bytes, &limits),
+    }
+    .map_err(|err| view_decode_refusal(&err))?;
+    let info = sequence.info();
+    let (animated, loop_count) = match info.kind() {
+        SequenceKind::Animation { loop_count } => (true, loop_count),
+        SequenceKind::Pages => (false, None),
+        // A container shape this protocol cannot describe is refused
+        // rather than reported as one of the two it can.
+        _ => return Err(ViewRefusal::UnsupportedFormat),
+    };
+    let opened = ViewDocument {
+        format: ViewFormat::from_raster(info.format()).ok_or(ViewRefusal::UnsupportedFormat)?,
+        animated,
+        loop_count,
+        count: info.count(),
+        width: info.width(),
+        height: info.height(),
+    };
+    Ok((opened, ViewBacking::Raster(sequence)))
+}
+
+/// Open `bytes` as a vector drawing, answering what it declares and the
+/// drawing a render rasterises.
+///
+/// Decoded to its own proportions rather than letter-boxed into a square,
+/// so a render fills whatever rectangle it is given at the design grid's
+/// full precision on both axes.
+fn open_vector(bytes: &[u8]) -> Result<(ViewDocument, ViewBacking), ViewRefusal> {
+    let drawing = tairix_svg::decode(bytes, tairix_svg::Viewport::Natural).map_err(|err| {
+        if unrecognised_svg(err) {
+            ViewRefusal::UnsupportedFormat
+        } else {
+            ViewRefusal::MalformedDocument
+        }
+    })?;
+    let extent = vector_extent(&drawing).ok_or(ViewRefusal::TooLarge)?;
+    let opened = ViewDocument {
+        format: ViewFormat::Svg,
+        animated: false,
+        loop_count: None,
+        count: 1,
+        width: extent.0,
+        height: extent.1,
+    };
+    Ok((
+        opened,
+        ViewBacking::Vector {
+            drawing,
+            extent,
+            selected: false,
+        },
+    ))
+}
+
+/// The pixel extent a drawing's own coordinate box declares: what "actual
+/// size" means for a picture that has no pixels.
+///
+/// One user unit is one pixel, which is what the format's own `width` and
+/// `height` mean when a document states them and the reading every renderer
+/// takes of a bare `viewBox`. `None` for a box no render could ever be
+/// asked for, which is the honest answer: an extent past what the
+/// rasteriser places exactly is not a size, and reporting a clamped one
+/// would tell a viewer the drawing is a shape it is not.
+fn vector_extent(drawing: &SvgImage) -> Option<(u32, u32)> {
+    let (width, height) = drawing.source_extent();
+    Some((round_extent(width)?, round_extent(height)?))
+}
+
+/// A positive, finite user-unit length as a pixel count of at least one,
+/// or `None` past what a render may be asked for.
+fn round_extent(value: f64) -> Option<u32> {
+    if !value.is_finite() || value <= 0.0 || value > f64::from(MAX_DRAWING_EXTENT) {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "held above zero and to `MAX_DRAWING_EXTENT` on the line above, so the rounded value is one a render may name"
+    )]
+    let pixels = (value + 0.5) as u32;
+    Some(pixels.max(1))
 }
 
 /// The limits a viewed document's pages are decoded under.
@@ -2281,12 +2597,22 @@ fn view_limits() -> DecodeLimits {
     )
 }
 
-/// Which refusal a decoder's error is, told apart so a viewer can say
-/// whether it could not read the file at all or could not afford it.
+/// Which refusal a decoder's error is, told apart so a viewer states the
+/// reason the user is actually looking at.
+///
+/// The three are genuinely different answers: an unreadable file, a real
+/// picture too big for the bound, and a machine that could not hold one it
+/// would otherwise have decoded. Folding the middle one into "failed to
+/// decode" would tell a user their photograph is broken when it is only
+/// large.
 fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
     match err {
         DecodeError::UnknownFormat => ViewRefusal::UnsupportedFormat,
         DecodeError::OutOfMemory => ViewRefusal::Unrenderable,
+        DecodeError::WidthExceedsLimit
+        | DecodeError::HeightExceedsLimit
+        | DecodeError::PixelCountExceedsLimit
+        | DecodeError::DimensionsOverflow => ViewRefusal::TooLarge,
         _ => ViewRefusal::MalformedDocument,
     }
 }
@@ -2313,22 +2639,16 @@ fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
 /// not be believed.
 pub fn open_view<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
-    format: Option<ImageFormat>,
+    format: Option<ViewFormat>,
 ) -> Result<ViewDocument, ViewFailure> {
-    let named = match format {
-        None => 0,
-        Some(format) => {
-            format_to_wire(format).ok_or(ViewFailure::Refused(ViewRefusal::UnsupportedFormat))?
-        }
-    };
     let mut w = Writer::new();
     w.u8(OP_VIEW_OPEN);
-    w.u8(named);
+    w.u8(format.map_or(0, ViewFormat::to_wire));
     let reply = view_reply(sandbox, w)?;
     let mut r = Reader::new(&reply);
     expect_tag(&mut r, REPLY_VIEW_OPENED)?;
     let named = r.u8().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let format = format_from_wire(named).ok_or(ViewFailure::ReplyMalformed)?;
+    let format = ViewFormat::from_wire(named).ok_or(ViewFailure::ReplyMalformed)?;
     let animated = read_flag(&mut r)?;
     let counted = read_flag(&mut r)?;
     let declared = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
@@ -2413,29 +2733,21 @@ pub fn select_page<L: Launcher, S: tairix_log::Sink>(
 /// bounds), or a reply could not be believed.
 pub fn render_page<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
-    source: Region,
-    dest_width: u32,
-    dest_height: u32,
+    extent: (u32, u32),
+    window: Region,
     out: &mut [u8],
 ) -> Result<(), ViewFailure> {
-    if dest_width == 0
-        || dest_width > MAX_DESTINATION_WIDTH
-        || dest_height == 0
-        || dest_height > MAX_DESTINATION_HEIGHT
-        || source.width == 0
-        || source.height == 0
-        || out.len() != pixel_buffer_len(dest_width, dest_height)
-    {
+    if !renderable(extent, window) || out.len() != pixel_buffer_len(window.width, window.height) {
         return Err(ViewFailure::Refused(ViewRefusal::MalformedRequest));
     }
     let mut w = Writer::new();
     w.u8(OP_VIEW_RENDER);
-    w.u32(source.x);
-    w.u32(source.y);
-    w.u32(source.width);
-    w.u32(source.height);
-    w.u32(dest_width);
-    w.u32(dest_height);
+    w.u32(extent.0);
+    w.u32(extent.1);
+    w.u32(window.x);
+    w.u32(window.y);
+    w.u32(window.width);
+    w.u32(window.height);
     let reply = view_reply(sandbox, w)?;
     let mut r = Reader::new(&reply);
     expect_tag(&mut r, REPLY_VIEW_RENDERED)?;
@@ -2444,11 +2756,11 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
         return Err(ViewFailure::ReplyMalformed);
     }
     let mut first_row = 0u32;
-    while first_row < dest_height {
-        let rows = rows_per_band.min(dest_height - first_row);
-        let band = view_band(sandbox, first_row, rows, dest_width)?;
-        let offset = pixel_buffer_len(dest_width, first_row);
-        let expected = pixel_buffer_len(dest_width, rows);
+    while first_row < window.height {
+        let rows = rows_per_band.min(window.height - first_row);
+        let band = view_band(sandbox, first_row, rows, window.width)?;
+        let offset = pixel_buffer_len(window.width, first_row);
+        let expected = pixel_buffer_len(window.width, rows);
         out.get_mut(offset..offset + expected)
             .ok_or(ViewFailure::ReplyMalformed)?
             .copy_from_slice(&band);

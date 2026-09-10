@@ -57,7 +57,7 @@ pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixe
 pub use dither::DitherRow;
 pub use paint::{Gradient, GradientKind, GradientStop, Paint, SpreadMethod};
 pub use reorient::Reorient;
-pub use resample::{resample, resample_rows, Region, ResampleError, Rgba8Image};
+pub use resample::{resample, resample_window, Region, ResampleError, Rgba8Image};
 pub use round::{round_rect_coverage, round_rect_radius};
-pub use scan::FillRule;
+pub use scan::{FillRule, MAX_DRAWING_EXTENT};
 pub use surface::{RowBand, RowBands, Surface, SUBPIXEL};

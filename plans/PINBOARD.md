@@ -143,7 +143,7 @@ One document, one engine, one writer.
   `tairix_wallpaper::{DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER}` and
   spelled by `default_wallpaper_path()`.
 - **A shipped master is authored no larger than the renderer's own maximum
-  destination** (`lib/sandbox`'s `MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT`,
+  destination** (`lib/sandbox`'s `MAX_DESTINATION_WIDTH`×`MAX_DESTINATION_HEIGHT`,
   3840×2160). JPEG entropy decoding cannot skip blocks: every block of the
   *source* image is Huffman-decoded regardless of the requested output
   scale, so a master far larger than any destination costs decode time no

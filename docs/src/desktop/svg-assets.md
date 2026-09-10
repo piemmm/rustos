@@ -59,6 +59,18 @@ given: normalising in the decoder and un-normalising in the surface's own
 shape is one uniform scale, so the scan converter needs no non-square grid of
 its own.
 
+Its production consumer is the parser sandbox's view service, which opens an
+SVG document as the second backing behind the same open/page/render/band
+protocol a raster document uses (`plans/VIEW.md`). A viewer zoomed in states
+the extent the whole drawing is scaled to and the one rectangle of it the
+window shows, and `Surface::layered_window` rasterises the contours straight
+into that rectangle: `source_extent()` rounded to pixels is what "actual
+size" means for a picture that has none of its own, every zoom level is drawn
+at full precision rather than resampled from one, and a magnification larger
+than memory costs the window rather than the magnification. A drawing whose
+own box is past `tairix_raster::MAX_DRAWING_EXTENT` is refused with a stated
+reason rather than reported at a clamped size.
+
 Filling both axes does mean a curve is flattened to the tolerance of the
 larger scale, so a drawing already close to the total-vertex bound can pass it
 under `Natural` and be admitted under `Square`. The bound is a containment

@@ -47,6 +47,17 @@ This crate owns:
   between two abutting parts of a glyph. A multi-layer stack is therefore
   painted several times larger and averaged back down, tapering to no
   enlargement at all once the result is fine enough for the seam not to show.
+- `Surface::layered_window` / `Surface::fill_contours_over` — the same, for
+  one *rectangle* of a drawing larger than the buffer. Vector artwork has no
+  natural pixel size, so a viewer showing it magnified asks for the drawing
+  at the extent it is magnified to — routinely larger than the screen, often
+  larger than memory — and for the rectangle the window is showing.
+  Rasterising the whole and cutting the rectangle out would cost the
+  magnification; this costs the rectangle, so zooming in has a flat price.
+  The seam-resolution enlargement is chosen from the *drawing*, never the
+  window, so every rectangle of one drawing agrees with every other and with
+  the whole; a drawing past `MAX_DRAWING_EXTENT` is refused rather than drawn
+  with its vertices clamped.
 - `Surface::fill_polygon` — the single anti-aliased filled-polygon scan
   converter. Vector artwork (pointer cursors in
   `lib/cursor`, status icons in `lib/icon`) is authored on a design grid and
@@ -241,7 +252,7 @@ This crate owns:
   requested one clamped to half the shorter side. A caller reasoning about
   *where* a shape's corners are — which rows carry an arc at all, as the
   compositor asks per window row — reads the clamp rather than restating it.
-- `resample` / `resample_rows` / `Surface::resampled` — the single image
+- `resample` / `resample_window` / `Surface::resampled` — the single image
   resampler the whole desktop scales through: the icon pipeline fitting a
   bundle's artwork into a slot, the wallpaper pipeline placing a photograph
   onto a screen, and the taskbar's picker scaling a window's frame into a
@@ -358,12 +369,19 @@ to 0.90 ns/px and a translucent window stack from 7.69 to 5.69 ns/px.
 ## The resampler
 
 `resample(src, region, w, h)` scales a rectangle of a straight-alpha RGBA8
-image to a new size; `resample_rows` produces any contiguous run of
-destination rows of that same result, so a caller that cannot hold (or cannot
-transport) a whole destination at once builds it a band at a time. Bands are
-computed from the source and the filter plan alone, never from a previous
-band, so assembling them yields byte-for-byte what one call would have
-produced.
+image to a new size; `resample_window` produces any *rectangle* of that same
+result, so a caller that cannot hold (or cannot transport, or does not want)
+a whole destination builds the part it needs. Windows are computed from the
+source and the filter plan alone, never from a previous one, so assembling
+them yields byte-for-byte what one call would have produced and two windows
+agree exactly where they meet.
+
+Both axes are windowed, which is what makes a zoom affordable: one
+screen-sized rectangle of a picture scaled a hundredfold costs that
+rectangle, and the scaled picture is never allocated. It is also what makes
+panning exact — the destination is addressed in its own pixels, so moving by
+one costs one, where a caller forced to name an integer *source* rectangle
+could only move by the zoom factor.
 
 Resampling is reconstruction followed by prefiltering, and which of the two
 dominates is decided by the ratio between the extents — so the kernel is
@@ -386,7 +404,7 @@ chosen per axis by the direction that axis is going:
 
 Both alpha spaces a desktop holds pixels in go through that one filter, each
 read and written in its own space. Straight-alpha RGBA8 (`resample`,
-`resample_rows`) is premultiplied on the way in and divided back out on the
+`resample_window`) is premultiplied on the way in and divided back out on the
 way out; premultiplied `Surface`s (`Surface::resampled`) multiply and divide
 nothing, filtering the stored channels as they are — half the multiplies in
 the inner loop, and no copy of the source. The two agree exactly on an opaque
@@ -423,11 +441,11 @@ drops the tap columns that carry no weight for any destination sample, so a
 plan sized for its worst sample does not charge every other sample for it.
 A destination row's first contributing tap writes the accumulator and the
 rest add to it, so a row never pays to clear a buffer it is about to
-overwrite. Scratch memory is a fixed handful of destination-width rows
+overwrite. Scratch memory is a fixed handful of window-width rows
 however extreme the ratio, so
 reducing a 4K photograph to a thumbnail costs no more working memory than
 reducing it to a screen. Every entry point is total — degenerate geometry, a
-region outside its image, a mis-sized output buffer, and a band past the
+region outside its image, a mis-sized output buffer, and a window past the
 destination are typed refusals, never a panic or a partial write.
 
 ## The clip window

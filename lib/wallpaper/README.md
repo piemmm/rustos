@@ -90,7 +90,7 @@ name → label table to drift. `catalog_categories` filters and orders a
 listing of the store's own subdirectories exactly as `catalog_entries` does a
 listing of one category's files.
 Each master is authored no larger than `lib/sandbox`'s
-`MAX_WALLPAPER_WIDTH`×`MAX_WALLPAPER_HEIGHT` (3840×2160): JPEG entropy
+`MAX_DESTINATION_WIDTH`×`MAX_DESTINATION_HEIGHT` (3840×2160): JPEG entropy
 decoding cannot skip blocks, so a source pixel beyond what the renderer
 will ever draw costs decode time no screen can use. `catalog_entries` is
 the one bounded, fail-closed definition of which files in a directory
