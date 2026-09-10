@@ -36,5 +36,8 @@ impl VectorIcon {
 /// # Errors
 /// Propagates the [`SvgError`] from [`tairix_svg::decode`].
 pub fn decode(bytes: &[u8]) -> Result<VectorIcon, SvgError> {
-    Ok(VectorIcon::from_svg(&tairix_svg::decode(bytes)?))
+    Ok(VectorIcon::from_svg(&tairix_svg::decode(
+        bytes,
+        tairix_svg::Viewport::Square,
+    )?))
 }

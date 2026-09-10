@@ -134,6 +134,7 @@ mod huffman;
 mod ico;
 mod jpeg;
 mod lzw;
+mod orientation;
 mod pages;
 mod png;
 #[cfg(test)]

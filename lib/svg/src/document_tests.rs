@@ -12,7 +12,18 @@ use alloc::vec::Vec;
 use tairix_raster::{Color, FillRule, Paint};
 
 use crate::error::SvgError;
-use crate::{decode, SvgLayer, DESIGN_GRID};
+use crate::{decode, SvgLayer, Viewport, DESIGN_GRID};
+
+/// Fit a document to the square slot, which is what all but the viewport's
+/// own tests are about.
+fn decode_square(bytes: &[u8]) -> Result<crate::SvgImage, SvgError> {
+    decode(bytes, Viewport::Square)
+}
+
+/// The design grid as a contour coordinate.
+fn grid() -> i32 {
+    i32::try_from(DESIGN_GRID).unwrap_or(0)
+}
 
 /// Every test document uses an eight-unit view box, so one user unit is
 /// exactly this many design units and every expected coordinate is a round
@@ -22,7 +33,7 @@ const UNIT: i32 = 256;
 /// The layers a document decodes to.
 #[track_caller]
 fn layers(svg: &str) -> Vec<SvgLayer> {
-    decode(svg.as_bytes())
+    decode_square(svg.as_bytes())
         .expect("a decodable document")
         .layers()
         .to_vec()
@@ -57,7 +68,7 @@ fn contour(layer: &SvgLayer) -> &[(i32, i32)] {
 fn every_document_lands_on_the_shared_design_grid() {
     for view_box in ["0 0 8 8", "0 0 24 24", "0 0 1000 1000"] {
         let svg = format!(r#"<svg viewBox="{view_box}"><rect width="1" height="1"/></svg>"#);
-        let image = decode(svg.as_bytes()).expect("a decodable document");
+        let image = decode_square(svg.as_bytes()).expect("a decodable document");
         assert_eq!(image.design(), DESIGN_GRID);
     }
 }
@@ -97,9 +108,9 @@ fn a_non_square_view_box_is_letter_boxed_not_stretched() {
     let left = points.iter().map(|point| point.0).min().expect("a point");
     let right = points.iter().map(|point| point.0).max().expect("a point");
     // Full width, half height, centred in the spare space.
-    assert_eq!((left, right), (0, i32::try_from(DESIGN_GRID).unwrap_or(0)));
-    assert_eq!(bottom - top, i32::try_from(DESIGN_GRID).unwrap_or(0) / 2);
-    assert_eq!(top, i32::try_from(DESIGN_GRID).unwrap_or(0) / 4);
+    assert_eq!((left, right), (0, grid()));
+    assert_eq!(bottom - top, grid() / 2);
+    assert_eq!(top, grid() / 4);
 }
 
 #[test]
@@ -235,7 +246,7 @@ fn a_use_cycle_is_refused() {
         r##"<g id="a"><use href="#b"/></g>
            <g id="b"><use href="#a"/></g>"##,
     );
-    assert_eq!(decode(svg.as_bytes()), Err(SvgError::TooComplex));
+    assert_eq!(decode_square(svg.as_bytes()), Err(SvgError::TooComplex));
 }
 
 /// A `switch` renders the first child it can, and only that one.
@@ -318,7 +329,7 @@ fn a_stroke_with_no_width_or_no_paint_draws_nothing() {
 #[test]
 fn a_hotspot_is_read_and_scaled_onto_the_grid() {
     let svg = r#"<svg viewBox="0 0 8 8" data-hotspot-x="2" data-hotspot-y="3"><rect width="1" height="1"/></svg>"#;
-    let image = decode(svg.as_bytes()).expect("a decodable document");
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
     assert_eq!(image.hotspot(), Some((2 * UNIT, 3 * UNIT)));
 }
 
@@ -326,13 +337,13 @@ fn a_hotspot_is_read_and_scaled_onto_the_grid() {
 fn no_hotspot_is_none_and_half_a_hotspot_is_refused() {
     let svg = document(r#"<rect width="1" height="1"/>"#);
     assert_eq!(
-        decode(svg.as_bytes())
+        decode_square(svg.as_bytes())
             .expect("a decodable document")
             .hotspot(),
         None
     );
     let half = r#"<svg viewBox="0 0 8 8" data-hotspot-x="2"><rect width="1" height="1"/></svg>"#;
-    assert_eq!(decode(half.as_bytes()), Err(SvgError::InvalidNumber));
+    assert_eq!(decode_square(half.as_bytes()), Err(SvgError::InvalidNumber));
 }
 
 // --- the XML layer --------------------------------------------------------
@@ -373,19 +384,22 @@ fn an_svg_prefixed_element_is_drawn() {
 
 #[test]
 fn a_document_that_is_not_svg_is_refused() {
-    assert_eq!(decode(b"<html><body/></html>"), Err(SvgError::MissingRoot));
-    assert_eq!(decode(b""), Err(SvgError::MissingRoot));
-    assert_eq!(decode(&[0xff, 0xfe, 0xfd]), Err(SvgError::NotUtf8));
+    assert_eq!(
+        decode_square(b"<html><body/></html>"),
+        Err(SvgError::MissingRoot)
+    );
+    assert_eq!(decode_square(b""), Err(SvgError::MissingRoot));
+    assert_eq!(decode_square(&[0xff, 0xfe, 0xfd]), Err(SvgError::NotUtf8));
 }
 
 #[test]
 fn a_document_with_no_coordinate_system_is_refused() {
     assert_eq!(
-        decode(br#"<svg><rect width="1" height="1"/></svg>"#),
+        decode_square(br#"<svg><rect width="1" height="1"/></svg>"#),
         Err(SvgError::MissingViewBox)
     );
     assert_eq!(
-        decode(br#"<svg viewBox="0 0 0 8"><rect width="1" height="1"/></svg>"#),
+        decode_square(br#"<svg viewBox="0 0 0 8"><rect width="1" height="1"/></svg>"#),
         Err(SvgError::InvalidViewBox)
     );
 }
@@ -400,7 +414,7 @@ fn malformed_xml_is_refused() {
         r#"<svg viewBox="0 0 8 8"><!-- unterminated"#,
     ] {
         assert_eq!(
-            decode(bad.as_bytes()),
+            decode_square(bad.as_bytes()),
             Err(SvgError::Malformed),
             "{bad:?} should be refused"
         );
@@ -410,15 +424,15 @@ fn malformed_xml_is_refused() {
 #[test]
 fn a_malformed_value_anywhere_refuses_the_whole_document() {
     assert_eq!(
-        decode(document(r#"<rect width="1" height="1" fill="chartreuseish"/>"#).as_bytes()),
+        decode_square(document(r#"<rect width="1" height="1" fill="chartreuseish"/>"#).as_bytes()),
         Err(SvgError::InvalidColor)
     );
     assert_eq!(
-        decode(document(r#"<rect width="1" height="1" transform="wobble(2)"/>"#).as_bytes()),
+        decode_square(document(r#"<rect width="1" height="1" transform="wobble(2)"/>"#).as_bytes()),
         Err(SvgError::InvalidNumber)
     );
     assert_eq!(
-        decode(document(r#"<path d="M0 0 X1 1"/>"#).as_bytes()),
+        decode_square(document(r#"<path d="M0 0 X1 1"/>"#).as_bytes()),
         Err(SvgError::UnsupportedPath)
     );
 }
@@ -431,13 +445,13 @@ fn an_unaffordable_document_is_refused() {
     let closed = "</g>".repeat(200);
     let deep = format!(r#"{opened}<rect width="1" height="1"/>{closed}"#);
     assert_eq!(
-        decode(document(&deep).as_bytes()),
+        decode_square(document(&deep).as_bytes()),
         Err(SvgError::TooComplex)
     );
 
     let many = "<rect width=\"1\" height=\"1\"/>".repeat(9000);
     assert_eq!(
-        decode(document(&many).as_bytes()),
+        decode_square(document(&many).as_bytes()),
         Err(SvgError::TooComplex)
     );
 }
@@ -460,10 +474,123 @@ fn assorted_hostile_documents_never_panic() {
         r#"<svg viewBox="-1e300 -1e300 1e300 1e300"><rect width="8" height="8"/></svg>"#,
     ];
     for case in cases {
-        if let Ok(image) = decode(case.as_bytes()) {
+        if let Ok(image) = decode_square(case.as_bytes()) {
             for layer in image.layers() {
                 assert!(!layer.contours.is_empty(), "{case:?} made an empty layer");
             }
         }
     }
+}
+
+// --- the viewport a document is fitted to ---------------------------------
+
+/// The contour of the only layer a document decodes to, under `viewport`.
+#[track_caller]
+fn only_contour(svg: &str, viewport: Viewport) -> Vec<(i32, i32)> {
+    let image = decode(svg.as_bytes(), viewport).expect("a decodable document");
+    let decoded = image.layers().to_vec();
+    assert_eq!(decoded.len(), 1, "expected one layer");
+    contour(&decoded[0]).to_vec()
+}
+
+/// A wide document holding a rectangle over the whole of its own view box.
+fn wide() -> alloc::string::String {
+    r#"<svg viewBox="0 0 16 4"><rect width="16" height="4"/></svg>"#.into()
+}
+
+#[test]
+fn the_square_slot_letter_boxes_a_drawing_that_is_not_square() {
+    // Sixteen by four into a square grid: the drawing keeps its shape, so
+    // it occupies a quarter of the height and is centred in the spare
+    // space.
+    let got = only_contour(&wide(), Viewport::Square);
+    let quarter = grid() / 4;
+    let top = (grid() - quarter) / 2;
+    assert!(got.contains(&(0, top)), "{got:?}");
+    assert!(got.contains(&(grid(), top + quarter)), "{got:?}");
+}
+
+#[test]
+fn the_natural_shape_fills_the_grid_on_both_axes() {
+    // The same drawing normalised: no bands, and full precision on the
+    // short axis rather than a quarter of it.
+    let got = only_contour(&wide(), Viewport::Natural);
+    assert!(got.contains(&(0, 0)), "{got:?}");
+    assert!(got.contains(&(grid(), grid())), "{got:?}");
+}
+
+#[test]
+fn the_authored_shape_is_carried_whichever_viewport_is_asked_for() {
+    // What a consumer rasterising the natural form sizes its surface from.
+    for viewport in [Viewport::Square, Viewport::Natural] {
+        let image = decode(wide().as_bytes(), viewport).expect("a decodable document");
+        assert_eq!(image.source_extent(), (16.0, 4.0), "{viewport:?}");
+        assert_eq!(image.design(), DESIGN_GRID, "{viewport:?}");
+    }
+}
+
+#[test]
+fn a_square_document_decodes_the_same_under_either_viewport() {
+    // Fitting a shape to its own shape is the same map however it is
+    // spelled, so the two viewports can only differ for a drawing that is
+    // not square.
+    let svg = document(r#"<rect x="1" y="2" width="4" height="3"/>"#);
+    assert_eq!(
+        decode(svg.as_bytes(), Viewport::Square),
+        decode(svg.as_bytes(), Viewport::Natural)
+    );
+}
+
+#[test]
+fn the_natural_shape_does_not_read_preserve_aspect_ratio() {
+    // Every anchoring names a different placement in a square slot, and
+    // none of them means anything once the viewport is the drawing's own
+    // shape.
+    let mut placements = Vec::new();
+    for ratio in ["xMinYMin", "xMidYMid", "xMaxYMax", "none"] {
+        let svg = format!(
+            r#"<svg viewBox="0 0 16 4" preserveAspectRatio="{ratio}"><rect width="16" height="4"/></svg>"#
+        );
+        let natural = only_contour(&svg, Viewport::Natural);
+        assert_eq!(
+            natural,
+            only_contour(&wide(), Viewport::Natural),
+            "{ratio} moved the natural fit"
+        );
+        placements.push(only_contour(&svg, Viewport::Square));
+    }
+    // The square slot, by contrast, places each one somewhere different.
+    placements.dedup();
+    assert_eq!(placements.len(), 4, "the square slot ignored an anchoring");
+}
+
+#[test]
+fn a_malformed_preserve_aspect_ratio_refuses_the_document_under_both() {
+    // The attribute means nothing to the natural fit, but a document is
+    // well formed or it is not — that cannot depend on who is asking.
+    let svg = r#"<svg viewBox="0 0 8 8" preserveAspectRatio="sideways"><rect width="1" height="1"/></svg>"#;
+    for viewport in [Viewport::Square, Viewport::Natural] {
+        assert_eq!(
+            decode(svg.as_bytes(), viewport),
+            Err(SvgError::InvalidViewBox),
+            "{viewport:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stroke_is_carried_into_the_stretch_rather_than_dropped_from_it() {
+    // A round pen over a stretched drawing is an ellipse on the grid, and
+    // becomes a round pen again in a surface of the drawing's own shape.
+    // What matters here is that the stroke still produces its own layer and
+    // spans the wider axis further than the narrow one.
+    let svg = r#"<svg viewBox="0 0 16 4"><line x1="0" y1="2" x2="16" y2="2" stroke="black" stroke-width="2"/></svg>"#;
+    let image = decode(svg.as_bytes(), Viewport::Natural).expect("a decodable document");
+    let decoded = image.layers().to_vec();
+    assert_eq!(decoded.len(), 1, "the stroke is the only layer");
+    let points = contour(&decoded[0]);
+    let height = points.iter().map(|&(_, y)| y).max().unwrap_or(0)
+        - points.iter().map(|&(_, y)| y).min().unwrap_or(0);
+    // Two user units of a four-unit box is half the grid once stretched.
+    assert_eq!(height, grid() / 2);
 }

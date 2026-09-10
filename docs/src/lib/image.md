@@ -97,6 +97,28 @@ butterfly (`idct4_islow`, `idct2_islow`, `idct1_islow`) and dequantises only
 the coefficients that butterfly reads, so it never forms the products of
 coefficients it is about to discard.
 
+**Orientation is applied, not reported.** A camera states which way up it
+was holding the sensor in an EXIF `Orientation` attribute, carried in the
+`APP1` segment before the frame header — the same tag number, values, and
+meaning TIFF's directory carries, so the position map both formats read is
+one definition (`src/orientation.rs`) rather than two that can drift. The
+picture the decoder produces is already the right way up, which means the
+attribute swaps the geometry `probe` reports, the axes a `decode_fitted`
+box is measured against, and the width and height the limits are checked
+against. Placing it costs nothing per picture: a decoded row is copied
+whole when there is no orientation to apply, and scattered pixel by pixel
+only when there is.
+
+Metadata is advisory, so a block that is absent, truncated, malformed, or
+states a value outside the eight the tag defines leaves the picture as
+stored rather than refusing the file. That is deliberately unlike TIFF,
+where the same tag sits in the directory describing the pixels being
+decoded and a bad value means the file cannot be read at all: here a
+camera's malformed metadata must not cost a reader the photograph. The
+reader follows neither the next-directory pointer nor any sub-directory, so
+it is one bounded pass over the first directory's entries and allocates
+nothing.
+
 The transform's arithmetic is `wrapping_*`: a valid 8-bit frame's
 coefficients are bounded so no wrap ever occurs and the result is exact,
 while a hostile file can at worst wrap an intermediate into the closing

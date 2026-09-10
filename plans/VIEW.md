@@ -52,6 +52,10 @@ already-registered `fuzz_image` target covers it with no new harness.
 
 What "complete" means, per format:
 
+- **JPEG** — already complete as a codec before this plan; what it lacked was
+  the EXIF `Orientation` attribute every camera writes, without which a
+  viewer shows every photograph on its side. It is now applied, not
+  reported, exactly as TIFF's own copy of the same tag is.
 - **GIF** — LZW in GIF's variable-code-width dialect with deferred clear,
   interlacing, global and local palettes, transparent index, the full
   frame-disposal model, and the `NETSCAPE2.0` loop count.
@@ -228,7 +232,7 @@ Name-addressed lookup lands with the emulator, its first consumer.
 |---|---|
 | GIF, TIFF, WEBP, BMP, ICO, Sprite decoders | `lib/image`, private modules |
 | Multi-frame / multi-page decode | `lib/image` sequence API |
-| Exact 90° rotation and flip | `lib/raster::surface` |
+| Exact 90° rotation and flip | `lib/raster::reorient` (`Surface::reoriented`) |
 | Viewport-targeted SVG rasterisation | `lib/svg`, `decode` evolved in place |
 | Untrusted decode | `lib/sandbox::imagerender` |
 | The app-side window shell | `lib/window::app` |
@@ -492,7 +496,77 @@ clients, and their exit-code sets are their own.
   transcription errors were caught mechanically by diffing against the
   published tables rather than by any test — which is why the tables are
   extracted rather than typed.
-- `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
+- `lib/image` orientation — **done**, and not previously in this plan. TIFF
+  applied its `Orientation` tag; JPEG never read the EXIF attribute that is
+  the same tag number with the same eight values, so every photograph a
+  camera turned opened on its side. The eight-case position map moved out of
+  `tiff` into a shared `orientation` unit — the eleventh — and `jpeg` now
+  reads the `APP1` block through it. The attribute swaps the geometry
+  `probe` reports, the axes a `decode_fitted` box is measured against, and
+  the dimensions the limits are checked against, so a caller is told about
+  the picture rather than the raster. Placing it costs nothing per picture:
+  a decoded row is copied whole when there is no orientation, and scattered
+  pixel by pixel only when there is.
+
+  Metadata is advisory, so an absent, truncated, or malformed block leaves
+  the picture as stored rather than refusing the file — deliberately unlike
+  TIFF, where the tag sits in the directory describing the pixels being
+  decoded and a bad value means the file cannot be read at all. A camera's
+  malformed metadata must not cost a reader the photograph. The reader
+  follows neither the next-directory pointer nor any sub-directory, so it is
+  one bounded pass that allocates nothing, and the JPEG fuzz generator now
+  emits EXIF blocks — in both byte orders, with undefined values and
+  over-declared entry counts — so mutation reaches it.
+- `lib/svg` viewport decode; `lib/raster` rotate/flip — **done**.
+
+  `lib/raster` gained `Reorient`: the eight ways a picture can be set down
+  without resampling it, as a group rather than a handful of methods. A
+  viewer holds one value and composes onto it (`then`), so a picture the
+  user has both turned and mirrored is still set down in **one** pass rather
+  than two allocations and two copies; `inverse` is what a pointer position
+  is read back through. `Surface::reoriented` allocates and returns `Option`
+  like the rest of the crate, because a turn that swaps the axes cannot be
+  done in place on an oblong and a caller-supplied destination would make
+  every caller agree its geometry. It reads each destination pixel back
+  through the undoing rather than scattering each source pixel forward, so
+  the writes run along the destination's rows and the identity needs no
+  special case to stay fast.
+
+  `lib/svg`'s `decode` took a `Viewport` in place, and it chooses only the
+  *shape* a drawing is fitted to. `Square` is the existing letter-boxed slot
+  every icon and cursor wants. `Natural` normalises the drawing across both
+  axes, and `source_extent()` carries the proportions it was authored in —
+  so rasterising into a surface of that shape gives the picture undistorted,
+  at the grid's full precision on both axes, with no bands to find and crop.
+  That works because `Surface::fill_contours` already stretches the grid
+  across the surface it is given, so normalising in the decoder and
+  un-normalising in the surface is one uniform scale: **no non-square design
+  grid, and no change to the scan converter**.
+
+  One consequence is real and is not papered over: filling both axes
+  flattens curves to the larger scale's tolerance, so a drawing close to the
+  total-vertex bound can pass it under `Natural` and be admitted under
+  `Square`. The bound is a containment bound and is not relaxed to suit a
+  shape; the SVG fuzz harness drives both viewports and asserts they can
+  disagree *only* about complexity.
+
+### The two eight-case maps are not one, and that is deliberate
+
+`lib/image`'s `orientation` and `lib/raster`'s `Reorient` both express the
+eight symmetries of a rectangle, and they are deliberately **not** unified.
+They share no value that could drift: the eight permutations are a
+mathematical fact each proves for itself, not a project constant. What they
+do not share is everything else — one is keyed to the wire numbering of a
+TIFF/EXIF tag and applies during a decode as a write address, the other is
+keyed to a user's intent and carries a composition law and an inverse no
+decoder needs.
+
+Unifying them would mean either an `lib/image` → `lib/raster` dependency —
+dragging the theme, reclaim and parallel crates into a decoder that today
+depends on two crates and runs inside a sandbox — or a third crate holding
+ten lines of index arithmetic. Both are worse than two small, separately
+exhaustive tests. A future reader tempted to "fix" this duplication should
+read this paragraph first; the rustdoc on both types points here.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.
 - Deletion of `userland/apps/viewer` and the reference sweep — planned.
@@ -500,6 +574,20 @@ clients, and their exit-code sets are their own.
   AES, which `lib/crypto` deliberately does not carry; whether to admit those as
   interop-only primitives or refuse encrypted files fail-closed is a decision to
   take then.
+
+## Noticed and not yet fixed
+
+- **WEBP does not apply an EXIF `Orientation` either.** The container reads
+  past its `EXIF` chunk, exactly as `jpeg` used to read past `APP1`. Now
+  that JPEG and TIFF both apply the tag, WEBP not applying it is an
+  inconsistency between three formats that should agree. It was left out of
+  the change that fixed JPEG because applying an orientation to an
+  *animation* is not the same job: the composition canvas, the per-frame
+  rectangles, and the declared canvas geometry would all have to be turned
+  together, which is the animation path rather than a row placement. The
+  shared reader (`orientation::from_exif`) is already there to be called.
+  This is recorded rather than deferred silently, and carries its regression
+  test when the fix lands.
 
 ## Verification
 

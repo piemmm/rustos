@@ -18,12 +18,12 @@ the rasterised result goes.
 
 ## What it produces
 
-`decode(bytes) -> Result<SvgImage, SvgError>`, converting an asset **once**
-into the fast-draw form the compositor blits — never re-parsing SVG on the hot
-path.
+`decode(bytes, viewport) -> Result<SvgImage, SvgError>`, converting an asset
+**once** into the fast-draw form the compositor blits — never re-parsing SVG
+on the hot path.
 
-An `SvgImage` is a square design grid (`DESIGN_GRID`, 2048 units a side) plus
-an ordered stack of `SvgLayer`s, bottom first. A layer is a `Paint`, a
+An `SvgImage` is a design grid (`DESIGN_GRID`, 2048 units a side) plus an
+ordered stack of `SvgLayer`s, bottom first. A layer is a `Paint`, a
 `FillRule`, and a list of **contours** in design-grid coordinates.
 
 Three decisions shape everything else:
@@ -37,11 +37,25 @@ Three decisions shape everything else:
   join) cannot be one ring. Contours are filled together under one rule, so
   the pieces merge or cancel as the rule says instead of being composited over
   each other — which would double-blend a translucent stroke.
-- **One design grid for every asset.** Whatever a document's own `viewBox`
-  says, it is fitted to the square grid with `preserveAspectRatio` honoured,
-  so non-square artwork is letter-boxed into the square slot rather than
-  stretched or refused, and curve flattening has a single known accuracy
-  target (0.4 design units).
+- **One design grid for every asset, and a `Viewport` that chooses its
+  shape.** Whatever a document's own `viewBox` says, it is fitted to the same
+  grid, so a consumer never rescales between assets and curve flattening has a
+  single known accuracy target (0.4 design units). `Viewport::Square` fits it
+  under `preserveAspectRatio`, so non-square artwork is letter-boxed into the
+  square slot rather than stretched or refused — the desktop's asset form.
+  `Viewport::Natural` normalises the drawing across both axes for a consumer
+  that will rasterise into the drawing's own shape, which is the viewer
+  showing a picture (`plans/VIEW.md`): `Surface::fill_contours` stretches the
+  grid across the surface it is given, so normalising here and un-normalising
+  there is one uniform scale and the scan converter needs no non-square grid.
+  `source_extent()` carries the authored proportions the consumer sizes that
+  surface from.
+
+  A viewport chooses a shape and nothing else: a document is well formed or it
+  is not, whoever asks. The one consequence it does carry is that filling both
+  axes flattens curves to the larger scale's tolerance, so a drawing close to
+  the total-vertex bound can pass it under `Natural`. That bound is a
+  containment bound and is not relaxed to suit a shape.
 
 ## Module map
 

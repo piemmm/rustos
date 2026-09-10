@@ -871,7 +871,7 @@ fn verify_raster_master(label: &str, bytes: &[u8]) -> Result<(), String> {
 /// Returns an actionable build-error message naming `label` and why the bytes
 /// are not artwork the desktop can draw.
 fn verify_vector_master(label: &str, bytes: &[u8]) -> Result<(), String> {
-    let image = tairix_svg::decode(bytes).map_err(|e| {
+    let image = tairix_svg::decode(bytes, tairix_svg::Viewport::Square).map_err(|e| {
         format!("image: {label} is neither a PNG nor an SVG the desktop can decode: {e:?}")
     })?;
     let (width, height) = image.source_extent();

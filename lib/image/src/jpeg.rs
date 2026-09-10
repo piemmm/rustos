@@ -12,6 +12,23 @@
 //! and a deferred height via `DNL` — is a typed, fail-closed refusal
 //! rather than a best-effort guess.
 //!
+//! # Orientation is applied, not reported
+//!
+//! A camera states which way up it was holding the sensor in an EXIF
+//! `Orientation` attribute, in the `APP1` segment before the frame header,
+//! and it is the same tag TIFF carries — so a decoder that ignored it would
+//! hand every consumer a photograph on its side. The picture this decoder
+//! produces is therefore already the right way up: the attribute swaps the
+//! geometry [`probe`] reports, the axes a [`decode_fitted`] box is measured
+//! against, and the limits the picture is checked against.
+//!
+//! Metadata is advisory, so a block that is absent, malformed, or states a
+//! value outside the eight the tag defines leaves the picture as stored
+//! rather than refusing the file. That is deliberately unlike TIFF, where
+//! the same tag sits in the directory describing the pixels being decoded
+//! and a bad value means the file cannot be read at all: here a camera's
+//! malformed metadata must not cost a reader the photograph.
+//!
 //! # Decoding shape
 //!
 //! The stream is a sequence of markers (ITU-T T.81 Annex B): tables
@@ -38,7 +55,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::huffman::{Canonical, MAX_CODE_BITS};
-use crate::{DecodeError, DecodeLimits, FitBox, RasterImage};
+use crate::orientation::{self, Orientation};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, RGBA_BYTES};
 
 // ---------------------------------------------------------------------
 // Marker codes (ITU-T T.81 Table B.1)
@@ -70,6 +88,7 @@ const DRI: u8 = 0xDD;
 const DHP: u8 = 0xDE;
 const EXP: u8 = 0xDF;
 const APP0: u8 = 0xE0;
+const APP1: u8 = 0xE1;
 const APP14: u8 = 0xEE;
 const APP15: u8 = 0xEF;
 const COM: u8 = 0xFE;
@@ -162,23 +181,27 @@ impl Scale {
     fn choose(
         width: u32,
         height: u32,
+        orientation: Orientation,
         fit: FitBox,
         limits: &DecodeLimits,
     ) -> Result<Self, DecodeError> {
-        let output = |scale: Self| {
-            (
+        // The box and the limits both describe the picture the caller is
+        // handed, so every comparison here is made on the picture a scale
+        // would present rather than on the raster it is stored as.
+        let picture = |scale: Self| {
+            orientation.picture_size(
                 output_dimension(width, scale.m()),
                 output_dimension(height, scale.m()),
             )
         };
         let admitted = |scale: Self| {
-            let (w, h) = output(scale);
+            let (w, h) = picture(scale);
             limits.check(w, h)
         };
         let covering = Self::ASCENDING
             .into_iter()
             .find(|&scale| {
-                let (w, h) = output(scale);
+                let (w, h) = picture(scale);
                 w >= fit.width() && h >= fit.height()
             })
             .unwrap_or(Self::Full);
@@ -961,6 +984,7 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
         return Err(DecodeError::JpegBadSignature);
     }
     let mut pos = 2usize; // past the 2-byte SOI marker
+    let mut orientation = None;
     loop {
         let (marker, next) = read_marker(bytes, pos)?;
         pos = next;
@@ -968,7 +992,8 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
             SOF0 | SOF1 | SOF2 => {
                 let (payload, _after) = read_segment(bytes, pos)?;
                 let frame = parse_sof(payload, marker == SOF2)?;
-                return Ok((frame.width, frame.height));
+                let orientation = orientation.unwrap_or(Orientation::IDENTITY);
+                return Ok(orientation.picture_size(frame.width, frame.height));
             }
             SOF3 | SOF5 | SOF6 | SOF7 | DHP | EXP => {
                 return Err(DecodeError::JpegLosslessOrHierarchicalUnsupported);
@@ -983,7 +1008,10 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
                 pos = after;
             }
             marker if (APP0..=APP15).contains(&marker) || marker == COM => {
-                let (_payload, after) = read_segment(bytes, pos)?;
+                let (payload, after) = read_segment(bytes, pos)?;
+                if marker == APP1 && orientation.is_none() {
+                    orientation = orientation::from_exif(payload);
+                }
                 pos = after;
             }
             marker if restart_index(marker).is_some() => {
@@ -1019,6 +1047,11 @@ struct Decoder<'a> {
     ac_tables: [Option<HuffmanTable>; 4],
     restart_interval: u32,
     adobe_transform: Option<u8>,
+    /// The orientation the first EXIF `APP1` block states, if one does.
+    /// Read before the frame header a well-formed file puts after it, so
+    /// the decode scale and the output buffer are both sized to the
+    /// picture rather than to the stored raster.
+    orientation: Option<Orientation>,
     frame: Option<Frame>,
     scale: Scale,
     /// Baseline/extended-sequential streaming sample planes, one per
@@ -1066,6 +1099,7 @@ fn decode_inner(
         ac_tables: [None, None, None, None],
         restart_interval: 0,
         adobe_transform: None,
+        orientation: None,
         frame: None,
         scale: Scale::Full,
         sample_planes: Vec::new(),
@@ -1140,6 +1174,13 @@ impl Decoder<'_> {
                     return Err(DecodeError::JpegArithmeticCodingUnsupported);
                 }
                 DNL => return Err(DecodeError::JpegDnlUnsupported),
+                APP1 => {
+                    let (payload, after) = read_segment(bytes, pos)?;
+                    pos = after;
+                    if self.orientation.is_none() {
+                        self.orientation = orientation::from_exif(payload);
+                    }
+                }
                 APP14 => {
                     let (payload, after) = read_segment(bytes, pos)?;
                     pos = after;
@@ -1173,11 +1214,21 @@ impl Decoder<'_> {
     /// scale it picks to them, which is what lets a source far larger than
     /// the limits still be served at a reduced scale.
     fn choose_scale(&self, frame: &Frame) -> Result<Scale, DecodeError> {
+        let orientation = self.orientation();
         let Some(fit) = self.fit else {
-            self.limits.check(frame.width, frame.height)?;
+            let (width, height) = orientation.picture_size(frame.width, frame.height);
+            self.limits.check(width, height)?;
             return Ok(Scale::Full);
         };
-        Scale::choose(frame.width, frame.height, fit, self.limits)
+        Scale::choose(frame.width, frame.height, orientation, fit, self.limits)
+    }
+
+    /// The orientation the file states, or the identity when it states none.
+    const fn orientation(&self) -> Orientation {
+        match self.orientation {
+            Some(orientation) => orientation,
+            None => Orientation::IDENTITY,
+        }
     }
 
     /// Allocate one streaming sample plane per component, sized to that
@@ -1711,13 +1762,15 @@ impl Decoder<'_> {
     /// straight from its plane with no copy at all.
     fn assemble(&self, frame: &Frame) -> Result<RasterImage, DecodeError> {
         let m = self.scale.m();
-        let output_width = frame.output_width(m);
-        let output_height = frame.output_height(m);
-        let pixel_count = u64::from(output_width)
-            .checked_mul(u64::from(output_height))
+        let stored_width = frame.output_width(m);
+        let stored_height = frame.output_height(m);
+        let orientation = self.orientation();
+        let (width, height) = orientation.picture_size(stored_width, stored_height);
+        let pixel_count = u64::from(width)
+            .checked_mul(u64::from(height))
             .ok_or(DecodeError::DimensionsOverflow)?;
         let byte_len = pixel_count
-            .checked_mul(4)
+            .checked_mul(RGBA_BYTES as u64)
             .ok_or(DecodeError::DimensionsOverflow)?;
         let mut out =
             vec![0u8; usize::try_from(byte_len).map_err(|_| DecodeError::DimensionsOverflow)?];
@@ -1725,8 +1778,7 @@ impl Decoder<'_> {
         let use_rgb = frame.components.len() == 3 && self.adobe_transform == Some(0);
         let h_max = frame.h_max().max(1);
         let v_max = frame.v_max().max(1);
-        let row_bytes =
-            usize::try_from(u64::from(output_width).saturating_mul(4)).unwrap_or(usize::MAX);
+        let mut row = vec![[0u8; RGBA_BYTES]; usize::try_from(stored_width).unwrap_or(usize::MAX)];
 
         let mut upsamplers: Vec<Upsampler<'_>> = frame
             .components
@@ -1747,36 +1799,66 @@ impl Decoder<'_> {
                             .component_sample_height(component, m)
                             .saturating_sub(1),
                     },
-                    output_width,
+                    stored_width,
                     h_max,
                     v_max,
                 )
             })
             .collect();
 
-        for y in 0..output_height {
-            let y_byte = usize::try_from(y)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(row_bytes);
-            let Some(out_row) = y_byte
-                .checked_add(row_bytes)
-                .and_then(|end| out.get_mut(y_byte..end))
-            else {
-                continue;
-            };
-
+        for y in 0..stored_height {
             for upsampler in &mut upsamplers {
                 upsampler.prepare(y);
             }
             let mut rows: [&[u8]; 3] = [&[], &[], &[]];
-            for (row, upsampler) in rows.iter_mut().zip(upsamplers.iter()) {
-                *row = upsampler.samples();
+            for (samples, upsampler) in rows.iter_mut().zip(upsamplers.iter()) {
+                *samples = upsampler.samples();
             }
 
-            let (pixels, _tail) = out_row.as_chunks_mut::<4>();
-            write_pixel_row(pixels, &rows, upsamplers.len(), use_rgb)?;
+            write_pixel_row(&mut row, &rows, upsamplers.len(), use_rgb)?;
+            place_row(&mut out, &row, orientation, y, width, height);
         }
-        Ok(RasterImage::from_parts(output_width, output_height, out))
+        Ok(RasterImage::from_parts(width, height, out))
+    }
+}
+
+/// Copy one decoded stored row into the picture, at the positions the
+/// orientation puts it.
+///
+/// An unoriented file — everything but a photograph a camera turned — lands
+/// the row whole, so the ordinary case pays one copy per row and not one per
+/// pixel. The two arms are pinned to agree by test.
+fn place_row(
+    out: &mut [u8],
+    row: &[[u8; RGBA_BYTES]],
+    orientation: Orientation,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    let at = |x: u32, y: u32| {
+        u64::from(y)
+            .checked_mul(u64::from(width))
+            .and_then(|row| row.checked_add(u64::from(x)))
+            .and_then(|index| index.checked_mul(RGBA_BYTES as u64))
+            .and_then(|at| usize::try_from(at).ok())
+    };
+    if orientation == Orientation::IDENTITY {
+        let (Some(start), Some(len)) = (at(0, y), row.len().checked_mul(RGBA_BYTES)) else {
+            return;
+        };
+        if let Some(slot) = out.get_mut(start..start.saturating_add(len)) {
+            slot.copy_from_slice(row.as_flattened());
+        }
+        return;
+    }
+    for (x, pixel) in row.iter().enumerate() {
+        let Ok(x) = u32::try_from(x) else { return };
+        let (dx, dy) = orientation.place(x, y, width, height);
+        let Some(start) = at(dx, dy) else { continue };
+        if let Some(slot) = out.get_mut(start..start + RGBA_BYTES) {
+            slot.copy_from_slice(pixel);
+        }
     }
 }
 

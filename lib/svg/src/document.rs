@@ -17,11 +17,13 @@
 //!
 //! # The design grid
 //!
-//! Every asset is placed on the same square [`DESIGN_GRID`], whatever its own
-//! `viewBox` says, with `preserveAspectRatio` honoured — so a non-square
-//! drawing is letter-boxed into the square slot the desktop draws icons and
-//! cursors in rather than being stretched or refused. Working in one grid
-//! also means curve flattening has a single, known accuracy target.
+//! Every asset is placed on the same [`DESIGN_GRID`] whatever its own
+//! `viewBox` says, so a consumer never rescales between assets and curve
+//! flattening has a single, known accuracy target. [`Viewport`] chooses how
+//! a drawing is fitted to it: letter-boxed under `preserveAspectRatio` into
+//! the square slot the desktop draws icons and cursors in, or normalised
+//! across both axes for a consumer that will rasterise into the drawing's
+//! own shape.
 
 use alloc::vec::Vec;
 
@@ -36,7 +38,8 @@ use crate::shape::{is_shape, shape_subpaths};
 use crate::stroke::stroke_outline;
 use crate::style::{scale_alpha, PaintSpec, Style};
 use crate::transform::{
-    parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, AspectRatio, ViewBox,
+    parse_aspect_ratio, parse_transform, parse_view_box, viewport_transform, Align, AspectRatio,
+    ViewBox,
 };
 use crate::xml::{self, Node};
 
@@ -70,6 +73,38 @@ const MAX_TOTAL_VERTICES: usize = 65_536;
 ///
 /// A fixed security bound; it is also what makes a reference cycle terminate.
 const MAX_USE_DEPTH: usize = 8;
+
+/// The shape a document's drawing is fitted to when it is decoded.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Viewport {
+    /// The square slot the desktop draws an icon or a cursor in.
+    ///
+    /// A drawing that is not square is letter-boxed into it under the
+    /// document's own `preserveAspectRatio`, so the artwork keeps its shape
+    /// and every slot keeps its size.
+    #[default]
+    Square,
+    /// The document's own shape.
+    ///
+    /// The drawing is normalised across the whole grid, and
+    /// [`SvgImage::source_extent`] carries the proportions it was authored
+    /// in — so a consumer that rasterises into a surface of that shape gets
+    /// the picture undistorted, at the grid's full precision on *both* axes,
+    /// and with no letter-box bands to find and crop. A viewer showing a
+    /// picture wants this; a slot to fill wants [`Square`](Self::Square).
+    ///
+    /// `preserveAspectRatio` states how to fit a drawing into a viewport of
+    /// a *different* shape, so it has nothing to say here — though a
+    /// malformed one still refuses the document, so no file is well formed
+    /// under one viewport and malformed under the other.
+    ///
+    /// Filling the grid on both axes does mean a curve is flattened to the
+    /// tolerance of the *larger* scale, so a drawing already close to the
+    /// total-vertex bound can pass it here and be refused as too complex
+    /// when the letter-boxed fit would have admitted it. The bound is a
+    /// containment bound and is not relaxed to suit a shape.
+    Natural,
+}
 
 /// One filled layer of a decoded SVG: a paint, a fill rule, and the contours
 /// it applies to, in design-grid coordinates.
@@ -132,16 +167,20 @@ impl SvgImage {
     }
 }
 
-/// Decode an SVG byte string into an [`SvgImage`].
+/// Decode an SVG byte string into an [`SvgImage`] fitted to `viewport`.
 ///
 /// The decoder is total: it returns `Ok` for a document it can draw and a
 /// precise [`SvgError`] for everything else, and it never panics for any
 /// input. It is the single image-decoding entry point the desktop's SVG-first
 /// asset pipeline runs untrusted on-disk assets through.
 ///
+/// `viewport` chooses the *shape* the drawing is fitted to. It never changes
+/// what counts as a well-formed document; see [`Viewport::Natural`] for the
+/// one thing it does change.
+///
 /// # Errors
 /// See [`SvgError`] for the closed set of rejection reasons.
-pub fn decode(bytes: &[u8]) -> Result<SvgImage, SvgError> {
+pub fn decode(bytes: &[u8], viewport: Viewport) -> Result<SvgImage, SvgError> {
     let text = core::str::from_utf8(bytes).map_err(|_| SvgError::NotUtf8)?;
     let root = xml::parse(text)?;
     if root.name != "svg" {
@@ -149,9 +188,19 @@ pub fn decode(bytes: &[u8]) -> Result<SvgImage, SvgError> {
     }
 
     let view_box = root_view_box(&root)?;
-    let ratio = match root.attr("preserveAspectRatio") {
+    // Parsed whichever viewport is asked for, so a malformed attribute
+    // refuses the document either way, and read only where it means
+    // something.
+    let declared = match root.attr("preserveAspectRatio") {
         Some(text) => parse_aspect_ratio(text)?,
         None => AspectRatio::default(),
+    };
+    let ratio = match viewport {
+        Viewport::Square => declared,
+        Viewport::Natural => AspectRatio {
+            align: Align::None,
+            slice: false,
+        },
     };
     let grid = f64::from(DESIGN_GRID);
     let to_design = viewport_transform(view_box, (grid, grid), ratio);

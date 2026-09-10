@@ -258,6 +258,7 @@ const DQT: u8 = 0xDB;
 const DRI: u8 = 0xDD;
 const SOS: u8 = 0xDA;
 const APP0: u8 = 0xE0;
+const APP1: u8 = 0xE1;
 const RST0: u8 = 0xD0;
 
 /// A standalone two-byte marker.
@@ -432,6 +433,71 @@ fn actual_blocks(natural: u32, factor: u32, factor_max: u32) -> u32 {
 /// randomised over baseline vs progressive, 1 vs 3 components, dimensions,
 /// chroma subsampling, quantisation-element precision, restart interval,
 /// the optional JFIF `APP0` segment, and the progressive scan sequence.
+/// An EXIF attribute block, in either byte order, sometimes stating an
+/// orientation the tag does not define and sometimes declaring more
+/// entries than it holds — so the reader is exercised on its refusals as
+/// well as its eight defined values, before mutation reaches it at all.
+fn exif_payload(rng: &mut Lcg) -> Vec<u8> {
+    let big = rng.below(2) == 0;
+    let u16b = |v: u16| {
+        if big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
+    };
+    let u32b = |v: u32| {
+        if big {
+            v.to_be_bytes()
+        } else {
+            v.to_le_bytes()
+        }
+    };
+    let entries = u16::try_from(rng.below(4)).unwrap_or(0) + 1;
+    let declared = if rng.below(4) == 0 {
+        u16::try_from(rng.below(4096)).unwrap_or(entries)
+    } else {
+        entries
+    };
+    let mut out = Vec::from(&b"Exif\0\0"[..]);
+    out.extend_from_slice(if big { b"MM" } else { b"II" });
+    out.extend_from_slice(&u16b(42));
+    out.extend_from_slice(&u32b(8));
+    out.extend_from_slice(&u16b(declared));
+    for index in 0..entries {
+        let orientation = index + 1 == entries;
+        let tag = if orientation { 274 } else { 256 };
+        let kind = if rng.below(8) == 0 { 4u16 } else { 3 };
+        let value = u32::try_from(rng.below(12)).unwrap_or(1);
+        out.extend_from_slice(&u16b(tag));
+        out.extend_from_slice(&u16b(kind));
+        out.extend_from_slice(&u32b(1));
+        if kind == 3 {
+            out.extend_from_slice(&u16b(u16::try_from(value).unwrap_or(1)));
+            out.extend_from_slice(&[0, 0]);
+        } else {
+            out.extend_from_slice(&u32b(value));
+        }
+    }
+    out.extend_from_slice(&u32b(0));
+    out
+}
+
+/// The application segments that may sit between `SOI` and the tables: a
+/// JFIF identifier the decoder must skip whole, and an EXIF block it must
+/// read an orientation out of.
+fn leading_app_segments(rng: &mut Lcg) -> Vec<u8> {
+    let mut out = Vec::new();
+    if rng.below(2) == 0 {
+        out.extend(segment(APP0, b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00"));
+    }
+    if rng.below(2) == 0 {
+        let payload = exif_payload(rng);
+        out.extend(segment(APP1, &payload));
+    }
+    out
+}
+
 fn build_valid_jpeg(rng: &mut Lcg) -> Vec<u8> {
     let progressive = rng.below(2) == 0;
     let width = u32::try_from(rng.below(24) + 1).unwrap_or(1);
@@ -452,10 +518,7 @@ fn build_valid_jpeg(rng: &mut Lcg) -> Vec<u8> {
     let ids: Vec<u8> = components.iter().map(|&(id, _, _)| id).collect();
 
     let mut out = bare_marker(SOI);
-    if rng.below(2) == 0 {
-        // A JFIF APP0 segment, which the decoder must skip whole.
-        out.extend(segment(APP0, b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00"));
-    }
+    out.extend(leading_app_segments(rng));
     out.extend(segment(DQT, &dqt_payload(0, rng.below(2) == 0)));
     out.extend(segment(DHT, &dht_payload(0, 0)));
     out.extend(segment(DHT, &dht_payload(1, 0)));

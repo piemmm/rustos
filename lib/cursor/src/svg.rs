@@ -50,5 +50,8 @@ impl VectorCursor {
 /// # Errors
 /// Propagates the [`SvgError`] from [`tairix_svg::decode`].
 pub fn decode(bytes: &[u8]) -> Result<VectorCursor, SvgError> {
-    Ok(VectorCursor::from_svg(&tairix_svg::decode(bytes)?))
+    Ok(VectorCursor::from_svg(&tairix_svg::decode(
+        bytes,
+        tairix_svg::Viewport::Square,
+    )?))
 }

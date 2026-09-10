@@ -10,9 +10,12 @@
 //!
 //! # What it produces
 //!
-//! [`decode`] turns an SVG byte string into an [`SvgImage`]: a square design
-//! grid plus an ordered stack of filled polygon [`SvgLayer`]s (bottom layer
-//! first), and an optional pointer hotspot. That is exactly the vector form
+//! [`decode`] turns an SVG byte string into an [`SvgImage`]: a design grid
+//! plus an ordered stack of filled polygon [`SvgLayer`]s (bottom layer
+//! first), and an optional pointer hotspot. A [`Viewport`] chooses the shape
+//! the drawing is fitted to — the square slot an icon or cursor occupies, or
+//! the document's own proportions a viewer shows a picture at — and nothing
+//! else about it. That is exactly the vector form
 //! `lib/cursor`'s `VectorCursor` and `lib/icon`'s `VectorIcon` already
 //! rasterise through `lib/raster`'s single polygon path, so the SVG-first
 //! pipeline converts an asset **once** into this fast-draw form and never
@@ -49,7 +52,8 @@
 //! let svg = br##"<svg viewBox="0 0 10 10">
 //!   <circle cx="5" cy="5" r="4" fill="#3070f0" stroke="black" stroke-width="1"/>
 //! </svg>"##;
-//! let image = tairix_svg::decode(svg).expect("a stroked circle");
+//! let image = tairix_svg::decode(svg, tairix_svg::Viewport::Square)
+//!     .expect("a stroked circle");
 //! // The fill, then the stroke over it: SVG's painting order.
 //! assert_eq!(image.layers().len(), 2);
 //! ```
@@ -73,5 +77,5 @@ pub mod style;
 pub mod transform;
 pub mod xml;
 
-pub use document::{decode, SvgImage, SvgLayer, DESIGN_GRID};
+pub use document::{decode, SvgImage, SvgLayer, Viewport, DESIGN_GRID};
 pub use error::SvgError;

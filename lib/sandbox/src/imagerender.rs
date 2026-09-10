@@ -259,7 +259,7 @@ fn rasterise(side: u32, icon: &[u8]) -> Result<Vec<u8>, IconRefusal> {
     if tairix_image::sniff(icon) == Some(ImageFormat::Png) {
         return rasterise_png(side, icon);
     }
-    match tairix_svg::decode(icon) {
+    match tairix_svg::decode(icon, tairix_svg::Viewport::Square) {
         Ok(image) => rasterise_svg(side, &image),
         // These two reasons mean the bytes do not even look like an SVG
         // document — not UTF-8, or no `<svg>` root at all — the same

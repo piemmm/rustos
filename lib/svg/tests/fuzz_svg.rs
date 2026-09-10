@@ -15,7 +15,7 @@
 //! fuzz --soak` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use tairix_svg::decode;
+use tairix_svg::{decode, SvgError, Viewport};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 100_000;
@@ -81,7 +81,19 @@ fn bounded(x: u64, max: usize) -> usize {
 /// artwork a consumer can draw — no layer without contours, and no more
 /// vertices than the decoder's own bound admits.
 fn decode_never_panics(bytes: &[u8]) {
-    if let Ok(image) = decode(bytes) {
+    let square = decode(bytes, Viewport::Square);
+    let natural = decode(bytes, Viewport::Natural);
+    // A viewport chooses the shape a drawing is fitted to, never whether
+    // the document is well formed. The one thing it may legitimately change
+    // is how much geometry the fit produces, and so whether that geometry
+    // fits within the bound.
+    assert!(
+        square.is_ok() == natural.is_ok()
+            || square == Err(SvgError::TooComplex)
+            || natural == Err(SvgError::TooComplex),
+        "the viewports disagreed other than about complexity"
+    );
+    for image in [square, natural].into_iter().flatten() {
         let mut vertices = 0usize;
         for layer in image.layers() {
             assert!(!layer.contours.is_empty(), "a layer with nothing to fill");

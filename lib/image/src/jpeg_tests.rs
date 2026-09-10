@@ -22,6 +22,7 @@ use super::{
     decode, decode_fitted, dequantize, dequantize_corner, idct1_islow, idct2_islow, idct4_islow,
     idct8_islow,
 };
+use crate::orientation::Orientation;
 use crate::{sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
 
 /// Generous limits for every fixture that is not itself exercising a
@@ -1194,4 +1195,206 @@ fn mutated_valid_fixtures_never_panic() {
         }
         let _ = decode(&mutated, &limits);
     }
+}
+
+// ---------------------------------------------------------------------
+// EXIF orientation
+// ---------------------------------------------------------------------
+
+const APP1: u8 = 0xE1;
+
+/// An `APP1` EXIF attribute block stating `orientation`, spliced in just
+/// after the `SOI` the JPEG opens with.
+///
+/// Built byte by byte here, big-endian, rather than through the reader
+/// under test, so a shared misreading of the layout cannot cancel out.
+fn with_exif(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    let mut block = Vec::from(&b"Exif\0\0"[..]);
+    block.extend_from_slice(b"MM");
+    block.extend_from_slice(&42u16.to_be_bytes());
+    block.extend_from_slice(&8u32.to_be_bytes());
+    block.extend_from_slice(&1u16.to_be_bytes());
+    block.extend_from_slice(&274u16.to_be_bytes());
+    block.extend_from_slice(&3u16.to_be_bytes());
+    block.extend_from_slice(&1u32.to_be_bytes());
+    block.extend_from_slice(&orientation.to_be_bytes());
+    block.extend_from_slice(&[0, 0]);
+    block.extend_from_slice(&0u32.to_be_bytes());
+
+    let mut out = Vec::from(&jpeg[..2]);
+    out.extend(segment(APP1, &block));
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// Two blocks side by side, so a turn is visible in the pixels: the left
+/// half is 200 and the right half 156, stored 16 wide by 8 high.
+fn two_tone_landscape() -> Vec<u8> {
+    build_flat_mono(16, 8, &[200, 156], None)
+}
+
+#[test]
+fn a_file_with_no_exif_block_decodes_as_stored() {
+    let image = decode(&two_tone_landscape(), &ROOMY).expect("decodes");
+    assert_eq!((image.width(), image.height()), (16, 8));
+    assert_eq!(rgba(image.pixels(), 16, 0, 0), [200, 200, 200, 255]);
+    assert_eq!(rgba(image.pixels(), 16, 15, 0), [156, 156, 156, 255]);
+}
+
+#[test]
+fn a_quarter_turn_clockwise_stands_the_picture_up() {
+    // Orientation 6 on a 16x8 raster is an 8x16 picture whose top half is
+    // the stored left half.
+    let image = decode(&with_exif(&two_tone_landscape(), 6), &ROOMY).expect("decodes");
+    assert_eq!((image.width(), image.height()), (8, 16));
+    for y in 0..16 {
+        let want = if y < 8 { 200 } else { 156 };
+        for x in 0..8 {
+            assert_eq!(
+                rgba(image.pixels(), 8, x, y),
+                [want, want, want, 255],
+                "pixel ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_orientation_permutes_the_stored_pixels_and_nothing_else() {
+    let stored = decode(&two_tone_landscape(), &ROOMY).expect("decodes");
+    for code in 1..=8u32 {
+        let orientation = Orientation::from_tag(code).expect("defined");
+        let tag = u16::try_from(code).expect("a tag value is small");
+        let image = decode(&with_exif(&two_tone_landscape(), tag), &ROOMY).expect("decodes");
+        let (width, height) = orientation.picture_size(stored.width(), stored.height());
+        assert_eq!((image.width(), image.height()), (width, height), "{code}");
+        for y in 0..stored.height() {
+            for x in 0..stored.width() {
+                let (dx, dy) = orientation.place(x, y, width, height);
+                assert_eq!(
+                    rgba(image.pixels(), width, dx, dy),
+                    rgba(stored.pixels(), stored.width(), x, y),
+                    "orientation {code}, stored ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_probe_reports_the_geometry_the_picture_presents() {
+    assert_eq!(super::probe(&two_tone_landscape()), Ok((16, 8)));
+    for code in [1, 2, 3, 4] {
+        assert_eq!(
+            super::probe(&with_exif(&two_tone_landscape(), code)),
+            Ok((16, 8))
+        );
+    }
+    for code in [5, 6, 7, 8] {
+        assert_eq!(
+            super::probe(&with_exif(&two_tone_landscape(), code)),
+            Ok((8, 16))
+        );
+    }
+}
+
+#[test]
+fn a_fit_box_is_measured_against_the_turned_picture() {
+    // Half scale stores 8x4, which a quarter turn presents as the 4x8 the
+    // box asks for. Measuring the box against the *stored* raster instead
+    // would need a full-scale decode to cover its 8 rows.
+    let jpeg = with_exif(&two_tone_landscape(), 6);
+    let fitted = decode_fitted(&jpeg, &ROOMY, FitBox::new(4, 8)).expect("decodes");
+    assert_eq!((fitted.width(), fitted.height()), (4, 8));
+
+    let whole = decode_fitted(&jpeg, &ROOMY, FitBox::new(8, 16)).expect("decodes");
+    assert_eq!((whole.width(), whole.height()), (8, 16));
+}
+
+#[test]
+fn a_limit_is_measured_against_the_turned_picture_too() {
+    // The caller receives an 8-wide, 16-high picture, so a 15-high ceiling
+    // refuses it and a 15-wide one does not.
+    let jpeg = with_exif(&two_tone_landscape(), 6);
+    let short = DecodeLimits::new(4096, 15, 4096 * 4096, 1_000_000);
+    assert_eq!(decode(&jpeg, &short), Err(DecodeError::HeightExceedsLimit));
+    let narrow = DecodeLimits::new(15, 4096, 4096 * 4096, 1_000_000);
+    assert!(decode(&jpeg, &narrow).is_ok());
+}
+
+#[test]
+fn a_block_stating_no_usable_orientation_leaves_the_picture_as_stored() {
+    let stored = decode(&two_tone_landscape(), &ROOMY).expect("decodes");
+    let mut malformed = with_exif(&two_tone_landscape(), 6);
+    // Break the TIFF header's byte order inside the spliced block.
+    let at = malformed
+        .windows(6)
+        .position(|w| w == b"Exif\0\0")
+        .expect("the block is there")
+        + 6;
+    malformed[at] = b'X';
+    let image = decode(&malformed, &ROOMY).expect("a bad metadata block is not a bad picture");
+    assert_eq!((image.width(), image.height()), (16, 8));
+    assert_eq!(image.pixels(), stored.pixels());
+
+    let undefined = decode(&with_exif(&two_tone_landscape(), 9), &ROOMY).expect("decodes");
+    assert_eq!((undefined.width(), undefined.height()), (16, 8));
+    assert_eq!(undefined.pixels(), stored.pixels());
+}
+
+#[test]
+fn the_row_copy_lands_a_row_exactly_where_the_position_map_says() {
+    // `place_row` copies a whole row when there is no orientation to
+    // apply. That arm is only sound if it agrees with the general one, so
+    // it is checked against the position map rather than against itself.
+    let (width, height) = (4u32, 3u32);
+    let row: Vec<[u8; 4]> = (0..width)
+        .map(|x| [u8::try_from(x).unwrap_or(0), 7, 9, 255])
+        .collect();
+    let len = usize::try_from(width * height * 4).expect("small");
+    for y in 0..height {
+        let mut copied = vec![0u8; len];
+        super::place_row(&mut copied, &row, Orientation::IDENTITY, y, width, height);
+
+        let mut scattered = vec![0u8; len];
+        for (x, pixel) in row.iter().enumerate() {
+            let x = u32::try_from(x).expect("small");
+            let (dx, dy) = Orientation::IDENTITY.place(x, y, width, height);
+            let at = usize::try_from((dy * width + dx) * 4).expect("small");
+            scattered[at..at + 4].copy_from_slice(pixel);
+        }
+        assert_eq!(copied, scattered, "row {y}");
+    }
+}
+
+#[test]
+fn a_fitted_decode_measures_the_limits_against_the_turned_picture() {
+    // The caller is handed an 8-wide, 16-high picture whatever scale is
+    // chosen, so a 15-wide ceiling must admit the full-scale decode and a
+    // 15-high one must refuse it. Measuring against the stored 16x8 raster
+    // instead reverses both, and made `decode_fitted` disagree with
+    // `decode` about the very same file.
+    let jpeg = with_exif(&two_tone_landscape(), 6);
+    let whole = FitBox::new(8, 16);
+
+    let narrow = DecodeLimits::new(15, 4096, 4096 * 4096, 1_000_000);
+    let fitted = decode_fitted(&jpeg, &narrow, whole).expect("8 wide is within 15");
+    assert_eq!((fitted.width(), fitted.height()), (8, 16));
+
+    // A 15-high ceiling cannot take the 16-high picture, so the search
+    // drops to the sharpest scale that fits rather than refusing outright.
+    let short = DecodeLimits::new(4096, 15, 4096 * 4096, 1_000_000);
+    let fitted = decode_fitted(&jpeg, &short, whole).expect("a smaller scale fits");
+    assert!(fitted.height() <= 15, "{} rows", fitted.height());
+    assert_eq!(fitted.width() * 2, fitted.height(), "the turn is kept");
+
+    // And the two entry points agree about the same file and limits.
+    assert_eq!(
+        decode(&jpeg, &narrow).map(|image| (image.width(), image.height())),
+        Ok((8, 16))
+    );
+    assert_eq!(
+        decode(&jpeg, &short).unwrap_err(),
+        DecodeError::HeightExceedsLimit
+    );
 }

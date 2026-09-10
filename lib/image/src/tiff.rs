@@ -44,6 +44,7 @@ use tairix_util::fallible;
 use crate::ccitt;
 use crate::channel::{Channel, Sampler};
 use crate::lzw::{CodeSource, Lzw, Widen};
+use crate::orientation::Orientation;
 use crate::pages::{PageSource, Pages};
 use crate::{jpeg, DecodeError, DecodeLimits, RasterImage, RGBA_BYTES};
 
@@ -440,7 +441,7 @@ struct Page<'a> {
     ifd: Ifd<'a>,
     width: u32,
     height: u32,
-    orientation: u32,
+    orientation: Orientation,
     compression: u16,
     colour: Colour,
     samples: Samples,
@@ -478,40 +479,16 @@ fn geometry(ifd: &Ifd<'_>) -> Result<Geometry, DecodeError> {
     ])?;
     let width = ifd.first(width.as_ref(), None)?;
     let height = ifd.first(height.as_ref(), None)?;
-    let orientation = ifd.first(orientation.as_ref(), Some(1))?;
-    if !(1..=8).contains(&orientation) {
-        return Err(DecodeError::TiffInvalidOrientation);
-    }
+    let orientation = Orientation::from_tag(ifd.first(orientation.as_ref(), Some(1))?)
+        .ok_or(DecodeError::TiffInvalidOrientation)?;
     let reduced = ifd.first(new_kind.as_ref(), Some(0))? & SUBFILE_REDUCED != 0
         || ifd.first(old_kind.as_ref(), Some(0))? == OLD_SUBFILE_REDUCED;
-    let (width, height) = if orientation >= 5 {
-        (height, width)
-    } else {
-        (width, height)
-    };
+    let (width, height) = orientation.picture_size(width, height);
     Ok(Geometry {
         width,
         height,
         reduced,
     })
-}
-
-/// Where a stored pixel lands once the page's orientation is applied.
-///
-/// Orientation names which edge of the picture the stored raster's first row
-/// and first column are, so applying it is a permutation of positions rather
-/// than anything done to a pixel.
-const fn oriented(orientation: u32, x: u32, y: u32, width: u32, height: u32) -> (u32, u32) {
-    match orientation {
-        2 => (width - 1 - x, y),
-        3 => (width - 1 - x, height - 1 - y),
-        4 => (x, height - 1 - y),
-        5 => (y, x),
-        6 => (width - 1 - y, x),
-        7 => (width - 1 - y, height - 1 - x),
-        8 => (y, height - 1 - x),
-        _ => (x, y),
-    }
 }
 
 impl<'a> Page<'a> {
@@ -523,10 +500,8 @@ impl<'a> Page<'a> {
         if width == 0 || height == 0 {
             return Err(DecodeError::ZeroDimension);
         }
-        let orientation = ifd.value(TAG_ORIENTATION, 1)?;
-        if !(1..=8).contains(&orientation) {
-            return Err(DecodeError::TiffInvalidOrientation);
-        }
+        let orientation = Orientation::from_tag(ifd.value(TAG_ORIENTATION, 1)?)
+            .ok_or(DecodeError::TiffInvalidOrientation)?;
         let compression = u16::try_from(ifd.value(TAG_COMPRESSION, u32::from(COMPRESSION_NONE))?)
             .map_err(|_| DecodeError::TiffUnsupportedCompression)?;
         let fax = matches!(
@@ -1483,11 +1458,7 @@ fn place(out: &mut [u8], width: u32, x: u32, y: u32, pixel: [u8; 4]) {
 
 /// The picture a page decodes to, after its orientation is applied.
 const fn output_size(page: &Page<'_>) -> (u32, u32) {
-    if page.orientation >= 5 {
-        (page.height, page.width)
-    } else {
-        (page.width, page.height)
-    }
+    page.orientation.picture_size(page.width, page.height)
 }
 
 /// Decode one page into a straight-alpha RGBA image.
@@ -1588,13 +1559,9 @@ fn emit_unit(
                 None => gather_samples(page, unit, layout, x, y),
             };
             let pixel = to_rgba(page, convert, &raw);
-            let (dx, dy) = oriented(
-                page.orientation,
-                origin.0 + x,
-                origin.1 + y,
-                out_width,
-                out_height,
-            );
+            let (dx, dy) =
+                page.orientation
+                    .place(origin.0 + x, origin.1 + y, out_width, out_height);
             place(out, out_width, dx, dy, pixel);
         }
     }
@@ -1690,13 +1657,9 @@ fn decode_jpeg_page(
                     else {
                         return Err(DecodeError::TiffJpegGeometryMismatch);
                     };
-                    let (dx, dy) = oriented(
-                        page.orientation,
-                        origin.0 + x,
-                        origin.1 + y,
-                        out_width,
-                        out_height,
-                    );
+                    let (dx, dy) =
+                        page.orientation
+                            .place(origin.0 + x, origin.1 + y, out_width, out_height);
                     place(out, out_width, dx, dy, pixel);
                 }
             }

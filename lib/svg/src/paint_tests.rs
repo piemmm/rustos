@@ -10,7 +10,13 @@ use core::fmt::Write;
 use tairix_raster::{Color, Paint};
 
 use crate::error::SvgError;
-use crate::{decode, DESIGN_GRID};
+use crate::{decode, SvgImage, Viewport, DESIGN_GRID};
+
+/// Fit a document to the square slot, which is what every gradient test
+/// here is about.
+fn decode_square(bytes: &[u8]) -> Result<SvgImage, SvgError> {
+    decode(bytes, Viewport::Square)
+}
 
 /// Design units per user unit: every document here has an eight-unit view
 /// box, so a sample point is easy to state exactly.
@@ -21,7 +27,7 @@ fn scale() -> f64 {
 /// The paint of a document's only layer.
 #[track_caller]
 fn only_paint(svg: &str) -> Paint {
-    let image = decode(svg.as_bytes()).expect("a decodable document");
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
     assert_eq!(image.layers().len(), 1, "expected exactly one layer");
     image.layers()[0].paint.clone()
 }
@@ -297,7 +303,7 @@ fn a_gradient_with_no_extent_paints_its_last_stop() {
 #[test]
 fn a_gradient_with_no_stops_paints_nothing() {
     let svg = document(r#"<linearGradient id="g"/>"#, "url(#g)");
-    let image = decode(svg.as_bytes()).expect("a decodable document");
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
     assert!(image.layers().is_empty());
 }
 
@@ -307,7 +313,7 @@ fn an_unresolvable_reference_falls_back_to_the_colour_beside_it() {
     assert_eq!(only_paint(&svg), Paint::Solid(Color::rgb(0, 255, 0)));
 
     let bare = document("", "url(#missing)");
-    let image = decode(bare.as_bytes()).expect("a decodable document");
+    let image = decode_square(bare.as_bytes()).expect("a decodable document");
     assert!(image.layers().is_empty());
 }
 
@@ -319,7 +325,7 @@ fn an_unknown_spread_method_is_refused() {
             </linearGradient>"##,
         "url(#g)",
     );
-    assert_eq!(decode(svg.as_bytes()), Err(SvgError::InvalidNumber));
+    assert_eq!(decode_square(svg.as_bytes()), Err(SvgError::InvalidNumber));
 }
 
 /// A gradient is a handful of stops in every real asset; an unbounded list
@@ -335,7 +341,7 @@ fn an_unbounded_stop_list_is_refused() {
         &alloc::format!(r#"<linearGradient id="g">{stops}</linearGradient>"#),
         "url(#g)",
     );
-    assert_eq!(decode(svg.as_bytes()), Err(SvgError::TooComplex));
+    assert_eq!(decode_square(svg.as_bytes()), Err(SvgError::TooComplex));
 }
 
 #[test]
@@ -347,7 +353,7 @@ fn a_gradient_may_stroke_as_well_as_fill() {
               </linearGradient></defs>
             <rect x="1" y="1" width="6" height="6" fill="none"
                   stroke="url(#g)" stroke-width="1"/></svg>"##;
-    let image = decode(svg.as_bytes()).expect("a stroked gradient");
+    let image = decode_square(svg.as_bytes()).expect("a stroked gradient");
     assert_eq!(image.layers().len(), 1);
     assert!(matches!(image.layers()[0].paint, Paint::Gradient(_)));
 }

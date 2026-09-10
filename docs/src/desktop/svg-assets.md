@@ -23,7 +23,7 @@ and that form is cached and re-rendered only on a scale or theme change:
                                               lib/raster Surface  ──blit──▶  compositor
 ```
 
-`tairix_svg::decode(bytes)` returns an `SvgImage`: a square design grid
+`tairix_svg::decode(bytes, viewport)` returns an `SvgImage`: a design grid
 (`design()`), an ordered stack of filled layers (`layers()`, bottom layer
 first — each an `SvgLayer { paint, rule, contours }`), and an optional pointer
 hotspot (`hotspot()`). A layer is several contours under one fill rule rather
@@ -35,13 +35,35 @@ scan converter — there is no second rasterisation path (`AGENTS.md` §2.2).
 The cursor and icon libraries expose the wrappers
 `tairix_cursor::decode_svg` and `tairix_icon::decode_svg`.
 
-Every asset is fitted to the **same** square design grid whatever its own
-`viewBox` says, honouring `preserveAspectRatio`, so a drawing that is not
-square is letter-boxed into the square slot rather than stretched, and a
-consumer never rescales between assets. An app-bundle icon master is still
-required to be authored square (`SvgImage::source_extent()` is what the image
-build checks): letter-boxing is right for artwork in general, but an icon
-with bars down two sides is not an icon.
+`viewport` chooses the shape the drawing is fitted to, and is the only thing
+it chooses: a document is well formed or it is not, and that cannot depend on
+who is asking.
+
+`Viewport::Square` is the desktop's asset form. Every asset is fitted to the
+**same** square design grid whatever its own `viewBox` says, honouring
+`preserveAspectRatio`, so a drawing that is not square is letter-boxed into
+the square slot rather than stretched, and a consumer never rescales between
+assets. An app-bundle icon master is still required to be authored square
+(`SvgImage::source_extent()` is what the image build checks): letter-boxing is
+right for artwork in general, but an icon with bars down two sides is not an
+icon.
+
+`Viewport::Natural` is what a *viewer* of a picture asks for, where there is
+no slot to fill and the drawing's own shape is the answer. The drawing is
+normalised across the whole grid — filling both axes — and `source_extent()`
+carries the proportions it was authored in, so a consumer that rasterises into
+a surface of that shape gets the picture undistorted, with the grid's full
+precision on both axes and no letter-box bands to find and crop. That works
+because `Surface::fill_contours` stretches the grid across the surface it is
+given: normalising in the decoder and un-normalising in the surface's own
+shape is one uniform scale, so the scan converter needs no non-square grid of
+its own.
+
+Filling both axes does mean a curve is flattened to the tolerance of the
+larger scale, so a drawing already close to the total-vertex bound can pass it
+under `Natural` and be admitted under `Square`. The bound is a containment
+bound and is not relaxed to suit a shape (`AGENTS.md` §24.4); the refusal is
+the bound doing its job on the geometry actually produced.
 
 ## Loading a whole asset set
 
