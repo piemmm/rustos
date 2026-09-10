@@ -187,9 +187,11 @@ impl CodeStream {
     fn code(&mut self, code: u16) {
         self.bits.push(code, self.width);
         self.since_clear += 1;
-        if self.since_clear >= 2 && usize::from(self.next) < super::MAX_CODES {
+        if self.since_clear >= 2 && usize::from(self.next) < crate::lzw::MAX_CODES {
             self.next += 1;
-            if u32::from(self.next) >= (1u32 << self.width) && self.width < super::MAX_CODE_BITS {
+            if u32::from(self.next) >= (1u32 << self.width)
+                && self.width < crate::lzw::MAX_CODE_BITS
+            {
                 self.width += 1;
             }
         }
@@ -242,7 +244,7 @@ fn lzw_compressed(indices: &[u8], min_code_size: u8) -> Vec<u8> {
             current = code;
         } else {
             stream.code(current);
-            if usize::from(next) < super::MAX_CODES {
+            if usize::from(next) < crate::lzw::MAX_CODES {
                 table.push(((current, byte), next));
                 next += 1;
             }

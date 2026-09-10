@@ -31,6 +31,7 @@ use core::ops::Range;
 
 use tairix_util::fallible;
 
+use crate::lzw::{CodeSource, Lzw, Widen};
 use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
 
 /// The three magic bytes every GIF opens with.
@@ -73,14 +74,6 @@ const NETSCAPE_LOOP_SUB_BLOCK: u8 = 0x01;
 /// nine would exceed the 256 entries an index byte can address.
 const MIN_CODE_SIZE_MIN: u8 = 2;
 const MIN_CODE_SIZE_MAX: u8 = 8;
-
-/// The widest LZW code the format allows, and the resulting table size.
-const MAX_CODE_BITS: u32 = 12;
-const MAX_CODES: usize = 1 << MAX_CODE_BITS;
-
-/// The prefix stored for a root code, which has none. Outside the code space,
-/// so it can never be mistaken for a code.
-const NO_PREFIX: u16 = u16::MAX;
 
 /// Bytes per colour-table entry: one each of red, green, and blue.
 const PALETTE_ENTRY_LEN: usize = 3;
@@ -411,53 +404,6 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     Ok((screen.width, screen.height))
 }
 
-/// The LZW dictionary and output stack, allocated once and reused by every
-/// frame of a stream.
-struct Lzw {
-    prefix: Vec<u16>,
-    suffix: Vec<u8>,
-    /// One slot deeper than the longest possible string, for the reserved
-    /// leading byte the not-yet-defined-code case fills in.
-    stack: Vec<u8>,
-}
-
-impl Lzw {
-    fn new() -> Option<Self> {
-        Some(Self {
-            prefix: fallible::filled(MAX_CODES, NO_PREFIX)?,
-            suffix: fallible::filled(MAX_CODES, 0u8)?,
-            stack: fallible::filled(MAX_CODES + 1, 0u8)?,
-        })
-    }
-
-    /// Walk `code`'s string onto the stack in reverse from `depth`, answering
-    /// its first byte.
-    ///
-    /// A dictionary entry's prefix is always a code that already existed when
-    /// the entry was defined, so the walk strictly decreases and terminates.
-    /// The index and depth are checked anyway, so a table this decoder could
-    /// not have built still cannot overrun either buffer.
-    fn walk(&mut self, code: u16, roots: u16, depth: &mut usize) -> Result<u8, DecodeError> {
-        let mut cursor = code;
-        while cursor >= roots {
-            let index = usize::from(cursor);
-            if index >= self.suffix.len() || *depth >= self.stack.len() {
-                return Err(DecodeError::GifInvalidCode);
-            }
-            self.stack[*depth] = self.suffix[index];
-            *depth += 1;
-            cursor = self.prefix[index];
-        }
-        if *depth >= self.stack.len() {
-            return Err(DecodeError::GifInvalidCode);
-        }
-        let root = u8::try_from(cursor).map_err(|_| DecodeError::GifInvalidCode)?;
-        self.stack[*depth] = root;
-        *depth += 1;
-        Ok(root)
-    }
-}
-
 /// The LZW code stream of one frame, read across its data sub-blocks.
 ///
 /// The sub-blocks are a framing layer only: the bit stream runs continuously
@@ -511,7 +457,18 @@ impl<'a> CodeReader<'a> {
         Ok(true)
     }
 
-    /// The next `width`-bit code, or `None` once the stream has run out.
+    /// Drain to just past the terminating zero-length sub-block, answering
+    /// the offset of the block that follows.
+    fn finish(&mut self) -> Result<usize, DecodeError> {
+        while !self.ended {
+            self.block = &[];
+            self.advance()?;
+        }
+        Ok(self.next_block)
+    }
+}
+
+impl CodeSource for CodeReader<'_> {
     fn code(&mut self, width: u32) -> Result<Option<u16>, DecodeError> {
         while self.held < width {
             let block = self.block;
@@ -532,30 +489,13 @@ impl<'a> CodeReader<'a> {
         self.held -= width;
         Ok(Some(code))
     }
-
-    /// Drain to just past the terminating zero-length sub-block, answering
-    /// the offset of the block that follows.
-    fn finish(&mut self) -> Result<usize, DecodeError> {
-        while !self.ended {
-            self.block = &[];
-            self.advance()?;
-        }
-        Ok(self.next_block)
-    }
 }
 
 /// Expand one frame's LZW stream into `out`, which is exactly the frame's
 /// pixel count, and answer the offset of the block after it.
 ///
-/// The table grows in lockstep with the encoder: the entry that fills the
-/// current width's code space widens the next read by one bit, to twelve. A
-/// stream that fills the table and never clears it keeps decoding at twelve
-/// bits against the table as it stands — the deferred clear real encoders
-/// rely on — rather than being refused.
-///
 /// A stream producing fewer pixels than the frame declares is refused, since
-/// a partly-filled frame would be a fabricated picture. One producing more
-/// stops at the frame's last pixel, because the rest is not part of the frame.
+/// a partly-filled frame would be a fabricated picture.
 fn expand(
     bytes: &[u8],
     data: usize,
@@ -563,68 +503,14 @@ fn expand(
     lzw: &mut Lzw,
     out: &mut [u8],
 ) -> Result<usize, DecodeError> {
-    let root_bits = u32::from(min_code_size);
-    let roots = 1u16 << root_bits;
-    let end = roots + 1;
-    for index in 0..usize::from(roots) {
-        lzw.prefix[index] = NO_PREFIX;
-        lzw.suffix[index] = u8::try_from(index).map_err(|_| DecodeError::GifInvalidCode)?;
-    }
-    let mut next = end + 1;
-    let mut width = root_bits + 1;
-    let mut previous: Option<u16> = None;
-    let mut written = 0usize;
     let mut reader = CodeReader::new(bytes, data);
-    while let Some(code) = reader.code(width)? {
-        if code == roots {
-            next = end + 1;
-            width = root_bits + 1;
-            previous = None;
-            continue;
-        }
-        if code == end {
-            break;
-        }
-        let mut depth = 0usize;
-        let first = match code.cmp(&next) {
-            core::cmp::Ordering::Less => lzw.walk(code, roots, &mut depth)?,
-            // The code this very step defines: its string is the previous one
-            // followed by that string's own first byte. The stack fills in
-            // reverse, so the trailing byte takes the slot below the walk —
-            // which is why the stack carries one extra.
-            core::cmp::Ordering::Equal => {
-                let Some(prev) = previous else {
-                    return Err(DecodeError::GifInvalidCode);
-                };
-                depth = 1;
-                let first = lzw.walk(prev, roots, &mut depth)?;
-                lzw.stack[0] = first;
-                first
-            }
-            core::cmp::Ordering::Greater => return Err(DecodeError::GifInvalidCode),
-        };
-        for slot in (0..depth).rev() {
-            if written == out.len() {
-                break;
-            }
-            out[written] = lzw.stack[slot];
-            written += 1;
-        }
-        if written == out.len() {
-            break;
-        }
-        if let Some(prev) = previous {
-            if usize::from(next) < MAX_CODES {
-                lzw.prefix[usize::from(next)] = prev;
-                lzw.suffix[usize::from(next)] = first;
-                next += 1;
-                if u32::from(next) >= (1u32 << width) && width < MAX_CODE_BITS {
-                    width += 1;
-                }
-            }
-        }
-        previous = Some(code);
-    }
+    let written = lzw.expand(
+        &mut reader,
+        u32::from(min_code_size),
+        Widen::WhenFull,
+        &DecodeError::GifInvalidCode,
+        out,
+    )?;
     if written != out.len() {
         return Err(DecodeError::GifTruncatedImageData);
     }

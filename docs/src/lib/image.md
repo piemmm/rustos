@@ -18,7 +18,7 @@ SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, `Gif`, `Bmp`,
-`Ico`, and `Sprite`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
+`Ico`, `Sprite`, and `Tiff`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
 from its leading signature, and `decode`, `decode_fitted`, and
 `Sequence::open` dispatch on it, refusing an unrecognised signature before any
 format-specific parsing runs. A further format is added only when a real
@@ -238,6 +238,82 @@ answer the largest that does, and only where none parses is the first page's
 own refusal the answer. `Sequence` exposes every page, including the
 unreadable ones, each with its own result.
 
+### TIFF
+
+The TIFF decoder is complete against TIFF 6.0: both byte orders; the chain of
+image file directories, each an independent page; strips *and* tiles; chunky
+and planar plane arrangements; bit depths 1, 2, 4, 8, 16, and 32 across the
+unsigned, signed, and IEEE-float sample formats (float at 16 and 32 bits, the
+two widths a float has); the `WhiteIsZero`, `BlackIsZero`, `RGB`, palette,
+transparency-mask, separated (CMYK) and `YCbCr` photometrics, the last with
+its chrominance subsampling, luma weights and coded ranges; the horizontal
+and floating-point predictors; associated and unassociated extra-sample
+alpha; the `Orientation` tag; and the compressions none, `PackBits`, LZW,
+Deflate/`AdobeDeflate`, CCITT modified-Huffman, Group 3 (one- and
+two-dimensional) and Group 4, and JPEG-in-TIFF.
+
+The LZW and Deflate paths reach the crate's existing codecs rather than a
+second copy: `tairix_compress`'s `zlib` module carries TIFF's zlib-wrapped
+DEFLATE, and the LZW dictionary and expansion loop are shared with the GIF
+decoder (`lib/image/src/lzw.rs`), which differs only in how codes are packed
+and when a new entry widens the code that follows it. TIFF carries **two** LZW
+dialects: its own, which widens one code earlier than the arithmetic suggests,
+and the classic one older writers emit, which packs a code least significant
+bit first *and* widens at the later point. They always travel together, and a
+stream's opening clear code tells them apart exactly — `0x80 0x00` for TIFF's
+own, `0x00 0x01` for the classic. A JPEG-compressed strip or tile is spliced
+from the `JPEGTables` field and the unit's own abbreviated stream and handed
+to the existing `jpeg` module, so the container grows no second JPEG decoder.
+
+Three readings the format's own text does not settle:
+
+- **A plain `decode` answers the first page the file does not call a reduced
+  copy of another.** A TIFF is an ordered document rather than one picture at
+  several sizes, so its first page is its picture — unlike an icon file, where
+  the largest is. `NewSubfileType` (and the superseded `SubfileType`) is the
+  file's own statement that a page is a thumbnail, so honouring it beats
+  guessing from size: a document whose second page happens to be larger still
+  answers its first. `SequenceInfo` still reports the *largest* page's
+  geometry, because that is the canvas a container needs.
+- **`Orientation` is applied, not reported.** The tag says which way up the
+  stored raster is, so a decoder that ignored it would hand every consumer a
+  sideways picture and the format knowledge needed to right it. A transposing
+  orientation therefore swaps the geometry `probe` reports, and the
+  permutation costs nothing: each sample is written where it belongs rather
+  than moved afterwards.
+- **A missing photometric under a fax compression reads as `WhiteIsZero`.**
+  Every fax is; the tag is otherwise required, and its absence is a writer's
+  omission rather than a licence to guess in general.
+
+A fax codes runs of white and black, so the CCITT decoder produces one bit per
+pixel with a set bit meaning black — the arrangement `WhiteIsZero` describes.
+A file that pairs it with `BlackIsZero` gets an inverted picture, because that
+is what it asked for.
+
+Refused by name rather than half-read: `BigTIFF` (version 43), which is a
+separate format with its own version marker, offset width and directory-entry
+layout, and which `sniff` therefore recognises so its refusal can state the
+reason; the CIE L\*a\*b\* and `LogLuv` photometrics; old-style JPEG
+(compression 6) and word-aligned CCITT (32771); samples of mixed depth or
+sample format, such as a 5-6-5 RGB page, since the depths claimed are the six
+the format's own tables list; a fill order of 2 at any depth but one, where
+reversing a byte's bits would reorder each pixel's own bits and not just the
+pixels; separate planes under JPEG or under subsampled chrominance, which no
+writer produces and no reader implements; the uncompressed-mode extension of
+T.4, which is a bypass of the run coding rather than a part of it; and a
+predictor over subsampled blocks, which have no row of samples for one to run
+along.
+
+Two fixed containment bounds hold the working set behind a page: a page count,
+because a directory costs six bytes and a chain that loops revisits one for
+ever, and a bits-per-pixel ceiling, because the caller's limits bound the
+*picture* and without it a page could declare hundreds of samples behind each
+of those pixels. The chain walk is additionally held to the directory entries
+the file has room for, so it stays linear in the input, and a strip or tile's
+own extent is weighed against the caller's limits like the picture is — a tile
+is not bounded by the image it covers, so nothing else would bound the buffer
+behind one.
+
 ### RISC OS sprite areas
 
 A sprite area is a container of independent, *named* pictures — an
@@ -303,7 +379,8 @@ all of them:
 - `Sequence::open(bytes, limits)` validates the structure — for GIF, one
   pass that walks the whole block chain, counts the frames, and reads the
   loop count; for a sprite area, one pass over the control-block chain that
-  measures every sprite — and decodes no pixels. `Sequence::open_as(format,
+  measures every sprite; for a TIFF, one pass over the directory chain that
+  measures every page — and decodes no pixels. `Sequence::open_as(format,
   bytes, limits)` is the same with the format named rather than sniffed,
   which for a sprite area is the only door.
 - `Sequence::info()` answers a `SequenceInfo`: the format, the geometry of the
@@ -352,8 +429,10 @@ A still picture is the **one-entry case** of the same shape — count `1`, kind
 `Pages`, delay `0` — so a consumer that shows pictures, animations, and icon
 files needs one path rather than three. `decode` on a multi-frame container
 answers its first composited frame, which is the picture the format shows
-first and exactly what a still consumer (an icon, a wallpaper) wants, and on
-a page container its largest page.
+first and exactly what a still consumer (an icon, a wallpaper) wants. On a
+page container it answers the page that container means by its picture: an
+icon file's or a sprite area's largest, and a TIFF document's first
+non-thumbnail page.
 
 ## Reduced-scale decode (`decode_fitted`) is a JPEG property
 
@@ -398,11 +477,12 @@ its own meaning there too — the picture the container is, which is its
 largest page — and is refused outright when that breaches the limits rather
 than quietly answering a smaller one.
 
-### PNG, GIF, and BMP
+### PNG, GIF, BMP, Sprite, and TIFF
 
 None has a reduced-scale decode process — filtered zlib-compressed
-scanlines, an LZW code stream, and a padded row array do not separate into
-scale-selectable passes — so `decode_fitted` on those *is* `decode`, at
+scanlines, an LZW code stream, a padded row array, and a grid of strips or
+tiles do not separate into scale-selectable passes — so `decode_fitted` on
+those *is* `decode`, at
 natural size, with no scale to degrade to. That asymmetry is an honest
 property of the formats rather than a gap in this crate: a caller that wants
 a smaller one resamples the decoded image through `lib/raster`'s one shared
@@ -502,7 +582,8 @@ rather than of the input, so the same image may decode later.
   `SequenceKind::{Animation, Pages}`, and
   `Frame::{index, width, height, delay_ns, pixels}` — the multi-entry shape,
   of which a still picture is the one-entry case.
-- `ImageFormat::{Png, Jpeg, Gif, Bmp, Ico, Sprite}` — the closed format enum.
+- `ImageFormat::{Png, Jpeg, Gif, Bmp, Ico, Sprite, Tiff}` — the closed format
+  enum.
 - `DecodeError` — every fail-closed refusal reason: PNG framing and
   chunk-ordering violations, `IHDR`/`PLTE`/`tRNS` validation, a
   `CompressedData` variant wrapping `tairix_compress::zlib::Error`, and the
@@ -518,7 +599,16 @@ rather than of the input, so the same image may decode later.
   bitmap height; the `Sprite*` family covering a malformed area header or
   control-block chain, truncation, an empty area, an invalid mode word, an
   unsupported screen mode or sprite type, and used-bit fields leaving no whole
-  pixels; plus `OutOfMemory` for a buffer the allocator refused.
+  pixels; the `Tiff*` family covering the byte-order mark and version,
+  truncation, `BigTIFF`, an empty or looping directory chain, a missing or
+  invalid tag value, an unsupported compression, photometric, bit depth,
+  sample format, plane arrangement, fill order or ink set, mixed or
+  over-wide samples, an invalid orientation, predictor, tile geometry,
+  colour map or subsampling, a strip-count mismatch or short strip, an LZW
+  code, a `TiffCompressedData` variant wrapping
+  `tairix_compress::zlib::Error`, the fax code, row-overflow, truncation,
+  missing-sync and uncompressed-mode refusals, and a JPEG unit of the wrong
+  size; plus `OutOfMemory` for a buffer the allocator refused.
 
 The crate is `no_std` + `alloc` and host-unit-tested beside the code with
 no external fixture files: the JPEG tests build their streams marker by
@@ -538,11 +628,19 @@ every prefix of a valid file being refused rather than half-decoded. The BMP
 and icon tests build every header version, bit depth, encoding, row order,
 and mask layout the same way, and cover the run-length escapes, the
 alpha-versus-mask rule, page addressing, and a truncated container still
-answering a page it wholly holds. Every format is fuzzed by
+answering a page it wholly holds. The TIFF tests write whole documents from a
+directory builder, so a fixture is a builder call and a refusal a mutation of
+one, and cover every depth, sample format, photometric, plane arrangement,
+predictor, orientation and compression, with the facsimile and LZW streams
+stated as the bit strings ITU-T T.4 gives rather than re-derived; the fax
+tables are additionally checked directly for being a prefix-free code that
+holds exactly the runs the specification lists, which is the property a
+hand-transcribed table most easily breaks. Every format is fuzzed by
 `tests/fuzz_image.rs` — random bytes, random bytes behind
 each valid signature, and structurally mutated valid fixtures (PNG chunks,
 JPEG baseline and progressive marker segments, GIF blocks, icon directory
-entries, and a BMP header's declared fields), each walked through `decode`,
-`decode_fitted`, and a full `Sequence` pass with a rewind —
-registered with `cargo xtask fuzz`. Stability tier: experimental
+entries, TIFF directory entries — including a rewrite that hands a payload to
+a compression it was not written for — and a BMP header's declared fields),
+each walked through `decode`, `decode_fitted`, and a full `Sequence` pass
+with a rewind — registered with `cargo xtask fuzz`. Stability tier: experimental
 (`lib/image/README.md`).

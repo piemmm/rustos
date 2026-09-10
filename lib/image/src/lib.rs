@@ -16,9 +16,10 @@
 //! [`decode`] and [`decode_fitted`] dispatch on the format [`sniff`]
 //! recognises from a byte signature: PNG ([`ImageFormat::Png`]), JPEG
 //! ([`ImageFormat::Jpeg`]), GIF ([`ImageFormat::Gif`]), BMP
-//! ([`ImageFormat::Bmp`]), and the icon and cursor containers
-//! ([`ImageFormat::Ico`]), each decoded by its own private module — BMP and
-//! ICO by one, because an icon's entries are the bitmaps BMP already reads.
+//! ([`ImageFormat::Bmp`]), TIFF ([`ImageFormat::Tiff`]), and the icon and
+//! cursor containers ([`ImageFormat::Ico`]), each decoded by its own private
+//! module — BMP and ICO by one, because an icon's entries are the bitmaps
+//! BMP already reads.
 //! [`ImageFormat`] stays closed and grows only with a real consumer, exactly
 //! as PNG was added for the icon pipeline, JPEG for the wallpaper masters,
 //! and the rest for the picture viewer. Being the one raster
@@ -51,7 +52,8 @@
 //! the container's own disposal model, so being able to ask for frame *n*
 //! directly would mean re-compositing every frame before it. A page
 //! container's entries are independent pictures instead, and choosing
-//! between them is the point, so [`Sequence::page`] addresses one directly.
+//! between them is the point, so [`Sequence::page`] addresses one directly:
+//! an icon file's sizes, a sprite area's icons, a TIFF document's pages.
 //! A still picture is the one-entry case of the same shape, so a consumer
 //! that shows pictures, animations, and icon files needs one path rather
 //! than three.
@@ -81,7 +83,8 @@
 //! takes the smallest entry covering the box rather than computing anything.
 //! PNG, GIF, and BMP have no reduced-scale decode process at all — their
 //! entropy coding and row layout do not separate into scale-selectable
-//! passes the way a block transform does — so for those [`decode_fitted`] is
+//! passes the way a block transform does, and neither does a sprite area or
+//! a TIFF's grid of strips and tiles — so for those [`decode_fitted`] is
 //! exactly [`decode`] and has no degradation to offer; that is an honest
 //! property of the formats, not a gap this crate is missing.
 //!
@@ -119,16 +122,19 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 mod bmp;
+mod ccitt;
 mod channel;
 mod crc32;
 mod gif;
 mod ico;
 mod jpeg;
+mod lzw;
 mod pages;
 mod png;
 #[cfg(test)]
 mod png_fixture;
 mod sprite;
+mod tiff;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
 /// shape [`RasterImage`] and every format decoder here produce.
@@ -160,6 +166,21 @@ pub(crate) fn le_u32(data: &[u8], at: usize) -> Option<u32> {
     data.get(at..)
         .and_then(<[u8]>::first_chunk::<4>)
         .map(|bytes| u32::from_le_bytes(*bytes))
+}
+
+/// The big-endian 16-bit value at `at`, for a format that carries its own
+/// byte order rather than fixing one.
+pub(crate) fn be_u16(data: &[u8], at: usize) -> Option<u16> {
+    data.get(at..)
+        .and_then(<[u8]>::first_chunk::<2>)
+        .map(|bytes| u16::from_be_bytes(*bytes))
+}
+
+/// The big-endian 32-bit value at `at`; see [`be_u16`].
+pub(crate) fn be_u32(data: &[u8], at: usize) -> Option<u32> {
+    data.get(at..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map(|bytes| u32::from_be_bytes(*bytes))
 }
 
 /// Why decoding an image failed. Every variant is a fail-closed refusal:
@@ -463,6 +484,102 @@ pub enum DecodeError {
     /// A sprite's first or last used bit was out of range, off a pixel
     /// boundary, or left its rows holding no whole pixels.
     SpriteInvalidWastage,
+
+    /// The file did not open with a byte-order mark and a version this
+    /// decoder recognises.
+    TiffBadSignature,
+    /// A header, directory, tag value, or unit ran past the end of the
+    /// input.
+    TiffTruncated,
+    /// The file declared `BigTIFF` (version 43), which is a separate format
+    /// with its own offset width and directory layout.
+    TiffBigTiffUnsupported,
+    /// The directory chain held no page whose geometry could be read.
+    TiffNoPages,
+    /// The directory chain declared more pages than the decoder's fixed
+    /// containment bound accepts, or revisited one it had already walked.
+    TiffTooManyPages,
+    /// A directory omitted a tag its page cannot be read without.
+    TiffMissingTag,
+    /// A tag carried a value outside the range its field permits, or a
+    /// field type no value of that tag can have.
+    TiffInvalidTagValue,
+    /// The directory declared a compression this decoder does not claim:
+    /// old-style JPEG, word-aligned CCITT, or a code the format does not
+    /// define.
+    TiffUnsupportedCompression,
+    /// The directory declared a photometric this decoder does not claim: a
+    /// CIE L\*a\*b\* or `LogLuv` encoding, or a code the format does not
+    /// define.
+    TiffUnsupportedPhotometric,
+    /// The directory declared a bit depth outside the six the format's own
+    /// tables list, one no sample format of that width exists for, or one
+    /// its own compression has no reading of — a facsimile is bilevel.
+    TiffUnsupportedBitDepth,
+    /// The directory declared a sample format this decoder has no reading
+    /// of.
+    TiffUnsupportedSampleFormat,
+    /// The samples of one pixel do not share a bit depth or a sample
+    /// format.
+    TiffMixedSampleLayout,
+    /// A per-sample tag's element count disagreed with the declared samples
+    /// per pixel, or the count is too few for the photometric to read.
+    TiffSampleCountMismatch,
+    /// One pixel's samples together exceed the decoder's fixed containment
+    /// bound on their width.
+    TiffPixelTooWide,
+    /// The directory declared a plane arrangement this decoder does not
+    /// claim: a code the format does not define, or separate planes under
+    /// JPEG or subsampled chrominance.
+    TiffUnsupportedPlanarConfiguration,
+    /// The directory declared a fill order other than one, at a depth where
+    /// reversing a byte's bits would reorder each pixel's own.
+    TiffUnsupportedFillOrder,
+    /// The directory declared an ink set other than CMYK, whose inks it
+    /// does not name.
+    TiffUnsupportedInkSet,
+    /// The directory declared an orientation outside the eight the format
+    /// defines.
+    TiffInvalidOrientation,
+    /// The directory declared a predictor the format does not define, or
+    /// one that is not defined at the page's bit depth or sample format.
+    TiffInvalidPredictor,
+    /// The directory declared a tile whose width or height is zero or not a
+    /// multiple of sixteen.
+    TiffInvalidTileGeometry,
+    /// The directory declared fewer strip or tile offsets or byte counts
+    /// than its own geometry needs.
+    TiffStripCountMismatch,
+    /// A strip or tile held fewer bytes than the geometry behind it needs.
+    TiffStripTruncated,
+    /// A palette page's colour map was absent or the wrong length for the
+    /// samples that index it.
+    TiffInvalidColourMap,
+    /// The directory declared a chrominance subsampling other than one,
+    /// two, or four.
+    TiffInvalidSubsampling,
+    /// An LZW code was neither in the table nor the one the reading step
+    /// would itself define.
+    TiffInvalidCode,
+    /// A strip or tile failed to decompress.
+    TiffCompressedData(tairix_compress::zlib::Error),
+    /// A fax's coded data held no code the run-length or mode tables
+    /// resolve.
+    TiffFaxBadCode,
+    /// A fax's run or changing element reached outside its row, or a mode
+    /// failed to advance along it.
+    TiffFaxRowOverflow,
+    /// A fax's coded data ended before its last row.
+    TiffFaxTruncated,
+    /// A fax row carried no end-of-line code, so the two-dimensional coding
+    /// it declared names no coding for that row.
+    TiffFaxMissingSync,
+    /// A fax entered uncompressed mode, which is a bypass of the run coding
+    /// rather than a part of it.
+    TiffFaxUncompressedMode,
+    /// A JPEG-compressed strip or tile decoded to a size other than the one
+    /// the directory places it at.
+    TiffJpegGeometryMismatch,
 }
 
 impl DecodeError {
@@ -619,6 +736,40 @@ impl DecodeError {
             Self::SpriteUnknownMode => "sprite declares an unsupported screen mode",
             Self::SpriteUnsupportedType => "sprite declares an unsupported sprite type",
             Self::SpriteInvalidWastage => "sprite's used-bit fields leave no whole pixels",
+            Self::TiffBadSignature => "not a TIFF file (bad byte-order mark or version)",
+            Self::TiffTruncated => "TIFF field runs past the end of the input",
+            Self::TiffBigTiffUnsupported => "TIFF declares `BigTIFF`, which is a separate format",
+            Self::TiffNoPages => "TIFF directory chain holds no readable page",
+            Self::TiffTooManyPages => "TIFF declares more pages than the decoder accepts",
+            Self::TiffMissingTag => "TIFF directory omits a tag its page needs",
+            Self::TiffInvalidTagValue => "TIFF tag holds a value its field does not permit",
+            Self::TiffUnsupportedCompression => "TIFF declares an unsupported compression",
+            Self::TiffUnsupportedPhotometric => "TIFF declares an unsupported photometric",
+            Self::TiffUnsupportedBitDepth => "TIFF declares an unsupported bit depth",
+            Self::TiffUnsupportedSampleFormat => "TIFF declares an unsupported sample format",
+            Self::TiffMixedSampleLayout => "TIFF samples do not share a bit depth or sample format",
+            Self::TiffSampleCountMismatch => "TIFF sample count disagrees with its own tags",
+            Self::TiffPixelTooWide => "TIFF pixel is wider than the decoder accepts",
+            Self::TiffUnsupportedPlanarConfiguration => {
+                "TIFF declares an unsupported plane arrangement"
+            }
+            Self::TiffUnsupportedFillOrder => "TIFF declares an unsupported fill order",
+            Self::TiffUnsupportedInkSet => "TIFF declares an ink set other than CMYK",
+            Self::TiffInvalidOrientation => "TIFF declares an invalid orientation",
+            Self::TiffInvalidPredictor => "TIFF declares a predictor its samples do not permit",
+            Self::TiffInvalidTileGeometry => "TIFF declares an invalid tile size",
+            Self::TiffStripCountMismatch => "TIFF declares too few strip or tile entries",
+            Self::TiffStripTruncated => "TIFF strip or tile is shorter than its geometry needs",
+            Self::TiffInvalidColourMap => "TIFF colour map is absent or the wrong length",
+            Self::TiffInvalidSubsampling => "TIFF declares an invalid chrominance subsampling",
+            Self::TiffInvalidCode => "TIFF LZW stream holds a code its table cannot resolve",
+            Self::TiffCompressedData(_) => "TIFF strip or tile data",
+            Self::TiffFaxBadCode => "TIFF fax data holds a code its tables cannot resolve",
+            Self::TiffFaxRowOverflow => "TIFF fax run reaches outside its row",
+            Self::TiffFaxTruncated => "TIFF fax data ends before its last row",
+            Self::TiffFaxMissingSync => "TIFF fax row carries no end-of-line code",
+            Self::TiffFaxUncompressedMode => "TIFF fax enters uncompressed mode",
+            Self::TiffJpegGeometryMismatch => "TIFF JPEG strip or tile decodes to the wrong size",
         }
     }
 }
@@ -626,7 +777,7 @@ impl DecodeError {
 impl core::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.message())?;
-        if let Self::CompressedData(inner) = self {
+        if let Self::CompressedData(inner) | Self::TiffCompressedData(inner) = self {
             write!(f, ": {inner}")?;
         }
         Ok(())
@@ -823,6 +974,10 @@ pub enum ImageFormat {
     /// signature to recognise; a caller that knows the type names it
     /// ([`probe_as`], [`decode_as`], [`Sequence::open_as`]).
     Sprite,
+    /// A TIFF 6.0 file: a chain of independent pages, each a grid of strips
+    /// or tiles over the sample layout, colour interpretation, predictor,
+    /// and compression its own directory declares.
+    Tiff,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -866,6 +1021,12 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     }
     if bytes.starts_with(&ico::ICO_SIGNATURE) || bytes.starts_with(&ico::CUR_SIGNATURE) {
         return Some(ImageFormat::Ico);
+    }
+    if tiff::SIGNATURES
+        .iter()
+        .any(|signature| bytes.starts_with(signature))
+    {
+        return Some(ImageFormat::Tiff);
     }
     None
 }
@@ -943,6 +1104,7 @@ pub fn probe_as(format: ImageFormat, bytes: &[u8]) -> Result<ImageInfo, DecodeEr
         ImageFormat::Bmp => bmp::probe(bytes)?,
         ImageFormat::Ico => ico::probe(bytes)?,
         ImageFormat::Sprite => sprite::probe(bytes)?,
+        ImageFormat::Tiff => tiff::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -1026,6 +1188,7 @@ pub fn decode_as(
         ImageFormat::Bmp => bmp::decode(bytes, limits),
         ImageFormat::Ico => ico::decode(bytes, limits),
         ImageFormat::Sprite => sprite::decode(bytes, limits),
+        ImageFormat::Tiff => tiff::decode(bytes, limits),
     }
 }
 
@@ -1224,6 +1387,8 @@ enum Entries<'a> {
     Ico(pages::Pages<ico::Directory<'a>>),
     /// A RISC OS sprite area's chain of independent pictures.
     Sprite(pages::Pages<sprite::Area<'a>>),
+    /// A TIFF's chain of independent pages.
+    Tiff(pages::Pages<tiff::Chain<'a>>),
 }
 
 /// A container's frames or pages, decoded in order.
@@ -1307,6 +1472,10 @@ impl<'a> Sequence<'a> {
             ImageFormat::Sprite => {
                 let pages = sprite::pages(bytes, limits)?;
                 Ok(Self::paged(ImageFormat::Sprite, pages, Entries::Sprite))
+            }
+            ImageFormat::Tiff => {
+                let pages = tiff::pages(bytes, limits)?;
+                Ok(Self::paged(ImageFormat::Tiff, pages, Entries::Tiff))
             }
             ImageFormat::Png => Self::still(ImageFormat::Png, png::probe(bytes)?, bytes, limits),
             ImageFormat::Jpeg => Self::still(ImageFormat::Jpeg, jpeg::probe(bytes)?, bytes, limits),
@@ -1417,6 +1586,7 @@ impl<'a> Sequence<'a> {
             }
             Entries::Ico(pages) => step_page(pages),
             Entries::Sprite(pages) => step_page(pages),
+            Entries::Tiff(pages) => step_page(pages),
         }
     }
 
@@ -1472,6 +1642,7 @@ impl<'a> Sequence<'a> {
             }
             Entries::Ico(pages) => addressed_page(pages, index),
             Entries::Sprite(pages) => addressed_page(pages, index),
+            Entries::Tiff(pages) => addressed_page(pages, index),
         }
     }
 
@@ -1487,6 +1658,7 @@ impl<'a> Sequence<'a> {
             Entries::Gif(frames) => frames.rewind(),
             Entries::Ico(pages) => pages.rewind(),
             Entries::Sprite(pages) => pages.rewind(),
+            Entries::Tiff(pages) => pages.rewind(),
         }
     }
 }

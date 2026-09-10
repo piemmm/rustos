@@ -1,5 +1,5 @@
 //! Deterministic fuzz harness for every image decoder (PNG, JPEG, GIF, BMP,
-//! ICO/CUR, and RISC OS sprite areas).
+//! ICO/CUR, RISC OS sprite areas, and TIFF).
 //!
 //! Invariants, for any bytes an untrusted bundle icon, wallpaper, or opened
 //! picture may carry:
@@ -9,9 +9,10 @@
 //!    pixel count exceeds the [`DecodeLimits`] they were given.
 //! 2. Structure-aware mutations of a valid, builder-made file — bit flips,
 //!    length/CRC tweaks, reordering of PNG chunks, JPEG marker segments,
-//!    GIF blocks, or icon directory entries, and overwriting a BMP header's
-//!    declared fields — never panic: the mutated bytes either decode within
-//!    the limits or are refused with a typed error.
+//!    GIF blocks, TIFF directory entries, or icon directory entries, and
+//!    overwriting a BMP header's or a TIFF directory's declared fields —
+//!    never panic: the mutated bytes either decode within the limits or are
+//!    refused with a typed error.
 //! 3. The generators are not degenerate: every pristine fixture each one
 //!    produces actually decodes (a corpus that never round-trips would
 //!    leave invariant 2 exercising only the trivial "refused immediately"
@@ -1331,6 +1332,377 @@ fn mutate_sprite(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------
+// TIFF fixtures
+// -----------------------------------------------------------------------
+
+/// The four openings a TIFF can have: the byte-order mark then the version,
+/// restated here because this harness builds its own files.
+const TIFF_HEADERS: [[u8; 4]; 4] = [
+    [b'I', b'I', 42, 0],
+    [b'I', b'I', 43, 0],
+    [b'M', b'M', 0, 42],
+    [b'M', b'M', 0, 43],
+];
+
+/// A directory entry's fixed length.
+const TIFF_ENTRY_LEN: usize = 12;
+
+/// The compressions the decoder claims. The generator writes only the three
+/// it can encode; a mutation rewrites the tag to any of them, which is what
+/// drives the LZW, fax, and JPEG paths with structured-but-wrong payloads.
+const TIFF_COMPRESSIONS: [u16; 9] = [1, 2, 3, 4, 5, 7, 8, 32773, 32946];
+
+/// One field of a directory under construction: tag, type, and the values
+/// in little-endian element order.
+type TiffField = (u16, u16, Vec<u8>);
+
+fn tiff_u16(out: &mut Vec<u8>, big: bool, value: u16) {
+    out.extend_from_slice(&if big {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
+    });
+}
+
+fn tiff_u32(out: &mut Vec<u8>, big: bool, value: u32) {
+    out.extend_from_slice(&if big {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
+    });
+}
+
+/// Bytes one element of a field type occupies.
+fn tiff_width(kind: u16) -> usize {
+    match kind {
+        1 | 2 | 6 | 7 => 1,
+        3 | 8 => 2,
+        5 | 10 | 12 => 8,
+        _ => 4,
+    }
+}
+
+/// A field's bytes in the document's byte order.
+fn tiff_ordered(big: bool, kind: u16, bytes: &[u8]) -> Vec<u8> {
+    let step = tiff_width(kind);
+    if !big || step == 1 {
+        return bytes.to_vec();
+    }
+    let step = if kind == 5 || kind == 10 { 4 } else { step };
+    bytes
+        .chunks(step)
+        .flat_map(|chunk| chunk.iter().rev().copied())
+        .collect()
+}
+
+fn tiff_shorts(values: &[u16]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn tiff_longs(values: &[u32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// Write one page's directory, out-of-line values, and units, chaining on
+/// unless it is the `last`.
+fn tiff_page(out: &mut Vec<u8>, big: bool, fields: &[TiffField], units: &[Vec<u8>], last: bool) {
+    let mut fields = fields.to_vec();
+    let counts: Vec<u32> = units
+        .iter()
+        .map(|unit| u32::try_from(unit.len()).unwrap_or(0))
+        .collect();
+    // A tiled page names its arrays by the tile tags and a stripped one by
+    // the strip tags; the caller states which by seeding a tile width.
+    let tiled = fields.iter().any(|(tag, _, _)| *tag == 322);
+    let (offsets_tag, counts_tag) = if tiled { (324, 325) } else { (273, 279) };
+    fields.push((offsets_tag, 4, vec![0u8; units.len() * 4]));
+    fields.push((counts_tag, 4, tiff_longs(&counts)));
+    fields.sort_by_key(|(tag, _, _)| *tag);
+
+    let ifd_at = out.len();
+    let ifd_len = 2 + fields.len() * TIFF_ENTRY_LEN + 4;
+    let mut cursor = ifd_at + ifd_len;
+    let mut places = Vec::new();
+    for (_, kind, values) in &fields {
+        let len = tiff_ordered(big, *kind, values).len();
+        if len <= 4 {
+            places.push(None);
+        } else {
+            places.push(Some(cursor));
+            cursor += len;
+        }
+    }
+    let mut unit_offsets = Vec::new();
+    for unit in units {
+        unit_offsets.push(u32::try_from(cursor).unwrap_or(0));
+        cursor += unit.len();
+    }
+    let next = if last { 0 } else { cursor };
+
+    let values: Vec<Vec<u8>> = fields
+        .iter()
+        .map(|(tag, _, values)| {
+            if *tag == offsets_tag {
+                tiff_longs(&unit_offsets)
+            } else {
+                values.clone()
+            }
+        })
+        .collect();
+    tiff_u16(out, big, u16::try_from(fields.len()).unwrap_or(0));
+    for (((tag, kind, _), place), field) in fields.iter().zip(&places).zip(&values) {
+        let count = u32::try_from(field.len() / tiff_width(*kind)).unwrap_or(0);
+        tiff_u16(out, big, *tag);
+        tiff_u16(out, big, *kind);
+        tiff_u32(out, big, count);
+        if let Some(at) = place {
+            tiff_u32(out, big, u32::try_from(*at).unwrap_or(0));
+        } else {
+            let mut inline = tiff_ordered(big, *kind, field);
+            inline.resize(4, 0);
+            out.extend_from_slice(&inline);
+        }
+    }
+    tiff_u32(out, big, u32::try_from(next).unwrap_or(0));
+    for ((_, kind, _), (place, field)) in fields.iter().zip(places.iter().zip(&values)) {
+        if place.is_some() {
+            out.extend_from_slice(&tiff_ordered(big, *kind, field));
+        }
+    }
+    for unit in units {
+        out.extend_from_slice(unit);
+    }
+}
+
+/// `PackBits`-encode `data` as literal runs.
+fn tiff_pack_bits(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < data.len() {
+        let take = (data.len() - at).min(128);
+        out.push(u8::try_from(take - 1).unwrap_or(0));
+        out.extend_from_slice(&data[at..at + take]);
+        at += take;
+    }
+    out
+}
+
+/// Wrap `data` as a zlib stream of stored DEFLATE blocks, which is what
+/// TIFF's Deflate compression carries.
+fn tiff_zlib(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut at = 0usize;
+    loop {
+        let take = (data.len() - at).min(0xFFFF);
+        let last = at + take == data.len();
+        out.push(u8::from(last));
+        let len = u16::try_from(take).unwrap_or(0);
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(&data[at..at + take]);
+        at += take;
+        if last {
+            break;
+        }
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out.extend_from_slice(&(b << 16 | a).to_be_bytes());
+    out
+}
+
+/// One page's fields and units, over a random photometric, bit depth,
+/// plane arrangement, orientation, predictor, and strip or tile grid.
+fn tiff_random_page(rng: &mut Lcg) -> (Vec<TiffField>, Vec<Vec<u8>>) {
+    let photometric = [0u16, 1, 2, 3][rng.below(4)];
+    let bits = if photometric == 3 {
+        [1u16, 2, 4, 8][rng.below(4)]
+    } else {
+        [1u16, 2, 4, 8, 16][rng.below(5)]
+    };
+    let samples = if photometric == 2 { 3u16 } else { 1 };
+    let planar = photometric == 2 && rng.below(3) == 0;
+    let width = 1 + u32::try_from(rng.below(24)).unwrap_or(0);
+    let height = 1 + u32::try_from(rng.below(24)).unwrap_or(0);
+    let tiled = rng.below(4) == 0;
+    let compression = [1u16, 8, 32773][rng.below(3)];
+
+    let mut fields: Vec<TiffField> = vec![
+        (256, 4, tiff_longs(&[width])),
+        (257, 4, tiff_longs(&[height])),
+        (258, 3, tiff_shorts(&vec![bits; usize::from(samples)])),
+        (259, 3, tiff_shorts(&[compression])),
+        (262, 3, tiff_shorts(&[photometric])),
+        (
+            274,
+            3,
+            tiff_shorts(&[1 + u16::try_from(rng.below(8)).unwrap_or(0)]),
+        ),
+        (277, 3, tiff_shorts(&[samples])),
+        (284, 3, tiff_shorts(&[if planar { 2 } else { 1 }])),
+    ];
+    if photometric == 3 {
+        let mut map = vec![0u16; (1usize << bits) * 3];
+        for slot in &mut map {
+            *slot = u16::try_from(rng.below(0x1_0000)).unwrap_or(0);
+        }
+        fields.push((320, 3, tiff_shorts(&map)));
+    }
+    if bits == 8 && rng.below(3) == 0 {
+        fields.push((317, 3, tiff_shorts(&[2])));
+    }
+
+    let planes = if planar { u32::from(samples) } else { 1 };
+    let per_plane = if planar { 1 } else { u32::from(samples) };
+    let (columns, rows, across, down) = if tiled {
+        let columns = 16 * (1 + u32::try_from(rng.below(2)).unwrap_or(0));
+        fields.push((322, 4, tiff_longs(&[columns])));
+        fields.push((323, 4, tiff_longs(&[16])));
+        (columns, 16, width.div_ceil(columns), height.div_ceil(16))
+    } else {
+        let rows = (1 + u32::try_from(rng.below(8)).unwrap_or(0)).min(height);
+        fields.push((278, 4, tiff_longs(&[rows])));
+        (width, rows, 1, height.div_ceil(rows))
+    };
+    let row_bytes =
+        usize::try_from((u64::from(columns) * u64::from(per_plane) * u64::from(bits)).div_ceil(8))
+            .unwrap_or(0);
+    let mut units = Vec::new();
+    for _ in 0..planes {
+        for down_index in 0..down {
+            let unit_rows = if tiled {
+                rows
+            } else {
+                (height - down_index * rows).min(rows)
+            };
+            for _ in 0..across {
+                let mut raw = vec![0u8; row_bytes * usize::try_from(unit_rows).unwrap_or(0)];
+                rng.fill(&mut raw);
+                units.push(match compression {
+                    8 => tiff_zlib(&raw),
+                    32773 => tiff_pack_bits(&raw),
+                    _ => raw,
+                });
+            }
+        }
+    }
+    (fields, units)
+}
+
+/// Build one structurally valid, randomised TIFF of one or two pages.
+fn build_valid_tiff(rng: &mut Lcg) -> Vec<u8> {
+    let big = rng.below(2) == 0;
+    let mut out = Vec::new();
+    out.extend_from_slice(if big { b"MM" } else { b"II" });
+    tiff_u16(&mut out, big, 42);
+    tiff_u32(&mut out, big, 8);
+    let pages = 1 + rng.below(2);
+    for page in 0..pages {
+        let (fields, units) = tiff_random_page(rng);
+        tiff_page(&mut out, big, &fields, &units, page + 1 == pages);
+    }
+    out
+}
+
+/// The byte range of every entry of a TIFF's *first* directory, for a swap
+/// that reorders two of them.
+///
+/// One directory only, because [`swap_two_ranges`] rebuilds the span its
+/// bounds cover and a later page's entries are separated from the first
+/// page's by that page's values and units.
+fn tiff_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let big = match bytes.first_chunk::<2>() {
+        Some(b"MM") => true,
+        Some(b"II") => false,
+        _ => return Vec::new(),
+    };
+    let read16 = |at: usize| {
+        bytes.get(at..at + 2).map(|pair| {
+            let pair = [pair[0], pair[1]];
+            if big {
+                u16::from_be_bytes(pair)
+            } else {
+                u16::from_le_bytes(pair)
+            }
+        })
+    };
+    let read32 = |at: usize| {
+        bytes.get(at..at + 4).map(|quad| {
+            let quad = [quad[0], quad[1], quad[2], quad[3]];
+            if big {
+                u32::from_be_bytes(quad)
+            } else {
+                u32::from_le_bytes(quad)
+            }
+        })
+    };
+    let mut bounds = Vec::new();
+    let at = match read32(4).and_then(|at| usize::try_from(at).ok()) {
+        Some(at) if at != 0 => at,
+        _ => return bounds,
+    };
+    let Some(count) = read16(at) else {
+        return bounds;
+    };
+    for index in 0..usize::from(count) {
+        let entry = at + 2 + index * TIFF_ENTRY_LEN;
+        if entry + TIFF_ENTRY_LEN > bytes.len() {
+            return bounds;
+        }
+        bounds.push((entry, entry + TIFF_ENTRY_LEN));
+    }
+    bounds
+}
+
+/// Structurally mutate a pristine TIFF: maybe reorder two directory
+/// entries, maybe rewrite one into a compression tag so a payload reaches a
+/// decoder it was not written for, then flip a handful of bits.
+fn mutate_tiff(rng: &mut Lcg, pristine: &[u8]) -> Vec<u8> {
+    let mut bytes = pristine.to_vec();
+    if rng.below(3) == 0 {
+        let bounds = tiff_bounds(&bytes);
+        if let Some(rebuilt) = swap_two_ranges(rng, &bytes, &bounds) {
+            bytes = rebuilt;
+        }
+    }
+    let bounds = tiff_bounds(&bytes);
+    if rng.below(2) == 0 && !bounds.is_empty() {
+        let big = bytes.first_chunk::<2>() == Some(b"MM");
+        let (entry, _) = bounds[rng.below(bounds.len())];
+        let compression = TIFF_COMPRESSIONS[rng.below(TIFF_COMPRESSIONS.len())];
+        let order16 = |value: u16| {
+            if big {
+                value.to_be_bytes()
+            } else {
+                value.to_le_bytes()
+            }
+        };
+        // Tag 259 of SHORT type, count one, so the rewrite lands as a value
+        // the page will act on.
+        bytes[entry..entry + 2].copy_from_slice(&order16(259));
+        bytes[entry + 2..entry + 4].copy_from_slice(&order16(3));
+        bytes[entry + 4..entry + 8].copy_from_slice(&if big {
+            1u32.to_be_bytes()
+        } else {
+            1u32.to_le_bytes()
+        });
+        bytes[entry + 8..entry + 10].copy_from_slice(&order16(compression));
+        bytes[entry + 10..entry + 12].fill(0);
+    }
+    flip_bits(rng, &mut bytes);
+    bytes
+}
+
+// -----------------------------------------------------------------------
 // Mutation and invariants
 // -----------------------------------------------------------------------
 
@@ -1360,8 +1732,13 @@ fn chunk_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Swap two of the framed `bounds` ranges of `bytes`, leaving everything
 /// outside them (the signature ahead of the first range, and whatever
 /// follows the last) exactly where it was. `None` when there is nothing to
-/// swap. Shared by both formats' mutators: a PNG chunk and a JPEG marker
-/// segment are both "a framed range the decoder must re-walk".
+/// swap. Shared by every format's mutator: a PNG chunk, a JPEG marker
+/// segment, and a TIFF directory entry are all "a framed range the decoder
+/// must re-walk".
+///
+/// The ranges must **cover** the span from the first to the last, because
+/// the rebuild concatenates them: bounds with a gap between two of them
+/// would drop whatever sat in it.
 fn swap_two_ranges(rng: &mut Lcg, bytes: &[u8], bounds: &[(usize, usize)]) -> Option<Vec<u8>> {
     if bounds.len() < 2 {
         return None;
@@ -1542,14 +1919,16 @@ fn arbitrary_bytes_behind_each_signature_never_panic() {
             body.clear();
             body.resize(rng.below(300), 0);
             rng.fill(&mut body);
-            for prefix in [
+            let mut prefixes: Vec<&[u8]> = vec![
                 &SIGNATURE[..],
                 &[0xFF, SOI][..],
                 &GIF_MAGIC[..],
                 &BMP_MAGIC[..],
                 &ICO_HEADER[..],
                 &CUR_HEADER[..],
-            ] {
+            ];
+            prefixes.extend(TIFF_HEADERS.iter().map(|header| &header[..]));
+            for prefix in prefixes {
                 buf.clear();
                 buf.extend_from_slice(prefix);
                 buf.extend_from_slice(&body);
@@ -1806,5 +2185,49 @@ fn the_sprite_generator_produces_a_valid_corpus() {
             seen += 1;
         }
         assert_eq!(seen, count, "a fixture decoded a different sprite count");
+    }
+}
+
+#[test]
+fn mutated_valid_tiff_fixtures_never_panic() {
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "mutated_valid_tiff_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let pristine = build_valid_tiff(&mut rng);
+            let mutated = mutate_tiff(&mut rng, &pristine);
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_tiff_generator_produces_a_valid_corpus() {
+    const DRAWS: u64 = 500;
+    let mut rng = Lcg::new(tairix_fuzzseed::start(
+        "the_tiff_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let limits = DecodeLimits::new(256, 256, 256 * 256, 1 << 16);
+    for _ in 0..DRAWS {
+        let bytes = build_valid_tiff(&mut rng);
+        let mut sequence =
+            Sequence::open(&bytes, &limits).expect("a pristine generated fixture failed to open");
+        let count = sequence.info().count();
+        let mut seen = 0u32;
+        while sequence
+            .next_frame()
+            .expect("a pristine generated fixture failed to decode a page")
+            .is_some()
+        {
+            seen += 1;
+        }
+        assert_eq!(seen, count, "a fixture decoded a different page count");
     }
 }

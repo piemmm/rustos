@@ -59,14 +59,52 @@ What "complete" means, per format:
   `BITMAPV5HEADER`, 1/2/4/8/16/24/32 bpp, RLE4/RLE8, bitfield masks, top-down
   and bottom-up rows. ICO/CUR is the directory over it, per entry, including
   PNG-compressed entries and the 1-bpp AND mask.
-- **TIFF** — both byte orders; the IFD chain; strips *and* tiles; planar and
-  chunky; bit depths 1/2/4/8/16/32 across the integer and float sample
-  formats; photometric WhiteIsZero / BlackIsZero / RGB / palette /
-  transparency-mask / CMYK / YCbCr; the horizontal and floating-point
-  predictors; associated and unassociated extra-sample alpha; compressions
-  none, PackBits, LZW (TIFF's dialect and the classic off-by-one variant),
-  Deflate/AdobeDeflate through `tairix_compress::inflate`, CCITT G3 1D/2D and
-  G4, and JPEG-in-TIFF through the existing `jpeg` module.
+- **TIFF 6.0** — both byte orders; the IFD chain; strips *and* tiles; planar
+  and chunky; bit depths 1/2/4/8/16/32 across the unsigned, signed, and IEEE
+  float sample formats (float at the two widths a float has, 16 and 32);
+  photometric WhiteIsZero / BlackIsZero / RGB / palette / transparency-mask /
+  CMYK / YCbCr, the last with its subsampling, luma weights and coded ranges;
+  the horizontal and floating-point predictors; associated and unassociated
+  extra-sample alpha; the Orientation tag; compressions none, PackBits, LZW
+  (TIFF's dialect and the classic variant), Deflate/AdobeDeflate through
+  `tairix_compress::zlib` (TIFF's Deflate is zlib-wrapped, not raw), CCITT
+  G3 1D/2D and G4, and JPEG-in-TIFF through the existing `jpeg` module.
+
+  Three readings the format does not settle, and one it does not have:
+  - **A plain decode answers the first page the file does not call a reduced
+    copy of another** (`NewSubfileType`, or the superseded `SubfileType`). A
+    TIFF is an ordered *document*, not one picture at several sizes, so its
+    picture is its first page — where an icon file's and a sprite area's is
+    their largest. Reading the file's own thumbnail declaration beats
+    guessing from size, which would answer page two of a mixed-paper scan.
+    `SequenceInfo` still reports the largest page's geometry, because that is
+    the canvas a container needs, so it and `probe` may differ for a TIFF
+    where they agree for the other two.
+  - **Orientation is applied, not reported.** A decoder that ignored it would
+    hand every consumer a sideways picture *and* the format knowledge to
+    right it. A transposing orientation therefore swaps the geometry `probe`
+    answers, and the permutation is free: each sample is written where it
+    belongs rather than moved afterwards.
+  - **A missing photometric under a fax compression reads as WhiteIsZero.**
+    Every fax is; the tag is otherwise required and nothing else defaults.
+  - **TIFF has a signature, so it enters `sniff`** — `II*\0` / `MM\0*`, and
+    nothing else in the sniff order can shadow it (PNG opens `0x89`, JPEG
+    `0xFF`, GIF `G`, BMP `BM` = `0x42 0x4D`, an icon `0x00 0x00`).
+
+  Refused by name rather than half-read: **BigTIFF** (version 43) — a
+  separate format with its own version marker, offset width and directory
+  layout, so claiming it would mean claiming it completely, and `sniff`
+  recognises it precisely so the refusal can state that rather than reading
+  as no format at all; the CIE L\*a\*b\* and LogLuv photometrics; old-style
+  JPEG (compression 6) and word-aligned CCITT (32771); samples of mixed depth
+  or sample format, such as a 5-6-5 RGB page, since the claimed depths are
+  the six the format's own tables list; a fill order of 2 at any depth but
+  one, where reversing a byte's bits would reorder each pixel's own bits and
+  not just the pixels; separate planes under JPEG or subsampled chrominance,
+  which no writer produces and no reader implements; T.4's uncompressed-mode
+  extension, a bypass of the run coding rather than a part of it; and a
+  predictor over subsampled blocks, which have no row of samples to run
+  along.
 - **WEBP** — the RIFF container; `VP8 ` lossy (bool decoder, intra
   prediction, DCT/WHT, loop filter, YUV to RGB); `VP8L` lossless
   (meta-Huffman, colour cache, all four transforms); `ALPH` including its
@@ -312,9 +350,24 @@ clients, and their exit-code sets are their own.
   the format has no signature, the fuzz harness drives *every* input it
   already builds through the naming door as well, so the sprite decoder gets
   the whole corpus rather than only its own.
-- `lib/image` TIFF, WEBP — planned, in that order (TIFF's CCITT and LZW
-  codecs and WEBP's VP8 lossy decoder are each a change in their own right).
-  TIFF is a page container and takes `pages` as it stands.
+- `lib/image` TIFF — **done**, complete as specified above, with the
+  facsimile codec (`ccitt`) and both LZW dialects. It is a page container and
+  took `pages` as it stood. One more crate unit was lifted out of its single
+  home so the two formats that carry an LZW stream share it rather than each
+  holding a subtly different copy: `lzw` (the dictionary, the string walk,
+  the entry a code defines for itself, and the deferred clear, from `gif`),
+  parameterised by the two things the dialects actually disagree on — how
+  codes are packed into bytes and when a new entry widens the code that
+  follows it. TIFF's own dialect widens one code early; the classic one older
+  writers emit packs least significant bit first *and* widens at the later
+  point, and the two differences always travel together, so a stream's
+  opening clear code (`0x80 0x00` against `0x00 0x01`) tells them apart
+  exactly. A tile's own extent is weighed against the caller's limits like
+  the picture is, because a tile is not bounded by the image it covers — a
+  fixed 256-pixel tile over a 16-pixel image is what a real writer produces —
+  so without that nothing bounds the buffer behind one.
+- `lib/image` WEBP — planned (its VP8 lossy decoder is a change in its own
+  right).
 - `lib/svg` viewport decode; `lib/raster` rotate/flip — planned.
 - `lib/sandbox::imagerender` view operations — planned.
 - `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.
