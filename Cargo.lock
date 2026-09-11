@@ -5762,23 +5762,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-viewer"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-controls",
- "tairix-display",
- "tairix-font",
- "tairix-geometry",
- "tairix-input",
- "tairix-procinfo",
- "tairix-raster",
- "tairix-rt",
- "tairix-theme",
- "tairix-window",
-]
-
-[[package]]
 name = "tairix-vim"
 version = "0.0.0"
 dependencies = [

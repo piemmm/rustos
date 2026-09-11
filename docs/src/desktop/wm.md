@@ -1468,11 +1468,11 @@ so the resize keeps the window identity. A fixed-size app asks for
 inert — so an app that renders at one size is never handed a size it did not
 ask to handle. The two travel as one value, so "fixed" cannot arrive carrying
 a minimum it would never be measured against.
-The file **viewer** (`userland/apps/viewer`) is a resizable app: it re-wraps
-its text to the new width, preserves the reader's scroll position across the
-resize, and fails closed (keeping the current surface) if a new frame region
-cannot be allocated or the session refuses the re-map. Files and the terminal
-open resizable too.
+The picture and document **viewer** (`userland/apps/view`) is a resizable app:
+it refits the page to the new client size, keeps the zoom and placement the
+user set across the resize, and fails closed (keeping the current surface and
+geometry) if a new frame region cannot be allocated or the session refuses the
+re-map. Files and the terminal open resizable too.
 
 `DesktopShell::sync_active_frame` keeps exactly one window showing its active
 frame: on every focus change — a click-to-activate press, a taskbar activation,

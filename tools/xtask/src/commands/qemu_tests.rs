@@ -7110,12 +7110,12 @@ static TESTS: &[QemuTest] = &[
     //
     // It boots the same graphical world as its icon-bar sibling, types the
     // unlock passphrase, logs in and starts `desktop`. The pointer script then
-    // launches the **viewer** from the program library. The viewer holds no
+    // launches the **`view`** viewer from the program library. It holds no
     // filesystem capability of its own and is handed no document, so it asks
     // the session's trusted picker, which opens at the account's home under
     // the *session's* authority. One click on the planted document's row
     // concludes the pick, so the session mints a one-shot delegation for that
-    // file and the viewer redeems it.
+    // file and `view` redeems it.
     //
     // The guest's PASS is those two dispatched syscalls, each attributed by
     // the kernel to the principal that made it and required in that order — a
@@ -10642,8 +10642,8 @@ fn fsmutate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
-/// Launch the viewer from the program library and choose the planted document
-/// in the trusted picker it opens.
+/// Launch the `view` viewer from the program library and choose the planted
+/// document in the trusted picker it opens.
 ///
 /// Three clicks, each gated on a fact the emitting side can honestly state:
 ///

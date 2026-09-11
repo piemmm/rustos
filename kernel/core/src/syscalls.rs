@@ -606,11 +606,12 @@ impl StreamPos {
 /// operation on it runs under.
 ///
 /// A descriptor is either one the caller opened itself — exercised under the
-/// caller's own attested identity — or a one-shot delegation exercised under
-/// the identity `fd_grant` captured from the grantor. Both are filesystem
-/// paths re-resolved and re-authorised through the secured VFS on every
-/// operation; they differ only in the credential, and in the extent ceiling a
-/// writable delegation carries.
+/// caller's own attested identity — or a delegation exercised under the
+/// identity its grantor captured, whether that grantor was a one-shot
+/// `fd_grant` or the parent that wired the descriptor into this task at
+/// spawn. All are filesystem paths re-resolved and re-authorised through the
+/// secured VFS on every operation; they differ only in the credential, and in
+/// the extent ceiling a writable `fd_grant` delegation carries.
 struct PathAuthority<'a> {
     /// The absolute path the descriptor resolves to.
     path: &'a str,
@@ -619,7 +620,8 @@ struct PathAuthority<'a> {
     /// The capability set every VFS re-check runs under.
     caps: &'a CapabilitySet,
     /// The highest file length a write or truncate may produce, or [`None`]
-    /// for a descriptor the caller opened itself.
+    /// for an unbounded reach — a descriptor the caller opened itself, or one
+    /// a parent conferred whole at spawn.
     write_ceiling: Option<u64>,
 }
 
@@ -649,7 +651,7 @@ impl<'a> PathAuthority<'a> {
                 path: &file.path,
                 uid: file.uid,
                 caps: &file.caps,
-                write_ceiling: Some(file.write_ceiling),
+                write_ceiling: file.write_ceiling,
             }),
             OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
@@ -1875,6 +1877,15 @@ where
     /// descriptions (cursor, pipe end — the clone registers one more live
     /// end); dropping them on any later failure path releases everything
     /// (nothing leaks).
+    ///
+    /// A **path-backed** descriptor is conferred rather than copied
+    /// ([`OpenFile::conferred_to_child`](crate::aspace::OpenFile::conferred_to_child)):
+    /// it reaches the child as a delegation carrying the parent's captured
+    /// identity, because a path is re-authorised under whoever holds it and
+    /// the point of handing a child a document is that the child need hold no
+    /// filesystem capability. Every wire form converts, not just an explicit
+    /// handle — an inherited standard stream is the same descriptor reaching
+    /// the same child by a different spelling.
     #[allow(clippy::type_complexity)] // The pair names exactly the two artefacts the wiring produces.
     fn apply_attach_wires(
         &self,
@@ -1945,7 +1956,13 @@ where
             };
             if let Some(entry) = entry {
                 child_streams.close_slot(fd);
-                wired.push((fd, entry));
+                // The child exercises what it is handed under the identity
+                // the parent captured here, so a document reaches a child
+                // that holds no filesystem capability of its own.
+                wired.push((
+                    fd,
+                    entry.conferred_to_child(caller.caps.owner().0, *caller.caps.effective()),
+                ));
             }
         }
         Ok((child_streams, wired))
@@ -10092,7 +10109,7 @@ where
             path: path.clone(),
             uid: caller.caps.owner().0,
             caps: *caller.caps.effective(),
-            write_ceiling,
+            write_ceiling: Some(write_ceiling),
         };
         // The recipient is named by its attested process *instance*, not by
         // a task id: a number is redrawn once its task is gone, so one the
@@ -19782,6 +19799,281 @@ mod tests {
         assert_eq!(
             child_entry.pipe().expect("pipe end").try_write(b"x"),
             crate::pipe::WriteStep::Wrote(1)
+        );
+    }
+
+    /// A **path-backed** descriptor wired into a child is *conferred*, not
+    /// copied: the child holds it as a delegation carrying the spawning
+    /// parent's captured identity, and the two still share one open file
+    /// description (`plans/SPAWN.md` SP10, `plans/NEW-FILEMANAGER.md` `FM6b`).
+    ///
+    /// The regression: a plain clone left the child an `OpenBacking::Path`,
+    /// which every operation re-authorises under *the holder's* own identity.
+    /// The file manager's hand-off of a document to a viewer that
+    /// deliberately requests no filesystem capability was therefore refused
+    /// on every read — the one case the hand-off exists for.
+    #[test]
+    fn spawn_confers_the_parents_reach_on_a_wired_path_descriptor() {
+        /// The document the parent opens and wires behind the child's stdin.
+        const DOC_PATH: &[u8] = b"/f";
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The parent's only open descriptor is the document, so the handle
+        // the block names is deterministic (4, the lowest non-standard fd).
+        let attach = SpawnAttach {
+            wires: [
+                FdWire::Handle(4),
+                FdWire::Inherit,
+                FdWire::Inherit,
+                FdWire::Inherit,
+            ],
+            ..SpawnAttach::INHERIT
+        };
+        let mut payload = SPAWN_PATH.to_vec();
+        payload.extend_from_slice(DOC_PATH);
+        let doc_addr = 0x1000 + SPAWN_PATH.len() as u64;
+        let (space, physmap) = send_aspace_with_attach(&payload, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"hello".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        )
+        .with_filesystem(fs);
+
+        let doc_fd = u32::try_from(
+            h.fs_open(&ctx, doc_addr, DOC_PATH.len(), OpenFlags::READ)
+                .expect("the parent opens the document"),
+        )
+        .expect("a descriptor number");
+        assert_eq!(doc_fd, 4, "the wire names the parent's only open handle");
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("wired spawn succeeds");
+
+        let child_entry = aspaces
+            .read()
+            .open_file_entry(ProcessId(pid), tairix_abi::STDIN)
+            .expect("wired child entry");
+        match &child_entry.backing {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.path, "/f");
+                assert_eq!(file.uid, 1000, "the spawning parent's uid was captured");
+                assert!(
+                    file.caps.holds(CapabilityId::FS_ACCESS),
+                    "the parent's effective set was captured, not the child's"
+                );
+                assert_eq!(
+                    file.write_ceiling, None,
+                    "a conferred descriptor carries the parent's own unbounded reach"
+                );
+            }
+            other => panic!("expected a conferred delegation, got {other:?}"),
+        }
+        assert!(child_entry.flags.is_read());
+    }
+
+    /// A conferred descriptor is read by a holder with **no** filesystem
+    /// capability of its own, under the conferring parent's captured identity
+    /// — and conferring carries the descriptor's own access and nothing more.
+    #[test]
+    fn a_conferred_descriptor_reads_under_the_conferring_identity() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("parent registration");
+        // The holder's own memory must be writable for the read's copy-out.
+        let (hspace, hphysmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"");
+        aspaces
+            .write()
+            .register(ProcessId(3), hspace, hphysmap)
+            .expect("holder registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let parent_caps = make_caps_record(2, &[CapabilityId::FS_ACCESS], sink);
+        let pctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &parent_caps,
+        };
+        // The holder runs as a different user and holds no capability at all.
+        let holder_caps = make_owned_caps_record(3, 2000, &[], sink);
+        let hctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &holder_caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.read_data = b"hello".to_vec();
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+
+        let fd = u32::try_from(
+            h.fs_open(&pctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("the parent opens the document"),
+        )
+        .expect("a descriptor number");
+        let conferred = aspaces
+            .read()
+            .open_file_entry(ProcessId(2), fd)
+            .expect("parent entry")
+            .conferred_to_child(parent_caps.owner().0, *parent_caps.effective());
+        aspaces
+            .write()
+            .install_std_entry(ProcessId(3), tairix_abi::STDIN, conferred)
+            .expect("the conferred entry installs behind a standard slot");
+
+        assert_eq!(
+            h.fs_read(&hctx, tairix_abi::STDIN, 0, 0x1000, 5),
+            Ok(5),
+            "a holder with no filesystem capability reads what it was handed"
+        );
+        assert!(
+            fs.calls()
+                .iter()
+                .any(|c| c.contains("read uid=1000 path=/f")),
+            "the read was authorised under the conferring identity: {:?}",
+            fs.calls()
+        );
+        // Conferring carries the parent descriptor's own access and no more:
+        // a write through a read-only one is refused by its flags, before any
+        // identity is consulted. Reaching *beyond* this descriptor is the
+        // dispatcher's own capability gate, which every path-opening syscall
+        // the holder might try still faces.
+        assert_eq!(
+            h.fs_write(&hctx, tairix_abi::STDIN, 0, 0x1000, 2),
+            Err(Errno::PermissionDenied),
+            "a conferred read-only descriptor must never become writable"
+        );
+    }
+
+    /// Conferring re-expresses only a **path** backing. A delegation reaching
+    /// a grandchild keeps the identity its own grantor captured, so a spawn
+    /// can never launder a descriptor into authority its holder was never
+    /// given; a pipe, pty, or resource end has its own authority model and is
+    /// cloned untouched.
+    #[test]
+    fn conferring_widens_no_backing_but_a_path() {
+        let grantor = CapabilitySet::empty();
+        let delegated = crate::aspace::OpenFile::new(
+            crate::aspace::OpenBacking::Delegated(crate::aspace::DelegatedFile {
+                path: String::from("/granted"),
+                uid: 1000,
+                caps: grantor,
+                write_ceiling: Some(64),
+            }),
+            OpenFlags::READ.union(OpenFlags::WRITE),
+        );
+        let passed_on = delegated.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]));
+        match &passed_on.backing {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.uid, 1000, "the original grantor's identity stands");
+                assert!(!file.caps.holds(CapabilityId::FS_ACCESS));
+                assert_eq!(
+                    file.write_ceiling,
+                    Some(64),
+                    "the grant's extent ceiling is not lifted by passing it on"
+                );
+            }
+            other => panic!("expected the delegation to pass through, got {other:?}"),
+        }
+
+        // A path backing is the one that converts, and it takes the
+        // conferring task's identity whole.
+        let own = crate::aspace::OpenFile::new(
+            crate::aspace::OpenBacking::Path(String::from("/own")),
+            OpenFlags::WRITE,
+        );
+        match &own
+            .conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]))
+            .backing
+        {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.path, "/own");
+                assert_eq!(file.uid, 4242);
+                assert!(file.caps.holds(CapabilityId::FS_ACCESS));
+                assert_eq!(file.write_ceiling, None);
+            }
+            other => panic!("expected a conferred delegation, got {other:?}"),
+        }
+
+        // Conferring re-expresses the authority, never the description: the
+        // two handles still walk the file together, so a child a shell
+        // redirected with `>>` appends at its parent's position.
+        let child = own.conferred_to_child(4242, CapabilitySet::empty());
+        own.advance_cursor(7);
+        assert_eq!(
+            child.cursor(),
+            7,
+            "a conferred handle shares the open file description"
+        );
+
+        // A directory stays a path. A delegation expresses byte access to one
+        // file, so conferring a listing would turn a working directory
+        // descriptor into one `fs_readdir` refuses.
+        let dir = crate::aspace::OpenFile::new(
+            crate::aspace::OpenBacking::Path(String::from("/dir")),
+            OpenFlags::READ.union(OpenFlags::DIRECTORY),
+        );
+        assert!(
+            matches!(
+                dir.conferred_to_child(4242, caps_with(&[CapabilityId::FS_ACCESS]))
+                    .backing,
+                crate::aspace::OpenBacking::Path(ref p) if p == "/dir"
+            ),
+            "a directory descriptor must not be conferred as a byte delegation"
         );
     }
 

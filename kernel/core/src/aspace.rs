@@ -535,14 +535,19 @@ impl FaultLocality {
 
 /// A filesystem object delegated by another process, carrying the
 /// **grantor's** captured authority (`plans/CAPABILITY_USE.md` CU6 — the
-/// file picker's one-shot hand-off).
+/// file picker's one-shot hand-off, and the spawn wiring of
+/// `plans/SPAWN.md` SP10).
 ///
-/// Captured at `fd_grant` time from the grantor's kernel-attested identity
-/// — never from anything the recipient supplies — so every later operation
-/// on the redeemed descriptor is re-authorised through the secured VFS
-/// under exactly the authority the grantor held, no more. The recipient's
-/// own identity and capability set never enter the check: the delegation
-/// *is* the authority, established by the grantor's user-mediated choice.
+/// Captured from the grantor's kernel-attested identity — never from
+/// anything the recipient supplies — so every later operation on the
+/// descriptor is re-authorised through the secured VFS under exactly the
+/// authority the grantor held, no more. The recipient's own identity and
+/// capability set never enter the check: the delegation *is* the authority,
+/// established by the grantor's user-mediated choice.
+///
+/// Two grantors mint one: `fd_grant`, whose hand-off is attenuated by mode
+/// and by extent, and the spawn wiring, where a parent confers its own
+/// unattenuated reach over a descriptor it already holds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegatedFile {
     /// The resolved absolute path the grantor's descriptor named.
@@ -552,14 +557,20 @@ pub struct DelegatedFile {
     /// The grantor's effective capability set at grant time.
     pub caps: CapabilitySet,
     /// The highest file length the holder may write or truncate this
-    /// delegation to, and zero for a read-only one.
+    /// delegation to, or [`None`] for the grantor's own unbounded reach.
     ///
-    /// A delegation attenuates by extent as well as by mode: `fd_grant`
-    /// refuses a writable delegation with no ceiling, so an unbounded writable
-    /// delegation is not representable. That is what lets a service hand a
-    /// caller direct, full-speed access to a file it owns without also handing
-    /// it the ability to fill the volume.
-    pub write_ceiling: u64,
+    /// An `fd_grant` delegation attenuates by extent as well as by mode, and
+    /// always carries `Some`: the grant refuses a writable delegation with no
+    /// ceiling (and pins a read-only one at zero), so an unbounded writable
+    /// *grant* is not representable. That is what lets a service hand a caller
+    /// direct, full-speed access to a file it owns without also handing it the
+    /// ability to fill the volume.
+    ///
+    /// A spawn wire carries `None`, because the parent is passing on a
+    /// descriptor it already holds rather than attenuating one: a shell
+    /// redirecting a child's output into a file confers the reach it has, and
+    /// any finite ceiling here would be a limit nothing asked for.
+    pub write_ceiling: Option<u64>,
 }
 
 /// What a descriptor resolves to: a filesystem path or a typed resource.
@@ -705,6 +716,48 @@ impl OpenFile {
                 cursor: AtomicU64::new(0),
                 lock_owner: crate::filelock::mint_owner(),
             }),
+        }
+    }
+
+    /// This descriptor as a spawned child holds it: a plain file's path
+    /// backing re-expressed as a delegation under the spawning parent's `uid`
+    /// and `caps`, sharing the same open file description.
+    ///
+    /// A path backing is re-resolved and re-authorised on every operation
+    /// under *whoever holds it*, so a plain clone would have the child
+    /// exercise its parent's file under the child's own identity — which a
+    /// child that deliberately requests no filesystem capability does not
+    /// have, and which a child holding more than its parent should not get.
+    ///
+    /// Everything else is cloned unchanged, each for its own reason. A
+    /// delegation is never re-captured: widening one to the parent's reach
+    /// would let a spawn launder authority its holder was never given. A pipe,
+    /// pty, and resource have authority models of their own that do not read
+    /// the holder's identity. And a **directory** stays a path, because a
+    /// delegation expresses byte access to one file — `fd_grant` refuses to
+    /// mint one over a directory for that reason — so conferring a listing
+    /// would refuse it rather than hand it on.
+    ///
+    /// A conferred descriptor is consequently not a lock or watch subject,
+    /// exactly as a granted one is not: those re-resolve under the holder's
+    /// own identity, which a delegation deliberately does not have.
+    #[must_use]
+    pub fn conferred_to_child(&self, uid: u32, caps: CapabilitySet) -> Self {
+        let OpenBacking::Path(path) = &self.backing else {
+            return self.clone();
+        };
+        if self.flags.contains(OpenFlags::DIRECTORY) {
+            return self.clone();
+        }
+        Self {
+            backing: OpenBacking::Delegated(DelegatedFile {
+                path: path.clone(),
+                uid,
+                caps,
+                write_ceiling: None,
+            }),
+            flags: self.flags,
+            description: Arc::clone(&self.description),
         }
     }
 
@@ -3061,7 +3114,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/report.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         let who = ProcId::from_raw([0x2Au8; tairix_abi::PROC_ID_LEN]);
         let first = reg.mint_fd_delegation(ProcessId(2), who, file.clone(), OpenFlags::READ);
@@ -3077,7 +3130,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/other.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         assert_ne!(
             reg.mint_fd_delegation(ProcessId(2), who, other, OpenFlags::READ),
@@ -3111,7 +3164,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/report.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         let chosen = ProcId::from_raw([0xA1u8; tairix_abi::PROC_ID_LEN]);
         let newcomer = ProcId::from_raw([0xB2u8; tairix_abi::PROC_ID_LEN]);

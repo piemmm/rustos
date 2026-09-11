@@ -328,13 +328,16 @@ Done (code + host coverage). What now holds:
   a requesting window's death aborts its pick via the
   `ShellWindowHost` bridge. The session's manifest gained
   `CAP_FS_ACCESS` (AppInfo + kernel pin) — the CU6 trusted-UI widening.
-- **The consumer**: `userland/apps/viewer` (`viewer.app`, a
-  program-library entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` and
+- **The consumer**: `userland/apps/view` (`view.app`, a program-library
+  entry), manifest `CAP_CONSOLE_WRITE` + `CAP_SHM` + `CAP_PROC_SPAWN` and
   deliberately **no filesystem capability** — it window-creates, asks
-  `pick_file` at startup, redeems the delegated handle, reads at most
-  `CONTENT_MAX` bytes through the delegated descriptor, and renders the
-  sanitised text (host-tested `content_lines` + themed renderers);
-  `Enter` re-picks, cancellation shows a notice.
+  `pick_file` when it was handed no document, redeems the delegated handle,
+  reads the document under a fixed input-byte ceiling, and streams it to its
+  own capability-empty decoder (`plans/VIEW.md`); cancellation shows a notice.
+  The read-only *text* viewer that first proved this path is deleted: its
+  design was a text pager, and the property AW5 turns on — an application
+  holding no filesystem authority reading exactly the one file the user chose
+  — is what `view.app` now carries.
 - Coverage: kernel grant/redeem/delegated-read/withdraw unit tests, the
   window-protocol round-trip/fail-closed tests (decoders remain in
   `fuzz_decode`), the `lib/window` loopback pick suite, the `lib/browse`

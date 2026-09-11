@@ -827,27 +827,71 @@ mod program {
             }
 
             // Then queued input, drained before anything is painted so a
-            // burst of pointer motion costs one frame rather than one each.
-            match events.try_wait(window.shell.client()) {
-                Ok(Some(event)) => {
-                    let repaint = match route(
-                        &mut window,
-                        &mut pending_source,
-                        &event,
-                        theme,
-                        scale,
-                        &mut reported,
-                    ) {
-                        Routed::Changed(scope) => scope,
-                        Routed::Closed => return 0,
-                        Routed::Idle => continue,
-                    };
-                    if window.present(repaint, &reported, theme, scale).is_err() {
-                        return fail(app::EXIT_CHANNEL_LOST, "present refused");
+            // burst of pointer motion costs one frame rather than one each;
+            // and with nothing queued, whatever the park wakes on. Both reach
+            // the one routing below: a park *consumes* the event it woke on,
+            // so nothing else would ever see it again.
+            let delivered = match events.try_wait(window.shell.client()) {
+                Ok(None) => {
+                    // Nothing queued: submit whatever the state now calls
+                    // for. The answer is collected on the next turn either
+                    // way — a deferred job wakes the park, and one carried
+                    // out inline for want of a worker thread is already on
+                    // the desk — so what `submit` reports about where it ran
+                    // changes nothing here.
+                    match window.view.next_request() {
+                        Some(Request::Open) => {
+                            // The open stays outstanding until it is
+                            // answered, so this arm repeats while the worker
+                            // is reading. Only a source is worth submitting;
+                            // without one the picker's conclusion is what
+                            // brings it, and that arrives as an event. Either
+                            // way park rather than re-ask a question whose
+                            // answer cannot have changed yet.
+                            if let Some(source) = pending_source.take() {
+                                worker.submit(Job::Open(source));
+                                continue;
+                            }
+                        }
+                        Some(Request::Show {
+                            page,
+                            extent,
+                            window: rect,
+                            pixels,
+                        }) => {
+                            worker.submit(Job::Show {
+                                page,
+                                extent,
+                                window: rect,
+                                pixels,
+                            });
+                            continue;
+                        }
+                        None => {}
                     }
-                    continue;
+
+                    // Nothing to submit: arm the animation deadline — one
+                    // shot, to the next frame the container actually asks
+                    // for — and park. A paused viewer arms nothing at all.
+                    let now = tairix_rt::clock_get();
+                    window.view.arm_deadline(now);
+                    deadline.set(window.view.deadline_ns());
+                    let woken = events.wait(window.shell.client());
+                    // A frame may be due whether the park ended on the
+                    // deadline or on an event; the render it calls for is
+                    // asked for on the next turn.
+                    let _ = window.view.tick(tairix_rt::clock_get());
+                    woken
                 }
-                Ok(None) => {}
+                other => other,
+            };
+
+            let event = match delivered {
+                Ok(Some(event)) => event,
+                // A park the worker's answer interrupted carries no event;
+                // the collect at the top of the next turn adopts what it
+                // woke for.
+                Ok(None) => continue,
                 Err(EventError::Mailbox(_)) => {
                     return fail(app::EXIT_CHANNEL_LOST, "the event channel died")
                 }
@@ -855,55 +899,21 @@ mod program {
                     report("a malformed window event was refused");
                     continue;
                 }
-            }
-
-            // Nothing queued: ask for whatever the state now calls for. The
-            // answer is collected on the next turn either way — a deferred
-            // job wakes the park, and one carried out inline for want of a
-            // worker thread is already on the desk — so what `submit` reports
-            // about where it ran changes nothing here.
-            match window.view.next_request() {
-                Some(Request::Open) => {
-                    if let Some(source) = pending_source.take() {
-                        worker.submit(Job::Open(source));
-                    }
-                    // With nothing to open the picker's conclusion is what
-                    // brings one, and that arrives as an event.
-                }
-                Some(Request::Show {
-                    page,
-                    extent,
-                    window: rect,
-                    pixels,
-                }) => {
-                    worker.submit(Job::Show {
-                        page,
-                        extent,
-                        window: rect,
-                        pixels,
-                    });
-                }
-                None => {
-                    // Nothing outstanding: arm the animation deadline — one
-                    // shot, to the next frame the container actually asks
-                    // for — and park. A paused viewer arms nothing at all.
-                    let now = tairix_rt::clock_get();
-                    window.view.arm_deadline(now);
-                    deadline.set(window.view.deadline_ns());
-                    match events.wait(window.shell.client()) {
-                        Ok(Some(_) | None) => {}
-                        Err(EventError::Mailbox(_)) => {
-                            return fail(app::EXIT_CHANNEL_LOST, "the event channel died")
-                        }
-                        Err(EventError::Undecodable(_)) => {
-                            report("a malformed window event was refused");
-                        }
-                    }
-                    // A frame may be due whether the park ended on the
-                    // deadline or on an event; the render it calls for is
-                    // asked for on the next turn.
-                    let _ = window.view.tick(tairix_rt::clock_get());
-                }
+            };
+            let repaint = match route(
+                &mut window,
+                &mut pending_source,
+                &event,
+                theme,
+                scale,
+                &mut reported,
+            ) {
+                Routed::Changed(scope) => scope,
+                Routed::Closed => return 0,
+                Routed::Idle => continue,
+            };
+            if window.present(repaint, &reported, theme, scale).is_err() {
+                return fail(app::EXIT_CHANNEL_LOST, "present refused");
             }
         }
     }

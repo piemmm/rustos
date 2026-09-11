@@ -432,24 +432,25 @@ it guarantees:
   receives a `Resized`).
   The mechanism is per-app opt-in, never forced on an app that renders at one
   size (`AGENTS.md` §2.4 — the app decides, the window manager honours it).
-- **The file viewer is the shipping resizable app.** `userland/apps/viewer`
-  opens `WindowSizing::Resizable`, and on every `WindowEvent::Resized` (an interactive
-  grab settling, or a maximize/restore) it allocates a fresh frame region at the
-  new client size, `WindowRequest::Resize`s the window onto it, unmaps the old
-  region **only after** the session adopts the new one, re-wraps its text to the
-  new column count, and repaints — preserving the reader's scroll position. It
-  fails closed (keeping the current surface, never crashing) if a new region
-  cannot be allocated or the session refuses the re-map. The file manager
+- **The picture and document viewer is the shipping resizable app.**
+  `userland/apps/view` opens `WindowSizing::Resizable`, and on every
+  `WindowEvent::Resized` (an interactive grab settling, or a maximize/restore)
+  it allocates a fresh frame region at the new client size,
+  `WindowRequest::Resize`s the window onto it, unmaps the old region **only
+  after** the session adopts the new one, refits the page to the new client
+  size, and repaints — keeping the zoom and placement the user set. It fails
+  closed (keeping the current surface and geometry, never crashing) if a new
+  region cannot be allocated or the session refuses the re-map. The file manager
   (`WIN_SIZING`) re-lays-out its listing on `Resized`, and the terminal is
   now resizable too (Stage G).
 - **The viewer's render is size-parameterized and host-tested.**
-  `Viewer::render_into` lays out to whatever surface it is handed,
-  `visible_{rows,cols}_for` derive the grid from the client size, and
-  `ScrollView::relayout` re-wraps and clamps the offset into the resized
-  content — all covered by `tairix_viewer` unit tests (arbitrary-size render,
-  geometry scaling, and offset-preserving relayout). A resize reallocates the
-  retained surface with the frame region, adopting both only once the session
-  accepts the re-map.
+  `tairix_view`'s paint lays out to whatever surface it is handed,
+  `Layout::for_window` derives every rectangle render and hit-test read from
+  the client size and the active `Scale`, and a refit clamps the pan into the
+  resized viewport — all covered by `tairix_view` unit tests (layout at
+  several scales, geometry scaling, and clamped pan across a resize). A resize
+  reallocates the retained surface with the frame region, adopting both only
+  once the session accepts the re-map.
 - **Tests.** `lib/abi` covers the `resizable` flag round-trip and its dirty-byte
   rejection; `lib/window` covers the flag forwarding to the host; `userland/gui/session`
   covers a resizable-requested open decorating with a resizable frame and a live

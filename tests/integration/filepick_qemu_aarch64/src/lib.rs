@@ -49,11 +49,11 @@
 /// `<system application store>/<name>.app`, composed from the shared
 /// `lib/abi` spellings on both sides rather than written out here.
 ///
-/// The viewer, because it is the application built to hold **no** filesystem
-/// capability of its own: handed no document it asks the session's trusted
-/// picker, so a file reaching it is proof of the delegation rather than of any
-/// authority it already had.
-pub const PICK_APP_NAME: &str = "viewer";
+/// The picture and document viewer, because it is the application built to
+/// hold **no** filesystem capability of its own: handed no document it asks
+/// the session's trusted picker, so a file reaching it is proof of the
+/// delegation rather than of any authority it already had.
+pub const PICK_APP_NAME: &str = "view";
 
 /// Process name (`comm`) the kernel attests for the desktop session — the
 /// principal that mints the delegation.

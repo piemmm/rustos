@@ -4186,7 +4186,7 @@ transfer, landed in increments:
   browser engine hoisted to `lib/browse` (its second consumer), the
   session's trusted picker (`SessionPicker`, one slot, session-authority
   listings, key+click navigation over the shared hit-test; the session
-  manifest gained `CAP_FS_ACCESS`), and the `viewer.app` consumer holding
+  manifest gained `CAP_FS_ACCESS`), and the `view.app` consumer holding
   **no** filesystem capability — it reads exactly the one user-chosen file
   through the redeemed delegation. Remaining (staged in `plans/APPWIN.md`
   AW5): the autoload QEMU vertical's picker stage, which shifts the
@@ -4340,8 +4340,8 @@ per-app recipes (§2.2).
   keeps the client from receiving bar input (and clips the client out of the
   gutter), and `InputRouter` wheel/track-page/thumb-drag driving over the
   Stage-A math. The **viewer app** is the second, nested consumer
-  (`tairix_viewer::ScrollView`), scrolling a long file by keyboard through
-  the same `ScrollModel`. The pointer record carries a `Scrolled` tick
+  (`tairix_view`'s two pan bars), scrolling a magnified page by keyboard and
+  by pointer through the same `ScrollModel`. The pointer record carries a `Scrolled` tick
   (`lib/abi`), delivered as `lib/input::PointerScrolled` and a new theme
   `scrollbar_breadth`/`min_thumb_length` metric sizes the furniture.
 - **Server-side window decorations — DONE** (`plans/COMPOSITOR-WORK.md`). The
@@ -4359,7 +4359,7 @@ per-app recipes (§2.2).
   Minimize→hide+`Minimized`, PutToBack→restack, SizeToggle→`Resized`) — no new
   syscall, no ambient authority. Client-driven resizability is live: the create
   request carries a `resizable` flag, a resizable window gets the grabber + live
-  size toggle, and the file viewer (`userland/apps/viewer`) and the terminal
+  size toggle, and the picture viewer (`userland/apps/view`) and the terminal
   re-lay-out on `WindowEvent::Resized` (re-mapping their region via
   `WindowRequest::Resize`); Files presents fixed size. A window may also ask
   the compositor to frost what is behind it (`WindowRequest::SetBackdropBlur`,

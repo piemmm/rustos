@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 24 open, 94 closed, 118 total.
+table normalises all three to **closed**. 23 open, 95 closed, 118 total.
 
-### Open (24)
+### Open (23)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -50,9 +50,8 @@ table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D119 | a wired path-backed descriptor is refused to a child holding no `CAP_FS_ACCESS` | breaks the file manager's inherited-document hand-off; needs a User decision |
 
-### Closed (94)
+### Closed (95)
 
 | ID | Subject |
 |---|---|
@@ -151,34 +150,50 @@ table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 | D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
+| D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS`, breaking the inherited-document hand-off |
 
 ## Scope
 
 The open items, in priority order:
 
-- **D119 — a wired path-backed descriptor is refused to a child holding no
-  `CAP_FS_ACCESS`.** `FdWire::Handle` clones the parent's `OpenFile` into the
-  child with its backing unchanged (`apply_attach_wires`), so the child holds
-  an `OpenBacking::Path`. `PathAuthority::of` resolves a path backing to **the
-  caller's own** uid and capability set, and `admit()` demands
-  `CAP_FS_ACCESS` — so every `fs_read`/`fs_stat` on the descriptor is refused
-  with `PermissionDenied` for exactly the programs the hand-off exists for.
-  The file manager's `launch_viewer` rustdoc states the opposite ("the viewer
-  reads the document with no filesystem capability of its own"), and both
-  `viewer.app` and `view.app` request no filesystem capability. `fd_grant`'s
-  delegation is unaffected (`OpenBacking::Delegated` carries the grantor's
-  captured identity), so the picker route works and the file-manager route
-  does not. Nothing catches it: the only spawn-wire test wires a **pipe** end,
-  which is not a path backing and never reaches the gate. Both viewers fail
-  closed and state the refusal, so it is diagnosable rather than silent.
+- **D119 — a wired path-backed descriptor was refused to a child holding no
+  `CAP_FS_ACCESS` — DONE.** A wire cloned the parent's `OpenFile` with its
+  backing unchanged, so the child held an `OpenBacking::Path`;
+  `PathAuthority::of` resolves a path backing to **the caller's own** uid and
+  capability set, so every `fs_read`/`fs_stat` on a handed-over document was
+  `PermissionDenied` for exactly the programs the hand-off exists for.
 
-  The fix is to clone a wired path-backed handle as a delegation carrying the
-  spawning parent's captured identity, as `fd_grant` does. That **grants
-  authority across a spawn**, and deciding that any wired descriptor confers
-  the parent's reach — rather than only one minted for the purpose — is a
-  security decision for the User to take. Raised rather than resolved
-  unilaterally (`plans/VIEW.md`). Its regression test is a capability-less
-  child reading a path-backed wired descriptor.
+  The User took the security decision the fix turns on: **any** wired
+  path-backed handle confers the parent's reach, rather than only one minted
+  for the purpose. `OpenFile::conferred_to_child` re-expresses a path backing
+  as a delegation carrying the spawning parent's captured uid and effective
+  set, sharing the one open file description so a redirected child still walks
+  the file with its parent. It is applied to every resolved wire, not only an
+  explicit handle, because an inherited standard stream is the same descriptor
+  reaching the same child by a different spelling. `DelegatedFile::write_ceiling`
+  became `Option<u64>` to carry the difference honestly: `fd_grant` attenuates
+  and always names a ceiling, a parent passing on its own reach has none, and
+  `PathAuthority` now reads the field directly rather than re-wrapping it.
+
+  It is never a widening. The parent could perform every operation itself; a
+  child holding *more* than its parent is attenuated to the parent's captured
+  set; and a backing that is already a delegation passes through carrying its
+  own grantor's identity rather than being re-captured, so a spawn cannot
+  launder authority its holder was never given.
+
+  Two boundaries the self-review found and the conferral respects. A
+  **directory** descriptor stays a path: a delegation expresses byte access
+  to one file — which is why `fd_grant` refuses to mint one over a directory
+  — so conferring a listing would have turned a working wired directory into
+  one `fs_readdir` refuses. And a conferred descriptor is not a lock or watch
+  subject, exactly as a granted one is not, because both re-resolve under the
+  holder's own identity; nothing in the tree does either on a standard
+  descriptor (`flock` opens its own path), so this narrows no live caller.
+
+  Regression tests: `spawn_confers_the_parents_reach_on_a_wired_path_descriptor`
+  (a real wired spawn, the conferred backing, the shared description, and a
+  capability-less holder reading under the parent's captured identity — it
+  fails on the unfixed tree) and `conferring_widens_no_backing_but_a_path`.
 - **D1 — FIX-SYSCALL residual verticals** (x86_64/riscv64 syscall-body
   tests + metal re-confirmation). The design and code are done; the
   per-arch conformance verticals are not.
@@ -619,14 +634,15 @@ The open items, in priority order:
   accepted with this recorded for the PTY owner. The subsequent DHCPv4
   D2 change (`plans/DHCP.md` — the `lib/net::Stack`/`netstack` interface
   integration of the DHCP client) reproduces the identical 300 s timeout at
-  the same PTY Ctrl-C stage (viewer.app loaded, desktop still pumping, no
+  the same PTY Ctrl-C stage (the last bundle of the store scan loaded — the
+  transcripts name `viewer.app`, since deleted — desktop still pumping, no
   WARN/panic/OOM) for the identical reason — a few added `lib/net`/`netstack`
   bytes shift the same load/spawn timing; DHCP cannot reach the pty path — and
   was likewise accepted (User-confirmed) with this recorded for the PTY owner.
   The subsequent DHCPv6 D4a change (`plans/DHCP.md` — the pure
   `lib/net::dhcpv6` RFC 8415 client engine) reproduces the identical 300 s
-  timeout at the same stage (viewer.app loaded ~87 s guest-time, desktop
-  still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
+  timeout at the same stage (the store scan's last bundle loaded ~87 s
+  guest-time, desktop still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
   `lib/net` module adds compiled bytes that shift the same load/spawn
   timing; DHCPv6 is inert at runtime here (D4a is engine-only, no netstack
   wiring) so it cannot reach the pty path — and was likewise recorded for
@@ -5740,9 +5756,9 @@ the sibling surface no channel reports:
 dedicated vertical rather than a stage on `autoload_input`, which is the D15
 freeze case — landing a security path's only guest coverage on a
 known-intermittent host would make it intermittent by construction. It boots the
-production aarch64 pipeline against the shared autoload root, launches the
-Viewer from the program library, waits for `PICKER_SHOWN`, and clicks the
-planted document's row. The row's screen point is reconstructed by driving the
+production aarch64 pipeline against the shared autoload root, launches `view`
+from the program library, waits for `PICKER_SHOWN`, and clicks the planted
+document's row. The row's screen point is reconstructed by driving the
 production `Browser` and `render::entry_rect` over the home listing, with both
 sides deriving that listing from the same two definitions the fixture plants
 from (`tairix_users::HOME_SUBDIRS` and `HOME_DOC_NAME`), so neither carries a
@@ -5750,17 +5766,21 @@ copy of it; the picker is undecorated session chrome, so the offset is
 `PICKER_ORIGIN` alone with no client inset.
 
 The guest PASS is a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed
-by `sc=fd_redeem` from `comm=viewer`, in that order. Attributing each half to
+by `sc=fd_redeem` from `comm=view`, in that order. The planted document is text,
+which a picture viewer states it cannot draw — the run's claim is which
+principal delegated to which, and a refusal reads it as well as a render. Attributing each half to
 the principal the kernel says made the call is what makes the run a statement
 about a hand-off *between* processes; requiring the order rules out a redemption
 that could not have come from this pick.
 
-**Evidence.** The run's transcript carries `viewer.app` loaded, then
+**Evidence.** The run's transcript carries the picked application loaded, then
 `id=20008 file picker on screen`, then `comm=desktop … sc=fd_grant`, then
-`comm=viewer … sc=fd_redeem`, and the two `proc` ids differ with the viewer's
+`comm=<app> … sc=fd_redeem`, and the two `proc` ids differ with the app's
 `pproc` naming the session — so the delegation crossed a real process boundary.
-Falsified by removing the pick-click: the run then fails at its ceiling with the
-Viewer launched and the picker on screen but **zero** grant or redeem records,
+The recorded run named `viewer`, the app the vertical was written against; it
+is now `view` and the transcript's shape is unchanged.
+Falsified by removing the pick-click: the run then fails at its ceiling with
+`view` launched and the picker on screen but **zero** grant or redeem records,
 so the witness is caused by the gesture and not by the launch. Four consecutive
 runs pass in 16.88–17.09 s.
 

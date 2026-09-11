@@ -1043,7 +1043,6 @@ mod tests {
                 "useradd",
                 "users",
                 "view",
-                "viewer",
                 "vim",
                 "wallpaper",
                 "wc",

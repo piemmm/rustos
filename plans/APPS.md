@@ -759,13 +759,15 @@ because an event frame is fixed-width and a path is far wider than one. The
 path confers no access: the application opens it under its own authority,
 exactly as it would an argument.
 
-**Open conflict.** `viewer.app` requests *no* filesystem capability by design
-(`plans/CAPABILITY_USE.md` CU6): it reads only the one file a trusted-picker
-delegation hands it. A *path* is therefore not something it can open, so the
-open-target channel as specified cannot serve it — it drains the queue, states
-the refusal, and offers its picker instead. Handing the viewer a **delegated
-descriptor** rather than a path is the shape that would work; that is not
-built and needs a decision.
+**Open conflict.** `view.app` requests *no* filesystem capability by design
+(`plans/CAPABILITY_USE.md` CU6): it reads only the one file it is handed. A
+*path* is therefore not something it can open, so the open-target channel as
+specified cannot serve it — it drains the queue, states the refusal, and
+offers its picker instead. Handing the viewer a **delegated descriptor**
+rather than a path is the shape that works, and the spawn wire now proves it
+(a path-backed wire reaches the child carrying the parent's captured
+identity, D119); carrying a descriptor on the *relaunch* channel is the
+part still unbuilt, and needs a decision.
 
 ## 11. Security summary
 

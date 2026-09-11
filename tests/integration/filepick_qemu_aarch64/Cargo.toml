@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-filepick-qemu-aarch64"
-description = "plans/CAPABILITY_USE.md CU6 QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch the viewer from the program library, let the session's trusted picker open at the user's home, click the planted document's row, and hold the run to the one-shot descriptor delegation crossing from the session to the viewer"
+description = "plans/CAPABILITY_USE.md CU6 QEMU integration test: boot the graphical desktop on the aarch64 virt board, launch the `view` viewer from the program library, let the session's trusted picker open at the user's home, click the planted document's row, and hold the run to the one-shot descriptor delegation crossing from the session to the viewer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,7 +23,7 @@ path = "src/lib.rs"
 name = "tairix-test-filepick-qemu-aarch64"
 path = "src/main.rs"
 
-# Freestanding "boot the production aarch64 desktop, launch the viewer, and
+# Freestanding "boot the production aarch64 desktop, launch `view`, and
 # watch the picker delegate one descriptor into it" integration test. It runs
 # the entire production boot pipeline through `tairix-kernel`'s library half
 # (`boot_aarch64::boot`) — bootstrap-floor virtio-MMIO discovery, the unlock

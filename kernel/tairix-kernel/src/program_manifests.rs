@@ -1248,16 +1248,6 @@ mod tests {
         CapabilityId::SHM,
     ];
 
-    // The windowed file viewer `viewer` (plans/APPWIN.md AW5): console
-    // write for its fail-loud diagnostics and CAP_SHM to create and
-    // grant the zero-copy window frame region the desktop session
-    // maps — and deliberately NO filesystem capability: its only reach
-    // into the filesystem is the one file the user hands it through
-    // the session's trusted picker (the CU6 one-shot fd_grant
-    // delegation, redeemed with the unprivileged fd_redeem). Not an
-    // embedded spawn-floor program, so the list lives only in this pin.
-    const VIEWER_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
-
     // The windowed Date & Time app `datetime` (plans/NEW-TASKBAR.md T17):
     // console write for its fail-loud diagnostics, `CAP_SHM` to create and
     // grant the zero-copy window frame region the desktop session maps, and
@@ -1526,7 +1516,6 @@ mod tests {
             ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
             ("view", ProgramKind::Application, VIEW_REQUEST),
-            ("viewer", ProgramKind::Application, VIEWER_REQUEST),
             ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
             (
                 "wallpaper",

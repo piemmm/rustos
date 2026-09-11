@@ -8,9 +8,24 @@ decoding and of I/O.
 picker-delegation paths (`plans/APPWIN.md` AW5, `plans/CAPABILITY_USE.md` CU6) —
 is **deleted**, not evolved. Its purpose was a proof; its design was a text
 pager holding a `ScrollModel` over sanitised lines, which is not a viewer for
-pictures. Text belongs to `edit.app`, which already renders it: two apps
-claiming `text/plain` would be two text-rendering paths, and the charter permits
-one.
+pictures. The properties it proved are `view.app`'s now, and the CU6 vertical
+was re-pointed onto it rather than dropped.
+
+**The six text types it claimed are deliberately unclaimed, and the desktop
+cannot open a text file until one of them has a home.** The earlier reading
+here — "text belongs to `edit.app`, which already renders it" — was true about
+*rendering* and wrong about the hand-off. `edit` is a `kind = "command"`
+full-screen TUI: it takes a **path operand** and reads fd 0 in raw mode for
+keystrokes, while the file manager hands a document as a **descriptor on
+`STDIN`** and has no terminal to give it. Adding `associations` to its manifest
+would therefore not open a text file; it would hand a curses editor a document
+where it expects keys. Giving text a home means one of two real pieces of work
+— the desktop learning to host a command-kind bundle inside `terminal.app`, or
+`view` growing a text page source behind the seam it already has — and the User
+took the decision to delete now and accept the gap rather than smuggle either
+into this change. Until then a text file states "no application to open
+`<name>`", which is the honest fail-closed answer the manager already gives and
+never a fabricated open.
 
 ## What it is
 
@@ -38,7 +53,8 @@ not claimed at all. A file the decoder refuses fails closed to a **stated
 reason drawn in the window and written to `stderr`**; never a blank surface,
 and never a fabricated image.
 
-Associations are **pictures and PDF only**. Text is `edit.app`'s.
+Associations are **pictures and PDF only**; text is claimed by nothing, for
+the reason given above.
 
 Each new format is a private module in `lib/image`'s existing shape: `probe`
 returning declared geometry; `decode` weighing `DecodeLimits` **before**
@@ -792,43 +808,87 @@ read this paragraph first; the rustdoc on both types points here.
   that entry, and the priority rule above. Recorded rather than deferred
   silently.
 
-- Deletion of `userland/apps/viewer` and the reference sweep — planned. The
-  two apps overlap on nothing (`viewer` claims only text types, `view` only
-  pictures) and shadow no name, so they coexist until the sweep lands.
+- **Deletion of `userland/apps/viewer` and the reference sweep — done.** The
+  bundle, its workspace membership, its capability pin in the kernel's manifest
+  registry, and its row in the image bundle pin are gone; the `lib/browse` and
+  `applib` fixtures named `viewer` are synthetic manifest names and were left
+  alone. The CU6 vertical (`filepick_qemu_aarch64`) was **re-pointed** onto
+  `view` rather than deleted: it is the only run that drives a capability-bearing
+  descriptor across two principals on a live machine, and `view` asks the same
+  picker for the same reason. The planted document stays text, which `view`
+  refuses with a stated reason — the run's claim is which principal called
+  `fd_grant` and which called `fd_redeem`, and a refusal carries it as well as a
+  render would. Opening a real picture end to end from Files is the remaining
+  half of this plan's verification and is **not** written; it is now reachable
+  for the first time, because the hand-off it needs was the defect closed
+  below.
+- **Two defects in the viewer's event loop, found by re-pointing the CU6
+  vertical onto it — fixed.** `view`'s picker path had never run on a guest
+  (the vertical drove `viewer`), and the first run of it hung to the 600 s
+  ceiling: the session minted the delegation and delivered `FilePicked` to
+  the viewer's port, and the viewer never redeemed it or made another
+  syscall.
+
+  The park **discarded the event it drained**. `WindowEvents::wait` consumes
+  and decodes a frame and returns it, and the loop matched `Ok(Some(_) |
+  None) => {}` — so the one event a park woke on was thrown away and the
+  viewer parked again for ever. Every other app over this shell binds the
+  event and routes it; `view` was the only one that did not, which is why
+  nothing else showed it. The drain and the park now both yield an
+  `Option<WindowEvent>` into a **single** routing site, so a parked event
+  cannot be dropped and the route-and-present block exists once.
+
+  Beside it, an outstanding open **busy-spun instead of parking**. The open
+  request stays outstanding until answered, so while the worker read a
+  document the loop asked again each turn, found the source already taken,
+  submitted nothing, and looped — pegging a core for the length of the
+  read. A turn with nothing to submit now falls through to the park, which
+  the worker's answer wakes; submitting still continues immediately.
+
+  The regression test is the vertical itself: it reproduced the hang on the
+  unfixed tree (UNFINISHED at 605 s, `fd_redeem` count zero) and passes on
+  the fixed one in 17 s, on the witnesses `comm=desktop sc=fd_grant` then
+  `comm=view sc=fd_redeem`. The loop is inside the freestanding `Run`
+  binary, which no host test can enter, so the guest run is the only place
+  this property can be held.
+
+- **The inherited-document hand-off now reaches a program with no filesystem
+  capability (D119) — done.** A wire cloned the parent's `OpenFile` with its
+  backing unchanged, so the child held an `OpenBacking::Path`, which
+  `PathAuthority::of` resolves under *the holder's* own identity — and a viewer
+  deliberately holds none, so `fs_read` and `fs_stat` were both
+  `PermissionDenied`. The picker route worked only because `fd_grant` mints a
+  backing that carries its grantor's captured identity.
+
+  The User took the decision the fix turns on: **any** wired path-backed handle
+  confers the parent's reach, not only one minted for the purpose.
+  `OpenFile::conferred_to_child` re-expresses a path backing as a delegation
+  carrying the spawning parent's captured uid and effective set, sharing the one
+  open file description so a redirected child still walks the file with its
+  parent, and it is applied to every resolved wire rather than only an explicit
+  handle — an inherited standard stream is the same descriptor reaching the same
+  child by a different spelling, and fixing one would have left its twin.
+  `DelegatedFile::write_ceiling` became `Option<u64>` so the two grantors read
+  honestly: `fd_grant` attenuates and always names a ceiling, a parent passing
+  on its own reach has none, and `PathAuthority` now reads the field rather than
+  re-wrapping it.
+
+  It never widens. The parent could perform every operation itself; a child
+  holding *more* than its parent is attenuated to the parent's set; and a
+  backing that is already a delegation passes through with its own grantor's
+  identity rather than being re-captured, so a spawn cannot launder authority
+  its holder was never given. A **directory** stays a path for the reason
+  `fd_grant` refuses to delegate one — a delegation expresses byte access to
+  one file, so conferring a listing would refuse it rather than hand it on.
+  The tests are in `kernel/core`, and the end-to-end one fails on the unfixed
+  tree.
+
 - `lib/pdf` behind the page source — next change. Encrypted PDFs need MD5/RC4/
   AES, which `lib/crypto` deliberately does not carry; whether to admit those as
   interop-only primitives or refuse encrypted files fail-closed is a decision to
   take then.
 
 ## Noticed and not yet fixed
-
-- **The inherited-document hand-off does not work for a program with no
-  filesystem capability, and the file manager's own rustdoc says it does.**
-  `FdWire::Handle` clones the parent's `OpenFile` into the child *with its
-  backing unchanged* (`apply_attach_wires`), so the child's descriptor is
-  `OpenBacking::Path`. `PathAuthority::of` then resolves a path backing to
-  **the caller's own** uid and capability set, and `admit()` requires
-  `CAP_FS_ACCESS` — which is exactly what a viewer deliberately does not hold.
-  Every operation on the descriptor is therefore refused with
-  `PermissionDenied`: `fs_read`, and `fs_stat` with it.
-
-  The delegated path is unaffected — `fd_grant` mints `OpenBacking::Delegated`,
-  which carries the grantor's captured identity precisely so a holder with no
-  filesystem capability can read what it was handed — so the *picker* route
-  works and the *file manager* route does not. `viewer.app` has the same
-  property today and nothing catches it: the only spawn-wire test
-  (`spawn_attach_wires_a_pipe_end_into_the_child`) wires a **pipe** end, which
-  is not a path backing and so never reaches this gate.
-
-  Both viewers fail closed and *state* the refusal rather than blanking, so the
-  defect is diagnosable rather than silent. The fix is for a wired path-backed
-  handle to be cloned as a delegation carrying the spawning parent's captured
-  identity, exactly as `fd_grant` does — but that is a kernel change that
-  **grants authority across a spawn**, and deciding that any wired descriptor
-  confers the parent's reach (rather than only one minted for the purpose) is a
-  security decision for the User to take, not one to guess at. Raised rather
-  than resolved unilaterally; it carries its regression test — a capability-less
-  child reading a path-backed wired descriptor — when the fix lands.
 
 - **`WindowEvent::FilePicked` carries no name, so a picked document is
   unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and

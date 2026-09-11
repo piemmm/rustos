@@ -698,7 +698,7 @@ there).**
   argument at all, because the redeemer's instance is the dispatcher's own
   capability snapshot. That is why the picker (unlike `shm_grant` and
   `call_grant`, which resolve their recipient as an endpoint's live server)
-  cannot name the peer of an in-flight call: it holds none. The `viewer.app` consumer holds no
+  cannot name the peer of an in-flight call: it holds none. The `view.app` consumer holds no
   filesystem capability at all and reads exactly the one user-chosen
   file: spawn-time narrowing plus user-mediated widening, with no new
   capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already
