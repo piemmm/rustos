@@ -401,7 +401,7 @@ mod program {
     /// Nothing is reported as applied that the session did not accept: a
     /// document this program cannot even encode, an unanswered rendezvous,
     /// and a typed refusal are three distinct outcomes.
-    fn send_apply(document: &PinboardDocument) -> ApplyOutcome {
+    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> ApplyOutcome {
         let request = PinboardRequest::Apply {
             document: *document,
         }
@@ -423,7 +423,9 @@ mod program {
     /// so making the click wait for it would freeze the window for a disk
     /// commit. The loop encodes the document (in memory, and refusable on the
     /// spot), submits, and shows the answer on the wake it nudges.
-    type Applier = tairix_rt::work::Worker<PinboardDocument, ApplyOutcome>;
+    /// The round trip carries nothing over from one apply to the next, so the
+    /// work keeps no state.
+    type Applier = tairix_rt::work::Worker<(), PinboardDocument, ApplyOutcome>;
 
     /// The one style the chooser paints and hit-tests through: the active
     /// theme's interface face at the real desktop's own density and screen
@@ -629,6 +631,7 @@ mod program {
         // once.
         let applier = alloc::sync::Arc::new(Applier::new(
             send_apply,
+            (),
             tairix_rt::sync::WorkerWake::create(),
         ));
         if let Err(reason) = Applier::start(&applier) {

@@ -1042,6 +1042,7 @@ mod tests {
                 "unmount",
                 "useradd",
                 "users",
+                "view",
                 "viewer",
                 "vim",
                 "wallpaper",

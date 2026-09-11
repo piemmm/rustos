@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 94 closed, 117 total.
+table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 
-### Open (23)
+### Open (24)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -50,6 +50,7 @@ table normalises all three to **closed**. 23 open, 94 closed, 117 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
+| D119 | a wired path-backed descriptor is refused to a child holding no `CAP_FS_ACCESS` | breaks the file manager's inherited-document hand-off; needs a User decision |
 
 ### Closed (94)
 
@@ -155,6 +156,29 @@ table normalises all three to **closed**. 23 open, 94 closed, 117 total.
 
 The open items, in priority order:
 
+- **D119 — a wired path-backed descriptor is refused to a child holding no
+  `CAP_FS_ACCESS`.** `FdWire::Handle` clones the parent's `OpenFile` into the
+  child with its backing unchanged (`apply_attach_wires`), so the child holds
+  an `OpenBacking::Path`. `PathAuthority::of` resolves a path backing to **the
+  caller's own** uid and capability set, and `admit()` demands
+  `CAP_FS_ACCESS` — so every `fs_read`/`fs_stat` on the descriptor is refused
+  with `PermissionDenied` for exactly the programs the hand-off exists for.
+  The file manager's `launch_viewer` rustdoc states the opposite ("the viewer
+  reads the document with no filesystem capability of its own"), and both
+  `viewer.app` and `view.app` request no filesystem capability. `fd_grant`'s
+  delegation is unaffected (`OpenBacking::Delegated` carries the grantor's
+  captured identity), so the picker route works and the file-manager route
+  does not. Nothing catches it: the only spawn-wire test wires a **pipe** end,
+  which is not a path backing and never reaches the gate. Both viewers fail
+  closed and state the refusal, so it is diagnosable rather than silent.
+
+  The fix is to clone a wired path-backed handle as a delegation carrying the
+  spawning parent's captured identity, as `fd_grant` does. That **grants
+  authority across a spawn**, and deciding that any wired descriptor confers
+  the parent's reach — rather than only one minted for the purpose — is a
+  security decision for the User to take. Raised rather than resolved
+  unilaterally (`plans/VIEW.md`). Its regression test is a capability-less
+  child reading a path-backed wired descriptor.
 - **D1 — FIX-SYSCALL residual verticals** (x86_64/riscv64 syscall-body
   tests + metal re-confirmation). The design and code are done; the
   per-arch conformance verticals are not.

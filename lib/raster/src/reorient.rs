@@ -173,9 +173,7 @@ impl Surface {
     ///
     /// Nothing is resampled: every pixel is carried across unchanged, so a
     /// quarter turn of a picture is exact and turning it back returns the
-    /// picture it started as. A turn that swaps the axes cannot be done in
-    /// place on an oblong, so this allocates rather than taking a
-    /// destination whose geometry every caller would have to agree.
+    /// picture it started as.
     ///
     /// Reorienting the picture a window actually shows costs a window's
     /// worth of work; reorienting a decoded master costs the master's. A
@@ -183,30 +181,67 @@ impl Surface {
     /// not what it decoded.
     ///
     /// Returns `None` when the destination cannot be allocated, so the
-    /// caller fails closed rather than panicking.
+    /// caller fails closed rather than panicking. A caller turning the same
+    /// geometry repeatedly — a viewer panning a picture it has rotated —
+    /// wants [`reorient_into`](Self::reorient_into) instead, which is this
+    /// without the allocation.
     #[must_use]
     pub fn reoriented(&self, how: Reorient) -> Option<Self> {
         let (width, height) = how.applied_size(self.width(), self.height());
         let mut out = Self::new(width, height)?;
+        self.reorient_into(&mut out, how).then_some(out)
+    }
+
+    /// Set this surface's pixels down `how` into `dest`, whose geometry must
+    /// be exactly what [`Reorient::applied_size`] gives for this one.
+    ///
+    /// The case [`reoriented`](Self::reoriented) is the allocating entry
+    /// point to, so there is one position map rather than two. A viewer
+    /// panning a rotated picture re-fills a destination it already holds:
+    /// the turn is a permutation of the same pixel count either way, and
+    /// allocating a window's worth of them per pointer sample is the cost
+    /// this exists to remove.
+    ///
+    /// Answers `false` — writing nothing — when `dest` is the wrong shape,
+    /// so a caller that has not resized it yet fails closed rather than
+    /// drawing a picture into the wrong geometry.
+    #[must_use]
+    pub fn reorient_into(&self, dest: &mut Self, how: Reorient) -> bool {
+        let (width, height) = how.applied_size(self.width(), self.height());
+        if dest.width() != width || dest.height() != height {
+            return false;
+        }
+        let Ok(source_width) = usize::try_from(self.width()) else {
+            return false;
+        };
         let source = self.pixels();
-        let source_width = usize::try_from(self.width()).ok()?;
         // Reading each destination pixel back through the undoing, rather
         // than scattering each source pixel forward, keeps the writes
         // running along the destination's own rows.
         let back = how.inverse();
         for dy in 0..height {
-            let (first, row) = out.row_span_mut(dy, 0, width)?;
+            let Some((first, row)) = dest.row_span_mut(dy, 0, width) else {
+                return false;
+            };
             for (offset, slot) in row.iter_mut().enumerate() {
-                let dx = first.checked_add(u32::try_from(offset).ok()?)?;
+                let Some(dx) = u32::try_from(offset)
+                    .ok()
+                    .and_then(|o| first.checked_add(o))
+                else {
+                    return false;
+                };
                 let (sx, sy) = back.place(dx, dy, width, height);
                 let at = usize::try_from(sy)
-                    .ok()?
-                    .checked_mul(source_width)?
-                    .checked_add(usize::try_from(sx).ok()?)?;
-                *slot = *source.get(at)?;
+                    .ok()
+                    .and_then(|y| y.checked_mul(source_width))
+                    .and_then(|base| usize::try_from(sx).ok().and_then(|x| base.checked_add(x)));
+                let Some(pixel) = at.and_then(|at| source.get(at)) else {
+                    return false;
+                };
+                *slot = *pixel;
             }
         }
-        Some(out)
+        true
     }
 }
 

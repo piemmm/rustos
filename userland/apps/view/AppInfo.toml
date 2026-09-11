@@ -1,0 +1,46 @@
+# Signed-AppInfo manifest source for the `view` picture and document viewer
+# (plans/VIEW.md). Discovered by the build's app-bundle composer, which
+# cross-compiles Run, signs the manifest, and plants the bundle on the
+# read-only /System/Applications store.
+#
+# The capability list is the bundle's request — deliberately WITHOUT any
+# filesystem capability. The viewer's only reach into the filesystem is the
+# one document the user hands it: a read-only descriptor the file manager had
+# the kernel clone in at spawn, or a one-shot fd_grant the session's trusted
+# picker delegated and fd_redeem installs (the CU6 user-mediated file
+# capability, plans/CAPABILITY_USE.md). CAP_CONSOLE_WRITE is for its fail-loud
+# stderr diagnostics; CAP_SHM creates and grants the zero-copy window frame
+# region the desktop session maps, and the pipe pair its sandbox worker is
+# reached over. The launched process receives this set intersected with the
+# launching user's grants, never more.
+#
+# CAP_PROC_SPAWN is what lets the viewer re-enter its own binary as the
+# capability-empty decoder: a document is untrusted input and is never decoded
+# in this address space. The child inherits nothing but its two wired pipes,
+# so the decoder holds strictly less authority than the viewer does.
+id = "os.tairix.view"
+name = "view"
+version = "0.1.0"
+kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from
+# this *signed* manifest rather than from anything the running process says
+# about itself (plans/NEW-TASKBAR.md).
+purpose = "Look at a picture or a document"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN"]
+# Several documents open side by side is the ordinary case for a viewer —
+# comparing two pictures — so each is its own process: a malformed file
+# crashes its own decoder and disturbs no other window.
+instances = "multiple"
+# File-type associations: the picture formats the decoder supports
+# *completely*. A format that can only be half-decoded is not claimed at all,
+# so `application/pdf` is absent until `lib/pdf` lands behind the page source
+# (plans/VIEW.md). Text belongs to `edit.app`. A display hint only — the
+# signed load gate still verifies and capability-checks the launch.
+associations = ["image/jpeg", "image/png", "image/svg+xml", "image/gif", "image/tiff", "image/webp", "image/bmp", "image/vnd.microsoft.icon", "image/x-riscos-sprite"]
+# A windowed, user-facing application: list it in the desktop's program
+# library beside the other graphical tools (plans/NEW-TASKBAR.md T3).
+library = "Graphics"
+# This bundle's own icon in its Resources/, authored as SVG so one file serves
+# every slot and every UI scale exactly (plans/ICONS.md).
+library-icon = "view.svg"

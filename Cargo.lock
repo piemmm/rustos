@@ -5741,6 +5741,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-view"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-controls",
+ "tairix-display",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-help",
+ "tairix-icon",
+ "tairix-input",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-viewer"
 version = "0.0.0"
 dependencies = [

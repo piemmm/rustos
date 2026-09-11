@@ -432,25 +432,41 @@ impl Surface {
     /// [`Surface::new`] states.
     #[must_use]
     pub fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
-        let count = pixel_count(width, height)?;
-        let expected_len = count.checked_mul(4)?;
-        if rgba.len() != expected_len {
-            return None;
-        }
+        let mut out = Self::new(width, height)?;
+        out.write_rgba8(rgba).then_some(out)
+    }
+
+    /// Replace every pixel of this surface from row-major **straight**-alpha
+    /// RGBA8 bytes of exactly its own geometry.
+    ///
+    /// The case [`from_rgba8`](Self::from_rgba8) is the allocating entry
+    /// point to, so there is one straight-to-premultiplied conversion rather
+    /// than two. A viewer collecting a window's worth of decoded pixels on
+    /// every pan sample writes them into the surface it already holds:
+    /// allocating and freeing a window-sized picture per pointer sample is
+    /// the cost this exists to remove.
+    ///
+    /// The whole surface is written, ignoring the active clip and origin,
+    /// because these are the surface's pixels rather than a drawing onto
+    /// them.
+    ///
+    /// Answers `false` — writing nothing — when `rgba.len()` is not exactly
+    /// `width * height * 4`, so a caller holding a stale buffer fails closed
+    /// rather than drawing part of a picture.
+    #[must_use]
+    pub fn write_rgba8(&mut self, rgba: &[u8]) -> bool {
+        let Some(expected_len) = pixel_count(self.width, self.height)
+            .and_then(|count| count.checked_mul(4))
+            .filter(|len| *len == rgba.len())
+        else {
+            return false;
+        };
+        debug_assert_eq!(expected_len / 4, self.pixels.len());
         let (quads, _remainder) = rgba.as_chunks::<4>();
-        let pixels = fallible::collected(
-            count,
-            quads
-                .iter()
-                .map(|&[r, g, b, a]| Color::rgba(r, g, b, a).premultiply()),
-        )?;
-        Some(Self {
-            width,
-            height,
-            clip: ClipRect::whole(width, height),
-            origin: Origin::default(),
-            pixels,
-        })
+        for (slot, &[r, g, b, a]) in self.pixels.iter_mut().zip(quads) {
+            *slot = Color::rgba(r, g, b, a).premultiply();
+        }
+        true
     }
 
     /// `region` of this surface resampled to `dest_width`×`dest_height`

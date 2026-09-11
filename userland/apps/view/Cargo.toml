@@ -1,0 +1,79 @@
+[package]
+name = "tairix-view"
+description = "TAIRiX picture and document viewer: a windowed viewer for JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO and RISC OS Sprite that holds no filesystem capability of its own — every document is read through the one file the user chose in the desktop session's trusted picker and decoded by a capability-empty sandbox worker (plans/VIEW.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The frozen `Errno` and the standard-stream descriptors the viewer reports
+# its refusals through.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The single shared theme definition, so the viewer's chrome matches the rest
+# of the desktop.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Shared software rasterisation: the retained window picture, the alpha
+# checkerboard, and `Reorient`/`Surface::reorient_into` — the one place a
+# picture is turned without resampling it.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# Shared text rasterisation for the info panel and the status line.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared Reactive Alloy controls the viewer composes: the toolbar of icon
+# buttons, the two scrollbars, the zoom slider, and the info panel's fact
+# list. The viewer paints no control of its own.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The shared integer screen geometry (`Rect`, `Region`, `Scale`) the layout
+# and every hit-test are expressed in.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The shared desktop input vocabulary the one pure pointer/key entry point
+# takes, so routing is host-testable without a window.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The built-in icon glyph vocabulary the toolbar's buttons draw.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The view protocol's own vocabulary — `ViewFormat`, `ViewDocument`,
+# `ViewPage`, `ViewFailure` — so the engine speaks the seam's types rather
+# than a parallel copy of them.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# Checked conversions and fallible allocation.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+# The package is both the host-tested viewer engine (the document model, the
+# viewport, the one layout, the request/answer desk and the renderers) and the
+# `Run` entry-point binary of the on-disk `view.app` bundle. The binary is a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert
+# host stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-view-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+# The window-frame pixel codec: the one definition of the straight-alpha
+# conversion between this program's surface and the shared frame.
+tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
+# The app half of the window channel and the shared windowed-app shell.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the allocator, the syscall
+# wrappers, and the shared worker-thread deferral desk the sandbox session
+# runs on.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The memory-pressure band the font client's glyph cache obeys.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# The bundle's own `Help/` tree, read through the capability-scoped seam for
+# the short `-h` surface.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The sandbox's own worker-role side: `serve_stdio`, `worker_role` and the
+# launcher that re-enters this binary as its capability-empty decoder.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+# The engine's host tests draw text, so they inject the shared solid test
+# transport rather than reaching a running `fontd`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true

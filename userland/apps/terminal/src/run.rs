@@ -946,6 +946,7 @@ mod program {
         // they used to be, and stated once.
         let publisher = alloc::sync::Arc::new(Publisher::new(
             write_profile,
+            (),
             tairix_rt::sync::WorkerWake::create(),
         ));
         if let Err(reason) = Publisher::start(&publisher) {
@@ -1255,7 +1256,8 @@ mod program {
     /// every one. The loop therefore *asks* and adopts nothing; the worker
     /// writes and answers with what the store then holds; the loop adopts that
     /// on the wake it nudges.
-    type Publisher = tairix_rt::work::Worker<PublishJob, PublishAnswer>;
+    /// A fresh store handle per job, so the work keeps no state.
+    type Publisher = tairix_rt::work::Worker<(), PublishJob, PublishAnswer>;
 
     /// What the store said, or why it said nothing.
     type PublishAnswer = Result<Published, Errno>;
@@ -1271,7 +1273,7 @@ mod program {
     /// The answer is deliberately what the store *now says* rather than what
     /// was asked for, so a value a machine policy or a shipped default supplies
     /// wins over the widget's, and *Restore defaults* needs no second path.
-    fn write_profile(job: &PublishJob) -> PublishAnswer {
+    fn write_profile(_: &mut (), job: &mut PublishJob) -> PublishAnswer {
         let mut host = RtHost;
         let mut store = SettingsStore::open(&mut host, OWN_WORD);
         match job {

@@ -2168,3 +2168,121 @@ grid, the date above the time) and its paint through the shared
 `lib/controls` dialog and text field. The `Run` binary is the usual
 windowed-app composition: one granted frame region, one event mailbox
 parked on a wait-set, and the `WindowClient` calls.
+
+## Picture and document viewer (`tairix-view`)
+
+The `view.app` bundle is the desktop's viewer for pictures and documents
+(`plans/VIEW.md`): the app the file manager hands a picture to, and a
+standalone application that asks the session's trusted picker when launched
+with no document. It claims JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO and
+RISC OS Sprite — every format the decoder supports *completely*. PDF is
+deliberately absent from its `associations` until `lib/pdf` lands behind the
+same page source: claiming a format with no decoder behind it would offer the
+viewer for a file it must always refuse.
+
+**It is a viewer.** It holds no write capability and has no editing, saving,
+export, annotation, or printing — which is why it needs no filesystem
+authority of its own.
+
+### Two capabilities the viewer does not have, and one it does
+
+Its manifest requests `CAP_CONSOLE_WRITE`, `CAP_SHM` and `CAP_PROC_SPAWN`,
+and deliberately **no filesystem capability**. A document reaches it only as
+the user's own act: a read-only descriptor the file manager had the kernel
+clone in at spawn (`DOCUMENT_ROLE_ARG` plus `STDIN`, the inherited-document
+hand-off), or the one-shot `fd_grant` a `FilePicked` carries after the user
+chose a file in the *session's* UI under the *session's* authority, which the
+unprivileged `fd_redeem` installs.
+
+`CAP_PROC_SPAWN` is what lets the viewer re-enter its own binary as a
+capability-empty decoder. A document is untrusted input and is **never**
+decoded in the viewer's address space: `Run` measures the descriptor, streams
+it to the worker in `MAX_DOCUMENT_CHUNK` pieces under a fixed input-byte
+ceiling, and drives `open_view` / `select_page` / `render_page` against it.
+The worker inherits nothing but its two wired pipes, so it holds strictly
+less authority than the viewer, and a malformed or hostile file crashes it and
+nothing else — the seam replaces it and the viewer states the refusal.
+
+### Three spaces, and the request that keeps them exact
+
+A page has a natural pixel size; the user may turn or mirror it, giving the
+**displayed** size; the zoom scales that; and the canvas shows a window of the
+result. The engine is careful about which space a value is in, because the
+worker holds the page and knows nothing of the user's turn:
+
+* the render request names an extent and a window **in page space**, so it is
+  the same shape whichever backing answers it — a raster page resampled, or a
+  drawing rasterised afresh at that extent;
+* setting that page-space extent down through the user's turn gives back
+  exactly the extent the viewer believes it is displaying, which is the
+  property that makes panning exact to the screen pixel at any magnification;
+* the window rectangle is mapped between the two spaces through
+  `Reorient`'s own position map rather than a second piece of orientation
+  arithmetic, so the rectangle asked for and the pixels the turn produces
+  cannot disagree.
+
+The turn itself is applied in the app, not the worker: it is a permutation of
+pixels the app already holds and has validated, and the app holds
+*premultiplied* pixels where the wire is straight alpha, so turning in the
+worker would be a lossy round trip for no gain. `Surface::reorient_into`
+re-fills a destination the app already holds, so panning a rotated picture
+allocates nothing per pointer sample.
+
+### Nothing waits on the loop that owes a frame
+
+Reading the file and driving the sandbox both wait on something, so both run
+on the shared worker desk (`tairix_rt::work::Worker`), whose state *is* the
+sandbox session — open once, then draw from the page it holds. The loop
+submits and carries on drawing; the answer arrives as a wake on the wait-set
+it already parks in. The pixel buffer travels with the job and comes back in
+the answer, so an interactive re-render allocates nothing once the geometry
+has settled.
+
+An answer is adopted only if it still describes what the state calls for. A
+rectangle the user has panned or zoomed away from is a real picture of the
+wrong place, and drawing it at the current placement would put those pixels
+somewhere they do not belong — so it is dropped, and the render the state now
+wants is asked for instead. A page container's first render is the ordinary
+case of that: the container declares its *largest* page, so a smaller page's
+own geometry only becomes known when the entry is decoded, and the viewer
+refits to the page and asks again.
+
+Animation is one-shot and tickless: playback arms a single deadline from the
+frame's own declared delay and the park wakes on the next window event **or**
+that deadline, whichever is first. A paused viewer arms no timer at all.
+
+### The window
+
+`Layout::for_window` is the one definition of where every band sits, read
+unchanged by the painter and by every hit-test. The toolbar is claimed from
+the top edge and the status line from the bottom before the body, so however
+small the window becomes the tools stay reachable and only the canvas gives up
+room; an information panel too narrow to say anything is not drawn at all
+rather than drawn as a useless strip. A thumbnail sidebar is not part of the
+app yet and is deliberately absent rather than reserved — the worker holds one
+decoded page, so a thumbnail render would displace the page on screen
+(`plans/VIEW.md`).
+
+The toolbar's tools are one ordered list — glyph, command, and tooltip at the
+same position — so the picture a tool draws and the action it runs cannot be
+wired up apart. Every surface that can ask for something resolves to that same
+`Command` set: the toolbar, the keyboard, and the app-declared menu the
+session draws (the app draws no menu pixel). The zoom slider is a *view* of
+the viewport rather than a second copy of it, and its value is tied to no
+write at all — a viewer persists nothing, so a drag is smooth by construction.
+
+`instances = "multiple"`: several documents open side by side are several
+viewers, so a malformed file crashes its own decoder and disturbs no other
+window. Transparency is drawn against a checkerboard, so a transparent picture
+reads as transparent rather than as the colour behind it.
+
+### What the pick conclusion does not carry
+
+`WindowEvent::FilePicked` carries the authority and nothing else, so a
+document chosen in the picker arrives **unnamed**: the information panel and
+the window title state what the viewer knows and invent nothing. One
+consequence is real and is recorded rather than papered over — a RISC OS
+sprite area carries no signature and is reached only by being *named*, so a
+sprite opens from the file manager (which passes its path) but not from the
+picker. Widening the pick conclusion to carry the chosen leaf name is a
+window-protocol change of its own (`plans/VIEW.md`).

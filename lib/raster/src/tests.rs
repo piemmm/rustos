@@ -442,6 +442,45 @@ fn from_rgba8_zero_size_matches_surface_new() {
     assert_eq!(Surface::from_rgba8(0, 0, &[]), Surface::new(0, 0));
 }
 
+#[test]
+fn write_rgba8_gives_exactly_what_from_rgba8_builds() {
+    let rgba = [
+        255, 0, 0, 255, // opaque red
+        0, 255, 0, 0, // fully transparent green
+        0, 0, 255, 255, // opaque blue
+        10, 20, 30, 40, // an arbitrary translucent pixel
+    ];
+    let built = Surface::from_rgba8(2, 2, &rgba).expect("length matches");
+    let mut held = Surface::filled(2, 2, RED.premultiply()).expect("allocates");
+    assert!(held.write_rgba8(&rgba));
+    assert_eq!(held, built);
+}
+
+#[test]
+fn write_rgba8_rejects_a_length_mismatch_without_writing() {
+    let mut held = Surface::filled(2, 2, BLUE.premultiply()).expect("allocates");
+    let untouched = held.clone();
+    // One pixel short of the 2x2x4 = 16 bytes a 2x2 surface needs, then one
+    // pixel over: neither describes this surface.
+    assert!(!held.write_rgba8(&[0u8; 15]));
+    assert!(!held.write_rgba8(&[0u8; 20]));
+    assert_eq!(held, untouched);
+}
+
+#[test]
+fn write_rgba8_ignores_the_clip_and_origin_because_it_replaces_the_pixels() {
+    let rgba = [7u8; 16];
+    let mut clipped = Surface::new(2, 2).expect("allocates");
+    let mut whole = Surface::new(2, 2).expect("allocates");
+    clipped.with_clip(0, 0, 1, 1, |surface| {
+        surface.with_origin(1, 1, |surface| {
+            assert!(surface.write_rgba8(&rgba));
+        });
+    });
+    assert!(whole.write_rgba8(&rgba));
+    assert_eq!(clipped, whole);
+}
+
 // ---- anti-aliased polygon fill --------------------------------------
 
 #[test]

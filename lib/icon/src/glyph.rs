@@ -160,6 +160,24 @@ pub enum IconKind {
     Priority,
     /// A cross, for ending a task outright.
     Quit,
+    /// A magnifier bearing a plus, for magnifying what is displayed.
+    ZoomIn,
+    /// A magnifier bearing a minus, for reducing what is displayed.
+    ZoomOut,
+    /// Four corner brackets, for scaling what is displayed to its window.
+    ZoomFit,
+    /// Callipers around a fixed box, for displaying at the true pixel size.
+    ZoomActual,
+    /// A clockwise half-turn arrow, for turning what is displayed right.
+    RotateRight,
+    /// An anticlockwise half-turn arrow, for turning what is displayed left.
+    RotateLeft,
+    /// Two arrowheads facing away from an axis, for mirroring what is
+    /// displayed.
+    Mirror,
+    /// An `i` in a ring, for showing what is known about the thing on
+    /// display.
+    Info,
 }
 
 impl IconKind {
@@ -216,6 +234,14 @@ impl IconKind {
             "resume" => Self::Resume,
             "priority" => Self::Priority,
             "quit" => Self::Quit,
+            "zoom-in" => Self::ZoomIn,
+            "zoom-out" => Self::ZoomOut,
+            "zoom-fit" => Self::ZoomFit,
+            "zoom-actual" => Self::ZoomActual,
+            "rotate-right" => Self::RotateRight,
+            "rotate-left" => Self::RotateLeft,
+            "mirror" => Self::Mirror,
+            "info" => Self::Info,
             _ => Self::Generic,
         }
     }
@@ -278,6 +304,14 @@ impl IconKind {
             Self::Priority => 45,
             Self::Quit => 46,
             Self::FolderFilled => 47,
+            Self::ZoomIn => 48,
+            Self::ZoomOut => 49,
+            Self::ZoomFit => 50,
+            Self::ZoomActual => 51,
+            Self::RotateRight => 52,
+            Self::RotateLeft => 53,
+            Self::Mirror => 54,
+            Self::Info => 55,
         }
     }
 
@@ -339,6 +373,14 @@ impl IconKind {
             Self::Priority => "priority",
             Self::Quit => "quit",
             Self::FolderFilled => "folder-filled",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
+            Self::ZoomFit => "zoom-fit",
+            Self::ZoomActual => "zoom-actual",
+            Self::RotateRight => "rotate-right",
+            Self::RotateLeft => "rotate-left",
+            Self::Mirror => "mirror",
+            Self::Info => "info",
         }
     }
 }
@@ -413,6 +455,14 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Resume => resume(color),
         IconKind::Priority => priority(color),
         IconKind::Quit => quit(color),
+        IconKind::ZoomIn => magnifier(color, true),
+        IconKind::ZoomOut => magnifier(color, false),
+        IconKind::ZoomFit => zoom_fit(color),
+        IconKind::ZoomActual => zoom_actual(color),
+        IconKind::RotateRight => rotate(color, true),
+        IconKind::RotateLeft => rotate(color, false),
+        IconKind::Mirror => mirror(color),
+        IconKind::Info => info(color),
     };
     VectorIcon::new(DESIGN, layers)
 }
@@ -882,5 +932,164 @@ fn quit(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![
         IconLayer::from_points(color, FALLING),
         IconLayer::from_points(color, RISING),
+    ]
+}
+
+/// A magnifier over a plus or a minus, for magnifying or reducing what a
+/// window displays.
+///
+/// One table for both, because the two glyphs differ only in the bar the
+/// lens holds; drawing them as separate coordinate sets would be two lenses
+/// to keep identical.
+fn magnifier(color: Color, magnify: bool) -> alloc::vec::Vec<IconLayer> {
+    // Lens: an octagonal annulus, outer then inner in one even-odd ring.
+    const LENS: &[(i32, i32)] = &[
+        (10, 3),
+        (15, 5),
+        (17, 10),
+        (15, 15),
+        (10, 17),
+        (5, 15),
+        (3, 10),
+        (5, 5),
+        (10, 5),
+        (13, 7),
+        (14, 10),
+        (13, 13),
+        (10, 14),
+        (7, 13),
+        (6, 10),
+        (7, 7),
+    ];
+    const HANDLE: &[(i32, i32)] = &[(14, 16), (16, 14), (22, 20), (20, 22)];
+    const BAR: &[(i32, i32)] = &[(7, 9), (13, 9), (13, 11), (7, 11)];
+    const STEM: &[(i32, i32)] = &[(9, 7), (11, 7), (11, 13), (9, 13)];
+    let mut layers = alloc::vec![
+        IconLayer::from_points(color, LENS),
+        IconLayer::from_points(color, HANDLE),
+        IconLayer::from_points(color, BAR),
+    ];
+    if magnify {
+        layers.push(IconLayer::from_points(color, STEM));
+    }
+    layers
+}
+
+/// Four corner brackets facing outward, for scaling a picture to fill the
+/// window it is shown in.
+fn zoom_fit(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TOP_LEFT: &[(i32, i32)] = &[(3, 3), (11, 3), (11, 6), (6, 6), (6, 11), (3, 11)];
+    const TOP_RIGHT: &[(i32, i32)] = &[(21, 3), (21, 11), (18, 11), (18, 6), (13, 6), (13, 3)];
+    const BOTTOM_LEFT: &[(i32, i32)] = &[(3, 21), (3, 13), (6, 13), (6, 18), (11, 18), (11, 21)];
+    const BOTTOM_RIGHT: &[(i32, i32)] =
+        &[(21, 21), (13, 21), (13, 18), (18, 18), (18, 13), (21, 13)];
+    vec![
+        IconLayer::from_points(color, TOP_LEFT),
+        IconLayer::from_points(color, TOP_RIGHT),
+        IconLayer::from_points(color, BOTTOM_LEFT),
+        IconLayer::from_points(color, BOTTOM_RIGHT),
+    ]
+}
+
+/// Callipers closed on a fixed box, for showing a picture at its true pixel
+/// size: what is measured is the picture, not the window, so the jaws do not
+/// move.
+fn zoom_actual(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LEFT_JAW: &[(i32, i32)] = &[
+        (3, 4),
+        (8, 4),
+        (8, 7),
+        (6, 7),
+        (6, 17),
+        (8, 17),
+        (8, 20),
+        (3, 20),
+    ];
+    const RIGHT_JAW: &[(i32, i32)] = &[
+        (21, 4),
+        (21, 20),
+        (16, 20),
+        (16, 17),
+        (18, 17),
+        (18, 7),
+        (16, 7),
+        (21, 7),
+    ];
+    const BOX: &[(i32, i32)] = &[(10, 9), (14, 9), (14, 15), (10, 15)];
+    vec![
+        IconLayer::from_points(color, LEFT_JAW),
+        IconLayer::from_points(color, RIGHT_JAW),
+        IconLayer::from_points(color, BOX),
+    ]
+}
+
+/// A half-turn arrow, for turning what a window displays a quarter turn.
+///
+/// The arc is shared and only the head moves, so the two directions cannot
+/// drift apart. Deliberately a half-turn arc rather than [`refresh`]'s
+/// near-complete ring: a toolbar carrying both must not draw them alike.
+fn rotate(color: Color, clockwise: bool) -> alloc::vec::Vec<IconLayer> {
+    // Outer half-annulus left over the top to right, then back inside.
+    const ARC: &[(i32, i32)] = &[
+        (3, 12),
+        (5, 7),
+        (7, 5),
+        (12, 3),
+        (17, 5),
+        (19, 7),
+        (21, 12),
+        (18, 12),
+        (16, 8),
+        (12, 6),
+        (8, 8),
+        (6, 12),
+    ];
+    const RIGHT_HEAD: &[(i32, i32)] = &[(16, 11), (23, 11), (19, 18)];
+    const LEFT_HEAD: &[(i32, i32)] = &[(1, 11), (8, 11), (5, 18)];
+    vec![
+        IconLayer::from_points(color, ARC),
+        IconLayer::from_points(color, if clockwise { RIGHT_HEAD } else { LEFT_HEAD }),
+    ]
+}
+
+/// Two arrowheads facing away from a central axis, for mirroring what a
+/// window displays.
+fn mirror(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const AXIS: &[(i32, i32)] = &[(11, 2), (13, 2), (13, 22), (11, 22)];
+    const LEFT: &[(i32, i32)] = &[(9, 5), (9, 19), (2, 12)];
+    const RIGHT: &[(i32, i32)] = &[(15, 5), (15, 19), (22, 12)];
+    vec![
+        IconLayer::from_points(color, AXIS),
+        IconLayer::from_points(color, LEFT),
+        IconLayer::from_points(color, RIGHT),
+    ]
+}
+
+/// An `i` in a ring, for what is known about the thing on display.
+fn info(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const RING: &[(i32, i32)] = &[
+        (12, 2),
+        (19, 5),
+        (22, 12),
+        (19, 19),
+        (12, 22),
+        (5, 19),
+        (2, 12),
+        (5, 5),
+        (12, 5),
+        (17, 7),
+        (19, 12),
+        (17, 17),
+        (12, 19),
+        (7, 17),
+        (5, 12),
+        (7, 7),
+    ];
+    const DOT: &[(i32, i32)] = &[(10, 7), (14, 7), (14, 10), (10, 10)];
+    const STEM: &[(i32, i32)] = &[(10, 12), (14, 12), (14, 18), (10, 18)];
+    vec![
+        IconLayer::from_points(color, RING),
+        IconLayer::from_points(color, DOT),
+        IconLayer::from_points(color, STEM),
     ]
 }

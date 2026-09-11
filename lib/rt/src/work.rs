@@ -10,6 +10,22 @@
 //! so an interaction that settles repeatedly costs one further job rather than
 //! one each, and two answers can never race for what a store ends up saying.
 //!
+//! # The work keeps its own state
+//!
+//! A job is not always a self-contained round trip. A viewer's sandboxed
+//! decode is a *session* — open the document once, then draw from the page it
+//! holds — so the thing carrying the work has to remember what it did last
+//! time, and the loop must not be able to reach it. The state therefore
+//! belongs to the worker: `run` receives it by exclusive reference, and it is
+//! the same state on the fall-back path, so there is one session however the
+//! job ran.
+//!
+//! The job arrives by **exclusive reference**, so the work may take a lent
+//! buffer out of it and hand it back in the answer. A window's worth of
+//! pixels is megabytes; allocating and freeing that per pointer sample is the
+//! cost that removes — and a job the work only reads is still not copied to
+//! reach it.
+//!
 //! # A machine that grants no worker is slower, never wrong
 //!
 //! The kernel may refuse the wake pipe or the thread. [`Worker::start`] then
@@ -37,30 +53,40 @@ pub enum NoWorker {
     Thread(Errno),
 }
 
-/// A worker thread and the desk it takes work from.
+/// A worker thread, the desk it takes work from, and the state its work
+/// keeps between jobs.
 ///
 /// `run` is the work itself. It is a plain function pointer rather than a
 /// closure or a trait so the same one serves the worker thread and the
-/// fall-back path, and no caller can supply two that disagree.
-pub struct Worker<Req, Ans> {
+/// fall-back path, and no caller can supply two that disagree — and its
+/// state travels the same way, so neither path can be given a session the
+/// other does not have.
+///
+/// `S` is `()` for work that carries nothing over from one job to the next.
+pub struct Worker<S, Req, Ans> {
     desk: Mutex<JobDesk<Req, Ans>>,
     /// Signalled when a job is submitted, and on teardown.
     work: Condvar,
     wake: WorkerWake,
-    run: fn(&Req) -> Ans,
+    run: fn(&mut S, &mut Req) -> Ans,
+    /// Held apart from the desk so a submission never waits on a job in
+    /// flight: only the thread carrying work out ever locks this.
+    state: Mutex<S>,
 }
 
-impl<Req, Ans> Worker<Req, Ans> {
-    /// A worker that carries out `run`, waking its loop over `wake`.
+impl<S, Req, Ans> Worker<S, Req, Ans> {
+    /// A worker that carries out `run` over `state`, waking its loop over
+    /// `wake`.
     ///
     /// Nothing is started until [`start`](Self::start).
     #[must_use]
-    pub fn new(run: fn(&Req) -> Ans, wake: WorkerWake) -> Self {
+    pub fn new(run: fn(&mut S, &mut Req) -> Ans, state: S, wake: WorkerWake) -> Self {
         Self {
             desk: Mutex::new(JobDesk::new()),
             work: Condvar::new(),
             wake,
             run,
+            state: Mutex::new(state),
         }
     }
 
@@ -83,7 +109,8 @@ impl<Req, Ans> Worker<Req, Ans> {
                 // No worker will ever take it, so it is carried out here and
                 // left on the desk: one adopt path however it was run.
                 drop(desk);
-                let answer = (self.run)(&job);
+                let mut job = job;
+                let answer = (self.run)(&mut self.state.lock(), &mut job);
                 let _ = self.desk.lock().deliver(answer);
                 return true;
             }
@@ -113,7 +140,7 @@ impl<Req, Ans> Worker<Req, Ans> {
     /// the answer, nudge the loop.
     fn serve(&self) {
         loop {
-            let job = {
+            let mut job = {
                 let mut desk = self.desk.lock();
                 loop {
                     if desk.stopping() {
@@ -125,9 +152,9 @@ impl<Req, Ans> Worker<Req, Ans> {
                     desk = self.work.wait(desk);
                 }
             };
-            // The wait itself, with no lock held: this is the call that would
-            // otherwise have frozen the window.
-            let answer = (self.run)(&job);
+            // The wait itself, with the desk unlocked: this is the call that
+            // would otherwise have frozen the window.
+            let answer = (self.run)(&mut self.state.lock(), &mut job);
             if self.desk.lock().deliver(answer) {
                 self.wake.nudge();
             }
@@ -135,7 +162,7 @@ impl<Req, Ans> Worker<Req, Ans> {
     }
 }
 
-impl<Req: Send + 'static, Ans: Send + 'static> Worker<Req, Ans> {
+impl<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static> Worker<S, Req, Ans> {
     /// Start `worker` on its own thread.
     ///
     /// On failure the desk is left stopped, so the program is still correct
@@ -164,17 +191,17 @@ impl<Req: Send + 'static, Ans: Send + 'static> Worker<Req, Ans> {
 /// store would otherwise hold the teardown for as long as that store takes, and
 /// it leaves at its next turn round its loop anyway. Its own handle on the desk
 /// keeps it alive until then.
-pub struct WorkerGuard<Req, Ans>(Arc<Worker<Req, Ans>>);
+pub struct WorkerGuard<S, Req, Ans>(Arc<Worker<S, Req, Ans>>);
 
-impl<Req, Ans> WorkerGuard<Req, Ans> {
+impl<S, Req, Ans> WorkerGuard<S, Req, Ans> {
     /// Guard `worker`.
     #[must_use]
-    pub fn new(worker: &Arc<Worker<Req, Ans>>) -> Self {
+    pub fn new(worker: &Arc<Worker<S, Req, Ans>>) -> Self {
         Self(Arc::clone(worker))
     }
 }
 
-impl<Req, Ans> Drop for WorkerGuard<Req, Ans> {
+impl<S, Req, Ans> Drop for WorkerGuard<S, Req, Ans> {
     fn drop(&mut self) {
         self.0.stop();
     }
@@ -192,29 +219,34 @@ mod tests {
         what: &'static str,
     }
 
-    /// And an answer that says what it was about, as the real ones do.
+    /// And an answer that says what it was about, as the real ones do, plus
+    /// which job of the session it was.
     #[derive(Debug, Eq, PartialEq)]
     struct Done {
         doubled: u32,
         of: &'static str,
+        run_number: u32,
     }
 
-    /// Doubling stands in for a store round trip: the point is *where* it ran,
-    /// not what it computed.
-    fn double(job: &Job) -> Done {
+    /// Doubling stands in for a store round trip, and the running count for
+    /// the session a real one keeps: the point is *where* it ran and *what it
+    /// remembered*, not what it computed.
+    fn double(runs: &mut u32, job: &mut Job) -> Done {
+        *runs += 1;
         Done {
             doubled: job.value * 2,
             of: job.what,
+            run_number: *runs,
         }
     }
 
-    /// A job, and the answer carrying it out gives.
+    /// A job, and the answer carrying out the *first* one of a session gives.
     fn job() -> (Job, Done) {
         let job = Job {
             value: 21,
             what: "a settled edit",
         };
-        (job, double(&job))
+        (job, double(&mut 0, &mut { job }))
     }
 
     /// The property the whole fall-back exists for: with no worker the job is
@@ -223,7 +255,7 @@ mod tests {
     #[test]
     fn a_stopped_worker_carries_the_job_out_on_the_caller() {
         let (job, done) = job();
-        let worker: Worker<Job, Done> = Worker::new(double, WorkerWake::create());
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
         worker.stop();
         assert!(
             worker.submit(job),
@@ -238,7 +270,7 @@ mod tests {
     #[test]
     fn a_running_worker_defers_the_job() {
         let (job, _) = job();
-        let worker: Worker<Job, Done> = Worker::new(double, WorkerWake::create());
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
         assert!(!worker.submit(job), "the job went to the desk");
         assert_eq!(
             worker.collect(),
@@ -252,7 +284,8 @@ mod tests {
     #[test]
     fn the_guard_stops_the_worker_it_holds() {
         let (job, done) = job();
-        let worker: Arc<Worker<Job, Done>> = Arc::new(Worker::new(double, WorkerWake::create()));
+        let worker: Arc<Worker<u32, Job, Done>> =
+            Arc::new(Worker::new(double, 0, WorkerWake::create()));
         {
             let _guard = WorkerGuard::new(&worker);
             assert!(!worker.submit(job), "still running inside the scope");
@@ -261,13 +294,30 @@ mod tests {
         assert_eq!(worker.collect(), Some(done));
     }
 
+    /// The property the state exists for: a session is carried from one job to
+    /// the next, and the loop that submitted them never held it.
+    #[test]
+    fn the_work_keeps_its_state_across_jobs() {
+        let (job, _) = job();
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        // Stopped, so each job runs on this thread — which is also the path
+        // that must see the same session as a worker thread would.
+        worker.stop();
+        for expected in 1..=3 {
+            assert!(worker.submit(job));
+            let answer = worker.collect().expect("an answer per job");
+            assert_eq!(answer.run_number, expected);
+        }
+    }
+
     /// A machine that grants no wake pipe grants no worker either: starting
     /// leaves the desk in the state that runs later submissions inline, so the
     /// caller only has to state why.
     #[test]
     fn a_start_without_a_wake_leaves_the_work_on_the_caller() {
         let (job, done) = job();
-        let worker: Arc<Worker<Job, Done>> = Arc::new(Worker::new(double, WorkerWake::create()));
+        let worker: Arc<Worker<u32, Job, Done>> =
+            Arc::new(Worker::new(double, 0, WorkerWake::create()));
         // The host grants no pipe, which is exactly the refusal being modelled.
         assert!(!worker.wake().is_armed());
         assert!(matches!(Worker::start(&worker), Err(NoWorker::Wake)));

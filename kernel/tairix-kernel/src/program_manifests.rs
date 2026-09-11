@@ -1233,6 +1233,21 @@ mod tests {
         CapabilityId::SHM,
     ];
 
+    // The picture and document viewer `view` (plans/VIEW.md): console write
+    // for its fail-loud diagnostics, `CAP_SHM` for the zero-copy window
+    // frame region and the pipe pair its decoder is reached over, and
+    // `CAP_PROC_SPAWN` to re-enter its own binary as that capability-empty
+    // decoder — a document is untrusted input and is never decoded in the
+    // viewer's own address space. Deliberately NO filesystem capability: the
+    // one document it reads arrives as a descriptor cloned in at spawn or a
+    // one-shot fd_grant the session's trusted picker delegated. Not an
+    // embedded spawn-floor program, so the list lives only in this pin.
+    const VIEW_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::PROC_SPAWN,
+        CapabilityId::SHM,
+    ];
+
     // The windowed file viewer `viewer` (plans/APPWIN.md AW5): console
     // write for its fail-loud diagnostics and CAP_SHM to create and
     // grant the zero-copy window frame region the desktop session
@@ -1510,6 +1525,7 @@ mod tests {
             ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
             ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
             ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
+            ("view", ProgramKind::Application, VIEW_REQUEST),
             ("viewer", ProgramKind::Application, VIEWER_REQUEST),
             ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
             (

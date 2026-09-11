@@ -264,3 +264,42 @@ fn placing_a_coordinate_outside_the_picture_is_total() {
     assert_eq!(Reorient::HalfTurn.place(u32::MAX, u32::MAX, 4, 4), (0, 0));
     assert_eq!(Reorient::QuarterTurnRight.place(0, u32::MAX, 4, 4), (0, 0));
 }
+
+#[test]
+fn reorienting_into_a_held_destination_gives_what_allocating_one_gives() {
+    let source = numbered(5, 3);
+    for how in Reorient::ALL {
+        let allocated = source.reoriented(how).expect("allocates");
+        let (width, height) = how.applied_size(5, 3);
+        let mut held = Surface::new(width, height).expect("allocates");
+        assert!(source.reorient_into(&mut held, how), "{how:?}");
+        assert_eq!(held.pixels(), allocated.pixels(), "{how:?}");
+    }
+}
+
+#[test]
+fn reorienting_into_a_wrongly_shaped_destination_writes_nothing() {
+    let source = numbered(4, 2);
+    // The transposing cases want 2x4, the rest 4x2, so one destination of
+    // each shape is refused by exactly the four that do not want it.
+    for how in Reorient::ALL {
+        let (width, height) = how.applied_size(4, 2);
+        let mut swapped = Surface::filled(height, width, Color::rgba(9, 9, 9, 255).premultiply())
+            .expect("allocates");
+        let untouched = swapped.clone();
+        if width == height {
+            continue;
+        }
+        assert!(!source.reorient_into(&mut swapped, how), "{how:?}");
+        assert_eq!(swapped, untouched, "{how:?}");
+    }
+}
+
+#[test]
+fn a_held_destination_is_refilled_rather_than_blended_into() {
+    let mut held =
+        Surface::filled(2, 2, Color::rgba(200, 0, 0, 255).premultiply()).expect("allocates");
+    let source = numbered(2, 2);
+    assert!(source.reorient_into(&mut held, Reorient::None));
+    assert_eq!(held.pixels(), source.pixels());
+}

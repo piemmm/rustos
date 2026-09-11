@@ -251,6 +251,7 @@ members = [
     "userland/apps/unlink",
     "userland/apps/unmount",
     "userland/apps/useradd",
+    "userland/apps/view",
     "userland/apps/viewer",
     "userland/apps/vim",
     "userland/apps/wallpaper",

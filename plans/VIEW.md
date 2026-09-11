@@ -697,14 +697,154 @@ read this paragraph first; the rustdoc on both types points here.
   precision rather than resampled from one, and a magnification larger
   than memory costs the window.
 
-- `userland/apps/view` engine, `Run`, bundle, 13 Help locales — planned.
-- Deletion of `userland/apps/viewer` and the reference sweep — planned.
+- **`userland/apps/view` engine, `Run`, bundle, 13 Help locales — done.**
+  `instances = "multiple"` is what the flag actually means — several
+  *processes*, not several windows — so each viewer is one window over the
+  shell's `AppWindow`, and comparing two pictures is opening the second. That
+  is also the containment: a malformed file crashes its own decoder and
+  disturbs no other window.
+
+  The engine holds the three spaces apart, and that is the load-bearing part.
+  A render request names an extent and a window **in page space**, because the
+  worker holds the page and knows nothing of the user's turn; setting that
+  extent down through the turn gives back exactly the extent the viewer
+  believes it is displaying (`page_extent`/`scaled`), and the window rectangle
+  crosses between the spaces through `Reorient`'s own position map
+  (`window_in_page_space`) rather than a second piece of orientation
+  arithmetic. `Reorient`/`Surface::reorient_into` therefore get their
+  production caller here, as this plan said they would.
+
+  **Staleness is about the state now, not about what was asked.** An answer
+  the worker returns is adopted only if it still describes the render the
+  current state calls for — one derivation (`wanted_shape`) serves both the
+  asking and the checking. A rectangle the user has panned away from is a real
+  picture of the wrong place, and drawing it at the current placement would put
+  those pixels somewhere they do not belong. A page container's first render is
+  the ordinary case of that rather than an edge: the container declares its
+  *largest* page, so a smaller page's own geometry is only known once the entry
+  is decoded, and the viewer adopts the entry, refits to it, and asks again.
+
+  Two facts had to be split to make that work. `Document` holds the entry the
+  viewer is **showing** apart from the entry the worker holds **decoded**:
+  deriving the selection from the decoded entry lost it the instant the old
+  picture was dropped, so a page turn asked for the page the user had just
+  left. And the pending state is one value (`Pending::Open`/`Idle`/`Show`)
+  rather than an "opening" flag beside an in-flight render, which makes a
+  render before an open unrepresentable rather than merely avoided — the open
+  is left outstanding until answered, because only the embedder knows when it
+  holds a source.
+
+  Nothing that waits runs on the loop that owes a frame. Reading the file and
+  driving the sandbox both go on the shared worker desk, whose **state is the
+  session** — open once, then draw from the page held. That needed
+  `tairix_rt::work::Worker` generalised in place to carry worker-owned state
+  and to take its job **by value**: a view is a session rather than a
+  self-contained round trip, and passing the job by value is what lets the
+  loop lend the work its pixel buffer and have it handed back, so an
+  interactive re-render allocates nothing once the geometry has settled. Both
+  existing consumers (the wallpaper applier, the terminal publisher) are
+  `S = ()`.
+
+  Two `lib/raster` primitives carry the app's zero-allocation paint, both the
+  existing ones generalised rather than new paths beside them:
+  `Surface::write_rgba8` (which `from_rgba8` is now the allocating entry point
+  to) refills a held surface from straight-alpha bytes, and
+  `Surface::reorient_into` (which `reoriented` is now the allocating entry
+  point to) re-fills a held destination, so panning a rotated picture costs no
+  window-sized allocation per pointer sample.
+
+  Eight glyphs entered `lib/icon`'s closed vocabulary for the toolbar —
+  `ZoomIn`, `ZoomOut`, `ZoomFit`, `ZoomActual`, `RotateRight`, `RotateLeft`,
+  `Mirror`, `Info` — each with the tool that uses it landing in the same
+  change. The rotate glyphs are deliberately a *half*-turn arc rather than
+  `refresh`'s near-complete ring, because a toolbar carrying both must not draw
+  them alike. The viewer resolves them through the refusing artwork seam
+  (`NoArtwork`), which is what a process holding no filesystem capability must
+  do; the mandatory built-in glyph tier is what makes that total.
+
+  Three defects were found and fixed on the way, each with a regression test:
+  the byte-count formatter multiplied before dividing and so **panicked** on a
+  large file (a production path); the layout multiplied a window extent the
+  desktop session supplies without widening it first; and the zoom slider's
+  page step was floor-divided, leaving each step a hair short of a rung so the
+  travel never quite reached the top of the ladder.
+
+- **The thumbnail sidebar — not started, and deliberately absent rather than
+  reserved.** The app has no sidebar band, no toggle, and no key for one: a
+  reserved-but-undrawn panel is the half-built surface the charter forbids, so
+  it is out until it is real.
+
+  It turns on a design question this plan has not taken. The worker holds
+  **one** decoded page, so rendering a thumbnail of page *i* displaces the
+  page on screen — and the shown render must always win the latest-wins desk,
+  so thumbnails can only be asked for when nothing else is. Filling the strip
+  in ascending order costs each entry one decode (the sequence walk is O(1)
+  amortised forward), plus one rewind to return to the entry being shown; a
+  user who opens the sidebar on frame 90 of a hundred-frame animation pays a
+  composition restart for it. The alternatives are a second worker (a second
+  sandbox, a second document upload) or a page cache in the worker (which the
+  view protocol has no shape for), and choosing between them is a decision to
+  take rather than to guess.
+
+  What it needs when it lands: a second request kind at a small extent, a
+  decoded-thumbnail cache under `lib/reclaim`'s budget and pressure bands, the
+  `IconTile`-in-a-`Panel` painting, sidebar hit-testing so a click selects
+  that entry, and the priority rule above. Recorded rather than deferred
+  silently.
+
+- Deletion of `userland/apps/viewer` and the reference sweep — planned. The
+  two apps overlap on nothing (`viewer` claims only text types, `view` only
+  pictures) and shadow no name, so they coexist until the sweep lands.
 - `lib/pdf` behind the page source — next change. Encrypted PDFs need MD5/RC4/
   AES, which `lib/crypto` deliberately does not carry; whether to admit those as
   interop-only primitives or refuse encrypted files fail-closed is a decision to
   take then.
 
 ## Noticed and not yet fixed
+
+- **The inherited-document hand-off does not work for a program with no
+  filesystem capability, and the file manager's own rustdoc says it does.**
+  `FdWire::Handle` clones the parent's `OpenFile` into the child *with its
+  backing unchanged* (`apply_attach_wires`), so the child's descriptor is
+  `OpenBacking::Path`. `PathAuthority::of` then resolves a path backing to
+  **the caller's own** uid and capability set, and `admit()` requires
+  `CAP_FS_ACCESS` — which is exactly what a viewer deliberately does not hold.
+  Every operation on the descriptor is therefore refused with
+  `PermissionDenied`: `fs_read`, and `fs_stat` with it.
+
+  The delegated path is unaffected — `fd_grant` mints `OpenBacking::Delegated`,
+  which carries the grantor's captured identity precisely so a holder with no
+  filesystem capability can read what it was handed — so the *picker* route
+  works and the *file manager* route does not. `viewer.app` has the same
+  property today and nothing catches it: the only spawn-wire test
+  (`spawn_attach_wires_a_pipe_end_into_the_child`) wires a **pipe** end, which
+  is not a path backing and so never reaches this gate.
+
+  Both viewers fail closed and *state* the refusal rather than blanking, so the
+  defect is diagnosable rather than silent. The fix is for a wired path-backed
+  handle to be cloned as a delegation carrying the spawning parent's captured
+  identity, exactly as `fd_grant` does — but that is a kernel change that
+  **grants authority across a spawn**, and deciding that any wired descriptor
+  confers the parent's reach (rather than only one minted for the purpose) is a
+  security decision for the User to take, not one to guess at. Raised rather
+  than resolved unilaterally; it carries its regression test — a capability-less
+  child reading a path-backed wired descriptor — when the fix lands.
+
+- **`WindowEvent::FilePicked` carries no name, so a picked document is
+  unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and
+  nothing else, which is right about *authority* and short about *identity*:
+  the viewer cannot state the name of the document the user just chose, so its
+  title and its information panel say what they know and invent nothing. One
+  consequence is functional rather than cosmetic — a RISC OS sprite area
+  carries no signature and is reached only by being *named*, so a sprite opens
+  from the file manager (which passes its path) but not from the picker.
+
+  The fix is to widen the pick conclusion to carry the chosen leaf name, which
+  is a change to the window event's own wire format and so ripples through
+  `lib/abi`, `lib/window`, the session's picker and every app that matches on
+  `FilePicked`. That is a window-protocol change of its own rather than
+  something to smuggle into an app change, and it carries its regression test
+  when it lands. Recorded rather than deferred silently.
 
 - **`lib/sandbox` allocates its bounded buffers infallibly.** Every band,
   destination, and frame buffer in the crate is `vec![0u8; n]`

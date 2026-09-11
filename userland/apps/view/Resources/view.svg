@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>view</title>
+  <!-- A framed photograph with a magnifier over its corner: a viewer, not an
+       editor. Every shape is a filled polygon and every curve is cut as
+       integer line segments, because the desktop's SVG subset has no strokes
+       and no transforms — a shackle-style inner cut in the colour beneath is
+       how an outline is drawn. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#5B3E9B" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#7052B8" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,92 20,92"/>
+
+  <!-- The photograph's mount -->
+  <polygon fill="#F3F1FA" points="46,64 210,64 210,192 46,192"/>
+
+  <!-- Sky inside the mount -->
+  <polygon fill="#9BD2F0" points="60,78 196,78 196,178 60,178"/>
+  <!-- Sun, cut as an octagon -->
+  <polygon fill="#F5C542" points="160,92 172,97 177,109 172,121 160,126 148,121 143,109 148,97"/>
+  <!-- Far ridge -->
+  <polygon fill="#4E8F6B" points="60,150 104,104 138,142 160,120 196,158 196,178 60,178"/>
+  <!-- Near ridge, darker so the two read apart -->
+  <polygon fill="#2F6B4C" points="60,178 96,138 132,178"/>
+
+  <!-- Magnifier over the lower-right corner: lens rim as an octagonal
+       annulus, the sky colour punched through its middle -->
+  <polygon fill="#241A45" points="138,168 156,152 180,152 198,168 198,192 180,208 156,208 138,192"/>
+  <polygon fill="#DCEEF9" points="148,172 162,160 174,160 188,172 188,188 174,200 162,200 148,188"/>
+  <!-- Handle -->
+  <polygon fill="#241A45" points="192,196 206,182 224,200 210,214"/>
+</svg>
