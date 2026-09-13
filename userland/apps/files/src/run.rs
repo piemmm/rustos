@@ -1008,9 +1008,10 @@ mod program {
         /// The file manager opens the file **read-only in its own table** and
         /// wires that descriptor onto the child's `STDIN` slot
         /// ([`FdWire::Handle`]); the kernel clones the read-only open
-        /// description into the child owner-checked, so the viewer reads the
-        /// document with no filesystem capability of its own and there is no
-        /// post-spawn channel or ordering race. The [`DOCUMENT_ROLE_ARG`] token
+        /// description into the child owner-checked, capturing *this*
+        /// process's attested identity onto the backing as it crosses over, so
+        /// the viewer reads the document with no filesystem capability of its
+        /// own and there is no post-spawn channel or ordering race. The [`DOCUMENT_ROLE_ARG`] token
         /// tells the viewer it was handed a document (rather than to prompt),
         /// and the leaf name titles its window. The manager's own descriptor is
         /// closed regardless of the spawn outcome — the child holds its own

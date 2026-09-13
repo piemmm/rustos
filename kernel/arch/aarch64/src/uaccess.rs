@@ -86,21 +86,15 @@ extern "C" {
 
 /// Publish the routine into the Arch HAL guarded-copy slot.
 ///
-/// Idempotent (the slot accepts a re-install of the same routine), so
-/// every caller of [`crate::exceptions::init_vectors`] may run it
-/// unconditionally.
-///
-/// # Errors
-///
-/// [`tairix_arch_api::uaccess::InstallGuardedCopyError`] when a
-/// *different* routine already occupies the slot — a boot-order defect
-/// the caller must treat as fatal (fail closed).
+/// This port arms the window from the per-CPU
+/// [`crate::exceptions::init_vectors`], so every secondary republishes
+/// this same routine; the slot takes the store unconditionally.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-pub fn install() -> Result<(), tairix_arch_api::uaccess::InstallGuardedCopyError> {
+pub fn install() {
     tairix_arch_api::uaccess::install_guarded_copy(
         tairix_aarch64_guarded_user_copy
             as unsafe extern "C" fn(*mut u8, *const u8, usize) -> usize,
-    )
+    );
 }
 
 /// If `pc` (a saved `ELR_EL1` from a same-EL data abort) lies inside the

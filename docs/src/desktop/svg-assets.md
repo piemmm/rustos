@@ -71,6 +71,18 @@ than memory costs the window rather than the magnification. A drawing whose
 own box is past `tairix_raster::MAX_DRAWING_EXTENT` is refused with a stated
 reason rather than reported at a clamped size.
 
+That bound is on a *coordinate*, so it is not by itself a bound on the buffer:
+a window with both sides inside it still multiplies out to 2^40 pixels, and
+`Vec::try_reserve_exact` was measured granting the whole 4 TiB on an
+overcommitting host — leaving the fill to touch pages until the process is
+killed, an outcome no `Option` can report. `tairix_raster::MAX_SURFACE_PIXELS`
+bounds the total a single surface may hold, so such a request is a refusal
+rather than a host-policy lottery. It sits at twice the pixels of the largest
+display target, so every legitimate full-screen buffer passes; like the extent
+it is a containment bound on an absurd size and not a memory budget
+(`AGENTS.md` §24.4) — a machine short of RAM still refuses a far smaller
+surface through the allocator.
+
 Filling both axes does mean a curve is flattened to the tolerance of the
 larger scale, so a drawing already close to the total-vertex bound can pass it
 under `Natural` and be admitted under `Square`. The bound is a containment

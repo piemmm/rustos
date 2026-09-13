@@ -46,3 +46,26 @@ pub mod spawn_producer;
 /// architecture-neutral layout module.
 #[cfg(freestanding)]
 pub const USER_VA_TOP: u64 = 1 << 47;
+
+/// The user region and the kernel's direct physical map must share no
+/// PML4 slot, and the map must reach past the user image bias.
+///
+/// Those two are what let a process root carry the whole of RAM without
+/// carrying it in the half a user program addresses: the map used to be an
+/// identity window in the low half, so it had to stop at the image bias and
+/// a machine with more RAM than that had frames the kernel could not reach.
+/// Pinned at build time rather than discovered as a fail-closed allocation
+/// on a large machine.
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+const _: () = {
+    use tairix_arch_x86_64::paging::{MAX_PHYSMAP_GIB, PHYSMAP_PML4_FIRST_SLOT};
+
+    assert!(
+        (USER_VA_TOP >> 39) <= PHYSMAP_PML4_FIRST_SLOT as u64,
+        "user space must end at or below the direct map's first root slot"
+    );
+    assert!(
+        ((MAX_PHYSMAP_GIB as u64) << 30) > crate::spawn_layout::CHILD_USER_BIAS,
+        "the direct map must reach past the user image bias"
+    );
+};

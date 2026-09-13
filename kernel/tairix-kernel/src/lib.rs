@@ -465,6 +465,11 @@ pub mod riscv64;
 #[cfg(any(kernel_isa = "riscv64", test))]
 pub mod riscv64_plic_irq;
 
+// The callback pointers every port's wiring installs, defined once so no two
+// ports can drift and so each port's test compares against the coercion the
+// install actually stored.
+pub mod preempt_callbacks;
+
 // Each port's trap-callback wiring, hoisted out of its freestanding-only
 // port module for the same reason as `riscv64_plic_irq`: it carries a host
 // regression test. What the test pins is that all three ports install the

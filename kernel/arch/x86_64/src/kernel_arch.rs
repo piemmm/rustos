@@ -386,9 +386,9 @@ impl SchedulerArch for X86_64Arch {
 
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // SAFETY: `LAPIC_BASE_PHYS` is identity-mapped (boot.s
-            // SAFETY-INVARIANT 4). Each CPU sees its own per-CPU
-            // LAPIC at that physical address; concurrent
+            // SAFETY: the LAPIC register block is reachable through the
+            // direct physical map under every root. Each CPU sees its own
+            // per-CPU LAPIC at that address; concurrent
             // `send_ipi` calls on different CPUs therefore access
             // independent registers and do not race. Within a single
             // CPU the call is not re-entrant — the kernel-side
@@ -402,7 +402,7 @@ impl SchedulerArch for X86_64Arch {
             // ICR it clobbers belongs to a mainline that is never resumed
             // because the report halts this CPU.
             let mmio = unsafe {
-                crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32)
+                crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_VIRT as *mut u32)
             };
             let mut lapic = crate::apic::Lapic::new(mmio);
             lapic.send_ipi(

@@ -64,10 +64,14 @@ fn callback_round_trips() {
     let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(timer_callback().is_none());
-    set_timer_callback(host_cb);
+    // Coerce once: the slot is compared against *this* pointer value,
+    // because two coercions of one `fn` item are not guaranteed to share
+    // an address.
+    let cb: extern "C" fn(CpuId) = host_cb;
+    set_timer_callback(cb);
     assert_eq!(
-        timer_callback().map(|f| f as *const () as usize),
-        Some(host_cb as *const () as usize)
+        timer_callback().map(|f| f as *const ()),
+        Some(cb as *const ())
     );
     clear_for_tests();
 }
@@ -224,10 +228,11 @@ fn ipi_callback_round_trips() {
     let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(ipi_callback().is_none());
-    set_ipi_callback(host_cb);
+    let cb: extern "C" fn(CpuId) = host_cb;
+    set_ipi_callback(cb);
     assert_eq!(
-        ipi_callback().map(|f| f as *const () as usize),
-        Some(host_cb as *const () as usize)
+        ipi_callback().map(|f| f as *const ()),
+        Some(cb as *const ())
     );
     clear_for_tests();
 }
@@ -237,10 +242,11 @@ fn preempt_callback_round_trips_through_its_own_slot() {
     let _guard = lock_preempt_tests();
     clear_for_tests();
     assert!(preempt_callback().is_none());
-    set_preempt_callback(host_cb);
+    let cb: extern "C" fn(CpuId) = host_cb;
+    set_preempt_callback(cb);
     assert_eq!(
-        preempt_callback().map(|f| f as *const () as usize),
-        Some(host_cb as *const () as usize)
+        preempt_callback().map(|f| f as *const ()),
+        Some(cb as *const ())
     );
     // The preempt slot is independent of the timer and IPI slots, so
     // arming U-mode preemption never disturbs the tick/IPI dispatch.

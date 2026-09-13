@@ -170,9 +170,16 @@ static SPAWN_FRAME_SOURCE: Once<FrameTableSource> = Once::new();
 pub(crate) fn page_table_source(
     frames: &'static FrameAllocator,
 ) -> Result<&'static FrameTableSource, Errno> {
-    SPAWN_FRAME_SOURCE
+    let source = SPAWN_FRAME_SOURCE
         .call_once_infallible(|| FrameTableSource::new(frames, &SPAWN_TABLE_PHYSMAP))
-        .map_err(|_| Errno::NotImplemented)
+        .map_err(|_| Errno::NotImplemented)?;
+    // The fault-time access-flag fix-up walks whichever root is active
+    // with no `AddressSpace` in hand, so it needs a source that reaches
+    // any table in RAM. This one does — its direct map covers the whole
+    // window — and publishing it here, where it is created, means no
+    // consumer ordering can leave the fault path without one.
+    tairix_arch_api::frames::publish_active_frames(source);
+    Ok(source)
 }
 
 /// The aarch64 runtime `spawn` producer installed into the

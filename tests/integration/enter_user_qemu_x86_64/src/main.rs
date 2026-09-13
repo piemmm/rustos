@@ -109,7 +109,7 @@ mod kernel {
 
     /// Ring-3 virtual address the stub code is aliased at. 64 GiB — far
     /// above the live identity window
-    /// ([`paging::AddressSpace::new_identity_window`]) — so the alias
+    /// ([`paging::AddressSpace::new_boot_identity`]) — so the alias
     /// lands on freshly-walked tables under the shared PML4[0]/PDPT, not
     /// on an identity huge-page leaf. Page aligned and canonical.
     const USER_CODE_VA: u64 = 0x10_0000_0000;
@@ -188,7 +188,7 @@ mod kernel {
     fn run_round_trip() -> ! {
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+        let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
             qemu_exit::exit_failure();
         };
 

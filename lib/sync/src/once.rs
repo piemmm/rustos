@@ -247,10 +247,13 @@ impl<T> OnceCell<T> {
     /// if it is empty, `Ok(Some(value))` otherwise. Requires `&mut self`,
     /// so no synchronisation is necessary.
     pub fn take(&mut self) -> Result<Option<T>, PoisonError> {
-        let state = *self.state.get_mut();
+        // `&mut self` already excludes every other observer, so the ordering
+        // is immaterial; `loom`'s atomics offer no `get_mut`, and reaching for
+        // one would put this path outside the model checker's view.
+        let state = self.state.load(Ordering::Relaxed);
         match state {
             READY => {
-                *self.state.get_mut() = EMPTY;
+                self.state.store(EMPTY, Ordering::Relaxed);
                 // SAFETY: state was READY and we have exclusive access;
                 // we move the value out and reset the state.
                 let v = self.value.with_mut(|p| unsafe { (*p).assume_init_read() });
@@ -270,7 +273,7 @@ impl<T> Default for OnceCell<T> {
 
 impl<T> Drop for OnceCell<T> {
     fn drop(&mut self) {
-        if *self.state.get_mut() == READY {
+        if self.state.load(Ordering::Relaxed) == READY {
             // SAFETY: state was READY; drop the contained value exactly
             // once.
             self.value.with_mut(|p| unsafe { (*p).assume_init_drop() });

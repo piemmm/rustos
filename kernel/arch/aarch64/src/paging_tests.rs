@@ -304,7 +304,7 @@ fn map_4k_with_attrs_uses_the_supplied_leaf_attrs() {
         .expect("map the EL0 page");
 
     // Walk to the leaf descriptor and confirm it carries the EL0 attrs.
-    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("va is mapped");
+    let leaf = host_leaf_descriptor(&POOL, space.root_phys(), va).expect("va is mapped");
     assert_eq!(phys_from_descriptor(leaf), pa);
     assert_eq!(leaf & (0b11 << 6), attrs::AP_RO_EL0);
     assert_eq!(leaf & attrs::UXN, 0);
@@ -419,11 +419,12 @@ fn sctlr_values_keep_the_unknown_reset_traps_clear() {
 fn identity_gigapages_map_device_then_normal() {
     static POOL: PageTablePool = PageTablePool::new();
     let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("two gigapages");
-    // The host walk reads the root through its identity-mapped address.
-    let root = space.root_phys() as *const u64;
-    // SAFETY: `root_phys` is the address of a live table page from the
-    // process-static pool; reading the first two entries is sound.
-    let (e0, e1) = unsafe { (*root, *root.add(1)) };
+    let root = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: a live table page from the process-static pool; reading its
+    // first two entries is sound.
+    let (e0, e1) = unsafe { ((*root)[0], (*root)[1]) };
     // Under the default mask GiB 0 is Device, GiB 1 is Normal; both are
     // valid blocks.
     assert!(is_block(e0));
@@ -492,10 +493,12 @@ fn configured_device_gigapages_select_the_leaf_attributes() {
     assert_eq!(device_gigapages(), mask);
 
     let space = AddressSpace::new_identity_gigapages(&POOL, 4).expect("four gigapages");
-    let root = space.root_phys() as *const u64;
-    // SAFETY: `root_phys` is the address of a live table page from the
-    // process-static pool; reading the first four entries is sound.
-    let entries = unsafe { [*root, *root.add(1), *root.add(2), *root.add(3)] };
+    let root = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: a live table page from the process-static pool; reading its
+    // first four entries is sound.
+    let entries = unsafe { [(*root)[0], (*root)[1], (*root)[2], (*root)[3]] };
     assert_eq!(entries[0] & (0b111 << 2), attrs::ATTR_IDX_DEVICE);
     assert_eq!(entries[1] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
     assert_eq!(entries[2] & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
@@ -520,11 +523,11 @@ fn map_4k_walks_and_translates() {
 
     // Manually walk the just-built hierarchy and confirm it translates
     // `va` to `pa` (the host analogue of an MMU lookup).
-    let translated = host_translate(space.root_phys(), va).expect("va is mapped");
+    let translated = host_translate(&POOL, space.root_phys(), va).expect("va is mapped");
     assert_eq!(translated, pa);
 
     // A neighbouring page in the same L3 table is absent.
-    assert!(host_translate(space.root_phys(), va + PAGE_SIZE as u64).is_none());
+    assert!(host_translate(&POOL, space.root_phys(), va + PAGE_SIZE as u64).is_none());
 }
 
 #[test]
@@ -539,27 +542,28 @@ fn map_4k_rejects_misaligned_inputs() {
 /// `root_phys`, following table descriptors and returning the output
 /// physical address of the leaf (block or page) that maps `va`, or
 /// `None` if no valid leaf is reached.
-fn host_translate(root_phys: u64, va: u64) -> Option<u64> {
-    host_leaf_descriptor(root_phys, va).map(phys_from_descriptor)
+fn host_translate(frames: &dyn PageTableFrames, root_phys: u64, va: u64) -> Option<u64> {
+    host_leaf_descriptor(frames, root_phys, va).map(phys_from_descriptor)
 }
 
 /// As [`host_translate`], but returns the full leaf *descriptor* (output
 /// address plus attributes) so a test can assert the leaf's permission
 /// bits, not just its translation.
-fn host_leaf_descriptor(root_phys: u64, va: u64) -> Option<u64> {
-    let mut table = root_phys as *const u64;
+fn host_leaf_descriptor(frames: &dyn PageTableFrames, root_phys: u64, va: u64) -> Option<u64> {
+    let mut phys = root_phys;
     for level in 1..=LEVELS {
-        let idx = table_index(va, level);
-        // SAFETY: `table` points at a live, identity-addressed table page
-        // built by `map_4k`/`new_identity_gigapages`; `idx < 512`.
-        let entry = unsafe { *table.add(idx) };
+        let table = frames.table_at(phys)?;
+        // SAFETY: `phys` names a live table page built by
+        // `map_4k`/`new_identity_gigapages` and drawn from `frames`, so
+        // the source's view of it is readable; `table_index` is < 512.
+        let entry = unsafe { &*table }[table_index(va, level)];
         if (entry & attrs::VALID) == 0 {
             return None;
         }
         if is_block(entry) || level == LEVELS {
             return Some(entry);
         }
-        table = phys_from_descriptor(entry) as *const u64;
+        phys = phys_from_descriptor(entry);
     }
     None
 }
@@ -627,8 +631,14 @@ impl PageTableFrames for RecordingFrames {
         // SAFETY: the monotonic index makes this slot exclusively ours.
         let table: &'static mut Table = unsafe { &mut *self.storage[idx].get() };
         let entries = &mut table.0;
-        let phys = phys_of(entries);
+        let phys = phys_of(entries.as_ptr() as u64);
         Some(TableFrame { phys, entries })
+    }
+
+    fn table_at(&self, phys: u64) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
+        let base = phys_of(self.storage.as_ptr() as u64);
+        let index = tairix_arch_api::frames::pool_slot_of(base, Self::CAPACITY, phys)?;
+        Some(self.storage[index].get().cast())
     }
 
     fn free_table(&self, phys: u64) {
@@ -736,7 +746,7 @@ fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
         PageFlags::READ | PageFlags::EXEC | PageFlags::USER,
     )
     .expect("user code map");
-    let code_leaf = host_leaf_descriptor(space.root_phys(), code_va).expect("mapped");
+    let code_leaf = host_leaf_descriptor(&POOL, space.root_phys(), code_va).expect("mapped");
     assert_eq!(
         code_leaf & attrs::UXN,
         0,
@@ -753,7 +763,7 @@ fn map_page_translates_neutral_user_flags_to_wx_safe_leaves() {
         PageFlags::READ | PageFlags::WRITE | PageFlags::USER,
     )
     .expect("user data map");
-    let data_leaf = host_leaf_descriptor(space.root_phys(), data_va).expect("mapped");
+    let data_leaf = host_leaf_descriptor(&POOL, space.root_phys(), data_va).expect("mapped");
     assert_ne!(data_leaf & attrs::UXN, 0, "user data must be EL0 XN");
     assert_ne!(data_leaf & attrs::PXN, 0, "user data must be EL1 XN");
 }
@@ -803,7 +813,7 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
         Ok(true)
     );
     // The clear took effect on the descriptor.
-    let leaf = host_leaf_descriptor(space.root_phys(), va).expect("mapped");
+    let leaf = host_leaf_descriptor(&POOL, space.root_phys(), va).expect("mapped");
     assert_eq!(leaf & attrs::AF, 0, "AF must be cleared after a probe");
 
     // Probe 2: no access since the clear (the host has no CPU to re-set
@@ -816,9 +826,9 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
 
     // Simulate a touch the way the exception path does on real hardware:
     // an Access-Flag fault sets AF back on the leaf.
-    // SAFETY: `root_phys` is the live, host-identity-addressed L1 table of
-    // this exclusively-owned space; no other reference walks it here.
-    assert!(unsafe { set_accessed_flag_in_root(space.root_phys(), va) });
+    // SAFETY: `root_phys` is the live L1 table of this exclusively-owned
+    // space, drawn from `POOL`; no other reference walks it here.
+    assert!(unsafe { set_accessed_flag_in_root(&POOL, space.root_phys(), va) });
 
     // Probe 3: the page now reads accessed again — the full clock/
     // second-chance transition, end to end.
@@ -845,14 +855,14 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
     let root = space.root_phys();
 
     // An unmapped address: nothing to set, returns false (fail closed).
-    // SAFETY: `root` is the live, host-identity-addressed L1 table of this
-    // exclusively-owned space.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va + PAGE_SIZE as u64) });
+    // SAFETY: `root` is the live L1 table of this exclusively-owned
+    // space, drawn from `POOL`.
+    assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va + PAGE_SIZE as u64) });
 
     // The leaf still carries AF (eager map), so setting is a no-op that
     // reports false — the fault was not the referenced-bit mechanism.
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va) });
+    assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va) });
 
     // Clear AF, then setting it reports true exactly once; a second call
     // finds AF already set and reports false.
@@ -861,10 +871,10 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
         Ok(true)
     );
     // SAFETY: as above.
-    assert!(unsafe { set_accessed_flag_in_root(root, va) });
+    assert!(unsafe { set_accessed_flag_in_root(&POOL, root, va) });
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va) });
-    let leaf = host_leaf_descriptor(root, va).expect("mapped");
+    assert!(!unsafe { set_accessed_flag_in_root(&POOL, root, va) });
+    let leaf = host_leaf_descriptor(&POOL, root, va).expect("mapped");
     assert_ne!(leaf & attrs::AF, 0, "AF must be set after the fault fix-up");
 }
 
@@ -923,12 +933,14 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     let shared = POOL.alloc().expect("a stand-in shared window table");
     let shared_phys = shared.as_ptr() as u64;
 
-    // SAFETY: `root_phys` names this space's live L1 table from the
+    let root_table = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: `root_table` is this space's live L1 table from the
     // process-static pool; writing its own window slot is what every root
     // constructor does once a window is reserved.
     unsafe {
-        let root = &mut *(space.root_phys() as *mut [u64; ENTRIES_PER_TABLE]);
-        root[KERNEL_WINDOW_FIRST_SLOT] = table_descriptor(shared_phys);
+        (*root_table)[KERNEL_WINDOW_FIRST_SLOT] = table_descriptor(shared_phys);
     }
 
     // SAFETY: the space is not the active translation regime (the host has
@@ -940,12 +952,63 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     // survival is proven by the walk never having named it: the window slot
     // is cleared before the descent.
     // SAFETY: as above — reading the root's own window slot.
-    let slot = unsafe {
-        (*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]))[KERNEL_WINDOW_FIRST_SLOT]
-    };
+    let slot = unsafe { (*root_table)[KERNEL_WINDOW_FIRST_SLOT] };
     assert_eq!(
         slot, 0,
         "the shared window descriptor was dropped, not walked"
+    );
+}
+
+/// A parent descriptor whose output address the frame source never handed
+/// out is what a clobbered or hostile table looks like. Every walk must
+/// read it as "nothing mapped here" rather than dereference the address
+/// the integer happens to name.
+#[test]
+fn a_descriptor_the_source_cannot_reach_fails_the_walk_closed() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va = 64u64 << 30;
+    mmu::AddressSpace::map_page(&mut space, va, 0x4123_4000, PageFlags::READ)
+        .expect("map the probe page");
+    // A page-aligned table the pool never handed out, holding a valid
+    // block at the index the walk would read next. Recovering a table by
+    // dereferencing its address — what the walk did before it asked the
+    // frame source — would read this and answer with a mapping; asking
+    // the source refuses the address outright.
+    let mut foreign = Table::new();
+    foreign.0[table_index(va, 2)] = descriptor(0x4000_0000, normal_leaf_attrs(true));
+    let foreign_phys = foreign.0.as_ptr() as u64;
+
+    // Overwrite the L1 table descriptor to point at it, valid and
+    // non-block so the walk would follow it.
+    let root_table = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: this space's live L1 table from the process-static pool,
+    // exclusively owned here.
+    unsafe {
+        (*root_table)[table_index(va, 1)] = table_descriptor(foreign_phys);
+    }
+
+    assert_eq!(mmu::AddressSpace::translate(&space, va), None);
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, va),
+        Err(MapError::NotMapped)
+    );
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Err(MapError::NotMapped)
+    );
+    // SAFETY: `root_phys` is the live L1 table of this exclusively-owned
+    // space, drawn from `POOL`.
+    assert!(!unsafe { set_accessed_flag_in_root(&POOL, space.root_phys(), va) });
+    // And a fresh map over the unreachable branch is refused rather than
+    // walked into: `leaf_present` reads it as absent, then `ensure_child`
+    // refuses the descriptor it cannot recover.
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut space, va, 0x4123_4000, PageFlags::READ),
+        Err(MapError::PoolExhausted)
     );
 }
 

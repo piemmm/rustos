@@ -250,13 +250,14 @@ and then translating back to its frame; a double mapping refused; an
 unmap returning the frame and then translating to nothing; a second
 unmap failing closed), driven per-port — the suite needs a
 port-constructed address space and a port-specific mappable address pair,
-the same reason the `irq`/`timer` verticals stand apart. riscv64 and
-aarch64 run it over their real `AddressSpace` (their walk recovers tables
-through the identity map, so it is host-runnable); x86_64's walk reaches
-intermediate tables through the higher-half kernel window (phys ≠ virt),
-so it is not host-runnable and its `map_page`/`activate` are proven by the
-`memory_isolation` QEMU vertical instead — like the bare-metal `switch`,
-which never carries a host check (`AGENTS.md` §2.1 — no fake primitive).
+the same reason the `irq`/`timer` verticals stand apart. All three
+paging ports run it over their real `AddressSpace`: a walk recovers each
+level through the frame source that drew it (`PageTableFrames::table_at`,
+below), so no port carries a physical/virtual relationship of its own and
+x86_64's higher-half pool (phys ≠ virt) is host-runnable like the others.
+Only `activate`'s root-register write stays bare-metal, proven by the
+`memory_isolation` QEMU vertical — like `switch`, which never carries a
+host check (`AGENTS.md` §2.1 — no fake primitive).
 wasm32 has no page table (each Web Worker is a sandboxed linear-memory
 instance the kernel never re-maps), so the slice is **n/a** there. The
 three `memory_isolation_qemu_*` verticals build their victim/attacker
@@ -359,11 +360,26 @@ table and every intermediate table a mapping walk allocates. The
 `PageTableFrames` slice (`kernel/arch/api::frames`) is the seam a port
 draws those frames through: `alloc_table` hands back a `TableFrame`
 carrying both the frame's physical address (for the parent PTE / root
-register) and a zeroed `'static` view of its 512 entries. A port never
-owns the storage and never computes the physical/virtual relationship
-itself; the source does. This keeps the §17.4 one-way edge intact — a
-port names only the HAL trait, never `kernel/mem` — while letting the
-caller decide where the frames come from.
+register) and a zeroed `'static` view of its 512 entries, and
+`table_at` is the inverse — the only way a port turns a parent entry's
+output address back into a table it can read or write. A port never owns
+the storage and never computes the physical/virtual relationship itself;
+the source does, at both ends. This keeps the §17.4 one-way edge intact
+— a port names only the HAL trait, never `kernel/mem` — while letting
+the caller decide where the frames come from.
+
+Routing the *recovery* through the seam is what lets a source place its
+frames wherever its own map puts them, and it makes the walk fail
+closed: `table_at` answers `None` for an address the source never handed
+out, so a corrupt or hostile descriptor's arbitrary output address ends
+the walk with `MapError::NotMapped` / `translate` → `None` instead of
+being dereferenced. A `PageTablePool` resolves the address to the slot
+it was handed out of (via the shared `pool_slot_of` arithmetic), so the
+pointer keeps that storage's provenance rather than being rebuilt from
+an integer; `FrameTableSource` re-translates it through the same direct
+map `alloc_table` used. `reclaim_hierarchy` draws both the table view
+and the free from the source for the same reason, so no port re-derives
+either.
 
 There are two implementations of the one trait (parallel impls, not
 duplication, `AGENTS.md` §2.2 carve-out). The static `PageTablePool`
@@ -374,12 +390,13 @@ buddy `FrameAllocator`, maps it through the kernel direct map
 allocator — if the frame falls outside the direct map (`AGENTS.md`
 §2.9). `frames::conformance::run_all` proves the contract on the host
 (a fresh frame is zeroed, page-aligned, distinct from earlier frames,
-and the source eventually fails closed with `None`): riscv64 and aarch64
-run it over their real `PageTablePool` (their `phys_of` is the identity
-map, so it is host-runnable) and `kernel/mem` runs it over
-`FrameTableSource`; x86_64's pool derives `phys` by subtracting the
-higher-half base, so its pool is proven through the `memory_isolation`
-QEMU vertical instead (the same honest asymmetry the MMU slice carries).
+`table_at` recovers exactly the frame a `phys` was handed out with and
+refuses an address the source never handed out, and the source
+eventually fails closed with `None`). All three ports run it over their
+real `PageTablePool` and `kernel/mem` runs it over `FrameTableSource`;
+because `table_at` is defined as the inverse of whatever `phys`
+derivation a source keeps, x86_64's higher-half pool is host-runnable
+too.
 
 This is the `plans/WIRING.md` Stage W5b lineage: Stage W5b-1 lifted the
 bootstrap page-table primitive behind the HAL; Stage W5b-2 folded

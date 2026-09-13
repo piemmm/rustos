@@ -109,6 +109,24 @@ impl PageTableFrames for FrameTableSource {
         Some(TableFrame { phys, entries })
     }
 
+    fn table_at(&self, phys: u64) -> Option<*mut [u64; PAGE_TABLE_ENTRIES]> {
+        // The same direct map `alloc_table` minted the frame's `entries`
+        // view through, so a port's walk recovers exactly the pointer it
+        // was handed — and a `phys` outside the map (a corrupt or foreign
+        // descriptor) answers `None` rather than a fabricated pointer.
+        // A page-aligned physical address maps to a page-aligned (hence
+        // table-aligned) direct-map pointer; a misaligned one names no
+        // table at all.
+        if !phys.is_multiple_of(PAGE_SIZE as u64) {
+            return None;
+        }
+        let ptr = self.phys.translate(PhysAddr::new(phys), PAGE_SIZE)?;
+        // The page alignment checked above makes the `u8`→`[u64; 512]`
+        // widening the `cast_ptr_alignment` lint flags sound.
+        #[allow(clippy::cast_ptr_alignment)]
+        Some(ptr.as_ptr().cast::<[u64; PAGE_TABLE_ENTRIES]>())
+    }
+
     fn free_table(&self, phys: u64) {
         // The teardown half: a dead process's table frame returns to the
         // kernel allocator for reuse, so its page tables stop leaking RAM.

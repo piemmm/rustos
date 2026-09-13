@@ -6,7 +6,7 @@
 //! duration to stay deterministic.
 
 use super::*;
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Serialises tests that mutate the shared dispatch-callback slot.
@@ -42,10 +42,14 @@ fn callback_round_trips() {
     let _guard = STATE_LOCK.lock().expect("lock");
     clear_dispatch_for_tests();
     assert!(dispatch_callback().is_none());
-    set_dispatch_callback(recording_dispatch);
+    // Coerce once: the slot is compared against *this* pointer value,
+    // because two coercions of one `fn` item are not guaranteed to share
+    // an address.
+    let cb: SyscallDispatchFn = recording_dispatch;
+    set_dispatch_callback(cb);
     assert_eq!(
-        dispatch_callback().map(|f| f as *const () as usize),
-        Some(recording_dispatch as *const () as usize)
+        dispatch_callback().map(|f| f as *const ()),
+        Some(cb as *const ())
     );
     clear_dispatch_for_tests();
 }

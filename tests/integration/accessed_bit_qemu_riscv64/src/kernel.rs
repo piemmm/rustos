@@ -150,6 +150,10 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     // so the `satp` switch does not move the ground under the running code.
     // Boot hart.
     unsafe { space.switch() };
+    // The A/D fault fix-up walks the active root with no `AddressSpace` in
+    // hand, so it draws its tables from the published source. This pool is
+    // the only one this image has.
+    tairix_arch_api::frames::publish_active_frames(&PAGE_TABLE_POOL);
 
     // Install the trap vector so the software A/D page fault is dispatched
     // (and resolved) by the production trap path, and install the

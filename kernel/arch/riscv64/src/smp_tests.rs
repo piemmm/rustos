@@ -53,10 +53,14 @@ fn hartid_validity_tracks_the_registered_pool() {
 fn secondary_entry_round_trips_and_is_set_once() {
     clear_secondary_entry_for_tests();
     assert_eq!(secondary_entry_addr(), 0);
-    set_secondary_entry(host_entry).expect("first install");
-    assert_eq!(secondary_entry_addr(), host_entry as *const () as usize);
+    // Coerce once: the published address is compared against *this*
+    // pointer value, because two coercions of one `fn` item are not
+    // guaranteed to share an address.
+    let entry: extern "C" fn(CpuId) -> ! = host_entry;
+    set_secondary_entry(entry).expect("first install");
+    assert_eq!(secondary_entry_addr(), entry as *const () as usize);
     assert_eq!(
-        set_secondary_entry(host_entry),
+        set_secondary_entry(entry),
         Err(SetEntryError::AlreadyInstalled)
     );
     clear_secondary_entry_for_tests();

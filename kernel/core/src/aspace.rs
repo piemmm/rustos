@@ -562,6 +562,36 @@ pub struct DelegatedFile {
     pub write_ceiling: u64,
 }
 
+/// A filesystem object a parent wired into a child at spawn, operated on
+/// under the **parent's** captured identity rather than the child's.
+///
+/// A wire is the parent naming one of its own open descriptors and one child
+/// it is itself creating, so the descriptor carries the reach it was opened
+/// with — the same reason [`DelegatedFile`] captures its grantor's. It confers
+/// nothing the parent could not confer anyway: a parent that can wire a pipe
+/// can already pump the file's bytes down it, and the child holds no
+/// filesystem capability with which to re-open the path it cannot even read.
+///
+/// Unlike a delegation it carries **no extent ceiling**. A delegation's bound
+/// exists so a service can hand an untrusted caller direct access to a file it
+/// owns without also handing it the ability to fill the volume; a parent and
+/// its own child are not that pairing, and the parent could fill the volume
+/// itself. The bound is therefore the parent's own limits, and a ceiling
+/// `spawn` has no parameter for would be invented rather than enforced.
+///
+/// Never re-delegatable: `fd_grant` accepts only [`OpenBacking::Path`], so a
+/// wired descriptor cannot be granted onward and captured authority never
+/// widens.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InheritedFile {
+    /// The absolute path the parent's descriptor named.
+    pub path: String,
+    /// The parent's uid, the identity every VFS re-check runs under.
+    pub uid: u32,
+    /// The parent's effective capability set at spawn time.
+    pub caps: CapabilitySet,
+}
+
 /// What a descriptor resolves to: a filesystem path or a typed resource.
 ///
 /// A descriptor's number is unique per process regardless of what backs it,
@@ -594,6 +624,11 @@ pub enum OpenBacking {
     /// `fd_grant` accepts only [`OpenBacking::Path`], so a delegation
     /// chain cannot form and delegated authority never widens.
     Delegated(DelegatedFile),
+    /// A filesystem object a spawning parent wired into this task's standard
+    /// slots (`plans/SPAWN.md`), operated on under the **parent's** captured
+    /// identity rather than this task's — so a child holding no filesystem
+    /// capability reads the document it was handed. See [`InheritedFile`].
+    Inherited(InheritedFile),
     /// The master end of a kernel pseudo-terminal (`plans/PTY.md`): the
     /// terminal emulator's handle. A read drains the slave's cooked output;
     /// a write feeds the input discipline. Cloning the entry registers one
@@ -759,11 +794,12 @@ impl OpenFile {
     /// The absolute filesystem path this descriptor resolves to **under the
     /// holder's own credentials**, or `None` when it has none.
     ///
-    /// A delegated backing answers `None`: it names a path, but that path is
-    /// operated on under the grantor's captured identity, so an operation
-    /// that would run it under the holder's own must not see it. An
-    /// operation that handles both reaches for the authority rather than the
-    /// path, and the name says which of the two this is.
+    /// A delegated or spawn-inherited backing answers `None`: it names a
+    /// path, but that path is operated on under a captured identity — the
+    /// grantor's or the spawning parent's — so an operation that would run it
+    /// under the holder's own must not see it. An operation that handles both
+    /// reaches for the authority rather than the path, and the name says
+    /// which of the two this is.
     #[must_use]
     pub fn own_path(&self) -> Option<&str> {
         match &self.backing {
@@ -771,6 +807,7 @@ impl OpenFile {
             OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
             | OpenBacking::Delegated(_)
+            | OpenBacking::Inherited(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
@@ -785,6 +822,7 @@ impl OpenFile {
             OpenBacking::Path(_)
             | OpenBacking::Pipe(_)
             | OpenBacking::Delegated(_)
+            | OpenBacking::Inherited(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }

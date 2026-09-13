@@ -25,14 +25,14 @@
 //! observer (early boot) simply records nothing (fail-safe).
 
 use core::panic::Location;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Installed resolver for the running CPU's dense id (a `fn() -> Option<u32>`
-/// stored as a `usize`, `0` = none). One seam, read both by the spinlocks
-/// (to stamp a lock's owner) and by the kernel's observer (to pick the
-/// per-CPU slot to record into), so the two can never disagree about which
-/// core they are on.
-static CPU_ID: AtomicUsize = AtomicUsize::new(0);
+use crate::fnptr::FnCell;
+
+/// Installed resolver for the running CPU's dense id. One seam, read both by
+/// the spinlocks (to stamp a lock's owner) and by the kernel's observer (to
+/// pick the per-CPU slot to record into), so the two can never disagree about
+/// which core they are on.
+static CPU_ID: FnCell<CpuIdFn> = FnCell::empty();
 
 /// Resolver for the running CPU's dense id. Must be lock-free (it runs
 /// inside the lock primitives) — a banked-register read, never a lookup
@@ -41,22 +41,14 @@ pub type CpuIdFn = fn() -> Option<u32>;
 
 /// Install the running-CPU-id resolver. Idempotent; the last writer wins.
 pub fn install_cpu_id(resolver: CpuIdFn) {
-    CPU_ID.store(resolver as usize, Ordering::Relaxed);
+    CPU_ID.install(resolver);
 }
 
 /// The running CPU's dense id, or [`None`] before a resolver is installed.
 #[inline]
 #[must_use]
 pub fn current_cpu() -> Option<u32> {
-    let raw = CPU_ID.load(Ordering::Relaxed);
-    if raw == 0 {
-        return None;
-    }
-    // SAFETY: `install_cpu_id` only ever stores a value produced by
-    // `CpuIdFn as usize`; a non-zero slot is therefore a valid such `fn`
-    // with no captured environment.
-    let f: CpuIdFn = unsafe { core::mem::transmute::<usize, CpuIdFn>(raw) };
-    f()
+    CPU_ID.load().and_then(|resolve| resolve())
 }
 
 /// An owner stamp: `0` means unowned, otherwise the owning CPU's dense id
@@ -98,35 +90,30 @@ pub enum LockEvent {
 /// The observer the kernel installs to record lock lifecycle events into
 /// its per-CPU lockup-diagnostic state.
 ///
-/// `site_ptr` is the acquiring call's `&'static Location<'static>` reduced
-/// to a `usize` (`0` for [`LockEvent::Released`], which carries no site).
-/// The kernel observer reconstructs the reference to read `file`/`line`.
+/// `site` is the acquiring call's location, or [`None`] for
+/// [`LockEvent::Released`], which carries none. Passed as the reference
+/// itself rather than as an address: an integer round trip strips the
+/// pointer's provenance, so the observer could not soundly read `file`/`line`
+/// back out of one.
 ///
 /// `aux` is the contended lock's owner stamp for [`LockEvent::Contended`]
 /// and `0` for every other event.
-pub type ObserverFn = fn(event: LockEvent, site_ptr: usize, aux: u32);
+pub type ObserverFn = fn(event: LockEvent, site: Option<&'static Location<'static>>, aux: u32);
 
-/// The installed observer, as a thin `fn` pointer stored as a `usize`
-/// (`0` = none). Relaxed access is sufficient: this is a best-effort
-/// diagnostic channel, not a synchronising handshake.
-static OBSERVER: AtomicUsize = AtomicUsize::new(0);
+/// The installed observer. A best-effort diagnostic channel, not a
+/// synchronising handshake.
+static OBSERVER: FnCell<ObserverFn> = FnCell::empty();
 
 /// Install the lock-lifecycle observer. Idempotent; the last writer wins.
 pub fn install(observer: ObserverFn) {
-    OBSERVER.store(observer as usize, Ordering::Relaxed);
+    OBSERVER.install(observer);
 }
 
 /// Forward one event to the installed observer, if any.
 #[inline]
-fn dispatch(event: LockEvent, site_ptr: usize, aux: u32) {
-    let raw = OBSERVER.load(Ordering::Relaxed);
-    if raw != 0 {
-        // SAFETY: `install` only ever stores a value produced by
-        // `ObserverFn as usize`; a non-zero slot is therefore a valid
-        // `ObserverFn`, which is a plain `fn` with no captured environment
-        // and `'static` validity.
-        let f: ObserverFn = unsafe { core::mem::transmute::<usize, ObserverFn>(raw) };
-        f(event, site_ptr, aux);
+fn dispatch(event: LockEvent, site: Option<&'static Location<'static>>, aux: u32) {
+    if let Some(observe) = OBSERVER.load() {
+        observe(event, site, aux);
     }
 }
 
@@ -134,23 +121,19 @@ fn dispatch(event: LockEvent, site_ptr: usize, aux: u32) {
 /// of the acquiring call).
 #[inline]
 pub fn note(event: LockEvent, site: &'static Location<'static>) {
-    dispatch(event, core::ptr::from_ref(site) as usize, 0);
+    dispatch(event, Some(site), 0);
 }
 
 /// Report that the spin for `site` is still contended, and by whom.
 #[inline]
 pub fn note_contended(site: &'static Location<'static>, owner: u32) {
-    dispatch(
-        LockEvent::Contended,
-        core::ptr::from_ref(site) as usize,
-        owner,
-    );
+    dispatch(LockEvent::Contended, Some(site), owner);
 }
 
 /// Report the release (drop) of the CPU's current lock.
 #[inline]
 pub fn note_release() {
-    dispatch(LockEvent::Released, 0, 0);
+    dispatch(LockEvent::Released, None, 0);
 }
 
 #[cfg(test)]
@@ -172,8 +155,8 @@ mod tests {
     /// installs its observer (early boot) is safe.
     #[test]
     fn note_without_an_observer_is_a_safe_no_op() {
-        // No `install(..)`, so `OBSERVER` is the `0` sentinel.
-        assert_eq!(OBSERVER.load(Ordering::Relaxed), 0);
+        // No `install(..)`, so the slot is empty.
+        assert!(!OBSERVER.is_installed());
         let here = Location::caller();
         note(LockEvent::Acquiring, here);
         note(LockEvent::Acquired, here);
@@ -181,7 +164,7 @@ mod tests {
         note_release();
         // Reaching here without a panic or a call through the null slot is
         // the guarantee; the slot is untouched.
-        assert_eq!(OBSERVER.load(Ordering::Relaxed), 0);
+        assert!(!OBSERVER.is_installed());
     }
 
     /// The event discriminants are the stable wire the kernel observer

@@ -25,6 +25,7 @@ use tairix_arch_api::sidechannel::{Mitigation, MitigationProfile, SideChannelMit
 use tairix_arch_api::timer::{self, TickFn, Timer};
 use tairix_arch_api::{CoreType, CpuFeatureSet};
 use tairix_arch_api::{CpuId, PerCpu, SchedulerArch};
+use tairix_sync::FnCell;
 
 #[derive(Default)]
 struct DoubleArch {
@@ -138,22 +139,15 @@ fn per_cpu_isolation_vertical_runs_over_two_handles() {
 
 #[derive(Default)]
 struct DoubleTimer {
-    callback: AtomicUsize,
+    callback: FnCell<TickFn>,
 }
 
 impl Timer for DoubleTimer {
     fn set_tick_callback(&self, callback: TickFn) {
-        self.callback.store(callback as usize, Ordering::Relaxed);
+        self.callback.install(callback);
     }
     fn tick_callback(&self) -> Option<TickFn> {
-        let raw = self.callback.load(Ordering::Relaxed);
-        if raw == 0 {
-            None
-        } else {
-            // SAFETY: every store is the round-trip of a valid `TickFn`
-            // pointer through `set_tick_callback`.
-            Some(unsafe { core::mem::transmute::<usize, TickFn>(raw) })
-        }
+        self.callback.load()
     }
     fn dispatch_tick(&self, cpu: CpuId) -> bool {
         match self.tick_callback() {

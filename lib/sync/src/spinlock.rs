@@ -43,11 +43,12 @@
 //! [`Release`]: core::sync::atomic::Ordering::Release
 
 use core::fmt;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 use crate::irq::{InterruptControl, NopInterruptControl};
 use crate::loom_compat::{AtomicBool, Ordering, SyncUnsafeCell};
-use crate::spinwait::spin_wait;
+use crate::spinwait::spin_until;
 
 /// A test-and-test-and-set spinlock.
 ///
@@ -127,7 +128,10 @@ impl<T: ?Sized> SpinLock<T> {
             #[cfg(feature = "lock-diagnostics")]
             self.owner
                 .store(crate::lockwatch::owner_stamp(), Ordering::Relaxed);
-            Some(SpinLockGuard { lock: self })
+            Some(SpinLockGuard {
+                lock: self,
+                _cpu_bound: PhantomData,
+            })
         } else {
             None
         }
@@ -170,12 +174,10 @@ impl<T: ?Sized> SpinLock<T> {
             // names whoever is actually holding the lock against it.
             #[cfg(feature = "lock-diagnostics")]
             crate::lockwatch::note_contended(site, self.owner.load(Ordering::Relaxed));
-            // Test-and-test-and-set: spin reading until the lock looks
-            // free, then retry the CAS. This avoids hammering the cache
-            // line with RMW operations.
-            while self.locked.load(Ordering::Relaxed) {
-                spin_wait();
-            }
+            // Test-and-test-and-set: spin reading until the lock looks free,
+            // then retry the CAS. This avoids hammering the cache line with
+            // RMW operations.
+            spin_until(|| !self.locked.load(Ordering::Relaxed));
         }
     }
 
@@ -221,7 +223,17 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for SpinLock<T> {
 #[must_use = "if unused the lock is immediately released"]
 pub struct SpinLockGuard<'a, T: ?Sized> {
     lock: &'a SpinLock<T>,
+    /// Pins the guard to the CPU that acquired the lock. Releasing it on
+    /// another core would unlock from a core that never acquired, and under
+    /// lock diagnostics would pop a per-CPU record it never pushed; a raw
+    /// pointer is how a type opts out of the `Send` the borrow alone grants.
+    _cpu_bound: PhantomData<*const ()>,
 }
+
+// SAFETY: a shared `&SpinLockGuard` hands out `&T` through `Deref`, so several
+// threads can reach the value at once and `T: Sync` is the whole requirement.
+// `Send` deliberately stays blocked by the marker field above.
+unsafe impl<T: ?Sized + Sync> Sync for SpinLockGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for SpinLockGuard<'_, T> {
     type Target = T;
@@ -276,7 +288,7 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for SpinLockGuard<'_, T> {
 /// See the [module docs](self) for use cases, ordering, and IRQ guarantees.
 pub struct IrqSafeSpinLock<T, I: InterruptControl = NopInterruptControl> {
     inner: SpinLock<T>,
-    _irq: core::marker::PhantomData<fn() -> I>,
+    _irq: PhantomData<fn() -> I>,
 }
 
 // SAFETY: Same reasoning as `SpinLock<T>`; `I` is zero-sized phantom.
@@ -291,7 +303,7 @@ impl<T, I: InterruptControl> IrqSafeSpinLock<T, I> {
     pub const fn new(value: T) -> Self {
         Self {
             inner: SpinLock::new(value),
-            _irq: core::marker::PhantomData,
+            _irq: PhantomData,
         }
     }
 
@@ -301,7 +313,7 @@ impl<T, I: InterruptControl> IrqSafeSpinLock<T, I> {
     pub fn new(value: T) -> Self {
         Self {
             inner: SpinLock::new(value),
-            _irq: core::marker::PhantomData,
+            _irq: PhantomData,
         }
     }
 
@@ -373,6 +385,15 @@ pub struct IrqSafeSpinLockGuard<'a, T, I: InterruptControl> {
     inner: core::mem::ManuallyDrop<SpinLockGuard<'a, T>>,
     state: core::mem::ManuallyDrop<I::State>,
 }
+
+// SAFETY: a shared `&IrqSafeSpinLockGuard` reaches only `&T` through `Deref`
+// — the saved interrupt state is private and read solely by `Drop`, which
+// needs `&mut` — so `T: Sync` is the whole requirement. The guard stays
+// `!Send` through the inner `SpinLockGuard`, which is load-bearing here: the
+// saved state must be restored by the very CPU that masked, and a guard
+// dropped on another core would strand this one with interrupts masked
+// for ever.
+unsafe impl<T: Sync, I: InterruptControl> Sync for IrqSafeSpinLockGuard<'_, T, I> {}
 
 impl<T, I: InterruptControl> Deref for IrqSafeSpinLockGuard<'_, T, I> {
     type Target = T;

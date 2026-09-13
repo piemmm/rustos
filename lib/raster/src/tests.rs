@@ -8,7 +8,7 @@ use crate::paint::Paint;
 use crate::resample::Region;
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, MAX_DRAWING_EXTENT};
-use crate::surface::{layered_factor, Surface, LAYERED_TARGET_SIDE, SUBPIXEL};
+use crate::surface::{layered_factor, Surface, LAYERED_TARGET_SIDE, MAX_SURFACE_PIXELS, SUBPIXEL};
 
 const BLUE: Color = Color::rgb(0, 0, 255);
 const RED: Color = Color::rgb(255, 0, 0);
@@ -247,6 +247,53 @@ fn new_surface_is_transparent() {
 fn a_surface_the_allocator_refuses_is_none_not_a_panic() {
     assert_eq!(Surface::new(u32::MAX, u32::MAX), None);
     assert_eq!(Surface::filled(u32::MAX, u32::MAX, RED.premultiply()), None);
+}
+
+/// A side past the drawing bound is refused *before* the allocator is asked.
+///
+/// The square case above is refused by the layout overflow alone, which is
+/// why it never exposed this: one huge side and one ordinary one overflows
+/// nothing, so the request reached the allocator — and a host that
+/// overcommits granted it, then died writing the pages in. That is not a
+/// refusal any `Option` can carry, so the bound has to come first.
+#[test]
+fn a_side_past_the_drawing_bound_is_refused_without_asking_the_allocator() {
+    assert_eq!(Surface::new(u32::MAX, 1080), None);
+    assert_eq!(Surface::new(1080, u32::MAX), None);
+    assert_eq!(Surface::filled(u32::MAX, 1080, RED.premultiply()), None);
+    assert_eq!(Surface::new(MAX_DRAWING_EXTENT + 1, 1), None);
+    // The bound itself is admitted: a refusal one pixel early would reject
+    // artwork the vector path is documented to place exactly.
+    assert!(Surface::new(MAX_DRAWING_EXTENT, 1).is_some());
+}
+
+/// Both sides inside the drawing bound still multiply out to 4 TiB, and
+/// `try_reserve_exact` was measured granting exactly that on an
+/// overcommitting host — so only the total bound turns it into a refusal
+/// instead of a fill that touches pages until the process is killed.
+#[test]
+fn a_total_past_the_surface_bound_is_refused_without_asking_the_allocator() {
+    assert_eq!(Surface::new(MAX_DRAWING_EXTENT, MAX_DRAWING_EXTENT), None);
+    assert_eq!(Surface::new(MAX_DRAWING_EXTENT, 1 << 10), None);
+    assert_eq!(
+        Surface::filled(MAX_DRAWING_EXTENT, MAX_DRAWING_EXTENT, RED.premultiply()),
+        None
+    );
+}
+
+/// The bound is containment, not a budget: the largest full-screen buffer
+/// the desktop legitimately asks for has to pass it.
+#[test]
+fn the_surface_bound_admits_the_largest_display_target() {
+    // Both sides of the bound are constants, so the relation is a build
+    // failure rather than something a test run has to reach.
+    const EIGHT_K: usize = 7680 * 4320;
+    const _: () = assert!(EIGHT_K <= MAX_SURFACE_PIXELS, "an 8K back buffer must pass");
+    const PAST_BOUND: usize = 8193 * 8192;
+    const _: () = assert!(PAST_BOUND > MAX_SURFACE_PIXELS);
+    // The edge then sits where it is documented rather than wherever the
+    // allocator happened to give up.
+    assert_eq!(Surface::new(8193, 8192), None);
 }
 
 #[test]

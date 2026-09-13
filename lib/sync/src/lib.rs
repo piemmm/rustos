@@ -44,12 +44,16 @@
 //! - Every `unsafe` block carries a `// SAFETY:` rationale per.
 
 #![no_std]
+// `FnPtr` is what bounds `fnptr::FnCell` to real function pointers; without
+// it the cell would either take an unsafe constructor or trust its caller.
+#![feature(fn_ptr_trait)]
 // The `loom` model-checking build compiles only the interleaving harnesses,
 // so items only production reaches read as dead there.
 #![cfg_attr(loom, allow(dead_code))]
 
 mod loom_compat;
 
+pub mod fnptr;
 pub mod irq;
 #[cfg(feature = "lock-diagnostics")]
 pub mod lockwatch;
@@ -60,6 +64,7 @@ pub mod seqlock;
 pub mod spinlock;
 pub mod spinwait;
 
+pub use fnptr::FnCell;
 pub use irq::{InterruptControl, IrqState, NopInterruptControl, NopIrqState};
 pub use mcs::{McsGuard, McsLock, McsNode};
 pub use once::{AlreadySetError, InitError, Once, OnceCell, PoisonError};
@@ -263,9 +268,55 @@ mod tests {
         assert_eq!(s.read(), (0, 0));
         // SAFETY: single writer in single-threaded test.
         unsafe {
-            s.write(|v| *v = (3, 4));
+            s.write((3, 4));
         }
         assert_eq!(s.read(), (3, 4));
+    }
+
+    /// The payload is copied through whole words, so a `T` that is not a
+    /// whole number of them, or is aligned more strictly than one, is where a
+    /// word-at-a-time copy goes wrong: a dropped tail, or a `read` that
+    /// assumed word alignment it never had.
+    #[test]
+    fn seqlock_round_trips_payloads_that_do_not_match_the_word_grid() {
+        // Sub-word.
+        let byte = SeqLock::new(0u8);
+        // SAFETY: single writer in a single-threaded test (each case below).
+        unsafe { byte.write(0xA5) };
+        assert_eq!(byte.read(), 0xA5);
+
+        // Not a whole number of words, and byte-aligned, so the final word is
+        // part payload and part padding.
+        let odd = SeqLock::new([0u8; 13]);
+        let filled = [7u8; 13];
+        unsafe { odd.write(filled) };
+        assert_eq!(odd.read(), filled);
+
+        // More strictly aligned than a word on every Tier-1 target.
+        let wide = SeqLock::new(0u128);
+        unsafe { wide.write(u128::MAX - 1) };
+        assert_eq!(wide.read(), u128::MAX - 1);
+
+        // Exactly the reserved budget.
+        let full = SeqLock::new([0usize; seqlock::MAX_PAYLOAD_WORDS]);
+        let mut every = [0usize; seqlock::MAX_PAYLOAD_WORDS];
+        for (i, slot) in every.iter_mut().enumerate() {
+            *slot = usize::MAX - i;
+        }
+        unsafe { full.write(every) };
+        assert_eq!(full.read(), every);
+    }
+
+    /// A rewrite replaces the payload rather than merging with it: a shorter
+    /// value's bytes must not leave the previous one's tail behind.
+    #[test]
+    fn seqlock_rewrites_every_byte_of_the_payload() {
+        let s = SeqLock::new([0xFFu8; 9]);
+        // SAFETY: single writer in a single-threaded test.
+        unsafe { s.write([0x00u8; 9]) };
+        assert_eq!(s.read(), [0x00u8; 9]);
+        unsafe { s.write([0x11u8; 9]) };
+        assert_eq!(s.read(), [0x11u8; 9]);
     }
 
     #[test]
@@ -277,7 +328,7 @@ mod tests {
                 for i in 0u64..5_000 {
                     // SAFETY: this test is the sole writer.
                     unsafe {
-                        s.write(|v| *v = i);
+                        s.write(i);
                     }
                 }
             })
@@ -594,7 +645,7 @@ mod tests {
         let s = SeqLock::new(0u32);
         assert_eq!(s.sequence(), 0);
         // SAFETY: single writer in single-threaded test.
-        unsafe { s.write(|v| *v = 1) };
+        unsafe { s.write(1) };
         assert_eq!(s.sequence(), 2);
     }
 

@@ -233,7 +233,7 @@ fn run_resume() -> ! {
 
     // Fresh address space (the live identity window + higher-half kernel window) and
     // activate it before any user mapping is added.
-    let Some(arch_space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(arch_space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "X1 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };

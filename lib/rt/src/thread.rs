@@ -694,8 +694,12 @@ mod tests {
     fn the_payload_head_is_the_runner() {
         let _g = registry_lock();
         let cell = acquire_cell();
+        // Coerce once: the recovered runner is compared against *this*
+        // pointer value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let runner: Runner = run::<fn() -> u8, u8>;
         let payload = Box::new(Payload::<fn() -> u8, u8> {
-            run: run::<fn() -> u8, u8>,
+            run: runner,
             cell,
             body: || 7u8,
             _outcome: PhantomData,
@@ -707,10 +711,7 @@ mod tests {
         // does; comparing the function addresses proves it recovers the right
         // monomorphisation.
         let read: Runner = unsafe { core::ptr::read(base as *const Runner) };
-        assert_eq!(
-            read as *const () as usize,
-            run::<fn() -> u8, u8> as *const () as usize
-        );
+        assert_eq!(read as *const (), runner as *const ());
     }
 
     /// On the host there is no trap, so a spawn fails closed — and it must

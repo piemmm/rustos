@@ -28,6 +28,7 @@ mod help_lint;
 mod image_apps;
 mod image_drivers;
 mod linkcheck;
+mod loom;
 mod miri;
 mod model_check;
 mod netpeer;
@@ -69,6 +70,7 @@ pub enum Command {
     FsSoak,
     RngSoak,
     Miri,
+    Loom,
     ModelCheck,
     SpecReview,
     CharterCite,
@@ -104,6 +106,7 @@ impl Command {
         Command::FsSoak,
         Command::RngSoak,
         Command::Miri,
+        Command::Loom,
         Command::ModelCheck,
         Command::SpecReview,
         Command::CharterCite,
@@ -137,6 +140,7 @@ impl Command {
             "proptest" => Command::Proptest,
             "fssoak" => Command::FsSoak,
             "rngsoak" => Command::RngSoak,
+            "loom" => Command::Loom,
             "miri" => Command::Miri,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
@@ -173,6 +177,7 @@ impl Command {
             Command::Proptest => "proptest",
             Command::FsSoak => "fssoak",
             Command::RngSoak => "rngsoak",
+            Command::Loom => "loom",
             Command::Miri => "miri",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
@@ -229,6 +234,9 @@ impl Command {
             Command::RngSoak => {
                 "Soak the random generators through the statistical battery for a budget."
             }
+            Command::Loom => {
+                "Model-check the sync primitives over every thread interleaving."
+            }
             Command::Miri => {
                 "Interpret the crates with a hand-written unsafe core under the UB oracle."
             }
@@ -276,6 +284,7 @@ impl Command {
             Command::Proptest => run_proptest(ctx, args),
             Command::FsSoak => run_fssoak(ctx, args),
             Command::RngSoak => run_rngsoak(ctx, args),
+            Command::Loom => loom::run(ctx, args),
             Command::Miri => miri::run(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
@@ -1165,6 +1174,12 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // interpreter says whether a raw pointer stayed in bounds. Deterministic
     // given its logged seed, and fails closed.
     miri::run(ctx, &[])?;
+    // The interleaving oracle over the synchronisation primitives. The test
+    // matrix runs whichever ordering the host scheduler picked; only the model
+    // checker covers the ones it did not. Cheap — the models are seconds — and
+    // it is here because the harness had rotted into not compiling while
+    // nothing ran it.
+    loom::run(ctx, &[])?;
     // re-run `lib/crypto`'s unit tests under release optimisation
     // (`[profile.release]` is `opt-level = 3`). The constant-time
     // comparison guarantee can be broken by the optimiser, so the charter

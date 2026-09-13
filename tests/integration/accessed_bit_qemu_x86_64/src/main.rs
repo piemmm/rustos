@@ -48,13 +48,13 @@ use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlag
 use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
 
 /// Virtual address the test maps its single 4 KiB probe page at: the first
-/// byte past the live identity window, so the mapping is a fresh 4 KiB leaf
-/// (its own PDPT/PD/PT) and never lands inside one of the window's huge
-/// blocks. Derived from the port's published window rather than picked, so a
-/// window widened to cover more RAM cannot swallow it.
+/// byte past the boot trampoline's identity window, so the mapping is a
+/// fresh 4 KiB leaf (its own PDPT/PD/PT) and never lands inside one of the
+/// window's huge blocks. Derived from the port's published extent rather
+/// than picked.
 #[cfg(itest_x86_64)]
 fn test_vaddr() -> u64 {
-    paging::configured_identity_bytes()
+    (paging::BOOT_IDENTITY_GIB as u64) << 30
 }
 
 /// A misaligned address, to confirm the fail-closed reject.
@@ -127,7 +127,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
             .write_volatile(PROBE_BYTE);
     }
 
-    let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         fail(&mut com1, "page-table pool exhausted building space");
     };
 

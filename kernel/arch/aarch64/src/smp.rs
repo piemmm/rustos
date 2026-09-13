@@ -74,6 +74,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tairix_arch_api::{CpuId, PerCpu};
 
 use crate::percpu_hal::PerCpuStorage;
+use tairix_sync::FnCell;
 
 /// Per-secondary-core kernel stack size, in bytes (64 KiB).
 ///
@@ -277,10 +278,9 @@ fn reset_secondary_stacks_for_tests() {
     SECONDARY_STACK_STRIDE.store(0, Ordering::Release);
 }
 
-/// The secondary-core entry the trampoline runs, packed into a `usize`
-/// (the size of a `fn` pointer) so the trampoline reads it without a
-/// lock. `0` until [`set_secondary_entry`] installs it.
-static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
+/// The secondary-core entry the trampoline runs, read without a lock.
+/// Empty until [`set_secondary_entry`] installs it.
+static SECONDARY_ENTRY_FN: FnCell<extern "C" fn(CpuId) -> !> = FnCell::empty();
 
 /// Base address of the published dense-id → `MPIDR_EL1`-affinity table
 /// (`0` until [`register_secondary_affinities`] publishes it). Read by
@@ -481,16 +481,15 @@ impl StartCpuError {
 ///
 /// [`SetEntryError::AlreadyInstalled`] on the second publish.
 pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEntryError> {
-    let raw = entry as usize;
-    SECONDARY_ENTRY_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map_err(|_| SetEntryError::AlreadyInstalled)?;
+    if !SECONDARY_ENTRY_FN.claim(entry) {
+        return Err(SetEntryError::AlreadyInstalled);
+    }
     // The freshly-started core reads this slot before it enables its
     // MMU/cache; push the cacheable write to the point of coherency so
     // the MMU-off read observes it (vacuous on the host).
     crate::paging::clean_invalidate_range_to_poc(
         core::ptr::addr_of!(SECONDARY_ENTRY_FN) as u64,
-        core::mem::size_of::<AtomicUsize>() as u64,
+        core::mem::size_of_val(&SECONDARY_ENTRY_FN) as u64,
     );
     Ok(())
 }
@@ -499,12 +498,12 @@ pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEn
 /// Test/diagnostic observer.
 #[must_use]
 pub fn secondary_entry_addr() -> usize {
-    SECONDARY_ENTRY_FN.load(Ordering::Acquire)
+    SECONDARY_ENTRY_FN.addr() as usize
 }
 
 #[cfg(test)]
 fn clear_secondary_entry_for_tests() {
-    SECONDARY_ENTRY_FN.store(0, Ordering::Release);
+    SECONDARY_ENTRY_FN.clear();
 }
 
 /// Mask isolating the affinity fields (`Aff0`–`Aff2`) of `MPIDR_EL1`.
@@ -737,14 +736,7 @@ fn spintable_trampoline_addr() -> usize {
 #[no_mangle]
 extern "C" fn tairix_arch_aarch64_secondary_main(cpu: CpuId) -> ! {
     install_current_cpu_index(cpu);
-    let raw = SECONDARY_ENTRY_FN.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: every store into the slot round-trips a valid
-        // `extern "C" fn(CpuId) -> !` pointer through
-        // `set_secondary_entry`; the callback is a `fn` with no captured
-        // environment, safe to invoke on this core.
-        let entry: extern "C" fn(CpuId) -> ! =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId) -> !>(raw) };
+    if let Some(entry) = SECONDARY_ENTRY_FN.load() {
         entry(cpu);
     }
     crate::kernel_arch::halt_current_cpu()

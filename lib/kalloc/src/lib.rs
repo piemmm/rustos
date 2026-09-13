@@ -108,10 +108,10 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_abi::PAGE_SIZE;
 use tairix_sync::irq::{InterruptControl, IrqState};
+use tairix_sync::FnCell;
 use tairix_sync::IrqSafeSpinLock;
 
 /// Bytes of the bootstrap heap arena a freestanding bin reserves in `.bss`.
@@ -726,15 +726,14 @@ unsafe impl Sync for FreeListAllocator {}
 // blocks, so moving it between threads aliases nothing.
 unsafe impl Send for FreeListAllocator {}
 
-/// Installed per-CPU interrupt-mask hook (a `fn() -> usize` stored as a
-/// `usize`, `0` = none), read *outside* the lock to make every allocator's
-/// critical section interrupt-safe. See [`install_irq_control`].
-static IRQ_DISABLE: AtomicUsize = AtomicUsize::new(0);
+/// Installed per-CPU interrupt-mask hook, read *outside* the lock to make
+/// every allocator's critical section interrupt-safe. See
+/// [`install_irq_control`].
+static IRQ_DISABLE: FnCell<fn() -> usize> = FnCell::empty();
 
-/// Installed per-CPU interrupt-restore hook (a `fn(usize)` stored as a
-/// `usize`, `0` = none), paired with [`IRQ_DISABLE`] and doubling as the
-/// set-once claim [`install_irq_control`] competes for.
-static IRQ_RESTORE: AtomicUsize = AtomicUsize::new(0);
+/// Installed per-CPU interrupt-restore hook, paired with [`IRQ_DISABLE`]
+/// and doubling as the set-once claim [`install_irq_control`] competes for.
+static IRQ_RESTORE: FnCell<fn(usize)> = FnCell::empty();
 
 /// Install the per-CPU interrupt mask/restore hooks that make every
 /// [`FreeListAllocator`] lock in this binary **interrupt-safe**, foreclosing
@@ -764,13 +763,10 @@ pub fn install_irq_control(disable: fn() -> usize, restore: fn(usize)) {
     // Claim the pair by publishing `restore`; only the caller that wins the
     // claim goes on to publish `disable`, whose Release makes the matching
     // `restore` visible to the Acquire load in `with_inner`.
-    if IRQ_RESTORE
-        .compare_exchange(0, restore as usize, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
+    if !IRQ_RESTORE.claim(restore) {
         return;
     }
-    IRQ_DISABLE.store(disable as usize, Ordering::Release);
+    IRQ_DISABLE.install(disable);
 }
 
 /// Interrupt state saved by the installed [`install_irq_control`] hook, or
@@ -799,13 +795,9 @@ unsafe impl InterruptControl for InstalledIrqControl {
     type State = SavedIrqState;
 
     fn disable() -> Self::State {
-        let raw = IRQ_DISABLE.load(Ordering::Acquire);
-        if raw == 0 {
+        let Some(disable) = IRQ_DISABLE.load() else {
             return SavedIrqState(None);
-        }
-        // SAFETY: a non-zero slot only ever holds a `fn() -> usize` pointer
-        // round-tripped through `install_irq_control`.
-        let disable = unsafe { core::mem::transmute::<usize, fn() -> usize>(raw) };
+        };
         SavedIrqState(Some(disable()))
     }
 
@@ -813,15 +805,11 @@ unsafe impl InterruptControl for InstalledIrqControl {
         let Some(token) = state.0 else {
             return;
         };
-        let raw = IRQ_RESTORE.load(Ordering::Relaxed);
-        if raw == 0 {
-            return;
+        // `restore` is published before `disable`, so a `token` from the
+        // installed `disable` always finds its pair here.
+        if let Some(restore) = IRQ_RESTORE.load() {
+            restore(token);
         }
-        // SAFETY: `token` came from the installed `disable`, whose paired
-        // `restore` (published before it with Release/Acquire) is visible
-        // here; it is this CPU's saved state, restored exactly once.
-        let restore = unsafe { core::mem::transmute::<usize, fn(usize)>(raw) };
-        restore(token);
     }
 }
 

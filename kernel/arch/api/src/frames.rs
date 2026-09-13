@@ -24,6 +24,8 @@
 //! deliberate shape of modularity, never collapsed behind a
 //! `cfg` (carve-out).
 
+use tairix_sync::Once;
+
 /// Number of `u64` entries in one 4 KiB page table.
 ///
 /// Every architecture TAIRiX targets uses a 512-entry (`4096 / 8`)
@@ -46,9 +48,9 @@ pub const PAGE_TABLE_ENTRIES: usize = 512;
 ///
 /// The two name the *same* physical frame: `entries` is the source's
 /// direct-map view of `phys`. A port stores `phys` in the parent entry
-/// and recovers the table on a later walk through its own translation
-/// regime (the identity / higher-half map the port already relies on),
-/// exactly as it did with the static pool.
+/// and recovers the table on a later walk by asking the source for it
+/// again ([`PageTableFrames::table_at`]), so the physical/virtual
+/// relationship stays the source's alone.
 pub struct TableFrame {
     /// Physical address of the frame (a multiple of 4 KiB).
     pub phys: u64,
@@ -86,6 +88,28 @@ pub trait PageTableFrames: Sync {
     /// a table without clearing it first.
     fn alloc_table(&self) -> Option<TableFrame>;
 
+    /// Recover the CPU-dereferenceable view of the table frame at
+    /// physical address `phys`, or [`None`] when this source cannot
+    /// reach it.
+    ///
+    /// The inverse of the `phys`/`entries` pairing
+    /// [`Self::alloc_table`] hands out, and the only way a port turns a
+    /// parent entry's output address back into a table it can read or
+    /// write: a walk resolves each level through this, never by
+    /// dereferencing `phys` itself. Keeping the derivation here is what
+    /// lets a source place its frames wherever its own map puts them —
+    /// a higher-half direct map, a slot in a static pool — while the
+    /// port stays ignorant of the relationship.
+    ///
+    /// [`None`] is the fail-closed answer for a `phys` this source did
+    /// not hand out: a corrupt or hostile descriptor's arbitrary
+    /// address makes the walk report "not mapped" instead of
+    /// dereferencing whatever the integer happens to name. The returned
+    /// pointer is valid for the frame's whole 512 entries and aliases
+    /// the `entries` view of the same `alloc_table`, so a caller must
+    /// hold exclusive access before minting a `&mut` from it.
+    fn table_at(&self, phys: u64) -> Option<*mut [u64; PAGE_TABLE_ENTRIES]>;
+
     /// Return the table frame at physical address `phys` to this source.
     ///
     /// `phys` **must** be the `phys` of a [`TableFrame`] this source
@@ -106,11 +130,59 @@ pub trait PageTableFrames: Sync {
     fn free_table(&self, phys: u64);
 }
 
-/// Reclaim every table frame of a page-table hierarchy, post-order, and
-/// hand each frame's physical address to `free_table` — the one teardown
-/// walk every port's `AddressSpace` reuses instead of re-deriving its own
-/// (the descriptor predicates and the phys→entries derivation are the only
-/// genuinely per-ISA parts, so they are the closures).
+/// The frame source a walk of a CPU's **active** translation root
+/// recovers its tables through, published once by the boot wiring.
+///
+/// A fault-time walk — the software access-flag fix-up the aarch64 and
+/// riscv64 ports perform in exception context — holds no `AddressSpace`,
+/// so it cannot ask that space's own source for a table. The kernel's
+/// production source reaches every table frame in RAM through its direct
+/// map, the ports' static pools included, so one publication serves
+/// every root a CPU can be running on. Before it is published (on the
+/// host, and during boot before the frame allocator exists) such a walk
+/// has no way to reach a table and fails closed.
+static ACTIVE_FRAMES: Once<&'static dyn PageTableFrames> = Once::new();
+
+/// Publish the source free-standing walks of the active root draw their
+/// tables from. The first publication wins; a later one changes nothing.
+pub fn publish_active_frames(frames: &'static dyn PageTableFrames) {
+    let _ = ACTIVE_FRAMES.call_once_infallible(|| frames);
+}
+
+/// The published [`publish_active_frames`] source, or [`None`] while none
+/// has been published.
+#[must_use]
+pub fn active_frames() -> Option<&'static dyn PageTableFrames> {
+    ACTIVE_FRAMES.get().ok().flatten().copied()
+}
+
+/// Index of the slot a static table pool handed `phys` out of, given the
+/// physical address of the pool's first slot and its capacity — the one
+/// derivation every port's `PageTablePool` shares, so none re-derives it.
+///
+/// A pool's slots are contiguous, naturally-aligned 4 KiB tables, so the
+/// index is the byte offset divided by the table size. Resolving `phys`
+/// to an *index* rather than to a pointer is what lets a pool answer
+/// [`PageTableFrames::table_at`] from the slot itself: a pointer rebuilt
+/// from the integer would carry no provenance for the storage it names.
+/// [`None`] for a `phys` below the pool, misaligned to a slot boundary,
+/// or past its capacity — a foreign address names no slot, so the walk
+/// asking for it fails closed.
+#[must_use]
+pub fn pool_slot_of(base_phys: u64, capacity: usize, phys: u64) -> Option<usize> {
+    const STRIDE: u64 = core::mem::size_of::<[u64; PAGE_TABLE_ENTRIES]>() as u64;
+    let offset = phys.checked_sub(base_phys)?;
+    if offset % STRIDE != 0 {
+        return None;
+    }
+    let index = usize::try_from(offset / STRIDE).ok()?;
+    (index < capacity).then_some(index)
+}
+
+/// Reclaim every table frame of a page-table hierarchy, post-order,
+/// returning each to `frames` — the one teardown walk every port's
+/// `AddressSpace` reuses instead of re-deriving its own (the descriptor
+/// predicate is the only genuinely per-ISA part, so it is the closure).
 ///
 /// The walk starts at the table at `root_phys` (depth `0`) and descends
 /// through every entry `child_of` classifies as a pointer to a child
@@ -118,17 +190,19 @@ pub trait PageTableFrames: Sync {
 /// is released while a live descriptor still points at it. Block/leaf
 /// descriptors are never descended into or freed — only *table* frames
 /// are reclaimed; leaf frames (user RAM, MMIO) belong to their own
-/// owners.
+/// owners. A `phys` `frames` cannot reach ([`PageTableFrames::table_at`]
+/// answering [`None`]) is neither descended into *nor freed*: a source
+/// that never handed the address out cannot own the frame, so freeing it
+/// would hand an unrelated frame back to the allocator on the strength of
+/// a corrupt descriptor. The walk continues past it; at worst a table
+/// whose parent entry was clobbered leaks, which is the safe side of that
+/// trade.
 ///
 /// * `child_of(entry, depth)` — `Some(child_phys)` when `entry`, read
 ///   from a table at `depth`, is a valid pointer to a child table;
 ///   `None` for invalid entries and block/page leaves. Returning `None`
 ///   at the deepest level is the caller's responsibility (a leaf-level
 ///   descriptor must never classify as a table).
-/// * `entries_of(phys)` — the CPU-dereferenceable view of the table at
-///   `phys`, exactly the derivation the port's own mapping walk uses.
-/// * `free_table(phys)` — invoked exactly once per table frame,
-///   post-order, the root included.
 ///
 /// Recursion depth is bounded by the architecture's table depth (at most
 /// four levels on every TAIRiX target).
@@ -137,22 +211,15 @@ pub trait PageTableFrames: Sync {
 ///
 /// The caller must guarantee, exactly as its own mapping walk does, that
 /// every `phys` reachable through `child_of` (including `root_phys`)
-/// names a live table frame of *this* hierarchy whose entries
-/// `entries_of` can dereference, that the hierarchy is not the active
-/// translation of any CPU, and that no other reference to those tables
-/// is live during the walk.
-pub unsafe fn reclaim_hierarchy<C, E, F>(
-    root_phys: u64,
-    child_of: &C,
-    entries_of: &E,
-    free_table: &mut F,
-) where
+/// names a live table frame of *this* hierarchy, that the hierarchy is
+/// not the active translation of any CPU, and that no other reference to
+/// those tables is live during the walk.
+pub unsafe fn reclaim_hierarchy<C>(root_phys: u64, frames: &dyn PageTableFrames, child_of: &C)
+where
     C: Fn(u64, usize) -> Option<u64>,
-    E: Fn(u64) -> *const [u64; PAGE_TABLE_ENTRIES],
-    F: FnMut(u64),
 {
     // SAFETY: forwarded caller contract (see above).
-    unsafe { reclaim_at(root_phys, 0, child_of, entries_of, free_table) }
+    unsafe { reclaim_at(root_phys, 0, frames, child_of) }
 }
 
 /// Recursive post-order step of [`reclaim_hierarchy`].
@@ -161,38 +228,37 @@ pub unsafe fn reclaim_hierarchy<C, E, F>(
 ///
 /// As [`reclaim_hierarchy`]; `table_phys` names a live table of the
 /// hierarchy at `depth`.
-unsafe fn reclaim_at<C, E, F>(
-    table_phys: u64,
-    depth: usize,
-    child_of: &C,
-    entries_of: &E,
-    free_table: &mut F,
-) where
+unsafe fn reclaim_at<C>(table_phys: u64, depth: usize, frames: &dyn PageTableFrames, child_of: &C)
+where
     C: Fn(u64, usize) -> Option<u64>,
-    E: Fn(u64) -> *const [u64; PAGE_TABLE_ENTRIES],
-    F: FnMut(u64),
 {
+    // An address this source never handed out names no frame it owns, so
+    // it is left alone entirely rather than handed to `free_table`.
+    let Some(table) = frames.table_at(table_phys) else {
+        return;
+    };
     // Four levels is the deepest hierarchy any TAIRiX target walks
     // (x86_64 PML4→PT); a `child_of` that classifies a leaf-level entry
     // as a table would otherwise walk leaf frame contents as
     // descriptors, so the depth is bounded here as well (fail closed).
     if depth < 4 {
         // SAFETY: the caller guarantees `table_phys` names a live table
-        // this hierarchy owns, so `entries_of` yields a dereferenceable
-        // view no other reference aliases during the walk.
-        let entries = unsafe { &*entries_of(table_phys) };
+        // this hierarchy owns, so the source's view of it is
+        // dereferenceable and no other reference aliases it during the
+        // walk.
+        let entries = unsafe { &*table };
         for &entry in entries {
             if let Some(child_phys) = child_of(entry, depth) {
                 // SAFETY: `child_of` classified `entry` as a valid child
                 // table pointer of this hierarchy — the caller's contract
                 // extends to it.
                 unsafe {
-                    reclaim_at(child_phys, depth + 1, child_of, entries_of, free_table);
+                    reclaim_at(child_phys, depth + 1, frames, child_of);
                 }
             }
         }
     }
-    free_table(table_phys);
+    frames.free_table(table_phys);
 }
 
 /// The page-table frame-source conformance vertical.
@@ -201,16 +267,16 @@ unsafe fn reclaim_at<C, E, F>(
 /// the host against any faithful source. It proves the contract a port
 /// relies on: a fresh frame is zeroed, physically page-aligned, and
 /// distinct from earlier frames, writes through one frame do not affect
-/// another, and the source eventually fails closed with [`None`] rather
-/// than aliasing or panicking.
+/// another, [`PageTableFrames::table_at`] recovers exactly the frame a
+/// `phys` was handed out with and fails closed on an address the source
+/// never handed out, and the source eventually fails closed with
+/// [`None`] rather than aliasing or panicking.
 ///
-/// A port whose static-pool `phys` derivation is only valid on the
-/// bare-metal target (x86_64 subtracts the higher-half base) cannot run
-/// this on the host; it proves the seam end-to-end through its
-/// `memory_isolation` / spawn QEMU verticals instead, the same honest
-/// asymmetry [`crate::mmu::conformance`] already carries. Ports whose
-/// `phys` derivation is the identity map (aarch64, riscv64) run it on
-/// the host over their real `PageTablePool`.
+/// Every port runs this on the host over its real `PageTablePool`,
+/// including x86_64's, whose `phys` subtracts the higher-half base:
+/// [`PageTableFrames::table_at`] is defined as the inverse of whatever
+/// each source's `phys` derivation is, so the suite never needs to know
+/// which relationship a source keeps.
 pub mod conformance {
     use super::PageTableFrames;
 
@@ -244,6 +310,43 @@ pub mod conformance {
             second.entries.iter().all(|&e| e == 0),
             "a second fresh frame is zeroed, independent of the first"
         );
+        let second_phys = second.phys;
+
+        // `table_at` is the walk's only way back to a table, so it must
+        // name the very frame the `phys` was handed out with — the byte a
+        // parent entry's output address resolves to is the byte the child
+        // table was built in.
+        let recovered = frames
+            .table_at(first_phys)
+            .expect("a phys this source handed out is recoverable");
+        // SAFETY: `first_phys` was handed out by this source and the
+        // `entries` view of it was dropped above, so this is the only live
+        // reference to the frame.
+        assert_eq!(
+            unsafe { &*recovered }[0],
+            0xDEAD_BEEF,
+            "table_at recovers the frame the phys was handed out with"
+        );
+        let other = frames
+            .table_at(second_phys)
+            .expect("a phys this source handed out is recoverable");
+        assert!(
+            !core::ptr::eq(recovered, other),
+            "distinct frames recover to distinct tables"
+        );
+
+        // Fail closed rather than dereference an address the source never
+        // handed out: a corrupt or hostile parent entry carries an
+        // arbitrary output address, and the walk must read it as "not
+        // mapped".
+        assert!(
+            frames.table_at(first_phys | 0x8).is_none(),
+            "an address off a table boundary names no table"
+        );
+        assert!(
+            frames.table_at(u64::MAX - 0xFFF).is_none(),
+            "an address this source never handed out names no table"
+        );
 
         // Drain the rest; every frame stays page-aligned and the source
         // fails closed within `capacity` rather than aliasing forever.
@@ -268,7 +371,7 @@ pub mod conformance {
         use super::super::{PageTableFrames, TableFrame, PAGE_TABLE_ENTRIES};
         use super::run_all;
         use core::cell::UnsafeCell;
-        use core::sync::atomic::{AtomicUsize, Ordering};
+        use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
         const DOUBLE_CAPACITY: usize = 8;
 
@@ -285,12 +388,49 @@ pub mod conformance {
         struct BumpFrames {
             storage: [UnsafeCell<Table>; DOUBLE_CAPACITY],
             used: AtomicUsize,
-            freed: AtomicUsize,
+            freed: [AtomicU64; DOUBLE_CAPACITY],
+            freed_len: AtomicUsize,
         }
 
         // SAFETY: each slot is handed out exactly once via the monotonic
-        // `AtomicUsize`, so the `&'static mut` views never alias.
+        // `AtomicUsize`, so the `&'static mut` views never alias; the
+        // freed log is plain atomics.
         unsafe impl Sync for BumpFrames {}
+
+        impl BumpFrames {
+            const fn new() -> Self {
+                // The array initialisers need a `const`, and copying it per
+                // slot is the point: each element is its own cell.
+                #[allow(clippy::declare_interior_mutable_const)]
+                const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
+                #[allow(clippy::declare_interior_mutable_const)]
+                const FREED: AtomicU64 = AtomicU64::new(0);
+                // `const`, so the pool lands in the `static` it initialises
+                // rather than a runtime stack frame, despite the
+                // `large_stack_arrays` heuristic.
+                #[allow(clippy::large_stack_arrays)]
+                Self {
+                    storage: [ZERO; DOUBLE_CAPACITY],
+                    used: AtomicUsize::new(0),
+                    freed: [FREED; DOUBLE_CAPACITY],
+                    freed_len: AtomicUsize::new(0),
+                }
+            }
+
+            /// Every `phys` handed back, in the order it was returned;
+            /// slots past [`Self::freed_count`] stay zero.
+            fn freed_order(&self) -> [u64; DOUBLE_CAPACITY] {
+                let mut out = [0u64; DOUBLE_CAPACITY];
+                for (slot, out) in self.freed.iter().zip(out.iter_mut()) {
+                    *out = slot.load(Ordering::SeqCst);
+                }
+                out
+            }
+
+            fn freed_count(&self) -> usize {
+                self.freed_len.load(Ordering::SeqCst)
+            }
+        }
 
         impl PageTableFrames for BumpFrames {
             fn alloc_table(&self) -> Option<TableFrame> {
@@ -307,26 +447,32 @@ pub mod conformance {
                 Some(TableFrame { phys, entries })
             }
 
+            /// The slot the pool handed `phys` out of.
+            ///
+            /// Rebuilding the pointer from the integer instead would strip
+            /// the storage's provenance, so the offset is taken from the
+            /// storage base pointer — the same shape a port's pool uses,
+            /// and the shape a direct-map source gets for free from its
+            /// window base. A `phys` from elsewhere fails closed.
+            fn table_at(&self, phys: u64) -> Option<*mut [u64; PAGE_TABLE_ENTRIES]> {
+                let base = self.storage.as_ptr() as u64;
+                let idx = super::super::pool_slot_of(base, DOUBLE_CAPACITY, phys)?;
+                Some(self.storage[idx].get().cast())
+            }
+
             fn free_table(&self, phys: u64) {
                 // A bump pool retires a returned frame without reuse,
-                // exactly like the per-port boot pools it models; count
-                // the return so the suite can assert the discipline.
-                let _ = phys;
-                self.freed.fetch_add(1, Ordering::SeqCst);
+                // exactly like the per-port boot pools it models; log the
+                // return so the suite can assert the discipline.
+                let slot = self.freed_len.fetch_add(1, Ordering::SeqCst);
+                assert!(slot < DOUBLE_CAPACITY, "more frees than the pool can hold");
+                self.freed[slot].store(phys, Ordering::SeqCst);
             }
         }
 
         #[test]
         fn reclaim_hierarchy_frees_every_table_post_order_and_only_tables() {
-            // The array initialiser needs a `const`, and copying it per slot
-            // is the point: each element must be its own independent cell.
-            #[allow(clippy::declare_interior_mutable_const)]
-            const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
-            static POOL: BumpFrames = BumpFrames {
-                storage: [ZERO; DOUBLE_CAPACITY],
-                used: AtomicUsize::new(0),
-                freed: AtomicUsize::new(0),
-            };
+            static POOL: BumpFrames = BumpFrames::new();
 
             // A synthetic three-level hierarchy over the identity-phys
             // double: bit 0 marks a table pointer, bit 1 a leaf — the
@@ -347,39 +493,84 @@ pub mod conformance {
             let child_of = |entry: u64, _depth: usize| -> Option<u64> {
                 ((entry & TABLE) != 0).then_some(entry & !0xFFF)
             };
-            let entries_of = |phys: u64| -> *const [u64; PAGE_TABLE_ENTRIES] { phys as *const _ };
-            let mut freed = [0u64; 4];
-            let mut freed_len = 0usize;
-            let mut free = |phys: u64| {
-                assert!(freed_len < freed.len(), "no table is freed twice");
-                freed[freed_len] = phys;
-                freed_len += 1;
-            };
             // SAFETY: every phys reachable through `child_of` names a live
-            // table of this test hierarchy (identity addresses of the
-            // pool's slots), the hierarchy is no CPU's translation, and no
-            // other reference to the tables is live during the walk.
+            // table of this test hierarchy (slots the pool handed out), the
+            // hierarchy is no CPU's translation, and no other reference to
+            // the tables is live during the walk.
             unsafe {
-                super::super::reclaim_hierarchy(root_phys, &child_of, &entries_of, &mut free);
+                super::super::reclaim_hierarchy(root_phys, &POOL, &child_of);
             }
 
             // Post-order: the deepest table first, the root last, each
             // exactly once, and no leaf frame ever freed.
-            assert_eq!(freed_len, 3);
-            assert_eq!(&freed[..3], &[deep_phys, mid_phys, root_phys]);
+            assert_eq!(POOL.freed_count(), 3);
+            assert_eq!(POOL.freed_order()[..3], [deep_phys, mid_phys, root_phys]);
+        }
+
+        /// A hierarchy holding a descriptor the source cannot reach —
+        /// what a corrupt or foreign parent entry looks like — still
+        /// gives up every frame the source owns, never walks the bytes
+        /// the unreachable address happens to name, and never hands that
+        /// address to `free_table`: a source that did not hand it out
+        /// does not own the frame, and freeing it on the strength of a
+        /// clobbered descriptor would return an unrelated frame to the
+        /// allocator.
+        #[test]
+        fn reclaim_hierarchy_leaves_an_unreachable_table_alone() {
+            static POOL: BumpFrames = BumpFrames::new();
+            const TABLE: u64 = 1;
+            let root = POOL.alloc_table().expect("root");
+            let root_phys = root.phys;
+            // Two children: one the pool handed out, one it never did.
+            let mid = POOL.alloc_table().expect("mid");
+            let mid_phys = mid.phys;
+            root.entries[0] = mid_phys | TABLE;
+            root.entries[1] = 0x1_0000_0000 | TABLE;
+
+            let child_of = |entry: u64, _depth: usize| -> Option<u64> {
+                ((entry & TABLE) != 0).then_some(entry & !0xFFF)
+            };
+            // SAFETY: `mid_phys` and `root_phys` name live tables of this
+            // test hierarchy; the foreign address is never dereferenced
+            // (which is the property under test), the hierarchy is no
+            // CPU's translation, and no other reference is live.
+            unsafe {
+                super::super::reclaim_hierarchy(root_phys, &POOL, &child_of);
+            }
+            assert_eq!(POOL.freed_count(), 2);
+            assert_eq!(
+                POOL.freed_order()[..2],
+                [mid_phys, root_phys],
+                "the unreachable child is neither walked nor freed"
+            );
+        }
+
+        #[test]
+        fn pool_slot_of_maps_a_handed_out_phys_to_its_slot() {
+            use super::super::pool_slot_of;
+            const BASE: u64 = 0x8020_0000;
+            const STRIDE: u64 = 4096;
+            assert_eq!(pool_slot_of(BASE, 4, BASE), Some(0));
+            assert_eq!(pool_slot_of(BASE, 4, BASE + 3 * STRIDE), Some(3));
+        }
+
+        #[test]
+        fn pool_slot_of_fails_closed_off_the_pool() {
+            use super::super::pool_slot_of;
+            const BASE: u64 = 0x8020_0000;
+            const STRIDE: u64 = 4096;
+            // Below the pool, past its capacity, and off a slot boundary:
+            // a foreign address names no slot, so the walk asking for it
+            // reads as "not mapped" rather than dereferencing it.
+            assert_eq!(pool_slot_of(BASE, 4, BASE - STRIDE), None);
+            assert_eq!(pool_slot_of(BASE, 4, BASE + 4 * STRIDE), None);
+            assert_eq!(pool_slot_of(BASE, 4, BASE + 8), None);
+            assert_eq!(pool_slot_of(BASE, 0, BASE), None);
         }
 
         #[test]
         fn suite_accepts_a_faithful_bump_source() {
-            // The array initialiser needs a `const`, and copying it per slot
-            // is the point: each element must be its own independent cell.
-            #[allow(clippy::declare_interior_mutable_const)]
-            const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table([0; PAGE_TABLE_ENTRIES]));
-            static POOL: BumpFrames = BumpFrames {
-                storage: [ZERO; DOUBLE_CAPACITY],
-                used: AtomicUsize::new(0),
-                freed: AtomicUsize::new(0),
-            };
+            static POOL: BumpFrames = BumpFrames::new();
             run_all(&POOL, DOUBLE_CAPACITY);
 
             // And behind the object-safe erasure the per-process façade

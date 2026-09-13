@@ -43,11 +43,12 @@
 use crate::interrupts::{InterruptStackFrame, SavedRegs};
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use crate::preempt::{LAPIC_BASE_PHYS, LAPIC_EOI_OFFSET};
+use crate::preempt::{LAPIC_BASE_VIRT, LAPIC_EOI_OFFSET};
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::AtomicU32;
 
 use tairix_abi::MsiMessage;
+use tairix_sync::FnCell;
 
 mod routing;
 
@@ -129,7 +130,7 @@ pub fn external_isr_addr(_vector: u8) -> Option<u64> {
 /// calls `tairix_arch_x86_64_external_irq_dispatch` on every
 /// delivery; that Rust function reads this slot, looks up the GSI
 /// through [`global_routing`], forwards, and writes EOI.
-static EXTERNAL_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
+static EXTERNAL_IRQ_DISPATCH_FN: FnCell<ExternalIrqDispatchFn> = FnCell::empty();
 
 /// Signature of the installed external-IRQ dispatcher.
 ///
@@ -145,11 +146,11 @@ pub type ExternalIrqDispatchFn = extern "C" fn(vector: u8);
 /// Returns [`SetDispatchError::AlreadyInstalled`] on the second
 /// publish (one-shot publish).
 pub fn set_external_irq_dispatch(cb: ExternalIrqDispatchFn) -> Result<(), SetDispatchError> {
-    let raw = cb as usize;
-    EXTERNAL_IRQ_DISPATCH_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetDispatchError::AlreadyInstalled)
+    if EXTERNAL_IRQ_DISPATCH_FN.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetDispatchError::AlreadyInstalled)
+    }
 }
 
 /// Failure modes of [`set_external_irq_dispatch`].
@@ -167,7 +168,7 @@ pub enum SetDispatchError {
 /// `set_external_irq_dispatch_*` host tests.
 #[must_use]
 pub fn external_irq_dispatch_addr() -> usize {
-    EXTERNAL_IRQ_DISPATCH_FN.load(Ordering::Acquire)
+    EXTERNAL_IRQ_DISPATCH_FN.addr() as usize
 }
 
 #[cfg(test)]
@@ -175,7 +176,7 @@ pub(crate) fn clear_external_irq_dispatch_for_tests() {
     // Test-only helper so back-to-back host tests can re-install a
     // dispatcher. — permitted in tests; production
     // code never clears the slot.
-    EXTERNAL_IRQ_DISPATCH_FN.store(0, Ordering::Release);
+    EXTERNAL_IRQ_DISPATCH_FN.clear();
 }
 
 // --- Global routing slot ------------------------------------------
@@ -273,14 +274,7 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
     let vector_u8 = vector as u8;
 
     if (EXTERNAL_VECTOR_FIRST..=EXTERNAL_VECTOR_LAST).contains(&vector_u8) {
-        let raw = EXTERNAL_IRQ_DISPATCH_FN.load(Ordering::Acquire);
-        if raw != 0 {
-            // SAFETY: every store into the slot rounds-trips a valid
-            // `ExternalIrqDispatchFn` pointer through
-            // `set_external_irq_dispatch`. Function pointers are
-            // `usize`-sized; the transmute is lossless.
-            let cb: ExternalIrqDispatchFn =
-                unsafe { core::mem::transmute::<usize, ExternalIrqDispatchFn>(raw) };
+        if let Some(cb) = EXTERNAL_IRQ_DISPATCH_FN.load() {
             cb(vector_u8);
         }
         // If no dispatcher is installed we fall through to EOI. A
@@ -293,7 +287,7 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
     // SAFETY: LAPIC EOI register at the architecturally-fixed offset.
     // Writing `0` is the documented "end-of-interrupt" sequence.
     unsafe {
-        let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
+        let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
     }
 
@@ -423,11 +417,12 @@ mod tests {
     #[test]
     fn external_irq_dispatch_addr_round_trips_installed_fn() {
         clear_external_irq_dispatch_for_tests();
-        set_external_irq_dispatch(host_test_dispatcher_cb).expect("install");
-        assert_eq!(
-            external_irq_dispatch_addr(),
-            host_test_dispatcher_cb as *const () as usize,
-        );
+        // Coerce once: the published address is compared against *this*
+        // pointer value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let cb: ExternalIrqDispatchFn = host_test_dispatcher_cb;
+        set_external_irq_dispatch(cb).expect("install");
+        assert_eq!(external_irq_dispatch_addr(), cb as *const () as usize);
         clear_external_irq_dispatch_for_tests();
     }
 }

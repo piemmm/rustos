@@ -22,11 +22,20 @@
 //!
 //! The windowed copy routine is target-specific naked assembly (the
 //! window bounds are *instruction addresses*), so it lives in each
-//! architecture port. The port publishes it here through a set-once
-//! slot at trap-vector initialisation — the same install-before-first-
-//! fault discipline every port's fault-handler slot follows — and the
-//! architecture-neutral copy path reaches it through [`copy_user_span`]
-//! without naming any concrete port.
+//! architecture port. The port publishes it here at trap-vector
+//! initialisation — the same install-before-first-fault discipline every
+//! port's fault-handler slot follows — and the architecture-neutral copy
+//! path reaches it through [`copy_user_span`] without naming any
+//! concrete port.
+//!
+//! Publication is unconditional and infallible: an image holds exactly
+//! one such routine (the sole installer is the port compiled into it),
+//! and aarch64 arms the window from its per-CPU `init_vectors`, so every
+//! secondary republishes the identical pointer. A set-once slot would
+//! have to judge whether an occupant *is* the routine offered, which no
+//! sound test can answer — two coercions of one `fn` item need not share
+//! an address, so it would refuse the right routine while staying blind
+//! to a wrong one.
 //!
 //! With no routine installed [`copy_user_span`] performs a plain
 //! forward copy. That is the honest implementation on targets with no
@@ -47,7 +56,7 @@
 //! panics, takes no lock, and touches no memory outside
 //! `[dst, dst + len)` / `[src, src + len)`.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use tairix_sync::FnCell;
 
 /// Signature of a port's fault-windowed span copy.
 ///
@@ -65,61 +74,24 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// exactly what the window absorbs and reports as the non-zero return.
 pub type GuardedCopyFn = unsafe extern "C" fn(dst: *mut u8, src: *const u8, len: usize) -> usize;
 
-/// Slot holding the installed guarded copy routine as a raw function
-/// pointer (`0` = none installed).
-static GUARDED_COPY: AtomicUsize = AtomicUsize::new(0);
-
-/// Failure mode of [`install_guarded_copy`].
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum InstallGuardedCopyError {
-    /// A *different* routine was already published; the slot is set-once
-    /// per boot. Re-installing the same routine is idempotent and
-    /// succeeds, so a per-CPU init path may call the install
-    /// unconditionally.
-    AlreadyInstalled,
-}
+/// Slot holding the installed guarded copy routine.
+static GUARDED_COPY: FnCell<GuardedCopyFn> = FnCell::empty();
 
 /// Publish the port's fault-windowed copy routine.
 ///
 /// Called by the port's trap-vector initialisation, before user space
-/// (and therefore any syscall copy) can run. Idempotent for the same
-/// routine so a per-CPU init path may install unconditionally; a
-/// *conflicting* second install fails closed.
-///
-/// # Errors
-///
-/// [`InstallGuardedCopyError::AlreadyInstalled`] when a different
-/// routine is already published.
-pub fn install_guarded_copy(cb: GuardedCopyFn) -> Result<(), InstallGuardedCopyError> {
-    let raw = cb as usize;
-    match GUARDED_COPY.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Ok(()),
-        Err(existing) if existing == raw => Ok(()),
-        Err(_) => Err(InstallGuardedCopyError::AlreadyInstalled),
-    }
+/// (and therefore any syscall copy) can run. Every CPU that arms the
+/// vectors may call this unconditionally: the image holds one routine,
+/// so a republication stores the pointer that is already there.
+pub fn install_guarded_copy(cb: GuardedCopyFn) {
+    GUARDED_COPY.install(cb);
 }
 
 /// Read back the installed guarded copy routine, if any. A test /
 /// diagnostic observer; [`copy_user_span`] is the consuming path.
 #[must_use]
 pub fn guarded_copy() -> Option<GuardedCopyFn> {
-    let raw = GUARDED_COPY.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every value stored into the slot round-trips a valid
-        // `GuardedCopyFn` through `install_guarded_copy`; function
-        // pointers are `usize`-sized so the transmute is lossless.
-        Some(unsafe { core::mem::transmute::<usize, GuardedCopyFn>(raw) })
-    }
-}
-
-#[cfg(test)]
-fn clear_guarded_copy_for_tests() {
-    // Test-only: lets a host test exercise both the default and the
-    // installed dispatch without poisoning its siblings. Production code
-    // never clears the slot.
-    GUARDED_COPY.store(0, Ordering::Release);
+    GUARDED_COPY.load()
 }
 
 /// `true` iff `pc` lies inside the half-open fault window
@@ -272,7 +244,7 @@ mod tests {
     // in parallel threads and two of them clearing and reinstalling the
     // same static would race.
     #[test]
-    fn slot_dispatch_default_and_set_once_semantics() {
+    fn slot_dispatch_default_republish_and_replace() {
         // A routine whose non-zero return models a mid-copy fault.
         unsafe extern "C" fn always_faults(_dst: *mut u8, _src: *const u8, len: usize) -> usize {
             len.max(1)
@@ -284,7 +256,7 @@ mod tests {
             0
         }
 
-        clear_guarded_copy_for_tests();
+        GUARDED_COPY.clear();
         assert!(guarded_copy().is_none());
 
         // Default path: a plain copy moves the bytes.
@@ -296,34 +268,42 @@ mod tests {
         assert_eq!(dst, src);
 
         // Installed path: the routine is consulted and its non-zero
-        // return surfaces as the fault error.
-        install_guarded_copy(always_faults).expect("first install");
-        assert_eq!(
-            guarded_copy().map(|f| f as usize),
-            Some(always_faults as GuardedCopyFn as usize)
-        );
+        // return surfaces as the fault error. Which routine occupies the
+        // slot is asserted by what it *does* — the two differ in outcome
+        // — rather than by comparing its address against a second
+        // coercion, which Rust does not promise equal.
+        install_guarded_copy(always_faults);
+        assert!(guarded_copy().is_some());
         let mut dst2 = [0u8; 4];
         // SAFETY: distinct live buffers of the stated length.
         let faulted = unsafe { copy_user_span(dst2.as_mut_ptr(), src.as_ptr(), src.len()) };
         assert_eq!(faulted, Err(CopySpanFault));
 
-        // Re-installing the same routine is idempotent; a conflicting
-        // routine fails closed.
-        assert_eq!(install_guarded_copy(always_faults), Ok(()));
-        assert_eq!(
-            install_guarded_copy(other),
-            Err(InstallGuardedCopyError::AlreadyInstalled)
-        );
-
-        // A successful (zero) return from the installed routine is Ok.
-        clear_guarded_copy_for_tests();
-        install_guarded_copy(other).expect("reinstall after clear");
+        // Republishing the same routine leaves the dispatch unchanged,
+        // which is what lets a per-CPU init path install unconditionally.
+        install_guarded_copy(always_faults);
         let mut dst3 = [0u8; 4];
         // SAFETY: distinct live buffers of the stated length.
-        let ok = unsafe { copy_user_span(dst3.as_mut_ptr(), src.as_ptr(), src.len()) };
+        let still_faulted = unsafe { copy_user_span(dst3.as_mut_ptr(), src.as_ptr(), src.len()) };
+        assert_eq!(still_faulted, Err(CopySpanFault));
+
+        // Last writer wins: a second, different routine replaces the
+        // first, and its zero return is `Ok`.
+        install_guarded_copy(other);
+        let mut dst4 = [0u8; 4];
+        // SAFETY: distinct live buffers of the stated length.
+        let ok = unsafe { copy_user_span(dst4.as_mut_ptr(), src.as_ptr(), src.len()) };
         assert_eq!(ok, Ok(()));
-        assert_eq!(dst3, src);
-        clear_guarded_copy_for_tests();
+        assert_eq!(dst4, src);
+
+        // Clearing restores the plain-copy default.
+        GUARDED_COPY.clear();
+        assert!(guarded_copy().is_none());
+        let mut dst5 = [0u8; 4];
+        // SAFETY: distinct live buffers of the stated length.
+        let plain = unsafe { copy_user_span(dst5.as_mut_ptr(), src.as_ptr(), src.len()) };
+        assert_eq!(plain, Ok(()));
+        assert_eq!(dst5, src);
     }
 
     #[test]

@@ -117,31 +117,36 @@ fn wait_counted_with_no_peers_reports_nothing_asked_immediately() {
 /// set-once per process (mirrors the SMP hand-off's single-lifecycle test).
 #[test]
 fn published_tables_are_set_once_and_a_latched_stop_exempts_its_requester() {
+    // The publication takes `&'static` tables because a port's are statics.
+    // Leaking a `Vec` to manufacture that lifetime would hand the coordinator
+    // heap nothing ever reclaims, which an undefined-behaviour oracle reports
+    // as the leak it is; a `static` is what the real caller passes anyway.
+    static SHORT: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+    static LONG: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
+    static ONLINE: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+    static ACK: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+    static ONLINE_AGAIN: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+    static ACK_AGAIN: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+
     // A mismatched publish is refused *before* the set-once guard is consumed.
-    let short: &'static [AtomicBool] = Vec::leak(table(2));
-    let long: &'static [AtomicBool] = Vec::leak(table(3));
     assert_eq!(
-        publish_tables(short, long),
+        publish_tables(&SHORT, &LONG),
         Err(PublishError::LengthMismatch)
     );
 
     // The first well-formed publish succeeds; a second is refused.
-    let online: &'static [AtomicBool] = Vec::leak(table(4));
-    let ack: &'static [AtomicBool] = Vec::leak(table(4));
-    assert_eq!(publish_tables(online, ack), Ok(()));
-    let online2: &'static [AtomicBool] = Vec::leak(table(4));
-    let ack2: &'static [AtomicBool] = Vec::leak(table(4));
+    assert_eq!(publish_tables(&ONLINE, &ACK), Ok(()));
     assert_eq!(
-        publish_tables(online2, ack2),
+        publish_tables(&ONLINE_AGAIN, &ACK_AGAIN),
         Err(PublishError::AlreadyPublished)
     );
 
     // `acknowledge(cpu)` sets exactly `cpu`'s slot in the published ack table.
-    assert!(!ack[2].load(Ordering::Acquire));
+    assert!(!ACK[2].load(Ordering::Acquire));
     acknowledge(2);
-    assert!(ack[2].load(Ordering::Acquire));
+    assert!(ACK[2].load(Ordering::Acquire));
     assert!(
-        !ack[1].load(Ordering::Acquire),
+        !ACK[1].load(Ordering::Acquire),
         "only the caller's slot is set"
     );
 

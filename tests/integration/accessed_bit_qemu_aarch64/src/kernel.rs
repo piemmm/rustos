@@ -157,6 +157,10 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // so enabling translation does not move the ground under the running
     // code. Boot CPU.
     unsafe { space.switch() };
+    // The access-flag fault fix-up walks the active root with no
+    // `AddressSpace` in hand, so it draws its tables from the published
+    // source. This pool is the only one this image has.
+    tairix_arch_api::frames::publish_active_frames(&PAGE_TABLES);
     let mut space = space;
 
     // The probe frame is identity-mapped RAM, so its physical address is

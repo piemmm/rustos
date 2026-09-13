@@ -8,9 +8,10 @@
 //! real hardware those bytes are reachable because the kernel keeps a
 //! direct map of physical memory: a fixed virtual window in the active
 //! page table where a physical address `p` is reachable at `p +
-//! offset`. On the `x86_64` boot path that window is the identity map
-//! the trampoline installs over the low 4 GiB (`kernel/arch/x86_64`
-//! `boot.s`, SAFETY-INVARIANT 4), so `offset == 0`.
+//! offset`. The `x86_64` port's window is in the kernel half
+//! (`kernel/arch/x86_64` `paging::PHYSMAP_VMA_BASE`), so `offset` is
+//! non-zero there; the identity-linked `aarch64` and `riscv64` ports
+//! carry an identity window, so `offset == 0`.
 //!
 //! This module is the seam between "a `PhysAddr` a device understands"
 //! and "a `NonNull<u8>` the CPU can dereference". Production wires a
@@ -95,9 +96,9 @@ pub trait PhysMap {
 /// The kernel's direct physical map: physical `p` is reachable at the
 /// virtual address `p + offset`, for every `p` in `[0, limit)`.
 ///
-/// `offset == 0` describes an identity map (the `x86_64` boot
-/// trampoline's low-4-GiB window); a non-zero `offset` describes a
-/// higher-half direct map a later boot path may install.
+/// `offset == 0` describes an identity map (what the identity-linked
+/// `aarch64` and `riscv64` ports carry); a non-zero `offset` describes a
+/// kernel-half direct map (what `x86_64` installs).
 #[derive(Debug, Clone, Copy)]
 pub struct DirectPhysMap {
     offset: u64,
@@ -113,7 +114,7 @@ impl DirectPhysMap {
     }
 
     /// Build an identity direct map (`offset == 0`) covering
-    /// `[0, limit)` — the shape the `x86_64` boot trampoline installs.
+    /// `[0, limit)` — the shape an identity-linked port carries.
     #[must_use]
     pub const fn identity(limit: u64) -> Self {
         Self::new(0, limit)

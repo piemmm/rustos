@@ -23,18 +23,13 @@
 //!
 //! The runtime `spawn` syscall is issued by PID 1 `init`, so the producer runs
 //! under PID 1's own root, which [`init_spawn`](crate::x86_64::init_spawn)
-//! built with [`ArchAddressSpace::new_identity_window`]: it identity-maps the
-//! discovered-RAM window ([`paging::configured_identity_gigapages`]) **and**
-//! mirrors the higher-half kernel window. The
-//! x86_64 page-table walk recovers each existing intermediate table from its
-//! **low physical address** (`paging::ensure_child`) and writes each new table
-//! through its higher-half static pointer, and the image content is written
-//! through the same identity [`ConfiguredIdentityPhysMap`] — all three are
-//! mapped under PID 1's active root, since every table and image frame comes
-//! from the live allocator inside that window. So the producer builds the child's
-//! tables *through the caller's active CR3*, never switching it, exactly as the
-//! aarch64 producer builds through its identity window. The child's own CR3 is
-//! reloaded by its `pre_resume` hook before the scheduler first resumes it
+//! built with [`ArchAddressSpace::new_process_root`]: the higher-half kernel
+//! window plus the direct physical map, and no identity map. Every table the
+//! walk recovers and every image frame it writes is reached through that map
+//! ([`ConfiguredPhysMap`]), which PID 1's root carries like every other root,
+//! so the producer builds the child's tables *through the caller's active
+//! CR3*, never switching it. The child's own CR3 is reloaded by its
+//! `pre_resume` hook before the scheduler first resumes it
 //! (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
 //!
 //! Spawning is *not* a privileged bypass: the child receives only the authority
@@ -74,35 +69,41 @@ const BOOT_CPU: usize = 0;
 /// [`LiveSpace`]'s window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
-/// The kernel's direct physical map: the low identity window
-/// (`virtual == physical`) the boot path sized from the discovered memory
-/// map, mirroring the aarch64 and riscv64 ports.
+/// The kernel's direct physical map: the higher-half window at
+/// [`paging::PHYSMAP_VMA_BASE`] the boot path sized from the discovered
+/// memory map, where physical `p` is reachable at `PHYSMAP_VMA_BASE + p`.
 ///
-/// It has to be the **identity** map because the x86_64 page-table walk
-/// recovers an existing child table by dereferencing its physical address
-/// directly (`paging::ensure_child`), so the frame view the page-table
-/// source hands the port must satisfy `virtual == physical`. It is also the
-/// view every other kernel path that reaches a frame by pointer uses — the
-/// child image write, the shared-region zero-on-free scrub, the remap
-/// window's record store, the slab page supply — so there is one map, not a
-/// separate higher-half one that could cover different RAM.
+/// It is the view every kernel path that reaches a frame by pointer uses —
+/// the child image write, the shared-region zero-on-free scrub, the remap
+/// window's record store, the slab page supply, and the page-table walk's
+/// own table recovery — so there is one map, not a second that could cover
+/// different RAM. Being in the kernel half is what lets every process root
+/// carry it: its extent is bounded by the architecture rather than by where
+/// user space begins, and the tables beneath it are shared rather than
+/// redrawn per process.
 ///
-/// The limit is re-derived from the live window on every call
-/// ([`paging::configured_identity_bytes`]) rather than frozen at a
-/// build-time gigabyte count a real machine outgrows: the fixed 1 GiB
-/// higher-half map this replaced left every frame above it unreachable
-/// while the allocator kept handing them out. A frame outside the window
-/// still fails the translate and its consumer fails closed rather than
-/// fabricating a pointer.
-pub struct ConfiguredIdentityPhysMap;
+/// The limit is re-derived from the live map on every call
+/// ([`paging::physmap_bytes`]) rather than frozen at a build-time gigabyte
+/// count a real machine outgrows. A frame outside it still fails the
+/// translate and its consumer fails closed rather than fabricating a
+/// pointer.
+pub struct ConfiguredPhysMap;
 
-impl PhysMap for ConfiguredIdentityPhysMap {
+impl ConfiguredPhysMap {
+    /// The live map as a linear window, re-read so a caller can never
+    /// hold a stale extent.
+    fn window() -> DirectPhysMap {
+        DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes())
+    }
+}
+
+impl PhysMap for ConfiguredPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
-        DirectPhysMap::identity(paging::configured_identity_bytes()).translate(phys, len)
+        Self::window().translate(phys, len)
     }
 
     fn reverse(&self, virt: usize) -> Option<PhysAddr> {
-        DirectPhysMap::identity(paging::configured_identity_bytes()).reverse(virt)
+        Self::window().reverse(virt)
     }
 
     fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {
@@ -116,13 +117,13 @@ impl PhysMap for ConfiguredIdentityPhysMap {
     }
 }
 
-/// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table frame
+/// The single, `'static` [`ConfiguredPhysMap`] the page-table frame
 /// source borrows.
 ///
 /// Also handed to the kernel core as the arch direct physical map
 /// (`plans/USB.md`): it covers the same RAM the allocator draws from, so
 /// any frame the kernel must reach by pointer is reachable.
-pub static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
+pub static SPAWN_TABLE_PHYSMAP: ConfiguredPhysMap = ConfiguredPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's PML4 hierarchy is built from.
@@ -186,23 +187,20 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
 
-        // Build a PML4 identity-mapping the discovered-RAM window (RAM + the
-        // LAPIC MMIO page) and the higher-half kernel window, and capture its
-        // root *without* switching CR3: the spawning caller (PID 1) stays
-        // active under its own root, so the running parent is never moved out
-        // from under itself. The child's tables and image are written through
-        // the caller's active root — which identity-maps the live allocator's
-        // page-table and image frames and mirrors the higher-half kernel
-        // window — so the build does not require the child space to be
-        // active.
+        // Build the child's PML4 and capture its root *without* switching
+        // CR3: the spawning caller (PID 1) stays active under its own root,
+        // so the running parent is never moved out from under itself. The
+        // child's tables and image are written through the direct physical
+        // map, which the caller's active root carries, so the build does not
+        // require the child space to be active.
         // The child's own CR3 is reloaded by its `pre_resume` hook before the
         // scheduler first resumes it (`plans/SPAWN.md` SP2, `plans/PI.md` X1).
-        let arch = ArchAddressSpace::new_identity_window(table_frames)
+        let arch = ArchAddressSpace::new_process_root(table_frames)
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.pml4_phys();
 
         let mut space = AddressSpace::new(arch);
-        let physmap = ConfiguredIdentityPhysMap;
+        let physmap = ConfiguredPhysMap;
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag. A mismatch fails closed; the registry
@@ -246,8 +244,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
         // contract). The frame source draws RAM frames from the kernel's live
-        // allocator, written through the identity `physmap` mapped under the
-        // caller's active root. The retained live space
+        // allocator, written through the `physmap` the caller's active root
+        // carries. The retained live space
         // below owns the whole footprint and returns it (frames zeroed,
         // tables freed) when the task exits. A returning `Err` maps to a
         // stable errno; the cause is already audited by `spawn_image`.
@@ -298,9 +296,9 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             // `set_user_thread_pointer`'s contract.
             unsafe { set_user_thread_pointer(tls_base) };
             // SAFETY: paging is enabled and `child_root_phys` is the PML4 of
-            // the child's space, which identity-maps the low kernel window the
-            // running dispatcher executes from and mirrors the higher-half
-            // kernel window — exactly `activate_user_root`'s contract.
+            // the child's space, which mirrors the higher-half kernel window
+            // the running dispatcher executes from and carries the direct
+            // physical map — exactly `activate_user_root`'s contract.
             unsafe { activate_user_root(child_root_phys) };
         });
 
@@ -314,8 +312,8 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
 
         // The child's process address space (`plans/PI.md` 5d-0-ii (b′)): the
         // *same* arch space the snapshot above was frozen from, zeroing
-        // anonymous frames through the same identity direct map the image
-        // build used (the child's CR3 carries it). No
+        // anonymous frames through the same direct map the image build used
+        // (the child's CR3 carries it). No
         // `'static` allocator, or a window the allocator rejects, retains none
         // and the child's `mem_map` / `mmio_map` fail closed.
         let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
@@ -327,7 +325,7 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    ConfiguredIdentityPhysMap,
+                    ConfiguredPhysMap,
                     static_frames,
                     VirtAddr::new(WINDOWS.mmio),
                     spawn_layout::MMIO_WINDOW_PAGES,

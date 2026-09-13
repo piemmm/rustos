@@ -94,10 +94,14 @@ fn dispatch_ecall_forwards_number_and_args_and_writes_return() {
 fn dispatch_callback_round_trips() {
     clear_dispatch_for_tests();
     assert!(dispatch_callback().is_none());
-    set_dispatch_callback(recording_cb);
+    // Coerce once: the slot is compared against *this* pointer value,
+    // because two coercions of one `fn` item are not guaranteed to share
+    // an address.
+    let cb: SyscallDispatchFn = recording_cb;
+    set_dispatch_callback(cb);
     assert_eq!(
-        dispatch_callback().map(|f| f as *const () as usize),
-        Some(recording_cb as *const () as usize)
+        dispatch_callback().map(|f| f as *const ()),
+        Some(cb as *const ())
     );
     clear_dispatch_for_tests();
 }

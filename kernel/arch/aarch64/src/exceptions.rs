@@ -130,7 +130,7 @@ pub const fn is_fiq(kind: u64) -> bool {
 // (no global mutable state; this is an immutable,
 // publish-once pointer).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use tairix_sync::FnCell;
 
 /// Signature of the installed device-IRQ dispatcher, invoked from the
 /// IRQ path with the acknowledged GIC INTID. Like the timer callback it
@@ -138,9 +138,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// call from interrupt context.
 pub type DeviceIrqDispatchFn = extern "C" fn(u32);
 
-/// Slot holding the installed dispatcher as a raw function pointer
-/// (`0` = none).
-static DEVICE_IRQ_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
+/// The installed device-IRQ dispatcher.
+static DEVICE_IRQ_DISPATCH_FN: FnCell<DeviceIrqDispatchFn> = FnCell::empty();
 
 /// Failure modes of [`set_device_irq_dispatch`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -155,25 +154,25 @@ pub enum SetDispatchError {
 ///
 /// [`SetDispatchError::AlreadyInstalled`] on the second publish.
 pub fn set_device_irq_dispatch(cb: DeviceIrqDispatchFn) -> Result<(), SetDispatchError> {
-    let raw = cb as usize;
-    DEVICE_IRQ_DISPATCH_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetDispatchError::AlreadyInstalled)
+    if DEVICE_IRQ_DISPATCH_FN.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetDispatchError::AlreadyInstalled)
+    }
 }
 
 /// Address of the installed device-IRQ dispatcher (`0` if none).
 /// Test/diagnostic observer.
 #[must_use]
 pub fn device_irq_dispatch_addr() -> usize {
-    DEVICE_IRQ_DISPATCH_FN.load(Ordering::Acquire)
+    DEVICE_IRQ_DISPATCH_FN.addr() as usize
 }
 
 #[cfg(test)]
 fn clear_device_irq_dispatch_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a dispatcher.
     // Production code never clears the slot.
-    DEVICE_IRQ_DISPATCH_FN.store(0, Ordering::Release);
+    DEVICE_IRQ_DISPATCH_FN.clear();
 }
 
 /// Invoke the installed device-IRQ dispatcher with `intid`, if any.
@@ -185,14 +184,7 @@ fn clear_device_irq_dispatch_for_tests() {
 /// practice (fail closed rather than guess).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn dispatch_device_irq(intid: u32) {
-    let raw = DEVICE_IRQ_DISPATCH_FN.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: every value stored into the slot round-trips a valid
-        // `DeviceIrqDispatchFn` through `set_device_irq_dispatch`;
-        // function pointers are `usize`-sized so the transmute is
-        // lossless, and the callback carries no captured environment.
-        let cb: DeviceIrqDispatchFn =
-            unsafe { core::mem::transmute::<usize, DeviceIrqDispatchFn>(raw) };
+    if let Some(cb) = DEVICE_IRQ_DISPATCH_FN.load() {
         cb(intid);
     }
 }
@@ -234,12 +226,9 @@ pub unsafe fn init_vectors() {
     // Arm the fault-windowed user copy alongside the vector table: the
     // two are one mechanism (the handler below redirects an in-window
     // same-EL data abort to the copy's fix-up), so no consumer can
-    // install the vectors without the recovery. The install is
-    // idempotent for this routine; a conflicting occupant is a
-    // boot-order defect the CPU must not run past (fail closed).
-    if crate::uaccess::install().is_err() {
-        crate::kernel_arch::halt_current_cpu();
-    }
+    // install the vectors without the recovery. Runs on every CPU that
+    // arms the vectors, republishing the one routine the image holds.
+    crate::uaccess::install();
     let base = tairix_aarch64_vectors as *const () as u64;
     // SAFETY: `base` is the 2 KiB-aligned address of the asm vector
     // table; writing it to `VBAR_EL1` has no side effect beyond the
@@ -983,11 +972,12 @@ mod tests {
     #[test]
     fn device_irq_dispatch_addr_round_trips_installed_fn() {
         clear_device_irq_dispatch_for_tests();
-        set_device_irq_dispatch(host_device_dispatch).expect("install");
-        assert_eq!(
-            device_irq_dispatch_addr(),
-            host_device_dispatch as *const () as usize
-        );
+        // Coerce once: the published address is compared against *this*
+        // pointer value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let cb: DeviceIrqDispatchFn = host_device_dispatch;
+        set_device_irq_dispatch(cb).expect("install");
+        assert_eq!(device_irq_dispatch_addr(), cb as *const () as usize);
         clear_device_irq_dispatch_for_tests();
     }
 }

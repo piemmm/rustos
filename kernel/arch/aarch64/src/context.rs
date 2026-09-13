@@ -260,7 +260,11 @@ mod tests {
         let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 24]);
         let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(24) } as u64;
         let mut c = TaskCtx::new();
-        c.prepare(top, host_entry, 0xCAFE).unwrap();
+        // Coerce once: the frame word is compared against *this* pointer
+        // value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let entry: unsafe extern "C" fn(usize) -> ! = host_entry;
+        c.prepare(top, entry, 0xCAFE).unwrap();
         assert_eq!(c.sp, top - FRAME_BYTES);
         let frame_words = usize::try_from(FRAME_BYTES).unwrap() / size_of::<u64>();
         let frame = unsafe { core::slice::from_raw_parts(c.sp as *const u64, frame_words) };
@@ -269,7 +273,7 @@ mod tests {
             assert_eq!(*slot, 0);
         }
         // x30 <- entry (index 11)
-        assert_eq!(frame[11], host_entry as *const () as usize as u64);
+        assert_eq!(frame[11], entry as *const () as usize as u64);
         // x0 <- arg (index 12)
         assert_eq!(frame[12], 0xCAFE);
         // Alignment padding and d8..d15 are deterministic on first entry.

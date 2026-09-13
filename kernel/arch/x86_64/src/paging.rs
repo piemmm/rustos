@@ -23,17 +23,24 @@
 //! It implements the Arch HAL page-table surface
 //! ([`tairix_arch_api::mmu::AddressSpace`] +
 //! [`tairix_arch_api::tlb::TlbShootdown`]) `kernel/mem` drives. The
-//! page-table *walk* (`map_page` / `translate` / `unmap`) recovers
-//! intermediate tables through the low identity map and so is only valid
-//! on the bare-metal target; like [`AddressSpace::activate`] it is proven
-//! by the `memory_isolation` QEMU vertical, not a host conformance test
-//! (the host build of those methods is `unreachable!`). The bit math is
-//! a strict subset so promotion does not require interface creep.
+//! page-table *walk* (`map_page` / `translate` / `unmap`) recovers each
+//! level through the frame source that drew it, so it runs on the host
+//! too; only [`AddressSpace::activate`]'s `CR3` load needs the metal,
+//! and that is proven by the `memory_isolation` QEMU vertical. The bit
+//! math is a strict subset so promotion does not require interface
+//! creep.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use tairix_arch_api::frames::{PageTableFrames, TableFrame};
+use tairix_arch_api::frames::{pool_slot_of, PageTableFrames, TableFrame};
+
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+extern "C" {
+    /// The boot trampoline's PDPT for the direct physical map's floor
+    /// (`boot.s` SAFETY-INVARIANT 10), linked 1:1 in low memory.
+    static boot_pdpt_physmap: u8;
+}
 use tairix_arch_api::mmu::{AddressSpace as MmuAddressSpace, KernelWindow, MapError, PageFlags};
 use tairix_arch_api::tlb::TlbShootdown;
 
@@ -43,36 +50,104 @@ pub use tairix_abi::PAGE_SIZE;
 /// Number of 64-bit entries in a page-table page (PML4 / PDPT / PD / PT).
 pub const ENTRIES_PER_TABLE: usize = 512;
 
-/// Gigabytes of physical memory the boot trampoline identity-maps before
-/// any discovery has run (`boot.s` SAFETY-INVARIANT 4, whose static
-/// `boot_pds` array holds exactly this many page directories). It is the
-/// floor [`widen_boot_identity`] widens from, and the window every root
-/// built before the widening carries.
+/// Gigabytes of physical memory the boot trampoline identity-maps
+/// (`boot.s` SAFETY-INVARIANT 4, whose static `boot_pds` array holds
+/// exactly this many page directories).
+///
+/// This is the whole identity window, never widened: it exists for the
+/// addresses that must be reachable *as* physical addresses — the
+/// trampoline's own tables, the AP start-up trampoline, and the firmware
+/// tables and architectural MMIO frames the boot path reads before
+/// discovery — and its extent is fixed by what `boot.s` builds. RAM is
+/// reached through the direct physical map below instead, so the identity
+/// window's cost no longer scales with the installed RAM.
 pub const BOOT_IDENTITY_GIB: usize = 4;
 
-/// Largest identity window the low PDPT can express: its 512 slots at
-/// 1 GiB each. A wider window would need a second PML4 slot, which the
-/// port's virtual layout gives to user space.
-pub const MAX_IDENTITY_GIB: usize = ENTRIES_PER_TABLE;
-
-/// Gigabytes of physical memory currently identity-mapped in every
-/// translation root, published by [`widen_boot_identity`] once the boot
-/// memory map is known. Read on every direct-map translate and by every
-/// root constructor, so the whole system shares one window.
-static IDENTITY_GIGAPAGES: AtomicUsize = AtomicUsize::new(BOOT_IDENTITY_GIB);
-
-/// Gigabytes of physical memory the live identity window covers.
-#[must_use]
-pub fn configured_identity_gigapages() -> usize {
-    IDENTITY_GIGAPAGES.load(Ordering::Acquire)
+/// Sign-extend a PML4 slot's base to its canonical higher-half virtual
+/// address: bit 47 of any slot at or above 256 is set, so bits 63:48
+/// are ones.
+const fn canonical_slot_base(slot: usize) -> u64 {
+    0xFFFF_0000_0000_0000 | ((slot as u64) << 39)
 }
 
-/// Exclusive top of the live identity window, in bytes — the direct
-/// physical map's limit and the ceiling a kernel stack or arena block must
-/// sit below to stay reachable under every root.
+/// First PML4 slot the direct physical map claims.
+///
+/// The port's user virtual region runs to `1 << 47`, which is exactly this
+/// slot's base, and slots 510 (the kernel remap window) and 511 (the
+/// higher-half kernel image) are taken. So the map starts at the first
+/// slot above user space and runs to the remap window: the kernel half
+/// and the user half share no slot, which is what lets a process root
+/// carry the map without carrying a mapping of RAM in the half user code
+/// addresses.
+pub const PHYSMAP_PML4_FIRST_SLOT: usize = 256;
+
+/// PML4 slots the direct physical map spans — everything from its first
+/// slot up to the kernel remap window. Derived, so moving either boundary
+/// cannot leave the two overlapping.
+pub const PHYSMAP_PML4_SLOTS: usize = KERNEL_WINDOW_PML4_SLOT - PHYSMAP_PML4_FIRST_SLOT;
+
+/// Base virtual address of the direct physical map: physical `p` is
+/// reachable at `PHYSMAP_VMA_BASE + p` under every root.
+pub const PHYSMAP_VMA_BASE: u64 = canonical_slot_base(PHYSMAP_PML4_FIRST_SLOT);
+
+/// Widest direct physical map the claimed slots can express, in gigabytes
+/// (512 GiB per slot).
+pub const MAX_PHYSMAP_GIB: usize = PHYSMAP_PML4_SLOTS * ENTRIES_PER_TABLE;
+
+/// The map must start below the kernel remap window (or its slot count
+/// would be a negative span) and stay in the higher half (or its base
+/// would need no sign extension and the spelling above would be wrong).
+/// Pinned so moving either boundary fails the build rather than producing
+/// an address nothing maps.
+const _: () = assert!(
+    PHYSMAP_PML4_FIRST_SLOT < KERNEL_WINDOW_PML4_SLOT
+        && PHYSMAP_PML4_FIRST_SLOT >= ENTRIES_PER_TABLE / 2,
+    "the direct physical map must sit in the higher half, below the kernel remap window"
+);
+
+/// The map's shared PML4 entries, one per claimed slot, or `0` for a slot
+/// the reservation did not need.
+///
+/// Every root this port builds installs them, so the tables beneath them
+/// are shared rather than redrawn per process: a root's share of the map
+/// is its own PML4 entries and not one page.
+static PHYSMAP_PML4: [AtomicU64; PHYSMAP_PML4_SLOTS] =
+    [const { AtomicU64::new(0) }; PHYSMAP_PML4_SLOTS];
+
+/// Gigabytes the direct map covers before it is widened: the floor the
+/// boot trampoline lays down (`boot.s` SAFETY-INVARIANT 10). The host has
+/// no trampoline and so no map at all.
+const PHYSMAP_FLOOR_GIB: usize = if cfg!(all(target_arch = "x86_64", target_os = "none")) {
+    BOOT_IDENTITY_GIB
+} else {
+    0
+};
+
+/// Gigabytes of physical memory the live direct map covers.
+static PHYSMAP_GIGAPAGES: AtomicUsize = AtomicUsize::new(PHYSMAP_FLOOR_GIB);
+
+/// Gigabytes of physical memory the live direct physical map covers.
 #[must_use]
-pub fn configured_identity_bytes() -> u64 {
-    (configured_identity_gigapages() as u64) << 30
+pub fn physmap_gigapages() -> usize {
+    PHYSMAP_GIGAPAGES.load(Ordering::Acquire)
+}
+
+/// Exclusive top of the live direct physical map, in bytes — the highest
+/// physical address the kernel can reach by pointer.
+#[must_use]
+pub fn physmap_bytes() -> u64 {
+    (physmap_gigapages() as u64) << 30
+}
+
+/// The direct-map virtual address of physical `phys`.
+///
+/// `const`, so a fixed MMIO register block (the LAPIC, an IO-APIC) names
+/// its direct-map address without a run-time load on the interrupt path.
+/// The address resolves only for a `phys` below [`physmap_bytes`]; a
+/// caller with a discovered address checks that first.
+#[must_use]
+pub const fn physmap_virt(phys: u64) -> u64 {
+    PHYSMAP_VMA_BASE.wrapping_add(phys)
 }
 
 /// `true` when the part maps 1 GiB pages at PDPT level (CPUID
@@ -99,16 +174,25 @@ pub fn gigapages_supported() -> bool {
     }
 }
 
-/// Page directories [`widen_boot_identity`] and the root constructors need
-/// to identity-map `gib` gigabytes: none when the part has 1 GiB pages
-/// (the PDPT holds the leaves itself), otherwise one per gigabyte.
+/// Page-table pages `install_boot_physmap` must draw to widen the map to
+/// `gib` gigabytes.
+///
+/// The boot trampoline supplies the first span's PDPT and the leaves below
+/// [`BOOT_IDENTITY_GIB`], so what is left is one PDPT per *further* 512 GiB
+/// span, plus — only on a part without 1 GiB pages, where a PDPT cannot
+/// hold the leaves itself — one page directory per gigabyte above the
+/// floor. A `gib` at or below the floor needs nothing.
 #[must_use]
-pub fn identity_directory_frames(gib: usize) -> usize {
-    if gigapages_supported() {
+pub fn physmap_table_frames(gib: usize) -> usize {
+    // A map at or below the floor draws nothing: it has no span beyond the
+    // trampoline's own and no gigabyte above the leaves it already holds.
+    let further_spans = gib.div_ceil(ENTRIES_PER_TABLE).saturating_sub(1);
+    let directories = if gigapages_supported() {
         0
     } else {
-        gib
-    }
+        gib.saturating_sub(PHYSMAP_FLOOR_GIB)
+    };
+    further_spans + directories
 }
 
 /// Base virtual address of the -2 GiB higher-half kernel window.
@@ -207,9 +291,9 @@ const PAGES_PER_FINE_CHAIN: usize = 3;
 
 /// Maximum number of page-table pages a static pool hands out. Sized for the
 /// two roots a bring-up path or a fixture builds at once, plus a further
-/// fine-grained chain each. A window widened past the boot floor needs more,
-/// and `alloc_table` then answers `None`, so the constructor fails closed
-/// rather than returning a root with holes in its identity map.
+/// fine-grained chain each. A pool that runs dry makes `alloc_table` answer
+/// `None`, so the constructor fails closed rather than returning a root with
+/// holes in it.
 const POOL_SIZE: usize = 2 * (PAGES_PER_LIVE_ROOT + PAGES_PER_FINE_CHAIN);
 
 /// A statically-allocated pool of zero-initialised page-table pages.
@@ -290,8 +374,16 @@ impl PageTableFrames for PageTablePool {
         let entries = self.alloc()?;
         // The static pool is a higher-half kernel image; `phys_of`
         // recovers the physical address the MMU needs (`plans/WIRING.md` W5b-3 — the bootstrap frame source).
-        let phys = phys_of(entries);
+        let phys = phys_of(entries.as_ptr() as u64);
         Some(TableFrame { phys, entries })
+    }
+
+    fn table_at(&self, phys: u64) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
+        // Recovered from the slot the pool handed `phys` out of, so the
+        // pointer keeps its storage's provenance; a `phys` from anywhere
+        // else names no slot and the walk asking for it fails closed.
+        let index = pool_slot_of(phys_of(self.storage.as_ptr() as u64), POOL_SIZE, phys)?;
+        Some(self.storage[index].get().cast())
     }
 
     fn free_table(&self, phys: u64) {
@@ -306,16 +398,15 @@ impl PageTableFrames for PageTablePool {
 
 /// An address space built on a freshly-allocated PML4.
 ///
-/// The constructor identity-maps the first 32 MiB with 2 MiB huge pages
-/// (so low physical memory, including the boot stack, stays reachable)
-/// **and** mirrors the boot trampoline's higher-half kernel window
-/// (`boot.s` SAFETY-INVARIANT 9) so the higher-half-linked kernel
-/// code/stack/data remain reachable regardless of which `AddressSpace`
-/// is currently active. The [`Self::map_4k`] method adds finer-grained
-/// mappings used by the memory-isolation test.
+/// Every constructor installs what a live root must carry whichever space
+/// is active: the boot trampoline's higher-half kernel window (`boot.s`
+/// SAFETY-INVARIANT 9), where the kernel's code, stack and data are linked,
+/// and the direct physical map, through which it reaches every frame. They
+/// differ only in whether they add an identity window on top
+/// ([`Self::new_process_root`] does not; [`Self::new_boot_identity`] and
+/// [`Self::new_bookkeeping_identity_32mib`] do, at their own extents).
 pub struct AddressSpace {
     pml4_phys: u64,
-    pml4: &'static mut [u64; ENTRIES_PER_TABLE],
     /// The frame source the page-table walk allocates intermediate
     /// tables from, retained so the [`tairix_arch_api::mmu::AddressSpace`]
     /// HAL impl can install mappings without the caller re-supplying it.
@@ -326,28 +417,45 @@ pub struct AddressSpace {
 }
 
 impl AddressSpace {
-    /// Build a root carrying the live identity window plus the higher-half
-    /// kernel window — the constructor for any space that will be **made
-    /// live**.
+    /// Build a root for a **process**: the kernel windows and the direct
+    /// physical map, and no identity map at all.
     ///
-    /// The extent is not a parameter, and deliberately so: kernel code runs
-    /// with the current task's root active, so a root that maps less than
-    /// [`configured_identity_gigapages`] leaves kernel memory above its own
-    /// ceiling unreachable while it is loaded. That is silent until something
-    /// the kernel touches happens to land high — a kernel-heap slab page
-    /// drawn from a frame, an intermediate table the walk dereferences
-    /// through its low physical address (see [`ensure_child`]), a frame handed
-    /// to a process image — at which point the fault has no local cause. The
-    /// window is read here so no caller can get it wrong. The leaves are
-    /// 1 GiB pages where the part has them and 2 MiB pages otherwise.
+    /// The port's kernel is linked higher-half, so nothing a process root
+    /// must keep reachable — the executing kernel code, its stack, a frame
+    /// the kernel reaches by pointer — is addressed physically: the image
+    /// is in its own window and RAM is in the direct map
+    /// ([`PHYSMAP_VMA_BASE`]). The map's slots sit above the user virtual
+    /// region, so the half user code addresses carries user mappings only,
+    /// and the tables beneath them are shared — a process pays its own
+    /// PML4 entries for the whole of RAM, not one page per gigabyte.
     ///
     /// # Errors
     ///
-    /// Returns `None` if the frame source is exhausted or the window
-    /// overflows the 2 MiB-page count.
-    pub fn new_identity_window(frames: &'static dyn PageTableFrames) -> Option<Self> {
+    /// Returns `None` if the frame source is exhausted.
+    pub fn new_process_root(frames: &'static dyn PageTableFrames) -> Option<Self> {
+        let (pml4_phys, _) = Self::new_kernel_windows(frames)?;
+        Some(Self { pml4_phys, frames })
+    }
+
+    /// Build a root carrying the boot trampoline's identity window on top
+    /// of the kernel windows and the direct physical map — the constructor
+    /// for a space that must keep physical addresses reachable *as*
+    /// physical addresses while it is live.
+    ///
+    /// The extent is [`BOOT_IDENTITY_GIB`] and is not a parameter: it is
+    /// what `boot.s` maps, and what the addresses that genuinely need it —
+    /// the trampoline's own tables, the AP start-up trampoline, the
+    /// firmware tables — all lie below. RAM above it is reached through the
+    /// direct map like any other frame, so this window does not grow with
+    /// the machine. The leaves are 1 GiB pages where the part has them and
+    /// 2 MiB pages otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the frame source is exhausted.
+    pub fn new_boot_identity(frames: &'static dyn PageTableFrames) -> Option<Self> {
         // 512 × 2 MiB = 1 GiB.
-        Self::new_identity(frames, configured_identity_gigapages().checked_mul(512)?)
+        Self::new_identity(frames, BOOT_IDENTITY_GIB.checked_mul(512)?)
     }
 
     /// Build a root identity-mapping only `[0, 32 MiB)`, for a space that is
@@ -355,10 +463,10 @@ impl AddressSpace {
     ///
     /// The MMIO register-window maps use one purely as page-table
     /// bookkeeping — the device is reached through the direct physical map,
-    /// never through this root — and their window base sits inside the live
-    /// identity window, so a root carrying that window would collide with it.
-    /// Making this space live would strand every kernel address above
-    /// 32 MiB; use [`Self::new_identity_window`] for anything that runs.
+    /// never through this root — and their window base sits inside the
+    /// identity window, so a root carrying that window would collide with
+    /// it. Making this space live would strand every kernel address above
+    /// 32 MiB; use [`Self::new_boot_identity`] for anything that runs.
     ///
     /// # Errors
     ///
@@ -368,12 +476,53 @@ impl AddressSpace {
         Self::new_identity(frames, 16)
     }
 
-    /// Shared constructor backing [`Self::new_identity_window`] and
+    /// Draw a root and install the mappings *every* live space carries: the
+    /// higher-half kernel image window, the kernel remap window, and the
+    /// direct physical map. Done here rather than at each call site so no
+    /// future space can be built without them.
+    ///
+    /// Returns the root's physical address alongside its table, so the
+    /// identity constructor can go on writing into the same root.
+    fn new_kernel_windows(
+        frames: &'static dyn PageTableFrames,
+    ) -> Option<(u64, &'static mut [u64; ENTRIES_PER_TABLE])> {
+        let TableFrame {
+            phys: pml4_phys,
+            entries: pml4,
+        } = frames.alloc_table()?;
+
+        // Mirror the boot trampoline's higher-half kernel window so the
+        // higher-half-linked kernel code/stack/data stay reachable after a
+        // CR3 switch to this space (`boot.s` SAFETY-INVARIANT 9). Map the
+        // -2 GiB window at KERNEL_VMA_BASE onto physical [0, 1 GiB) with
+        // 2 MiB huge pages, covering the whole kernel image.
+        let TableFrame {
+            phys: pdpt_high_phys,
+            entries: pdpt_high,
+        } = frames.alloc_table()?;
+        let TableFrame {
+            phys: pd_high_phys,
+            entries: pd_high,
+        } = frames.alloc_table()?;
+        let hi_i4 = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
+        let hi_i3 = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
+        pml4[hi_i4] = pdpt_high_phys | flags::PRESENT | flags::WRITABLE;
+        pdpt_high[hi_i3] = pd_high_phys | flags::PRESENT | flags::WRITABLE;
+        for (i, slot) in pd_high.iter_mut().enumerate() {
+            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        }
+
+        install_kernel_window_slot(pml4);
+        install_physmap_slots(pml4);
+        Some((pml4_phys, pml4))
+    }
+
+    /// Shared constructor backing [`Self::new_boot_identity`] and
     /// [`Self::new_bookkeeping_identity_32mib`] (one definition).
     ///
-    /// Identity-maps the first `pages_2mib` 2 MiB pages and mirrors the boot
-    /// trampoline's higher-half kernel window. A whole-gigabyte span on a
-    /// part with 1 GiB pages is laid down as PDPT leaves; otherwise one page
+    /// Identity-maps the first `pages_2mib` 2 MiB pages on top of the
+    /// mappings every live root carries. A whole-gigabyte span on a part
+    /// with 1 GiB pages is laid down as PDPT leaves; otherwise one page
     /// directory is drawn per gigabyte.
     fn new_identity(frames: &'static dyn PageTableFrames, pages_2mib: usize) -> Option<Self> {
         // One PDPT addresses 512 GiB; a wider span has nowhere to put its
@@ -381,10 +530,7 @@ impl AddressSpace {
         if pages_2mib > ENTRIES_PER_TABLE * ENTRIES_PER_TABLE {
             return None;
         }
-        let TableFrame {
-            phys: pml4_phys,
-            entries: pml4,
-        } = frames.alloc_table()?;
+        let (pml4_phys, pml4) = Self::new_kernel_windows(frames)?;
         let TableFrame {
             phys: pdpt_phys,
             entries: pdpt,
@@ -425,38 +571,7 @@ impl AddressSpace {
             }
         }
 
-        // Mirror the boot trampoline's higher-half kernel window so the
-        // higher-half-linked kernel code/stack/data stay reachable after a
-        // CR3 switch to this space (`boot.s` SAFETY-INVARIANT 9). Map the
-        // -2 GiB window at KERNEL_VMA_BASE onto physical [0, 1 GiB) with
-        // 2 MiB huge pages — the same first-GiB identity PD the trampoline
-        // reuses, covering the whole kernel image.
-        let TableFrame {
-            phys: pdpt_high_phys,
-            entries: pdpt_high,
-        } = frames.alloc_table()?;
-        let TableFrame {
-            phys: pd_high_phys,
-            entries: pd_high,
-        } = frames.alloc_table()?;
-        let hi_i4 = ((KERNEL_VMA_BASE >> 39) & 0x1FF) as usize;
-        let hi_i3 = ((KERNEL_VMA_BASE >> 30) & 0x1FF) as usize;
-        pml4[hi_i4] = pdpt_high_phys | flags::PRESENT | flags::WRITABLE;
-        pdpt_high[hi_i3] = pd_high_phys | flags::PRESENT | flags::WRITABLE;
-        for (i, slot) in pd_high.iter_mut().enumerate() {
-            *slot = ((i as u64) << 21) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
-        }
-
-        // Every root reaches the kernel remap window, so a kernel address
-        // in it resolves whichever root is active. Done here rather than at
-        // each call site so no future space can be built without it.
-        install_kernel_window_slot(pml4);
-
-        Some(Self {
-            pml4_phys,
-            pml4,
-            frames,
-        })
+        Some(Self { pml4_phys, frames })
     }
 
     /// Build a root that maps **only** the kernel remap window — the handle
@@ -479,11 +594,17 @@ impl AddressSpace {
             entries: pml4,
         } = frames.alloc_table()?;
         install_kernel_window_slot(pml4);
-        Some(Self {
-            pml4_phys,
-            pml4,
-            frames,
-        })
+        Some(Self { pml4_phys, frames })
+    }
+
+    /// The PML4, recovered through the frame source that drew it, or
+    /// [`None`] when the source cannot reach it (fail closed).
+    ///
+    /// The space retains only `pml4_phys`, so the root is reached exactly
+    /// as every other level of the walk is and no long-lived `&mut` to it
+    /// can alias a second walk of the same table.
+    fn root_table(&self) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
+        self.frames.table_at(self.pml4_phys)
     }
 
     /// `true` if `vaddr` already resolves to a live leaf (4 KiB page or
@@ -493,45 +614,55 @@ impl AddressSpace {
     /// [`tairix_arch_api::mmu::AddressSpace`] HAL impl to report
     /// [`tairix_arch_api::mmu::MapError::AlreadyMapped`] rather than
     /// silently clobber an existing mapping (`map_4k_inner` overwrites a
-    /// PT leaf without checking, so the HAL layer must guard it here). It
-    /// recovers intermediate tables from the low physical address each
-    /// entry holds, exactly as [`ensure_child`] does, so it is only valid
-    /// on the bare-metal target where the low identity map is live.
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    /// PT leaf without checking, so the HAL layer must guard it here).
+    /// Each level is recovered through the frame source that drew it,
+    /// exactly as [`ensure_child`] does, so an entry the source cannot
+    /// reach reads as "no leaf here".
     fn leaf_present(&self, vaddr: u64) -> bool {
         let i4 = ((vaddr >> 39) & 0x1FF) as usize;
         let i3 = ((vaddr >> 30) & 0x1FF) as usize;
         let i2 = ((vaddr >> 21) & 0x1FF) as usize;
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-        let e4 = self.pml4[i4];
+        let Some(root) = self.root_table() else {
+            return false;
+        };
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `self.frames`; `&self` keeps the read shared.
+        let e4 = unsafe { &*root }[i4];
         if e4 & flags::PRESENT == 0 {
             return false;
         }
-        // SAFETY: a present entry holds a low physical table address
-        // `ensure_child` wrote; the low 32 MiB is identity-mapped, so the
-        // address dereferences directly on the bare-metal target.
-        let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-        let e3 = pdpt[i3];
+        let Some(pdpt) = self.frames.table_at(e4 & ADDR_MASK) else {
+            return false;
+        };
+        // SAFETY: a present entry holds a table address `ensure_child`
+        // drew from this source, so its view of it is a live table of this
+        // hierarchy.
+        let e3 = unsafe { &*pdpt }[i3];
         if e3 & flags::PRESENT == 0 {
             return false;
         }
         if e3 & flags::HUGE != 0 {
             return true;
         }
+        let Some(pd) = self.frames.table_at(e3 & ADDR_MASK) else {
+            return false;
+        };
         // SAFETY: as above — a present non-huge PDPT entry's address is a
-        // live identity-mapped PD.
-        let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-        let e2 = pd[i2];
+        // live PD of this hierarchy.
+        let e2 = unsafe { &*pd }[i2];
         if e2 & flags::PRESENT == 0 {
             return false;
         }
         if e2 & flags::HUGE != 0 {
             return true;
         }
+        let Some(pt) = self.frames.table_at(e2 & ADDR_MASK) else {
+            return false;
+        };
         // SAFETY: as above — a present non-huge PD entry's address is a
-        // live identity-mapped PT.
-        let pt = unsafe { &*((e2 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-        pt[i1] & flags::PRESENT != 0
+        // live PT of this hierarchy.
+        (unsafe { &*pt })[i1] & flags::PRESENT != 0
     }
 
     /// Map `paddr` at `vaddr` with a 4 KiB page granularity.
@@ -646,9 +777,21 @@ impl AddressSpace {
         let i2 = ((vaddr >> 21) & 0x1FF) as usize;
         let i1 = ((vaddr >> 12) & 0x1FF) as usize;
 
-        let pdpt = ensure_child(self.pml4, i4, frames)?;
+        // A user leaf in a kernel-half slot would hand ring 3 the direct
+        // physical map, the kernel heap's remap window, or the kernel
+        // image. The window allocators already bound every user address
+        // below the half, so this is the fail-closed floor under them
+        // rather than the only check.
+        if leaf.user && is_kernel_half_slot(i4) {
+            return None;
+        }
+
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `self.frames`; `&mut self` makes the exclusive borrow sound.
+        let pml4 = unsafe { &mut *self.root_table()? };
+        let pdpt = ensure_child(pml4, i4, frames)?;
         if leaf.user {
-            self.pml4[i4] |= flags::USER;
+            pml4[i4] |= flags::USER;
         }
         let pd = ensure_child(pdpt, i3, frames)?;
         if leaf.user {
@@ -676,9 +819,11 @@ impl AddressSpace {
     /// Caller must guarantee that the new PML4 also maps the currently
     /// executing instruction's `rip` and the current stack — otherwise
     /// the CPU will fault on the very next memory access.
-    /// [`Self::new_identity_window`] upholds that by mapping both the live
-    /// identity window (boot stack / low physical) and the higher-half kernel
-    /// window (where the higher-half-linked code/stack/data live).
+    /// Every root constructor upholds that by mapping the higher-half
+    /// kernel window (where the higher-half-linked code/stack/data live)
+    /// and the direct physical map; [`Self::new_boot_identity`] adds the
+    /// trampoline's identity window on top for a space that must also
+    /// reach low physical addresses as themselves.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub unsafe fn switch(&self) {
         // The first fully-configured space activated on the metal is the
@@ -744,107 +889,239 @@ const _: () = assert!(
     "the kernel remap window must be a representable extent"
 );
 
-/// Widen the live translation root's low identity map to `[0, gib GiB)`
-/// and publish `gib` as the window every later root and every direct-map
-/// translate reads ([`configured_identity_gigapages`]).
+/// Widen the direct physical map to `[0, gib GiB)` out of the carved
+/// `tables` run and publish it as the map every later root installs
+/// ([`physmap_gigapages`]).
 ///
-/// The boot trampoline maps a fixed [`BOOT_IDENTITY_GIB`] gigabytes before
-/// the firmware memory map has been parsed, which is enough to reach the
-/// architectural LAPIC/IO-APIC frames and the firmware tables but not the
-/// RAM of a machine with more than that installed. Once the map is known
-/// the boot path calls this with the discovered window, so a frame the
-/// allocator draws from the top of a multi-gigabyte pool is reachable by
-/// pointer like any other.
+/// The boot trampoline lays the map's floor down before it knows how much
+/// RAM is installed (`boot.s` SAFETY-INVARIANT 10): its own PDPT at
+/// [`PHYSMAP_PML4_FIRST_SLOT`], covering `[0, BOOT_IDENTITY_GIB GiB)`
+/// through the identity window's page directories. That is enough for the
+/// architectural MMIO frames and the firmware tables; this is what extends
+/// it over the discovered RAM, so a frame the allocator draws from the top
+/// of a multi-terabyte pool is reachable by pointer like any other.
 ///
-/// `directories` is the physical base of [`identity_directory_frames`]
-/// contiguous page-aligned frames used as page directories; it is ignored
-/// (and may be zero) when the part has 1 GiB pages, which need none. The
-/// frames must lie inside the *pre-widening* window, since they are written
-/// through it.
+/// `tables` is the physical base of [`physmap_table_frames`] contiguous
+/// page-aligned frames — the further spans' PDPTs first, then the page
+/// directories a part without 1 GiB pages needs. They are written through
+/// the trampoline's identity window, so the run must lie inside it.
 ///
 /// Returns `false`, having changed nothing, for a `gib` that is not a
-/// widening ([`BOOT_IDENTITY_GIB`] or less), exceeds
-/// [`MAX_IDENTITY_GIB`], comes with a `directories` run the widening would
-/// have to write outside the window it is widening from, or arrives after
-/// the window has already been widened — the caller then fails the boot
-/// rather than running on a window it did not install.
+/// widening ([`BOOT_IDENTITY_GIB`] or less), exceeds [`MAX_PHYSMAP_GIB`],
+/// comes with a `tables` run that is misaligned or reaches outside the
+/// identity window, arrives after the map has already been widened, or
+/// meets a live root whose first-span entry is not the trampoline's — the
+/// caller then fails the boot rather than running on a map it did not
+/// install.
 ///
 /// # Safety
 ///
 /// * Paging is enabled, the caller runs on the boot CPU before any
-///   secondary is brought up, and no other CPU is walking the low PDPT.
-/// * `directories` names [`identity_directory_frames`] page-aligned frames
-///   that no other owner holds (the boot path reserves them out of the
-///   memory map before the frame allocator is built).
+///   secondary is brought up, and no other CPU walks the live PML4.
+/// * `tables` names [`physmap_table_frames`] page-aligned frames that no
+///   other owner holds (the boot path reserves them out of the memory map
+///   before the frame allocator is built).
 ///
-/// The widening only ever re-expresses `[0, BOOT_IDENTITY_GIB GiB)` with
-/// the identical output addresses and adds mappings above it, so no live
-/// translation changes meaning; `CR3` is reloaded at the end so the CPU
-/// drops the stale entries for the re-expressed range.
+/// The widening only adds translations — in the trampoline's own table
+/// above its floor, and in PML4 slots the trampoline left empty — so no
+/// live translation changes meaning; `CR3` is reloaded at the end so the
+/// CPU picks the new entries up.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub unsafe fn widen_boot_identity(gib: usize, directories: u64) -> bool {
-    if gib <= BOOT_IDENTITY_GIB || gib > MAX_IDENTITY_GIB {
+#[must_use]
+pub unsafe fn install_boot_physmap(gib: usize, tables: u64) -> bool {
+    if gib <= BOOT_IDENTITY_GIB || gib > MAX_PHYSMAP_GIB {
         return false;
     }
-    // One widening per boot: a second would rewrite the live PDPT under
-    // roots already built from the published window.
-    if configured_identity_gigapages() != BOOT_IDENTITY_GIB {
+    // One widening per boot: a second would rewrite the trampoline's table
+    // under roots already built from the published map.
+    if physmap_gigapages() != PHYSMAP_FLOOR_GIB {
         return false;
     }
-    let dir_frames = identity_directory_frames(gib);
-    if dir_frames != 0 {
-        let bytes = (dir_frames as u64) * PAGE_SIZE as u64;
-        let fits_in_current_window = directories & (PAGE_SIZE as u64 - 1) == 0
-            && directories
-                .checked_add(bytes)
-                .is_some_and(|end| end <= (BOOT_IDENTITY_GIB as u64) << 30);
-        if !fits_in_current_window {
-            return false;
-        }
+    let frames = physmap_table_frames(gib);
+    let Some(bytes) = (frames as u64).checked_mul(PAGE_SIZE as u64) else {
+        return false;
+    };
+    let writable_through_identity = tables & (PAGE_SIZE as u64 - 1) == 0
+        && tables
+            .checked_add(bytes)
+            .is_some_and(|end| end <= (BOOT_IDENTITY_GIB as u64) << 30);
+    if !writable_through_identity {
+        return false;
     }
-
     let root = active_root_phys();
     if root == 0 {
         return false;
     }
     // SAFETY: `CR3` names the live PML4, which sits in low physical memory
     // the trampoline identity-maps, so its physical address dereferences
-    // directly (the round-trip every walk in this module relies on).
+    // directly. The only entries written are the map's own slots, which the
+    // trampoline left empty above its floor.
     let pml4 = unsafe { &mut *(root as *mut [u64; ENTRIES_PER_TABLE]) };
-    let low = pml4[0];
-    if low & flags::PRESENT == 0 || low & flags::HUGE != 0 {
+    let floor = boot_physmap_entry();
+    // The trampoline writes its floor by a byte offset into `boot_pml4`; if
+    // that ever disagreed with the slot constant here, the map would be
+    // built somewhere nothing reads. Check, do not assume.
+    if pml4[PHYSMAP_PML4_FIRST_SLOT] != floor {
         return false;
     }
-    // SAFETY: as above — a present non-huge PML4 entry holds the low
-    // identity-mapped PDPT the trampoline built.
-    let pdpt = unsafe { &mut *((low & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
 
-    if dir_frames == 0 {
-        for (slot_gib, slot) in pdpt.iter_mut().take(gib).enumerate() {
-            *slot = ((slot_gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+    // The carved run is laid out as the further spans' PDPTs followed by the
+    // page directories, so a page is found by index alone.
+    let spans = gib.div_ceil(ENTRIES_PER_TABLE);
+    let huge = gigapages_supported();
+    let directories = tables + ((spans - 1) as u64) * PAGE_SIZE as u64;
+
+    // The entry for one gigabyte of the map: a 1 GiB leaf where the part
+    // has them, else a page directory of 2 MiB leaves drawn from the run.
+    // One definition, shared by the trampoline's span and the further ones.
+    let leaf_for = |slot_gib: usize| -> u64 {
+        let base = (slot_gib as u64) << 30;
+        if huge {
+            return base | flags::PRESENT | flags::WRITABLE | flags::HUGE;
         }
-    } else {
-        for (slot_gib, slot) in pdpt.iter_mut().enumerate().take(gib) {
-            let pd_phys = directories + (slot_gib as u64) * PAGE_SIZE as u64;
-            // SAFETY: the caller pins `directories` as unowned page-aligned
-            // frames inside the pre-widening window, so each directory
-            // dereferences here and aliases nothing live.
-            let pd = unsafe { &mut *(pd_phys as *mut [u64; ENTRIES_PER_TABLE]) };
-            let base = (slot_gib as u64) << 30;
-            for (block, entry) in pd.iter_mut().enumerate() {
-                *entry = (base + ((block as u64) << 21))
-                    | flags::PRESENT
-                    | flags::WRITABLE
-                    | flags::HUGE;
+        let pd_phys = directories + ((slot_gib - PHYSMAP_FLOOR_GIB) as u64) * PAGE_SIZE as u64;
+        // These frames were carved from the firmware memory map, not handed
+        // out by a `PageTableFrames` source, and they are written before the
+        // frame allocator exists — so the trampoline's identity window is
+        // the only view of them there is. Every other walk in this module
+        // goes through the source that drew the table.
+        //
+        // SAFETY: the caller pins the run as unowned page-aligned frames
+        // inside the identity window, so each page dereferences here and
+        // aliases nothing live.
+        let pd = unsafe { &mut *(pd_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+        for (block, entry) in pd.iter_mut().enumerate() {
+            *entry =
+                (base + ((block as u64) << 21)) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        }
+        pd_phys | flags::PRESENT | flags::WRITABLE
+    };
+
+    let mut entries = [0u64; PHYSMAP_PML4_SLOTS];
+    entries[0] = floor;
+    for (span, entry) in entries.iter_mut().enumerate().take(spans) {
+        let pdpt_phys = if span == 0 {
+            floor & ADDR_MASK
+        } else {
+            let phys = tables + ((span - 1) as u64) * PAGE_SIZE as u64;
+            *entry = phys | flags::PRESENT | flags::WRITABLE;
+            phys
+        };
+        // SAFETY: span 0 is the trampoline's own table and the rest are
+        // pages of the caller's carved run; both lie inside the identity
+        // window, so they dereference here and alias nothing live.
+        let pdpt = unsafe { &mut *(pdpt_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+        let first_gib = span * ENTRIES_PER_TABLE;
+        // The trampoline already filled its span below the floor; leave
+        // those entries exactly as they are, since live translations use
+        // them.
+        let from = if span == 0 { PHYSMAP_FLOOR_GIB } else { 0 };
+        for (slot, pte) in pdpt.iter_mut().enumerate().skip(from) {
+            let slot_gib = first_gib + slot;
+            if slot_gib >= gib {
+                break;
             }
-            *slot = pd_phys | flags::PRESENT | flags::WRITABLE;
+            *pte = leaf_for(slot_gib);
         }
     }
 
-    IDENTITY_GIGAPAGES.store(gib, Ordering::Release);
+    if !publish_physmap(&entries, gib) {
+        return false;
+    }
+    install_physmap_slots(pml4);
 
     invalidate_all_local();
     true
+}
+
+/// Record `entries` as the direct map's shared PML4 entries and `gib` as
+/// its extent, set-once.
+///
+/// Split out from `install_boot_physmap` because this half is pure
+/// bookkeeping: it is what the host tests drive to observe that every root
+/// constructor installs the published slots, with no `CR3` to patch.
+///
+/// Returns `false`, having published nothing, for an extent that does not
+/// match the entries it arrives with, or for a second call.
+#[cfg(any(all(target_arch = "x86_64", target_os = "none"), test))]
+fn publish_physmap(entries: &[u64; PHYSMAP_PML4_SLOTS], gib: usize) -> bool {
+    // A publication must add gigabytes above the floor the trampoline
+    // already covers, and stay inside the slots the map claims.
+    if gib.saturating_sub(PHYSMAP_FLOOR_GIB) == 0 || gib > MAX_PHYSMAP_GIB {
+        return false;
+    }
+    // An entry per 512 GiB span and no more: a short run would leave a hole
+    // the map claims to cover, a long one a slot nothing backs.
+    let spans = gib.div_ceil(ENTRIES_PER_TABLE);
+    if entries.iter().take(spans).any(|entry| *entry == 0)
+        || entries.iter().skip(spans).any(|entry| *entry != 0)
+    {
+        return false;
+    }
+    if PHYSMAP_GIGAPAGES
+        .compare_exchange(PHYSMAP_FLOOR_GIB, gib, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    for (slot, entry) in PHYSMAP_PML4.iter().zip(entries) {
+        slot.store(*entry, Ordering::Release);
+    }
+    true
+}
+
+/// Copy the published direct-map entries into `pml4`'s claimed slots.
+///
+/// Every root constructor calls this, so no space can be built without the
+/// map: the trampoline's floor span is adopted here, and the widening's
+/// further spans come from what it published (it patches the live root
+/// itself). A not-present-to-present entry needs no TLB maintenance: the
+/// CPU never caches an absent translation.
+fn install_physmap_slots(pml4: &mut [u64; ENTRIES_PER_TABLE]) {
+    adopt_boot_physmap_floor();
+    for (offset, slot) in PHYSMAP_PML4.iter().enumerate() {
+        let entry = slot.load(Ordering::Acquire);
+        if entry != 0 {
+            pml4[PHYSMAP_PML4_FIRST_SLOT + offset] = entry;
+        }
+    }
+}
+
+/// The direct map's first-span entry as the boot trampoline built it: its
+/// own PDPT, whose address is a link-time constant because `.boot.bss` is
+/// linked 1:1 in low memory (`linker.ld`), so it *is* the physical address
+/// the MMU needs.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn boot_physmap_entry() -> u64 {
+    // A link-time constant, never dereferenced here.
+    let phys = core::ptr::addr_of!(boot_pdpt_physmap) as u64;
+    phys | flags::PRESENT | flags::WRITABLE
+}
+
+/// Publish the trampoline's floor as the map's first span, once.
+///
+/// Every root constructor calls this, so a consumer that runs no boot path
+/// — an integration fixture with its own `kernel_main` — still reaches the
+/// architectural MMIO frames under every root it builds. The widening fills
+/// the same table's upper slots and republishes the identical entry, so the
+/// two cannot disagree.
+fn adopt_boot_physmap_floor() {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    let _ = PHYSMAP_PML4[0].compare_exchange(
+        0,
+        boot_physmap_entry(),
+        Ordering::AcqRel,
+        Ordering::Relaxed,
+    );
+}
+
+/// `true` if PML4 slot `index` belongs to the kernel half — the direct
+/// physical map, the kernel remap window, or the higher-half kernel image.
+///
+/// The port's user virtual region stops exactly at the first of them, so
+/// this is also "not addressable by a user program".
+const fn is_kernel_half_slot(index: usize) -> bool {
+    index >= PHYSMAP_PML4_FIRST_SLOT
 }
 
 /// Discard every cached translation on the calling CPU by reloading `CR3`
@@ -853,7 +1130,7 @@ pub unsafe fn widen_boot_identity(gib: usize, directories: u64) -> bool {
 /// The port sets no `GLOBAL` leaf, so a `CR3` reload discards the whole
 /// TLB and the paging-structure caches; the root is unchanged and still
 /// maps the executing code, stack, and per-CPU data. This is the port's
-/// only whole-address-space local invalidation, shared by the identity
+/// only whole-address-space local invalidation, shared by the direct map's
 /// widening and the block split — never a second copy of the sequence.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn invalidate_all_local() {
@@ -886,31 +1163,27 @@ pub fn reserve_kernel_window(frames: &'static dyn PageTableFrames) -> Option<Ker
     }
     let TableFrame { phys, entries: _ } = frames.alloc_table()?;
     KERNEL_WINDOW_PML4.store(phys | flags::PRESENT | flags::WRITABLE, Ordering::Release);
-    install_kernel_window(active_root_phys());
+    install_kernel_window(frames, active_root_phys());
     Some(window)
 }
 
-/// Install the published window entry into the PML4 at `root_phys`, or do
-/// nothing when no window is reserved (or `root_phys` is zero, which is
-/// what the host build reports).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn install_kernel_window(root_phys: u64) {
+/// Install the published window entry into the PML4 at `root_phys`,
+/// reaching it through `frames`. Does nothing when no window is reserved,
+/// when `root_phys` is zero (what the host build reports), or when
+/// `frames` cannot reach that root.
+fn install_kernel_window(frames: &'static dyn PageTableFrames, root_phys: u64) {
     if root_phys == 0 {
         return;
     }
-    // SAFETY: a non-zero `CR3` base names the live PML4, which lives in low
-    // physical memory the boot trampoline identity-maps, so the physical
-    // address dereferences directly (the same round-trip `ensure_child`
-    // relies on). The only entry written is the window's own slot, which no
-    // other writer touches.
-    let root = unsafe { &mut *(root_phys as *mut [u64; ENTRIES_PER_TABLE]) };
+    let Some(table) = frames.table_at(root_phys) else {
+        return;
+    };
+    // SAFETY: a non-zero `CR3` base names the live PML4 and the production
+    // source's direct map covers it, so its view is dereferenceable. The
+    // only entry written is the window's own slot, which no other writer
+    // touches.
+    let root = unsafe { &mut *table };
     install_kernel_window_slot(root);
-}
-
-/// Host substitute: there is no live `CR3` to patch.
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-fn install_kernel_window(root_phys: u64) {
-    let _ = root_phys;
 }
 
 /// Copy the published window entry into `pml4`'s slot.
@@ -975,16 +1248,23 @@ pub fn publish_boot_park_root() {
 pub fn publish_boot_park_root() {}
 
 /// The physical root of the calling CPU's active translation regime
-/// (`CR3`'s table base, PCID/flag bits masked off).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+/// (`CR3`'s table base, PCID/flag bits masked off), or `0` on the host,
+/// which runs no translation regime of its own.
 fn active_root_phys() -> u64 {
-    let cr3: u64;
-    // SAFETY: reading `CR3` observes the active root without side
-    // effects; no Rust spelling exists for the control register.
-    unsafe {
-        core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, preserves_flags, nomem));
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        let cr3: u64;
+        // SAFETY: reading `CR3` observes the active root without side
+        // effects; no Rust spelling exists for the control register.
+        unsafe {
+            core::arch::asm!("mov {v}, cr3", v = out(reg) cr3, options(nostack, preserves_flags, nomem));
+        }
+        cr3 & !0xFFF
     }
-    cr3 & !0xFFF
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        0
+    }
 }
 
 /// Reactivate `root_phys` as the active top-level translation root (load
@@ -1053,150 +1333,123 @@ impl MmuAddressSpace for AddressSpace {
         if flags.contains(PageFlags::WRITE_COMBINE) {
             return Err(MapError::Unsupported);
         }
-        // The four-level walk is only valid on the bare-metal target (it
-        // recovers tables through the low identity map). `map_page` is
-        // therefore proven by the `memory_isolation` QEMU vertical, not a
-        // host conformance test; on the host it is unreachable.
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            if self.leaf_present(vaddr) {
-                return Err(MapError::AlreadyMapped);
-            }
-            let frames = self.frames;
-            let writable = flags.contains(PageFlags::WRITE);
-            let user = flags.contains(PageFlags::USER);
-            let executable = flags.contains(PageFlags::EXEC);
-            let memory_attrs = if flags.contains(PageFlags::DEVICE) {
-                flags::CACHE_DISABLE | flags::WRITE_THROUGH
-            } else {
-                0
-            };
-            let result = self.map_4k_inner(
-                frames,
-                vaddr,
-                paddr,
-                LeafPolicy {
-                    writable,
-                    user,
-                    no_execute: !executable,
-                    memory_attrs,
-                },
-            );
-            // Alignment and prior-mapping are ruled out, so the only
-            // remaining failure is page-table-pool exhaustion.
-            result.ok_or(MapError::PoolExhausted)
+        if self.leaf_present(vaddr) {
+            return Err(MapError::AlreadyMapped);
         }
-        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-        {
-            // `self.frames` is read only by the bare-metal walk above;
-            // touch it here so the host build does not flag it unused.
-            let _ = (vaddr, paddr, flags, self.frames);
-            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
-        }
+        let frames = self.frames;
+        let writable = flags.contains(PageFlags::WRITE);
+        let user = flags.contains(PageFlags::USER);
+        let executable = flags.contains(PageFlags::EXEC);
+        let memory_attrs = if flags.contains(PageFlags::DEVICE) {
+            flags::CACHE_DISABLE | flags::WRITE_THROUGH
+        } else {
+            0
+        };
+        let result = self.map_4k_inner(
+            frames,
+            vaddr,
+            paddr,
+            LeafPolicy {
+                writable,
+                user,
+                no_execute: !executable,
+                memory_attrs,
+            },
+        );
+        // Alignment and prior-mapping are ruled out, so the only remaining
+        // failure is frame-source exhaustion.
+        result.ok_or(MapError::PoolExhausted)
     }
 
     fn translate(&self, vaddr: u64) -> Option<(u64, PageFlags)> {
-        // The four-level walk is only valid on the bare-metal target (it
-        // recovers tables through the low identity map), exactly like
-        // `map_page`; on the host it is unreachable.
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
-            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
-            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
-            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-            let e4 = self.pml4[i4];
-            if e4 & flags::PRESENT == 0 {
-                return None;
-            }
-            // SAFETY: a present entry holds a low identity-mapped table
-            // address `ensure_child` wrote (the same round-trip
-            // `leaf_present` relies on).
-            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e3 = pdpt[i3];
-            if e3 & flags::PRESENT == 0 {
-                return None;
-            }
-            if e3 & flags::HUGE != 0 {
-                return Some((
-                    resolved_page(e3 & ADDR_MASK, vaddr, 30),
-                    page_flags_from_pte(e3),
-                ));
-            }
-            // SAFETY: as above — a present non-huge PDPT entry's address
-            // is a live identity-mapped PD.
-            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e2 = pd[i2];
-            if e2 & flags::PRESENT == 0 {
-                return None;
-            }
-            if e2 & flags::HUGE != 0 {
-                return Some((
-                    resolved_page(e2 & ADDR_MASK, vaddr, 21),
-                    page_flags_from_pte(e2),
-                ));
-            }
-            // SAFETY: as above — a present non-huge PD entry's address is
-            // a live identity-mapped PT.
-            let pt = unsafe { &*((e2 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e1 = pt[i1];
-            if e1 & flags::PRESENT == 0 {
-                return None;
-            }
-            Some((e1 & ADDR_MASK, page_flags_from_pte(e1)))
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `self.frames`; `&self` keeps the read shared.
+        let e4 = unsafe { &*self.root_table()? }[i4];
+        if e4 & flags::PRESENT == 0 {
+            return None;
         }
-        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-        {
-            let _ = vaddr;
-            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        // SAFETY: a present entry holds a table address `ensure_child`
+        // drew from this source (the same round-trip `leaf_present` relies
+        // on), so its view of it is a live table of this hierarchy.
+        let e3 = unsafe { &*self.frames.table_at(e4 & ADDR_MASK)? }[i3];
+        if e3 & flags::PRESENT == 0 {
+            return None;
         }
+        if e3 & flags::HUGE != 0 {
+            return Some((
+                resolved_page(e3 & ADDR_MASK, vaddr, 30),
+                page_flags_from_pte(e3),
+            ));
+        }
+        // SAFETY: as above — a present non-huge PDPT entry's address is a
+        // live PD of this hierarchy.
+        let e2 = unsafe { &*self.frames.table_at(e3 & ADDR_MASK)? }[i2];
+        if e2 & flags::PRESENT == 0 {
+            return None;
+        }
+        if e2 & flags::HUGE != 0 {
+            return Some((
+                resolved_page(e2 & ADDR_MASK, vaddr, 21),
+                page_flags_from_pte(e2),
+            ));
+        }
+        // SAFETY: as above — a present non-huge PD entry's address is a
+        // live PT of this hierarchy.
+        let e1 = unsafe { &*self.frames.table_at(e2 & ADDR_MASK)? }[i1];
+        if e1 & flags::PRESENT == 0 {
+            return None;
+        }
+        Some((e1 & ADDR_MASK, page_flags_from_pte(e1)))
     }
 
     fn unmap(&mut self, vaddr: u64) -> Result<u64, MapError> {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
-            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
-            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
-            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-            // Navigate to the 4 KiB PT leaf without allocating. A missing
-            // level or a huge-page leaf means there is no 4 KiB leaf to
-            // tear down here — fail closed (per-page unmap never shatters
-            // a huge page).
-            let e4 = self.pml4[i4];
-            if e4 & flags::PRESENT == 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present entry → identity-mapped PDPT (see `translate`).
-            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e3 = pdpt[i3];
-            if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present non-huge PDPT entry → identity-mapped PD.
-            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e2 = pd[i2];
-            if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present non-huge PD entry → identity-mapped PT, and
-            // `&mut self` makes the exclusive borrow of the leaf sound.
-            let pt = unsafe { &mut *((e2 & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
-            let e1 = pt[i1];
-            if e1 & flags::PRESENT == 0 {
-                return Err(MapError::NotMapped);
-            }
-            pt[i1] = 0;
-            Ok(e1 & ADDR_MASK)
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        // Navigate to the 4 KiB PT leaf without allocating. A missing
+        // level or a huge-page leaf means there is no 4 KiB leaf to tear
+        // down here — fail closed (per-page unmap never shatters a huge
+        // page).
+        let frames = self.frames;
+        let root = self.root_table().ok_or(MapError::NotMapped)?;
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `frames`; `&mut self` makes the exclusive borrow sound.
+        let e4 = unsafe { &*root }[i4];
+        if e4 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
         }
-        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-        {
-            let _ = vaddr;
-            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        let pdpt = frames.table_at(e4 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present entry → a live PDPT of this hierarchy (see
+        // `translate`).
+        let e3 = unsafe { &*pdpt }[i3];
+        if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
+            return Err(MapError::NotMapped);
         }
+        let pd = frames.table_at(e3 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present non-huge PDPT entry → a live PD of this
+        // hierarchy.
+        let e2 = unsafe { &*pd }[i2];
+        if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
+            return Err(MapError::NotMapped);
+        }
+        let pt_table = frames.table_at(e2 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present non-huge PD entry → a live PT of this hierarchy,
+        // and `&mut self` makes the exclusive borrow of the leaf sound.
+        let pt = unsafe { &mut *pt_table };
+        let e1 = pt[i1];
+        if e1 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        pt[i1] = 0;
+        Ok(e1 & ADDR_MASK)
     }
 
     fn root_phys(&self) -> u64 {
@@ -1218,115 +1471,116 @@ impl MmuAddressSpace for AddressSpace {
         if (vaddr & (PAGE_SIZE as u64 - 1)) != 0 {
             return Err(MapError::Misaligned);
         }
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            let i4 = ((vaddr >> 39) & 0x1FF) as usize;
-            let i3 = ((vaddr >> 30) & 0x1FF) as usize;
-            let i2 = ((vaddr >> 21) & 0x1FF) as usize;
-            let i1 = ((vaddr >> 12) & 0x1FF) as usize;
-            // Navigate to the 4 KiB PT leaf without allocating, exactly as
-            // `unmap` does. A missing level or a huge-page leaf means there
-            // is no 4 KiB leaf whose referenced bit this reports — fail
-            // closed with `NotMapped` (the tier tracks only 4 KiB
-            // anonymous leaves, never a huge block).
-            let e4 = self.pml4[i4];
-            if e4 & flags::PRESENT == 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present entry → identity-mapped PDPT (see `translate`).
-            let pdpt = unsafe { &*((e4 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e3 = pdpt[i3];
-            if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present non-huge PDPT entry → identity-mapped PD.
-            let pd = unsafe { &*((e3 & ADDR_MASK) as *const [u64; ENTRIES_PER_TABLE]) };
-            let e2 = pd[i2];
-            if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
-                return Err(MapError::NotMapped);
-            }
-            // SAFETY: present non-huge PD entry → identity-mapped PT, and
-            // `&mut self` makes the exclusive borrow of the leaf sound.
-            let pt = unsafe { &mut *((e2 & ADDR_MASK) as *mut [u64; ENTRIES_PER_TABLE]) };
-            let e1 = pt[i1];
-            if e1 & flags::PRESENT == 0 {
-                return Err(MapError::NotMapped);
-            }
-            let was_accessed = e1 & flags::ACCESSED != 0;
-            if was_accessed {
-                // Clear the Accessed bit so the CPU re-sets it on the next
-                // touch; a later probe reading it still clear proves the
-                // page went untouched in between (the clock scan).
-                pt[i1] = e1 & !flags::ACCESSED;
-                // The stale TLB entry may still permit an access without a
-                // page-walk (and so without re-setting Accessed), so the
-                // cleared bit only becomes observable once the TLB entry is
-                // invalidated: flush this page on the current CPU.
-                self.flush_page(vaddr);
-            }
-            Ok(was_accessed)
+        let i4 = ((vaddr >> 39) & 0x1FF) as usize;
+        let i3 = ((vaddr >> 30) & 0x1FF) as usize;
+        let i2 = ((vaddr >> 21) & 0x1FF) as usize;
+        let i1 = ((vaddr >> 12) & 0x1FF) as usize;
+        // Navigate to the 4 KiB PT leaf without allocating, exactly as
+        // `unmap` does. A missing level or a huge-page leaf means there is
+        // no 4 KiB leaf whose referenced bit this reports — fail closed
+        // with `NotMapped` (the tier tracks only 4 KiB anonymous leaves,
+        // never a huge block).
+        let frames = self.frames;
+        let root = self.root_table().ok_or(MapError::NotMapped)?;
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `frames`; `&mut self` makes the exclusive borrow sound.
+        let e4 = unsafe { &*root }[i4];
+        if e4 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
         }
-        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-        {
-            let _ = vaddr;
-            unreachable!("the x86_64 page-table walk is only valid on the bare-metal target")
+        let pdpt = frames.table_at(e4 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present entry → a live PDPT of this hierarchy (see
+        // `translate`).
+        let e3 = unsafe { &*pdpt }[i3];
+        if e3 & flags::PRESENT == 0 || e3 & flags::HUGE != 0 {
+            return Err(MapError::NotMapped);
         }
+        let pd = frames.table_at(e3 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present non-huge PDPT entry → a live PD of this
+        // hierarchy.
+        let e2 = unsafe { &*pd }[i2];
+        if e2 & flags::PRESENT == 0 || e2 & flags::HUGE != 0 {
+            return Err(MapError::NotMapped);
+        }
+        let pt_table = frames.table_at(e2 & ADDR_MASK).ok_or(MapError::NotMapped)?;
+        // SAFETY: present non-huge PD entry → a live PT of this hierarchy,
+        // and `&mut self` makes the exclusive borrow of the leaf sound.
+        let pt = unsafe { &mut *pt_table };
+        let e1 = pt[i1];
+        if e1 & flags::PRESENT == 0 {
+            return Err(MapError::NotMapped);
+        }
+        let was_accessed = e1 & flags::ACCESSED != 0;
+        if was_accessed {
+            // Clear the Accessed bit so the CPU re-sets it on the next
+            // touch; a later probe reading it still clear proves the page
+            // went untouched in between (the clock scan).
+            pt[i1] = e1 & !flags::ACCESSED;
+            // The stale TLB entry may still permit an access without a
+            // page-walk (and so without re-setting Accessed), so the
+            // cleared bit only becomes observable once the TLB entry is
+            // invalidated: flush this page on the current CPU.
+            self.flush_page(vaddr);
+        }
+        Ok(was_accessed)
     }
 
     unsafe fn reclaim_table_frames(&mut self) {
-        // The four-level walk recovers tables through the low identity
-        // map, so — exactly like `map_page` — it is only meaningful on the
-        // bare-metal target; a host space never maps anything to reclaim.
+        // Defence in depth: the dispatcher parks a CPU off a user root at
+        // every task suspend, so a dead space's root is never the active
+        // translation here — but freeing the walked-from root of a live
+        // regime would be catastrophic, so verify and re-park first. With
+        // no park root published the frames are retired unreclaimed rather
+        // than dismantling the active translation (fail closed). Only the
+        // bare-metal target has a `CR3` to compare: a host space is no
+        // CPU's active translation.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            // Defence in depth: the dispatcher parks a CPU off a user root
-            // at every task suspend, so a dead space's root is never the
-            // active translation here — but freeing the walked-from root
-            // of a live regime would be catastrophic, so verify and
-            // re-park first. With no park root published the frames are
-            // retired unreclaimed rather than dismantling the active
-            // translation (fail closed).
-            if active_root_phys() == self.pml4_phys && !park_kernel_root() {
-                return;
+        if active_root_phys() == self.pml4_phys && !park_kernel_root() {
+            return;
+        }
+        let Some(root) = self.root_table() else {
+            return;
+        };
+        // The kernel remap window's and the direct physical map's PML4
+        // entries point at tables *every* root shares, not at tables this
+        // hierarchy owns, and the walk below cannot tell the two apart — it
+        // would free the live kernel heap's page tables, or the map the
+        // whole kernel reaches RAM through. Drop them from this root first;
+        // both are permanent and are reached through every other root
+        // unchanged.
+        //
+        // SAFETY: `pml4_phys` names this space's live PML4, drawn from
+        // `self.frames`; `&mut self` makes the exclusive borrow sound, and
+        // the borrow ends before the reclaim walk below re-reads the root.
+        unsafe {
+            (*root)[KERNEL_WINDOW_PML4_SLOT] = 0;
+            for slot in (*root)
+                .iter_mut()
+                .skip(PHYSMAP_PML4_FIRST_SLOT)
+                .take(PHYSMAP_PML4_SLOTS)
+            {
+                *slot = 0;
             }
-            // The kernel remap window's PML4 entry points at a PDPT
-            // *every* root shares, not at a table this hierarchy owns, and
-            // the walk below cannot tell the two apart — it would free the
-            // live kernel heap's page tables. Drop it from this root first;
-            // the window itself is permanent and is reached through every
-            // other root unchanged.
-            self.pml4[KERNEL_WINDOW_PML4_SLOT] = 0;
-            let frames = self.frames;
-            // A four-level hierarchy rooted at the PML4: a present PML4
-            // entry always points at a PDPT; a present PDPT/PD entry
-            // without `HUGE` points at the next table; PT (depth 3)
-            // entries are page leaves and are never descended into.
-            let child_of = |entry: u64, depth: usize| -> Option<u64> {
-                (depth < 3
-                    && (entry & flags::PRESENT) != 0
-                    && (depth == 0 || (entry & flags::HUGE) == 0))
-                    .then_some(entry & ADDR_MASK)
-            };
-            // Tables are recovered from their physical address through the
-            // low identity map — the same round-trip `leaf_present` and
-            // `ensure_child` rely on.
-            let entries_of = |phys: u64| phys as *const [u64; ENTRIES_PER_TABLE];
-            // SAFETY: every phys `child_of` yields was written by
-            // `ensure_child` / `new_identity` from a `TableFrame` of
-            // `self.frames`, so it names a live, identity-reachable table
-            // this hierarchy owns; the guard above upholds the not-active
-            // contract the caller asserts, and `self` is borrowed mutably
-            // so no other reference walks the tables.
-            unsafe {
-                tairix_arch_api::frames::reclaim_hierarchy(
-                    self.pml4_phys,
-                    &child_of,
-                    &entries_of,
-                    &mut |phys| {
-                        frames.free_table(phys);
-                    },
-                );
-            }
+        }
+        let frames = self.frames;
+        // A four-level hierarchy rooted at the PML4: a present PML4 entry
+        // always points at a PDPT; a present PDPT/PD entry without `HUGE`
+        // points at the next table; PT (depth 3) entries are page leaves
+        // and are never descended into.
+        let child_of = |entry: u64, depth: usize| -> Option<u64> {
+            (depth < 3
+                && (entry & flags::PRESENT) != 0
+                && (depth == 0 || (entry & flags::HUGE) == 0))
+                .then_some(entry & ADDR_MASK)
+        };
+        // SAFETY: every phys `child_of` yields was written by
+        // `ensure_child` / `new_identity` from a `TableFrame` of
+        // `self.frames`, so it names a live table this hierarchy owns and
+        // the source can reach; the guard above upholds the not-active
+        // contract the caller asserts, and `self` is borrowed mutably so no
+        // other reference walks the tables.
+        unsafe {
+            tairix_arch_api::frames::reclaim_hierarchy(self.pml4_phys, frames, &child_of);
         }
     }
 
@@ -1381,9 +1635,7 @@ impl TlbShootdown for AddressSpace {
 
 /// Decode an x86_64 leaf PTE's permission bits back into the neutral
 /// [`PageFlags`]. Present implies readable; `WRITABLE`/`USER` map
-/// directly; executability is the inverse of the `NO_EXECUTE` bit. Only
-/// compiled on the bare-metal target where the page-table walk runs.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+/// directly; executability is the inverse of the `NO_EXECUTE` bit.
 fn page_flags_from_pte(pte: u64) -> PageFlags {
     let mut out = PageFlags::READ;
     if pte & flags::WRITABLE != 0 {
@@ -1405,9 +1657,7 @@ fn page_flags_from_pte(pte: u64) -> PageFlags {
 
 /// 4 KiB-aligned physical address `vaddr` resolves to under a leaf whose
 /// region starts at `leaf_base` and spans `1 << region_shift` bytes
-/// (30 = 1 GiB PDPT leaf, 21 = 2 MiB PD leaf, 12 = 4 KiB PT leaf). Only
-/// compiled on the bare-metal target.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+/// (30 = 1 GiB PDPT leaf, 21 = 2 MiB PD leaf, 12 = 4 KiB PT leaf).
 fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
     let region_mask = (1u64 << region_shift) - 1;
     (leaf_base + (vaddr & region_mask)) & !((PAGE_SIZE as u64) - 1)
@@ -1415,8 +1665,8 @@ fn resolved_page(leaf_base: u64, vaddr: u64, region_shift: u32) -> u64 {
 
 // `&mut [u64; 512]` in, `&'static mut [u64; 512]` out: the returned
 // reference does not borrow from `parent` (it points at a freshly
-// alloc'd table from `frames`, or at a sibling table recovered through
-// the identity map). `mut_from_ref` / `mut_from_immut` clippy lint
+// alloc'd table from `frames`, or at a sibling table recovered from the
+// same source). `mut_from_ref` / `mut_from_immut` clippy lint
 // flags this shape because the function does not return a borrow of
 // `parent`'s lifetime — which is exactly the documented contract.
 #[allow(clippy::mut_from_ref)]
@@ -1433,15 +1683,13 @@ fn ensure_child(
         if entry & flags::HUGE != 0 {
             return None;
         }
-        // Existing child — recover the `&mut` from the physical address.
-        // Identity mapping makes phys = virt here.
-        let phys = entry & ADDR_MASK;
+        let table = frames.table_at(entry & ADDR_MASK)?;
         // SAFETY: every entry that has PRESENT set was inserted below (or
-        // by a `new_identity_*` constructor) with a physical address that came
-        // from a `TableFrame`, so the round-trip is valid; identity
-        // mapping means we can dereference the physical address directly.
-        let child: &'static mut [u64; ENTRIES_PER_TABLE] =
-            unsafe { &mut *(phys as usize as *mut [u64; ENTRIES_PER_TABLE]) };
+        // by a root constructor) with a physical address drawn from
+        // `frames`, so the source's view of it is a live table of this
+        // hierarchy; the walk holds the hierarchy exclusively, so the
+        // `&mut` does not alias.
+        let child: &'static mut [u64; ENTRIES_PER_TABLE] = unsafe { &mut *table };
         Some(child)
     } else {
         let TableFrame { phys, entries } = frames.alloc_table()?;
@@ -1450,29 +1698,34 @@ fn ensure_child(
     }
 }
 
-fn phys_of(table: &[u64; ENTRIES_PER_TABLE]) -> u64 {
-    // The page-table pool is a higher-half kernel static (linked at
-    // KERNEL_VMA_BASE + phys; see linker.ld / boot.s SAFETY-INVARIANT 9).
-    // Convert its virtual address back to the physical address the MMU
-    // needs in a page-table entry or CR3. The subtraction cannot wrap: on
-    // the bare-metal target every kernel static lives at or above
-    // KERNEL_VMA_BASE.
-    (table.as_ptr() as u64) - KERNEL_VMA_BASE
+/// Physical address of the kernel static at virtual address `virt`.
+///
+/// The page-table pool is a higher-half kernel static (linked at
+/// `KERNEL_VMA_BASE + phys`; see `linker.ld` / `boot.s`
+/// SAFETY-INVARIANT 9), so its virtual address converts back to the
+/// physical address the MMU needs in a page-table entry or CR3 by
+/// subtracting the window base. Wrapping, so the host build of
+/// [`PageTablePool`] — whose statics live nowhere near the higher half —
+/// yields a `phys` its own `table_at` still inverts rather than
+/// panicking on an overflow the target can never see.
+const fn phys_of(virt: u64) -> u64 {
+    virt.wrapping_sub(KERNEL_VMA_BASE)
 }
 
 #[cfg(test)]
 mod tests {
-    // Page-table mechanics are tested end-to-end in the
-    // `memory_isolation` QEMU integration test (the only environment in
-    // which the CPU actually walks them). Host-side unit tests of the
-    // bit manipulation would re-implement the CPU's MMU and add nothing
-    // that the architectural test does not already prove.
-    //
-    // This stub exists so `cargo test -p tairix-arch-x86_64` runs cleanly
-    // on the host target without emitting a "no tests in module" lint.
+    use super::*;
+    use core::sync::atomic::AtomicU64;
+    use tairix_arch_api::mmu::{self, PageFlags};
+
+    /// A virtual address above the widest identity window the boot floor
+    /// can carry, so the walk draws fresh tables instead of meeting a
+    /// constructor's huge-page leaf.
+    const FINE_VA: u64 = 480u64 << 30;
+    const FINE_PA: u64 = 0x4123_4000;
+
     #[test]
     fn page_constants_are_canonical() {
-        use super::*;
         assert_eq!(PAGE_SIZE, 4096);
         assert_eq!(ENTRIES_PER_TABLE, 512);
         // Intel SDM Vol 3A §4.5 paging-structure flag bit positions.
@@ -1481,5 +1734,358 @@ mod tests {
         assert_eq!(flags::USER, 1 << 2);
         assert_eq!(flags::HUGE, 1 << 7);
         assert_eq!(flags::NO_EXECUTE, 1 << 63);
+    }
+
+    /// The pool's `phys_of`/`table_at` pair is the port's whole
+    /// physical↔virtual relationship, so the shared suite runs over the
+    /// real pool here rather than only on the metal.
+    #[test]
+    fn passes_frames_conformance() {
+        static POOL: PageTablePool = PageTablePool::new();
+        tairix_arch_api::frames::conformance::run_all(&POOL, POOL_SIZE);
+    }
+
+    #[test]
+    fn passes_mmu_conformance() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        mmu::conformance::run_all(&mut space, FINE_VA, FINE_PA);
+    }
+
+    /// A parent entry whose address the frame source never handed out is
+    /// what a clobbered or hostile table looks like. Every walk must read
+    /// it as "nothing mapped here" rather than dereference the address the
+    /// integer happens to name.
+    #[test]
+    fn an_entry_the_source_cannot_reach_fails_the_walk_closed() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, PageFlags::READ)
+            .expect("map the probe page");
+        // A page-aligned table the pool never handed out, holding a
+        // present huge leaf at the index the walk would read next.
+        // Recovering a table by dereferencing its address — what the walk
+        // did before it asked the frame source — would read this and
+        // answer with a mapping; asking the source refuses the address
+        // outright.
+        let mut foreign = Table::new();
+        foreign.0[((FINE_VA >> 21) & 0x1FF) as usize] =
+            FINE_PA | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        let foreign_phys = phys_of(foreign.0.as_ptr() as u64);
+
+        // Overwrite the PDPT entry covering `FINE_VA` to point at it,
+        // present and non-huge so the walk would follow it.
+        let root = POOL
+            .table_at(space.root_phys())
+            .expect("the pool's own root");
+        // SAFETY: this space's live PML4 from the process-static pool,
+        // exclusively owned here; the PDPT it names is the same pool's.
+        let pdpt_phys = unsafe { (*root)[((FINE_VA >> 39) & 0x1FF) as usize] } & ADDR_MASK;
+        let pdpt = POOL.table_at(pdpt_phys).expect("the pool's own PDPT");
+        // SAFETY: as above.
+        unsafe {
+            (*pdpt)[((FINE_VA >> 30) & 0x1FF) as usize] =
+                foreign_phys | flags::PRESENT | flags::WRITABLE;
+        }
+
+        assert_eq!(mmu::AddressSpace::translate(&space, FINE_VA), None);
+        assert_eq!(
+            mmu::AddressSpace::unmap(&mut space, FINE_VA),
+            Err(MapError::NotMapped)
+        );
+        assert_eq!(
+            mmu::AddressSpace::test_and_clear_accessed(&mut space, FINE_VA),
+            Err(MapError::NotMapped)
+        );
+        // And a fresh map over the unreachable branch is refused rather
+        // than walked into: `leaf_present` reads it as absent, then
+        // `ensure_child` refuses the entry it cannot recover.
+        assert_eq!(
+            mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, PageFlags::READ),
+            Err(MapError::PoolExhausted)
+        );
+    }
+
+    /// A recording [`PageTableFrames`] double: a bump pool over `'static`
+    /// slots plus a log of every `free_table` return, so teardown can be
+    /// asserted to hand back exactly the frames the hierarchy drew.
+    struct RecordingFrames {
+        storage: [UnsafeCell<Table>; Self::CAPACITY],
+        used: AtomicUsize,
+        freed: [AtomicU64; Self::CAPACITY],
+        freed_len: AtomicUsize,
+    }
+
+    // SAFETY: each slot is handed out exactly once via the monotonic
+    // `used` counter, so the `&'static mut` views never alias; the freed
+    // log is plain atomics.
+    unsafe impl Sync for RecordingFrames {}
+
+    impl RecordingFrames {
+        const CAPACITY: usize = 16;
+
+        const fn new() -> Self {
+            // The array initialisers need a `const`, and copying it per
+            // slot is the point: each element is its own cell.
+            #[allow(clippy::declare_interior_mutable_const)]
+            const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
+            #[allow(clippy::declare_interior_mutable_const)]
+            const FREED: AtomicU64 = AtomicU64::new(0);
+            // `const`, so the pool lands in the `static` it initialises
+            // rather than a runtime stack frame, despite the
+            // `large_stack_arrays` heuristic.
+            #[allow(clippy::large_stack_arrays)]
+            Self {
+                storage: [ZERO; Self::CAPACITY],
+                used: AtomicUsize::new(0),
+                freed: [FREED; Self::CAPACITY],
+                freed_len: AtomicUsize::new(0),
+            }
+        }
+
+        fn freed_phys(&self) -> impl Iterator<Item = u64> + '_ {
+            self.freed
+                .iter()
+                .take(self.freed_len.load(Ordering::SeqCst))
+                .map(|slot| slot.load(Ordering::SeqCst))
+        }
+    }
+
+    impl PageTableFrames for RecordingFrames {
+        fn alloc_table(&self) -> Option<TableFrame> {
+            let idx = self.used.fetch_add(1, Ordering::SeqCst);
+            if idx >= Self::CAPACITY {
+                self.used.store(Self::CAPACITY, Ordering::SeqCst);
+                return None;
+            }
+            // SAFETY: the monotonic index makes this slot exclusively ours.
+            let table: &'static mut Table = unsafe { &mut *self.storage[idx].get() };
+            let entries = &mut table.0;
+            let phys = phys_of(entries.as_ptr() as u64);
+            Some(TableFrame { phys, entries })
+        }
+
+        fn table_at(&self, phys: u64) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
+            let base = phys_of(self.storage.as_ptr() as u64);
+            let index = pool_slot_of(base, Self::CAPACITY, phys)?;
+            Some(self.storage[index].get().cast())
+        }
+
+        fn free_table(&self, phys: u64) {
+            let slot = self.freed_len.fetch_add(1, Ordering::SeqCst);
+            assert!(slot < Self::CAPACITY, "more frees than the pool can hold");
+            self.freed[slot].store(phys, Ordering::SeqCst);
+        }
+    }
+
+    /// Teardown hands back exactly the tables the four-level hierarchy
+    /// drew — the root last, each once — and never a leaf frame.
+    #[test]
+    fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
+        static POOL: RecordingFrames = RecordingFrames::new();
+        let mut space = AddressSpace::new_bookkeeping_identity_32mib(&POOL).expect("a root");
+        let root_phys = space.root_phys();
+        let drawn = POOL.used.load(Ordering::SeqCst);
+        // Two pages a gigabyte apart, so the walk draws an independent
+        // PD/PT pair for each. Both hang off the *low* PDPT the identity
+        // window already installed, because a PML4 slot spans 512 GiB and
+        // these addresses are inside slot 0.
+        mmu::AddressSpace::map_page(&mut space, FINE_VA, FINE_PA, PageFlags::READ).expect("map A");
+        mmu::AddressSpace::map_page(
+            &mut space,
+            FINE_VA + (1u64 << 30),
+            FINE_PA + PAGE_SIZE as u64,
+            PageFlags::READ,
+        )
+        .expect("map B");
+        let total = POOL.used.load(Ordering::SeqCst);
+        assert_eq!(total, drawn + 4, "a PD/PT pair per page, no new PDPT");
+
+        // SAFETY: a host space is no CPU's active translation, and no
+        // other reference into its tables is live.
+        unsafe { mmu::AddressSpace::reclaim_table_frames(&mut space) };
+
+        let mut count = 0usize;
+        for phys in POOL.freed_phys() {
+            assert!(
+                POOL.freed_phys().take(count).all(|seen| seen != phys),
+                "no table is freed twice"
+            );
+            count += 1;
+        }
+        assert_eq!(count, total, "every drawn table was returned");
+        assert_eq!(
+            POOL.freed_phys().last(),
+            Some(root_phys),
+            "the root is freed last"
+        );
+        assert!(
+            POOL.freed_phys().all(|phys| phys != FINE_PA),
+            "a leaf frame is never freed"
+        );
+    }
+
+    #[test]
+    fn the_direct_map_claims_the_slots_between_user_space_and_the_remap_window() {
+        // 1 << 47 is the port's user-VA ceiling, and the map starts at the
+        // slot it lands on: the two share no slot, so a process root can
+        // carry the whole of RAM without carrying it in the half a user
+        // program addresses.
+        assert_eq!((1u64 << 47) >> 39, PHYSMAP_PML4_FIRST_SLOT as u64);
+        assert_eq!(PHYSMAP_VMA_BASE, 0xFFFF_8000_0000_0000);
+        assert_eq!(PHYSMAP_PML4_SLOTS, 254);
+        // 254 slots at 512 GiB is 127 TiB, so the reach is bounded by the
+        // architecture rather than by where user space begins — which is
+        // the whole point of moving the map out of the low half.
+        assert_eq!(MAX_PHYSMAP_GIB, 254 * 512);
+        assert!(is_kernel_half_slot(PHYSMAP_PML4_FIRST_SLOT));
+        assert!(!is_kernel_half_slot(PHYSMAP_PML4_FIRST_SLOT - 1));
+        assert!(is_kernel_half_slot(KERNEL_WINDOW_PML4_SLOT));
+    }
+
+    /// The widening draws only what the boot trampoline does not already
+    /// supply: its span's PDPT and the leaves below the floor are free.
+    #[test]
+    fn physmap_table_frames_counts_what_the_trampoline_does_not_supply() {
+        // The host build reports no 1 GiB pages, so each gigabyte above the
+        // floor also costs its own page directory.
+        assert!(!gigapages_supported());
+        let floor = PHYSMAP_FLOOR_GIB;
+        assert_eq!(physmap_table_frames(floor), 0);
+        assert_eq!(physmap_table_frames(floor + 1), 1);
+        assert_eq!(
+            physmap_table_frames(ENTRIES_PER_TABLE),
+            ENTRIES_PER_TABLE - floor,
+            "one span, a directory per gigabyte above the floor"
+        );
+        assert_eq!(
+            physmap_table_frames(ENTRIES_PER_TABLE + 1),
+            1 + (ENTRIES_PER_TABLE + 1 - floor),
+            "a second span costs its own PDPT"
+        );
+    }
+
+    /// A process root reaches RAM through the direct map only. The bare
+    /// physical address of the very same frame resolves to nothing, which
+    /// is what makes the low half user-only: the standing full-RAM
+    /// identity map every spawned process used to carry is gone.
+    #[test]
+    fn a_process_root_has_no_identity_map_where_a_boot_root_does() {
+        static PROCESS_POOL: PageTablePool = PageTablePool::new();
+        static BOOT_POOL: PageTablePool = PageTablePool::new();
+        let probe = 0x0020_0000u64;
+
+        let process = AddressSpace::new_process_root(&PROCESS_POOL).expect("a process root");
+        assert!(
+            mmu::AddressSpace::translate(&process, probe).is_none(),
+            "a process root must not map a physical address as itself"
+        );
+
+        let boot = AddressSpace::new_boot_identity(&BOOT_POOL).expect("a boot root");
+        assert_eq!(
+            mmu::AddressSpace::translate(&boot, probe).map(|(phys, _)| phys),
+            Some(probe),
+            "a boot root keeps the trampoline's identity window"
+        );
+        // And it stops at the trampoline's own extent rather than growing
+        // with the machine: RAM above it is the direct map's job.
+        assert!(
+            mmu::AddressSpace::translate(&boot, (BOOT_IDENTITY_GIB as u64) << 30).is_none(),
+            "the identity window is the trampoline's fixed extent"
+        );
+    }
+
+    /// A user leaf in a kernel-half slot would hand ring 3 the direct map,
+    /// the kernel heap's remap window, or the kernel image. The walk
+    /// refuses it whatever the caller computed.
+    #[test]
+    fn a_user_mapping_is_refused_in_the_kernel_half() {
+        static POOL: PageTablePool = PageTablePool::new();
+        let mut space = AddressSpace::new_process_root(&POOL).expect("a process root");
+        for slot in [
+            PHYSMAP_PML4_FIRST_SLOT,
+            PHYSMAP_PML4_FIRST_SLOT + PHYSMAP_PML4_SLOTS - 1,
+            KERNEL_WINDOW_PML4_SLOT,
+        ] {
+            assert!(
+                space
+                    .map_4k_user(&POOL, canonical_slot_base(slot), FINE_PA, true)
+                    .is_none(),
+                "slot {slot} is the kernel's"
+            );
+        }
+        // Not a blanket refusal: the user half still maps.
+        assert!(space.map_4k_user(&POOL, FINE_VA, FINE_PA, true).is_some());
+    }
+
+    #[test]
+    fn publish_physmap_refuses_an_extent_its_entries_do_not_cover() {
+        let none = [0u64; PHYSMAP_PML4_SLOTS];
+        assert!(!publish_physmap(&none, 0), "an empty map covers nothing");
+        assert!(
+            !publish_physmap(&none, MAX_PHYSMAP_GIB + 1),
+            "wider than the claimed slots can express"
+        );
+        assert!(
+            !publish_physmap(&none, 1),
+            "a span with no entry would leave a hole the map claims to cover"
+        );
+        let mut extra = [0u64; PHYSMAP_PML4_SLOTS];
+        extra[0] = flags::PRESENT | flags::WRITABLE;
+        extra[1] = flags::PRESENT | flags::WRITABLE;
+        assert!(
+            !publish_physmap(&extra, 1),
+            "a spare entry would leave a slot nothing backs"
+        );
+    }
+
+    /// The one test that drives the set-once publication, because it is
+    /// process-global: a second caller is refused by design. Every other
+    /// test here is insensitive to it — a root's direct-map slots name
+    /// tables this pool owns and the reclaim walk drops them before it
+    /// descends, so neither the pool accounting nor a walk of the low half
+    /// changes.
+    #[test]
+    fn every_root_installs_the_published_direct_map() {
+        static POOL: PageTablePool = PageTablePool::new();
+        const GIB: usize = 4;
+
+        // One shared PDPT, as the boot carve builds it: 1 GiB leaves
+        // covering `[0, GIB GiB)`, reached from the map's first slot.
+        let TableFrame {
+            phys: pdpt_phys,
+            entries: pdpt,
+        } = POOL.alloc_table().expect("a PDPT");
+        for (gib, slot) in pdpt.iter_mut().take(GIB).enumerate() {
+            *slot = ((gib as u64) << 30) | flags::PRESENT | flags::WRITABLE | flags::HUGE;
+        }
+        let mut entries = [0u64; PHYSMAP_PML4_SLOTS];
+        entries[0] = pdpt_phys | flags::PRESENT | flags::WRITABLE;
+        assert!(publish_physmap(&entries, GIB), "the first publication");
+        assert_eq!(physmap_gigapages(), GIB);
+        assert_eq!(physmap_bytes(), (GIB as u64) << 30);
+        assert!(
+            !publish_physmap(&entries, GIB),
+            "the map is installed once per boot"
+        );
+
+        let probe = 0x1234_5000u64;
+        for space in [
+            AddressSpace::new_process_root(&POOL).expect("a process root"),
+            AddressSpace::new_boot_identity(&POOL).expect("a boot root"),
+        ] {
+            assert_eq!(
+                mmu::AddressSpace::translate(&space, physmap_virt(probe)).map(|(phys, _)| phys),
+                Some(probe),
+                "every root reaches a frame through the direct map"
+            );
+        }
+        // Past the published extent nothing is mapped, so a frame the map
+        // does not cover faults rather than reading a neighbour's.
+        let space = AddressSpace::new_process_root(&POOL).expect("a process root");
+        assert!(
+            mmu::AddressSpace::translate(&space, physmap_virt(physmap_bytes())).is_none(),
+            "the map stops at its published extent"
+        );
     }
 }

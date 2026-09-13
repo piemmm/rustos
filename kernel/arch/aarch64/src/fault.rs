@@ -26,9 +26,8 @@
 //! are gated to the freestanding aarch64 target (in
 //! [`crate::exceptions`]).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use tairix_arch_api::backtrace::UserRegisterFrame;
+use tairix_sync::FnCell;
 
 /// Shift of the `ESR_ELx.EC` (exception class) field (bits `[31:26]`,
 /// ARM ARM D17.2.37).
@@ -149,9 +148,8 @@ pub const fn is_access_flag_fault(esr: u64) -> bool {
 /// handlers report the outcome to QEMU through [`crate::qemu_exit`].
 pub type FaultHandlerFn = extern "C" fn(esr: u64, far: u64, elr: u64) -> !;
 
-/// Slot holding the installed fault handler as a raw function pointer
-/// (`0` = none installed).
-static FAULT_HANDLER: AtomicUsize = AtomicUsize::new(0);
+/// The installed fault handler.
+static FAULT_HANDLER: FnCell<FaultHandlerFn> = FnCell::empty();
 
 /// Failure modes of [`set_fault_handler`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -168,11 +166,11 @@ pub enum SetFaultHandlerError {
 ///
 /// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
 pub fn set_fault_handler(cb: FaultHandlerFn) -> Result<(), SetFaultHandlerError> {
-    let raw = cb as usize;
-    FAULT_HANDLER
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+    if FAULT_HANDLER.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetFaultHandlerError::AlreadyInstalled)
+    }
 }
 
 /// Read back the installed fault handler, if any. The vector calls this
@@ -180,22 +178,14 @@ pub fn set_fault_handler(cb: FaultHandlerFn) -> Result<(), SetFaultHandlerError>
 /// observer.
 #[must_use]
 pub fn fault_handler() -> Option<FaultHandlerFn> {
-    let raw = FAULT_HANDLER.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every value stored into the slot round-trips a valid
-        // `FaultHandlerFn` through `set_fault_handler`; function pointers
-        // are `usize`-sized so the transmute is lossless.
-        Some(unsafe { core::mem::transmute::<usize, FaultHandlerFn>(raw) })
-    }
+    FAULT_HANDLER.load()
 }
 
 #[cfg(test)]
 fn clear_fault_handler_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a handler.
     // Production code never clears the slot.
-    FAULT_HANDLER.store(0, Ordering::Release);
+    FAULT_HANDLER.clear();
 }
 
 /// Signature of the user-fault resolver the vector offers a lower-EL data
@@ -225,9 +215,8 @@ fn clear_fault_handler_for_tests() {
 pub type UserFaultResolveFn =
     extern "C" fn(far: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
 
-/// Slot holding the installed user-fault resolver as a raw function
-/// pointer (`0` = none installed).
-static USER_FAULT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
+/// The installed user-fault resolver.
+static USER_FAULT_RESOLVER: FnCell<UserFaultResolveFn> = FnCell::empty();
 
 /// Install the user-fault resolver.
 ///
@@ -240,33 +229,25 @@ static USER_FAULT_RESOLVER: AtomicUsize = AtomicUsize::new(0);
 ///
 /// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
 pub fn set_user_fault_resolver(cb: UserFaultResolveFn) -> Result<(), SetFaultHandlerError> {
-    let raw = cb as usize;
-    USER_FAULT_RESOLVER
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+    if USER_FAULT_RESOLVER.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetFaultHandlerError::AlreadyInstalled)
+    }
 }
 
 /// Read back the installed user-fault resolver, if any. The vector calls
 /// this on a lower-EL data abort; it is also a test/diagnostic observer.
 #[must_use]
 pub fn user_fault_resolver() -> Option<UserFaultResolveFn> {
-    let raw = USER_FAULT_RESOLVER.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every value stored into the slot round-trips a valid
-        // `UserFaultResolveFn` through `set_user_fault_resolver`; function
-        // pointers are `usize`-sized so the transmute is lossless.
-        Some(unsafe { core::mem::transmute::<usize, UserFaultResolveFn>(raw) })
-    }
+    USER_FAULT_RESOLVER.load()
 }
 
 #[cfg(test)]
 fn clear_user_fault_resolver_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a resolver.
     // Production code never clears the slot.
-    USER_FAULT_RESOLVER.store(0, Ordering::Release);
+    USER_FAULT_RESOLVER.clear();
 }
 
 /// Signature of the user-fault **terminator** the vector calls for a
@@ -294,9 +275,8 @@ fn clear_user_fault_resolver_for_tests() {
 pub type UserFaultTerminateFn =
     extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
 
-/// Slot holding the installed user-fault terminator as a raw function
-/// pointer (`0` = none installed).
-static USER_FAULT_TERMINATOR: AtomicUsize = AtomicUsize::new(0);
+/// The installed user-fault terminator.
+static USER_FAULT_TERMINATOR: FnCell<UserFaultTerminateFn> = FnCell::empty();
 
 /// Install the user-fault terminator.
 ///
@@ -310,11 +290,11 @@ static USER_FAULT_TERMINATOR: AtomicUsize = AtomicUsize::new(0);
 ///
 /// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
 pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
-    let raw = cb as usize;
-    USER_FAULT_TERMINATOR
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetFaultHandlerError::AlreadyInstalled)
+    if USER_FAULT_TERMINATOR.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetFaultHandlerError::AlreadyInstalled)
+    }
 }
 
 /// Read back the installed user-fault terminator, if any. The vector calls
@@ -322,22 +302,14 @@ pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaul
 /// observer.
 #[must_use]
 pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
-    let raw = USER_FAULT_TERMINATOR.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every value stored into the slot round-trips a valid
-        // `UserFaultTerminateFn` through `set_user_fault_terminator`;
-        // function pointers are `usize`-sized so the transmute is lossless.
-        Some(unsafe { core::mem::transmute::<usize, UserFaultTerminateFn>(raw) })
-    }
+    USER_FAULT_TERMINATOR.load()
 }
 
 #[cfg(test)]
 fn clear_user_fault_terminator_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a terminator.
     // Production code never clears the slot.
-    USER_FAULT_TERMINATOR.store(0, Ordering::Release);
+    USER_FAULT_TERMINATOR.clear();
 }
 
 #[cfg(test)]
@@ -461,15 +433,16 @@ mod tests {
         clear_user_fault_resolver_for_tests();
         assert!(user_fault_resolver().is_none());
 
-        set_user_fault_resolver(host_user_fault_resolver).expect("first install");
+        // Coerce once: the slot is compared against *this* pointer value,
+        // because two coercions of one `fn` item are not guaranteed to
+        // share an address.
+        let cb: UserFaultResolveFn = host_user_fault_resolver;
+        set_user_fault_resolver(cb).expect("first install");
         let got = user_fault_resolver().expect("resolver present");
-        assert_eq!(
-            got as *const () as usize,
-            host_user_fault_resolver as *const () as usize
-        );
+        assert_eq!(got as *const (), cb as *const ());
 
         assert_eq!(
-            set_user_fault_resolver(host_user_fault_resolver),
+            set_user_fault_resolver(cb),
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_user_fault_resolver_for_tests();
@@ -487,15 +460,13 @@ mod tests {
         clear_user_fault_terminator_for_tests();
         assert!(user_fault_terminator().is_none());
 
-        set_user_fault_terminator(host_user_fault_terminator).expect("first install");
+        let cb: UserFaultTerminateFn = host_user_fault_terminator;
+        set_user_fault_terminator(cb).expect("first install");
         let got = user_fault_terminator().expect("terminator present");
-        assert_eq!(
-            got as *const () as usize,
-            host_user_fault_terminator as *const () as usize
-        );
+        assert_eq!(got as *const (), cb as *const ());
 
         assert_eq!(
-            set_user_fault_terminator(host_user_fault_terminator),
+            set_user_fault_terminator(cb),
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_user_fault_terminator_for_tests();
@@ -506,15 +477,13 @@ mod tests {
         clear_fault_handler_for_tests();
         assert!(fault_handler().is_none());
 
-        set_fault_handler(host_fault_handler).expect("first install");
+        let cb: FaultHandlerFn = host_fault_handler;
+        set_fault_handler(cb).expect("first install");
         let got = fault_handler().expect("handler present");
-        assert_eq!(
-            got as *const () as usize,
-            host_fault_handler as *const () as usize
-        );
+        assert_eq!(got as *const (), cb as *const ());
 
         assert_eq!(
-            set_fault_handler(host_fault_handler),
+            set_fault_handler(cb),
             Err(SetFaultHandlerError::AlreadyInstalled)
         );
         clear_fault_handler_for_tests();

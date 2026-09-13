@@ -265,14 +265,13 @@ pub enum BootError {
     /// path fails closed. A single-CPU
     /// boot is unaffected: one TSC is self-monotonic.
     TscNotInvariant,
-    /// The identity/direct-map window could not be widened to cover the
-    /// discovered RAM — no usable run below the boot trampoline's own
-    /// window could host the page directories, or the arch widening
-    /// refused the request. Every kernel path that reaches a frame by
-    /// pointer would then fail closed above the trampoline's window while
-    /// the allocator kept handing out frames above it, so the boot refuses
-    /// rather than running on RAM it cannot reach.
-    IdentityWindowWiden,
+    /// The direct physical map could not be installed over the discovered
+    /// RAM — no usable run below the boot trampoline's identity window
+    /// could host its page tables, or the arch install refused the
+    /// request. Every kernel path that reaches a frame by pointer would
+    /// then fail closed while the allocator kept handing out frames, so
+    /// the boot refuses rather than running on RAM it cannot reach.
+    DirectMapInstall,
 }
 
 impl BootError {
@@ -305,7 +304,7 @@ impl BootError {
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
             Self::UserFaultTerminatorInstall => "user_fault_terminator_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
-            Self::IdentityWindowWiden => "identity_window_widen_failed",
+            Self::DirectMapInstall => "direct_map_install_failed",
         }
     }
 }
@@ -329,27 +328,14 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// and may not be renumbered.
 const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
-/// Security-relevant boot decision: how wide the identity/direct-map
-/// window the kernel reaches every RAM frame through ended up, and whether
-/// the part's 1 GiB pages backed it. Logged on every boot so a machine
-/// whose RAM outruns the window is visible in the record rather than
-/// discovered as a fail-closed allocation later. Sits in the
-/// `kernel/core`-owned `4000..5000` range; the id is part of the audit
-/// contract and may not be renumbered.
-pub const KERNEL_BOOT_IDENTITY_WINDOW: EventId = EventId(4096);
-
-/// First gigabyte the identity/direct-map window may not reach: the user
-/// virtual base every child image is mapped at. The window shares each
-/// process root's low half with that image, so it stops short of it.
-const IDENTITY_WINDOW_CAP_GIB: usize = (crate::spawn_layout::CHILD_USER_BIAS >> 30) as usize;
-
-/// A cap that reached the image bias would map RAM over the child's own
-/// pages. Pin it at build time rather than discovering the overlap as a
-/// corrupted image.
-const _: () = assert!(
-    (IDENTITY_WINDOW_CAP_GIB as u64) << 30 <= crate::spawn_layout::CHILD_USER_BIAS,
-    "the identity window must stop at or below the user image bias"
-);
+/// Security-relevant boot decision: how wide the direct physical map the
+/// kernel reaches every RAM frame through ended up, and whether the part's
+/// 1 GiB pages backed it. Logged on every boot so a machine whose RAM
+/// outruns the map is visible in the record rather than discovered as a
+/// fail-closed allocation later. Sits in the `kernel/core`-owned
+/// `4000..5000` range; the id is part of the audit contract and may not be
+/// renumbered.
+pub const KERNEL_BOOT_DIRECT_MAP: EventId = EventId(4096);
 
 // --- Retained boot audit log ----------------------------------------
 
@@ -597,6 +583,28 @@ pub fn bring_up_bsp(
     #[cfg(all(freestanding, kernel_isa = "x86_64"))]
     tairix_arch_x86_64::paging::publish_boot_park_root();
 
+    // 1e. Boot-info parsing and the direct physical map — before anything
+    //     reaches a register block or a frame by pointer. The trampoline
+    //     identity-maps only what must be addressed physically, so the LAPIC
+    //     register writes the steps below make, and every frame the kernel
+    //     later touches, resolve through this map or not at all. The tables
+    //     it needs are carved out of the firmware map first, so the frame
+    //     allocator never hands them out.
+    //
+    // SAFETY: `boot_info` is the verbatim trampoline pointer (the
+    // documented invariant of [`boot`]); the blob and every table it
+    // points at sit in the identity-mapped 0..4 GiB window (`boot.s`
+    // SAFETY-INVARIANT 4).
+    let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
+    let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
+    let direct_map_gib = crate::mem_map::direct_map_gib(
+        &memory_map,
+        paging::BOOT_IDENTITY_GIB,
+        paging::MAX_PHYSMAP_GIB,
+    );
+    install_direct_physical_map(&mut memory_map, direct_map_gib)?;
+    log_direct_map(log_sink, paging::physmap_gigapages());
+
     // 2. Software-enable the BSP LAPIC and read its ID.
     let mut lapic = make_bsp_lapic();
     lapic.software_enable(0xFF);
@@ -617,35 +625,8 @@ pub fn bring_up_bsp(
     )
     .map_err(|_| BootError::TimerCalibration)?;
 
-    // 4. Boot-info parsing — first the memory map, then the RSDP.
+    // 4. The RSDP, from the boot info parsed in step 1e.
     //
-    // SAFETY: `boot_info` is the verbatim trampoline pointer (the
-    // documented invariant of [`boot`]); the blob and every table it
-    // points at sit in the identity-mapped 0..4 GiB window (`boot.s`
-    // SAFETY-INVARIANT 4).
-    let boot_data = unsafe { BootData::load(boot_info) }.map_err(|_| BootError::BootInfoParse)?;
-
-    let (mut memory_map, installed_memory_bytes) = build_memory_map(&boot_data)?;
-
-    // Widen the identity/direct-map window to the RAM the firmware map
-    // reports, before anything reaches a frame through it. The trampoline
-    // maps a fixed window sized for the architectural MMIO frames and the
-    // firmware tables, not for the installed RAM; the allocator draws from
-    // the top of its pool downward, so on a machine with more RAM than that
-    // the very first frame handed out would be unreachable by pointer and
-    // every consumer of it — the process-image write, the shared-region
-    // scrub, a page table, a slab page — would fail closed while gigabytes
-    // sat free. The page directories the widening needs are carved out of
-    // the map first (and only where the part has no 1 GiB pages, which need
-    // none), so the allocator never hands them out.
-    let identity_gib = crate::mem_map::identity_window_gib(
-        &memory_map,
-        paging::BOOT_IDENTITY_GIB,
-        IDENTITY_WINDOW_CAP_GIB,
-    );
-    widen_identity_window(&mut memory_map, identity_gib)?;
-    log_identity_window(log_sink, paging::configured_identity_gigapages());
-
     // SAFETY: same identity-window contract as the `BootData::load`
     // above — the RSDP the loader published sits below 4 GiB.
     let rsdp = unsafe { boot_data.validated_rsdp() }.ok_or(BootError::NoRsdp)?;
@@ -884,7 +865,7 @@ unsafe fn install_fault_entries() -> Result<(), BootError> {
         percpu::install_vector(0, fault::PAGE_FAULT_VECTOR, fault::page_fault_isr_addr())
             .map_err(|_| BootError::PageFaultIsrInstall)?;
     }
-    tairix_arch_x86_64::uaccess::install().map_err(|_| BootError::PageFaultIsrInstall)?;
+    tairix_arch_x86_64::uaccess::install();
     let _ = crate::x86_64::panic_ctx::install_kernel_fault_handler();
     Ok(())
 }
@@ -1176,22 +1157,23 @@ unsafe fn ecam_bus(
     // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
     let mcfg_bytes = unsafe { acpi::locate_mcfg(rsdp) }?;
     let ecam = acpi::mcfg_first_ecam(mcfg_bytes)?;
-    // The window must lie wholly inside the identity map, or an identity
+    // The window must lie wholly inside the direct physical map, or a
     // `RegisterWindow` over it would touch unmapped memory (fail closed).
     let window_len = ecam.window_len();
     let end = ecam.base.checked_add(window_len)?;
-    if ecam.base == 0 || end > paging::configured_identity_bytes() {
+    if ecam.base == 0 || end > paging::physmap_bytes() {
         return None;
     }
     let len = usize::try_from(window_len).ok()?;
-    let addr = usize::try_from(ecam.base).ok()?;
+    let addr = usize::try_from(paging::physmap_virt(ecam.base)).ok()?;
     let ptr = core::ptr::NonNull::new(addr as *mut u8)?;
     // SAFETY: `ecam.base .. ecam.base + len` is the firmware-described ECAM
     // configuration window (`mcfg_first_ecam`), proven above to lie wholly
-    // within the live identity map, so `ptr` is a valid, uniquely-owned
-    // pointer to `len` bytes for the kernel's lifetime. Config space is only
-    // ever accessed through the bounded `RegisterWindow` accessors this
-    // window backs; nothing else aliases it during single-CPU bring-up.
+    // within the live direct physical map, so `ptr` is a valid,
+    // uniquely-owned pointer to `len` bytes for the kernel's lifetime.
+    // Config space is only ever accessed through the bounded
+    // `RegisterWindow` accessors this window backs; nothing else aliases it
+    // during single-CPU bring-up.
     let window = unsafe { RegisterWindow::from_mapping(ecam.base, ptr, len) };
     Some(tairix_pci::mechanism_ecam(window))
 }
@@ -1272,10 +1254,10 @@ where
     // touches PCI configuration space or the MSI-X BAR (the kernel owns
     // interrupt routing, exactly as Linux's PCI core does). The MSI-X table
     // write goes through a throwaway `CAP_MMIO_MAP` register-window map over
-    // the identity physical map; if that context cannot be built the
+    // the direct physical map; if that context cannot be built the
     // interrupt-driven functions are left undiscovered rather than granted a
     // line that never delivers (fail closed).
-    let phys = DirectPhysMap::identity(paging::configured_identity_bytes());
+    let phys = DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes());
     let Some(mmio_space) = ArchAddressSpace::new_bookkeeping_identity_32mib(&MSI_PROBE_PT_POOL)
     else {
         return;
@@ -1367,58 +1349,60 @@ unsafe fn enable_nxe() {
 }
 
 fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {
-    // SAFETY: `LAPIC_BASE_PHYS` (= 0xFEE0_0000) is identity-mapped by
-    // `boot.s` SAFETY-INVARIANT 4 (the 0..4 GiB identity map covers
-    // it). The constructor only stores the pointer; no MMIO read or
-    // write happens here.
-    let mmio = unsafe { VolatileLapicMmio::new(preempt::LAPIC_BASE_PHYS as *mut u32) };
+    // SAFETY: `LAPIC_BASE_VIRT` is the architectural LAPIC base reached
+    // through the direct physical map, which every root carries. The
+    // constructor only stores the pointer; no MMIO read or write happens
+    // here.
+    let mmio = unsafe { VolatileLapicMmio::new(preempt::LAPIC_BASE_VIRT as *mut u32) };
     Lapic::new(mmio)
 }
 
-/// Widen the identity/direct-map window to `gib` gigabytes, reserving the
-/// page directories it needs out of `map` first.
+/// Widen the direct physical map to `[0, gib GiB)`, reserving the page
+/// tables it needs out of `map` first.
 ///
-/// A window that already covers `gib` (the common case on a machine whose
-/// RAM fits the boot trampoline's own window) is left alone. Otherwise the
-/// directories are carved below the *pre-widening* window, because that is
-/// what the widening can still write through, and reserved so the frame
-/// allocator never hands them out from under the live page tables.
-fn widen_identity_window(map: &mut BootMemoryMap, gib: usize) -> Result<(), BootError> {
+/// A map that already covers `gib` — the boot trampoline's own floor, on a
+/// machine whose RAM fits it — is left alone. Otherwise the tables are
+/// carved below that floor, because that is what the widening can still
+/// write through, and reserved so the frame allocator never hands them out
+/// from under the live page tables.
+fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<(), BootError> {
     if gib <= paging::BOOT_IDENTITY_GIB {
         return Ok(());
     }
-    let directories = match paging::identity_directory_frames(gib) {
+    let tables = match paging::physmap_table_frames(gib) {
         0 => 0,
         pages => crate::mem_map::carve_frames_from_map(
             map,
             pages,
             (paging::BOOT_IDENTITY_GIB as u64) << 30,
         )
-        .ok_or(BootError::IdentityWindowWiden)?,
+        .ok_or(BootError::DirectMapInstall)?,
     };
     // SAFETY: this runs on the BSP before any secondary is brought up and
-    // before the frame allocator exists, so no other CPU walks the low
-    // PDPT and nothing else owns `directories` — the carve above reserved
-    // those page-aligned frames out of the map for this use alone.
-    if unsafe { paging::widen_boot_identity(gib, directories) } {
+    // before the frame allocator exists, so no other CPU walks the live
+    // PML4 and nothing else owns `tables` — the carve above reserved those
+    // page-aligned frames out of the map for this use alone (and a part
+    // with 1 GiB pages within one span needs none, so the run may be
+    // empty).
+    if unsafe { paging::install_boot_physmap(gib, tables) } {
         Ok(())
     } else {
-        Err(BootError::IdentityWindowWiden)
+        Err(BootError::DirectMapInstall)
     }
 }
 
-/// Record how wide the identity/direct-map window ended up, so a machine
-/// whose RAM outruns it is visible in the boot record rather than found
-/// later as a fail-closed allocation.
-fn log_identity_window(sink: &(dyn tairix_log::Sink + Sync), gib: usize) {
+/// Record how wide the direct physical map ended up, so a machine whose
+/// RAM outruns it is visible in the boot record rather than found later as
+/// a fail-closed allocation.
+fn log_direct_map(sink: &(dyn tairix_log::Sink + Sync), gib: usize) {
     use tairix_log::{Event, Field, FieldValue, Level};
 
     tairix_log::log(
         sink,
         &Event {
             level: Level::Info,
-            id: KERNEL_BOOT_IDENTITY_WINDOW,
-            message: "identity/direct-map window sized from the discovered map",
+            id: KERNEL_BOOT_DIRECT_MAP,
+            message: "direct physical map sized from the discovered map",
             fields: &[
                 Field {
                     key: "gigabytes",
@@ -1534,6 +1518,21 @@ fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescri
     });
 }
 
+/// The direct-map address of the IO-APIC register block at physical
+/// `phys`, or [`None`] when the block lies outside the live direct
+/// physical map (fail closed — the caller skips an IO-APIC it could not
+/// reach rather than dereferencing an address nothing maps).
+fn io_apic_mmio_virt(phys: u32) -> Option<usize> {
+    // The block is an index/data register pair at offsets 0x00 and 0x10
+    // (Intel 82093AA §3.1), so one 32-byte window covers it.
+    const WINDOW_BYTES: u64 = 0x20;
+    let phys = u64::from(phys);
+    if phys.checked_add(WINDOW_BYTES)? > paging::physmap_bytes() {
+        return None;
+    }
+    usize::try_from(paging::physmap_virt(phys)).ok()
+}
+
 /// Discover every IO-APIC the MADT advertises, build a production
 /// [`IoApicController`], install one per-pin IDT vector + routing
 /// entry, and program every redirection entry masked.
@@ -1565,7 +1564,9 @@ fn discover_and_program_io_apics(
     // below.
     struct Discovered {
         gsi_base: u32,
-        mmio_base: u32,
+        /// The block's direct-map address, derived once here so step 3
+        /// reuses the very pointer this pass validated.
+        mmio_virt: usize,
         pin_count: u32,
     }
     let mut discovered: Vec<Discovered> = Vec::new();
@@ -1574,17 +1575,23 @@ fn discover_and_program_io_apics(
             address, gsi_base, ..
         } = entry
         {
-            // SAFETY: the IO-APIC MMIO base addresses MADT publishes
-            // sit at firmware-fixed physical frames covered by
-            // `boot.s` SAFETY-INVARIANT 4 (0..4 GiB identity map).
-            // The constructor only stores the pointer; no MMIO
+            // A block the direct map does not reach is an unusable block:
+            // skip it rather than dereference an address nothing maps. If
+            // that leaves none, the caller fails closed below.
+            let Some(mmio_virt) = io_apic_mmio_virt(address) else {
+                continue;
+            };
+            // SAFETY: the IO-APIC register block MADT publishes sits at a
+            // firmware-fixed physical frame, proven above to lie wholly
+            // within the live direct physical map, so the pointer is valid
+            // for the block. The constructor only stores it; no MMIO
             // access happens here.
-            let mmio = unsafe { VolatileIoApicMmio::new(address as *mut u32) };
+            let mmio = unsafe { VolatileIoApicMmio::new(mmio_virt as *mut u32) };
             let mut ioapic = IoApic::new(mmio);
             let pin_count = u32::from(ioapic.max_redirection_entry()) + 1;
             discovered.push(Discovered {
                 gsi_base,
-                mmio_base: address,
+                mmio_virt,
                 pin_count,
             });
         }
@@ -1607,8 +1614,9 @@ fn discover_and_program_io_apics(
     let blocks: Vec<(u32, IoApic<VolatileIoApicMmio>, u32)> = discovered
         .iter()
         .map(|d| {
-            // SAFETY: same as the discovery pass.
-            let mmio = unsafe { VolatileIoApicMmio::new(d.mmio_base as *mut u32) };
+            // SAFETY: same as the discovery pass — the very pointer it
+            // validated against the direct map.
+            let mmio = unsafe { VolatileIoApicMmio::new(d.mmio_virt as *mut u32) };
             (d.gsi_base, IoApic::new(mmio), d.pin_count)
         })
         .collect();

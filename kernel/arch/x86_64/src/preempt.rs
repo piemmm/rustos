@@ -43,8 +43,7 @@
 //! closed.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use core::sync::atomic::{AtomicU32, AtomicU64};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Bare-metal-only imports — host builds carry neither
 // `init_local_preempt` nor the timer dispatcher (the static callback
@@ -55,6 +54,7 @@ use crate::apic::{Lapic, LapicMmio};
 use crate::apic_timer::{self, Calibration};
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::interrupts::{InterruptStackFrame, SavedRegs};
+use tairix_sync::FnCell;
 
 /// IDT vector the LAPIC timer fires on.
 ///
@@ -73,7 +73,7 @@ pub const TIMER_VECTOR: u8 = 0x20;
 /// swap it in/out with `Relaxed` atomics — the callback table is set
 /// up *before* any timer fires and never mutated again in normal
 /// operation.
-static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+static TIMER_CALLBACK_FN: FnCell<extern "C" fn(u32)> = FnCell::empty();
 
 /// The preemption callback the timer ISR forwards each tick **taken from
 /// ring 3** to, packed into a `usize`. Installed by the binary before the
@@ -99,7 +99,7 @@ static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// only while ring 3 runs (which `crate::userentry` enters with `IF` set);
 /// the explicit ring gate is defence-in-depth so a future in-kernel `sti`
 /// can never accidentally preempt the kernel.
-static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+static PREEMPT_CALLBACK_FN: FnCell<extern "C" fn(u32)> = FnCell::empty();
 
 /// LAPIC EOI register MMIO offset (Intel SDM Vol 3A §11.4.1 Table 11-1).
 /// Re-declared here so the dispatcher can write through a bare-metal
@@ -110,10 +110,21 @@ pub const LAPIC_EOI_OFFSET: usize = 0xB0;
 /// LAPIC base MMIO address (the architecturally-fixed value Intel CPUs
 /// expose after reset; OVMF and QEMU agree on the same default).
 ///
-/// Identity-mapped by the boot trampoline (`boot.s` SAFETY-INVARIANT 4
-/// — 0..4 GiB identity map). Re-declared here rather than imported
-/// from `apic.rs` to avoid a dependency cycle in the ISR-fast path.
+/// This is the *physical* base, which is what a device-visible message
+/// address needs (the MSI/IPI destination encoding). Anything that
+/// dereferences the register block names [`LAPIC_BASE_VIRT`] instead.
+/// Re-declared here rather than imported from `apic.rs` to avoid a
+/// dependency cycle in the ISR-fast path.
 pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
+
+/// LAPIC register block as the CPU reaches it: the physical base through
+/// the port's direct physical map, which every translation root carries.
+///
+/// The interrupt paths that write EOI or arm the timer run under whichever
+/// root the interrupted task had loaded, and a process root carries no
+/// identity map — so a raw physical dereference would fault there. A
+/// `const`, so naming it costs the ISR path nothing.
+pub const LAPIC_BASE_VIRT: u64 = crate::paging::physmap_virt(LAPIC_BASE_PHYS);
 
 /// LAPIC ID register MMIO offset (Intel SDM Vol 3A §11.4.6, Table 11-1).
 /// Re-declared here, like [`LAPIC_EOI_OFFSET`], because the paths that read
@@ -205,22 +216,14 @@ static PREEMPT_WAKEUP_ABS_TSC: AtomicU64 = AtomicU64::new(NO_DEADLINE);
 /// could be `Drop`-ped while the ISR is mid-flight.
 pub fn set_timer_callback(cb: extern "C" fn(u32)) {
     // `fn` pointers are `usize`-sized, so `as usize` is lossless.
-    TIMER_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+    TIMER_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed timer callback, if any.
 /// Test/diagnostic observer.
 #[must_use]
 pub fn timer_callback() -> Option<extern "C" fn(u32)> {
-    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `TIMER_CALLBACK_FN` originates from
-        // `set_timer_callback`, which always round-trips a valid
-        // `extern "C" fn(u32)` pointer.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
-    }
+    TIMER_CALLBACK_FN.load()
 }
 
 /// Install the per-CPU ring-3-preemption callback the timer ISR forwards
@@ -233,22 +236,14 @@ pub fn timer_callback() -> Option<extern "C" fn(u32)> {
 /// interrupt context: there is no captured environment that could be
 /// `Drop`-ped while the ISR is mid-flight.
 pub fn set_preempt_callback(cb: extern "C" fn(u32)) {
-    PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Release);
+    PREEMPT_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed ring-3-preemption callback, if any.
 /// Test/diagnostic observer.
 #[must_use]
 pub fn preempt_callback() -> Option<extern "C" fn(u32)> {
-    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `PREEMPT_CALLBACK_FN` originates from
-        // `set_preempt_callback`, which always round-trips a valid
-        // `extern "C" fn(u32)` pointer.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) })
-    }
+    PREEMPT_CALLBACK_FN.load()
 }
 
 /// `true` iff the code-segment selector `cs` of an interrupted context
@@ -383,9 +378,10 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     if tairix_arch_api::quiesce_stop_requested(cpu_id) {
         // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI register
         // (Intel SDM Vol 3A §11.8.5); writing `0` is the documented
-        // end-of-interrupt sequence, and the MMIO is identity-mapped.
+        // end-of-interrupt sequence, and the register block is reachable
+        // through the direct physical map under every root.
         unsafe {
-            let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
+            let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
             core::ptr::write_volatile(eoi, 0);
         }
         tairix_arch_api::quiesce_acknowledge(cpu_id);
@@ -410,16 +406,10 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     }
     reprogram();
 
-    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw != 0 && cpu_id != u32::MAX {
-        // SAFETY: every store into `TIMER_CALLBACK_FN` is the
-        // round-trip of a valid `extern "C" fn(u32)` pointer through
-        // `set_timer_callback`. The callback is `fn` (not a closure),
-        // so it has no captured environment and is safe to invoke
-        // from interrupt context with interrupts disabled.
-        let cb: extern "C" fn(u32) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(raw) };
-        cb(cpu_id);
+    if cpu_id != u32::MAX {
+        if let Some(cb) = TIMER_CALLBACK_FN.load() {
+            cb(cpu_id);
+        }
     }
 
     // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI
@@ -428,7 +418,7 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // preemptive switch below so the in-service bit is released and a
     // later resumed task can be preempted again.
     unsafe {
-        let eoi = (LAPIC_BASE_PHYS + LAPIC_EOI_OFFSET as u64) as *mut u32;
+        let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
     }
 
@@ -459,10 +449,11 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn local_lapic_id() -> u8 {
-    // SAFETY: LAPIC MMIO is identity-mapped (boot.s SAFETY-INVARIANT 4);
-    // the ID register is read-only and reading it has no side effects.
+    // SAFETY: the LAPIC register block is reachable through the direct
+    // physical map under every root; the ID register is read-only and
+    // reading it has no side effects.
     unsafe {
-        let id_reg = (LAPIC_BASE_PHYS + LAPIC_ID_OFFSET as u64) as *const u32;
+        let id_reg = (LAPIC_BASE_VIRT + LAPIC_ID_OFFSET as u64) as *const u32;
         (core::ptr::read_volatile(id_reg) >> 24) as u8
     }
 }
@@ -500,8 +491,10 @@ pub fn current_cpu_id_from_lapic() -> u32 {
 /// no-op).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn preempt_ring3_if_pending(frame: *const InterruptStackFrame, cpu_id: u32) {
-    let preempt_raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
-    if preempt_raw == 0 || cpu_id == u32::MAX {
+    let Some(cb) = PREEMPT_CALLBACK_FN.load() else {
+        return;
+    };
+    if cpu_id == u32::MAX {
         return;
     }
     // `frame.cs` is the selector of the interrupted context, decoded to
@@ -518,12 +511,6 @@ pub(crate) unsafe fn preempt_ring3_if_pending(frame: *const InterruptStackFrame,
     if !from_ring3 {
         return;
     }
-    // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a valid
-    // `extern "C" fn(u32)` through `set_preempt_callback`; the callback is a
-    // `fn` with no captured environment, safe to call from interrupt
-    // context.
-    let cb: extern "C" fn(u32) =
-        unsafe { core::mem::transmute::<usize, extern "C" fn(u32)>(preempt_raw) };
     // Establish the in-handler GS convention (current GS = kernel TLS) the
     // kthread cooperative-park balance expects, exactly as the `syscall`
     // entry stub's `swapgs` does (`plans/PI.md` X2): an interrupt gate
@@ -579,11 +566,12 @@ pub fn arm_oneshot(ticks_from_now: u64) {
     // The LAPIC initial-count register is 32-bit; clamp to the register
     // width and to at least one tick.
     let count = u32::try_from(ticks_from_now).unwrap_or(u32::MAX).max(1);
-    // SAFETY: the LAPIC MMIO window is identity-mapped (boot.s
-    // SAFETY-INVARIANT 4); the initial-count register accepts any 32-bit
-    // write, which (re)starts the one-shot countdown (Intel SDM §11.5.4).
+    // SAFETY: the LAPIC register block is reachable through the direct
+    // physical map under every root; the initial-count register accepts any
+    // 32-bit write, which (re)starts the one-shot countdown (Intel SDM
+    // §11.5.4).
     unsafe {
-        let icr = (LAPIC_BASE_PHYS + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
+        let icr = (LAPIC_BASE_VIRT + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(icr, count);
     }
 }
@@ -599,7 +587,7 @@ pub fn disarm() {
     // SAFETY: as in `arm_oneshot`; writing `0` to the initial-count
     // register is the documented "halt the timer" sequence.
     unsafe {
-        let icr = (LAPIC_BASE_PHYS + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
+        let icr = (LAPIC_BASE_VIRT + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(icr, 0);
     }
 }
@@ -820,10 +808,14 @@ mod tests {
     /// it installed under `cargo test`.
     #[test]
     fn the_timer_callback_round_trips() {
-        extern "C" fn cb(_cpu: u32) {}
+        extern "C" fn host_cb(_cpu: u32) {}
+        // Coerce once: the slot is compared against *this* pointer value,
+        // because two coercions of one `fn` item are not guaranteed to
+        // share an address.
+        let cb: extern "C" fn(u32) = host_cb;
         set_timer_callback(cb);
         let got = timer_callback().expect("the installed timer callback reads back");
-        assert!(core::ptr::fn_addr_eq(got, cb as extern "C" fn(u32)));
+        assert!(core::ptr::fn_addr_eq(got, cb));
     }
 
     #[test]
@@ -837,10 +829,14 @@ mod tests {
 
     #[test]
     fn the_preempt_callback_round_trips() {
-        extern "C" fn cb(_cpu: u32) {}
+        extern "C" fn host_cb(_cpu: u32) {}
+        // Coerce once: the slot is compared against *this* pointer value,
+        // because two coercions of one `fn` item are not guaranteed to
+        // share an address.
+        let cb: extern "C" fn(u32) = host_cb;
         set_preempt_callback(cb);
         let got = preempt_callback().expect("the installed preempt callback reads back");
-        assert!(core::ptr::fn_addr_eq(got, cb as extern "C" fn(u32)));
+        assert!(core::ptr::fn_addr_eq(got, cb));
     }
 
     #[test]

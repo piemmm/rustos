@@ -220,13 +220,13 @@ where
         slot.store(bits, Ordering::Release);
     }
 
-    // SAFETY: `LAPIC_BASE_PHYS` is identity-mapped (boot.s
-    // SAFETY-INVARIANT 4). Each CPU accesses its own per-CPU LAPIC at
-    // that physical address, so concurrent senders touch independent
+    // SAFETY: the LAPIC register block is reachable through the direct
+    // physical map under every root. Each CPU accesses its own per-CPU
+    // LAPIC at that address, so concurrent senders touch independent
     // registers; the global lock above already serialises shootdowns on
     // this CPU.
     let mmio =
-        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32) };
+        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_VIRT as *mut u32) };
     let mut lapic = crate::apic::Lapic::new(mmio);
     // Raised from the local copy, never from the published bitmap the targets
     // are concurrently clearing, so the set asked is exactly the set counted.
@@ -332,10 +332,11 @@ unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut Saved
     // for this vector whether or not this CPU still owed one.
     // SAFETY: `LAPIC_EOI_OFFSET` is the architecturally-fixed EOI
     // register; writing `0` is the documented end-of-interrupt sequence
-    // (Intel SDM Vol 3A §11.8.5). LAPIC MMIO is identity-mapped.
+    // (Intel SDM Vol 3A §11.8.5). The register block is reachable through
+    // the direct physical map under every root.
     unsafe {
         let eoi =
-            (crate::preempt::LAPIC_BASE_PHYS + crate::preempt::LAPIC_EOI_OFFSET as u64) as *mut u32;
+            (crate::preempt::LAPIC_BASE_VIRT + crate::preempt::LAPIC_EOI_OFFSET as u64) as *mut u32;
         core::ptr::write_volatile(eoi, 0);
     }
 }

@@ -52,20 +52,21 @@
 //! test can drive a tick directly); only the host `requestAnimationFrame`
 //! re-arm is gated to the wasm target.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_arch_api::{CpuId, Timer};
+use tairix_sync::FnCell;
 
 /// `u64` sentinel meaning "no `CpuId` recorded for this context yet".
 const NO_CPU: u64 = u32::MAX as u64;
 
-/// The callback the frame loop forwards each tick to, packed into a
-/// `usize` so it swaps in without a lock. Set up before the first frame.
-static TICK_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+/// The callback the frame loop forwards each tick to. Set up before the
+/// first frame.
+static TICK_CALLBACK_FN: FnCell<extern "C" fn(CpuId)> = FnCell::empty();
 
 /// The IPI callback the `MessageChannel` handler forwards each delivered
-/// reschedule to, packed into a `usize`. Set up before any IPI is sent.
-static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+/// reschedule to. Set up before any IPI is sent.
+static IPI_CALLBACK_FN: FnCell<extern "C" fn(CpuId)> = FnCell::empty();
 
 /// This context's `CpuId`, passed to both callbacks; [`NO_CPU`] until
 /// [`init_local_preempt`] records it.
@@ -81,36 +82,26 @@ static TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 /// [`CpuId`]. Storing a `fn` (not a closure) keeps it safe to call from
 /// the host callback: there is no captured environment to drop.
 pub fn set_tick_callback(cb: extern "C" fn(CpuId)) {
-    TICK_CALLBACK_FN.store(cb as usize, Ordering::Release);
+    TICK_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed tick callback, if any. Test/diagnostic.
 #[must_use]
 pub fn tick_callback() -> Option<extern "C" fn(CpuId)> {
-    decode_callback(TICK_CALLBACK_FN.load(Ordering::Acquire))
+    TICK_CALLBACK_FN.load()
 }
 
 /// Install the IPI callback the `MessageChannel` handler forwards each
 /// delivered reschedule to. Storing a `fn` (not a closure) keeps it safe
 /// to call from the host callback.
 pub fn set_ipi_callback(cb: extern "C" fn(CpuId)) {
-    IPI_CALLBACK_FN.store(cb as usize, Ordering::Release);
+    IPI_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed IPI callback, if any. Test/diagnostic.
 #[must_use]
 pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
-    decode_callback(IPI_CALLBACK_FN.load(Ordering::Acquire))
-}
-
-fn decode_callback(raw: usize) -> Option<extern "C" fn(CpuId)> {
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into a callback slot round-trips a valid
-        // `extern "C" fn(CpuId)` pointer through `set_*_callback`.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
-    }
+    IPI_CALLBACK_FN.load()
 }
 
 /// This context's recorded `CpuId`, or `u32::MAX` if unset.
@@ -132,8 +123,8 @@ pub fn tick_count() -> u64 {
 
 #[cfg(test)]
 fn clear_for_tests() {
-    TICK_CALLBACK_FN.store(0, Ordering::Release);
-    IPI_CALLBACK_FN.store(0, Ordering::Release);
+    TICK_CALLBACK_FN.clear();
+    IPI_CALLBACK_FN.clear();
     TICK_CPU_ID.store(NO_CPU, Ordering::Release);
     TICK_COUNT.store(0, Ordering::Release);
 }

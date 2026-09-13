@@ -2612,8 +2612,9 @@ then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
 closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`).
 `root_phys` returns the L1 root and `activate` forwards to the gated
 `switch` (the `TTBR0_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
-intermediate tables through the identity map (phys == virt), the whole
-`map_page` path is host-runnable: `passes_mmu_conformance` drives
+each intermediate table from the frame source that drew it
+(`PageTableFrames::table_at`) rather than by dereferencing its physical
+address, the whole `map_page` path is host-runnable: `passes_mmu_conformance` drives
 `mmu::conformance::run_all` over a real `AddressSpace`, and a companion
 host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which

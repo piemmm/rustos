@@ -1023,7 +1023,26 @@ connects `cmd | cmd`. Binding design decisions:
   caller keeps its behaviour. The block is copied through the validated
   boundary and parsed fail-closed **before any state is touched**; every
   `Handle` is resolved owner-checked against the kernel-trusted caller id
-  (a forged or foreign fd is `NotFound`, never a probe oracle).
+  (a forged or foreign fd is `NotFound`, never a probe oracle). A directory
+  handle is refused (`OutOfRange`): a standard slot is a byte stream, and a
+  directory's authority is a listing and a namespace to open through, which
+  is the same reason `fd_grant` declines one.
+- **A wired path backing carries the parent's captured identity.** A
+  `OpenBacking::Path` is re-resolved and re-authorised against whoever
+  *uses* it, so cloning one into the child unchanged handed over a
+  descriptor the child could not read: `admit()` demands `CAP_FS_ACCESS`
+  against the child's own set, and the programs the hand-off exists for
+  deliberately request none. Crossing into the child therefore rewrites the
+  backing to `OpenBacking::Inherited`, capturing the parent's kernel-attested
+  uid and effective set exactly as `fd_grant` captures its grantor's — one
+  capture at the single point every parent open entry funnels through, so an
+  inheriting wire behaves as an explicit `Handle` does. It confers nothing
+  the parent could not confer anyway (a parent that can wire a pipe can pump
+  the file's bytes down it), and unlike a delegation it carries **no** extent
+  ceiling: that bound guards a service against an untrusted caller, where a
+  parent could fill the volume itself, so the bound is the parent's own
+  limits. Not re-delegatable — `fd_grant` accepts only
+  `OpenBacking::Path` — so captured authority never widens.
 - **Wired child streams live in the child's own open table at fd 0–3.**
   For each `Handle` wire the kernel clones the parent's open entry into the
   child's `OpenFileTable` at the standard fd number itself (the entries

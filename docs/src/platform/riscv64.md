@@ -439,9 +439,11 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   The `AddressSpace` draws its tables through the Arch HAL
   `PageTableFrames` seam (Stage W5b-3): the `.bss` `PageTablePool` is the
   boot/bootstrap source, and a real per-process space is backed by
-  `kernel/mem`'s `FrameTableSource` over the frame allocator. The pool's
-  identity `phys_of` lets the `frames::conformance` suite run on the host
-  (`passes_frames_conformance`).
+  `kernel/mem`'s `FrameTableSource` over the frame allocator. The walk
+  recovers each level through `PageTableFrames::table_at` on the source
+  that drew it, so the `frames::conformance` suite runs on the host
+  (`passes_frames_conformance`) and a PTE naming an address the source
+  never handed out fails the walk closed.
   This is the architectural mechanism the memory-isolation vertical
   exercises: two hierarchies disagreeing on one VA so the MMU faults a
   cross-address-space access (`AGENTS.md` §4; see *Memory-isolation QEMU

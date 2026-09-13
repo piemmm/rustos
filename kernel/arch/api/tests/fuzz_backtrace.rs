@@ -39,7 +39,13 @@
 use tairix_arch_api::backtrace::{walk, FrameLayout, StackBounds, StackReader, MAX_FRAMES};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 200_000;
+///
+/// Scaled right down under the interpreter, which is orders of magnitude
+/// slower than native and is here to find undefined behaviour rather than to
+/// widen the input search: a handful of passes already reaches every branch of
+/// the walk, including the unmapped cut, and the wide sweep belongs to the
+/// native and budgeted runs.
+const SMOKE_ITERATIONS: u64 = if cfg!(miri) { 64 } else { 200_000 };
 
 /// Number of 64-bit words in the backing "stack" the walker reads.
 const WORDS: usize = 512;

@@ -32,6 +32,9 @@ pub struct Target {
     pub package: &'static str,
     /// Why this crate's safety needs an oracle.
     pub description: &'static str,
+    /// Cargo features to enable, for a crate whose `unsafe` is behind one.
+    /// Empty means the default build.
+    pub features: &'static [&'static str],
 }
 
 /// The crates whose soundness rests on a hand-written `unsafe` core.
@@ -39,14 +42,36 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-collections",
         description: "the open-addressed hash table's control array and iterators",
+        features: &[],
     },
     Target {
         package: "tairix-inline",
         description: "the allocation-free tier's inline slot arrays, and the volatile scrub a secret ring leaves behind",
+        features: &[],
     },
     Target {
         package: "tairix-hash",
         description: "the one-shot key-publication cell the containers are keyed through",
+        features: &[],
+    },
+    Target {
+        package: "tairix-sync",
+        description: "the MCS queue's intrusive node chain, the set-once cell's MaybeUninit, \
+                      and every guard's aliasing claim",
+        features: &[],
+    },
+    Target {
+        package: "tairix-sync",
+        description: "the same, plus the lock-diagnostics observer seam, whose function \
+                      pointers and site records live only under that feature",
+        features: &["lock-diagnostics"],
+    },
+    Target {
+        package: "tairix-arch-api",
+        description: "the HAL's shared unsafe floor: the frame-pointer unwinder's walk over a \
+                      hostile stack, the page-table reclaim walk, and the per-CPU and quiesce \
+                      table publications",
+        features: &[],
     },
 ];
 
@@ -113,17 +138,21 @@ fn selected(opts: &Options) -> Result<Vec<&'static Target>, String> {
     let Some(name) = opts.package.as_deref() else {
         return Ok(TARGETS.iter().collect());
     };
-    match TARGETS.iter().find(|t| t.package == name) {
-        Some(target) => Ok(vec![target]),
-        None => Err(format!(
+    // Every matching entry, not the first: a crate whose `unsafe` is split
+    // across features has one target per build, and running only one of them
+    // would leave the rest uninterpreted while still reporting success.
+    let picked: Vec<&'static Target> = TARGETS.iter().filter(|t| t.package == name).collect();
+    if picked.is_empty() {
+        return Err(format!(
             "miri: unknown package `{name}`; known: {}",
             TARGETS
                 .iter()
                 .map(|t| t.package)
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
+        ));
     }
+    Ok(picked)
 }
 
 /// Run the oracle over every selected crate, failing closed.
@@ -160,6 +189,9 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> Job {
     let mut cmd: Command = ctx.cargo();
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
+    if !target.features.is_empty() {
+        cmd.args(["--features", &target.features.join(",")]);
+    }
     let job_seed = seed::job_seed(seed, index);
     cmd.env(seed::FUZZ_SEED_ENV, job_seed.to_string());
     // Miri hides the host environment from the interpreted program, so the
@@ -169,7 +201,16 @@ fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> J
         "MIRIFLAGS",
         format!("{MIRIFLAGS} -Zmiri-env-forward={}", seed::FUZZ_SEED_ENV),
     );
-    Job::new(format!("miri {} (seed {job_seed})", target.package), cmd)
+    let label = if target.features.is_empty() {
+        format!("miri {} (seed {job_seed})", target.package)
+    } else {
+        format!(
+            "miri {} +{} (seed {job_seed})",
+            target.package,
+            target.features.join(",")
+        )
+    };
+    Job::new(label, cmd)
 }
 
 #[cfg(test)]
@@ -195,6 +236,26 @@ mod tests {
         assert_eq!(chosen[0].package, "tairix-collections");
     }
 
+    /// A crate whose `unsafe` is split across features has one target per
+    /// build, and a filter that returned only the first would run one and
+    /// report success for both.
+    #[test]
+    fn a_package_filter_selects_every_feature_build_of_that_package() {
+        let opts = parse(&args(&["--package", "tairix-sync"])).expect("filter");
+        let chosen = selected(&opts).expect("both builds");
+        assert_eq!(
+            chosen.len(),
+            TARGETS
+                .iter()
+                .filter(|t| t.package == "tairix-sync")
+                .count()
+        );
+        assert!(chosen.iter().any(|t| t.features.is_empty()));
+        assert!(chosen
+            .iter()
+            .any(|t| t.features.contains(&"lock-diagnostics")));
+    }
+
     #[test]
     fn an_unknown_package_is_refused_rather_than_silently_skipped() {
         let opts = parse(&args(&["--package", "nope"])).expect("filter");
@@ -208,14 +269,23 @@ mod tests {
         assert!(parse(&args(&["--what"])).is_err());
     }
 
-    /// Every target must name a real workspace package, and none twice.
+    /// Every target must name a real workspace package, and no *build* twice.
+    ///
+    /// A package may appear more than once — one entry per feature set, where
+    /// its `unsafe` is split across features — so the identity a duplicate
+    /// would waste the interpreter on is the pair, not the name alone.
     #[test]
     fn the_registry_is_distinct() {
         for (index, target) in TARGETS.iter().enumerate() {
             assert!(target.package.starts_with("tairix-"), "{}", target.package);
             assert!(!target.description.is_empty());
             for other in &TARGETS[index + 1..] {
-                assert_ne!(target.package, other.package);
+                assert_ne!(
+                    (target.package, target.features),
+                    (other.package, other.features),
+                    "{} is registered twice with the same features",
+                    target.package
+                );
             }
         }
     }

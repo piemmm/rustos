@@ -605,12 +605,12 @@ impl StreamPos {
 /// The path a filesystem-backed descriptor names and the authority every
 /// operation on it runs under.
 ///
-/// A descriptor is either one the caller opened itself — exercised under the
-/// caller's own attested identity — or a one-shot delegation exercised under
-/// the identity `fd_grant` captured from the grantor. Both are filesystem
-/// paths re-resolved and re-authorised through the secured VFS on every
-/// operation; they differ only in the credential, and in the extent ceiling a
-/// writable delegation carries.
+/// A descriptor is one the caller opened itself — exercised under the caller's
+/// own attested identity — or one exercised under a captured identity: a
+/// one-shot delegation carrying the grantor's, or a spawn wire carrying the
+/// parent's. All three are filesystem paths re-resolved and re-authorised
+/// through the secured VFS on every operation; they differ only in the
+/// credential, and in the extent ceiling a writable delegation carries.
 struct PathAuthority<'a> {
     /// The absolute path the descriptor resolves to.
     path: &'a str,
@@ -630,11 +630,10 @@ impl<'a> PathAuthority<'a> {
     ///
     /// This is the **one** place that decision is made. A descriptor the
     /// caller opened runs under the caller's own attested identity; a
-    /// delegation runs under the identity captured from the grantor at
-    /// `fd_grant` time, because the delegation *is* the authority and the
-    /// holder may legitimately hold no filesystem capability at all.
-    /// Resolving that per operation would be one chance per operation to
-    /// read the wrong one.
+    /// delegation or a spawn wire runs under the identity captured when it
+    /// was minted, because the descriptor *is* the authority and its holder
+    /// may legitimately hold no filesystem capability at all. Resolving that
+    /// per operation would be one chance per operation to read the wrong one.
     fn of(entry: &'a crate::aspace::OpenFile, caller: &'a CallerContext<'_>) -> Option<Self> {
         match &entry.backing {
             OpenBacking::Path(path) => Some(Self {
@@ -650,6 +649,16 @@ impl<'a> PathAuthority<'a> {
                 uid: file.uid,
                 caps: &file.caps,
                 write_ceiling: Some(file.write_ceiling),
+            }),
+            OpenBacking::Inherited(file) => Some(Self {
+                path: &file.path,
+                uid: file.uid,
+                caps: &file.caps,
+                // A wire carries the parent's own reach on its own
+                // descriptor, so the bound is the parent's own limits. A
+                // delegation's extent ceiling guards a service against an
+                // untrusted caller; a parent could fill the volume itself.
+                write_ceiling: None,
             }),
             OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
@@ -1932,6 +1941,14 @@ where
                         .read()
                         .open_file_entry(caller.process(), handle)
                         .ok_or(Errno::NotFound)?;
+                    // A standard slot is a byte stream. A directory's
+                    // authority is a listing and a namespace to open through,
+                    // neither of which a stream expresses, so it is refused
+                    // here exactly as `fd_grant` refuses one — rather than
+                    // producing a descriptor no stream operation can serve.
+                    if entry.flags.contains(OpenFlags::DIRECTORY) {
+                        return Err(Errno::OutOfRange);
+                    }
                     let direction_ok = if fd == tairix_abi::STDIN {
                         entry.flags.is_read()
                     } else {
@@ -1943,7 +1960,23 @@ where
                     Some(entry)
                 }
             };
-            if let Some(entry) = entry {
+            if let Some(mut entry) = entry {
+                // Capture the parent's kernel-attested identity onto a path
+                // backing as it crosses into the child. A path backing is
+                // re-authorised against whoever *uses* it, so leaving it
+                // unchanged would hand the child a descriptor it cannot read:
+                // the child holds its own capability set, and the programs the
+                // hand-off exists for deliberately hold no filesystem
+                // capability at all. Every parent open entry reaching a child
+                // passes through here, so an inheriting wire captures exactly
+                // as an explicit `Handle` does.
+                if let OpenBacking::Path(path) = &entry.backing {
+                    entry.backing = OpenBacking::Inherited(crate::aspace::InheritedFile {
+                        path: path.clone(),
+                        uid: caller.caps.owner().0,
+                        caps: *caller.caps.effective(),
+                    });
+                }
                 child_streams.close_slot(fd);
                 wired.push((fd, entry));
             }
@@ -3788,11 +3821,11 @@ where
         if len == 0 {
             return Ok(0);
         }
-        // A filesystem-backed descriptor — the caller's own or a delegation —
-        // reads through the secured VFS under the authority the backing
-        // decides. The coarse `CAP_FS_ACCESS` gate is applied there rather
-        // than at dispatch, so a resource or pipe read is not forced to hold
-        // it and a delegation's holder is not forced to hold it either.
+        // A filesystem-backed descriptor — the caller's own, a delegation, or
+        // a spawn wire — reads through the secured VFS under the authority the
+        // backing decides. The coarse `CAP_FS_ACCESS` gate is applied there
+        // rather than at dispatch, so a resource or pipe read is not forced to
+        // hold it and neither is the holder of a captured-identity backing.
         if let Some(authority) = PathAuthority::of(entry, caller) {
             return self.read_path_backing(caller, entry, pos, &authority, buf, len);
         }
@@ -3807,7 +3840,9 @@ where
             OpenBacking::PtyMaster(end) => self.pty_master_read(caller, end, buf, len, timeout_ns),
             OpenBacking::PtySlave(end) => self.pty_slave_read(caller, end, buf, len, timeout_ns),
             // Served above; fail closed rather than trust the construction.
-            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
+            OpenBacking::Path(_) | OpenBacking::Delegated(_) | OpenBacking::Inherited(_) => {
+                Err(Errno::OutOfRange)
+            }
         }
     }
 
@@ -3927,7 +3962,9 @@ where
             OpenBacking::PtyMaster(end) => self.pty_master_write(caller, end, buf, len),
             OpenBacking::PtySlave(end) => self.pty_slave_write(caller, end, buf, len),
             // Served above; fail closed rather than trust the construction.
-            OpenBacking::Path(_) | OpenBacking::Delegated(_) => Err(Errno::OutOfRange),
+            OpenBacking::Path(_) | OpenBacking::Delegated(_) | OpenBacking::Inherited(_) => {
+                Err(Errno::OutOfRange)
+            }
         }
     }
 
@@ -19785,6 +19822,141 @@ mod tests {
         );
     }
 
+    /// A wired **path**-backed descriptor reaches the child under the
+    /// spawning parent's captured identity, so a child holding no filesystem
+    /// capability of its own can read the document it was handed — the
+    /// inherited-document hand-off (`plans/VIEW.md`,
+    /// `plans/NEW-FILEMANAGER.md` `FM6b`).
+    ///
+    /// A path backing is re-authorised against whoever *uses* it, so cloning
+    /// the parent's entry unchanged handed the child a descriptor whose every
+    /// `fs_read` and `fs_stat` was refused `PermissionDenied` — for exactly
+    /// the programs the hand-off exists for, since a viewer deliberately
+    /// requests no `CAP_FS_ACCESS`. The only wire test before this one wired a
+    /// *pipe* end, which is not a path backing and so never reached the gate.
+    ///
+    /// The child is given a different uid from the parent, so the resolved
+    /// identity proves the capture rather than coinciding with the holder's
+    /// own.
+    #[test]
+    fn spawn_wires_a_path_backed_handle_under_the_parents_captured_identity() {
+        /// The uid the parent opens the document under; the child is given
+        /// the next one, so a coincidence cannot pass for a capture.
+        const PARENT_UID: u32 = 1000;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        // The parent's own read-only open of the document is the first
+        // descriptor it allocates, so it is fd 4 — the standard slots are
+        // reserved by the process ABI and never handed out.
+        let attach = SpawnAttach {
+            wires: [
+                FdWire::Handle(4),
+                FdWire::Inherit,
+                FdWire::Inherit,
+                FdWire::Inherit,
+            ],
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        aspaces
+            .write()
+            .set_streams(ProcessId(2), DescriptorTable::standard_on(1));
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_owned_caps_record(
+            2,
+            PARENT_UID,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        )
+        .with_filesystem(fs);
+
+        let document = u32::try_from(
+            h.fs_open(&ctx, 0x1000, SPAWN_PATH.len(), OpenFlags::READ)
+                .expect("the parent opens the document"),
+        )
+        .expect("a descriptor number fits");
+        assert_eq!(document, 4);
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("wired spawn succeeds");
+
+        let child_entry = aspaces
+            .read()
+            .open_file_entry(ProcessId(pid), tairix_abi::STDIN)
+            .expect("wired child entry");
+        // The backing carries the parent's identity rather than the path
+        // alone, and answers no `own_path`: nothing may run it under the
+        // holder's own credentials.
+        let crate::aspace::OpenBacking::Inherited(inherited) = &child_entry.backing else {
+            panic!("a wired path handle reaches the child as a spawn inheritance");
+        };
+        assert_eq!(inherited.uid, PARENT_UID);
+        assert!(child_entry.own_path().is_none());
+
+        // The child holds a different uid and *no* capability at all. The
+        // authority every operation on the descriptor runs under is still the
+        // parent's, so the coarse filesystem gate admits it.
+        let child_caps = make_owned_caps_record(pid, PARENT_UID + 1, &[], sink);
+        let child_ctx = CallerContext {
+            task_id: SecTaskId(pid),
+            caps: &child_caps,
+        };
+        let authority = PathAuthority::of(&child_entry, &child_ctx)
+            .expect("a path-backed wire resolves an authority");
+        assert_eq!(authority.uid, PARENT_UID);
+        assert_eq!(authority.admit(), Ok(()));
+        // A wire carries the parent's own reach, so it invents no extent
+        // ceiling — unlike a delegation, which is never minted without one.
+        assert!(authority.write_ceiling.is_none());
+
+        // The parent closing its own descriptor leaves the child's clone
+        // intact: the hand-off outlives the hand.
+        assert_eq!(h.fs_close(&ctx, document), Ok(0));
+        assert!(aspaces
+            .read()
+            .open_file_entry(ProcessId(pid), tairix_abi::STDIN)
+            .is_some());
+    }
+
     /// An **inheriting** attach block hands the child the parent's own
     /// entry-backed standard streams: a shell hosted on a pty (its fd 0–2
     /// wired to the slave, so those console slots are closed) spawns a
@@ -20420,27 +20592,21 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        // Block 0: a handle that names no descriptor. Block 1: the pipe's
-        // write end (fd 5) behind stdin, which needs a readable entry.
+        let wire_at = |slot: u32, handle: u32| {
+            let mut wires = [FdWire::Inherit; tairix_abi::STD_STREAM_COUNT];
+            wires[slot as usize] = FdWire::Handle(handle);
+            SpawnAttach {
+                wires,
+                ..SpawnAttach::INHERIT
+            }
+        };
+        // A handle that names no descriptor; the pipe's write end (fd 5)
+        // behind stdin, which needs a readable entry; and a directory handle
+        // (fd 6), which no standard slot can serve in either direction.
         let blocks = [
-            SpawnAttach {
-                wires: [
-                    FdWire::Inherit,
-                    FdWire::Handle(99),
-                    FdWire::Inherit,
-                    FdWire::Inherit,
-                ],
-                ..SpawnAttach::INHERIT
-            },
-            SpawnAttach {
-                wires: [
-                    FdWire::Handle(5),
-                    FdWire::Inherit,
-                    FdWire::Inherit,
-                    FdWire::Inherit,
-                ],
-                ..SpawnAttach::INHERIT
-            },
+            wire_at(tairix_abi::STDOUT, 99),
+            wire_at(tairix_abi::STDIN, 5),
+            wire_at(tairix_abi::STDIN, 6),
         ];
         let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &blocks);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
@@ -20457,7 +20623,11 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
+            sink,
+        );
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -20471,34 +20641,35 @@ mod tests {
                     args: &[],
                 },
             ])))));
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        )
+        .with_filesystem(fs);
+        assert_eq!(
+            h.fs_open(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                OpenFlags::READ.union(OpenFlags::DIRECTORY)
+            ),
+            Ok(6)
         );
 
-        assert_eq!(
+        let spawn_with = |block: usize| {
             h.spawn(
                 &ctx,
                 0x1000,
                 SPAWN_PATH.len(),
-                attach_addr(0),
+                attach_addr(block),
                 SPAWN_ATTACH_LEN,
                 0,
                 0,
-            ),
-            Err(Errno::NotFound)
-        );
-        assert_eq!(
-            h.spawn(
-                &ctx,
-                0x1000,
-                SPAWN_PATH.len(),
-                attach_addr(1),
-                SPAWN_ATTACH_LEN,
-                0,
-                0,
-            ),
-            Err(Errno::PermissionDenied)
-        );
+            )
+        };
+        assert_eq!(spawn_with(0), Err(Errno::NotFound));
+        assert_eq!(spawn_with(1), Err(Errno::PermissionDenied));
+        assert_eq!(spawn_with(2), Err(Errno::OutOfRange));
     }
 
     /// The attach pair's shape is validated before any state is touched: a

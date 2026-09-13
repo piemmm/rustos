@@ -2134,18 +2134,29 @@ fn note_reply(out: &StackOutput, expect: IpAddr, seen: &mut bool) {
     }
 }
 
-/// Transmit engine output onto the wire, one frame per datagram. Send
-/// errors are tolerated: before QEMU binds its end there is no receiver
+/// Transmit engine output onto the wire, one frame per datagram, reporting
+/// whether the wire accepted every one.
+///
+/// Send errors are tolerated: before QEMU binds its end there is no receiver
 /// (the engine's retransmission machinery recovers the loss), after the
 /// guest exits the wire is torn down under us, and a counterpart that has
 /// stopped draining refuses the frame once [`SEND_TIMEOUT`] elapses rather
-/// than parking this thread.
-fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[TxFrame]) {
+/// than parking this thread. Most callers therefore ignore the answer.
+///
+/// It is returned for the one caller that cannot: a bare flood SYN is never
+/// retransmitted, so nothing recovers a refused one and counting it as sent
+/// would credit the flood for a SYN the guest never saw. A host whose
+/// datagram socket buffer is smaller than a burst — macOS defaults to 4 KiB
+/// against Linux's 200-odd — refuses part of every burst, so a flood that
+/// did not check would report a full backlog the guest never had.
+fn send_frames(socket: &UnixDatagram, qemu_sock: &PathBuf, frames: &[TxFrame]) -> bool {
+    let mut accepted = true;
     for frame in frames {
         // The host peer speaks the raw wire; a live device would consume
         // the transmit-offload metadata, so it is ignored here.
-        let _ = socket.send_to(&frame.bytes, qemu_sock);
+        accepted &= socket.send_to(&frame.bytes, qemu_sock).is_ok();
     }
+    accepted
 }
 
 // --- NTP-server peer (plans/TIMESYNC.md TS-2 vertical) -----------------
@@ -3669,9 +3680,12 @@ fn emit_bare_syn(
     {
         return false;
     }
-    let sent = !out.frames.is_empty();
-    send_frames(socket, qemu_sock, &out.frames);
-    sent
+    // Both halves matter: the stack must have produced the frame *and* the
+    // wire must have taken it. A refused SYN is retried on the next pass
+    // rather than counted, since nothing retransmits it.
+    let produced = !out.frames.is_empty();
+    let accepted = send_frames(socket, qemu_sock, &out.frames);
+    produced && accepted
 }
 
 // --- Active TCP client (N6b-2-β-2 listener vertical) -------------------

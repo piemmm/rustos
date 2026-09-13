@@ -246,7 +246,6 @@ pub mod userentry;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod idt;
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub mod paging;
 
 /// x86_64 machine-takeover mechanism (`plans/NEW-SUPERVISOR.md` §9): the Arch

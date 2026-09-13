@@ -1,6 +1,7 @@
 //! x86_64 direct-physical-map QEMU integration test: the kernel reaches
 //! **every** usable byte of a guest that has more RAM than the boot
-//! trampoline's own identity window.
+//! trampoline's own identity window, and it reaches it in the kernel half
+//! rather than in the half user programs address.
 //!
 //! ## Why this exists
 //!
@@ -13,19 +14,30 @@
 //! free (`plans/OPEN-DEFECTS.md` D55). Nothing caught it, because every
 //! other x86_64 guest in the matrix is small enough to fit the window.
 //!
+//! It was then an *identity* map in the low half, which every process root
+//! had to carry, so it had to stop short of the user image bias and a
+//! machine with more RAM than that had frames the kernel could not reach
+//! (D56). Both halves of that are what this vertical now watches.
+//!
 //! ## What this test asserts
 //!
 //! The guest is given more RAM than the trampoline's window, so the firmware
 //! map reports usable RAM above it. Then:
 //!
-//! 1. The boot path widened the window past the trampoline's own — proof it
-//!    sized it from the discovered map rather than a build-time constant.
+//! 1. The boot path sized the map past the trampoline's own window — proof
+//!    it read the discovered map rather than a build-time constant.
 //! 2. The early-boot RAM self-test left **no** usable byte unreachable: each
 //!    one was written and read back through the direct map. A frame the map
-//!    does not cover is left untested and counted, so a window that stopped
+//!    does not cover is left untested and counted, so a map that stopped
 //!    short shows up here rather than as a silent skip.
+//! 3. The live structure holds: a frame is reachable through the map while
+//!    the user virtual address that would alias it under an identity map
+//!    holds an *unrelated* mapping, the two lie in disjoint root slots, and
+//!    a process root maps that frame's bare physical address to nothing.
+//!    That collision is what capped the map at the user bias, and it is
+//!    checked on the metal under a live root rather than only on the host.
 //!
-//! Only when both hold does `BootCompleted` report success to QEMU.
+//! Only when all three hold does `BootCompleted` report success to QEMU.
 //!
 //! ## How it differs from the production `tairix-kernel` binary
 //!
@@ -46,10 +58,14 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_x86_64::paging::BOOT_IDENTITY_GIB;
+    use tairix_arch_api::frames::PageTableFrames as _;
+    use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
+    use tairix_arch_x86_64::paging::{
+        self, AddressSpace, PageTablePool, BOOT_IDENTITY_GIB, PHYSMAP_PML4_FIRST_SLOT,
+    };
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
-    use tairix_kernel::x86_64::boot::KERNEL_BOOT_IDENTITY_WINDOW;
+    use tairix_kernel::x86_64::boot::KERNEL_BOOT_DIRECT_MAP;
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink};
     use tairix_log::{Event, EventId, FieldValue, Sink};
 
@@ -81,12 +97,133 @@ mod kernel {
     /// `kernel_core::AuditEvent::BootCompleted`: every init phase succeeded.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-    /// Set when the boot path reported an identity window wider than the
-    /// trampoline's own — the guest's RAM forced a widening.
-    static WINDOW_WIDENED: AtomicBool = AtomicBool::new(false);
+    /// Set when the boot path reported a direct map wider than the
+    /// trampoline's own identity window — the guest's RAM forced it.
+    static MAP_SIZED_FROM_RAM: AtomicBool = AtomicBool::new(false);
 
     /// Set when the RAM self-test reported verifying every usable byte.
     static RAM_FULLY_REACHED: AtomicBool = AtomicBool::new(false);
+
+    /// Page-table pages the structural probe's two roots draw from. A
+    /// `.bss` pool, so the probe needs nothing of the live allocator and
+    /// cannot perturb the boot it is observing.
+    static PROBE_POOL: PageTablePool = PageTablePool::new();
+
+    /// Frame the probe reaches two ways: through the kernel image's own
+    /// window (it is this binary's static) and through the direct map.
+    /// Its marker is distinctive, so reading it back at
+    /// `PHYSMAP_VMA_BASE + phys` identifies *that* frame rather than
+    /// merely proving some page is mapped there.
+    static PROBE_FRAME: ProbeFrame = ProbeFrame {
+        marker: PROBE_MARKER,
+        rest: [0; 4096 - PROBE_MARKER.len()],
+    };
+
+    /// A page-aligned frame the probe reads through the direct map. Never
+    /// written: a read proves the translation, and the RAM self-test
+    /// above already writes and reads back every usable byte.
+    #[repr(C, align(4096))]
+    struct ProbeFrame {
+        marker: [u8; 8],
+        rest: [u8; 4096 - 8],
+    }
+
+    /// The marker [`PROBE_FRAME`] opens with.
+    const PROBE_MARKER: [u8; 8] = [0x5D, 0x56, 0xD1, 0xA6, 0x00, 0xFF, 0x7E, 0x81];
+
+    /// The PML4 slot a virtual address resolves through: bits 47:39, with
+    /// the sign-extension above them masked off.
+    fn pml4_slot(va: u64) -> usize {
+        ((va >> 39) & 0x1FF) as usize
+    }
+
+    /// Prove the structure the defect was about: the direct map reaches a
+    /// frame in the kernel half, the user address that would alias it under
+    /// an identity map holds an *unrelated* mapping in a disjoint root slot,
+    /// and a process root maps that frame's bare physical address to
+    /// nothing at all.
+    ///
+    /// The map's own shared tables are deliberately not walked. They are
+    /// carved from the firmware memory map before any frame allocator
+    /// exists, so no `PageTableFrames` source ever handed them out and
+    /// `table_at` refuses them — which is the fail-closed behaviour the
+    /// walk owes a table it cannot vouch for. The hardware translation is
+    /// witnessed by reading through it instead, which is the stronger
+    /// statement anyway.
+    ///
+    /// Run before the boot path builds PID 1, so the root it draws is never
+    /// made live.
+    fn structural_probe() -> Result<(), &'static str> {
+        let probe_phys = core::ptr::addr_of!(PROBE_FRAME) as u64 - paging::KERNEL_VMA_BASE;
+        let map_va = paging::physmap_virt(probe_phys);
+
+        // The hardware reaches the frame through the map, and reaches *that*
+        // frame: the marker read back is the one the kernel-window alias
+        // holds.
+        for (offset, expected) in PROBE_MARKER.iter().enumerate() {
+            // SAFETY: the map is live (the boot path widened it before this
+            // record is written, and the trampoline laid its floor before
+            // any Rust ran) and covers `probe_phys`, which names this
+            // binary's own page-aligned static; the read is in-bounds of
+            // that frame and mutates nothing.
+            let seen = unsafe { core::ptr::read_volatile((map_va + offset as u64) as *const u8) };
+            if seen != *expected {
+                return Err("the map does not read back the frame's marker");
+            }
+        }
+
+        let Some(mut process) = AddressSpace::new_process_root(&PROBE_POOL) else {
+            return Err("no process root");
+        };
+
+        // The root carries the map, and carries nothing at all in the slot
+        // a bare physical address would resolve through.
+        let Some(root) = PROBE_POOL.table_at(process.pml4_phys()) else {
+            return Err("the pool cannot reach the root it drew");
+        };
+        // SAFETY: the pool drew this root and nothing else holds a
+        // reference into it; the reads observe two entries.
+        let (physmap_slot, identity_slot) = unsafe {
+            (
+                (*root)[PHYSMAP_PML4_FIRST_SLOT],
+                (*root)[pml4_slot(probe_phys)],
+            )
+        };
+        if physmap_slot == 0 {
+            return Err("the process root carries no direct-map slot");
+        }
+        if identity_slot != 0 {
+            return Err("the process root carries an identity mapping");
+        }
+
+        // The user address an identity map would have collided with maps an
+        // *unrelated* frame, and it lies in a different root slot from the
+        // map's own address.
+        let alias_va = (tairix_kernel::x86_64::USER_VA_TOP >> 1) + probe_phys;
+        let other_phys = probe_phys + 4096;
+        if process
+            .map_page(alias_va, other_phys, PageFlags::READ | PageFlags::USER)
+            .is_err()
+        {
+            return Err("the aliasing user address would not map");
+        }
+        if process.translate(alias_va).map(|(phys, _)| phys) != Some(other_phys) {
+            return Err("the aliasing user address resolves to the wrong frame");
+        }
+        if pml4_slot(alias_va) >= PHYSMAP_PML4_FIRST_SLOT {
+            return Err("the user region reaches the direct map's slots");
+        }
+        if pml4_slot(map_va) != PHYSMAP_PML4_FIRST_SLOT {
+            return Err("the map's address is not in its own slot");
+        }
+
+        // And the frame's bare physical address reaches nothing: the
+        // full-RAM identity map every process root used to carry is gone.
+        if process.translate(probe_phys).is_some() {
+            return Err("a bare physical address still resolves");
+        }
+        Ok(())
+    }
 
     /// Read an unsigned field of `event` by key.
     fn field_u64(event: &Event<'_>, key: &str) -> Option<u64> {
@@ -106,13 +243,24 @@ mod kernel {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
 
-            if event.id == KERNEL_BOOT_IDENTITY_WINDOW {
+            if event.id == KERNEL_BOOT_DIRECT_MAP {
                 match field_u64(event, "gigabytes") {
                     // The guest is sized so its RAM tops the trampoline's
-                    // window: a window that did not widen means the boot path
-                    // never read the discovered map, which is the defect.
+                    // identity window: a map no wider than that means the
+                    // boot path never read the discovered map, which is the
+                    // defect. The map is live by the time this record is
+                    // written, so the structural probe runs here.
                     Some(gib) if gib > BOOT_IDENTITY_GIB as u64 => {
-                        WINDOW_WIDENED.store(true, Ordering::Release);
+                        if let Err(why) = structural_probe() {
+                            SerialSink::new().write_event(&Event {
+                                level: tairix_log::Level::Error,
+                                id: EventId(0),
+                                message: why,
+                                fields: &[],
+                            });
+                            qemu_exit::exit_failure();
+                        }
+                        MAP_SIZED_FROM_RAM.store(true, Ordering::Release);
                     }
                     _ => qemu_exit::exit_failure(),
                 }
@@ -134,7 +282,7 @@ mod kernel {
             }
 
             if event.id == BOOT_COMPLETED_EVENT_ID {
-                if WINDOW_WIDENED.load(Ordering::Acquire)
+                if MAP_SIZED_FROM_RAM.load(Ordering::Acquire)
                     && RAM_FULLY_REACHED.load(Ordering::Acquire)
                 {
                     qemu_exit::exit_success();
@@ -164,7 +312,7 @@ mod kernel {
 
     /// The symbol the arch crate's boot trampoline calls.
     ///
-    /// The observer stands in for **both** sinks: the identity-window and
+    /// The observer stands in for **both** sinks: the direct-map and
     /// RAM-self-test records are diagnostics on the log channel while
     /// `BootCompleted` is an audit record, and this vertical grades all
     /// three.

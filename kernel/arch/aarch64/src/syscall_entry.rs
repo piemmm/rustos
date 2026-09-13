@@ -31,11 +31,10 @@
 //! [`dispatch_svc`] all build and are unit-tested on the host
 //! ([`SyscallFrame`] is host-constructible).
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use tairix_abi::SYSCALL_MAX_ARGS;
 
 use crate::fault::exception_class;
+use tairix_sync::FnCell;
 
 /// `ESR_EL1.EC` code for an `svc` executed in AArch64 state (ARM ARM
 /// Table D17-2). The user-space syscall path.
@@ -110,33 +109,25 @@ pub fn syscall_frame_from_saved(saved: &[u64; SAVED_GPRS]) -> SyscallFrame {
 pub type SyscallDispatchFn =
     extern "C" fn(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64;
 
-/// Atomically-stored dispatch callback (`0` = none installed).
-static SYSCALL_DISPATCH_CALLBACK: AtomicUsize = AtomicUsize::new(0);
+/// The dispatch callback, empty until the binary installs it.
+static SYSCALL_DISPATCH_CALLBACK: FnCell<SyscallDispatchFn> = FnCell::empty();
 
 /// Install the per-binary dispatch callback. Called once during boot,
 /// before user space is entered. Storing a `fn` (not a closure) keeps it
 /// safe to invoke from exception context.
 pub fn set_dispatch_callback(cb: SyscallDispatchFn) {
-    SYSCALL_DISPATCH_CALLBACK.store(cb as usize, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.install(cb);
 }
 
 /// Read back the installed dispatch callback, if any. Test/diagnostic.
 #[must_use]
 pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
-    let raw = SYSCALL_DISPATCH_CALLBACK.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `SYSCALL_DISPATCH_CALLBACK`
-        // round-trips a valid `SyscallDispatchFn` through
-        // `set_dispatch_callback`.
-        Some(unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) })
-    }
+    SYSCALL_DISPATCH_CALLBACK.load()
 }
 
 #[cfg(test)]
 fn clear_dispatch_for_tests() {
-    SYSCALL_DISPATCH_CALLBACK.store(0, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.clear();
 }
 
 /// Dispatch an `svc` captured in `frame` to the installed callback.
@@ -163,6 +154,7 @@ mod tests {
     use super::*;
     use crate::fault::ESR_EC_SHIFT;
     use core::sync::atomic::AtomicU64;
+    use core::sync::atomic::Ordering;
 
     #[test]
     fn svc_class_is_recognised() {

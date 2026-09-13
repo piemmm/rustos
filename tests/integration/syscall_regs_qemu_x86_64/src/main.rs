@@ -329,7 +329,7 @@ mod kernel {
     fn run_round_trip() -> ! {
         let page = paging::PAGE_SIZE as u64;
 
-        let Some(mut space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+        let Some(mut space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
             qemu_exit::exit_failure();
         };
 

@@ -212,7 +212,7 @@ fn run_round_trip() -> ! {
 
     // 1. Fresh address space (low 32 MiB identity + higher-half kernel window)
     //    and activate it before any user mapping is added.
-    let Some(arch) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(arch) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "page-table pool exhausted (identity map)");
         qemu_exit::exit_failure();
     };

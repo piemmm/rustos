@@ -1,16 +1,16 @@
 //! Loom model-checking harness.
 //!
-//! Run with:
+//! Driven by `cargo xtask loom`, which is the only thing that builds this
+//! file: `loom` replaces the primitives' atomics wholesale, so it needs a
+//! whole-crate rebuild under its own `--cfg` and cannot ride the ordinary
+//! test pass. Directly, that is:
 //!
 //! ```text
-//! RUSTFLAGS="--cfg loom" cargo test --test loom \
-//!     -p tairix-kernel-sync --release
+//! RUSTFLAGS="--cfg loom" cargo test -p tairix-sync --test loom --release
 //! ```
 //!
-//! When the `loom` cfg is *not* enabled the file compiles to an empty
-//! test binary, so the default `cargo test` workflow stays fast.
-//! `cargo xtask test` runs the loom suite when the helper-tool cache
-//! contains a usable `loom` build (see `tools/xtask`).
+//! Without the `loom` cfg the file compiles to an empty test binary, so the
+//! default `cargo test` workflow stays fast.
 //!
 //! Each test below exercises a small N-way interleaving (two or three
 //! threads, two or three operations each) — enough to catch missed
@@ -33,7 +33,10 @@ fn loom_spinlock_mutual_exclusion() {
         });
         *lock.lock() += 1;
         t1.join().unwrap();
-        assert_eq!(lock.into_inner(), 2);
+        // Read back through the lock rather than `into_inner`: the `Arc` the
+        // spawned thread shared is still alive, so the value cannot be moved
+        // out of it.
+        assert_eq!(*lock.lock(), 2);
     });
 }
 
@@ -77,7 +80,7 @@ fn loom_seqlock_reader_writer() {
         let writer = thread::spawn(move || {
             // SAFETY: this thread is the sole writer.
             unsafe {
-                s1.write(|v| *v = 7);
+                s1.write(7);
             }
         });
         let v = s.read();

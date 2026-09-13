@@ -45,6 +45,8 @@
 //! are observed kernel-side — `plans/CCOMPAT.md` CC3). Inventing a
 //! host stub that "enters user mode" would be a fake primitive.
 
+use tairix_sync::FnCell;
+
 /// The architecture-neutral register state a process image is entered
 /// with.
 ///
@@ -151,33 +153,25 @@ pub trait EnterUser: Send + Sync {
 /// the fault path's frame instead.
 pub type UserEntryObserverFn = extern "C" fn(crate::CpuId, u64, u64, bool);
 
-/// The installed observer as a raw function pointer (`0` = none).
-static USER_ENTRY_OBSERVER: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+/// The installed observer.
+static USER_ENTRY_OBSERVER: FnCell<UserEntryObserverFn> = FnCell::empty();
 
 /// Install the user-entry observer every port reports through.
 ///
 /// Storing a `fn` (not a closure) keeps it safe to call from trap
 /// context: there is no captured environment to drop mid-flight.
 pub fn set_user_entry_observer(cb: UserEntryObserverFn) {
-    USER_ENTRY_OBSERVER.store(cb as usize, core::sync::atomic::Ordering::Relaxed);
+    USER_ENTRY_OBSERVER.install(cb);
 }
 
 /// The installed observer, if any.
 ///
 /// A port checks this *before* reading its saved frame, so an image whose
-/// kernel installed no observer pays one relaxed load per entry and never
-/// touches the frame.
+/// kernel installed no observer pays one load per entry and never touches
+/// the frame.
 #[must_use]
 pub fn user_entry_observer() -> Option<UserEntryObserverFn> {
-    let raw = USER_ENTRY_OBSERVER.load(core::sync::atomic::Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `USER_ENTRY_OBSERVER` round-trips a valid
-        // `UserEntryObserverFn` through `set_user_entry_observer`.
-        Some(unsafe { core::mem::transmute::<usize, UserEntryObserverFn>(raw) })
-    }
+    USER_ENTRY_OBSERVER.load()
 }
 
 /// Report the register state `cpu` is entering the kernel from user mode

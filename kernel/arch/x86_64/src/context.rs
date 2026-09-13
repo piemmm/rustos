@@ -295,7 +295,11 @@ mod tests {
         let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 16]);
         let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(16) } as u64;
         let mut c = TaskCtx::new();
-        c.prepare(top, host_entry, 0xCAFE).unwrap();
+        // Coerce once: the frame word is compared against *this* pointer
+        // value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let entry: unsafe extern "C" fn(usize) -> ! = host_entry;
+        c.prepare(top, entry, 0xCAFE).unwrap();
         // rsp should be `top - 72` (8 frame words + the alignment pad).
         assert_eq!(c.rsp, top - 72);
         // Verify the frame layout the resume epilogue will pop, in the
@@ -308,6 +312,6 @@ mod tests {
             assert_eq!(*slot, 0);
         }
         // return address <- entry (consumed by `ret`).
-        assert_eq!(frame[7], host_entry as *const () as usize as u64);
+        assert_eq!(frame[7], entry as *const () as usize as u64);
     }
 }

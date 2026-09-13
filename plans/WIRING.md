@@ -452,12 +452,13 @@ abi-sys verticals) keep their signatures. AArch64's `switch` completes
 the `SCTLR_EL1` + `isb` transition before a private live-translation
 witness permits the set-once atomic park-root publication; its MMU-off
 prefix therefore contains no Device-nGnRnE LDXR/STXR retry loop.
-riscv64 + aarch64 run
-`passes_mmu_conformance` on the host (their walk recovers tables through
-the identity map); x86_64's walk reaches tables through the higher-half
-window (phys ≠ virt), so it is not host-runnable and its `map_page`/
-`activate` are proven by the `memory_isolation` QEMU vertical instead
-(the honest asymmetry the bare-metal `switch` already has). All three
+All three ports run `passes_mmu_conformance` on the host: a walk
+recovers each level through `PageTableFrames::table_at` on the source
+that drew it, so the port itself holds no physical↔virtual relationship
+and x86_64's higher-half pool (phys ≠ virt) is no longer an obstacle.
+Only `activate`'s root-register write needs the metal, and the
+`memory_isolation` QEMU vertical proves it (the honest asymmetry the
+bare-metal `switch` already has). All three
 `memory_isolation_qemu_*` verticals now build their victim/attacker
 spaces through `AddressSpace::map_page` + `activate` (proven *through the
 HAL*). wasm32 is an honest **n/a** (no page table; sandboxed linear
@@ -511,10 +512,15 @@ HAL *modules* compile). Docs:
 
 - Added the **`PageTableFrames`** HAL frame-source slice
   (`kernel/arch/api::frames`): `alloc_table` hands back a `TableFrame`
-  (physical address + zeroed `'static` entry view) so a port owns neither
-  the storage nor the phys/virt relationship, plus the host
-  `frames::conformance` vertical (fresh frame zeroed, page-aligned,
-  distinct, fails closed with `None`).
+  (physical address + zeroed `'static` entry view) and `table_at` is its
+  inverse — the only way a port turns a parent entry's output address back
+  into a table — so a port owns neither the storage nor the phys/virt
+  relationship at either end, and an address the source never handed out
+  fails the walk closed. Plus the host `frames::conformance` vertical
+  (fresh frame zeroed, page-aligned, distinct; `table_at` round-trips and
+  refuses a foreign address; the source fails closed with `None`).
+  `reclaim_hierarchy` draws the table view and the free from the source,
+  so no port re-derives either.
 - Each port's `PageTablePool` now `impl PageTableFrames` (the
   boot/bootstrap source), and every port `AddressSpace::new_*` /
   `map_4k*` / `ensure_child` takes a `&'static dyn PageTableFrames` —
@@ -526,10 +532,10 @@ HAL *modules* compile). Docs:
   `PhysMap`, zeroes it, hands back a `TableFrame`, and fails closed
   (returning the frame) for a frame outside the direct map. §17.4 is kept
   — `kernel/mem` depends on `kernel/arch/api`, never the reverse.
-- riscv64 + aarch64 run `passes_frames_conformance` on the host (identity
-  `phys_of`); `kernel/mem` runs the suite over `FrameTableSource`;
-  x86_64's higher-half pool is proven through the `memory_isolation` QEMU
-  vertical (the honest asymmetry the MMU slice already carries).
+- All three ports run `passes_frames_conformance` on the host and
+  `kernel/mem` runs the suite over `FrameTableSource`: `table_at` is
+  defined as the inverse of whatever `phys` derivation a source keeps, so
+  x86_64's higher-half pool is host-runnable like the identity ones.
 - **Deliverable met:** a per-process address space's internal tables come
   from the kernel frame allocator via the seam; the `memory_isolation_qemu_*`
   and spawn verticals stay green; no `cfg(target_arch …)` leaks. Docs:

@@ -279,14 +279,15 @@ pub mod conformance {
         TICKS.store(0, Ordering::Relaxed);
         LAST_CPU.store(u32::MAX, Ordering::Relaxed);
 
-        timer.set_tick_callback(probe_tick);
+        // Coerce once and compare the slot against *that* pointer value:
+        // two coercions of one `fn` item are not guaranteed to share an
+        // address, so re-coercing here would assert something Rust does
+        // not promise.
+        let probe: TickFn = probe_tick;
+        timer.set_tick_callback(probe);
         let installed: TickFn = timer.tick_callback().expect("callback must round-trip");
-        // Cast `probe_tick` through its `TickFn` pointer type before the
-        // integer cast: a direct function-item → integer cast trips the
-        // `function_casts_as_integer` lint.
-        let probe_addr = probe_tick as TickFn as usize;
         assert_eq!(
-            installed as usize, probe_addr,
+            installed as usize, probe as usize,
             "the installed callback must round-trip unchanged"
         );
 
@@ -314,14 +315,15 @@ pub mod conformance {
         use super::super::{TickFn, Timer};
         use super::run_all;
         use crate::CpuId;
-        use core::sync::atomic::{AtomicUsize, Ordering};
+        use core::sync::atomic::Ordering;
+        use tairix_sync::FnCell;
 
         /// A faithful host double: an in-handle callback slot standing in
         /// for the port's static, with the shared invoke-on-dispatch
         /// logic.
         #[derive(Default)]
         struct CellTimer {
-            callback: AtomicUsize,
+            callback: FnCell<TickFn>,
             /// Last armed deadline (`u64::MAX` sentinel = disarmed), so a
             /// local unit test can assert arm/disarm round-trips. The
             /// generic `run_all` only proves the calls are total.
@@ -330,17 +332,10 @@ pub mod conformance {
 
         impl Timer for CellTimer {
             fn set_tick_callback(&self, callback: TickFn) {
-                self.callback.store(callback as usize, Ordering::Relaxed);
+                self.callback.install(callback);
             }
             fn tick_callback(&self) -> Option<TickFn> {
-                let raw = self.callback.load(Ordering::Relaxed);
-                if raw == 0 {
-                    None
-                } else {
-                    // SAFETY: every store is the round-trip of a valid
-                    // `TickFn` pointer through `set_tick_callback`.
-                    Some(unsafe { core::mem::transmute::<usize, TickFn>(raw) })
-                }
+                self.callback.load()
             }
             fn dispatch_tick(&self, cpu: CpuId) -> bool {
                 match self.tick_callback() {
@@ -385,21 +380,15 @@ pub mod conformance {
         /// A broken timer that never invokes the callback must be
         /// rejected by the fires-on-dispatch check.
         struct DeadTimer {
-            callback: AtomicUsize,
+            callback: FnCell<TickFn>,
         }
 
         impl Timer for DeadTimer {
             fn set_tick_callback(&self, callback: TickFn) {
-                self.callback.store(callback as usize, Ordering::Relaxed);
+                self.callback.install(callback);
             }
             fn tick_callback(&self) -> Option<TickFn> {
-                let raw = self.callback.load(Ordering::Relaxed);
-                if raw == 0 {
-                    None
-                } else {
-                    // SAFETY: as in `CellTimer`.
-                    Some(unsafe { core::mem::transmute::<usize, TickFn>(raw) })
-                }
+                self.callback.load()
             }
             fn dispatch_tick(&self, _cpu: CpuId) -> bool {
                 // Faithful about the no-callback case (so it clears the
@@ -416,7 +405,7 @@ pub mod conformance {
         #[should_panic(expected = "must invoke the callback exactly once")]
         fn suite_rejects_a_timer_that_never_fires() {
             run_all(&DeadTimer {
-                callback: AtomicUsize::new(0),
+                callback: FnCell::empty(),
             });
         }
     }

@@ -4,7 +4,7 @@
 //! module — as `crate::riscv64_preempt_wiring` is for its port — so the
 //! wiring carries a host regression test. The callbacks themselves are
 //! architecture-neutral and shared by every port
-//! (`tairix_kernel_core::traps`); this module only names the x86_64 trap
+//! (`crate::preempt_callbacks`); this module only names the x86_64 trap
 //! slots they go into.
 //!
 //! x86_64 has no separate reschedule-IPI callback slot: its placement IPI
@@ -15,6 +15,7 @@
 //! A forgotten install is a silent lost wakeup rather than a build
 //! failure, so the host test below pins each slot's contents.
 
+use crate::preempt_callbacks::{PREEMPT_CALLBACK, TIMER_CALLBACK};
 use tairix_arch_x86_64::preempt;
 
 /// Install every trap callback the x86_64 preemption surface forwards to.
@@ -24,13 +25,14 @@ use tairix_arch_x86_64::preempt;
 /// phase, before `init` drops to ring 3 with `IF` set — so the first tick
 /// that can be *taken* already has a handler.
 pub(crate) fn install_callbacks() {
-    preempt::set_preempt_callback(tairix_kernel_core::on_user_preempt_point);
-    preempt::set_timer_callback(tairix_kernel_core::on_timer_tick);
+    preempt::set_preempt_callback(PREEMPT_CALLBACK);
+    preempt::set_timer_callback(TIMER_CALLBACK);
 }
 
 #[cfg(test)]
 mod tests {
     use super::install_callbacks;
+    use crate::preempt_callbacks::{installed, PREEMPT_CALLBACK, TIMER_CALLBACK};
     use tairix_arch_x86_64::preempt;
 
     /// Both slots must hold the *shared* kernel-core callback rather than
@@ -40,19 +42,12 @@ mod tests {
     fn the_wiring_step_installs_the_shared_preempt_and_tick_callbacks() {
         install_callbacks();
 
-        let installed = |slot: Option<extern "C" fn(u32)>, want: extern "C" fn(u32)| {
-            slot.is_some_and(|got| core::ptr::fn_addr_eq(got, want))
-        };
-
         assert!(
-            installed(
-                preempt::preempt_callback(),
-                tairix_kernel_core::on_user_preempt_point
-            ),
+            installed(preempt::preempt_callback(), PREEMPT_CALLBACK),
             "ring-3 preemption callback not installed"
         );
         assert!(
-            installed(preempt::timer_callback(), tairix_kernel_core::on_timer_tick),
+            installed(preempt::timer_callback(), TIMER_CALLBACK),
             "LAPIC-timer callback not installed"
         );
     }

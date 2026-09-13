@@ -54,15 +54,20 @@ fn callbacks_round_trip() {
     assert!(tick_callback().is_none());
     assert!(ipi_callback().is_none());
 
-    set_tick_callback(record_a);
-    set_ipi_callback(record_b);
+    // Coerce once each: the slots are compared against *these* pointer
+    // values, because two coercions of one `fn` item are not guaranteed
+    // to share an address.
+    let tick: extern "C" fn(CpuId) = record_a;
+    let ipi: extern "C" fn(CpuId) = record_b;
+    set_tick_callback(tick);
+    set_ipi_callback(ipi);
     assert_eq!(
-        tick_callback().map(|f| f as *const () as usize),
-        Some(record_a as *const () as usize)
+        tick_callback().map(|f| f as *const ()),
+        Some(tick as *const ())
     );
     assert_eq!(
-        ipi_callback().map(|f| f as *const () as usize),
-        Some(record_b as *const () as usize)
+        ipi_callback().map(|f| f as *const ()),
+        Some(ipi as *const ())
     );
     clear_for_tests();
 }

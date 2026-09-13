@@ -37,9 +37,8 @@
 //! The argument packing, the callback storage, and [`dispatch_syscall`]
 //! all build and are unit-tested on the host.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 use tairix_abi::SYSCALL_MAX_ARGS;
+use tairix_sync::FnCell;
 
 /// Pack the syscall argument words into the canonical `tairix_abi`
 /// layout. The order matches the ABI definition pinned in
@@ -65,33 +64,25 @@ pub const fn pack_raw_args(
 pub type SyscallDispatchFn =
     extern "C" fn(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64;
 
-/// Atomically-stored dispatch callback (`0` = none installed).
-static SYSCALL_DISPATCH_CALLBACK: AtomicUsize = AtomicUsize::new(0);
+/// The dispatch callback, empty until the binary installs it.
+static SYSCALL_DISPATCH_CALLBACK: FnCell<SyscallDispatchFn> = FnCell::empty();
 
 /// Install the per-binary dispatch callback. Called once during boot,
 /// before user space runs. Storing a `fn` (not a closure) keeps it safe
 /// to invoke from the syscall entry.
 pub fn set_dispatch_callback(cb: SyscallDispatchFn) {
-    SYSCALL_DISPATCH_CALLBACK.store(cb as usize, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.install(cb);
 }
 
 /// Read back the installed dispatch callback, if any. Test/diagnostic.
 #[must_use]
 pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
-    let raw = SYSCALL_DISPATCH_CALLBACK.load(Ordering::Acquire);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `SYSCALL_DISPATCH_CALLBACK`
-        // round-trips a valid `SyscallDispatchFn` through
-        // `set_dispatch_callback`.
-        Some(unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) })
-    }
+    SYSCALL_DISPATCH_CALLBACK.load()
 }
 
 #[cfg(test)]
 fn clear_dispatch_for_tests() {
-    SYSCALL_DISPATCH_CALLBACK.store(0, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.clear();
 }
 
 /// Dispatch a syscall to the installed callback.

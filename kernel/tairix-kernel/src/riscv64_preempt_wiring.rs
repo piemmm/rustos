@@ -3,7 +3,7 @@
 //! Hoisted out of the freestanding-only `crate::riscv64` port module — as
 //! `crate::riscv64_plic_irq` is — so the wiring carries a host regression
 //! test. The callbacks themselves are architecture-neutral and shared by
-//! every port (`tairix_kernel_core::traps`); this module only names the
+//! every port (`crate::preempt_callbacks`); this module only names the
 //! riscv64 trap slots they go into.
 //!
 //! Installing them is one step rather than three call sites because a hart
@@ -13,21 +13,30 @@
 //! wakeup, not a compile error, and the riscv64 reschedule IPI was missing
 //! for exactly that reason.
 
+#[cfg(any(freestanding, test))]
+use crate::preempt_callbacks::{IPI_CALLBACK, PREEMPT_CALLBACK, TIMER_CALLBACK};
+#[cfg(any(freestanding, test))]
 use tairix_arch_riscv64::preempt;
 
 /// Install every trap callback the riscv64 preemption surface forwards to.
 ///
 /// Called before the sources are unmasked, so a delivered trap always has
 /// a handler.
+// The production caller is this port's freestanding `arm_preemption`, so a
+// host build of the crate compiles the module for its test alone. Gated to
+// match, rather than left to read as dead code on a host whose own ISA is
+// this one — where it fails `-D warnings` while every other host passes.
+#[cfg(any(freestanding, test))]
 pub(crate) fn install_callbacks() {
-    preempt::set_preempt_callback(tairix_kernel_core::on_user_preempt_point);
-    preempt::set_timer_callback(tairix_kernel_core::on_timer_tick);
-    preempt::set_ipi_callback(tairix_kernel_core::on_reschedule_ipi);
+    preempt::set_preempt_callback(PREEMPT_CALLBACK);
+    preempt::set_timer_callback(TIMER_CALLBACK);
+    preempt::set_ipi_callback(IPI_CALLBACK);
 }
 
 #[cfg(test)]
 mod tests {
     use super::install_callbacks;
+    use crate::preempt_callbacks::{installed, IPI_CALLBACK, PREEMPT_CALLBACK, TIMER_CALLBACK};
     use tairix_arch_riscv64::preempt;
 
     /// Every source the idle park can be woken by must have its callback
@@ -43,30 +52,18 @@ mod tests {
     /// deadline sweep.
     #[test]
     fn the_wiring_step_installs_the_shared_preempt_tick_and_ipi_callbacks() {
-        use tairix_arch_api::CpuId;
-
         install_callbacks();
 
-        let installed = |slot: Option<extern "C" fn(CpuId)>, want: extern "C" fn(CpuId)| {
-            slot.is_some_and(|got| core::ptr::fn_addr_eq(got, want))
-        };
-
         assert!(
-            installed(
-                preempt::preempt_callback(),
-                tairix_kernel_core::on_user_preempt_point
-            ),
+            installed(preempt::preempt_callback(), PREEMPT_CALLBACK),
             "U-mode preemption callback not installed"
         );
         assert!(
-            installed(preempt::timer_callback(), tairix_kernel_core::on_timer_tick),
+            installed(preempt::timer_callback(), TIMER_CALLBACK),
             "supervisor-timer callback not installed"
         );
         assert!(
-            installed(
-                preempt::ipi_callback(),
-                tairix_kernel_core::on_reschedule_ipi
-            ),
+            installed(preempt::ipi_callback(), IPI_CALLBACK),
             "reschedule-IPI callback not installed"
         );
     }

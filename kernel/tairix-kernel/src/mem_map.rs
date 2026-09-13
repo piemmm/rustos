@@ -22,7 +22,7 @@
 //! `riscv64::boot` consume it) and on any host `cargo test` build (where the
 //! tests below consume it), and on no other configuration, so it is never
 //! dead code. The single-window [`build_memory_map`] (aarch64) and the
-//! identity-window sizing and page-directory carve [`identity_window_gib`] /
+//! identity-window sizing and page-directory carve [`direct_map_gib`] /
 //! [`carve_frames_from_map`] (x86_64) are each gated to the port(s) that use
 //! them.
 
@@ -270,10 +270,10 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
 #[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
 const GIB: u64 = 1 << 30;
 
-/// Size the identity/direct-map window, in whole gigabytes, from the RAM
-/// `map` actually reports.
+/// Size the direct physical map, in whole gigabytes, from the RAM `map`
+/// actually reports.
 ///
-/// The window has to cover every frame the allocator can hand out, because
+/// The map has to cover every frame the allocator can hand out, because
 /// the kernel reaches a frame's bytes through it — a process image write, a
 /// shared-region scrub, a page table, a slab page. It is therefore the top
 /// of the highest **usable** region rounded up to a gigabyte, never the
@@ -281,14 +281,13 @@ const GIB: u64 = 1 << 30;
 /// well past the installed RAM, and sizing from that would map gigabytes of
 /// holes.
 ///
-/// `floor_gib` keeps the architectural MMIO frames the boot trampoline
-/// already covers inside the window on a machine with less RAM than that.
-/// `cap_gib` is the first gigabyte the window may not reach — the user
-/// virtual base, since the identity map shares each process root's low half
-/// with the child image. RAM above the cap is unreachable by pointer and
-/// every consumer of it fails closed.
+/// `floor_gib` keeps the architectural MMIO frames and firmware tables the
+/// boot trampoline already covers inside the map on a machine with less RAM
+/// than that. `cap_gib` is the widest map the port's virtual layout can
+/// express; RAM above it is unreachable by pointer and every consumer of it
+/// fails closed.
 #[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
-pub(crate) fn identity_window_gib(map: &BootMemoryMap, floor_gib: usize, cap_gib: usize) -> usize {
+pub(crate) fn direct_map_gib(map: &BootMemoryMap, floor_gib: usize, cap_gib: usize) -> usize {
     let top = map
         .regions()
         .iter()
@@ -302,12 +301,12 @@ pub(crate) fn identity_window_gib(map: &BootMemoryMap, floor_gib: usize, cap_gib
 /// Reserve `pages` physically contiguous, page-aligned frames below
 /// `max_addr` out of `map`, returning their physical base.
 ///
-/// The x86_64 identity widening needs page directories before the frame
+/// The x86_64 direct physical map needs its page tables before the frame
 /// allocator exists, and they must stay out of its hands afterwards, so
 /// they are carved from the firmware map exactly as the guard arena is
 /// — the same reserve-then-hand-back
 /// shape, so neither can drift from the other. `max_addr` is the window
-/// the caller can still write through while it installs the wider one.
+/// the caller can still write through while it installs the map.
 ///
 /// The run is taken from the **highest** usable placement that fits, not
 /// the lowest: a PC's first usable region is the legacy sub-640-KiB window
@@ -361,8 +360,7 @@ pub(crate) fn carve_frames_from_map(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_memory_map, carve_frames_from_map, identity_window_gib, region_byte_totals,
-        MemoryMapError,
+        build_memory_map, carve_frames_from_map, direct_map_gib, region_byte_totals, MemoryMapError,
     };
     use tairix_kernel_mem::{RegionKind, PAGE_SIZE};
 
@@ -641,7 +639,7 @@ mod tests {
     fn identity_window_covers_the_top_of_usable_ram() {
         // RAM ends at 5 GiB + 1 MiB, so the window must reach the whole 6th
         // gigabyte or the frames at the top of the pool are unreachable.
-        assert_eq!(identity_window_gib(&pc_map_with_high_ram(), 4, 64), 6);
+        assert_eq!(direct_map_gib(&pc_map_with_high_ram(), 4, 64), 6);
     }
 
     #[test]
@@ -655,7 +653,7 @@ mod tests {
             length: 0x1000_0000,
             kind: RegionKind::Reserved,
         });
-        assert_eq!(identity_window_gib(&map, 4, 64), 4, "floor, not the hole");
+        assert_eq!(direct_map_gib(&map, 4, 64), 4, "floor, not the hole");
     }
 
     #[test]
@@ -664,7 +662,7 @@ mod tests {
         // image, so the window stops short of it and those frames fail closed.
         let mut map = BootMemoryMap::new();
         map.push(usable(0, 128u64 << 30));
-        assert_eq!(identity_window_gib(&map, 4, 64), 64);
+        assert_eq!(direct_map_gib(&map, 4, 64), 64);
     }
 
     #[test]

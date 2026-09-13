@@ -208,7 +208,7 @@ pub use tlb::{conformance as tlb_conformance, TlbShootdown};
 
 pub use uaccess::{
     conformance as uaccess_conformance, copy_user_span, install_guarded_copy, pc_in_window,
-    CopySpanFault, GuardedCopyFn, InstallGuardedCopyError,
+    CopySpanFault, GuardedCopyFn,
 };
 
 pub use xtlb::{conformance as xtlb_conformance, CrossCpuTlbShootdown};

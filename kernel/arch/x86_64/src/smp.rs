@@ -43,7 +43,7 @@
 // the `ApBootSlot` struct itself only uses a plain `u32` so it can stay
 // `Copy + Eq` (the asm-side `xchg` atomicity is what the wire protocol
 // requires; the Rust-side struct never receives an AP write directly).
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // The caller-provided `ApStackPool` payload is held in an `UnsafeCell`
 // so its `static` lands in writable memory; only the freestanding
@@ -54,6 +54,7 @@ use core::cell::UnsafeCell;
 use tairix_arch_api::CpuId;
 
 use crate::apic::{DeliveryMode, Lapic, LapicMmio};
+use tairix_sync::FnCell;
 
 // --- Layout constants ------------------------------------------------
 
@@ -358,11 +359,16 @@ pub fn init_sipi_sipi<M: LapicMmio, D: Delay>(
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[must_use]
 pub fn bsp_lapic_id() -> u8 {
-    // SAFETY: 0xFEE00020 is the architectural LAPIC ID register on
-    // every Intel/AMD CPU since the original Pentium; on QEMU it is the
-    // emulated default. The MMIO frame is identity-mapped by `boot.s`
-    // (SAFETY-INVARIANT 4). A 32-bit volatile read has no side effects.
-    let id = unsafe { core::ptr::read_volatile(0xFEE0_0020 as *const u32) };
+    // SAFETY: the LAPIC ID register is architectural on every Intel/AMD
+    // CPU since the original Pentium; on QEMU it is the emulated default.
+    // The register block is reachable through the direct physical map
+    // under every root. A 32-bit volatile read has no side effects.
+    let id = unsafe {
+        core::ptr::read_volatile(
+            (crate::preempt::LAPIC_BASE_VIRT + crate::preempt::LAPIC_ID_OFFSET as u64)
+                as *const u32,
+        )
+    };
     ((id >> 24) & 0xFF) as u8
 }
 
@@ -409,9 +415,9 @@ pub fn trampoline_payload() -> &'static [u8] {
 /// that AP's [`ApBootSlot`]. `start_secondary` therefore reads this
 /// set-once slot and stamps it into every AP's boot slot, so the
 /// consumer installs the entry exactly once (mirroring the other ports'
-/// [`set_secondary_entry`] contract) rather than passing a raw function
-/// pointer per call.
-static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
+/// [`set_secondary_entry`] contract) rather than passing an entry point
+/// per call.
+static SECONDARY_ENTRY_FN: FnCell<extern "C" fn(CpuId) -> !> = FnCell::empty();
 
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -459,23 +465,23 @@ impl StartCpuError {
 ///
 /// [`SetEntryError::AlreadyInstalled`] on the second publish.
 pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEntryError> {
-    let raw = entry as usize;
-    SECONDARY_ENTRY_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetEntryError::AlreadyInstalled)
+    if SECONDARY_ENTRY_FN.claim(entry) {
+        Ok(())
+    } else {
+        Err(SetEntryError::AlreadyInstalled)
+    }
 }
 
 /// Address of the installed secondary entry (`0` if none).
 /// Test/diagnostic observer.
 #[must_use]
 pub fn secondary_entry_addr() -> usize {
-    SECONDARY_ENTRY_FN.load(Ordering::Acquire)
+    SECONDARY_ENTRY_FN.addr() as usize
 }
 
 #[cfg(test)]
 fn clear_secondary_entry_for_tests() {
-    SECONDARY_ENTRY_FN.store(0, Ordering::Release);
+    SECONDARY_ENTRY_FN.clear();
 }
 
 // --- Bare-metal bring-up orchestration ------------------------------
@@ -655,15 +661,16 @@ impl Delay for PitDelay {
     }
 }
 
-/// Build an ephemeral [`Lapic`] over this CPU's identity-mapped LAPIC
-/// MMIO frame. The boot CPU must have software-enabled its LAPIC first.
+/// Build an ephemeral [`Lapic`] over this CPU's LAPIC register block,
+/// reached through the direct physical map. The boot CPU must have
+/// software-enabled its LAPIC first.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
-    // SAFETY: `LAPIC_BASE_PHYS` is the architectural LAPIC MMIO base on
-    // every Intel-architecture system QEMU emulates, identity-mapped by
-    // `boot.s` (SAFETY-INVARIANT 4).
+    // SAFETY: `LAPIC_BASE_VIRT` is the architectural LAPIC MMIO base on
+    // every Intel-architecture system QEMU emulates, reached through the
+    // direct physical map, which every root carries.
     let mmio =
-        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_PHYS as *mut u32) };
+        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_VIRT as *mut u32) };
     Lapic::new(mmio)
 }
 
@@ -936,14 +943,18 @@ mod tests {
     fn secondary_entry_round_trips_and_is_set_once() {
         clear_secondary_entry_for_tests();
         assert_eq!(secondary_entry_addr(), 0);
-        assert_eq!(set_secondary_entry(dummy_entry), Ok(()));
-        assert_eq!(secondary_entry_addr(), dummy_entry as *const () as usize);
+        // Coerce once: the published address is compared against *this*
+        // pointer value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let entry: extern "C" fn(CpuId) -> ! = dummy_entry;
+        assert_eq!(set_secondary_entry(entry), Ok(()));
+        assert_eq!(secondary_entry_addr(), entry as *const () as usize);
         // A second publish is refused (set-once); the slot is unchanged.
         assert_eq!(
-            set_secondary_entry(dummy_entry),
+            set_secondary_entry(entry),
             Err(SetEntryError::AlreadyInstalled)
         );
-        assert_eq!(secondary_entry_addr(), dummy_entry as *const () as usize);
+        assert_eq!(secondary_entry_addr(), entry as *const () as usize);
         clear_secondary_entry_for_tests();
     }
 

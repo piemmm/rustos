@@ -106,6 +106,9 @@ use tairix_arch_api::cpufeatures::FeatureSupport;
 // record, so its type is imported only with that facility.
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_arch_api::InFlightInterrupt;
+#[cfg(feature = "watchdog-diagnostics")]
+use tairix_sync::FnCell;
+
 use tairix_log::{Level, Sink};
 use tairix_sync::once::OnceCell;
 use tairix_util::fmt::format_hex_u64;
@@ -441,7 +444,7 @@ fn image_relative(addr: u64) -> Option<u64> {
 /// of the running CPU's dense id; the observer needs it because a
 /// `tairix_sync` lock has no CPU argument.
 #[cfg(feature = "watchdog-diagnostics")]
-static LOCK_DIAG_CPU_FN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static LOCK_DIAG_CPU_FN: FnCell<fn() -> Option<CpuId>> = FnCell::empty();
 
 /// Install the debug-only lock-site diagnostics: register `current_cpu` (a
 /// lock-free resolver of the running CPU's dense id) and wire the
@@ -456,7 +459,7 @@ static LOCK_DIAG_CPU_FN: core::sync::atomic::AtomicUsize = core::sync::atomic::A
 /// it and every lock stays a bare compare-and-swap.
 #[cfg(feature = "watchdog-diagnostics")]
 pub fn install_lock_diagnostics(current_cpu: fn() -> Option<CpuId>) {
-    LOCK_DIAG_CPU_FN.store(current_cpu as usize, Ordering::Relaxed);
+    LOCK_DIAG_CPU_FN.install(current_cpu);
     tairix_sync::lockwatch::install_cpu_id(lock_diag_current_cpu_id);
     tairix_sync::lockwatch::install(lock_observer);
 }
@@ -473,16 +476,7 @@ fn lock_diag_current_cpu_id() -> Option<u32> {
 /// `None` before one is installed (fail-safe: record nothing).
 #[cfg(feature = "watchdog-diagnostics")]
 fn lock_diag_current_cpu() -> Option<CpuId> {
-    let raw = LOCK_DIAG_CPU_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        return None;
-    }
-    // SAFETY: `install_lock_diagnostics` only ever stores a value produced
-    // by `(fn() -> Option<CpuId>) as usize`; a non-zero slot is therefore a
-    // valid such function pointer with no captured environment.
-    let f: fn() -> Option<CpuId> =
-        unsafe { core::mem::transmute::<usize, fn() -> Option<CpuId>>(raw) };
-    f()
+    LOCK_DIAG_CPU_FN.load()?()
 }
 
 /// The `tairix_sync` lock observer: record `event` for the running CPU's
@@ -493,7 +487,11 @@ fn lock_diag_current_cpu() -> Option<CpuId> {
 /// and stores into per-CPU atomics. A context with no resolvable CPU or no
 /// per-CPU slot (pre-init, or a stray id) records nothing (fail-safe).
 #[cfg(feature = "watchdog-diagnostics")]
-fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize, aux: u32) {
+fn lock_observer(
+    event: tairix_sync::lockwatch::LockEvent,
+    site: Option<&'static core::panic::Location<'static>>,
+    aux: u32,
+) {
     use tairix_sync::lockwatch::LockEvent;
     let Some(cpu) = lock_diag_current_cpu() else {
         return;
@@ -502,8 +500,8 @@ fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize, aux:
         return;
     };
     match event {
-        LockEvent::Acquiring => lock_push(state, site_ptr, true),
-        LockEvent::TryAcquired => lock_push(state, site_ptr, false),
+        LockEvent::Acquiring => lock_push(state, site, true),
+        LockEvent::TryAcquired => lock_push(state, site, false),
         // Promote the innermost record from acquiring to held; its site was
         // pushed by the preceding `Acquiring` for the same lock.
         LockEvent::Acquired => lock_mark_held(state),
@@ -514,7 +512,7 @@ fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize, aux:
 }
 
 /// Push a lock record for `state`: claim the slot at the current depth (when
-/// within [`cpu_state::LOCK_STACK_MAX`]), then fill in `site_ptr` and whether
+/// within [`cpu_state::LOCK_STACK_MAX`]), then fill in `site` and whether
 /// that entry is still acquiring. Depth counts true nesting (saturating) so
 /// [`lock_pop`] stays balanced even past the cap.
 ///
@@ -524,11 +522,15 @@ fn lock_observer(event: tairix_sync::lockwatch::LockEvent, site_ptr: usize, aux:
 /// sampler landing inside the window reads a blank top entry and omits
 /// `k_lock` for that sample — no record, rather than a stale one.
 #[cfg(feature = "watchdog-diagnostics")]
-fn lock_push(state: &CpuState, site_ptr: usize, acquiring: bool) {
+fn lock_push(
+    state: &CpuState,
+    site: Option<&'static core::panic::Location<'static>>,
+    acquiring: bool,
+) {
     let depth = state.lock_depth.load(Ordering::Relaxed);
     let recordable = depth < cpu_state::LOCK_STACK_MAX;
     if recordable {
-        state.lock_sites[depth].store(0, Ordering::Relaxed);
+        state.lock_sites[depth].store(core::ptr::null_mut(), Ordering::Relaxed);
         state.lock_owner[depth].store(0, Ordering::Relaxed);
         set_acquiring(state, depth, false);
     }
@@ -537,7 +539,10 @@ fn lock_push(state: &CpuState, site_ptr: usize, acquiring: bool) {
         .store(depth.saturating_add(1), Ordering::Release);
     if recordable {
         set_acquiring(state, depth, acquiring);
-        state.lock_sites[depth].store(site_ptr, Ordering::Release);
+        let raw = site.map_or(core::ptr::null_mut(), |loc| {
+            core::ptr::from_ref(loc).cast_mut()
+        });
+        state.lock_sites[depth].store(raw, Ordering::Release);
     }
 }
 
@@ -1407,14 +1412,13 @@ struct Diag {
     #[cfg(feature = "watchdog-diagnostics")]
     bt_len: usize,
     /// The innermost spinlock this CPU was holding or spinning to acquire
-    /// when sampled, as a `&'static Location` (`usize`, `0` = none). On a
-    /// GICv2 hard lockup the maskable liveness sample cannot observe a CPU
-    /// wedged with interrupts off inside a spinlock section, so this
-    /// self-published record names the exact lock — rendered
-    /// `k_lock=<file>:<line>` from the acquiring call's source location,
-    /// never a runtime address.
+    /// when sampled ([`None`] = none). On a GICv2 hard lockup the maskable
+    /// liveness sample cannot observe a CPU wedged with interrupts off inside
+    /// a spinlock section, so this self-published record names the exact
+    /// lock — rendered `k_lock=<file>:<line>` from the acquiring call's
+    /// source location, never a runtime address.
     #[cfg(feature = "watchdog-diagnostics")]
-    lock_site: usize,
+    lock_site: Option<&'static core::panic::Location<'static>>,
     /// Whether [`Self::lock_site`] was still being *acquired* (spinning,
     /// contended/deadlocked) rather than *held* (wedged inside its critical
     /// section). Rendered as the `k_lock_state` tag.
@@ -1506,7 +1510,7 @@ impl Diag {
         #[cfg(feature = "watchdog-diagnostics")]
         bt_len: 0,
         #[cfg(feature = "watchdog-diagnostics")]
-        lock_site: 0,
+        lock_site: None,
         #[cfg(feature = "watchdog-diagnostics")]
         lock_acquiring: false,
         #[cfg(feature = "watchdog-diagnostics")]
@@ -1527,21 +1531,29 @@ impl Diag {
     }
 
     /// Read the innermost recorded lock site for `state` (the debug-only
-    /// per-CPU lock-site stack), as `(site_ptr, acquiring)`. `(0, false)`
-    /// when the CPU holds no recorded lock, and also while a push is still
-    /// filling in the slot it has just claimed — the entry reads blank and is
-    /// omitted rather than reported stale. An index past the recorded cap is
-    /// clamped to the deepest stored entry (a nesting that deep is
-    /// pathological and the outer entries still name a real held lock).
+    /// per-CPU lock-site stack), as `(site, acquiring, owner)`.
+    /// `(None, false, 0)` when the CPU holds no recorded lock, and also while
+    /// a push is still filling in the slot it has just claimed — the entry
+    /// reads blank and is omitted rather than reported stale. An index past
+    /// the recorded cap is clamped to the deepest stored entry (a nesting
+    /// that deep is pathological and the outer entries still name a real held
+    /// lock).
     #[cfg(feature = "watchdog-diagnostics")]
-    fn lock_snapshot(state: &CpuState) -> (usize, bool, u32) {
+    fn lock_snapshot(
+        state: &CpuState,
+    ) -> (Option<&'static core::panic::Location<'static>>, bool, u32) {
         let depth = state.lock_depth.load(Ordering::Acquire);
         if depth == 0 {
-            return (0, false, 0);
+            return (None, false, 0);
         }
         let top = depth - 1;
         let idx = top.min(cpu_state::LOCK_STACK_MAX - 1);
-        let site = state.lock_sites[idx].load(Ordering::Acquire);
+        let raw = state.lock_sites[idx].load(Ordering::Acquire);
+        // SAFETY: a non-null slot holds the `&'static Location` the
+        // `tairix_sync` lock observer was handed from `Location::caller()`,
+        // stored as a pointer so its provenance survived. `'static` rodata,
+        // so it outlives every reader.
+        let site = (!raw.is_null()).then(|| unsafe { &*raw.cast_const() });
         // Past the recorded cap the true top was never stored, so the clamped
         // entry we render is an outer *held* lock, not the (unknown)
         // acquiring one.
@@ -1855,7 +1867,7 @@ fn report_diagnostic_detail(level: Level, cpu: CpuId, observer: Option<CpuId>, d
     let has_detail = diag.pc != 0
         || diag.breadcrumb != KernelBreadcrumb::None
         || diag.bt_len != 0
-        || diag.lock_site != 0
+        || diag.lock_site.is_some()
         || diag.live_pc.is_some()
         || in_flight_field(diag.in_flight).is_some();
     if !has_detail {
@@ -2008,13 +2020,7 @@ fn report_detail_to(
     // GICv2 hard lockup this names the IRQ-masked culprit lock the maskable
     // liveness sample cannot observe: `acquiring` = still spinning to take
     // it (contended/deadlocked), `held` = wedged inside its section.
-    if diag.lock_site != 0 {
-        // SAFETY: a non-zero `lock_site` is the `&'static Location` the
-        // `tairix_sync` lock observer stored from `Location::caller()`; the
-        // pointee is `'static` rodata, valid for the whole run, so forming
-        // the reference and reading `file`/`line` is sound.
-        let loc: &'static core::panic::Location<'static> =
-            unsafe { &*(diag.lock_site as *const core::panic::Location<'static>) };
+    if let Some(loc) = diag.lock_site {
         fields[n] = tairix_log::Field {
             key: "k_lock",
             value: tairix_log::FieldValue::Str(loc.file()),
@@ -2147,7 +2153,7 @@ mod tests {
                 slot.store(0, Ordering::Relaxed);
             }
             for slot in &state.lock_sites {
-                slot.store(0, Ordering::Relaxed);
+                slot.store(core::ptr::null_mut(), Ordering::Relaxed);
             }
         }
         state
@@ -2194,7 +2200,7 @@ mod tests {
             #[cfg(feature = "watchdog-diagnostics")]
             bt_len: 0,
             #[cfg(feature = "watchdog-diagnostics")]
-            lock_site: 0,
+            lock_site: None,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
@@ -2728,7 +2734,7 @@ mod tests {
             breadcrumb_seq: 42,
             bt,
             bt_len: 3,
-            lock_site: 0,
+            lock_site: None,
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: 0,
@@ -2793,7 +2799,7 @@ mod tests {
             breadcrumb_seq: 5,
             bt,
             bt_len: 1,
-            lock_site: 0,
+            lock_site: None,
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: 0,
@@ -2949,38 +2955,46 @@ mod tests {
         assert!(no_field_contains(ev, "+0"));
     }
 
+    /// A `'static` location naming this call's own source line, so two calls
+    /// on different lines stand in for two distinct locks — the same
+    /// `Location::caller()` a real `SpinLock::lock` publishes.
+    #[cfg(feature = "watchdog-diagnostics")]
+    #[track_caller]
+    fn here() -> &'static core::panic::Location<'static> {
+        core::panic::Location::caller()
+    }
+
     /// The per-CPU lock-site stack tracks the *innermost* lock and stays
     /// balanced across nesting and release, and the acquiring→held
     /// promotion is reflected. The stored value is opaque to the stack
-    /// logic (a `Location` pointer), so fake distinct non-zero ids stand in
-    /// (the render path is what dereferences it — tested separately).
+    /// logic, so any two distinct call sites stand in for two locks.
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn the_lock_site_stack_tracks_the_innermost_lock() {
-        const OUTER: usize = 0x1000;
-        const INNER: usize = 0x2000;
+        let outer = here();
+        let inner = here();
         let state = reset(60);
         // No lock held → nothing recorded.
-        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
         // Spin-acquire the outer lock: recorded as acquiring, then promoted
         // to held once the CAS wins.
-        lock_push(state, OUTER, true);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, true, 0));
+        lock_push(state, Some(outer), true);
+        assert_eq!(Diag::lock_snapshot(state), (Some(outer), true, 0));
         lock_mark_held(state);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (Some(outer), false, 0));
         // A nested (held) inner lock becomes the innermost record.
-        lock_push(state, INNER, false);
-        assert_eq!(Diag::lock_snapshot(state), (INNER, false, 0));
+        lock_push(state, Some(inner), false);
+        assert_eq!(Diag::lock_snapshot(state), (Some(inner), false, 0));
         // Releasing the inner lock restores the outer (held) as innermost.
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (OUTER, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (Some(outer), false, 0));
         // Releasing the outer lock leaves nothing recorded.
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
         // A stray extra release underflows safely (fail-safe: no panic, no
         // wraparound into a bogus depth).
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
     }
 
     /// A CPU spinning for a lock stays `acquiring` across a nested lock
@@ -2994,21 +3008,21 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn a_spinning_lock_stays_acquiring_across_a_nested_acquire_release() {
-        const CONTENDED: usize = 0x3000;
-        const NESTED: usize = 0x4000;
+        let contended = here();
+        let nested = here();
         let state = reset(62);
-        lock_push(state, CONTENDED, true);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
+        lock_push(state, Some(contended), true);
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 0));
         // An interrupt taken mid-spin takes and releases its own lock.
-        lock_push(state, NESTED, true);
+        lock_push(state, Some(nested), true);
         lock_mark_held(state);
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 0));
         // Only winning the CAS promotes the outer entry to held.
         lock_mark_held(state);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), false, 0));
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
     }
 
     /// A contended entry records *which* core holds the lock against it, and
@@ -3017,22 +3031,22 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn a_contended_lock_records_its_holder() {
-        const CONTENDED: usize = 0x5000;
-        const OTHER: usize = 0x6000;
+        let contended = here();
+        let other = here();
         let state = reset(63);
-        lock_push(state, CONTENDED, true);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 0));
+        lock_push(state, Some(contended), true);
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 0));
         // The holder stamp is the owning CPU's id plus one.
         lock_note_owner(state, 4);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, true, 4));
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 4));
         // Winning the lock leaves the observed holder in place; the entry is
         // simply no longer acquiring.
         lock_mark_held(state);
-        assert_eq!(Diag::lock_snapshot(state), (CONTENDED, false, 4));
+        assert_eq!(Diag::lock_snapshot(state), (Some(contended), false, 4));
         lock_pop(state);
         // A slot reused by an uncontended acquire reports no owner.
-        lock_push(state, OTHER, false);
-        assert_eq!(Diag::lock_snapshot(state), (OTHER, false, 0));
+        lock_push(state, Some(other), false);
+        assert_eq!(Diag::lock_snapshot(state), (Some(other), false, 0));
         lock_pop(state);
     }
 
@@ -3043,17 +3057,19 @@ mod tests {
     #[test]
     fn the_lock_site_stack_survives_nesting_past_the_cap() {
         let state = reset(61);
-        // Push one more than the cap can record.
-        for i in 0..=cpu_state::LOCK_STACK_MAX {
-            lock_push(state, 0x1000 + i, false);
+        // Push one more than the cap can record. Every entry shares this
+        // one site; only the outermost is read back, so they need not differ.
+        let site = here();
+        for _ in 0..=cpu_state::LOCK_STACK_MAX {
+            lock_push(state, Some(site), false);
         }
-        // Pop back down to a single held lock (the outermost, id 0x1000).
+        // Pop back down to a single held lock (the outermost).
         for _ in 0..cpu_state::LOCK_STACK_MAX {
             lock_pop(state);
         }
-        assert_eq!(Diag::lock_snapshot(state), (0x1000, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (Some(site), false, 0));
         lock_pop(state);
-        assert_eq!(Diag::lock_snapshot(state), (0, false, 0));
+        assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
     }
 
     /// The debug detail names the stuck spinlock as `k_lock=<file>` +
@@ -3079,7 +3095,7 @@ mod tests {
             breadcrumb_seq: 0,
             bt: [0; cpu_state::WD_BT_MAX],
             bt_len: 0,
-            lock_site: core::ptr::from_ref::<core::panic::Location<'static>>(site) as usize,
+            lock_site: Some(site),
             lock_acquiring: true,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: 0,
@@ -3111,7 +3127,6 @@ mod tests {
     #[test]
     fn the_lock_site_field_discloses_no_runtime_address() {
         let site = core::panic::Location::caller();
-        let ptr = core::ptr::from_ref::<core::panic::Location<'static>>(site) as usize;
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
         let d = Diag {
             pc: 0,
@@ -3126,7 +3141,7 @@ mod tests {
             breadcrumb_seq: 0,
             bt: [0; cpu_state::WD_BT_MAX],
             bt_len: 0,
-            lock_site: ptr,
+            lock_site: Some(site),
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: 0,
@@ -3136,9 +3151,12 @@ mod tests {
         };
         report_detail_to(sink, Level::Error, 3, None, &d);
         let ev = &sink.snapshot()[0];
-        // The raw pointer value never appears as text in any field.
+        // The raw pointer value never appears as text in any field. `addr`
+        // rather than a cast: this wants the bare number to search for, and
+        // deliberately discards the provenance the record itself keeps.
         let mut hex = [0u8; 16];
-        let ptr_hex = format_hex_u64(ptr as u64, &mut hex);
+        let addr = core::ptr::from_ref(site).addr() as u64;
+        let ptr_hex = format_hex_u64(addr, &mut hex);
         assert!(no_field_contains(ev, ptr_hex));
     }
 
@@ -3459,7 +3477,7 @@ mod tests {
             breadcrumb_seq: 87_196,
             bt: [0u64; cpu_state::WD_BT_MAX],
             bt_len: 0,
-            lock_site: 0,
+            lock_site: None,
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
             lock_owner: 0,

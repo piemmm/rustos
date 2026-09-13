@@ -22,6 +22,7 @@ allocate does not belong in this crate.
 | `McsLock<T>` | High-contention critical sections; need FIFO fairness and no cache-line storms. | Low contention (`SpinLock` is cheaper); interrupt handlers (queue is unbounded). | `AcqRel` swap on tail; `Release` store on successor flag. | Process / kernel-thread only. |
 | `SeqLock<T>` | Read-mostly `T: Copy` data where readers must never block (vDSO time, statistics counters). | Multiple concurrent writers; large payloads. | Sequence-counter validation with `Acquire` re-sample. | Readers safe at any IRQ; writers must serialise themselves. |
 | `OnceCell<T>` / `Once<T>` | Set-once or lazy-init data. **No panic on poison** — the API returns `Result`. | Inside interrupt context against the same cell as the initialiser (busy loop). | `Release` publication; `Acquire` observation. | Process / kernel-thread only. |
+| `FnCell<F>` | A callback slot a port fills at boot and a trap path reads — timer tick, syscall dispatcher, fault handler, spin service. | Anything that is not a thin function pointer (the `FnPtr` bound rejects it), or a slot needing a captured environment. | `Release` publication; `Acquire` observation. | Any IRQ level: the load is one atomic read and never spins. |
 
 ### When a critical section may *sleep* — `SleepLock` (kernel-side)
 
@@ -106,6 +107,16 @@ hints the CPU. Every primitive in the crate spins through it, which is what
 makes the property total rather than a list of audited locks: it holds for a
 primitive added later and for a caller no registry names.
 
+An acquire path that has to wait spins through `spinwait::spin_until()`, which
+serves its round *before* testing the condition. That ordering is the property,
+not an accident: a CPU whose compare-exchange keeps losing to peers who release
+the lock in between would otherwise re-test a condition that already reads
+clear, and so never reach a round at all — spinning hot while a peer blocks on
+work only it can do. Stating it once in `spin_until` is also what makes it
+testable, since the window it guards (a release landing between one CPU's
+compare-exchange and its next load) is not one a test can schedule from
+outside the lock.
+
 The case that needs it is a cross-CPU TLB shootdown whose targets must
 acknowledge in software. x86_64 has no broadcast invalidation, so the
 initiator IPIs each target and waits — and a target inside
@@ -175,9 +186,39 @@ cannot race.
 - **`SeqLock`** — readers sample the sequence counter twice with
   `Acquire` plus an explicit `Acquire` fence; writers bump the counter
   to an odd value with `Release` before mutating and back to even with
-  `Release` on commit.
+  `Release` on commit. The payload itself is a fixed array of
+  `AtomicUsize` copied with `Relaxed` word accesses, *not* a `T` in a
+  cell: a reader deliberately copies while a writer may be mid-update,
+  and a racing non-atomic access is undefined in Rust rather than merely
+  unlucky. A relaxed race is defined — it yields *some* value — and the
+  sequence check is what rejects the mixed ones, with the bytes becoming
+  a `T` only once it passes. Payloads are bounded by
+  `seqlock::MAX_PAYLOAD_WORDS`, checked against `T` at compile time, and
+  `write` replaces the whole value rather than lending out a `&mut T`.
 - **`OnceCell` / `Once`** — initial publication is a `Release` store on
   the state word; every observer pairs it with an `Acquire` load.
+
+## Guards are bound to the CPU that took the lock
+
+Every guard (`SpinLockGuard`, `IrqSafeSpinLockGuard`, `RwLockReadGuard`,
+`RwLockWriteGuard`, `McsGuard`) is deliberately **not `Send`**, and is
+`Sync` only when the payload is.
+
+- **Not `Send`.** A guard names a critical section one CPU is inside.
+  Releasing it elsewhere unlocks on behalf of a core that never acquired
+  and, under `lock-diagnostics`, pops a per-CPU record it never pushed.
+  For `IrqSafeSpinLockGuard` the consequence is hardware-visible:
+  `InterruptControl::restore` must run on the CPU that masked, so a guard
+  dropped on another core breaks that contract from safe code *and*
+  leaves the acquiring core with interrupts masked for ever.
+- **`Sync` only for a `Sync` payload.** Sharing a guard hands `&T` to
+  every thread holding the shared reference. A mutex is `Sync` for a
+  merely-`Send` payload because it serialises access — but its *guard* is
+  not, and inferring otherwise let safe code race a `Cell` inside a
+  `SpinLock`.
+
+The bounds are pinned by
+[`lib/sync/tests/guard_bounds.rs`](../../../lib/sync/tests/guard_bounds.rs).
 
 ## Testing
 
@@ -188,22 +229,36 @@ cannot race.
   [`lib/sync/tests/rwlock_fairness.rs`](../../../lib/sync/tests/rwlock_fairness.rs).
 - **Loom-based concurrency tests** for `SpinLock`, `RwLock`, `McsLock`,
   `SeqLock` and `OnceCell` live in
-  [`lib/sync/tests/loom.rs`](../../../lib/sync/tests/loom.rs).
-  They are gated behind `#[cfg(loom)]`:
+  [`lib/sync/tests/loom.rs`](../../../lib/sync/tests/loom.rs). They are
+  gated behind `#[cfg(loom)]` and driven by `cargo xtask loom`, which is
+  a `ci` stage: `loom` substitutes its own atomics for `core`'s, so it
+  needs a whole-crate rebuild under its own `--cfg` and cannot ride the
+  ordinary test pass. Directly, that is:
 
   ```text
-  RUSTFLAGS="--cfg loom" cargo test --test loom \
-      -p tairix-kernel-sync --release
+  RUSTFLAGS="--cfg loom" cargo test -p tairix-sync --test loom --release
   ```
 
-- `cargo xtask test` runs everything except the loom suite on the
-  default toolchain (loom requires `std`, which the rest of the kernel
-  pipeline does not link).
+- **The UB oracle.** `cargo xtask miri` interprets the crate — both the
+  default build and the `lock-diagnostics` one — so the MCS queue's
+  intrusive node chain and the set-once cell's `MaybeUninit` are checked
+  for aliasing and provenance violations a test cannot see.
+
+- `cargo xtask test` runs everything except the loom suite, which needs
+  its own `--cfg loom` rebuild and so has its own `ci` stage
+  (`cargo xtask loom`). Both are gates; neither is optional.
 
 ## `unsafe` discipline
 
 Every `unsafe` block in the crate carries a `// SAFETY:` comment per
-`AGENTS.md` §2.10. The `SyncUnsafeCell` wrapper in
+`AGENTS.md` §2.10. `FnCell` is why no callback seam carries an `unsafe` block
+for its slot:
+a slot that round-trips a function pointer through `usize` and back with
+`transmute` discards the pointer's provenance, and calling what comes back is
+undefined under the strict model the UB oracle checks. Holding the pointer
+*as* a pointer keeps the provenance, so the crate carries that one
+`transmute_copy` in a single audited block instead of the same `unsafe`
+repeated in every architecture port. The `SyncUnsafeCell` wrapper in
 `lib/sync/src/loom_compat.rs` is the *only* place that re-exports the
 underlying `core::cell::UnsafeCell` (or `loom::cell::UnsafeCell`) so that
 the loom interleaving instrumentation is the single source of truth for

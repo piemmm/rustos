@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 24 open, 94 closed, 118 total.
+table normalises all three to **closed**. 23 open, 97 closed, 120 total.
 
-### Open (24)
+### Open (23)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -39,7 +39,7 @@ table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
 | D54 | a desktop worker issues ~2500 file opens at session start | starves every concurrent reader; the loop is not yet identified |
-| D56 | the x86_64 page-table walk recovers a table by its raw physical address | — |
+| D56 | every port's page tables are reachable only through an identity map, capping RAM at the user bias | x86_64 closed — kernel-half direct map, 127 TiB, no identity map in a process root; aarch64 and riscv64 open on a different shape (39-bit VA) |
 | D60 | the window-content release has no end-to-end vertical | — |
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
@@ -50,9 +50,8 @@ table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D119 | a wired path-backed descriptor is refused to a child holding no `CAP_FS_ACCESS` | breaks the file manager's inherited-document hand-off; needs a User decision |
 
-### Closed (94)
+### Closed (97)
 
 | ID | Subject |
 |---|---|
@@ -151,34 +150,13 @@ table normalises all three to **closed**. 24 open, 94 closed, 118 total.
 | D116 | a duplex storage or network trace tinted both directions alike, and the storage rail plotted only reads |
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
+| D120 | a per-CPU guarded-copy republish was refused, halting every aarch64 secondary |
+| D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS` |
 
 ## Scope
 
 The open items, in priority order:
 
-- **D119 — a wired path-backed descriptor is refused to a child holding no
-  `CAP_FS_ACCESS`.** `FdWire::Handle` clones the parent's `OpenFile` into the
-  child with its backing unchanged (`apply_attach_wires`), so the child holds
-  an `OpenBacking::Path`. `PathAuthority::of` resolves a path backing to **the
-  caller's own** uid and capability set, and `admit()` demands
-  `CAP_FS_ACCESS` — so every `fs_read`/`fs_stat` on the descriptor is refused
-  with `PermissionDenied` for exactly the programs the hand-off exists for.
-  The file manager's `launch_viewer` rustdoc states the opposite ("the viewer
-  reads the document with no filesystem capability of its own"), and both
-  `viewer.app` and `view.app` request no filesystem capability. `fd_grant`'s
-  delegation is unaffected (`OpenBacking::Delegated` carries the grantor's
-  captured identity), so the picker route works and the file-manager route
-  does not. Nothing catches it: the only spawn-wire test wires a **pipe** end,
-  which is not a path backing and never reaches the gate. Both viewers fail
-  closed and state the refusal, so it is diagnosable rather than silent.
-
-  The fix is to clone a wired path-backed handle as a delegation carrying the
-  spawning parent's captured identity, as `fd_grant` does. That **grants
-  authority across a spawn**, and deciding that any wired descriptor confers
-  the parent's reach — rather than only one minted for the purpose — is a
-  security decision for the User to take. Raised rather than resolved
-  unilaterally (`plans/VIEW.md`). Its regression test is a capability-less
-  child reading a path-backed wired descriptor.
 - **D1 — FIX-SYSCALL residual verticals** (x86_64/riscv64 syscall-body
   tests + metal re-confirmation). The design and code are done; the
   per-arch conformance verticals are not.
@@ -469,11 +447,14 @@ The open items, in priority order:
     on a live desktop; the honest witness is the release record plus the
     re-attach, and the page accounting belongs to a kernel-side test of
     `shm_unmap` refcounting rather than to a desktop vertical.
-- **D56 — the x86_64 page-table walk recovers a table by its raw physical
-  address**, so every page table, and the direct map that shares the window
-  with them, must live below the user virtual base. A machine with more than
-  64 GiB of RAM fails closed on every frame above it. Surfaced by D55, which
-  removed the smaller of the two bounds; not introduced by it.
+- **D56 — the page tables are reachable only through an identity map**, so
+  every page table, and the direct map that shares the window with them,
+  must live below the user virtual base. Surfaced by D55, which removed the
+  smaller of the two bounds; not introduced by it. The walk half is closed on
+  every port — each recovers a table through its frame source — and x86_64's
+  map is closed with it: a kernel-half direct map reaching 127 TiB, and a
+  process root with no identity map. The two 39-bit ports are open on a
+  different shape, since their whole address space is 512 GiB.
 - **D55 — the x86_64 direct physical map covered only the first gigabyte —
   DONE.** Every kernel path that reaches a frame by pointer — the spawn image
   write, the shared-memory scrub, the remap window's own record store, the
@@ -4111,24 +4092,20 @@ window. It was not latent: the buddy allocator hands out its highest frames
 first, so on any machine with RAM above the window the *first* frame drawn was
 already unreachable.
 
-**Fix.** One map, sized from the boot memory map. The boot trampoline's
-`[0, BOOT_IDENTITY_GIB GiB)` is now a floor rather than the window: once
-`build_memory_map` has run, `mem_map::identity_window_gib` takes the top of
-usable RAM (floored at the trampoline's window, capped at the user virtual
-base, since the identity map shares each process root's low half with the
-child image) and `paging::widen_boot_identity` installs it — as 1 GiB PDPT
-leaves where the part has them, else one page directory per gigabyte carved
-out of the map (`mem_map::carve_frames_from_map`, from the top of low usable
-RAM so it cannot land on the legacy structures or the AP trampoline at
-`0x8000`). Every root constructor and the direct map re-read the published
-window, so none can carry a different one. It fails closed
-(`BootError::IdentityWindowWiden`) rather than booting on RAM it cannot
-address.
+**Fix.** One map, sized from the boot memory map: the trampoline's fixed
+window became a floor, and once `build_memory_map` has run the boot path
+widens the map to the top of usable RAM, carving any page tables it needs
+out of the map first so the allocator never hands them out. Every root
+constructor and the direct map read the one published extent, so none can
+carry a different one, and it fails closed rather than booting on RAM it
+cannot address. (D56 then moved that map out of the low half; the sizing,
+the carve and the fail-closed shape are unchanged, so the symbol names
+above live in that entry.)
 
-The two maps collapsed into `ConfiguredIdentityPhysMap`, which
-`direct_phys_map()`, the page-table frame source, both spawn seams, and the
-root-unlock DMA/MMIO bring-up all share, so the `PHYSMAP_SPAN` / `IDENTITY_GIB`
-constants each of them carried are gone. PID 1's page tables moved to the
+The two maps collapsed into one `PhysMap` which `direct_phys_map()`, the
+page-table frame source, both spawn seams, and the root-unlock DMA/MMIO
+bring-up all share, so the `PHYSMAP_SPAN` / `IDENTITY_GIB` constants each of
+them carried are gone. PID 1's page tables moved to the
 allocator-backed source the runtime spawn already used: on a part without
 1 GiB pages the window costs a directory per gigabyte, which a fixed `.bss`
 reserve would have capped.
@@ -4144,50 +4121,201 @@ low RAM untested with it.
 
 **Regression cover.** `tests/integration/physmap_qemu_x86_64` boots the
 production pipeline on a 3584 MiB guest — the smallest `-m` for which QEMU's
-`pc` machine places any RAM above 4 GiB — and requires both that the window
-widened past the trampoline's own and that the self-test left no usable byte
-unreachable, i.e. every byte above 4 GiB was written and read back through
-`direct_phys_map()`. Host tests cover the window sizing, the top-down carve
+`pc` machine places any RAM above 4 GiB — and requires both that the map was
+sized past the trampoline's own window and that the self-test left no usable
+byte unreachable, i.e. every byte above 4 GiB was written and read back
+through `direct_phys_map()`. Host tests cover the sizing, the top-down carve
 and its reservation, and the engine's zero-page skip and unreachable
 accounting.
 
-**What is still bounded.** RAM above the user virtual base (64 GiB) stays
-unreachable and fails closed, because the page-table walk still recovers
-tables by raw physical address and so needs `virtual == physical`. Lifting
-that means walking through a higher-half direct map instead — see D56.
+The bound this left — RAM above the user virtual base, because the map was
+an identity window sharing each process root's low half with the child
+image — is gone on x86_64 (D56): the map moved to the kernel half. The two
+39-bit ports still carry it.
 
-## D56 — the x86_64 page-table walk recovers a table by its raw physical address (OPEN)
+## D56 — the page tables are reachable only through an identity map
+(x86_64 CLOSED; aarch64 and riscv64 OPEN)
 
-**Mechanism.** `paging::ensure_child` — and the read-only walks beside it —
-dereference a page-table entry's physical address directly (`phys as *mut`),
-so the port's direct map has to satisfy `virtual == physical`. An identity map
-lives in the low half of every process root, which it shares with the child
-image at `spawn_layout::CHILD_USER_BIAS` (64 GiB), so the window stops there.
-D55 sized that window from the discovered RAM; this is the bound left under
-it. The aarch64 and riscv64 ports have the same shape and the same bound
-(riscv64's Sv39 root is smaller still), so the user bias cannot simply move —
-it is one workspace-wide relocation bias every `rxe` is baked for.
+**Mechanism.** Every port's page-table walk *used to* recover a child table
+by dereferencing the physical address its parent entry holds
+(`phys as *mut [u64; 512]`), which forced the port's direct map to satisfy
+`virtual == physical`; and the identity window that satisfied it lived in the
+low half of every process root, which it shares with the child image at
+`spawn_layout::CHILD_USER_BIAS` (64 GiB), so the window stopped there. Both
+halves are closed on x86_64. The walk half is closed on all three ports: a
+walk recovers each level through `PageTableFrames::table_at` on the frame
+source that drew it, so no port carries a physical/virtual relationship of
+its own.
 
-**Consequence.** No corruption — a frame above the window fails its translate
-and its consumer fails closed — but a machine with more than 64 GiB of RAM
-degrades exactly as it did below 1 GiB before D55: the allocator hands out its
-highest frames first, so the first frame drawn is unreachable and the kernel
-runs on what is left. Not reachable on any target the matrix runs today.
+**Consequence, while it stood.** No corruption — a frame above the window
+failed its translate and its consumer failed closed — but a machine with
+more than 64 GiB of RAM degraded exactly as it did below 1 GiB before D55.
+Three further costs rode on the same root cause, all of them now gone on
+x86_64: a standing Meltdown-class exposure (every process root carried a
+full-RAM kernel-only mapping in the half its own code addresses), KPTI
+blocked (kernel tables cannot be isolated from a user root while the user
+root is *required* to carry that map), and a per-process page-table cost
+that scaled with RAM (one page directory per identity gigabyte where the
+part lacks 1 GiB pages — about 4 MiB of tables per process on a 1 TB
+machine, for a mapping user space must never use).
 
-**The fix.** Walk through a higher-half direct map instead of an identity one,
-as Linux does: give the port a dedicated PML4 region, dereference a table at
-`PHYSMAP_BASE + phys`, and drop the per-root low identity map to the MMIO and
-firmware window it is genuinely needed for. That also removes the per-root
-page-directory cost of identity-mapping RAM. The blast radius is the reason it
-is staged separately: ~15 sites in `kernel/arch/x86_64/src/paging.rs` plus
-every QEMU vertical that builds an `AddressSpace` from a static pool would
-have to bring the map up first.
+### x86_64 — closed
 
-**Done when:** an x86_64 guest with RAM above the user virtual base reaches a
-frame at the top of its pool through `direct_phys_map()`, and a vertical pins
-it.
+A kernel-half direct map at `paging::PHYSMAP_VMA_BASE`
+(`0xFFFF_8000_0000_0000`), claiming PML4 slots `256..=509` — the first slot
+above the port's user region (`USER_VA_TOP == 1 << 47` *is* slot 256's base)
+up to the kernel remap window at 510. 254 slots at 512 GiB is **127 TiB**,
+and the ceiling is now the 4-level paging layout rather than where user
+space begins. Three properties follow from the placement, and they are the
+three costs above:
 
----
+* **The low half is user-only.** `AddressSpace::new_process_root` carries
+  the two kernel windows and the map, and **no identity map at all**:
+  nothing a process root must keep reachable is addressed physically,
+  because the kernel is linked higher-half and RAM is in the map. The walk
+  additionally refuses a user leaf in any kernel-half slot
+  (`is_kernel_half_slot`) — the fail-closed floor under the window
+  allocators' own bounds.
+* **A process pays no pages for the map.** Its tables are drawn once and
+  shared; a root's whole share is its own PML4 entries.
+* **The identity window stopped growing.** `new_boot_identity` maps exactly
+  `BOOT_IDENTITY_GIB`, for the addresses that genuinely need to be
+  themselves (the trampoline's tables, the AP start-up trampoline at
+  `0x8000`, the firmware tables and the multiboot2/PVH blob). It is never
+  widened; `widen_boot_identity` is gone, and with it the first of the two
+  residues this entry used to list.
+
+**The floor is the trampoline's, not the boot path's.** `boot.s`
+SAFETY-INVARIANT 10 installs `PML4[256] → boot_pdpt_physmap`, whose low four
+entries point at the identity window's own page directories — so the map
+costs one table and no leaves of its own, and physical `X` is reachable at
+`PHYSMAP_VMA_BASE + X` from the first instruction after paging is on. This
+is load-bearing rather than an optimisation: the LAPIC register block is
+named at one address (`preempt::LAPIC_BASE_VIRT`), the interrupt paths write
+EOI under whichever root the interrupted task had loaded, and two
+integration fixtures run their own `kernel_main` and would otherwise fault
+on their first LAPIC read. `install_boot_physmap` therefore *widens* the
+floor over the discovered RAM, and verifies the trampoline's entry against
+its own slot constant first, because the asm writes it by byte offset.
+`LAPIC_BASE_PHYS` survives only for the MSI/IPI destination encoding, which
+is a device-visible message address rather than a dereference; the IO-APIC
+blocks and the firmware ECAM window go through the map too.
+
+**The boot stack had to move first.** `.boot.bss` is linked 1:1 in low
+memory and `%rsp` was never rebased, so the kernel ran its whole boot on a
+stack that existed only in the identity window — the first push after a
+switch to a process root would have faulted. `linker.ld` derives
+`boot_stack_{bottom,top}_high` from its own `KERNEL_VMA_BASE`, the
+trampoline loads the high alias on landing in the higher half, and the panic
+backtrace bounds follow. The bytes do not move; only how the kernel
+addresses them, which also aligns the boot stack with
+`validate_kernel_rsp0`'s canonical-higher-half requirement.
+
+**The map's tables sit outside every frame source, deliberately.** They are
+carved from the firmware memory map before an allocator exists, so
+`table_at` refuses them and a page-table *walk* of a direct-map address
+reports nothing mapped. That is the fail-closed behaviour the walk owes a
+table it cannot vouch for, and nothing needs otherwise: the map is reached
+by `PhysMap::translate` arithmetic, and root teardown drops its slots before
+it descends so the shared tables are never freed.
+
+**Proved by.** `tests/integration/physmap_qemu_x86_64` on a 3584 MiB guest
+adds a structural probe to D55's two assertions: a frame reachable through
+the map while the user address that would alias it under an identity map
+holds an *unrelated* mapping, the two in disjoint root slots, and the
+frame's bare physical address resolving to nothing. It witnesses the
+hardware translation by reading the frame's marker back through the map
+rather than walking into the map's own tables, and a failing check names
+itself on the serial. Host tests cover the slot layout, the widening's frame
+count, a process root having no identity map where a boot root does, the
+kernel-half refusal of a user leaf, and every root installing the published
+map. KPTI is no longer blocked by the map; it remains
+`Mitigation::Pending` on its own terms (`kernel/arch/x86_64/src/sidechannel.rs`).
+
+### aarch64 and riscv64 — open, and a different shape
+
+Not a port of the above. Both run a **39-bit** translation regime, so the
+whole address space is 512 GiB and the room the x86_64 map found does not
+exist:
+
+* **aarch64** is `TCR_EL1.T0SZ = 25` with `TTBR1` disabled (`EPD1`), three
+  levels from L1, root slots of 1 GiB. `aarch64::USER_VA_TOP` is `1 << 39` —
+  the *entire* space — so there is no free range to claim: a map there needs
+  the user ceiling lowered (slots 128..447 would give ~320 GiB below the
+  kernel remap window at 448) or `TTBR1` brought up for a real kernel half.
+  That is a design decision for the port, not a mechanical change. Its
+  process root also still carries the full-RAM identity window, derived from
+  the Device/RAM gigapage masks, and fails closed once that reaches
+  `CHILD_USER_BIAS`.
+* **riscv64** Sv39 has its upper half free below the kernel remap window at
+  root slot 447: slots 256..446 at `0xFFFF_FFC0_0000_0000` give ~191 GiB,
+  and its process root already identity-maps only 4 GiB, so the work is
+  adding the map rather than narrowing a root.
+
+Two riscv64 defects noticed while establishing that, recorded here because
+they share the root cause rather than because they were introduced:
+
+* Its **spawn** direct map is `DirectPhysMap::identity(4 GiB)`
+  (`IDENTITY_GIB` in `riscv64/spawn_producer.rs`), a worse ceiling than the
+  64 GiB x86_64 carried: a board with more than 4 GiB of RAM fails spawn
+  closed for every frame above it.
+* Its boot space is built `new_identity_gigapages(&BOOT_PAGE_TABLES, 447)`,
+  and Sv39 sign-extends from bit 38 — so root slots 256..446 map *upper-half*
+  virtual addresses to physical 256..446 GiB. `identity_limit()`'s claim of
+  447 GiB is therefore only honest for the low 256 GiB; above it the "identity"
+  translation names a non-canonical address. Latent on every guest the matrix
+  runs (none has that much RAM), and it disappears when the map moves to the
+  upper half properly.
+
+**The aarch64 residue this entry used to list stands**: `paging::table_path`,
+the watchdog's fault-proof `AT S1E1R` probe of the *active* root, still reads
+the boot trampoline's own tables through the trampoline's identity window
+rather than a frame source's view. It needs that port's physmap base once it
+exists.
+
+**Done when:** both 39-bit ports carry a direct map outside their user
+region and a process root with no full-RAM identity map, each documenting
+its own architectural ceiling and failing closed above it.
+
+### What the seam change closed
+
+The walk itself. `PageTableFrames` gained `table_at(phys) -> Option<*mut
+[u64; 512]>` — implemented once per source, never per call site: each
+port's `PageTablePool` resolves the address to the slot it was handed out
+of (through the shared `frames::pool_slot_of`), and `kernel/mem`'s
+`FrameTableSource` re-translates it through the same direct map
+`alloc_table` used. `reclaim_hierarchy` now takes the source directly, so
+its `entries_of` and free closures are gone from all three ports. Three
+things fell out of it:
+
+* **The walk fails closed.** A corrupt or hostile descriptor's arbitrary
+  output address used to be dereferenced blindly; `table_at` answers `None`
+  for an address the source never handed out, so `translate` reports `None`
+  and `unmap` / `test_and_clear_accessed` / the access-flag fix-up report
+  `NotMapped`.
+* **An aliasing defect, fixed.** Each port's `AddressSpace` retained a
+  `&'static mut` to its root table while the fault-time walk of the *active*
+  root (`set_accessed_flag_in_active`) minted a second `&mut` to the same
+  table. Miri's Stacked Borrows flagged it as soon as the provenance-clean
+  recovery made the walk interpretable. A space now keeps only `root_phys`
+  and reaches the root exactly as it reaches every other level.
+* **The three paging walks are UB-clean, and x86_64's is host-testable.**
+  `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p
+  tairix-arch-{aarch64,riscv64} --lib paging` passes. x86_64's `paging`
+  module was gated off the host entirely; it is now compiled there, which
+  removed two `unreachable!()` production arms and let `mmu::conformance`,
+  `frames::conformance`, and a `reclaim_table_frames` test run over its real
+  pool for the first time.
+
+**Miri stage enrolment is blocked by a different defect, not by this one.**
+With the paging walks clean, `cargo miri test -p tairix-arch-aarch64 --lib`
+aborts next in `context.rs`'s `TaskCtx::prepare`, which materialises the
+initial stack frame from the `stack_top: u64` the Arch HAL hands it
+(`let p = sp as *mut u64`). That is the HAL's own signature, shared by the
+scheduler and kthread spawn on all four ports, so it is its own defect
+class rather than a residue of this one; riscv64 additionally reports only
+intentional-`Box::leak` fixtures. The three ports therefore stay out of
+`tools/xtask/src/commands/miri.rs`'s `TARGETS` until that is fixed.
 
 ## D63 — an ARXFS commit published its superblock slot with no barrier (FIXED)
 
@@ -4638,13 +4766,13 @@ owner_lowers_the_sample` (the case that still must), and
 
 ## D71 — eleven x86_64 fixtures ran on a root that identity-mapped only 32 MiB, so kernel memory above it was unreachable (FIXED)
 
-**Mechanism.** The x86_64 port publishes one identity window
-(`configured_identity_gigapages`), and its own doc states the invariant: that
-figure is "identity-mapped in **every** translation root", read "by every root
-constructor", and is "the ceiling a kernel stack or arena block must sit below
-to stay reachable under every root". Kernel code runs with the current task's
-root active, so a root that maps less strands every kernel address above its
-own ceiling while it is loaded.
+**Mechanism.** The x86_64 port publishes one window through which the kernel
+reaches every frame by pointer, and its own doc stated the invariant: that
+figure is carried by **every** translation root, read by every root
+constructor. Kernel code runs with the current task's root active, so a root
+that maps less strands every kernel address above its own ceiling while it is
+loaded. (D56 later moved that window out of the low half; the invariant is
+the same and the constructors carry it the same way.)
 
 `AddressSpace::new_identity_first_32mib` let a caller build exactly such a
 root, and eleven QEMU fixtures activated one. It was harmless only by luck:
@@ -4667,13 +4795,13 @@ faulted with no local cause the instant they switched `CR3`; the other nine
 were latently broken and passed only on whether they happened to touch a high
 object while their root was loaded — luck, not correctness.
 
-**The fix: the extent stopped being a caller's choice.**
-`AddressSpace::new_identity_window` reads `configured_identity_gigapages()`
-itself, so a root that will be made live cannot under-map the window. The one
-narrow constructor left is `new_bookkeeping_identity_32mib`, documented for a
-space that is **never made live** — the two MMIO register-window maps use one
-purely as page-table bookkeeping, and their window base sits *inside* the live
-identity window, so those genuinely need a narrow root. Consequently:
+**The fix: the extent stopped being a caller's choice.** Every constructor
+of a root that will be made live installs the window itself, so a caller
+cannot under-map it. The one narrow constructor left is
+`new_bookkeeping_identity_32mib`, documented for a space that is **never made
+live** — the two MMIO register-window maps use one purely as page-table
+bookkeeping, and their window base sits *inside* the identity window, so those
+genuinely need a narrow root. Consequently:
 
 - Every fixture that activates a root now carries the same window production
   does, and the two private `IDENTITY_GIB` copies are deleted.
@@ -4682,9 +4810,9 @@ identity window, so those genuinely need a narrow root. Consequently:
   needed them. They had also become *failures* rather than redundancies —
   `map_4k` will not shatter the window's huge leaf.
 - The isolation fixture's secret address and the accessed-bit fixture's probe
-  and never-mapped addresses are derived from `configured_identity_bytes()`
-  instead of hard-coded, so a window widened to cover more RAM cannot quietly
-  bring them back inside it — the same staleness that caused this defect.
+  and never-mapped addresses are derived from the port's published identity
+  extent instead of hard-coded, so a wider window cannot quietly bring them
+  back inside it — the same staleness that caused this defect.
 - `POOL_SIZE` is derived from the per-root page-table cost
   (`PAGES_PER_LIVE_ROOT`) rather than a hand-picked 24 sized for the narrow
   root, and a window wider than the boot floor makes the constructor fail
@@ -6851,3 +6979,146 @@ per 500 runs, and long clean stretches appear either side of an unchanged tree
 (400 clean before a fix, 1200 clean after). Neither the whole-project gate nor
 a repeated suite run can distinguish this class; only the shuffled stress can,
 and only in aggregate.
+
+---
+
+## D119 — a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS` (FIXED)
+
+**Where.** `syscalls::apply_attach_wires`, and the authority `PathAuthority::of`
+resolves for the descriptor it produces.
+
+**Mechanism.** `FdWire::Handle` cloned the parent's `OpenFile` into the child
+with its backing unchanged, so the child held an `OpenBacking::Path`. A path
+backing is deliberately re-resolved and re-authorised against whoever *uses*
+it — that is what makes a revoked capability stop working mid-open — so
+`PathAuthority::of` read the **child's** uid and capability set, and `admit()`
+demanded `CAP_FS_ACCESS`. Every `fs_read` and `fs_stat` on the wired descriptor
+was therefore `PermissionDenied`, for exactly the programs the hand-off exists
+for: a viewer deliberately requests no filesystem capability. `fd_grant` was
+unaffected, because `OpenBacking::Delegated` carries the grantor's captured
+identity precisely so a capability-less holder can read what it was handed — so
+the *picker* route worked and the *file-manager* route did not, and
+`launch_viewer`'s own rustdoc claimed the behaviour the code refused.
+
+**Why it needed a decision, and what was decided.** The fix grants authority
+across a spawn, so whether *any* wired descriptor confers the parent's reach —
+rather than only one minted for the purpose — was the User's call. It does. A
+wire is the parent naming one of its own open descriptors and one child it is
+itself creating, having chosen that child's image and a subset of its own
+capabilities; it confers nothing the parent could not confer anyway, since a
+parent that can wire a pipe can already pump the file's bytes down it. What the
+wire adds is zero-copy and seekability, not reach. The child still cannot
+re-open the path: it holds no `CAP_FS_ACCESS`, so `fs_open` refuses, and the
+captured authority is bound to that one descriptor.
+
+**The fix — a distinct backing, not a reuse of `Delegated`.** A delegation is
+not the right carrier. `DelegatedFile::write_ceiling` is a `u64` with `0`
+meaning read-only, and `fd_grant` enforces `is_write() == (ceiling > 0)` so
+that an unbounded writable delegation is not representable. `spawn` has no
+ceiling parameter and legitimately needs none: the ceiling exists so a
+*service* can hand an *untrusted caller* direct access to a file it owns
+without also handing it the ability to fill the volume, and a parent and its
+own child are not that pairing — the parent could fill the volume itself.
+Reusing `Delegated` would therefore have had to either refuse writable wires
+(breaking output redirection) or mint an unbounded writable delegation,
+destroying the invariant `fd_grant` rests on.
+
+So a wired path becomes `OpenBacking::Inherited(InheritedFile { path, uid,
+caps })`, resolving to the parent's identity with `write_ceiling: None` — the
+parent's own limits. The capture happens at the single point in
+`apply_attach_wires` every parent open entry funnels through, so an inheriting
+wire captures exactly as an explicit `Handle` does. It is not re-delegatable:
+`fd_grant` pattern-matches `OpenBacking::Path` alone, so the new variant is
+refused onward without a new check, and captured authority never widens.
+`own_path()` answers `None` for it, as it already did for a delegation, so
+`fs_lock`, the file-watch registration, and `fs_readdir` — each of which
+authorises under the *holder's* own credentials — fail closed against it rather
+than running a captured identity under the wrong principal.
+
+**Also fixed, found by the same reading.** A **directory** handle could be wired
+onto a standard slot. A standard slot is a byte stream, and a directory's
+authority is a listing and a namespace to open through — the reason `fd_grant`
+declines one — so it is now refused `OutOfRange` at the wire rather than handed
+over as a descriptor no stream operation can serve.
+
+**Proved by.**
+`spawn_wires_a_path_backed_handle_under_the_parents_captured_identity`: a
+capability-less child of a *different* uid resolves its wired descriptor's
+authority to the parent's, `admit()` passes, no extent ceiling is invented, the
+parent's own close leaves the child's clone intact, and the directory wire is
+refused. Both halves fail before the fix and pass after. The only wire test
+before it wired a *pipe* end, which is not a path backing and never reached the
+gate.
+
+---
+
+## D120 — a per-CPU guarded-copy republish was refused, halting every aarch64 secondary (FIXED)
+
+The one site withheld from the `FnCell` callback-slot migration. Migrating
+`kernel/arch/api/src/uaccess.rs` failed three aarch64 `cpus=4` verticals
+deterministically — `kernel-arch-boot-aarch64`, `ipi-smp-qemu-aarch64`,
+`mem-pin-migration-qemu-aarch64` — each as `secondary cpu start failed cpu=1
+cause=no_online_ack`, with single-CPU verticals passing.
+
+**The mechanism.** `exceptions::init_vectors` arms the fault-windowed user copy
+alongside the EL1 vector table, and on this port it runs **per CPU** — the
+boot path and `production_secondary_entry` both call it. The old slot was an
+`AtomicUsize` whose install answered `Ok` to a re-install of the same routine,
+via an `existing == raw` comparison of function-pointer addresses; the
+secondary's republish therefore succeeded. `FnCell::claim` is strictly
+set-once and reports `false` for a repeat of the same routine, so the migrated
+install returned `AlreadyInstalled`, `init_vectors` took its fail-closed
+`halt_current_cpu()` branch, and the core stopped before `mark_online` — which
+is precisely `no_online_ack`. riscv64 and x86_64 were unaffected because their
+installs are boot-hart/BSP-only.
+
+The investigation that withheld the file recorded the slot as runtime-inert
+because every `install_guarded_copy` caller looked like `#[cfg(test)]`. That
+was read off the *host* build: each port's `install()` is
+`cfg(all(target_arch = …, target_os = "none"))`, so the one real caller is
+invisible on the host and present on exactly the target that failed.
+
+**The fix — publication, not a set-once claim.** The idempotency the seam
+needs cannot be built on an address comparison: two coercions of one `fn` item
+are not guaranteed to share an address, so `existing == raw` can report
+"different routine" for the same one. It fails closed on the good case and is
+blind to a genuinely wrong occupant, because a linked image holds exactly one
+such routine — the sole installer is the one port compiled into it.
+`install_guarded_copy` is therefore infallible and last-writer-wins, and
+`InstallGuardedCopyError` is gone along with the three ports' `Result` and the
+two halt branches. "One routine per image" is a property of the source,
+enforced by there being one installer, not by a runtime address test.
+
+**Coverage.** The three verticals above are the fail-before/pass-after
+reproducer (249 ms / 67 ms / 210 ms at `cpus=4`). The unit test adds the
+republish property directly: a second publication of the same routine leaves
+the dispatch unchanged, which is what lets a per-CPU arming path install
+unconditionally.
+
+**The comparison class it belonged to.** The same loaded-pointer-versus-fresh-
+coercion comparison sat in ~35 assertions across `kernel/arch/api`, all four
+ports, `kernel/tairix-kernel`'s three preempt-wiring modules and `lib/rt`,
+passing only because rustc dedupes a coercion within a crate. It was spelled
+three ways — `f as usize`, `f as *const () as usize`, and
+`core::ptr::fn_addr_eq` — and a sweep for the first two missed every instance
+of the third, which is the idiomatic one. Each site now derives both sides
+from a single coercion: a `let` binding in a test, and in the wiring modules a
+`static` the installer and the test share, so the property those tests exist
+for ("the slot holds the *shared* kernel-core callback, not a port-local
+restatement") is asserted against the pointer the install actually stored.
+
+Miri is the oracle for it, and it earns the name here: with the old spelling
+`preempt::tests::the_timer_callback_round_trips` and
+`the_preempt_callback_round_trips` in `kernel/arch/x86_64` **fail** under
+`cargo miri test`, and pass after. `kernel/arch/api` is now an enrolled `xtask
+miri` target, so this class is held there by the stage rather than by an ad-hoc
+run; the three paging *ports* stay out of the stage on an
+independent class — `context.rs`'s `u64`→pointer stack-frame write — now
+that D56 has cleared their page-table walks. See that entry.
+
+The three wiring modules no longer each carry their own copy of the coerced
+callbacks: `crate::preempt_callbacks` holds one `static` per callback and every
+installer and test reads the pointer from there, so two ports cannot drift and
+the `CpuId`-versus-`u32` spelling (a type alias, so the same type twice) is
+gone. What stays per port is what genuinely differs — which slots exist, x86_64
+having no separate reschedule slot.

@@ -18,13 +18,15 @@
 //!
 //! # Stack bounds
 //!
-//! The bootstrap processor runs on the linker-reserved boot stack
-//! (`boot_stack_bottom .. boot_stack_top` in `boot.s`, kept mapped by the
-//! preserved identity map). `stack_bounds` returns those bounds
-//! when the captured `sp` lies within them and `None` otherwise, so the
-//! unwinder degrades to registers + program counter on a stack the port
-//! cannot vouch for rather than reading memory that might be unmapped
-//! (fail closed — never a fault inside the fault handler).
+//! The bootstrap processor runs on the linker-reserved boot stack, addressed
+//! through the kernel window (`boot_stack_bottom_high ..
+//! boot_stack_top_high`, the aliases `linker.ld` derives from the low
+//! symbols `boot.s` reserves) because that is what `%rsp` holds and what
+//! stays mapped under every root. `stack_bounds` returns those bounds when
+//! the captured `sp` lies within them and `None` otherwise, so the unwinder
+//! degrades to registers + program counter on a stack the port cannot vouch
+//! for rather than reading memory that might be unmapped (fail closed —
+//! never a fault inside the fault handler).
 
 use tairix_arch_api::{
     Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
@@ -32,10 +34,11 @@ use tairix_arch_api::{
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 extern "C" {
-    /// Lowest address of the BSP boot stack (see `boot.s`).
-    static boot_stack_bottom: u8;
-    /// Exclusive top of the BSP boot stack (see `boot.s`).
-    static boot_stack_top: u8;
+    /// Lowest address of the BSP boot stack, through the kernel window
+    /// (`linker.ld` derives it from `boot.s`'s low symbol).
+    static boot_stack_bottom_high: u8;
+    /// Exclusive top of the BSP boot stack, through the kernel window.
+    static boot_stack_top_high: u8;
 }
 
 /// x86_64 implementation of the Arch HAL post-mortem-capture surface.
@@ -177,8 +180,8 @@ impl CpuStateCapture for Backtracer {
         }
         // SAFETY: taking the address of the extern boot-stack symbols is a
         // link-time constant; we never dereference them.
-        let low = core::ptr::addr_of!(boot_stack_bottom) as u64;
-        let high = core::ptr::addr_of!(boot_stack_top) as u64;
+        let low = core::ptr::addr_of!(boot_stack_bottom_high) as u64;
+        let high = core::ptr::addr_of!(boot_stack_top_high) as u64;
         StackBounds::enclosing(sp, low, high)
     }
 

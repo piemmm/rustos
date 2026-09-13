@@ -33,9 +33,16 @@ path = "src/lib.rs"
 #   the single `EntropySource`/`HardwareRng` seam every entropy consumer
 #   shares rather than re-defining the trait. The layering permits the edge
 #   `kernel/arch/api -> lib/rng`.
+#
+# - `tairix-sync` is a `lib/*` crate (no_std). It is named here so the
+#   guarded-copy slot holds its published routine in the shared `FnCell`
+#   every port's callback seam uses, rather than re-deriving the
+#   provenance-discarding `usize` round trip the cell exists to remove.
+#   The layering permits the edge `kernel/arch/api -> lib/sync`.
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # The device-tree reader and its bus-aware `reg` decoder: the generic
 # FDT->hardware-tree walk every FDT-based port shares lives here
 # (`fdtwalk`), so the ports contribute only their interrupt specifier and

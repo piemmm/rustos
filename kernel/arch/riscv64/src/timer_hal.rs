@@ -18,13 +18,11 @@
 //! [`conformance`](tairix_arch_api::timer::conformance) vertical; it is
 //! never linked into a kernel image.
 
-use core::sync::atomic::AtomicUsize;
 // `Ordering` is only named by the host backing cell; the bare-metal
 // build forwards to `preempt` and never touches it.
-#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
-use core::sync::atomic::Ordering;
 
 use tairix_arch_api::{CpuId, TickFn, Timer};
+use tairix_sync::FnCell;
 
 /// riscv64 implementation of the Arch HAL timer-programming surface.
 ///
@@ -38,7 +36,7 @@ pub struct TimerHal {
     /// is never read; kept so the host and bare-metal builds share one
     /// struct shape.
     #[cfg_attr(all(target_arch = "riscv64", target_os = "none"), allow(dead_code))]
-    host_callback: AtomicUsize,
+    host_callback: FnCell<TickFn>,
 }
 
 impl TimerHal {
@@ -46,7 +44,7 @@ impl TimerHal {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            host_callback: AtomicUsize::new(0),
+            host_callback: FnCell::empty(),
         }
     }
 }
@@ -59,8 +57,7 @@ impl Timer for TimerHal {
         }
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
-            self.host_callback
-                .store(callback as usize, Ordering::Relaxed);
+            self.host_callback.install(callback);
         }
     }
 
@@ -71,14 +68,7 @@ impl Timer for TimerHal {
         }
         #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
         {
-            let raw = self.host_callback.load(Ordering::Relaxed);
-            if raw == 0 {
-                None
-            } else {
-                // SAFETY: every store is the round-trip of a valid
-                // `TickFn` pointer through `set_tick_callback`.
-                Some(unsafe { core::mem::transmute::<usize, TickFn>(raw) })
-            }
+            self.host_callback.load()
         }
     }
 

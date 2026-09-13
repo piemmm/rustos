@@ -49,11 +49,12 @@
 //! recovers, and one that genuinely cannot is left for the loud report
 //! the detector already emitted (honest, never a silent no-op).
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_arch_api::{
     CpuId, FeatureSupport, RecoveryOutcome, StuckInterrupt, WatchdogArch, WatchdogKind,
 };
+use tairix_sync::FnCell;
 
 /// GIC INTID of the EL1 **virtual** generic-timer private-peripheral
 /// interrupt (the ARM Generic Timer raises the virtual timer on PPI 27).
@@ -121,11 +122,11 @@ pub const CNTV_CTL_IMASK: u64 = 1 << 1;
 static WATCHDOG_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// The callback the watchdog IRQ path forwards each cadence sample to,
-/// packed into a `usize` so the path swaps it in without a lock. Set up
-/// before the watchdog is armed; absent (`0`) the sample is a no-op (the
+/// swapped in without a lock. Set up before the watchdog is armed;
+/// absent, the sample is a no-op (the
 /// timer still re-arms), so an image that arms the watchdog without wiring
 /// the detector simply keeps sampling harmlessly (fail-safe).
-static WATCHDOG_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+static WATCHDOG_CALLBACK_FN: FnCell<WatchdogCallbackFn> = FnCell::empty();
 
 /// The signature of the watchdog cadence callback: the sampled CPU's
 /// [`CpuId`] and a pointer to the saved exception-register `frame` the trap
@@ -143,21 +144,13 @@ pub type WatchdogCallbackFn = extern "C" fn(CpuId, *const u64);
 /// (not a closure) keeps it safe to call from interrupt context: there is
 /// no captured environment to drop mid-flight.
 pub fn set_watchdog_callback(cb: WatchdogCallbackFn) {
-    WATCHDOG_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+    WATCHDOG_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed watchdog callback, if any. Test/diagnostic.
 #[must_use]
 pub fn watchdog_callback() -> Option<WatchdogCallbackFn> {
-    let raw = WATCHDOG_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `WATCHDOG_CALLBACK_FN` round-trips a
-        // valid `WatchdogCallbackFn` pointer through
-        // `set_watchdog_callback`.
-        Some(unsafe { core::mem::transmute::<usize, WatchdogCallbackFn>(raw) })
-    }
+    WATCHDOG_CALLBACK_FN.load()
 }
 
 /// Maximum frame-pointer links [`capture_sample_backtrace`] follows past
@@ -497,14 +490,7 @@ pub unsafe fn init_local_watchdog(interval_ticks: u64) {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_watchdog_interrupt(cpu: CpuId, frame: *const u64) {
     arm(WATCHDOG_INTERVAL_TICKS.load(Ordering::Relaxed));
-    let raw = WATCHDOG_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw != 0 {
-        // SAFETY: every store into `WATCHDOG_CALLBACK_FN` round-trips a
-        // valid `WatchdogCallbackFn` through `set_watchdog_callback`; the
-        // callback carries no captured environment. `frame` is forwarded
-        // from the trap handler's live saved register frame.
-        let cb: WatchdogCallbackFn =
-            unsafe { core::mem::transmute::<usize, WatchdogCallbackFn>(raw) };
+    if let Some(cb) = WATCHDOG_CALLBACK_FN.load() {
         cb(cpu, frame);
     }
 }
@@ -931,11 +917,15 @@ mod tests {
 
     #[test]
     fn callback_round_trips_through_the_slot() {
-        extern "C" fn cb(_cpu: CpuId, _frame: *const u64) {}
+        extern "C" fn host_cb(_cpu: CpuId, _frame: *const u64) {}
+        // Coerce once: the slot is compared against *this* pointer
+        // value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let cb: WatchdogCallbackFn = host_cb;
         set_watchdog_callback(cb);
         let got = watchdog_callback().expect("callback installed");
-        assert_eq!(got as usize, cb as *const () as usize);
-        WATCHDOG_CALLBACK_FN.store(0, Ordering::Relaxed);
+        assert_eq!(got as *const (), cb as *const ());
+        WATCHDOG_CALLBACK_FN.clear();
     }
 
     #[test]

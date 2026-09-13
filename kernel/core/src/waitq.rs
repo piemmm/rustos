@@ -33,12 +33,28 @@
 //! leaves the explicit-wake / timed-wake helpers as fail-safe no-ops.
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use core::ops::Bound;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
+
+/// Waiters released per acquisition of the queue lock.
+///
+/// Not a capacity — every wake below loops until its set is exhausted — but
+/// the granule that keeps the wake paths allocation-free. Collecting into a
+/// `Vec` allocated on every wake, *while holding the queue's spinlock*: it
+/// takes the kernel heap's own lock inside this one, and exhaustion aborts
+/// through `handle_alloc_error` rather than returning. A wake is exactly the
+/// path that must still work when memory is scarce, so it now borrows a
+/// stack array instead, sized so a realistic waiter set clears in one round
+/// while the lock hold and the stack footprint stay bounded.
+const WAKE_BATCH: usize = 32;
+
+/// One batch of waiters to release once the lock is dropped.
+type WakeBatch = ArrayVec<TaskId, WAKE_BATCH>;
 
 /// Sentinel deadline meaning "no timeout": a waiter registered with this
 /// value is only ever released by an explicit [`WaitQueue::wake_all`], never
@@ -323,16 +339,45 @@ impl WaitQueue {
     /// never taken while holding the wait-queue lock (no lock held across a
     /// hand-off).
     pub fn wake_all(&self, arch: &dyn WaitQueueArch) {
-        let ids: Vec<TaskId> = self
-            .waiters
-            .lock()
-            .order
-            .values()
-            .map(|&(_, task)| task)
-            .collect();
-        for id in ids {
-            arch.unpark(id);
+        self.wake_in_arrival_order(arch, usize::MAX);
+    }
+
+    /// Release up to `limit` waiters in FIFO order, in lock-sized batches.
+    ///
+    /// The shared body of [`Self::wake_all`] and [`Self::wake_n`]. Each round
+    /// copies a bounded run of ids out under the lock and unparks them after
+    /// dropping it, so the scheduler's locks are never taken while holding
+    /// this one and no wake ever allocates.
+    ///
+    /// The first round pins the arrival sequence the queue had reached, and
+    /// later rounds stop there: a waiter that registers *during* the wake was
+    /// not on the queue when the event fired, so it is left for the next one
+    /// — which also bounds the walk against a caller that keeps re-arming.
+    fn wake_in_arrival_order(&self, arch: &dyn WaitQueueArch, limit: usize) -> usize {
+        let mut woken = 0usize;
+        let mut cursor = Bound::Unbounded;
+        let mut end: Option<u64> = None;
+        while woken < limit {
+            let mut batch = WakeBatch::new();
+            {
+                let set = self.waiters.lock();
+                let stop = *end.get_or_insert(set.next_seq);
+                for (&seq, &(_, task)) in set.order.range((cursor, Bound::Excluded(stop))) {
+                    if woken + batch.len() == limit || batch.try_push(task).is_err() {
+                        break;
+                    }
+                    cursor = Bound::Excluded(seq);
+                }
+            }
+            if batch.is_empty() {
+                break;
+            }
+            woken += batch.len();
+            for &id in &batch {
+                arch.unpark(id);
+            }
         }
+        woken
     }
 
     /// Wake every waiter registered on the condition `key`, returning how many
@@ -349,17 +394,28 @@ impl WaitQueue {
     /// scheduler's locks are never taken while holding this one. An empty
     /// range allocates nothing. O(log n + woken).
     pub fn wake_key(&self, arch: &dyn WaitQueueArch, key: WakeKey) -> usize {
-        let ids: Vec<TaskId> = self
-            .waiters
-            .lock()
-            .by_waiter
-            .range((key, TaskId::MIN)..=(key, TaskId::MAX))
-            .map(|(&(_, task), _)| task)
-            .collect();
-        for &id in &ids {
-            arch.unpark(id);
+        let mut woken = 0usize;
+        let mut cursor = Bound::Included((key, TaskId::MIN));
+        loop {
+            let mut batch = WakeBatch::new();
+            {
+                let set = self.waiters.lock();
+                let upper = Bound::Included((key, TaskId::MAX));
+                for (&id, _) in set.by_waiter.range((cursor, upper)) {
+                    if batch.try_push(id.1).is_err() {
+                        break;
+                    }
+                    cursor = Bound::Excluded(id);
+                }
+            }
+            if batch.is_empty() {
+                return woken;
+            }
+            woken += batch.len();
+            for &id in &batch {
+                arch.unpark(id);
+            }
         }
-        ids.len()
     }
 
     /// Wake the oldest registered waiter, returning whether one existed.
@@ -386,18 +442,7 @@ impl WaitQueue {
     /// the scheduler's locks are never taken while holding this one.
     /// O(log n + woken).
     pub fn wake_n(&self, arch: &dyn WaitQueueArch, count: usize) -> usize {
-        let ids: Vec<TaskId> = self
-            .waiters
-            .lock()
-            .order
-            .values()
-            .take(count)
-            .map(|&(_, task)| task)
-            .collect();
-        for &id in &ids {
-            arch.unpark(id);
-        }
-        ids.len()
+        self.wake_in_arrival_order(arch, count)
     }
 
     /// The oldest registered task without waking or removing it.
@@ -468,26 +513,35 @@ impl WaitQueue {
     /// trips. A waiter that is still blocked simply re-`register`s with a fresh
     /// deadline on its next park.
     pub fn sweep(&self, arch: &dyn WaitQueueArch, now_ns: u64) {
-        let ids: Vec<TaskId> = {
-            let mut set = self.waiters.lock();
-            let expired: Vec<(u64, u64)> = set
-                .deadlines
-                .range(..=(now_ns, u64::MAX))
-                .map(|(&key, _)| key)
-                .collect();
-            let mut ids = Vec::with_capacity(expired.len());
-            for key in expired {
-                if let Some(id) = set.deadlines.remove(&key) {
+        loop {
+            let mut batch = WakeBatch::new();
+            {
+                let mut set = self.waiters.lock();
+                while !batch.is_full() {
+                    // Copied out before the mutation below, so the read of the
+                    // index does not outlive the borrow that removes from it.
+                    let Some((deadline, id)) = set
+                        .deadlines
+                        .range(..=(now_ns, u64::MAX))
+                        .next()
+                        .map(|(&deadline, &id)| (deadline, id))
+                    else {
+                        break;
+                    };
+                    set.deadlines.remove(&deadline);
                     if let Some(waiter) = set.by_waiter.get_mut(&id) {
                         waiter.deadline_ns = NO_DEADLINE;
                     }
-                    ids.push(id.1);
+                    // Cannot fail: the loop condition already proved the room.
+                    let _ = batch.try_push(id.1);
                 }
             }
-            ids
-        };
-        for id in ids {
-            arch.unpark(id);
+            if batch.is_empty() {
+                return;
+            }
+            for &id in &batch {
+                arch.unpark(id);
+            }
         }
     }
 
@@ -1247,6 +1301,9 @@ pub fn nearest_timed_deadline() -> Option<u64> {
 mod tests {
     use super::*;
 
+    // The wake paths themselves are allocation-free; the recording mock is
+    // ordinary test code and grows without a bound to respect.
+    use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
     /// A mock [`WaitQueueArch`] recording every `unpark` and `set_wakeup`,
@@ -1295,6 +1352,90 @@ mod tests {
             *self.wakeup_calls.borrow_mut() += 1;
             *self.last_wakeup.borrow_mut() = deadline_ns;
         }
+    }
+
+    /// A waiter set larger than one lock-sized batch is still released in
+    /// full, and in arrival order.
+    ///
+    /// The wake paths hand out ids a batch at a time so they never allocate
+    /// under the queue's spinlock; the risk that trades against is a walk
+    /// that loses its place at a batch boundary and strands every waiter
+    /// past the first `WAKE_BATCH`.
+    #[test]
+    fn a_wake_all_larger_than_one_batch_releases_every_waiter_in_order() {
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        let total = WAKE_BATCH * 2 + 7;
+        for i in 0..total {
+            q.register(i as TaskId, NO_DEADLINE);
+        }
+        q.wake_all(&arch);
+        let woken = arch.unparked.borrow();
+        assert_eq!(woken.len(), total);
+        for (i, id) in woken.iter().enumerate() {
+            assert_eq!(*id, i as TaskId, "arrival order held across batches");
+        }
+    }
+
+    /// `wake_n` stops at exactly `count` even when that lands mid-batch, and
+    /// takes the oldest waiters — the FIFO head, not whichever batch boundary
+    /// the walk happened to reach.
+    #[test]
+    fn a_counted_wake_stops_mid_batch_at_the_oldest_waiters() {
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        for i in 0..(WAKE_BATCH * 2) {
+            q.register(i as TaskId, NO_DEADLINE);
+        }
+        let want = WAKE_BATCH + 3;
+        assert_eq!(q.wake_n(&arch, want), want);
+        let woken = arch.unparked.borrow();
+        assert_eq!(woken.len(), want);
+        for (i, id) in woken.iter().enumerate() {
+            assert_eq!(*id, i as TaskId);
+        }
+    }
+
+    /// The timed sweep clears an expired set larger than one batch, and
+    /// leaves the queue with nothing still owed a deadline wake.
+    #[test]
+    fn a_sweep_larger_than_one_batch_expires_every_deadline() {
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        let total = WAKE_BATCH * 2 + 1;
+        for i in 0..total {
+            q.register(i as TaskId, 100);
+        }
+        q.sweep(&arch, 100);
+        assert_eq!(arch.unparked.borrow().len(), total);
+        assert_eq!(
+            q.earliest_deadline(),
+            None,
+            "a fired deadline is consumed, so the one-shot is not re-armed in the past"
+        );
+    }
+
+    /// A keyed wake spanning several batches releases that key's waiters and
+    /// nobody else's — the cursor must resume inside the key's range rather
+    /// than restarting at the whole set.
+    #[test]
+    fn a_keyed_wake_larger_than_one_batch_leaves_other_keys_parked() {
+        let q = WaitQueue::new();
+        let arch = MockArch::new();
+        let wanted = WakeKey::new(1);
+        let other = WakeKey::new(2);
+        let total = WAKE_BATCH + 5;
+        for i in 0..total {
+            q.register_keyed(wanted, i as TaskId, NO_DEADLINE);
+            q.register_keyed(other, (1000 + i) as TaskId, NO_DEADLINE);
+        }
+        assert_eq!(q.wake_key(&arch, wanted), total);
+        let woken = arch.unparked.borrow();
+        assert_eq!(woken.len(), total);
+        assert!(
+            woken.iter().all(|&id| id < 1000),
+            "a waiter on another key stays parked"
+        );
     }
 
     /// The defect this guards: a named queue is only useful if every shared

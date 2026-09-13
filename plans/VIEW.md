@@ -341,7 +341,10 @@ in a `Panel` for the thumbnail sidebar, a `FactList` for the info panel, and
 
 **`Run` (`src/run.rs`)** over the shared shell: the app-bar declaration, the
 wait-set extended with the worker channel and the animation deadline, document
-acquisition by `DOCUMENT_ROLE_ARG` + `STDIN` or `pick_file`, menus via
+acquisition by `DOCUMENT_ROLE_ARG` + `STDIN` or `pick_file` — a wired
+path-backed descriptor is operated on under the *spawning parent's* captured
+identity (`OpenBacking::Inherited`), which is what lets the viewer read its
+document while requesting no `CAP_FS_ACCESS` of its own — menus via
 `open_menu` + `AppMenu` (session-owned plates — the app draws no menu pixel),
 `set_tooltip` for the toolbar, and `Scrolled { dx, dy }` for the wheel.
 
@@ -801,34 +804,6 @@ read this paragraph first; the rustdoc on both types points here.
   take then.
 
 ## Noticed and not yet fixed
-
-- **The inherited-document hand-off does not work for a program with no
-  filesystem capability, and the file manager's own rustdoc says it does.**
-  `FdWire::Handle` clones the parent's `OpenFile` into the child *with its
-  backing unchanged* (`apply_attach_wires`), so the child's descriptor is
-  `OpenBacking::Path`. `PathAuthority::of` then resolves a path backing to
-  **the caller's own** uid and capability set, and `admit()` requires
-  `CAP_FS_ACCESS` — which is exactly what a viewer deliberately does not hold.
-  Every operation on the descriptor is therefore refused with
-  `PermissionDenied`: `fs_read`, and `fs_stat` with it.
-
-  The delegated path is unaffected — `fd_grant` mints `OpenBacking::Delegated`,
-  which carries the grantor's captured identity precisely so a holder with no
-  filesystem capability can read what it was handed — so the *picker* route
-  works and the *file manager* route does not. `viewer.app` has the same
-  property today and nothing catches it: the only spawn-wire test
-  (`spawn_attach_wires_a_pipe_end_into_the_child`) wires a **pipe** end, which
-  is not a path backing and so never reaches this gate.
-
-  Both viewers fail closed and *state* the refusal rather than blanking, so the
-  defect is diagnosable rather than silent. The fix is for a wired path-backed
-  handle to be cloned as a delegation carrying the spawning parent's captured
-  identity, exactly as `fd_grant` does — but that is a kernel change that
-  **grants authority across a spawn**, and deciding that any wired descriptor
-  confers the parent's reach (rather than only one minted for the purpose) is a
-  security decision for the User to take, not one to guess at. Raised rather
-  than resolved unilaterally; it carries its regression test — a capability-less
-  child reading a path-backed wired descriptor — when the fix lands.
 
 - **`WindowEvent::FilePicked` carries no name, so a picked document is
   unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and

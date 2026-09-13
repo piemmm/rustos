@@ -34,6 +34,7 @@ run rather than leaving you to guess which phase to blame. A measured warm run:
 | host test matrix | 77 s | one cargo invocation |
 | `clippy` host + 11 target passes | 73 s | sequential |
 | `miri` (the UB oracle over the hand-written `unsafe` cores) | 57 s | one process per crate, concurrent |
+| `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
 | `docs-check`, and all 11 static gates | 22 s | static gates concurrent |
 
 The pipeline **cannot** be squeezed under ten minutes: the QEMU phase's
@@ -107,6 +108,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
 | `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
+| `loom`        | Model-checks the `lib/sync` primitives over every thread interleaving |
 | `abi-check`   | Cross-checks the kernel syscall table against `lib/abi`     |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 

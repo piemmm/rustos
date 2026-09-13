@@ -615,6 +615,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-fuzzseed",
  "tairix-rng",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -638,6 +639,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-log",
  "tairix-rng",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -4256,6 +4258,7 @@ dependencies = [
 name = "tairix-test-physmap-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",

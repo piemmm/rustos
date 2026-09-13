@@ -31,6 +31,7 @@
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::CpuId;
+use tairix_sync::FnCell;
 
 /// GIC INTID of the EL1 physical-timer private-peripheral interrupt
 /// (ARM Generic Timer: the non-secure EL1 physical timer raises PPI 30).
@@ -57,10 +58,9 @@ const NO_CPU: u64 = u32::MAX as u64;
 /// [`u64::MAX`] in any realistic uptime, so it is unambiguous.
 const NO_DEADLINE: u64 = u64::MAX;
 
-/// The callback the timer IRQ path forwards each tick to, packed into a
-/// `usize` so the path swaps it in without a lock. Set up before the
-/// timer is armed.
-static TIMER_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+/// The callback the timer IRQ path forwards each tick to. Swapped in
+/// without a lock, so set up before the timer is armed.
+static TIMER_CALLBACK_FN: FnCell<extern "C" fn(CpuId)> = FnCell::empty();
 
 /// Published per-CPU tick-interval slice base (`null` until a
 /// [`PreemptStorage`] is registered). The slice is `PREEMPT_LEN` long;
@@ -216,13 +216,13 @@ impl<const N: usize> Default for PreemptStorage<N> {
     }
 }
 
-/// The IPI callback the SGI IRQ path forwards each delivered IPI to,
-/// packed into a `usize`. Set up before any IPI is enabled.
-static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+/// The IPI callback the SGI IRQ path forwards each delivered IPI to.
+/// Set up before any IPI is enabled.
+static IPI_CALLBACK_FN: FnCell<extern "C" fn(CpuId)> = FnCell::empty();
 
 /// The preemption callback the timer IRQ path forwards each tick **taken
-/// from EL0** to, packed into a `usize`. Installed by the binary before
-/// the timer is armed; absent (`0`) the timer tick is pure accounting and
+/// from EL0** to. Installed by the binary before the timer is armed;
+/// absent, the timer tick is pure accounting and
 /// nothing is preempted, so an image that arms the timer without wiring
 /// preemption simply keeps cooperative scheduling (fail-safe).
 ///
@@ -237,7 +237,7 @@ static IPI_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// preempts (the kernel is non-preemptible watch-out: a
 /// half-completed kernel critical section must never be switched away
 /// from).
-static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
+static PREEMPT_CALLBACK_FN: FnCell<extern "C" fn(CpuId)> = FnCell::empty();
 
 /// Install the timer callback.
 ///
@@ -246,21 +246,13 @@ static PREEMPT_CALLBACK_FN: AtomicUsize = AtomicUsize::new(0);
 /// interrupt context: there is no captured environment to drop
 /// mid-flight.
 pub fn set_timer_callback(cb: extern "C" fn(CpuId)) {
-    TIMER_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+    TIMER_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed timer callback, if any. Test/diagnostic.
 #[must_use]
 pub fn timer_callback() -> Option<extern "C" fn(CpuId)> {
-    let raw = TIMER_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `TIMER_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` pointer through
-        // `set_timer_callback`.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
-    }
+    TIMER_CALLBACK_FN.load()
 }
 
 /// Install the IPI callback the SGI IRQ path forwards each delivered IPI
@@ -268,20 +260,13 @@ pub fn timer_callback() -> Option<extern "C" fn(CpuId)> {
 /// interrupt context: there is no captured environment to drop
 /// mid-flight.
 pub fn set_ipi_callback(cb: extern "C" fn(CpuId)) {
-    IPI_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+    IPI_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed IPI callback, if any. Test/diagnostic.
 #[must_use]
 pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
-    let raw = IPI_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid
-        // `extern "C" fn(CpuId)` pointer through `set_ipi_callback`.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
-    }
+    IPI_CALLBACK_FN.load()
 }
 
 /// Install the EL0-preemption callback the timer IRQ path forwards each
@@ -292,22 +277,14 @@ pub fn ipi_callback() -> Option<extern "C" fn(CpuId)> {
 /// binary installs the callback (which suspends the running user task
 /// back to the scheduler) before arming the timer.
 pub fn set_preempt_callback(cb: extern "C" fn(CpuId)) {
-    PREEMPT_CALLBACK_FN.store(cb as usize, Ordering::Relaxed);
+    PREEMPT_CALLBACK_FN.install(cb);
 }
 
 /// Read the currently-installed EL0-preemption callback, if any.
 /// Test/diagnostic.
 #[must_use]
 pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
-    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw == 0 {
-        None
-    } else {
-        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` pointer through
-        // `set_preempt_callback`.
-        Some(unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) })
-    }
+    PREEMPT_CALLBACK_FN.load()
 }
 
 /// Invoke the installed EL0-preemption callback for `cpu`, if any.
@@ -319,14 +296,7 @@ pub fn preempt_callback() -> Option<extern "C" fn(CpuId)> {
 /// scheduling — the tick is pure accounting (fail-safe).
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub(crate) fn on_el0_preempt_point(cpu: CpuId) {
-    let raw = PREEMPT_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw != 0 {
-        // SAFETY: every store into `PREEMPT_CALLBACK_FN` round-trips a
-        // valid `extern "C" fn(CpuId)` pointer through
-        // `set_preempt_callback`; the callback carries no captured
-        // environment and is safe to call from interrupt context.
-        let cb: extern "C" fn(CpuId) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+    if let Some(cb) = PREEMPT_CALLBACK_FN.load() {
         cb(cpu);
     }
 }
@@ -526,9 +496,9 @@ pub fn timer_cpu_id(cpu: CpuId) -> Option<CpuId> {
 
 #[cfg(test)]
 fn clear_for_tests() {
-    TIMER_CALLBACK_FN.store(0, Ordering::Relaxed);
-    IPI_CALLBACK_FN.store(0, Ordering::Relaxed);
-    PREEMPT_CALLBACK_FN.store(0, Ordering::Relaxed);
+    TIMER_CALLBACK_FN.clear();
+    IPI_CALLBACK_FN.clear();
+    PREEMPT_CALLBACK_FN.clear();
     let len = PREEMPT_LEN.load(Ordering::Acquire);
     for idx in 0..len {
         interval_slot(idx).store(0, Ordering::Relaxed);
@@ -770,13 +740,7 @@ pub(crate) fn on_ipi_interrupt(cpu: CpuId) {
         tairix_arch_api::quiesce_acknowledge(cpu);
         crate::kernel_arch::halt_current_cpu();
     }
-    let raw = IPI_CALLBACK_FN.load(Ordering::Relaxed);
-    if raw != 0 {
-        // SAFETY: every store into `IPI_CALLBACK_FN` round-trips a valid
-        // `extern "C" fn(CpuId)` pointer through `set_ipi_callback`; the
-        // callback is a `fn` with no captured environment.
-        let cb: extern "C" fn(CpuId) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId)>(raw) };
+    if let Some(cb) = IPI_CALLBACK_FN.load() {
         cb(cpu);
     }
 }
@@ -824,9 +788,13 @@ mod tests {
         let _guard = lock_global_state();
         clear_for_tests();
         assert!(timer_callback().is_none());
-        set_timer_callback(host_cb);
+        // Coerce once: the slot is compared against *this* pointer
+        // value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let cb: extern "C" fn(CpuId) = host_cb;
+        set_timer_callback(cb);
         let got = timer_callback().expect("callback installed");
-        assert_eq!(got as usize, host_cb as *const () as usize);
+        assert_eq!(got as *const (), cb as *const ());
         clear_for_tests();
     }
 
@@ -835,9 +803,10 @@ mod tests {
         let _guard = lock_global_state();
         clear_for_tests();
         assert!(ipi_callback().is_none());
-        set_ipi_callback(host_cb);
+        let cb: extern "C" fn(CpuId) = host_cb;
+        set_ipi_callback(cb);
         let got = ipi_callback().expect("ipi callback installed");
-        assert_eq!(got as usize, host_cb as *const () as usize);
+        assert_eq!(got as *const (), cb as *const ());
         // The timer slot is independent of the IPI slot.
         assert!(timer_callback().is_none());
         clear_for_tests();
@@ -848,9 +817,10 @@ mod tests {
         let _guard = lock_global_state();
         clear_for_tests();
         assert!(preempt_callback().is_none());
-        set_preempt_callback(host_cb);
+        let cb: extern "C" fn(CpuId) = host_cb;
+        set_preempt_callback(cb);
         let got = preempt_callback().expect("preempt callback installed");
-        assert_eq!(got as usize, host_cb as *const () as usize);
+        assert_eq!(got as *const (), cb as *const ());
         // The preempt slot is independent of the timer and IPI slots, so
         // arming preemption never disturbs the tick/IPI dispatch.
         assert!(timer_callback().is_none());

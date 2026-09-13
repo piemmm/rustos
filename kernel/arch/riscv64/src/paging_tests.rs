@@ -1,9 +1,9 @@
 //! Host unit tests for the Sv39 paging primitives.
 //!
 //! The bit-level encoders and the table walk run on the host (the walk
-//! recovers child tables through their identity-mapped pointers, which
-//! on the host is the real allocation pointer), so every property below
-//! is checkable without a riscv64 target. The `satp` write itself is
+//! recovers each child table from the frame source that drew it, which
+//! on the host is a real allocation), so every property below is
+//! checkable without a riscv64 target. The `satp` write itself is
 //! exercised by the memory-isolation QEMU vertical.
 
 use super::*;
@@ -89,8 +89,12 @@ fn pool_hands_out_distinct_zeroed_pages_then_fails_closed() {
 fn identity_gigapages_install_leaf_entries() {
     let pool = fresh_pool();
     let space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
-    // The root table is reachable through its identity-mapped phys addr.
-    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
+    let root_table = pool
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: a live table page from the pool; the space is exclusively
+    // owned here, so the shared read does not alias a `&mut`.
+    let root = unsafe { &*root_table };
     for (i, &pte) in root.iter().take(4).enumerate() {
         assert!(pte_is_leaf(pte), "slot {i} should be a gigapage leaf");
         assert_eq!(phys_from_pte(pte), (i as u64) << 30);
@@ -109,18 +113,20 @@ fn identity_gigapages_rejects_out_of_range() {
 /// Host-side Sv39 walk mirroring the hardware MMU: returns the physical
 /// address a 4 KiB-aligned `vaddr` resolves to, or `None` if any level
 /// is invalid. Only used to verify [`AddressSpace::map_4k`].
-fn translate(space: &AddressSpace, vaddr: u64) -> Option<u64> {
-    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
-    let mut table = root;
+fn translate(frames: &dyn PageTableFrames, space: &AddressSpace, vaddr: u64) -> Option<u64> {
+    let mut phys = space.root_phys();
     for level in (0..SV39_LEVELS).rev() {
-        let pte = table[vpn_index(vaddr, level)];
+        let table = frames.table_at(phys)?;
+        // SAFETY: `phys` names a live table of this hierarchy, drawn from
+        // `frames`; the caller owns the space exclusively.
+        let pte = unsafe { &*table }[vpn_index(vaddr, level)];
         if (pte & flags::VALID) == 0 {
             return None;
         }
         if pte_is_leaf(pte) {
             return Some(phys_from_pte(pte));
         }
-        table = unsafe { &*(phys_from_pte(pte) as *const [u64; ENTRIES_PER_TABLE]) };
+        phys = phys_from_pte(pte);
     }
     None
 }
@@ -136,9 +142,9 @@ fn map_4k_builds_three_level_walk() {
     space
         .map_4k(pool, vaddr, paddr, flags::READ | flags::WRITE)
         .expect("map");
-    assert_eq!(translate(&space, vaddr), Some(paddr));
+    assert_eq!(translate(pool, &space, vaddr), Some(paddr));
     // A neighbouring page in the same L0 table is still unmapped.
-    assert_eq!(translate(&space, vaddr + PAGE_SIZE as u64), None);
+    assert_eq!(translate(pool, &space, vaddr + PAGE_SIZE as u64), None);
 }
 
 #[test]
@@ -178,15 +184,21 @@ fn map_gigapage_aliases_a_whole_gigabyte_at_a_high_va() {
         )
         .expect("gigapage alias");
     // Every address in the aliased gigabyte resolves to its phys base.
-    assert_eq!(translate(&space, vaddr), Some(paddr));
+    assert_eq!(translate(pool, &space, vaddr), Some(paddr));
     assert_eq!(
-        translate(&space, vaddr + 0x20_0000),
+        translate(pool, &space, vaddr + 0x20_0000),
         Some(paddr),
         "a megabyte into the gigapage still resolves to the gigapage base"
     );
     // The installed leaf carries the USER bit.
-    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
-    assert_ne!(root[vpn_index(vaddr, 2)] & flags::USER, 0);
+    let root_table = pool
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: a live table page from the pool, exclusively owned here.
+    assert_ne!(
+        unsafe { &*root_table }[vpn_index(vaddr, 2)] & flags::USER,
+        0
+    );
 }
 
 #[test]
@@ -226,18 +238,24 @@ fn passes_mmu_conformance() {
 /// found at (2 = gigapage, 1 = megapage, 0 = 4 KiB page), or `None` if any
 /// level is invalid. Mirrors the hardware MMU's stop-at-leaf walk so the
 /// split tests can assert the granularity a region is mapped at.
-fn leaf_pte(space: &AddressSpace, vaddr: u64) -> Option<(u64, usize)> {
-    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
-    let mut table = root;
+fn leaf_pte(
+    frames: &dyn PageTableFrames,
+    space: &AddressSpace,
+    vaddr: u64,
+) -> Option<(u64, usize)> {
+    let mut phys = space.root_phys();
     for level in (0..SV39_LEVELS).rev() {
-        let pte = table[vpn_index(vaddr, level)];
+        let table = frames.table_at(phys)?;
+        // SAFETY: `phys` names a live table of this hierarchy, drawn from
+        // `frames`; the caller owns the space exclusively.
+        let pte = unsafe { &*table }[vpn_index(vaddr, level)];
         if (pte & flags::VALID) == 0 {
             return None;
         }
         if pte_is_leaf(pte) {
             return Some((pte, level));
         }
-        table = unsafe { &*(phys_from_pte(pte) as *const [u64; ENTRIES_PER_TABLE]) };
+        phys = phys_from_pte(pte);
     }
     None
 }
@@ -268,26 +286,42 @@ fn passes_frames_conformance() {
     assert!(erased.alloc_table().is_some());
 }
 
-/// A recording [`PageTableFrames`] double: identity-phys leaked tables
-/// plus a log of every `free_table` return, so the reclaim test can
-/// assert teardown hands back exactly the frames the hierarchy drew.
+/// A recording [`PageTableFrames`] double: a fixed bump pool of
+/// page-aligned tables plus a log of every `free_table` return, so the
+/// reclaim test can assert teardown hands back exactly the frames the
+/// hierarchy drew.
+///
+/// The 4 KiB alignment of each slot is load-bearing: a PTE's PPN field
+/// carries only bits 12 and up of the physical address, so an unaligned
+/// table would be rounded down by the encode/decode round trip and the
+/// walk would read and write a *different* address than the one leased —
+/// silent memory corruption whose symptoms shift with the heap layout
+/// (the flaky 7-vs-5 reclaim count this replaced).
 struct RecordingFrames {
+    storage: [UnsafeCell<Table>; Self::CAPACITY],
+    used: AtomicUsize,
     freed: std::sync::Mutex<std::vec::Vec<u64>>,
 }
 
-/// A page-aligned table for the double to lease out. The alignment is
-/// load-bearing: a PTE's PPN field carries only bits 12 and up of the
-/// physical address, so an unaligned heap allocation would be rounded
-/// down by the encode/decode round trip and the walk would read and
-/// write a *different* heap address than the one leased — silent memory
-/// corruption whose symptoms shift with the heap layout (the flaky
-/// 7-vs-5 reclaim count this replaced).
-#[repr(C, align(4096))]
-struct AlignedTable([u64; ENTRIES_PER_TABLE]);
+// SAFETY: each slot is handed out exactly once via the monotonic `used`
+// counter, so the `&'static mut` views never alias; the freed log is
+// behind its own mutex.
+unsafe impl Sync for RecordingFrames {}
 
 impl RecordingFrames {
+    const CAPACITY: usize = 8;
+
     fn new() -> Self {
+        // The array initialiser needs a `const`, and copying it per slot is
+        // the point: each element must be its own independent table.
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
+        // The array is materialised straight into the leaked `Box` the
+        // caller holds, despite the `large_stack_arrays` heuristic.
+        #[allow(clippy::large_stack_arrays)]
         Self {
+            storage: [ZERO; Self::CAPACITY],
+            used: AtomicUsize::new(0),
             freed: std::sync::Mutex::new(std::vec::Vec::new()),
         }
     }
@@ -295,19 +329,22 @@ impl RecordingFrames {
 
 impl PageTableFrames for RecordingFrames {
     fn alloc_table(&self) -> Option<TableFrame> {
-        let table: &'static mut AlignedTable = std::boxed::Box::leak(std::boxed::Box::new(
-            AlignedTable([0u64; ENTRIES_PER_TABLE]),
-        ));
-        let phys = table.0.as_ptr() as u64;
-        assert_eq!(
-            phys % PAGE_SIZE as u64,
-            0,
-            "a leased table must survive the PPN encoding"
-        );
-        Some(TableFrame {
-            phys,
-            entries: &mut table.0,
-        })
+        let idx = self.used.fetch_add(1, Ordering::SeqCst);
+        if idx >= Self::CAPACITY {
+            self.used.store(Self::CAPACITY, Ordering::SeqCst);
+            return None;
+        }
+        // SAFETY: the monotonic index makes this slot exclusively ours.
+        let table: &'static mut Table = unsafe { &mut *self.storage[idx].get() };
+        let entries = &mut table.0;
+        let phys = phys_of(entries.as_ptr() as u64);
+        Some(TableFrame { phys, entries })
+    }
+
+    fn table_at(&self, phys: u64) -> Option<*mut [u64; ENTRIES_PER_TABLE]> {
+        let base = phys_of(self.storage.as_ptr() as u64);
+        let index = pool_slot_of(base, Self::CAPACITY, phys)?;
+        Some(self.storage[index].get().cast())
     }
 
     fn free_table(&self, phys: u64) {
@@ -361,19 +398,70 @@ fn map_page_translates_neutral_flags_and_walks() {
     let paddr = 0x8200_0000;
     mmu::AddressSpace::map_page(&mut space, vaddr, paddr, PageFlags::READ | PageFlags::WRITE)
         .expect("neutral map");
-    assert_eq!(translate(&space, vaddr), Some(paddr));
+    assert_eq!(translate(pool, &space, vaddr), Some(paddr));
     // The installed leaf carries exactly the translated R|W bits (plus the
     // always-set VALID/ACCESSED/DIRTY), not EXEC or USER.
-    let root = unsafe { &*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]) };
-    let l1 =
-        unsafe { &*(phys_from_pte(root[vpn_index(vaddr, 2)]) as *const [u64; ENTRIES_PER_TABLE]) };
-    let l0 =
-        unsafe { &*(phys_from_pte(l1[vpn_index(vaddr, 1)]) as *const [u64; ENTRIES_PER_TABLE]) };
-    let leaf = l0[vpn_index(vaddr, 0)];
+    let leaf = leaf_pte(pool, &space, vaddr).expect("the 4 KiB leaf").0;
     assert_ne!(leaf & flags::READ, 0);
     assert_ne!(leaf & flags::WRITE, 0);
     assert_eq!(leaf & flags::EXEC, 0);
     assert_eq!(leaf & flags::USER, 0);
+}
+
+/// A parent PTE whose PPN the frame source never handed out is what a
+/// clobbered or hostile table looks like. Every walk must read it as
+/// "nothing mapped here" rather than dereference the address the integer
+/// happens to name.
+#[test]
+fn a_pte_the_source_cannot_reach_fails_the_walk_closed() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let va = 100u64 << 30;
+    mmu::AddressSpace::map_page(&mut space, va, 0x8123_4000, PageFlags::READ)
+        .expect("map the probe page");
+    // A page-aligned table the pool never handed out, holding a valid
+    // leaf at the index the walk would read next. Recovering a table by
+    // dereferencing its address — what the walk did before it asked the
+    // frame source — would read this and answer with a mapping; asking
+    // the source refuses the address outright.
+    let mut foreign = Table::new();
+    foreign.0[vpn_index(va, 1)] = pte_from_phys(
+        0x8000_0000,
+        flags::VALID | flags::READ | flags::ACCESSED | flags::DIRTY,
+    );
+    let foreign_phys = foreign.0.as_ptr() as u64;
+
+    // Overwrite the root non-leaf PTE to point at it, valid and non-leaf
+    // so the walk would follow it.
+    let root_table = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: this space's live root table from the process-static pool,
+    // exclusively owned here.
+    unsafe {
+        (*root_table)[vpn_index(va, 2)] = pte_from_phys(foreign_phys, flags::VALID);
+    }
+
+    assert_eq!(mmu::AddressSpace::translate(&space, va), None);
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut space, va),
+        Err(MapError::NotMapped)
+    );
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut space, va),
+        Err(MapError::NotMapped)
+    );
+    // SAFETY: `root_phys` is the live root table of this exclusively-owned
+    // space, drawn from `POOL`.
+    assert!(!unsafe { set_accessed_flag_in_root(&POOL, space.root_phys(), va, AccessKind::Load) });
+    // And a fresh map over the unreachable branch is refused rather than
+    // walked into: `leaf_present` reads it as absent, then `ensure_child`
+    // refuses the PTE it cannot recover.
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut space, va, 0x8123_4000, PageFlags::READ),
+        Err(MapError::PoolExhausted)
+    );
 }
 
 #[test]
@@ -420,7 +508,7 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
         Ok(true)
     );
     assert_eq!(
-        leaf_pte(&space, va).expect("mapped").0 & flags::ACCESSED,
+        leaf_pte(pool, &space, va).expect("mapped").0 & flags::ACCESSED,
         0,
         "A must be cleared after a probe"
     );
@@ -436,7 +524,7 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
     // on the leaf.
     // SAFETY: `root_phys` is the live, host-identity-addressed root table
     // of this exclusively-owned space.
-    assert!(unsafe { set_accessed_flag_in_root(space.root_phys(), va, AccessKind::Load) });
+    assert!(unsafe { set_accessed_flag_in_root(pool, space.root_phys(), va, AccessKind::Load) });
 
     // Probe 3: the page reads accessed again — the full clock/second-chance
     // transition, end to end.
@@ -465,19 +553,21 @@ fn set_accessed_flag_in_root_respects_permission_and_clears() {
 
     // An unmapped address: nothing to set (fail closed).
     // SAFETY: `root` is the live, host-identity-addressed root table.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va + PAGE_SIZE as u64, AccessKind::Load) });
+    assert!(!unsafe {
+        set_accessed_flag_in_root(pool, root, va + PAGE_SIZE as u64, AccessKind::Load)
+    });
 
     // A store to a read-only leaf is a genuine permission fault, not an
     // A/D update: the WRITE permission is absent, so nothing is set.
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Store) });
+    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Store) });
     // An instruction fetch from a non-executable leaf likewise.
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Instruction) });
+    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Instruction) });
 
     // The eager map already set A, so a load "fault" finds nothing to do.
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
 
     // Clear A, then a permitted load access sets it once; a second finds
     // it already set.
@@ -486,11 +576,11 @@ fn set_accessed_flag_in_root_respects_permission_and_clears() {
         Ok(true)
     );
     // SAFETY: as above.
-    assert!(unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+    assert!(unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
     // SAFETY: as above.
-    assert!(!unsafe { set_accessed_flag_in_root(root, va, AccessKind::Load) });
+    assert!(!unsafe { set_accessed_flag_in_root(pool, root, va, AccessKind::Load) });
     assert_ne!(
-        leaf_pte(&space, va).expect("mapped").0 & flags::ACCESSED,
+        leaf_pte(pool, &space, va).expect("mapped").0 & flags::ACCESSED,
         0,
         "A must be set after the fault fix-up"
     );
@@ -523,13 +613,15 @@ fn an_identity_space_leaves_the_kernel_window_slots_alone() {
     static POOL: PageTablePool = PageTablePool::new();
     let space =
         AddressSpace::new_identity_gigapages(&POOL, IDENTITY_GIGAPAGES).expect("identity map");
-    let root = space.root_phys() as *const u64;
-    // SAFETY: `root_phys` is the address of a live table page from the
-    // process-static pool; reading its top entries is sound.
+    let root_table = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: a live table page from the process-static pool; reading its
+    // top entries is sound.
     let (first_window, top) = unsafe {
         (
-            *root.add(KERNEL_WINDOW_FIRST_SLOT),
-            *root.add(ENTRIES_PER_TABLE - 1),
+            (*root_table)[KERNEL_WINDOW_FIRST_SLOT],
+            (*root_table)[ENTRIES_PER_TABLE - 1],
         )
     };
     // No window is reserved in a host test, so both stay invalid — the
@@ -554,12 +646,14 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     let shared = POOL.alloc().expect("a stand-in shared window table");
     let shared_phys = shared.as_ptr() as u64;
 
-    // SAFETY: `root_phys` names this space's live root table from the
+    let root_table = POOL
+        .table_at(space.root_phys())
+        .expect("the pool's own root");
+    // SAFETY: `root_table` is this space's live root table from the
     // process-static pool; writing its own window slot is what every root
     // constructor does once a window is reserved.
     unsafe {
-        let root = &mut *(space.root_phys() as *mut [u64; ENTRIES_PER_TABLE]);
-        root[KERNEL_WINDOW_FIRST_SLOT] = pte_from_phys(shared_phys, flags::VALID);
+        (*root_table)[KERNEL_WINDOW_FIRST_SLOT] = pte_from_phys(shared_phys, flags::VALID);
     }
 
     // SAFETY: the space is not the active translation regime (the host has
@@ -568,8 +662,6 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
         MmuAddressSpace::reclaim_table_frames(&mut space);
     }
     // SAFETY: as above — reading the root's own window slot.
-    let slot = unsafe {
-        (*(space.root_phys() as *const [u64; ENTRIES_PER_TABLE]))[KERNEL_WINDOW_FIRST_SLOT]
-    };
+    let slot = unsafe { (*root_table)[KERNEL_WINDOW_FIRST_SLOT] };
     assert_eq!(slot, 0, "the shared window entry was dropped, not walked");
 }

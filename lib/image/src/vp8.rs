@@ -1623,14 +1623,24 @@ fn inverse_walsh(input: &[i16; BLOCK_COEFFS]) -> [i16; BLOCK_COEFFS] {
 }
 
 /// The inverse DCT of one transform block, answering its residual samples.
+///
+/// The intermediates are 64-bit because the second pass multiplies values
+/// the first pass already widened: a conformant stream's coefficients keep
+/// those products inside 32 bits, but a corrupt one's need not, and the
+/// transform must answer a bounded residual rather than trap. Narrowing
+/// saturates for the same reason. A conformant stream is unaffected — its
+/// values are orders of magnitude inside the bound.
 fn inverse_dct(input: &[i16; BLOCK_COEFFS]) -> [i32; BLOCK_COEFFS] {
-    let mut middle = [0i32; BLOCK_COEFFS];
+    const SIN: i64 = SIN_PI8_SQRT2 as i64;
+    const COS: i64 = COS_PI8_SQRT2_MINUS1 as i64;
+
+    let mut middle = [0i64; BLOCK_COEFFS];
     for column in 0..4 {
-        let at = |row: usize| i32::from(input[row * 4 + column]);
+        let at = |row: usize| i64::from(input[row * 4 + column]);
         let a = at(0) + at(2);
         let b = at(0) - at(2);
-        let c = ((at(1) * SIN_PI8_SQRT2) >> 16) - (at(3) + ((at(3) * COS_PI8_SQRT2_MINUS1) >> 16));
-        let d = (at(1) + ((at(1) * COS_PI8_SQRT2_MINUS1) >> 16)) + ((at(3) * SIN_PI8_SQRT2) >> 16);
+        let c = ((at(1) * SIN) >> 16) - (at(3) + ((at(3) * COS) >> 16));
+        let d = (at(1) + ((at(1) * COS) >> 16)) + ((at(3) * SIN) >> 16);
         middle[column] = a + d;
         middle[12 + column] = a - d;
         middle[4 + column] = b + c;
@@ -1641,14 +1651,22 @@ fn inverse_dct(input: &[i16; BLOCK_COEFFS]) -> [i32; BLOCK_COEFFS] {
         let at = |column: usize| middle[row * 4 + column];
         let a = at(0) + at(2);
         let b = at(0) - at(2);
-        let c = ((at(1) * SIN_PI8_SQRT2) >> 16) - (at(3) + ((at(3) * COS_PI8_SQRT2_MINUS1) >> 16));
-        let d = (at(1) + ((at(1) * COS_PI8_SQRT2_MINUS1) >> 16)) + ((at(3) * SIN_PI8_SQRT2) >> 16);
-        output[row * 4] = (a + d + 4) >> 3;
-        output[row * 4 + 3] = (a - d + 4) >> 3;
-        output[row * 4 + 1] = (b + c + 4) >> 3;
-        output[row * 4 + 2] = (b - c + 4) >> 3;
+        let c = ((at(1) * SIN) >> 16) - (at(3) + ((at(3) * COS) >> 16));
+        let d = (at(1) + ((at(1) * COS) >> 16)) + ((at(3) * SIN) >> 16);
+        let write = |value: i64| narrow_residual((value + 4) >> 3);
+        output[row * 4] = write(a + d);
+        output[row * 4 + 3] = write(a - d);
+        output[row * 4 + 1] = write(b + c);
+        output[row * 4 + 2] = write(b - c);
     }
     output
+}
+
+/// Narrow a transform intermediate to a residual, saturating at a bound
+/// low enough that adding it to a sample cannot overflow either.
+fn narrow_residual(value: i64) -> i32 {
+    const BOUND: i64 = (i32::MAX / 2) as i64;
+    i32::try_from(value.clamp(-BOUND, BOUND)).unwrap_or(0)
 }
 
 /// Add one transform block's residual to the samples predicted for it.

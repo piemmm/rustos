@@ -36,6 +36,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_arch_api::CpuId;
+use tairix_sync::FnCell;
 
 /// Base-2 logarithm of the per-secondary-hart kernel stack size, so the
 /// `smp.s` trampoline can index a hart's slice with a left shift rather
@@ -209,10 +210,9 @@ fn reset_secondary_stacks_for_tests() {
     SECONDARY_STACK_SHIFT_BITS.store(0, Ordering::Release);
 }
 
-/// The secondary-hart entry the trampoline runs, packed into a `usize`
-/// (the size of a `fn` pointer) so the trampoline reads it without a
-/// lock. `0` until [`set_secondary_entry`] installs it.
-static SECONDARY_ENTRY_FN: AtomicUsize = AtomicUsize::new(0);
+/// The secondary-hart entry the trampoline runs, read without a lock.
+/// Empty until [`set_secondary_entry`] installs it.
+static SECONDARY_ENTRY_FN: FnCell<extern "C" fn(CpuId) -> !> = FnCell::empty();
 
 /// Failure modes of [`set_secondary_entry`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -258,23 +258,23 @@ impl StartHartError {
 ///
 /// [`SetEntryError::AlreadyInstalled`] on the second publish.
 pub fn set_secondary_entry(entry: extern "C" fn(CpuId) -> !) -> Result<(), SetEntryError> {
-    let raw = entry as usize;
-    SECONDARY_ENTRY_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetEntryError::AlreadyInstalled)
+    if SECONDARY_ENTRY_FN.claim(entry) {
+        Ok(())
+    } else {
+        Err(SetEntryError::AlreadyInstalled)
+    }
 }
 
 /// Address of the installed secondary entry (`0` if none).
 /// Test/diagnostic observer.
 #[must_use]
 pub fn secondary_entry_addr() -> usize {
-    SECONDARY_ENTRY_FN.load(Ordering::Acquire)
+    SECONDARY_ENTRY_FN.addr() as usize
 }
 
 #[cfg(test)]
 fn clear_secondary_entry_for_tests() {
-    SECONDARY_ENTRY_FN.store(0, Ordering::Release);
+    SECONDARY_ENTRY_FN.clear();
 }
 
 /// Read the calling hart's id from the `tp` register.
@@ -362,14 +362,7 @@ fn secondary_trampoline_addr() -> usize {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_riscv64_secondary_main(hartid: CpuId) -> ! {
-    let raw = SECONDARY_ENTRY_FN.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: every store into the slot round-trips a valid
-        // `extern "C" fn(CpuId) -> !` pointer through
-        // `set_secondary_entry`; the callback is a `fn` with no captured
-        // environment, safe to invoke on this hart.
-        let entry: extern "C" fn(CpuId) -> ! =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(CpuId) -> !>(raw) };
+    if let Some(entry) = SECONDARY_ENTRY_FN.load() {
         entry(hartid);
     }
     crate::kernel_arch::halt_current_hart()

@@ -104,21 +104,15 @@ extern "C" {
 
 /// Publish the routine into the Arch HAL guarded-copy slot.
 ///
-/// Idempotent (the slot accepts a re-install of the same routine), so
-/// every caller of [`crate::trap::install_trap_vector`] may run it
-/// unconditionally.
-///
-/// # Errors
-///
-/// [`tairix_arch_api::uaccess::InstallGuardedCopyError`] when a
-/// *different* routine already occupies the slot — a boot-order defect
-/// the caller must treat as fatal (fail closed).
+/// Every caller of [`crate::trap::install_trap_vector`] may run it
+/// unconditionally: the slot takes the store, and this is the one
+/// routine the image holds.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub fn install() -> Result<(), tairix_arch_api::uaccess::InstallGuardedCopyError> {
+pub fn install() {
     tairix_arch_api::uaccess::install_guarded_copy(
         tairix_riscv64_guarded_user_copy
             as unsafe extern "C" fn(*mut u8, *const u8, usize) -> usize,
-    )
+    );
 }
 
 /// If `pc` (a saved `sepc` from a kernel-mode data page fault) lies

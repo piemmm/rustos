@@ -92,6 +92,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+use tairix_sync::FnCell;
+
 use tairix_abi::SYSCALL_MAX_ARGS;
 
 // --- MSR addresses (Intel SDM Vol 3A §2.7, §5.8.8) ------------------
@@ -628,12 +631,12 @@ pub type SyscallDispatchFn =
 /// `0` is the "no callback installed" sentinel. The trampoline
 /// fail-closes via [`crate::qemu_exit::exit_failure`] in that case
 /// (see [`tairix_arch_x86_64_syscall_dispatch`]'s rustdoc); a
-/// silent return would be an "open by default" failure per
-/// . Storage is gated to the freestanding target — the
+/// silent return would be the open-by-default failure the charter
+/// forbids. Storage is gated to the freestanding target — the
 /// host build never reads or writes it (matches the
 /// [`crate::preempt::set_timer_callback`] pattern).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-static SYSCALL_DISPATCH_CALLBACK: AtomicUsize = AtomicUsize::new(0);
+static SYSCALL_DISPATCH_CALLBACK: FnCell<SyscallDispatchFn> = FnCell::empty();
 
 /// Install the per-binary dispatch callback. Called once during
 /// kernel boot, before `init_local_syscalls` enables `syscall`
@@ -650,7 +653,7 @@ static SYSCALL_DISPATCH_CALLBACK: AtomicUsize = AtomicUsize::new(0);
 /// gating.
 pub fn set_dispatch_callback(cb: SyscallDispatchFn) {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    SYSCALL_DISPATCH_CALLBACK.store(cb as usize, Ordering::Release);
+    SYSCALL_DISPATCH_CALLBACK.install(cb);
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     let _ = cb;
 }
@@ -665,15 +668,7 @@ pub fn set_dispatch_callback(cb: SyscallDispatchFn) {
 pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        let raw = SYSCALL_DISPATCH_CALLBACK.load(Ordering::Acquire);
-        if raw == 0 {
-            None
-        } else {
-            // SAFETY: every store into `SYSCALL_DISPATCH_CALLBACK`
-            // originates from `set_dispatch_callback`, which round-
-            // trips a valid `SyscallDispatchFn` pointer.
-            Some(unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) })
-        }
+        SYSCALL_DISPATCH_CALLBACK.load()
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -727,18 +722,12 @@ unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
             true,
         );
     }
-    let raw = SYSCALL_DISPATCH_CALLBACK.load(Ordering::Acquire);
-    if raw == 0 {
-        // Fail-closed: a syscall reached the trampoline before the
-        // binary installed its dispatcher. Continuing would mean
-        // returning an unspecified value to user space, which is
-        // exactly the "open by default" failure
-        // forbid.
+    let Some(cb) = SYSCALL_DISPATCH_CALLBACK.load() else {
+        // A syscall reached the trampoline before the binary installed its
+        // dispatcher. Returning an unspecified value to user space would be
+        // the open-by-default failure the charter forbids, so fail closed.
         crate::qemu_exit::exit_failure();
-    }
-    // SAFETY: see `dispatch_callback` — every store round-trips a
-    // valid `SyscallDispatchFn`.
-    let cb: SyscallDispatchFn = unsafe { core::mem::transmute::<usize, SyscallDispatchFn>(raw) };
+    };
     cb(number, args_ptr)
 }
 

@@ -31,7 +31,8 @@
 //     the PVH magic (0x336EC578, the value the start_info record itself
 //     begins with) into EDI so the Rust prologue can tell the protocols
 //     apart, then falls through to the shared `boot_common`.
-//  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pdpt_high`/`boot_pds`
+//  3. The 4 KiB-aligned `boot_pml4`/`boot_pdpt`/`boot_pdpt_high`/
+//     `boot_pdpt_physmap`/`boot_pds`
 //     tables sit in `.boot.bss` (linked 1:1 in low memory by `linker.ld`)
 //     and are zero-initialised by the loader (BSS bytes are zero per the
 //     multiboot spec; QEMU's PVH ELF loader zero-fills the
@@ -46,12 +47,11 @@
 //     guarantees that the LAPIC MMIO frame at 0xFEE00000 and the IO-APIC
 //     frame at 0xFEC00000 — both architecturally fixed by Intel — are
 //     reachable, and likewise that any ACPI table OVMF/GRUB placed in
-//     high memory below 4 GiB is reachable. This is the *floor*, not the
-//     final window: the kernel reaches every RAM frame by pointer through
-//     this map, so once the firmware memory map has been parsed the boot
-//     path widens it to the discovered RAM
-//     (`paging::widen_boot_identity`). Four gigabytes is what the
-//     trampoline can lay down before it knows how much RAM is installed.
+//     high memory below 4 GiB is reachable — every address the boot path
+//     must reach *as* a physical address. It is never widened: RAM is
+//     reached through the direct physical map (invariant 10) instead, which
+//     lives in the kernel half and so is not bounded by where user space
+//     begins.
 //  5. The long-mode GDT below has a single 64-bit code segment at
 //     selector 0x08 with L=1 (long mode) and a 64-bit data segment at
 //     selector 0x10. Both are flat (base 0, limit ignored in 64-bit).
@@ -75,7 +75,23 @@
 //     so the direct physical map (`kernel/mem` phys.rs: DMA/MMIO/ACPI/
 //     multiboot info) is unaffected. After entering long mode the
 //     trampoline transfers to the high half with an absolute
-//     `movabs`+`jmp *%rax` to `higher_half_entry`.
+//     `movabs`+`jmp *%rax` to `higher_half_entry`, and re-points `%rsp` at
+//     the boot stack's own higher-half alias (`boot_stack_top_high`,
+//     derived in `linker.ld`) so the running stack is mapped under every
+//     translation root and not only under the identity window.
+// 10. The direct physical map's floor: PML4[256] -> `boot_pdpt_physmap`,
+//     whose low four entries point at the identity window's own page
+//     directories (`boot_pds`), so physical `X` is reachable at
+//     `paging::PHYSMAP_VMA_BASE + X` for `X` in 0..4 GiB from the first
+//     instruction after paging is on. It costs one table and no leaves of
+//     its own. The kernel widens the remainder of that table once the
+//     firmware memory map is known (`paging::install_boot_physmap`), and
+//     verifies this entry against its own slot constant first, so an
+//     asm/Rust disagreement fails the boot rather than mapping nothing.
+//     Laying the floor here rather than in the boot path is what lets the
+//     LAPIC and IO-APIC register blocks be named at one address: every
+//     consumer of this crate has the map, including one that runs no boot
+//     pipeline of its own.
 
 .section .multiboot_header, "a"
 .align 8
@@ -143,7 +159,10 @@ boot_common:
     orl  $0x3, %eax                                 // P|RW
     movl %eax, boot_pml4
 
-    // PDPT[i] -> boot_pds + i*4096 | P|RW, for i in 0..4  (one PD per GiB).
+    // PDPT[i] -> boot_pds + i*4096 | P|RW, for i in 0..4  (one PD per GiB),
+    // and the same page directories into the direct physical map's own PDPT
+    // (SAFETY-INVARIANT 10): the two windows share the identity leaves, so
+    // the map's floor costs one table and no leaves of its own.
     xorl %ecx, %ecx
 1:
     movl $boot_pds, %eax
@@ -153,6 +172,8 @@ boot_common:
     orl  $0x3, %eax                                 // P|RW
     movl %eax, boot_pdpt(,%ecx,8)
     movl $0, boot_pdpt+4(,%ecx,8)
+    movl %eax, boot_pdpt_physmap(,%ecx,8)
+    movl $0, boot_pdpt_physmap+4(,%ecx,8)
     incl %ecx
     cmpl $4, %ecx
     jl   1b
@@ -192,6 +213,15 @@ boot_common:
     orl  $0x3, %eax                                 // P|RW
     movl %eax, boot_pdpt_high + 0xFF0
     movl $0, boot_pdpt_high + 0xFF4
+
+    // PML4[256] -> boot_pdpt_physmap  (offset 256 * 8 = 0x800), the direct
+    // physical map's floor (SAFETY-INVARIANT 10). The Rust side verifies
+    // this entry against its own slot constant before it widens the map, so
+    // a disagreement fails the boot rather than mapping nothing.
+    movl $boot_pdpt_physmap, %eax
+    orl  $0x3, %eax                                 // P|RW
+    movl %eax, boot_pml4 + 0x800
+    movl $0, boot_pml4 + 0x804
 
     // CR3 <- PML4
     movl $boot_pml4, %eax
@@ -246,15 +276,22 @@ long_mode_start:
 // -- Higher-half landing pad. Linked into `.text` at KERNEL_VMA_BASE + phys
 //    (linker.ld), so reaching here means RIP is running in the higher-half
 //    kernel window. From here a normal RIP-relative `call` reaches the Rust
-//    entry point (both are high-half symbols). The boot stack stays valid
-//    because the 0..4 GiB identity map is preserved.
+//    entry point (both are high-half symbols).
 .section .text, "ax"
 .code64
 .global higher_half_entry
 .type higher_half_entry, @function
 higher_half_entry:
+    // Re-address the boot stack through the kernel window. The bytes do not
+    // move — `boot_stack_top_high` is the same page at
+    // `KERNEL_VMA_BASE + phys` (linker.ld) — but a low `%rsp` would live
+    // only in the identity window, and a process root carries none: the
+    // first push after a switch to one would fault. Nothing is live on the
+    // stack here, so replacing the pointer outright is sound: the 32-bit
+    // trampoline above pushes nothing and reaches this label by jump.
+    movabsq $boot_stack_top_high, %rsp
     // rdi/rsi still hold the multiboot magic / info pointer (untouched by
-    // the absolute jump above).
+    // the absolute jump above or the stack rebase).
     call tairix_arch_x86_64_main
 
     // `tairix_arch_x86_64_main` is `-> !`; reaching here is a kernel bug.
@@ -279,6 +316,13 @@ boot_pdpt:
 // PDPT for the higher-half kernel window (SAFETY-INVARIANT 9). Its entry
 // 510 points at `boot_pds` so 0xFFFFFFFF80000000 + X maps to physical X.
 boot_pdpt_high:
+    .skip 4096
+// PDPT for the direct physical map's floor (SAFETY-INVARIANT 10). Its low
+// entries point at `boot_pds`, the identity window's own directories, and
+// the kernel widens the remainder once the firmware memory map is known.
+// Exposed so `paging.rs` can name the table it must agree with.
+.global boot_pdpt_physmap
+boot_pdpt_physmap:
     .skip 4096
 // Four contiguous PDs, one per GiB of the identity-mapped 0..4 GiB window.
 // See SAFETY-INVARIANT 4. Symbol exposed so the AP bring-up code in

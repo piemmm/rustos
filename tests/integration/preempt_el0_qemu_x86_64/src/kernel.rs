@@ -213,7 +213,7 @@ static AUDIT_SINK: BootCompletedSink = BootCompletedSink;
 /// [`PAGE_TABLE_POOL`], returning its PML4 root and the entry register state.
 /// Fails the test loudly on any error.
 fn build_el0_space(image: &LoadImage) -> (u64, UserEntry) {
-    let Some(arch_space) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(arch_space) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         note(TEST_FAIL, "P-1c test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };

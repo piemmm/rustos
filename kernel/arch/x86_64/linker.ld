@@ -80,6 +80,14 @@ SECTIONS
     . = ALIGN(4K);
     __boot_phys_end = .;
 
+    /* The boot stack's higher-half aliases: the same bytes, addressed
+     * through the kernel window, so `%rsp` is canonical from the moment
+     * the trampoline lands in the higher half and stays mapped under a
+     * process root, which carries no identity map. Computed here because
+     * this script is the one definition of KERNEL_VMA_BASE. */
+    boot_stack_bottom_high = boot_stack_bottom + KERNEL_VMA_BASE;
+    boot_stack_top_high = boot_stack_top + KERNEL_VMA_BASE;
+
     /* Switch the location counter (VMA) into the higher half. Each section
      * below maps its LMA back to the contiguous low physical image with an
      * explicit `AT(ADDR(section) - KERNEL_VMA_BASE)`. */

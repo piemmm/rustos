@@ -55,14 +55,13 @@ use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 use tairix_arch_x86_64::{idt, paging, qemu_exit, serial};
 
 /// Virtual address only the *victim* address space maps: the first byte
-/// past the live identity window, so no root reaches it through the
-/// identity map and the *attacker* space is unmapped at every level of its
-/// PML4 hierarchy. Derived from the port's published window rather than
-/// picked, so a window widened to cover more RAM cannot silently bring the
-/// address back inside it.
+/// past the boot trampoline's identity window, so no root reaches it
+/// through that window and the *attacker* space is unmapped at every level
+/// of its PML4 hierarchy. Derived from the port's published extent rather
+/// than picked.
 #[cfg(itest_x86_64)]
 fn secret_vaddr() -> u64 {
-    paging::configured_identity_bytes()
+    (paging::BOOT_IDENTITY_GIB as u64) << 30
 }
 
 /// Magic byte written into the secret frame.
@@ -124,7 +123,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         p.write_volatile(SECRET_BYTE);
     }
 
-    let Some(mut victim) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(mut victim) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (victim)");
         qemu_exit::exit_failure();
     };
@@ -149,7 +148,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
         "[memory_isolation] victim PML4 = 0x{victim_pml4:x}, secret_paddr = 0x{secret_paddr:x}"
     );
 
-    let Some(attacker) = paging::AddressSpace::new_identity_window(&PAGE_TABLE_POOL) else {
+    let Some(attacker) = paging::AddressSpace::new_boot_identity(&PAGE_TABLE_POOL) else {
         let _ = writeln!(com1, "[memory_isolation] FAIL: pool exhausted (attacker)");
         qemu_exit::exit_failure();
     };

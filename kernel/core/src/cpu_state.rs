@@ -5,10 +5,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 // `AtomicU32` backs only the debug-diagnostics pre-silence-backtrace length,
-// and `AtomicUsize` the debug-diagnostics per-CPU lock-site stack, so both
+// and `AtomicPtr` the debug-diagnostics per-CPU lock-site stack, so both
 // are imported only when that facility is compiled in.
 #[cfg(feature = "watchdog-diagnostics")]
-use core::sync::atomic::{AtomicU32, AtomicUsize};
+use core::panic::Location;
+#[cfg(feature = "watchdog-diagnostics")]
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
 
 use tairix_kernel_sched_api::TaskAction;
 use tairix_sync::{OnceCell, SpinLock};
@@ -272,8 +274,12 @@ pub(crate) struct CpuState {
     /// `k_lock=<file>:<line>`. The stored value is a source `Location`
     /// pointer to `'static` rodata whose `file`/`line` are rendered — never
     /// a runtime code address, so it discloses no KASLR base.
+    ///
+    /// Stored as the pointer itself rather than an address: a `Location`
+    /// reconstructed from a `usize` carries no provenance, so reading its
+    /// `file`/`line` back out would be undefined.
     #[cfg(feature = "watchdog-diagnostics")]
-    pub(crate) lock_sites: [AtomicUsize; LOCK_STACK_MAX],
+    pub(crate) lock_sites: [AtomicPtr<Location<'static>>; LOCK_STACK_MAX],
     /// Current lock-nesting depth (number of valid [`Self::lock_sites`]
     /// entries, saturating at [`LOCK_STACK_MAX`] for recording while still
     /// counting true depth so release stays balanced). Written last
@@ -370,7 +376,7 @@ impl CpuState {
             #[cfg(feature = "watchdog-diagnostics")]
             wd_bt_len: AtomicU32::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
-            lock_sites: [const { AtomicUsize::new(0) }; LOCK_STACK_MAX],
+            lock_sites: [const { AtomicPtr::new(core::ptr::null_mut()) }; LOCK_STACK_MAX],
             #[cfg(feature = "watchdog-diagnostics")]
             lock_depth: AtomicUsize::new(0),
             #[cfg(feature = "watchdog-diagnostics")]

@@ -338,7 +338,7 @@ fn build_el0_space(
     rxe: &[u8],
     is_parent: bool,
 ) -> (u64, UserEntry) {
-    let Some(arch_space) = paging::AddressSpace::new_identity_window(pool) else {
+    let Some(arch_space) = paging::AddressSpace::new_boot_identity(pool) else {
         note(TEST_FAIL, "X4 test: page-table pool exhausted");
         qemu_exit::exit_failure();
     };

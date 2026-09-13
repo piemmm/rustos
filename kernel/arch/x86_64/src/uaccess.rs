@@ -71,21 +71,14 @@ extern "C" {
 
 /// Publish the routine into the Arch HAL guarded-copy slot.
 ///
-/// Idempotent (the slot accepts a re-install of the same routine).
 /// Paired with the dedicated `#PF` entry install on the boot path: the
 /// entry's kernel-fault window check is what redirects an in-window
 /// fault to the fix-up, so the two arm together.
-///
-/// # Errors
-///
-/// [`tairix_arch_api::uaccess::InstallGuardedCopyError`] when a
-/// *different* routine already occupies the slot — a boot-order defect
-/// the caller must treat as fatal (fail closed).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub fn install() -> Result<(), tairix_arch_api::uaccess::InstallGuardedCopyError> {
+pub fn install() {
     tairix_arch_api::uaccess::install_guarded_copy(
         tairix_x86_64_guarded_user_copy as unsafe extern "C" fn(*mut u8, *const u8, usize) -> usize,
-    )
+    );
 }
 
 /// If `pc` (the pushed `RIP` of a kernel-mode `#PF`) lies inside the

@@ -67,16 +67,20 @@
 //! [`IrqSafeSpinLock`]: crate::IrqSafeSpinLock
 
 use core::fmt;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 
 use crate::loom_compat::{AtomicUsize, Ordering, SyncUnsafeCell};
-use crate::spinwait::spin_wait;
+use crate::spinwait::{spin_until, spin_wait};
 
 // State word layout (in a single `AtomicUsize`):
 //   bit 0           : WRITER_BIT     — set while a writer holds the lock
 //   bits 1..HALF    : reader count
 //   bits HALF..LAST : pending-writer count
-//   The top bit is unused so saturating arithmetic stays well-defined.
+// Every bit is spoken for, so no field may be incremented without first
+// checking it is not already at its maximum: a wrap would carry into the
+// neighbouring field (or off the top) and hand out a state that lies about
+// who holds the lock.
 const WRITER_BIT: usize = 1;
 const READER_SHIFT: u32 = 1;
 const PENDING_SHIFT: u32 = usize::BITS / 2;
@@ -84,6 +88,11 @@ const READER_ONE: usize = 1 << READER_SHIFT;
 const PENDING_ONE: usize = 1 << PENDING_SHIFT;
 const READER_MASK: usize = ((1usize << (PENDING_SHIFT - READER_SHIFT)) - 1) << READER_SHIFT;
 const PENDING_MASK: usize = !((1usize << PENDING_SHIFT) - 1);
+
+/// Most concurrent readers the count field can hold.
+const MAX_READERS: usize = reader_count(READER_MASK);
+/// Most simultaneously registered writer intents the count field can hold.
+const MAX_PENDING: usize = pending_writers(PENDING_MASK);
 
 #[inline]
 const fn reader_count(state: usize) -> usize {
@@ -98,6 +107,49 @@ const fn pending_writers(state: usize) -> usize {
 #[inline]
 const fn writer_held(state: usize) -> bool {
     (state & WRITER_BIT) != 0
+}
+
+// The three state transitions, as total functions of the state word. Keeping
+// them pure is what lets the saturation boundaries — otherwise reachable only
+// with billions of live guards — be exercised directly, and it puts the
+// "check before you increment" ordering in one place instead of once per
+// caller.
+
+/// The state a reader acquisition moves to, or [`None`] if it must wait: a
+/// writer holds or is pending (writer preference), or the reader field is
+/// full.
+#[inline]
+const fn reader_acquired(state: usize) -> Option<usize> {
+    if writer_held(state) || pending_writers(state) > 0 || reader_count(state) == MAX_READERS {
+        return None;
+    }
+    Some(state + READER_ONE)
+}
+
+/// The state a writer's intent registration moves to, or [`None`] if the
+/// pending field is full.
+#[inline]
+const fn pending_registered(state: usize) -> Option<usize> {
+    if pending_writers(state) == MAX_PENDING {
+        return None;
+    }
+    Some(state + PENDING_ONE)
+}
+
+/// The state a *registered* writer moves to when it takes the lock: it
+/// withdraws its own intent and sets the writer bit in one transition, so no
+/// window shows the lock both held and still awaited by its holder.
+///
+/// [`None`] while a reader or another writer holds it, and — fail closed —
+/// for an unregistered caller: withdrawing an intent never lodged wraps the
+/// pending count to its maximum, and since readers defer to a pending writer
+/// the lock would then refuse every reader for ever.
+#[inline]
+const fn writer_acquired(state: usize) -> Option<usize> {
+    if reader_count(state) != 0 || writer_held(state) || pending_writers(state) == 0 {
+        return None;
+    }
+    Some((state - PENDING_ONE) | WRITER_BIT)
 }
 
 /// Writer-preference reader/writer lock.
@@ -152,20 +204,41 @@ impl<T: ?Sized> RwLock<T> {
     fn raw_try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
         let mut cur = self.state.load(Ordering::Relaxed);
         loop {
-            if writer_held(cur) || pending_writers(cur) > 0 {
-                return None;
+            let next = reader_acquired(cur)?;
+            match self
+                .state
+                .compare_exchange_weak(cur, next, Ordering::Acquire, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    return Some(RwLockReadGuard {
+                        lock: self,
+                        _cpu_bound: PhantomData,
+                    })
+                }
+                Err(actual) => cur = actual,
             }
-            if reader_count(cur) == reader_count(READER_MASK) {
-                // Reader count saturated — refuse rather than overflow.
-                return None;
-            }
-            match self.state.compare_exchange_weak(
-                cur,
-                cur + READER_ONE,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Some(RwLockReadGuard { lock: self }),
+        }
+    }
+
+    /// Register a writer's intent, which is what makes new readers back off.
+    /// `false` when the pending field is full, so the caller waits or refuses
+    /// rather than wrapping the count.
+    ///
+    /// A `fetch_add` cannot express this: it would publish the wrapped state
+    /// before the caller could inspect it, and for the window until the
+    /// caller undid it every reader would see a queue of writers as empty.
+    #[inline]
+    fn register_pending(&self) -> bool {
+        let mut cur = self.state.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = pending_registered(cur) else {
+                return false;
+            };
+            match self
+                .state
+                .compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
                 Err(actual) => cur = actual,
             }
         }
@@ -204,13 +277,14 @@ impl<T: ?Sized> RwLock<T> {
                 crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
                 return g;
             }
-            // Spin until both writer and pending-writer flags clear.
-            while {
+            // Spin until both writer and pending-writer flags clear. A
+            // reader refused because the count is momentarily full has no
+            // writer to watch for, which is why the shared loop serves its
+            // round before consulting the condition at all.
+            spin_until(|| {
                 let s = self.state.load(Ordering::Relaxed);
-                writer_held(s) || pending_writers(s) > 0
-            } {
-                spin_wait();
-            }
+                !writer_held(s) && pending_writers(s) == 0
+            });
         }
     }
 
@@ -218,44 +292,41 @@ impl<T: ?Sized> RwLock<T> {
     #[cfg_attr(feature = "lock-diagnostics", track_caller)]
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
         // First register intent so concurrent readers back off.
-        let prev = self.state.fetch_add(PENDING_ONE, Ordering::Relaxed);
-        if pending_writers(prev) == pending_writers(PENDING_MASK) {
-            // Pending-writer count saturated; undo and refuse.
-            self.state.fetch_sub(PENDING_ONE, Ordering::Relaxed);
+        if !self.register_pending() {
             return None;
         }
-        // Now attempt to flip WRITER_BIT, but only if there are no
-        // readers and no other writer.
+        // Now attempt to take the lock, withdrawing that intent in the same
+        // transition. One attempt only: `try_write` never spins.
         let cur = self.state.load(Ordering::Relaxed);
-        if reader_count(cur) == 0 && !writer_held(cur) {
-            // PENDING was already incremented; flip WRITER_BIT and drop
-            // our pending bump in one CAS.
-            if self
-                .state
-                .compare_exchange(
-                    cur,
-                    (cur - PENDING_ONE) | WRITER_BIT,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                )
+        let taken = writer_acquired(cur).is_some_and(|next| {
+            self.state
+                .compare_exchange(cur, next, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
-            {
-                // Record the successful non-spinning acquire against the
-                // caller's source site so a wedge while holding this
-                // guard names it. There was no spin phase, so this is the
-                // only note this acquisition emits.
-                #[cfg(feature = "lock-diagnostics")]
-                crate::lockwatch::note(
-                    crate::lockwatch::LockEvent::TryAcquired,
-                    core::panic::Location::caller(),
-                );
-                return Some(RwLockWriteGuard { lock: self });
-            }
-            self.state.fetch_sub(PENDING_ONE, Ordering::Relaxed);
+        });
+        if !taken {
+            self.withdraw_pending();
             return None;
         }
+        // Record the successful non-spinning acquire against the caller's
+        // source site so a wedge while holding this guard names it. There was
+        // no spin phase, so this is the only note this acquisition emits.
+        #[cfg(feature = "lock-diagnostics")]
+        crate::lockwatch::note(
+            crate::lockwatch::LockEvent::TryAcquired,
+            core::panic::Location::caller(),
+        );
+        Some(RwLockWriteGuard {
+            lock: self,
+            _cpu_bound: PhantomData,
+        })
+    }
+
+    /// Withdraw an intent this caller registered and did not convert into the
+    /// lock. Unconditional: the count cannot underflow because only a
+    /// successful [`Self::register_pending`] reaches here.
+    #[inline]
+    fn withdraw_pending(&self) {
         self.state.fetch_sub(PENDING_ONE, Ordering::Relaxed);
-        None
     }
 
     /// Acquire the exclusive (writer) lock, spinning until granted.
@@ -269,29 +340,34 @@ impl<T: ?Sized> RwLock<T> {
         let site = core::panic::Location::caller();
         #[cfg(feature = "lock-diagnostics")]
         crate::lockwatch::note(crate::lockwatch::LockEvent::Acquiring, site);
-        // Step 1: register pending-writer intent. This blocks new
-        // readers, achieving writer preference.
-        self.state.fetch_add(PENDING_ONE, Ordering::Relaxed);
+        // Step 1: register pending-writer intent. This blocks new readers,
+        // achieving writer preference. A full pending field is a wait, not a
+        // refusal — `write` has no way to decline — so spin until a departing
+        // writer frees a slot.
+        while !self.register_pending() {
+            spin_wait();
+        }
         loop {
             let cur = self.state.load(Ordering::Relaxed);
-            if reader_count(cur) == 0 && !writer_held(cur) {
+            if let Some(next) = writer_acquired(cur) {
                 if self
                     .state
-                    .compare_exchange_weak(
-                        cur,
-                        (cur - PENDING_ONE) | WRITER_BIT,
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange_weak(cur, next, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
                     #[cfg(feature = "lock-diagnostics")]
                     crate::lockwatch::note(crate::lockwatch::LockEvent::Acquired, site);
-                    return RwLockWriteGuard { lock: self };
+                    return RwLockWriteGuard {
+                        lock: self,
+                        _cpu_bound: PhantomData,
+                    };
                 }
-            } else {
-                spin_wait();
             }
+            // Reached on a lost CAS as well as on an unavailable lock. A weak
+            // compare-exchange may fail spuriously on the LL/SC targets, so
+            // omitting the round here would let a writer spin hot without
+            // hinting the core or serving its peers.
+            spin_wait();
         }
     }
 
@@ -335,7 +411,16 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for RwLock<T> {
 #[must_use = "if unused the read lock is immediately released"]
 pub struct RwLockReadGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
+    /// Pins the guard to the CPU that acquired it: releasing a reader slot
+    /// from a core that never took one, and under lock diagnostics popping a
+    /// per-CPU record it never pushed, is not something a caller should be
+    /// able to spell. A raw pointer is how a type opts out of `Send`.
+    _cpu_bound: PhantomData<*const ()>,
 }
+
+// SAFETY: a shared `&RwLockReadGuard` hands out `&T` through `Deref`, so
+// `T: Sync` is the requirement; `Send` stays blocked by the marker above.
+unsafe impl<T: ?Sized + Sync> Sync for RwLockReadGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
@@ -361,7 +446,14 @@ impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
 #[must_use = "if unused the write lock is immediately released"]
 pub struct RwLockWriteGuard<'a, T: ?Sized> {
     lock: &'a RwLock<T>,
+    /// Pins the guard to the CPU that acquired it, for the same reason as
+    /// [`RwLockReadGuard`]'s marker.
+    _cpu_bound: PhantomData<*const ()>,
 }
+
+// SAFETY: a shared `&RwLockWriteGuard` reaches only `&T` (`DerefMut` needs
+// `&mut`), so `T: Sync` is the requirement; `Send` stays blocked above.
+unsafe impl<T: ?Sized + Sync> Sync for RwLockWriteGuard<'_, T> {}
 
 impl<T: ?Sized> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
@@ -390,3 +482,10 @@ impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
         crate::lockwatch::note_release();
     }
 }
+
+// The state-word transitions are pure, so their saturation and underflow
+// refusals are unit-tested directly rather than left to a boundary no live
+// workload can reach.
+#[cfg(all(test, not(loom)))]
+#[path = "rwlock_tests.rs"]
+mod tests;

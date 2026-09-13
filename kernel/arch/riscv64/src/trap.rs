@@ -38,7 +38,7 @@
 //! host doc builds; the dispatch slot and `scause` decode build on the
 //! host so their unit tests run under `cargo test`.)
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use tairix_sync::FnCell;
 
 /// Caller-saved integer registers plus the return-state CSRs saved by
 /// `tairix_riscv64_trap_vector` before it calls the Rust handler, laid
@@ -249,8 +249,8 @@ pub const fn is_supervisor_external_interrupt(scause: u64) -> bool {
 /// not allocate, block, or re-enter the scheduler.
 pub type TrapDispatchFn = extern "C" fn();
 
-/// Slot holding the installed dispatcher as a raw function pointer.
-static TRAP_DISPATCH_FN: AtomicUsize = AtomicUsize::new(0);
+/// The installed trap dispatcher.
+static TRAP_DISPATCH_FN: FnCell<TrapDispatchFn> = FnCell::empty();
 
 /// Failure modes of [`set_trap_dispatch`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -266,25 +266,25 @@ pub enum SetDispatchError {
 ///
 /// [`SetDispatchError::AlreadyInstalled`] on the second publish.
 pub fn set_trap_dispatch(cb: TrapDispatchFn) -> Result<(), SetDispatchError> {
-    let raw = cb as usize;
-    TRAP_DISPATCH_FN
-        .compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ())
-        .map_err(|_| SetDispatchError::AlreadyInstalled)
+    if TRAP_DISPATCH_FN.claim(cb) {
+        Ok(())
+    } else {
+        Err(SetDispatchError::AlreadyInstalled)
+    }
 }
 
 /// Address of the installed dispatcher (`0` if none). Test/diagnostic
 /// observer.
 #[must_use]
 pub fn trap_dispatch_addr() -> usize {
-    TRAP_DISPATCH_FN.load(Ordering::Acquire)
+    TRAP_DISPATCH_FN.addr() as usize
 }
 
 #[cfg(test)]
 fn clear_trap_dispatch_for_tests() {
     // Test-only: lets back-to-back host tests reinstall a dispatcher.
     // Production code never clears the slot.
-    TRAP_DISPATCH_FN.store(0, Ordering::Release);
+    TRAP_DISPATCH_FN.clear();
 }
 
 // --- Freestanding trap vector + Rust handler ----------------------
@@ -325,12 +325,8 @@ pub unsafe fn install_trap_vector() {
     // Arm the fault-windowed user copy alongside the vector: the two are
     // one mechanism (the handler below redirects an in-window fault to
     // the copy's fix-up), so no consumer can install the vector without
-    // the recovery. The install is idempotent for this routine; a
-    // conflicting occupant is a boot-order defect the hart must not run
-    // past (fail closed).
-    if crate::uaccess::install().is_err() {
-        crate::kernel_arch::halt_current_hart();
-    }
+    // the recovery.
+    crate::uaccess::install();
     let base = tairix_riscv64_trap_vector as *const () as usize;
     // SAFETY: `base` is the 4-byte-aligned address of the asm trap
     // vector (direct mode encodes mode 0 in the low two bits, which are
@@ -803,13 +799,7 @@ unsafe fn trap_body(
         // the installed IPI callback.
         crate::preempt::on_software_interrupt();
     } else if is_supervisor_external_interrupt(scause) {
-        let raw = TRAP_DISPATCH_FN.load(Ordering::Acquire);
-        if raw != 0 {
-            // SAFETY: every value stored into the slot round-trips a
-            // valid `TrapDispatchFn` through `set_trap_dispatch`;
-            // function pointers are `usize`-sized so the transmute is
-            // lossless.
-            let cb: TrapDispatchFn = unsafe { core::mem::transmute::<usize, TrapDispatchFn>(raw) };
+        if let Some(cb) = TRAP_DISPATCH_FN.load() {
             cb();
         }
         // With no dispatcher installed the source stays pending and
@@ -959,8 +949,12 @@ mod tests {
     #[test]
     fn trap_dispatch_addr_round_trips_installed_fn() {
         clear_trap_dispatch_for_tests();
-        set_trap_dispatch(host_dispatch_cb).expect("install");
-        assert_eq!(trap_dispatch_addr(), host_dispatch_cb as *const () as usize);
+        // Coerce once: the published address is compared against *this*
+        // pointer value, because two coercions of one `fn` item are not
+        // guaranteed to share an address.
+        let cb: TrapDispatchFn = host_dispatch_cb;
+        set_trap_dispatch(cb).expect("install");
+        assert_eq!(trap_dispatch_addr(), cb as *const () as usize);
         clear_trap_dispatch_for_tests();
     }
 }

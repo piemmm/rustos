@@ -1,7 +1,8 @@
 # tairix-sync
 
 Shared `no_std` synchronisation primitives for TAIRiX: spin / MCS / RW
-locks, `SeqLock`, and set-once `Once` / `OnceCell`.
+locks, `SeqLock`, set-once `Once` / `OnceCell`, and `FnCell` — the published
+function pointer every callback seam installs through.
 
 These primitives are foundational and free of any kernel dependency, so
 they live in `lib/` where every layer may consume them (`AGENTS.md` §6,
@@ -13,11 +14,18 @@ architecture ports all build on this single, deduplicated surface
 See the crate-level rustdoc for the primitive catalogue and the
 selection guidance.
 
+## Oracles
+
+Two gates cover what a test suite cannot. `cargo xtask loom` model-checks the
+primitives over every thread interleaving; `cargo xtask miri` interprets the
+crate — default build and `lock-diagnostics` build — for undefined behaviour
+in the hand-written `unsafe`. Both are `ci` stages.
+
 ## Stability tier
 
 `stable` — the public surface (the lock types, their guards,
-`Once`/`OnceCell`, and the `InterruptControl` seam) is consumed across the
-kernel, driver, userland and test trees.
+`Once`/`OnceCell`, `FnCell`, and the `InterruptControl` seam) is consumed
+across the kernel, driver, userland and test trees.
 
 It depends on `core` alone, never `alloc` (and `loom` under the opt-in
 `--cfg loom` model-check build). That is deliberate and load-bearing: a

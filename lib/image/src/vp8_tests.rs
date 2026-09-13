@@ -275,3 +275,22 @@ fn the_inverse_transforms_are_linear_in_their_input() {
         assert!((two - 2 * one).abs() <= 1, "{one} doubled is {two}");
     }
 }
+
+/// A corrupt stream can dequantise to coefficients whose second transform
+/// pass would multiply past 32 bits. The transform must answer a bounded
+/// residual — one the sample addition cannot overflow either — rather than
+/// trap. Found by `fuzz_image`'s mutated-WebP harness.
+#[test]
+fn the_inverse_dct_bounds_a_corrupt_streams_coefficients() {
+    for extreme in [i16::MAX, i16::MIN] {
+        let residual = inverse_dct(&[extreme; BLOCK_COEFFS]);
+        for value in residual {
+            // Every sample the decoder adds this to is a `u8`, so the
+            // bound has to leave room for one.
+            assert!(
+                value.checked_add(i32::from(u8::MAX)).is_some(),
+                "residual {value} would overflow the sample addition"
+            );
+        }
+    }
+}

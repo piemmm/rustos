@@ -37,6 +37,25 @@ use crate::resample::{resample_pixels, Region, ResampleError};
 use crate::round::round_rect_coverage;
 use crate::scan::{FillRule, SampleSpace, ScanFill, MAX_DRAWING_EXTENT};
 
+/// The most pixels one surface may hold.
+///
+/// [`MAX_DRAWING_EXTENT`] bounds a *coordinate*, so a surface with both sides
+/// inside it can still ask for 2^40 pixels — 4 TiB, which
+/// `Vec::try_reserve_exact` grants outright on an overcommitting host, leaving
+/// the fill to touch pages until the process is killed. Bounding the total is
+/// what makes such a request a refusal rather than a host-policy lottery.
+///
+/// Twice the pixels of the largest display TAIRiX targets (8K UHD, 33.2 Mpx),
+/// so every legitimate full-screen buffer passes. It is a containment bound on
+/// an absurd size, not a memory budget: a machine short of RAM still refuses a
+/// far smaller surface through the allocator.
+///
+/// Nor is it the defence against a hostile image. A decoder weighs a declared
+/// geometry against its own `tairix_image::DecodeLimits` before allocating
+/// anything, so every surface built here is sized from geometry already
+/// validated — a discovered display mode, a window rect, a bounded icon side.
+pub const MAX_SURFACE_PIXELS: usize = 1 << 26;
+
 /// Where one span of a rounded-rectangle paint lands and what it does there:
 /// the span's own position on the surface — which is where its ordered dither
 /// is read — and the mode every span of that paint shares.
@@ -234,9 +253,10 @@ impl CachedBytes for Surface {
 impl Surface {
     /// Allocate a `width`×`height` surface cleared to fully transparent.
     ///
-    /// Returns `None` if the pixel count overflows `usize` (a surface that
-    /// could never be allocated) or the allocator refuses the pixels, so the
-    /// caller fails closed rather than panicking.
+    /// Returns `None` if either side is past [`MAX_DRAWING_EXTENT`], if the
+    /// total is past [`MAX_SURFACE_PIXELS`], if the pixel count overflows
+    /// `usize` (a surface that could never be allocated), or if the allocator
+    /// refuses the pixels, so the caller fails closed rather than panicking.
     #[must_use]
     pub fn new(width: u32, height: u32) -> Option<Self> {
         Self::filled(width, height, Pixel::TRANSPARENT)
@@ -1869,8 +1889,20 @@ fn add_offset(origin: i32, offset: u32) -> Option<u32> {
 
 /// `width * height` as a `usize`, or `None` on overflow.
 fn pixel_count(width: u32, height: u32) -> Option<usize> {
+    // A side past the drawing bound is refused before the allocator is asked.
+    // `try_reserve` alone is not the refusal it looks like: a host that
+    // overcommits hands back address space for a request no machine could
+    // satisfy, and the write that follows then faults pages in until the
+    // process is killed — an outcome no `Option` can report. The bound is
+    // what `MAX_DRAWING_EXTENT` already claims ("no surface that can be
+    // allocated comes close to it") and what `Surface::layered` already
+    // enforces; stating it here makes it true of every surface.
+    if width > MAX_DRAWING_EXTENT || height > MAX_DRAWING_EXTENT {
+        return None;
+    }
     let count = u64::from(width).checked_mul(u64::from(height))?;
-    usize::try_from(count).ok()
+    let count = usize::try_from(count).ok()?;
+    (count <= MAX_SURFACE_PIXELS).then_some(count)
 }
 
 /// Whether `local` falls in one of the two `radius`-wide bands at the ends of

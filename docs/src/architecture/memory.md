@@ -84,10 +84,13 @@ handed out; usable regions are rounded *inward* to whole-frame
 boundaries.
 
 **The zero page is never enrolled**, even when firmware reports it
-usable (the PC low-BIOS region starts at physical 0): under an identity
-direct map its translation is the null pointer, which no
-`NonNull`-based consumer ([`FrameTableSource`], the DMA pool, an MMIO
-window) can represent. Because the buddy lists hand out the lowest free
+usable (the PC low-BIOS region starts at physical 0): under an *identity*
+direct map — what the identity-linked `aarch64` and `riscv64` ports carry
+— its translation is the null pointer, which no `NonNull`-based consumer
+([`FrameTableSource`], the DMA pool, an MMIO window) can represent. The
+reservation is unconditional rather than per-port, because a frame the
+allocator must never hand out is cheaper to exclude once than to reason
+about per consumer. Because the buddy lists hand out the lowest free
 index first, a frame 0 that a consumer draws, cannot use, and returns
 would be re-issued to every later request — wedging allocation
 permanently while `free_frames` still reports plenty. It stays marked
@@ -168,9 +171,9 @@ the difference — it settles on the machine's advertised size either way — so
 the totals go to the log as `KERNEL_RAM_SELF_TEST`, at `Warn` when anything
 was unreachable, because a kernel that cannot address some of its own RAM by
 pointer will fail closed on every consumer that draws such a frame. Frame
-zero is skipped, exactly as the frame allocator never enrols it: an identity
-map translates it to the null pointer, so a window that began there would
-fail to map and take the whole first chunk of low RAM with it.
+zero is skipped, exactly as the frame allocator never enrols it: under an
+identity map it translates to the null pointer, so a window that began
+there would fail to map and take the whole first chunk of low RAM with it.
 
 **On the console.** The `TAIRiX <version> <RAM>MiB` identity line is drawn
 here — the figure starts at zero and climbs to the installed total in
@@ -284,7 +287,13 @@ page-table frames it draws through the Arch HAL `PageTableFrames` seam
 [`PhysMap`] (§3b), zeroes it, and hands the port a `TableFrame`
 (physical address + `'static` entry view). A frame outside the direct
 map is returned to the allocator and the request fails closed
-(`AGENTS.md` §2.9), never synthesising a pointer. This keeps the §17.4
+(`AGENTS.md` §2.9), never synthesising a pointer. The seam owns the
+*recovery* as well: a walk turns a parent entry's output address back
+into a table through `PageTableFrames::table_at`, never by
+dereferencing the address itself, so the port holds no
+physical/virtual relationship of its own and a descriptor naming an
+address the source never handed out ends the walk as `NotMapped`
+rather than being followed. This keeps the §17.4
 one-way edge intact — `kernel/arch/*` names only the HAL trait, never
 `kernel/mem` — while a real per-process address space's tables come from
 ordinary reclaimable RAM rather than a fixed `.bss` pool
@@ -381,10 +390,18 @@ round-trip, and every fail-closed branch are exercised with
 **The byte move itself runs under the architecture port's hardware
 fault window** (`tairix_arch_api::uaccess`, the `copy_from_user`
 page-fault fix-up of `tests/SECURITY.md` §5). Each MMU port publishes a
-fault-windowed span-copy routine into a set-once Arch HAL slot at its
+fault-windowed span-copy routine into an Arch HAL slot at its
 trap-vector install chokepoint (riscv64 `trap::install_trap_vector`,
 aarch64 `exceptions::init_vectors`, x86_64 the production boot beside
-its dedicated `#PF`-entry install): the copy's loads/stores sit inside
+its dedicated `#PF`-entry install). Publication is unconditional and
+infallible: an image holds exactly one such routine (the sole installer
+is the port compiled into it), and aarch64 arms the window per CPU, so
+every secondary republishes the identical pointer. A set-once slot would
+have to judge whether an occupant *is* the routine offered, which no
+sound test can answer — two coercions of one `fn` item need not share an
+address, so it would refuse the right routine while staying blind to a
+wrong one (`plans/OPEN-DEFECTS.md` D120). The copy's
+loads/stores sit inside
 an exported `[window_begin, window_end)` instruction range, and the
 port's trap handler, on a **kernel-mode** data fault whose saved PC lies
 inside that range, rewrites the frame's saved PC (`sepc` / the frame
@@ -522,9 +539,10 @@ composing the layers above:
   the buffer's *physical frames*, reached through the kernel direct physical
   map (`PhysMap`): `bytes` / `bytes_mut` / `slot_base` translate the buffer's
   `phys` into a pointer. The CPU therefore sees exactly the frames the device
-  DMAs to — there is no disconnected copy. Production wires a `DirectPhysMap`
-  (the boot identity map over low physical memory); host tests wire a
-  `SimPhysMap` standing in for physical RAM.
+  DMAs to — there is no disconnected copy. Production wires the port's own
+  direct map (`x86_64`: the kernel-half window at `PHYSMAP_VMA_BASE`;
+  `aarch64`/`riscv64`: an identity window over low physical memory); host
+  tests wire a `SimPhysMap` standing in for physical RAM.
 - **Zero-on-free** — every byte of the data region is wiped with
   [`zeroize`](https://crates.io/crates/zeroize) before the frames return to
   the buddy allocator. A later allocation that lands on the same slot sees
