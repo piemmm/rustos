@@ -103,8 +103,8 @@ every event pays the widest event's width — a path is far wider than one.
   authority, exactly as it would a path in its own argument list — which is
   why `files.app` puts every open target through the very same
   `location_components` rule its command line's starting location goes
-  through, and why `viewer.app`, which requests no filesystem capability at
-  all, cannot act on one (see *File viewer* below).
+  through, and why `view.app`, which requests no filesystem capability at
+  all, cannot act on one (see *Picture and document viewer* below).
 
 ## An overlay is a popup surface, never pixels in the app's own window
 
@@ -566,8 +566,10 @@ name — never a hard-coded viewer path), opens the file **read-only in its own
 table**, and spawns that bundle's `Run` with the descriptor wired onto the
 child's `STDIN` slot (`FdWire::Handle`) plus the reserved `DOCUMENT_ROLE_ARG`
 token and the leaf name for the window title. The kernel clones the read-only
-open description into the child owner-checked, so the viewer reads its document
-with **no filesystem capability of its own** (least privilege) and there is no
+open description into the child owner-checked and **confers** it — the child's
+descriptor carries the manager's captured identity, exactly as a `fd_grant`
+delegation carries its grantor's — so the viewer reads its document with **no
+filesystem capability of its own** (least privilege) and there is no
 post-spawn channel or ordering race; the manager closes its own descriptor
 immediately and reaps the child on the same any-child member as a launched
 bundle. Launching is asynchronous and fail-loud: a file no installed
@@ -1131,21 +1133,22 @@ composes the exact same `Browser` (it only chose a different starting
 directory, `AGENTS.md` §2.2).
 
 Opening a file into a viewer through this picker works as follows
-(`plans/NEW-FILEMANAGER.md` FM9-b): the session launches the Viewer, the
-Viewer (handed no document) asks the picker, the picker opens at
-`/Users/root`, a click on the planted document row concludes the pick, and
-the session delegates the chosen file to the Viewer through the CU6 one-shot
-`fd_grant` / `fd_redeem` — the Viewer then reads exactly that one file with no
-filesystem capability of its own.
+(`plans/NEW-FILEMANAGER.md` FM9-b): the session launches `view`, which (handed
+no document) asks the picker, the picker opens at `/Users/root`, a click on the
+planted document row concludes the pick, and the session delegates the chosen
+file to `view` through the CU6 one-shot `fd_grant` / `fd_redeem` — `view` then
+reads exactly that one file with no filesystem capability of its own.
 
 **Coverage: host-proven and guest-proven.** The kernel delegation path (mint,
 the instance gate, one-shot redemption, the grantor-identity re-check) and the
 picker's own model are unit-tested on the host, and the
 `filepick-qemu-aarch64` vertical drives the whole click-through on a running
-kernel: it launches the Viewer from the program library, waits for the
-session's own `PICKER_SHOWN` record, clicks the planted document's row, and
-passes only on a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
-`sc=fd_redeem` from `comm=viewer`.
+kernel: it launches `view` from the program library, waits for the session's
+own `PICKER_SHOWN` record, clicks the planted document's row, and passes only
+on a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
+`sc=fd_redeem` from `comm=view`. The planted document is a text file, which a
+picture viewer states it cannot draw — the claim the run makes is which
+principal delegated to which, and a refusal reads it just as a render would.
 
 Attributing each half to the principal the kernel says made the call is what
 makes the run a statement about a hand-off *between* two processes rather than
@@ -2061,57 +2064,6 @@ bundle (`plans/NEW-TASKBAR.md` T5), and
 the autoload QEMU vertical types a real command into the served window at
 the seat keyboard, PASSing only on the kernel-attested keyboard → session →
 terminal → pipe → shell → spawn round trip.
-
-## File viewer (`tairix-viewer`)
-
-The read-only text viewer is the first consumer of the desktop's trusted
-file picker and the CU6 one-shot file delegation (`plans/APPWIN.md` AW5,
-`plans/CAPABILITY_USE.md`). Its manifest requests `CAP_CONSOLE_WRITE` and
-`CAP_SHM` and deliberately **no filesystem capability**: on its own the
-viewer can open, list, and stat nothing.
-
-At startup the `Run` binary creates its window and immediately asks the
-session's picker (`WindowClient::pick_file`). The user browses in the
-*session's* UI under the *session's* authority; the viewer receives
-exactly one conclusion on its authenticated event channel — a
-`FilePicked` carrying the kernel's one-shot `fd_grant` handle, or a
-`PickCancelled`. Redeeming the handle (`fd_redeem`, unprivileged)
-installs a read-only descriptor whose reads the kernel re-authorises
-under the session's captured identity, so the viewer reads exactly the
-one file the user chose and nothing else — the user-mediated file
-capability of `AGENTS.md` §16.5, end to end.
-
-The host-tested view engine keeps untrusted content honest:
-`content_lines` bounds the shown bytes (`CONTENT_MAX`), splits on line
-feeds, and sanitises **every** non-printable byte to a placeholder before
-anything reaches the renderer, so a hostile picked file can neither pin
-unbounded memory nor smuggle control sequences; `Viewer::render_into`
-paints through the active theme and the shared monospace face, into the
-window-sized surface the `Run` binary holds for the life of the window.
-A pointer or scroll round narrows that surface's clip to the rectangle
-its controls reported and presents only that rectangle, so a hover costs
-a control's pixels rather than a window's.
-
-The window is mouse-driven, exactly as every desktop app is expected to
-be. A `Viewer` composes the current file view (or a status message) with
-a shared header `Button` ("Open…") and a shared vertical `ScrollBar`,
-kept in step through one `ScrollModel` — the same scroll geometry the
-window manager's own root-viewport bars use. `ViewerLayout` is the one
-definition of where the header, the button, the text area, and the
-scrollbar's gutter sit within the window, shared by rendering and pointer
-routing so the two can never disagree about where a control actually is.
-`Viewer::on_pointer` is the single pure entry point a translated
-`tairix_input::InputEvent` is fed into: clicking the button asks for
-another pick, dragging the thumb or clicking the track scrolls to the
-dragged or paged offset, and the wheel steps the view — the `Run` binary
-translates each delivered wire pointer event into that vocabulary through
-the one shared `tairix_window::pointer_input_events` mapping, the same
-translation the file manager's window channel uses. The keyboard remains
-a fully working secondary path: `Enter` asks for another pick, and the
-arrow/page/home/end keys still step the view. A cancelled pick leaves the
-viewer open with a notice; a `CloseRequested` ends it cleanly. The program
-library's catalog carries the viewer's entry, so the desktop's popup
-spawns the bundle.
 
 ## Date & Time (`tairix-datetime`)
 

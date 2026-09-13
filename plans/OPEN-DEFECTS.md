@@ -151,7 +151,7 @@ table normalises all three to **closed**. 23 open, 97 closed, 120 total.
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
 | D120 | a per-CPU guarded-copy republish was refused, halting every aarch64 secondary |
-| D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS` |
+| D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS`, breaking the inherited-document hand-off |
 
 ## Scope
 
@@ -600,14 +600,15 @@ The open items, in priority order:
   accepted with this recorded for the PTY owner. The subsequent DHCPv4
   D2 change (`plans/DHCP.md` — the `lib/net::Stack`/`netstack` interface
   integration of the DHCP client) reproduces the identical 300 s timeout at
-  the same PTY Ctrl-C stage (viewer.app loaded, desktop still pumping, no
+  the same PTY Ctrl-C stage (the last bundle of the store scan loaded — the
+  transcripts name `viewer.app`, since deleted — desktop still pumping, no
   WARN/panic/OOM) for the identical reason — a few added `lib/net`/`netstack`
   bytes shift the same load/spawn timing; DHCP cannot reach the pty path — and
   was likewise accepted (User-confirmed) with this recorded for the PTY owner.
   The subsequent DHCPv6 D4a change (`plans/DHCP.md` — the pure
   `lib/net::dhcpv6` RFC 8415 client engine) reproduces the identical 300 s
-  timeout at the same stage (viewer.app loaded ~87 s guest-time, desktop
-  still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
+  timeout at the same stage (the store scan's last bundle loaded ~87 s
+  guest-time, desktop still pumping IPC, no WARN/panic/OOM) for the identical reason — the new
   `lib/net` module adds compiled bytes that shift the same load/spawn
   timing; DHCPv6 is inert at runtime here (D4a is engine-only, no netstack
   wiring) so it cannot reach the pty path — and was likewise recorded for
@@ -5868,9 +5869,9 @@ the sibling surface no channel reports:
 dedicated vertical rather than a stage on `autoload_input`, which is the D15
 freeze case — landing a security path's only guest coverage on a
 known-intermittent host would make it intermittent by construction. It boots the
-production aarch64 pipeline against the shared autoload root, launches the
-Viewer from the program library, waits for `PICKER_SHOWN`, and clicks the
-planted document's row. The row's screen point is reconstructed by driving the
+production aarch64 pipeline against the shared autoload root, launches `view`
+from the program library, waits for `PICKER_SHOWN`, and clicks the planted
+document's row. The row's screen point is reconstructed by driving the
 production `Browser` and `render::entry_rect` over the home listing, with both
 sides deriving that listing from the same two definitions the fixture plants
 from (`tairix_users::HOME_SUBDIRS` and `HOME_DOC_NAME`), so neither carries a
@@ -5878,17 +5879,21 @@ copy of it; the picker is undecorated session chrome, so the offset is
 `PICKER_ORIGIN` alone with no client inset.
 
 The guest PASS is a `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed
-by `sc=fd_redeem` from `comm=viewer`, in that order. Attributing each half to
+by `sc=fd_redeem` from `comm=view`, in that order. The planted document is text,
+which a picture viewer states it cannot draw — the run's claim is which
+principal delegated to which, and a refusal reads it as well as a render. Attributing each half to
 the principal the kernel says made the call is what makes the run a statement
 about a hand-off *between* processes; requiring the order rules out a redemption
 that could not have come from this pick.
 
-**Evidence.** The run's transcript carries `viewer.app` loaded, then
+**Evidence.** The run's transcript carries the picked application loaded, then
 `id=20008 file picker on screen`, then `comm=desktop … sc=fd_grant`, then
-`comm=viewer … sc=fd_redeem`, and the two `proc` ids differ with the viewer's
+`comm=<app> … sc=fd_redeem`, and the two `proc` ids differ with the app's
 `pproc` naming the session — so the delegation crossed a real process boundary.
-Falsified by removing the pick-click: the run then fails at its ceiling with the
-Viewer launched and the picker on screen but **zero** grant or redeem records,
+The recorded run named `viewer`, the app the vertical was written against; it
+is now `view` and the transcript's shape is unchanged.
+Falsified by removing the pick-click: the run then fails at its ceiling with
+`view` launched and the picker on screen but **zero** grant or redeem records,
 so the witness is caused by the gesture and not by the launch. Four consecutive
 runs pass in 16.88–17.09 s.
 
@@ -6987,14 +6992,14 @@ and only in aggregate.
 **Where.** `syscalls::apply_attach_wires`, and the authority `PathAuthority::of`
 resolves for the descriptor it produces.
 
-**Mechanism.** `FdWire::Handle` cloned the parent's `OpenFile` into the child
-with its backing unchanged, so the child held an `OpenBacking::Path`. A path
-backing is deliberately re-resolved and re-authorised against whoever *uses*
-it — that is what makes a revoked capability stop working mid-open — so
-`PathAuthority::of` read the **child's** uid and capability set, and `admit()`
-demanded `CAP_FS_ACCESS`. Every `fs_read` and `fs_stat` on the wired descriptor
-was therefore `PermissionDenied`, for exactly the programs the hand-off exists
-for: a viewer deliberately requests no filesystem capability. `fd_grant` was
+**Mechanism.** A wire cloned the parent's `OpenFile` into the child with its
+backing unchanged, so the child held an `OpenBacking::Path`. A path backing is
+deliberately re-resolved and re-authorised against whoever *uses* it — that is
+what makes a revoked capability stop working mid-open — so `PathAuthority::of`
+read the **child's** uid and capability set, and `admit()` demanded
+`CAP_FS_ACCESS`. Every `fs_read` and `fs_stat` on the wired descriptor was
+therefore `PermissionDenied`, for exactly the programs the hand-off exists for:
+a viewer deliberately requests no filesystem capability. `fd_grant` was
 unaffected, because `OpenBacking::Delegated` carries the grantor's captured
 identity precisely so a capability-less holder can read what it was handed — so
 the *picker* route worked and the *file-manager* route did not, and
@@ -7011,44 +7016,60 @@ wire adds is zero-copy and seekability, not reach. The child still cannot
 re-open the path: it holds no `CAP_FS_ACCESS`, so `fs_open` refuses, and the
 captured authority is bound to that one descriptor.
 
-**The fix — a distinct backing, not a reuse of `Delegated`.** A delegation is
-not the right carrier. `DelegatedFile::write_ceiling` is a `u64` with `0`
-meaning read-only, and `fd_grant` enforces `is_write() == (ceiling > 0)` so
-that an unbounded writable delegation is not representable. `spawn` has no
-ceiling parameter and legitimately needs none: the ceiling exists so a
-*service* can hand an *untrusted caller* direct access to a file it owns
-without also handing it the ability to fill the volume, and a parent and its
-own child are not that pairing — the parent could fill the volume itself.
-Reusing `Delegated` would therefore have had to either refuse writable wires
-(breaking output redirection) or mint an unbounded writable delegation,
-destroying the invariant `fd_grant` rests on.
+**The fix — conferral onto the existing delegation, not a second carrier.**
+`OpenFile::conferred_to_child` re-expresses a path backing as an
+`OpenBacking::Delegated` carrying the spawning parent's captured uid and
+effective set, sharing the one open file description so a redirected child
+still walks the file with its parent. It is applied to every resolved wire,
+not only an explicit handle, because an inherited standard stream is the same
+descriptor reaching the same child by a different spelling.
 
-So a wired path becomes `OpenBacking::Inherited(InheritedFile { path, uid,
-caps })`, resolving to the parent's identity with `write_ceiling: None` — the
-parent's own limits. The capture happens at the single point in
-`apply_attach_wires` every parent open entry funnels through, so an inheriting
-wire captures exactly as an explicit `Handle` does. It is not re-delegatable:
-`fd_grant` pattern-matches `OpenBacking::Path` alone, so the new variant is
-refused onward without a new check, and captured authority never widens.
-`own_path()` answers `None` for it, as it already did for a delegation, so
-`fs_lock`, the file-watch registration, and `fs_readdir` — each of which
-authorises under the *holder's* own credentials — fail closed against it rather
-than running a captured identity under the wrong principal.
+A delegation is the right carrier once the extent ceiling is honest about the
+two grantors, so `DelegatedFile::write_ceiling` became `Option<u64>`:
+`fd_grant` attenuates and always names a ceiling (its `is_write() == (ceiling
+> 0)` check still refuses an unbounded writable *grant*), a parent passing on
+its own reach names none, and `PathAuthority` reads the field directly rather
+than re-wrapping it. A second `Inherited` backing was considered and rejected:
+it would have duplicated `DelegatedFile` and its authority resolution, grown a
+third arm at every match site that behaved identically to `Delegated`, and
+bought no invariant — an unbounded writable captured-identity descriptor is
+representable either way, and what actually holds the line is `fd_grant`'s own
+check.
 
-**Also fixed, found by the same reading.** A **directory** handle could be wired
-onto a standard slot. A standard slot is a byte stream, and a directory's
-authority is a listing and a namespace to open through — the reason `fd_grant`
-declines one — so it is now refused `OutOfRange` at the wire rather than handed
-over as a descriptor no stream operation can serve.
+It is never a widening. The parent could perform every operation itself; a
+child holding *more* than its parent is attenuated to the parent's captured
+set; and a backing that is already a delegation passes through carrying its
+own grantor's identity rather than being re-captured, so a spawn cannot
+launder authority its holder was never given.
 
-**Proved by.**
-`spawn_wires_a_path_backed_handle_under_the_parents_captured_identity`: a
-capability-less child of a *different* uid resolves its wired descriptor's
-authority to the parent's, `admit()` passes, no extent ceiling is invented, the
-parent's own close leaves the child's clone intact, and the directory wire is
-refused. Both halves fail before the fix and pass after. The only wire test
-before it wired a *pipe* end, which is not a path backing and never reached the
-gate.
+**Also fixed, found by the same reading.** A **directory** handle could be
+wired onto a standard slot. A standard slot is a byte stream, and a
+directory's authority is a listing and a namespace to open through — the
+reason `fd_grant` declines one — while the direction check alone admits one on
+`stdin`, since `READ | DIRECTORY` is a legitimate open. It is now refused
+`OutOfRange` at the wire. A directory cannot instead arrive by *inheritance*:
+a wire is the only thing that installs an entry behind a standard slot and
+descriptor numbers are allocated above them, so no slot a wire inherits from
+ever holds one. What may be conferred at all is the one question
+`OpenFile::delegatable_path` answers, now shared by `fd_grant` and the
+conferral so the two can never disagree.
+
+A conferred descriptor is consequently not a lock or watch subject, exactly as
+a granted one is not, because both re-resolve under the holder's own identity;
+nothing in the tree does either on a standard descriptor (`flock` opens its
+own path), so this narrows no live caller.
+
+**Proved by.** `spawn_confers_the_parents_reach_on_a_wired_path_descriptor`
+(a real wired spawn: the conferred backing, the captured uid and effective
+set, no invented ceiling, no `own_path`, and the parent's own close leaving
+the child's descriptor intact),
+`a_conferred_descriptor_reads_under_the_conferring_identity` (a
+capability-less holder of a different uid reads under the parent's captured
+identity, and a read-only conferral never becomes writable),
+`conferring_widens_no_backing_but_a_path` (a delegation keeps its
+own grantor, the description is shared, a directory is never conferred), and
+`spawn_refuses_a_directory_handle_behind_a_standard_slot`. Each fails on the
+unfixed tree and passes after.
 
 ---
 

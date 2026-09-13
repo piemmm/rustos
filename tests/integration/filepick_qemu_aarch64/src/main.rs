@@ -16,7 +16,7 @@
 //! So the guest boots the **production** aarch64 pipeline
 //! (`boot_aarch64::boot`) against a planted encrypted root, and the host drives
 //! the desktop blind through the QEMU monitor: unlock, log in, start the
-//! desktop, then Library → the viewer's row → the document's row in the
+//! desktop, then Library → `view`'s row → the document's row in the
 //! picker that opens. Only the audit sink is swapped, for the PASS witnesses
 //! below.
 //!

@@ -245,16 +245,16 @@ D92 instance gate, one-shot redemption, the grantor-identity re-check, the
 extent ceiling). **The guest run now exists**:
 `tests/integration/filepick_qemu_aarch64`, a dedicated vertical rather than a
 stage on the aarch64 `autoload_input` vertical, which would have inherited its
-open intermittency (D15). It launches the Viewer from the program-library row,
+open intermittency (D15). It launches `view` from the program-library row,
 waits for the picker to be on screen, and clicks the planted document's row;
 its guest PASS is `SyscallInvoked` `sc=fd_grant` from `comm=desktop` followed by
-`sc=fd_redeem` from `comm=viewer`, attributing each half to the principal the
+`sc=fd_redeem` from `comm=view`, attributing each half to the principal the
 kernel says made the call so the run states a hand-off *between* processes.
 
 Two of this section's earlier premises were wrong and are corrected here. The
-Viewer bundle **is** already on every fixture image — the image build discovers
-it from the userland walk, and its manifest's `library = "Accessories"` already
-makes it a popup row — so no fixture change was needed. And the session **can**
+viewer bundle **is** already on every fixture image — the image build discovers
+it from the userland walk, and its manifest's `library` category already makes
+it a popup row — so no fixture change was needed. And the session **can**
 emit a record: `DESKTOP_REVEALED`, `WINDOW_SHOWN` and `MENU_SHOWN` already
 reach the serial transcript through `tairix_rt::LogSink`.
 
@@ -936,8 +936,8 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   composer parses an optional `associations` MIME array from `AppInfo.toml`
   and emits the signed MIME table the ABI already reserved (`mime_count` /
   `mime_type_at`); the whole body — capabilities then MIME table — is under the
-  signature, so a tampered association breaks the bundle. `viewer.app` declares
-  the text/structured-config types it displays.
+  signature, so a tampered association breaks the bundle. `view.app` declares
+  the picture types its decoder supports completely.
 - **The running-system `BundleSource` is `files.app`'s `RtBundleSource`**: a
   bounded recursive walk of the system program stores then `/Apps`, reading each
   `<Name>.app/AppInfo` through the shared, host-tested
@@ -953,10 +953,14 @@ hand-off is the TAIRiX spelling of `viewer < file`, race-free at spawn:
   manager does this; the read-only picker composes the same `Browser` and never
   launches. Host-tested (`association_from_appinfo` valid / empty / fail-closed);
   the app wiring rides the FM9 vertical and builds clippy-clean cross-compiled.
-- **The viewer's inherited-document startup path is done**: `viewer.app`
+- **The viewer's inherited-document startup path is done**: `view.app`
   detects `DOCUMENT_ROLE_ARG` and reads its document from the inherited `STDIN`
   descriptor (titling its window from the leaf name), distinct from its
-  interactive picker path (its standalone launch is unchanged).
+  interactive picker path (its standalone launch is unchanged). The wire now
+  *confers* the manager's reach — a path-backed descriptor reaches the child as
+  a delegation carrying the spawning parent's captured identity — which is what
+  makes the hand-off reach an application holding no filesystem capability at
+  all (D119, `plans/OPEN-DEFECTS.md`).
 
 **The explicit "Open With…" chooser is now done, and it is not a menu**
 (`plans/NEW-MENUS.md` §6, decision 2 — the candidate set grows with the
@@ -1505,14 +1509,14 @@ the click-through that keys on them is written.
     `/Users/root`. The guest half is
     `tests/integration/filepick_qemu_aarch64` — its own vertical, not a stage
     on `autoload_input`, which is the D15 freeze case. It clicks the
-    program-library button and the Viewer's row; the Viewer, handed no
-    document, asks the picker, which opens the home. A single pointer click on
-    the document row (reconstructed through the production `Browser` and
+    program-library button and `view`'s row; `view`, handed no document, asks
+    the picker, which opens the home. A single pointer click on the document
+    row (reconstructed through the production `Browser` and
     `render::entry_rect`, at `PICKER_ORIGIN` with **no** frame inset — the
     picker is undecorated session chrome) concludes the pick, so the session
-    `fd_grant`s the chosen file to the Viewer and the Viewer `fd_redeem`s it.
+    `fd_grant`s the chosen file to `view` and `view` `fd_redeem`s it.
     The guest PASS is `sc=fd_grant` from `comm=desktop` then `sc=fd_redeem`
-    from `comm=viewer`, in that order: attributing each half to the principal
+    from `comm=view`, in that order: attributing each half to the principal
     the kernel says made the call is what makes the run a claim about a
     hand-off *between* processes, and the order rules out a redemption that
     could not have come from this pick.

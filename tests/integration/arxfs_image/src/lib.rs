@@ -94,12 +94,14 @@ pub const NEW_FILE_CONTENT: &[u8] = b"TAIRiX wrote this file to arxfs over virti
 /// A document planted in the fixture account's home (`/Users/root`) on the
 /// users-root volume, so the desktop session's trusted file picker — which
 /// opens at the user's home — has a real regular file to choose. Choosing it
-/// drives the CU6 one-shot `fd_grant`/`fd_redeem` delegation into the viewer
+/// drives the CU6 one-shot `fd_grant`/`fd_redeem` delegation into `view`
 /// (`plans/NEW-FILEMANAGER.md` FM9-b).
 pub const HOME_DOC_NAME: &[u8] = b"Welcome.txt";
 
-/// Contents of [`HOME_DOC_NAME`], displayed by the viewer once the picked
-/// file's delegated descriptor is redeemed and read.
+/// Contents of [`HOME_DOC_NAME`], read by `view` once the picked file's
+/// delegated descriptor is redeemed. A picture viewer states why it cannot
+/// draw a text document rather than blanking, so the delegation the vertical
+/// is about is what the read proves, not a rendered page.
 pub const HOME_DOC_CONTENT: &[u8] =
     b"Welcome to TAIRiX.\nThis document was opened through the trusted file picker.\n";
 

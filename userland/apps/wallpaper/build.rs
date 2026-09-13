@@ -5,7 +5,7 @@
 //!
 //! This is deliberately self-contained and keys only off the OS component of
 //! the target (bare-metal vs hosted), never the instruction set, so `cargo
-//! xtask cfg-check` stays clean. It mirrors `userland/apps/viewer/build.rs`.
+//! xtask cfg-check` stays clean. It mirrors `userland/apps/view/build.rs`.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(freestanding)");

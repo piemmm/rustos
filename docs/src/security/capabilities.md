@@ -89,9 +89,9 @@ general process — the graphical login screen holds it and nothing else
 does, because `CAP_PROC_SPAWN` already subsumes it
 ([The parser sandbox](./sandbox.md)).
 
-The one **object-grained** delegation beside spawn is the file hand-off
-(`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6, `plans/APPWIN.md`
-AW5, `plans/APPDATA.md` §3.8): a holder of `CAP_FS_ACCESS` — the desktop
+The one **object-grained** delegation a holder mints explicitly is the file
+hand-off (`fd_grant`/`fd_redeem`, `plans/CAPABILITY_USE.md` CU6,
+`plans/APPWIN.md` AW5, `plans/APPDATA.md` §3.8): a holder of `CAP_FS_ACCESS` — the desktop
 session's trusted picker, or the app-data service handing over a blob —
 delegates one of its **own** plain file descriptors, one-shot, to a
 recipient named by the attested `ProcId` the grantor read from an `Origin`
@@ -108,9 +108,23 @@ already-delegated descriptor is refused at mint); a writable delegation must
 name a byte-extent ceiling, so an unbounded one cannot be minted at all; and
 the audited grant dies unredeemed with its recipient. This is how an app with
 **no** filesystem capability reads exactly the one file the user chose (the
-`viewer.app` consumer), and how one reaches its own bulk data at full VFS
+`view.app` consumer), and how one reaches its own bulk data at full VFS
 speed inside a store bounded by what the service granted — in both cases
 without any new capability entering the vocabulary.
+
+**Spawn confers the same kind of authority, on a descriptor the parent already
+holds.** A path-backed descriptor wired into a child's standard slot
+(`FdWire`, `plans/SPAWN.md` SP10) reaches it as a delegation carrying the
+*parent's* captured uid and effective set, because a path is re-resolved and
+re-authorised under whoever holds it and the whole point of handing a child a
+document is that the child need hold no filesystem capability. It differs from
+a minted grant in what it bounds: a parent passes on the reach it has, so there
+is no extent ceiling, where `fd_grant` attenuates deliberately. It is still
+never a widening — the parent could perform every operation itself, a child
+holding *more* than its parent is attenuated to the parent's set, and a
+descriptor that is already a delegation passes through carrying its own
+grantor's identity rather than being re-captured, so a spawn can never launder
+authority its holder was never given.
 
 ## Exercise, release, revoke
 

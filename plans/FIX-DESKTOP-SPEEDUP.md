@@ -437,13 +437,12 @@ service data, a resize, a theme change, a first paint) keeps presenting whole,
 which is correct and needs no report.
 
 - **`widgets` is the control-tree recipe**, landed exactly as above.
-- **`viewer` and `wallpaper` follow it.** Both hold one window-sized surface for
+- **`view` and `wallpaper` follow it.** Both hold one window-sized surface for
   the life of the window, reallocated with the frame region on a resize and
-  adopted only once the session accepts the re-map. The viewer's engine draws
-  through `Viewer::render_into` — the intermediate text sub-surface it used to
-  allocate and blit is gone — and reports the text area and the bar together
-  whenever the scroll offset moves, which is the one commit its host makes into
-  a control. The chooser reports its gallery marks through
+  adopted only once the session accepts the re-map. The viewer's engine paints
+  into that retained surface — it allocates no intermediate sub-surface — and
+  reports the page area and whichever bars moved together whenever the pan or
+  zoom changes, which is the one commit its host makes into a control. The chooser reports its gallery marks through
   `damage::move_mark` over the tile rectangles (`Chooser::candidate_rect`), adds
   the preview model and its caption when the selection moves, reports the status
   line when an apply outcome is committed, and — the win peculiar to this app —

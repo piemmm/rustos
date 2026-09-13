@@ -535,14 +535,19 @@ impl FaultLocality {
 
 /// A filesystem object delegated by another process, carrying the
 /// **grantor's** captured authority (`plans/CAPABILITY_USE.md` CU6 — the
-/// file picker's one-shot hand-off).
+/// file picker's one-shot hand-off, and the spawn wiring of
+/// `plans/SPAWN.md` SP10).
 ///
-/// Captured at `fd_grant` time from the grantor's kernel-attested identity
-/// — never from anything the recipient supplies — so every later operation
-/// on the redeemed descriptor is re-authorised through the secured VFS
-/// under exactly the authority the grantor held, no more. The recipient's
-/// own identity and capability set never enter the check: the delegation
-/// *is* the authority, established by the grantor's user-mediated choice.
+/// Captured from the grantor's kernel-attested identity — never from
+/// anything the recipient supplies — so every later operation on the
+/// descriptor is re-authorised through the secured VFS under exactly the
+/// authority the grantor held, no more. The recipient's own identity and
+/// capability set never enter the check: the delegation *is* the authority,
+/// established by the grantor's user-mediated choice.
+///
+/// Two grantors mint one: `fd_grant`, whose hand-off is attenuated by mode
+/// and by extent, and the spawn wiring, where a parent confers its own
+/// unattenuated reach over a descriptor it already holds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DelegatedFile {
     /// The resolved absolute path the grantor's descriptor named.
@@ -552,44 +557,20 @@ pub struct DelegatedFile {
     /// The grantor's effective capability set at grant time.
     pub caps: CapabilitySet,
     /// The highest file length the holder may write or truncate this
-    /// delegation to, and zero for a read-only one.
+    /// delegation to, or [`None`] for the grantor's own unbounded reach.
     ///
-    /// A delegation attenuates by extent as well as by mode: `fd_grant`
-    /// refuses a writable delegation with no ceiling, so an unbounded writable
-    /// delegation is not representable. That is what lets a service hand a
-    /// caller direct, full-speed access to a file it owns without also handing
-    /// it the ability to fill the volume.
-    pub write_ceiling: u64,
-}
-
-/// A filesystem object a parent wired into a child at spawn, operated on
-/// under the **parent's** captured identity rather than the child's.
-///
-/// A wire is the parent naming one of its own open descriptors and one child
-/// it is itself creating, so the descriptor carries the reach it was opened
-/// with — the same reason [`DelegatedFile`] captures its grantor's. It confers
-/// nothing the parent could not confer anyway: a parent that can wire a pipe
-/// can already pump the file's bytes down it, and the child holds no
-/// filesystem capability with which to re-open the path it cannot even read.
-///
-/// Unlike a delegation it carries **no extent ceiling**. A delegation's bound
-/// exists so a service can hand an untrusted caller direct access to a file it
-/// owns without also handing it the ability to fill the volume; a parent and
-/// its own child are not that pairing, and the parent could fill the volume
-/// itself. The bound is therefore the parent's own limits, and a ceiling
-/// `spawn` has no parameter for would be invented rather than enforced.
-///
-/// Never re-delegatable: `fd_grant` accepts only [`OpenBacking::Path`], so a
-/// wired descriptor cannot be granted onward and captured authority never
-/// widens.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InheritedFile {
-    /// The absolute path the parent's descriptor named.
-    pub path: String,
-    /// The parent's uid, the identity every VFS re-check runs under.
-    pub uid: u32,
-    /// The parent's effective capability set at spawn time.
-    pub caps: CapabilitySet,
+    /// An `fd_grant` delegation attenuates by extent as well as by mode, and
+    /// always carries `Some`: the grant refuses a writable delegation with no
+    /// ceiling (and pins a read-only one at zero), so an unbounded writable
+    /// *grant* is not representable. That is what lets a service hand a caller
+    /// direct, full-speed access to a file it owns without also handing it the
+    /// ability to fill the volume.
+    ///
+    /// A spawn wire carries `None`, because the parent is passing on a
+    /// descriptor it already holds rather than attenuating one: a shell
+    /// redirecting a child's output into a file confers the reach it has, and
+    /// any finite ceiling here would be a limit nothing asked for.
+    pub write_ceiling: Option<u64>,
 }
 
 /// What a descriptor resolves to: a filesystem path or a typed resource.
@@ -624,11 +605,6 @@ pub enum OpenBacking {
     /// `fd_grant` accepts only [`OpenBacking::Path`], so a delegation
     /// chain cannot form and delegated authority never widens.
     Delegated(DelegatedFile),
-    /// A filesystem object a spawning parent wired into this task's standard
-    /// slots (`plans/SPAWN.md`), operated on under the **parent's** captured
-    /// identity rather than this task's — so a child holding no filesystem
-    /// capability reads the document it was handed. See [`InheritedFile`].
-    Inherited(InheritedFile),
     /// The master end of a kernel pseudo-terminal (`plans/PTY.md`): the
     /// terminal emulator's handle. A read drains the slave's cooked output;
     /// a write feeds the input discipline. Cloning the entry registers one
@@ -743,6 +719,70 @@ impl OpenFile {
         }
     }
 
+    /// The path this descriptor can hand on as a delegation, and [`None`]
+    /// when its authority is not one a delegation expresses.
+    ///
+    /// Only a plain filesystem file the holder opened itself qualifies. A
+    /// delegation does not re-delegate, because a chain would obscure whose
+    /// captured authority is exercised; a pipe, pty, or resource carries an
+    /// authority model of its own; and a directory's authority is a listing
+    /// and a namespace to open through, not a byte range.
+    ///
+    /// This is the one definition of that question, shared by `fd_grant`'s
+    /// one-shot hand-off and the spawn conferral, so the two can never
+    /// disagree about what may be delegated.
+    #[must_use]
+    pub fn delegatable_path(&self) -> Option<&str> {
+        match &self.backing {
+            OpenBacking::Path(path) if !self.flags.contains(OpenFlags::DIRECTORY) => Some(path),
+            OpenBacking::Path(_)
+            | OpenBacking::Resource(_)
+            | OpenBacking::Pipe(_)
+            | OpenBacking::Delegated(_)
+            | OpenBacking::PtyMaster(_)
+            | OpenBacking::PtySlave(_) => None,
+        }
+    }
+
+    /// This descriptor as a spawned child holds it: a plain file's path
+    /// backing re-expressed as a delegation under the spawning parent's `uid`
+    /// and `caps`, sharing the same open file description.
+    ///
+    /// A path backing is re-resolved and re-authorised on every operation
+    /// under *whoever holds it*, so a plain clone would have the child
+    /// exercise its parent's file under the child's own identity — which a
+    /// child that deliberately requests no filesystem capability does not
+    /// have, and which a child holding more than its parent should not get.
+    ///
+    /// Everything [`delegatable_path`](Self::delegatable_path) declines is
+    /// cloned unchanged, each for its own reason. A delegation is never
+    /// re-captured: widening one to the parent's reach would let a spawn
+    /// launder authority its holder was never given. A pipe, pty, and
+    /// resource have authority models of their own that do not read the
+    /// holder's identity. And a directory stays a path, so conferring can
+    /// never turn a listing into a byte delegation no matter who calls it —
+    /// the spawn wire refuses a directory outright before reaching here.
+    ///
+    /// A conferred descriptor is consequently not a lock or watch subject,
+    /// exactly as a granted one is not: those re-resolve under the holder's
+    /// own identity, which a delegation deliberately does not have.
+    #[must_use]
+    pub fn conferred_to_child(&self, uid: u32, caps: CapabilitySet) -> Self {
+        let Some(path) = self.delegatable_path() else {
+            return self.clone();
+        };
+        Self {
+            backing: OpenBacking::Delegated(DelegatedFile {
+                path: String::from(path),
+                uid,
+                caps,
+                write_ceiling: None,
+            }),
+            flags: self.flags,
+            description: Arc::clone(&self.description),
+        }
+    }
+
     /// The pipe end this descriptor holds, or `None` when it is backed by
     /// a path or resource.
     #[must_use]
@@ -794,12 +834,12 @@ impl OpenFile {
     /// The absolute filesystem path this descriptor resolves to **under the
     /// holder's own credentials**, or `None` when it has none.
     ///
-    /// A delegated or spawn-inherited backing answers `None`: it names a
-    /// path, but that path is operated on under a captured identity — the
-    /// grantor's or the spawning parent's — so an operation that would run it
-    /// under the holder's own must not see it. An operation that handles both
-    /// reaches for the authority rather than the path, and the name says
-    /// which of the two this is.
+    /// A delegated backing answers `None`: it names a path, but that path is
+    /// operated on under a captured identity — the `fd_grant` grantor's, or
+    /// the parent's on a descriptor conferred at spawn — so an operation that
+    /// would run it under the holder's own must not see it. An operation that
+    /// handles both reaches for the authority rather than the path, and the
+    /// name says which of the two this is.
     #[must_use]
     pub fn own_path(&self) -> Option<&str> {
         match &self.backing {
@@ -807,7 +847,6 @@ impl OpenFile {
             OpenBacking::Resource(_)
             | OpenBacking::Pipe(_)
             | OpenBacking::Delegated(_)
-            | OpenBacking::Inherited(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
@@ -822,7 +861,6 @@ impl OpenFile {
             OpenBacking::Path(_)
             | OpenBacking::Pipe(_)
             | OpenBacking::Delegated(_)
-            | OpenBacking::Inherited(_)
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
@@ -3099,7 +3137,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/report.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         let who = ProcId::from_raw([0x2Au8; tairix_abi::PROC_ID_LEN]);
         let first = reg.mint_fd_delegation(ProcessId(2), who, file.clone(), OpenFlags::READ);
@@ -3115,7 +3153,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/other.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         assert_ne!(
             reg.mint_fd_delegation(ProcessId(2), who, other, OpenFlags::READ),
@@ -3149,7 +3187,7 @@ mod tests {
             path: String::from("/Users/ada/Documents/report.txt"),
             uid: 1000,
             caps: CapabilitySet::empty(),
-            write_ceiling: 0,
+            write_ceiling: Some(0),
         };
         let chosen = ProcId::from_raw([0xA1u8; tairix_abi::PROC_ID_LEN]);
         let newcomer = ProcId::from_raw([0xB2u8; tairix_abi::PROC_ID_LEN]);
