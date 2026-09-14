@@ -801,8 +801,9 @@ fn the_record_algebra_matches_a_per_byte_model_over_a_randomised_run() {
     let mut model: Vec<Option<Held>> = std::vec![None; SINGLE_OWNER_SPAN];
     let bound = span_bound(SINGLE_OWNER_SPAN);
     let mut rng = FastRng::<64>::from_key(&[0x5Au8; 32]);
+    let steps: u32 = if cfg!(miri) { 24 } else { 600 };
 
-    for step in 0..600u32 {
+    for step in 0..steps {
         let a = rng.next_u64() % bound;
         let b = rng.next_u64() % bound;
         let (start, end) = if a <= b { (a, b) } else { (b, a) };
@@ -879,8 +880,9 @@ fn a_randomised_run_across_several_owners_keeps_exclusion_exact() {
     let mut model: Vec<Vec<Option<Held>>> = std::vec![std::vec![None; MULTI_OWNER_SPAN]; 3];
     let bound = span_bound(MULTI_OWNER_SPAN);
     let mut rng = FastRng::<64>::from_key(&[0xA5u8; 32]);
+    let steps: u32 = if cfg!(miri) { 24 } else { 800 };
 
-    for step in 0..800u32 {
+    for step in 0..steps {
         let who = (rng.next_u64() % 3) as usize;
         let a = rng.next_u64() % bound;
         let b = rng.next_u64() % bound;

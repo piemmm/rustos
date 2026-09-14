@@ -541,7 +541,7 @@ const fn to_task_action(action: RescheduleAction) -> TaskAction {
     }
 }
 
-/// Suspend the `ThreadControl` at `data` with `action` and switch back to
+/// Suspend the `ThreadControl` at `block` with `action` and switch back to
 /// its dispatcher, returning when the task is next resumed.
 ///
 /// The shared body of the two `C, S`-monomorphised thunks a
@@ -552,20 +552,20 @@ const fn to_task_action(action: RescheduleAction) -> TaskAction {
 ///
 /// # Safety
 ///
-/// `data` must be the address of the live, boxed `ThreadControl<C, S>` the
-/// publishing [`dispatch_step`] passed, monomorphised over the *same* `C, S`.
-/// The caller must run between that `dispatch_step`'s switch-into-task and
-/// the task's switch-back — from the task's own syscall trap or its own
-/// kthread body — so the CPU exclusively owns the control block (the
-/// kthread raw-pointer protocol, see the module docs). `bracket` must be
-/// `true` exactly when the caller runs inside the port's privilege-entry
-/// convention (a syscall handler), `false` for a kthread body.
-unsafe fn suspend_with<C, S>(data: usize, action: TaskAction, bracket: bool)
+/// `block` must address the live, boxed `ThreadControl<C, S>` the publishing
+/// [`dispatch_step`] passed. The caller must run between that
+/// `dispatch_step`'s switch-into-task and the task's switch-back — from the
+/// task's own syscall trap or its own kthread body — so the CPU exclusively
+/// owns the control block (the kthread raw-pointer protocol, see the module
+/// docs). `bracket` must be `true` exactly when the caller runs inside the
+/// port's privilege-entry convention (a syscall handler), `false` for a
+/// kthread body.
+unsafe fn suspend_with<C, S>(block: NonNull<ThreadControl<C, S>>, action: TaskAction, bracket: bool)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    let ctl = data as *mut ThreadControl<C, S>;
+    let ctl = block.as_ptr();
     // SAFETY: `ctl` is the live control block per this function's contract;
     // `cs` is `Copy`, and the three fields are distinct and live.
     let (cs, mut yielder) = unsafe {
@@ -616,13 +616,15 @@ where
 ///
 /// As [`suspend_with`], with the caller on the task's syscall-handler
 /// control flow.
-unsafe fn suspend_thunk_syscall<C, S>(data: usize, action: TaskAction)
+unsafe fn suspend_thunk_syscall<C, S>(block: NonNull<()>, action: TaskAction)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
     // SAFETY: forwarded contract (syscall-handler control flow ⇒ bracket).
-    unsafe { suspend_with::<C, S>(data, action, true) }
+    // The publisher paired this pointer with this thunk's `C, S`, so the cast
+    // restores the type it was erased from.
+    unsafe { suspend_with::<C, S>(block.cast(), action, true) }
 }
 
 /// [`suspend_with`] for a task suspending from its own **kthread body**
@@ -632,13 +634,15 @@ where
 ///
 /// As [`suspend_with`], with the caller on the kthread's own body control
 /// flow.
-unsafe fn suspend_thunk_body<C, S>(data: usize, action: TaskAction)
+unsafe fn suspend_thunk_body<C, S>(block: NonNull<()>, action: TaskAction)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    // SAFETY: forwarded contract (kthread body ⇒ no bracket).
-    unsafe { suspend_with::<C, S>(data, action, false) }
+    // SAFETY: forwarded contract (kthread body ⇒ no bracket). The publisher
+    // paired this pointer with this thunk's `C, S`, so the cast restores the
+    // type it was erased from.
+    unsafe { suspend_with::<C, S>(block.cast(), action, false) }
 }
 
 /// Suspend the kthread currently switched in on `cpu` with `action`,
@@ -675,13 +679,12 @@ pub fn reschedule_current(cpu: CpuId, action: RescheduleAction) -> bool {
     let Some(handle) = handle else {
         return false;
     };
-    // SAFETY: a published handle's `data`/`thunk` were installed by
-    // `dispatch_step` for the task currently switched in on this CPU,
-    // monomorphised over the matching `C, S`; this call runs from that
-    // task's syscall trap, so the control block is live and exclusively
-    // owned (the kthread raw-pointer protocol).
+    // SAFETY: `dispatch_step` published this handle for the task currently
+    // switched in on this CPU; the call runs from that task's syscall trap,
+    // so the control block is live and exclusively owned (the kthread
+    // raw-pointer protocol).
     unsafe {
-        (handle.thunk)(handle.data, to_task_action(action));
+        handle.suspend(to_task_action(action));
     }
     true
 }
@@ -779,17 +782,19 @@ struct UserUpgrade {
 ///
 /// # Safety
 ///
-/// `arg` must be the `usize`-cast address of a live, boxed
-/// `ThreadControl<C, S>` whose `task_ctx` was seeded by
-/// [`ContextSwitch::prepare`] with this function as the entry. The
-/// scheduler/shim upholds this: it is the only caller of `prepare`, and it
-/// passes exactly that address.
+/// `arg` must be the exposed address of a live, boxed `ThreadControl<C, S>`
+/// whose `task_ctx` was seeded by [`ContextSwitch::prepare`] with this
+/// function as the entry. The scheduler/shim upholds this: it is the only
+/// caller of `prepare`, and it exposes exactly that address.
 unsafe extern "C" fn trampoline<C, S>(arg: usize) -> !
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    let ctl = arg as *mut ThreadControl<C, S>;
+    // Genuinely an integer here: the port stashed it in the seeded frame and
+    // its assembly loaded it into the argument register, so no pointer
+    // survives that leg to carry provenance.
+    let ctl = core::ptr::with_exposed_provenance_mut::<ThreadControl<C, S>>(arg);
 
     // Take the work out (a transient borrow of the `Option` field, dropped
     // before the work runs). `None` only if the task was somehow entered
@@ -1229,7 +1234,11 @@ where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
-    let ctl: *mut ThreadControl<C, S> = addr_of_mut!(*control);
+    // One derivation from `control`, which everything below hangs off: a
+    // second reborrow of it would invalidate the raw pointer the field
+    // accesses run through.
+    let block: NonNull<ThreadControl<C, S>> = NonNull::from(&mut *control);
+    let ctl: *mut ThreadControl<C, S> = block.as_ptr();
 
     // SAFETY (all `*ctl` accesses below): `ctl` is the address of the live
     // boxed control block `control` owns; no other reference to it is live
@@ -1243,12 +1252,14 @@ where
             let cs = unsafe { (*ctl).cs };
             let stack = unsafe { (*ctl).stack.region() };
             // Seed the first frame at `trampoline`, passing the control
-            // block address as the entry argument.
+            // block address as the entry argument. The argument crosses the
+            // port's assembly as a bare machine word, so the pointer is
+            // *exposed* here and recovered there rather than carried.
             let prepared = cs.prepare(
                 unsafe { &mut *addr_of_mut!((*ctl).task_ctx) },
                 stack,
                 trampoline::<C, S>,
-                ctl as usize,
+                block.expose_provenance().get(),
             );
             if prepared.is_err() {
                 // A stack that cannot seed a frame fails the task closed:
@@ -1321,8 +1332,8 @@ where
         if let Some(pre) = unsafe { (*ctl).pre_resume.as_mut() } {
             pre(stack_top);
         }
-        publish_resume::<C, S>(cpu, ctl, suspend_thunk_syscall::<C, S>);
-        publish_live_space::<C, S>(cpu, ctl);
+        publish_resume::<C, S>(cpu, block, suspend_thunk_syscall::<C, S>);
+        publish_live_space::<C, S>(cpu, block);
     } else {
         // A kernel kthread is equally suspendable from its own body
         // (`reschedule_current` from a blocking primitive it calls — a
@@ -1332,7 +1343,7 @@ where
         // established. Without this a kthread contending on a lock whose
         // holder is parked could only spin, monopolising the CPU and
         // starving the dispatch loop — the whole system then hangs.
-        publish_resume::<C, S>(cpu, ctl, suspend_thunk_body::<C, S>);
+        publish_resume::<C, S>(cpu, block, suspend_thunk_body::<C, S>);
     }
 
     // Kernel-activity breadcrumb: the shim prologue is done and we are about
@@ -1444,17 +1455,16 @@ pub fn install_park_translation(park: fn()) {
 /// same outcome [`reschedule_current`] gives.
 fn publish_resume<C, S>(
     cpu: CpuId,
-    ctl: *mut ThreadControl<C, S>,
-    thunk: unsafe fn(usize, TaskAction),
+    block: NonNull<ThreadControl<C, S>>,
+    thunk: unsafe fn(NonNull<()>, TaskAction),
 ) where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
     if let Some(state) = cpu_state::get(cpu) {
-        *state.resume.lock() = Some(UserResumeHandle {
-            data: ctl as usize,
-            thunk,
-        });
+        // SAFETY: both thunks are monomorphised over this call's `C, S`,
+        // which is the type `block` addresses.
+        *state.resume.lock() = Some(unsafe { UserResumeHandle::new(block, thunk) });
     }
 }
 
@@ -1473,11 +1483,12 @@ fn clear_resume(cpu: CpuId) {
 ///
 /// Out-of-range or unconfigured `cpu` is a silent no-op, exactly as
 /// [`publish_resume`].
-fn publish_live_space<C, S>(cpu: CpuId, ctl: *mut ThreadControl<C, S>)
+fn publish_live_space<C, S>(cpu: CpuId, block: NonNull<ThreadControl<C, S>>)
 where
     C: ContextSwitch + Copy,
     S: KernelStack,
 {
+    let ctl = block.as_ptr();
     // SAFETY: dispatcher-side exclusive access to `*ctl` (the kthread
     // raw-pointer protocol; see `dispatch_step`). The shared borrow of the
     // `Arc` is taken only to form the borrowed handle published below; the
@@ -1614,7 +1625,6 @@ mod tests {
     use super::*;
 
     extern crate std;
-    use std::boxed::Box as StdBox;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -1629,18 +1639,32 @@ mod tests {
 
     /// What a [`RecordingCs`] saw — one recorder per test, so parallel
     /// test threads never share state.
-    #[derive(Default)]
     struct Recorder {
         prepares: AtomicUsize,
         switches: AtomicUsize,
         last_stack_top: AtomicU64,
         last_arg: AtomicU64,
-        last_entry: AtomicU64,
         last_prev: AtomicU64,
         last_next: AtomicU64,
         /// Cooperative-park bracket calls observed (`enter` + `leave` each
         /// count one), so a test can assert which suspend thunk ran.
         brackets: AtomicUsize,
+    }
+
+    impl Recorder {
+        /// Const-constructible, so a test's recorder can be a `static`
+        /// rather than an allocation.
+        const fn new() -> Self {
+            Self {
+                prepares: AtomicUsize::new(0),
+                switches: AtomicUsize::new(0),
+                last_stack_top: AtomicU64::new(0),
+                last_arg: AtomicU64::new(0),
+                last_prev: AtomicU64::new(0),
+                last_next: AtomicU64::new(0),
+                brackets: AtomicUsize::new(0),
+            }
+        }
     }
 
     /// A faithful host [`ContextSwitch`] double. `prepare` seeds a
@@ -1660,7 +1684,7 @@ mod tests {
             &self,
             ctx: &mut TaskContext,
             stack: KernelStackRegion,
-            entry: TaskEntry,
+            _entry: TaskEntry,
             arg: usize,
         ) -> Result<(), PrepareError> {
             let frame = stack.seed_frame(DOUBLE_FRAME)?;
@@ -1669,9 +1693,6 @@ mod tests {
                 .last_stack_top
                 .store(stack.top_addr(), Ordering::SeqCst);
             self.0.last_arg.store(arg as u64, Ordering::SeqCst);
-            self.0
-                .last_entry
-                .store(entry as usize as u64, Ordering::SeqCst);
             ctx.stack_pointer = frame.addr().get() as u64;
             Ok(())
         }
@@ -1730,8 +1751,15 @@ mod tests {
         }
     }
 
-    fn recorder() -> &'static Recorder {
-        StdBox::leak(StdBox::new(Recorder::default()))
+    /// This test's own recorder, as a `static` rather than a leaked box: the
+    /// interpreter cannot tell a deliberately leaked fixture from a real
+    /// leak, so the fixture allocates nothing at all. Each expansion declares
+    /// its own `static`, so parallel test threads still never share one.
+    macro_rules! recorder {
+        () => {{
+            static REC: Recorder = Recorder::new();
+            &REC
+        }};
     }
 
     /// Build a boxed control block directly (bypassing the scheduler) so a
@@ -1786,7 +1814,7 @@ mod tests {
 
     #[test]
     fn first_dispatch_step_prepares_then_switches_in() {
-        let rec = recorder();
+        let rec = recorder!();
         let cs = RecordingCs(rec);
         let stack = BoxStack::new().expect("stack allocates");
         let top = stack.top();
@@ -1798,15 +1826,17 @@ mod tests {
         // threads sharing an index would observe each other's slots.
         let action = dispatch_step(&mut control, 40);
 
-        // One prepare, with the stack's top, the trampoline entry, and the
-        // control block address as the entry argument.
+        // One prepare, with the stack's top and the control block's exposed
+        // address as the entry argument. That the *entry* is `trampoline` is
+        // not checkable here: identifying a function by its address is
+        // unspecified — two coercions of one item need not compare equal, and
+        // the interpreter mints a fresh address per cast — and the host never
+        // transfers control into the seeded frame. It is proven where the
+        // transfer is real: every QEMU kthread vertical runs a task body,
+        // which only the trampoline entry reaches.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 1);
         assert_eq!(rec.last_stack_top.load(Ordering::SeqCst), top);
         assert_eq!(rec.last_arg.load(Ordering::SeqCst), ctl_addr);
-        assert_eq!(
-            rec.last_entry.load(Ordering::SeqCst),
-            trampoline::<RecordingCs, BoxStack> as *const () as u64
-        );
         // Then exactly one switch, dispatch_ctx -> task_ctx.
         assert_eq!(rec.switches.load(Ordering::SeqCst), 1);
         assert_eq!(control.state, RunState::Running);
@@ -1824,7 +1854,7 @@ mod tests {
         // is one process-wide array shared across the whole test binary),
         // so parallel test threads never observe each other through it.
         const CPU: CpuId = 47;
-        let rec = recorder();
+        let rec = recorder!();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // Model the timer firing in EL1 after the policy arm and before the
@@ -1851,8 +1881,8 @@ mod tests {
         // per-CPU breadcrumb slots are one process-wide array), so parallel
         // test threads never observe each other through it.
         const CPU: CpuId = 48;
-        let rec = recorder();
-        let hits = leak_counter();
+        let rec = recorder!();
+        let hits = pre_resume_counter!();
         // A *user* kthread: a kernel one never leaves EL1 and is crumbed
         // `kernel_body` instead.
         let mut control = user_control_with(
@@ -1879,7 +1909,7 @@ mod tests {
 
     #[test]
     fn second_dispatch_step_skips_prepare() {
-        let rec = recorder();
+        let rec = recorder!();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         let _ = dispatch_step(&mut control, 41);
@@ -1905,7 +1935,7 @@ mod tests {
 
     #[test]
     fn finished_task_reports_exit_without_touching_the_port() {
-        let rec = recorder();
+        let rec = recorder!();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         control.state = RunState::Finished;
 
@@ -1919,7 +1949,7 @@ mod tests {
 
     #[test]
     fn yielder_yield_now_records_action_and_switches_back() {
-        let rec = recorder();
+        let rec = recorder!();
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
@@ -1953,7 +1983,7 @@ mod tests {
         let arch = Arc::new(TestArch::with_cpus(1));
         let scheduler = Scheduler::new(SchedulerConfig::defaults_for(1), Arc::clone(&arch))
             .expect("scheduler builds");
-        let rec = recorder();
+        let rec = recorder!();
 
         let id = spawn_kthread(&scheduler, RecordingCs(rec), 0, Priority::Normal, |_y| {})
             .expect("kthread admitted");
@@ -2037,7 +2067,7 @@ mod tests {
         // The control block owns the stack, exactly as a spawned kthread's
         // shim body does. Dropping it models the scheduler dropping the
         // body when the task exits.
-        let control = control_with(RecordingCs(recorder()), stack);
+        let control = control_with(RecordingCs(recorder!()), stack);
         drop(control);
 
         // The stack was reclaimed.
@@ -2059,10 +2089,13 @@ mod tests {
     // table so the parallel host test threads never collide, and clears
     // any handle it publishes before returning.
 
-    /// Leak a fresh, zeroed counter with a `'static` lifetime, for a
-    /// user kthread's `pre_resume` hook to tick.
-    fn leak_counter() -> &'static AtomicUsize {
-        StdBox::leak(StdBox::new(AtomicUsize::new(0)))
+    /// A fresh zeroed counter for a user kthread's `pre_resume` hook to
+    /// tick, allocation-free for the same reason the recorder is.
+    macro_rules! pre_resume_counter {
+        () => {{
+            static HITS: AtomicUsize = AtomicUsize::new(0);
+            &HITS
+        }};
     }
 
     #[test]
@@ -2082,10 +2115,11 @@ mod tests {
 
     #[test]
     fn reschedule_current_suspends_a_published_user_task() {
-        let rec = recorder();
+        let rec = recorder!();
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
-        let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
+        let block = NonNull::from(&mut *control);
+        let ctl: *mut ThreadControl<RecordingCs, BoxStack> = block.as_ptr();
         let cpu: CpuId = 54;
 
         // Model `dispatch_step`'s publish, then drive the trap-path entry
@@ -2094,7 +2128,7 @@ mod tests {
         // with the requested action recorded.
         publish_resume::<RecordingCs, BoxStack>(
             cpu,
-            ctl,
+            block,
             suspend_thunk_syscall::<RecordingCs, BoxStack>,
         );
         assert!(reschedule_current(cpu, RescheduleAction::Exit));
@@ -2121,7 +2155,7 @@ mod tests {
         // continuation somebody wrote into this save area. Switching into it
         // would run another task's kernel context under this task's page-table
         // root, so the step fails the task closed instead.
-        let rec = recorder();
+        let rec = recorder!();
         let cpu: CpuId = 34;
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
@@ -2157,8 +2191,8 @@ mod tests {
     /// that reason.
     #[test]
     fn a_refused_dispatch_step_publishes_nothing_for_the_cpu() {
-        let rec = recorder();
-        let hits = leak_counter();
+        let rec = recorder!();
+        let hits = pre_resume_counter!();
         let cpu: CpuId = 35;
         let mut control = user_control_with(
             RecordingCs(rec),
@@ -2166,7 +2200,7 @@ mod tests {
             hits,
         );
         control.live = Some(Arc::new(crate::procspace::ProcessSpace::for_test(
-            crate::procspace::host_test_space(),
+            crate::procspace::host_test_space!(),
         )));
 
         // One ordinary step seeds a real suspension point, publishes both
@@ -2224,8 +2258,8 @@ mod tests {
 
     #[test]
     fn user_dispatch_step_runs_pre_resume_and_publishes_then_clears() {
-        let rec = recorder();
-        let hits = leak_counter();
+        let rec = recorder!();
+        let hits = pre_resume_counter!();
         let cpu: CpuId = 61;
         let mut control = user_control_with(
             RecordingCs(rec),
@@ -2254,8 +2288,8 @@ mod tests {
         // activation hook + live space into the control block, consume the
         // pending slot, and resume the task as a fully-formed user kthread
         // (its `pre_resume` fires) — `plans/FIX-DESKTOP.md` §2.6.5.
-        let rec = recorder();
-        let hits = leak_counter();
+        let rec = recorder!();
+        let hits = pre_resume_counter!();
         let cpu: CpuId = 44;
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
@@ -2288,7 +2322,7 @@ mod tests {
 
     #[test]
     fn kernel_dispatch_step_publishes_a_body_handle_then_clears_it() {
-        let rec = recorder();
+        let rec = recorder!();
         let cpu: CpuId = 62;
         // A plain kernel kthread (no `pre_resume`) is enrolled in the
         // resume table for the duration of its step — its body can suspend
@@ -2325,15 +2359,15 @@ mod tests {
         // syscall-entry convention bracket (x86_64's `swapgs`): an unpaired
         // flip would corrupt the per-CPU convention. The syscall thunk runs
         // the bracket; the body thunk does not.
-        let rec = recorder();
+        let rec = recorder!();
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
-        let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
+        let block = NonNull::from(&mut *control);
         let cpu: CpuId = 53;
 
         publish_resume::<RecordingCs, BoxStack>(
             cpu,
-            ctl,
+            block,
             suspend_thunk_body::<RecordingCs, BoxStack>,
         );
         assert!(reschedule_current(cpu, RescheduleAction::Park));
@@ -2348,7 +2382,7 @@ mod tests {
         // The syscall thunk brackets the same suspend (enter + leave).
         publish_resume::<RecordingCs, BoxStack>(
             cpu,
-            ctl,
+            block,
             suspend_thunk_syscall::<RecordingCs, BoxStack>,
         );
         assert!(reschedule_current(cpu, RescheduleAction::Park));
@@ -2378,8 +2412,8 @@ mod tests {
         }
         install_park_translation(count_park);
 
-        let rec = recorder();
-        let hits = leak_counter();
+        let rec = recorder!();
+        let hits = pre_resume_counter!();
         let mut user = user_control_with(
             RecordingCs(rec),
             BoxStack::new().expect("stack allocates"),
@@ -2393,7 +2427,7 @@ mod tests {
             "a user-task switch-back parks the CPU's translation"
         );
 
-        let rec = recorder();
+        let rec = recorder!();
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         let before = PARKS.with(core::cell::Cell::get);
         let _ = dispatch_step(&mut kernel, 63);
@@ -2490,7 +2524,7 @@ mod tests {
 
     #[test]
     fn dispatch_step_fails_closed_on_a_guard_violation() {
-        let rec = recorder();
+        let rec = recorder!();
         let stack = GuardDouble {
             inner: BoxStack::new().expect("stack allocates"),
             violated: true,
@@ -2511,7 +2545,7 @@ mod tests {
 
     #[test]
     fn dispatch_step_reports_the_action_when_the_guard_is_intact() {
-        let rec = recorder();
+        let rec = recorder!();
         let stack = GuardDouble {
             inner: BoxStack::new().expect("stack allocates"),
             violated: false,

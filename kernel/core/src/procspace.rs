@@ -126,23 +126,28 @@ impl ProcessSpace {
 /// production space over the host page-table and physical-map doubles, so a
 /// test exercises the real thing rather than a bespoke stub.
 ///
-/// Shared by this module's own tests and [`crate::kthread`]'s, which needs a
-/// process space to hang off a control block.
+/// Takes the caller's own frame pool, which the `host_test_space!` macro
+/// declares. Use that macro rather than calling this directly.
 #[cfg(test)]
-pub(crate) fn host_test_space() -> Box<dyn LiveUserSpace + Send> {
+pub(crate) fn host_test_space_over(
+    pool: &'static tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator>,
+) -> Box<dyn LiveUserSpace + Send> {
     use tairix_kernel_mem::{
         AddressSpace, BootMemoryMap, FrameAllocator, HostPageTable, LiveSpace, MemoryRegion,
         PhysAddr, RegionKind, SimPhysMap, VirtAddr, PAGE_SIZE,
     };
 
-    let mut map = BootMemoryMap::new();
-    map.push(MemoryRegion {
-        kind: RegionKind::Usable,
-        start: PhysAddr::new((PAGE_SIZE * 16) as u64),
-        length: (256 * PAGE_SIZE) as u64,
-    });
-    let frames: &'static FrameAllocator =
-        Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+    let frames: &'static FrameAllocator = pool
+        .get_or_try_init(|| {
+            let mut map = BootMemoryMap::new();
+            map.push(MemoryRegion {
+                kind: RegionKind::Usable,
+                start: PhysAddr::new((PAGE_SIZE * 16) as u64),
+                length: (256 * PAGE_SIZE) as u64,
+            });
+            FrameAllocator::new(&map)
+        })
+        .expect("allocator");
     let sim = SimPhysMap::new(PhysAddr::new((PAGE_SIZE * 16) as u64), 256 * PAGE_SIZE);
     let live = LiveSpace::new(
         AddressSpace::new(HostPageTable::new()),
@@ -163,6 +168,24 @@ pub(crate) fn host_test_space() -> Box<dyn LiveUserSpace + Send> {
     Box::new(live)
 }
 
+/// A host process space over this call site's **own** frame pool.
+///
+/// `LiveSpace` borrows its allocator for `'static`. A leaked box would supply
+/// that, but the interpreter cannot tell a deliberately leaked fixture from a
+/// real leak, so the pool is a `static` — one per expansion, so no two
+/// concurrently-running tests share a frame budget.
+#[cfg(test)]
+macro_rules! host_test_space {
+    () => {{
+        static POOL: tairix_sync::OnceCell<tairix_kernel_mem::FrameAllocator> =
+            tairix_sync::OnceCell::new();
+        $crate::procspace::host_test_space_over(&POOL)
+    }};
+}
+
+#[cfg(test)]
+pub(crate) use host_test_space;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +194,7 @@ mod tests {
 
     #[test]
     fn with_hands_the_closure_one_shared_space() {
-        let shared = ProcessSpace::for_test(host_test_space());
+        let shared = ProcessSpace::for_test(host_test_space!());
         let first = shared
             .with(|space| space.reserve_anonymous(2))
             .expect("reservation fits the window");
@@ -185,7 +208,7 @@ mod tests {
 
     #[test]
     fn the_lock_excludes_a_second_borrow_while_one_is_live() {
-        let shared = ProcessSpace::for_test(host_test_space());
+        let shared = ProcessSpace::for_test(host_test_space!());
         shared.with(|_| {
             assert!(
                 shared.space.try_lock().is_none(),
@@ -216,7 +239,7 @@ mod tests {
         const FIRST_CPU: u32 = 43;
         const SECOND_CPU: u32 = 44;
 
-        let shared = Arc::new(ProcessSpace::for_test(host_test_space()));
+        let shared = Arc::new(ProcessSpace::for_test(host_test_space!()));
         let _first = crate::kthread::publish_live_space_for_test(FIRST_CPU, Arc::clone(&shared));
         let _second = crate::kthread::publish_live_space_for_test(SECOND_CPU, shared);
 
@@ -250,7 +273,7 @@ mod tests {
         // per-CPU slot is unshared under a parallel run.
         const CPU: u32 = 47;
 
-        let shared = Arc::new(ProcessSpace::for_test(host_test_space()));
+        let shared = Arc::new(ProcessSpace::for_test(host_test_space!()));
         let published = crate::kthread::publish_live_space_for_test(CPU, Arc::clone(&shared));
         assert_eq!(
             Arc::strong_count(&shared),

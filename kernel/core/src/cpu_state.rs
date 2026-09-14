@@ -3,6 +3,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 // `AtomicU32` backs only the debug-diagnostics pre-silence-backtrace length,
 // and `AtomicPtr` the debug-diagnostics per-CPU lock-site stack, so both
@@ -18,11 +19,64 @@ use tairix_sync::{OnceCell, SpinLock};
 use crate::procspace::ProcessSpace;
 
 /// Type-erased continuation handle for the task currently running on a CPU.
+///
+/// The control block travels as a **pointer**, never an address: a `usize`
+/// round trip strips its provenance, leaving the thunk to work through a
+/// pointer the compiler believes aliases nothing and may reorder or elide
+/// accesses through. Erasing the pointee's type — the block is generic over
+/// the port's context-switch and stack types — is a pointer cast, which
+/// leaves provenance intact.
+///
+/// Private fields and a single [`Self::suspend`] route to the thunk keep the
+/// pointer/thunk pairing an invariant of the value, as [`LiveSpacePtr`] does
+/// for its `Arc` provenance.
 #[derive(Copy, Clone)]
 pub(crate) struct ResumeHandle {
-    pub(crate) data: usize,
-    pub(crate) thunk: unsafe fn(usize, TaskAction),
+    ctl: NonNull<()>,
+    thunk: unsafe fn(NonNull<()>, TaskAction),
 }
+
+impl ResumeHandle {
+    /// Pair `ctl` with the `thunk` that recovers its type, erasing the
+    /// pointee for publication.
+    ///
+    /// # Safety
+    ///
+    /// `thunk` must be monomorphised over `T`. Nothing downstream can check
+    /// that: [`Self::suspend`] hands the erased pointer straight to the
+    /// thunk, which casts it back to the type it was compiled for.
+    pub(crate) unsafe fn new<T>(
+        ctl: NonNull<T>,
+        thunk: unsafe fn(NonNull<()>, TaskAction),
+    ) -> Self {
+        Self {
+            ctl: ctl.cast(),
+            thunk,
+        }
+    }
+
+    /// Suspend the published task with `action`, returning when it is next
+    /// resumed (never, for [`TaskAction::Exit`]).
+    ///
+    /// # Safety
+    ///
+    /// The control block must still be live, and the caller must run on the
+    /// published task's own control flow between its switch-in and its
+    /// switch-back, so the CPU exclusively owns the block. The publication
+    /// protocol guarantees both: a slot holds `Some` only across exactly
+    /// that window.
+    pub(crate) unsafe fn suspend(self, action: TaskAction) {
+        // SAFETY: the caller's contract is the thunk's, and `new` paired the
+        // thunk with the type this pointer addresses.
+        unsafe { (self.thunk)(self.ctl, action) }
+    }
+}
+
+// SAFETY: the handle borrows a control block whose publication protocol
+// confines every access to the single CPU its task is switched in on, so
+// moving the handle between CPUs hands over no concurrent access; the thunk
+// is a plain function pointer.
+unsafe impl Send for ResumeHandle {}
 
 /// Published address-space handle for the process whose thread is currently
 /// running on a CPU.

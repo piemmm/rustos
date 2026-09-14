@@ -208,7 +208,11 @@ The arch-neutral half lives in `kernel/core` and is host-proven:
   user task's handle carries the *syscall* suspend thunk (which brackets
   the suspend with the port's cooperative-park convention hook); a kernel
   kthread's carries the *body* thunk (no bracket — a kthread never entered
-  the port's privilege-entry convention). Kernel kthreads being
+  the port's privilege-entry convention). It carries the control block as a
+  **pointer**, not an address: routed through a `usize` it would arrive
+  stripped of provenance, leaving the thunk to work through a pointer the
+  compiler believes aliases nothing and may reorder or elide accesses
+  through. Kernel kthreads being
   suspendable is load-bearing: a kthread contending on a `SleepLock` whose
   holder is parked across a device wait must park too — an in-kernel spin
   would monopolise the CPU and starve the dispatch loop. A `pre_resume`
