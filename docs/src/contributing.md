@@ -113,7 +113,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `fmt`         | `cargo fmt --all -- --check`                                |
 | `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |
 | `deps-check`  | Enforces the [§17.4 modularity graph][modularity]           |
-| `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports     |
+| `cfg-check`   | Rejects target-conditional `cfg` outside the arch ports, and inside a freestanding port one that omits `target_os` |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
 | `test`        | `cargo test --workspace --all-targets` + QEMU matrix, run once ([§7][test]); the host pass starts in a randomised order, seed logged (see below) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |

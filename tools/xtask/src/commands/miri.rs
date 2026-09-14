@@ -17,6 +17,14 @@
 //!
 //! Adding a crate here means adding a [`Target`], never teaching `ci` about it
 //! directly.
+//!
+//! The stage builds for the **host**, so a port's `target_os = "none"` code is
+//! never interpreted, and what the `tairix-arch-*` crates are enrolled for is
+//! the portable `unsafe` core — the page-table walks, the initial-frame writes
+//! — which every host interprets alike. A port that reaches a hardware
+//! instruction from a *host* build instead aborts that crate's whole run with
+//! "unsupported operation", and only on the machine whose architecture it
+//! names: a developer on one arch and a runner on another do not agree.
 
 use std::ffi::OsString;
 use std::process::Command;

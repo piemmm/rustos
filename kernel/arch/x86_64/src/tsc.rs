@@ -83,6 +83,44 @@ pub fn detect_invariant_tsc() -> bool {
     }
 }
 
+/// Read the time-stamp counter.
+///
+/// The port's only `rdtsc`: the preemption deadline combiner, the
+/// scheduler tick, the APIC-timer calibration reader, and the
+/// cycle-counter HAL handle all read through it, so they cannot drift
+/// apart on the time base they compare against one another.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[inline]
+#[must_use]
+pub(crate) fn read_tsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    // SAFETY: `rdtsc` is unprivileged, has no memory side effects, and
+    // predates the architecture, so it is present on every x86_64 part.
+    // It reads the monotonically-non-decreasing counter into EDX:EAX.
+    unsafe {
+        core::arch::asm!(
+            "rdtsc",
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    (u64::from(hi) << 32) | u64::from(lo)
+}
+
+/// Host substitute for [`read_tsc`]: strictly increasing, so a host test
+/// observes the monotonicity the counter guarantees on real silicon.
+/// Never linked into a kernel image.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+#[inline]
+#[must_use]
+pub(crate) fn read_tsc() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::{invariant_tsc_supported, INVARIANT_TSC_BIT};

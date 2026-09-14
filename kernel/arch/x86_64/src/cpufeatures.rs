@@ -174,27 +174,7 @@ impl CpuCycleCounter {
 
 impl CpuCycles for CpuCycleCounter {
     fn cpu_cycles(&self) -> u64 {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // SAFETY: `rdtsc` is unprivileged, has no memory side effect,
-            // and is unconditionally available on every x86_64 CPU. The
-            // `cfg(target_arch = "x86_64")` guarantees a valid encoding.
-            let lo: u32;
-            let hi: u32;
-            unsafe {
-                core::arch::asm!(
-                    "rdtsc",
-                    out("eax") lo,
-                    out("edx") hi,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
-            (u64::from(hi) << 32) | u64::from(lo)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            0
-        }
+        crate::tsc::read_tsc()
     }
 
     fn cycles_monotonic_hint(&self) -> bool {

@@ -400,7 +400,7 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // below.
     PREEMPT_QUANTUM_ABS_TSC.store(NO_DEADLINE, Ordering::Relaxed);
     if slot_deadline(PREEMPT_WAKEUP_ABS_TSC.load(Ordering::Relaxed))
-        .is_some_and(|abs| abs <= read_tsc())
+        .is_some_and(|abs| abs <= crate::tsc::read_tsc())
     {
         PREEMPT_WAKEUP_ABS_TSC.store(NO_DEADLINE, Ordering::Relaxed);
     }
@@ -620,25 +620,6 @@ pub fn tsc_hz() -> u64 {
     PREEMPT_TSC_HZ.load(Ordering::Relaxed)
 }
 
-/// Read the time-stamp counter (the free-running absolute clock the
-/// combiner reasons in).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn read_tsc() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: `rdtsc` is unconditionally available, unprivileged, has no
-    // memory side effects, and reads the monotonic TSC into EDX:EAX.
-    unsafe {
-        core::arch::asm!(
-            "rdtsc",
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (u64::from(hi) << 32) | u64::from(lo)
-}
-
 /// Decode a stored deadline slot value into [`Option`] form
 /// ([`NO_DEADLINE`] ⇒ `None`).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -690,7 +671,7 @@ fn reprogram() {
         disarm();
         return;
     };
-    let rel_tsc = tairix_arch_api::wakeup::ticks_from_now(target, read_tsc());
+    let rel_tsc = tairix_arch_api::wakeup::ticks_from_now(target, crate::tsc::read_tsc());
     let tsc_hz = PREEMPT_TSC_HZ.load(Ordering::Relaxed);
     let lapic_hz = PREEMPT_LAPIC_HZ.load(Ordering::Relaxed);
     if tsc_hz == 0 || lapic_hz == 0 {

@@ -493,7 +493,7 @@ impl SecondaryBringup for RiscvArch {
 
 /// Read the architectural `time` CSR (nanosecond-resolution monotonic
 /// tick source on the `virt` board).
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) fn read_time() -> u64 {
     let ticks: u64;
     // SAFETY: `rdtime` reads the unprivileged `time` CSR; it has no
@@ -508,7 +508,7 @@ pub(crate) fn read_time() -> u64 {
 /// Host substitute for the `time` CSR: a strictly increasing counter so
 /// the unit tests below observe a monotonic clock. Never linked into a
 /// kernel image (the riscv64 build uses [`read_time`] above).
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
 pub(crate) fn read_time() -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

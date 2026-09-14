@@ -54,7 +54,7 @@ pub const fn x86_port_io8() -> X86PortIo8 {
 
 impl PortIo8 for X86PortIo8 {
     fn read8(&self, port: u16) -> u8 {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let value: u8;
             // SAFETY: `in al, dx` is a side-effect-only 8-bit PIO read
@@ -65,9 +65,7 @@ impl PortIo8 for X86PortIo8 {
             // aliases no neighbour. The instruction has no memory side
             // effects and clobbers no register outside `al`, so the
             // conservative `nomem`, `nostack`, and `preserves_flags`
-            // options hold. The surrounding `cfg(target_arch =
-            // "x86_64")` guarantees `in`/`out` are only emitted for an
-            // x86_64 code generator.
+            // options hold.
             unsafe {
                 core::arch::asm!(
                     "in al, dx",
@@ -78,21 +76,18 @@ impl PortIo8 for X86PortIo8 {
             }
             value
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: the legacy port I/O space exists
-            // only on x86, so `in`/`out` have no encoding here. This
-            // backend is never reached on such hosts (the i8042 driver's
-            // host unit tests use a mock `PortIo8`), so the shim returns
-            // a constant rather than emitting an invalid instruction;
-            // returning a value honours.
+            // `in`/`out` are ring-0 instructions, so a host build has
+            // no I/O privilege to execute one with — and never reaches
+            // this backend: the i8042 driver's tests mock `PortIo8`.
             let _ = port;
             0
         }
     }
 
     fn write8(&self, port: u16, value: u8) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // SAFETY: `out dx, al` is a side-effect-only 8-bit PIO write
             // to `port`. Same justification as `read8`: callers drive
@@ -109,10 +104,9 @@ impl PortIo8 for X86PortIo8 {
                 );
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: see `read8`. No port space exists
-            // off x86, and this backend is never reached on such hosts.
+            // See `read8`: no I/O privilege on a host, and unreached.
             let _ = (port, value);
         }
     }
@@ -127,7 +121,7 @@ impl PortIo8 for X86PortIo8 {
 /// there is no trait to satisfy and nothing to hold.
 #[must_use]
 pub fn read16(port: u16) -> u16 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         let value: u16;
         // SAFETY: `in ax, dx` is a side-effect-only 16-bit PIO read against
@@ -146,11 +140,9 @@ pub fn read16(port: u16) -> u16 {
         }
         value
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
-        // Non-x86_64 host build: no port space exists off x86 and this is
-        // never reached, so the shim returns a constant rather than
-        // emitting an invalid instruction.
+        // See `read8`: no I/O privilege on a host, and unreached.
         let _ = port;
         0
     }
@@ -158,7 +150,7 @@ pub fn read16(port: u16) -> u16 {
 
 /// Write 16 bits of `value` to I/O port `port`.
 pub fn write16(port: u16, value: u16) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         // SAFETY: `out dx, ax` is a side-effect-only 16-bit PIO write to
         // `port`. Same justification as [`read16`].
@@ -171,16 +163,16 @@ pub fn write16(port: u16, value: u16) {
             );
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
-        // Non-x86_64 host build: see `read16`.
+        // See `read8`: no I/O privilege on a host, and unreached.
         let _ = (port, value);
     }
 }
 
 impl PortIo for X86PortIo {
     fn read32(&self, port: u16) -> u32 {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let value: u32;
             // SAFETY: `in eax, dx` is a side-effect-only 32-bit PIO read
@@ -191,9 +183,7 @@ impl PortIo for X86PortIo {
             // §3.2.2.3.2. The instruction has no memory side effects and
             // clobbers no registers outside `eax`; the conservative
             // `nomem`, `nostack`, and `preserves_flags` options are
-            // declared accordingly. The surrounding `cfg(target_arch =
-            // "x86_64")` guarantees `in`/`out` are only emitted for an
-            // x86_64 code generator.
+            // declared accordingly.
             unsafe {
                 core::arch::asm!(
                     "in eax, dx",
@@ -204,20 +194,17 @@ impl PortIo for X86PortIo {
             }
             value
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: the legacy port I/O space exists
-            // only on x86. The PCI bus driver's host unit tests use a
-            // mock `PortIo`, so this backend is never reached; the shim
-            // returns a constant rather than emitting an invalid
-            // instruction.
+            // No I/O privilege on a host, and never reached: the PCI
+            // bus driver's tests mock `PortIo`.
             let _ = port;
             0
         }
     }
 
     fn write32(&self, port: u16, value: u32) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // SAFETY: `out dx, eax` is a side-effect-only 32-bit PIO
             // write to `port`. Same justification as `read32`: only the
@@ -234,10 +221,9 @@ impl PortIo for X86PortIo {
                 );
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: see `read32`. No port space exists
-            // off x86, and this backend is never reached on such hosts.
+            // See `read32`: no I/O privilege on a host, and unreached.
             let _ = (port, value);
         }
     }

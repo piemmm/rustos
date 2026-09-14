@@ -15,6 +15,14 @@
 //! *today*; each is a tracked defect to be burned down (see `PLAN.md`),
 //! and the set may only shrink — a new file under a grandfathered tree
 //! is still rejected unless the tree itself is listed.
+//!
+//! Inside a freestanding port the allow-list stops applying and a second
+//! rule takes over: a `cfg` naming `target_arch` must also name
+//! `target_os`. Gating on the architecture alone selects the bare-metal
+//! body in a *host* build of the port too — where the instruction is
+//! privileged, and where the UB oracle cannot interpret it at all — so
+//! the omission only shows up on the machine whose architecture the port
+//! names, and passes everywhere else.
 
 use std::path::Path;
 
@@ -35,6 +43,28 @@ const GRANDFATHERED: &[&str] = &[];
 /// The cfg predicates the charter forbids outside the allow-list.
 const FORBIDDEN_KEYS: &[&str] = &["target_arch", "target_pointer_width"];
 
+/// The ports whose target is freestanding, where an architecture gate
+/// must also name `target_os`.
+///
+/// `kernel/arch/wasm32` is absent deliberately: its target reports
+/// `target_os = "unknown"`, so pairing the gate there would disable the
+/// real body rather than the host one.
+const FREESTANDING_PORTS: &[&str] = &[
+    "kernel/arch/x86_64/",
+    "kernel/arch/aarch64/",
+    "kernel/arch/riscv64/",
+];
+
+/// Which rule an occurrence breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    /// Target-conditional compilation outside the ports and build glue.
+    TargetConditional,
+    /// A freestanding port's architecture gate that omits `target_os`,
+    /// so it also selects the bare-metal body in a host build.
+    ArchGateWithoutOs,
+}
+
 /// A single offending occurrence: a workspace-relative path and the
 /// 1-based line number that names a forbidden predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +72,7 @@ pub struct Violation {
     pub path: String,
     pub line: usize,
     pub text: String,
+    pub rule: Rule,
 }
 
 /// Scan the workspace rooted at `root` and return every violation
@@ -67,10 +98,14 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
                 dirs.push(path);
             } else if file_type.is_file() && name.ends_with(".rs") {
                 let rel = relative(root, &path);
-                if is_allowed(&rel) {
+                let rule = if is_freestanding_port(&rel) {
+                    Rule::ArchGateWithoutOs
+                } else if is_allowed(&rel) {
                     continue;
-                }
-                scan_file(&path, &rel, &mut out)?;
+                } else {
+                    Rule::TargetConditional
+                };
+                scan_file(&path, &rel, rule, &mut out)?;
             }
         }
     }
@@ -79,15 +114,20 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     Ok(out)
 }
 
-fn scan_file(path: &Path, rel: &str, out: &mut Vec<Violation>) -> Result<(), String> {
+fn scan_file(path: &Path, rel: &str, rule: Rule, out: &mut Vec<Violation>) -> Result<(), String> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("cfg-check: cannot read {}: {e}", path.display()))?;
     for (idx, line) in src.lines().enumerate() {
-        if line_offends(line) {
+        let offends = match rule {
+            Rule::TargetConditional => line_offends(line),
+            Rule::ArchGateWithoutOs => arch_gate_lacks_os(line),
+        };
+        if offends {
             out.push(Violation {
                 path: rel.to_string(),
                 line: idx + 1,
                 text: line.trim().to_string(),
+                rule,
             });
         }
     }
@@ -102,8 +142,26 @@ fn line_offends(line: &str) -> bool {
     line.contains("cfg") && FORBIDDEN_KEYS.iter().any(|k| line.contains(k))
 }
 
+/// Inside a freestanding port: a `cfg` gating on `target_arch` alone.
+///
+/// Comments are skipped — one gates no compilation, and a wrapped
+/// sentence quoting a predicate would otherwise read as an offence.
+/// Line-based like [`line_offends`], so a predicate split across lines
+/// reads as unpaired; every gate in the ports fits on one line today.
+fn arch_gate_lacks_os(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    line.contains("cfg") && line.contains("target_arch") && !line.contains("target_os")
+}
+
 fn is_allowed(rel: &str) -> bool {
     ALLOWED.iter().any(|p| rel.starts_with(p))
+}
+
+fn is_freestanding_port(rel: &str) -> bool {
+    FREESTANDING_PORTS.iter().any(|p| rel.starts_with(p))
 }
 
 fn is_grandfathered(rel: &str) -> bool {
@@ -125,12 +183,28 @@ pub fn run(root: &Path) -> Result<(), String> {
     if violations.is_empty() {
         return Ok(());
     }
-    let mut msg = String::from(
-        "cfg-check: target-conditional compilation is forbidden outside \
-         the architecture ports and build glue (AGENTS.md §17.2):\n",
-    );
-    for v in &violations {
-        let _ = writeln!(msg, "  {}:{}: {}", v.path, v.line, v.text);
+    let mut msg = String::new();
+    for (rule, heading) in [
+        (
+            Rule::TargetConditional,
+            "cfg-check: target-conditional compilation is forbidden outside \
+             the architecture ports and build glue (AGENTS.md §17.2):",
+        ),
+        (
+            Rule::ArchGateWithoutOs,
+            "cfg-check: a freestanding port's `target_arch` gate must also name \
+             `target_os` (AGENTS.md §17.2) — gating on the architecture alone \
+             selects the bare-metal body in a host build of the port too:",
+        ),
+    ] {
+        let mut hit = violations.iter().filter(|v| v.rule == rule).peekable();
+        if hit.peek().is_none() {
+            continue;
+        }
+        let _ = writeln!(msg, "{heading}");
+        for v in hit {
+            let _ = writeln!(msg, "  {}:{}: {}", v.path, v.line, v.text);
+        }
     }
     Err(msg)
 }
@@ -171,5 +245,50 @@ mod tests {
         ));
         assert!(!line_offends("// runs on the x86_64 target_arch in prose"));
         assert!(!line_offends("#[cfg(target_os = \"none\")]"));
+    }
+
+    #[test]
+    fn freestanding_ports_take_the_arch_gate_rule() {
+        assert!(is_freestanding_port(
+            "kernel/arch/riscv64/src/kernel_arch.rs"
+        ));
+        // Its target is `unknown`, not `none`, so the pairing does not apply.
+        assert!(!is_freestanding_port("kernel/arch/wasm32/src/lib.rs"));
+        // Arch-neutral, and not a port.
+        assert!(!is_freestanding_port("kernel/arch/api/src/lib.rs"));
+    }
+
+    /// The exact shape that let a host build execute `rdtsc` and took the
+    /// UB oracle's whole run down on an x86_64 runner while passing on
+    /// every other host.
+    #[test]
+    fn an_arch_gate_without_target_os_is_caught() {
+        assert!(arch_gate_lacks_os(
+            "        #[cfg(target_arch = \"x86_64\")]"
+        ));
+        assert!(arch_gate_lacks_os("#[cfg(not(target_arch = \"riscv64\"))]"));
+        assert!(!arch_gate_lacks_os(
+            "#[cfg(all(target_arch = \"x86_64\", target_os = \"none\"))]"
+        ));
+        assert!(!arch_gate_lacks_os(
+            "#[cfg(not(all(target_arch = \"aarch64\", target_os = \"none\")))]"
+        ));
+        // A gate on the OS alone is already host-safe.
+        assert!(!arch_gate_lacks_os(
+            "#[cfg(any(target_os = \"none\", doc))]"
+        ));
+    }
+
+    /// A comment gates no compilation, and a wrapped sentence quoting a
+    /// predicate must not read as an offence.
+    #[test]
+    fn a_comment_quoting_a_gate_is_not_an_offence() {
+        assert!(!arch_gate_lacks_os("// the surrounding `cfg(target_arch ="));
+        assert!(!arch_gate_lacks_os(
+            "//! modules are gated on `cfg(target_arch = \"aarch64\")`"
+        ));
+        assert!(!arch_gate_lacks_os(
+            "    /// Reads `0` unless `cfg(target_arch = \"riscv64\")`."
+        ));
     }
 }

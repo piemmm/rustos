@@ -334,22 +334,7 @@ impl SchedulerArch for X86_64Arch {
     fn ticks_now(&self) -> u64 {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // SAFETY: `RDTSC` is unconditionally available on every
-            // x86_64 CPU (it predates the architecture) and reads the
-            // monotonically-non-decreasing time-stamp counter into
-            // EDX:EAX. The instruction has no side effects and
-            // touches no memory.
-            let lo: u32;
-            let hi: u32;
-            unsafe {
-                core::arch::asm!(
-                    "rdtsc",
-                    out("eax") lo,
-                    out("edx") hi,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
-            (u64::from(hi) << 32) | u64::from(lo)
+            crate::tsc::read_tsc()
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {

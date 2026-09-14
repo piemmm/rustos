@@ -425,6 +425,17 @@ anywhere else means the Arch HAL boundary has leaked. As with
 shrink-only grandfather set; that set is currently empty — no workspace
 source names the target instruction set outside the allow-list.
 
+Inside a freestanding port the allow-list stops and a second rule takes
+over: a `cfg` naming `target_arch` must also name `target_os`. "Am I the
+real kernel build?" is `all(target_arch = …, target_os = "none")`, and a
+gate that asks only the architecture also selects the bare-metal body in
+a *host* build of that port — where the instruction is privileged, and
+where the UB oracle refuses it outright. The answer then depends on the
+build machine, so such a gate passes on every host but the one whose
+architecture the port names. `kernel/arch/wasm32` is exempt: its target
+reports `target_os = "unknown"`, so pairing there would disable the real
+body rather than the host one.
+
 ### Freestanding integration-test harness
 
 The freestanding QEMU integration binaries under `tests/integration/`

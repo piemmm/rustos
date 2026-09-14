@@ -95,52 +95,16 @@ pub trait TscReader {
     fn read(&mut self) -> u64;
 }
 
-/// Production [`TscReader`]: invokes the `rdtsc` instruction.
+/// Production [`TscReader`]: reads the time-stamp counter.
 ///
-/// `rdtsc` is unconditionally available on every x86_64 CPU and on the
-/// host toolchain TAIRiX builds against; the same impl is therefore
-/// reused on both `target_os = "none"` and `target_os = "linux"`
-/// builds (host unit tests of consumers that drive `calibrate` against
-/// a real CPU).
+/// `calibrate`'s own tests drive the calibration window through a mock
+/// reader, so this one is exercised only on the kernel target.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Rdtsc;
 
 impl TscReader for Rdtsc {
     fn read(&mut self) -> u64 {
-        #[cfg(target_arch = "x86_64")]
-        {
-            // SAFETY: `rdtsc` is unprivileged, has no memory side
-            // effects, and is documented in Intel SDM Vol. 2B. It is
-            // unconditionally available on every x86_64 CPU (it predates
-            // the architecture); the surrounding `cfg(target_arch =
-            // "x86_64")` guarantees the instruction is only emitted for
-            // an x86_64 code generator. The instruction reads the
-            // monotonically-non-decreasing time-stamp counter into
-            // EDX:EAX; we recombine it into a single `u64`.
-            let lo: u32;
-            let hi: u32;
-            unsafe {
-                core::arch::asm!(
-                    "rdtsc",
-                    out("eax") lo,
-                    out("edx") hi,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
-            (u64::from(hi) << 32) | u64::from(lo)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            // Non-x86_64 host build (e.g. a developer's aarch64 or
-            // riscv64 workstation running `cargo test`). `rdtsc` has no
-            // encoding off x86_64, so emitting it would fail to
-            // assemble. The production reader is never exercised on such
-            // hosts — `calibrate`'s unit tests drive the calibration
-            // window through `MockTsc` — so a constant keeps the crate
-            // building without inventing a fake timebase. Returning a
-            // value (rather than panicking) honours.
-            0
-        }
+        crate::tsc::read_tsc()
     }
 }
 
@@ -390,13 +354,12 @@ pub struct PolledPit;
 #[cfg(any(target_os = "none", doc))]
 impl PortIo for PolledPit {
     fn inb(&mut self, port: u16) -> u8 {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // SAFETY: PIT ports 0x40-0x43 and 0x61 are architecturally
-            // present on every x86 platform TAIRiX targets; reading
-            // them has no side-effects other than the read itself. The
-            // surrounding `cfg(target_arch = "x86_64")` guarantees
-            // `in`/`out` are only emitted for an x86_64 code generator.
+            // present on every x86 platform TAIRiX targets; reading one
+            // has no side effect beyond the read, touches no memory,
+            // and clobbers nothing outside `al`.
             unsafe {
                 let value: u8;
                 core::arch::asm!(
@@ -408,26 +371,19 @@ impl PortIo for PolledPit {
                 value
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: the legacy PIT port I/O space
-            // exists only on x86, so `in`/`out` have no encoding here.
-            // `PolledPit` is the production calibration backend and is
-            // never reached on such hosts (`calibrate`'s unit tests
-            // drive a mock `PortIo`), so the shim returns a constant
-            // rather than emitting an invalid instruction. Returning a
-            // value (rather than panicking) honours.
+            // A host build has no port I/O space, and never reaches the
+            // production backend — `calibrate`'s tests drive a mock.
             let _ = port;
             0
         }
     }
     fn outb(&mut self, port: u16, value: u8) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             // SAFETY: as for `inb`; writes to channel 2 / port 0x61
             // only affect the speaker gate and the timer pulse we own.
-            // The surrounding `cfg(target_arch = "x86_64")` guarantees
-            // `in`/`out` are only emitted for an x86_64 code generator.
             unsafe {
                 core::arch::asm!(
                     "out dx, al",
@@ -437,10 +393,9 @@ impl PortIo for PolledPit {
                 );
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
-            // Non-x86_64 host build: see `inb`. No PIT port space exists
-            // off x86, and this backend is never reached on such hosts.
+            // See `inb`: no port I/O space on a host, and unreached.
             let _ = (port, value);
         }
     }
