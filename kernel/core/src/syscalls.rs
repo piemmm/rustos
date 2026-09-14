@@ -11902,7 +11902,7 @@ where
         // Allocate the loading child's kernel stack synchronously, before its
         // address space exists, so its own loading body runs on it. Its guard
         // slot is unmapped in the shared window, so the build owes it nothing.
-        let stack = crate::kstack::alloc_kernel_stack();
+        let stack = crate::kstack::alloc_kernel_stack().ok_or(AdmitError::OutOfMemory)?;
 
         let cpu = SchedulerArch::current_cpu(self.arch);
         let cs = self.arch.context_switch();
@@ -11948,7 +11948,10 @@ where
 
         let task_id =
             spawn_kthread_with_stack_parked(self.sched, cs, stack, cpu, Priority::Normal, work)
-                .map_err(|_| AdmitError::SchedulerFull)?;
+                .map_err(|e| match e {
+                    tairix_kernel_sched_api::SchedError::OutOfMemory => AdmitError::OutOfMemory,
+                    _ => AdmitError::SchedulerFull,
+                })?;
         let sec_id = ProcessId::leader(SecTaskId(task_id));
 
         // Publish the id to the still-parked body before installing per-task

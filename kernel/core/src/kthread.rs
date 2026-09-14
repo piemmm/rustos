@@ -58,14 +58,15 @@
 //! use-after-free discipline against the `kernel/mem` slab tag check — exactly as [`tairix_arch_api::context::conformance`]
 //! tests only the host-testable `prepare`.
 
+use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of_mut, NonNull};
 
-use tairix_arch_api::{ContextSwitch, TaskContext};
+use tairix_arch_api::{ContextSwitch, KernelStackRegion, TaskContext, STACK_ALIGN};
 use tairix_kernel_mem::LiveUserSpace;
 use tairix_kernel_sched_api::{
-    CpuId, Priority, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
+    CpuId, Priority, SchedError, SchedResult, SchedulerArch, SchedulerPolicy, TaskAction, TaskId,
 };
 use tairix_sync::once::OnceCell;
 
@@ -176,21 +177,30 @@ pub struct StackGuardViolation;
 ///
 /// # Safety
 ///
-/// [`Self::top`] must return the exclusive upper bound (one past the last
-/// addressable byte) of a region that is mapped, writable, exclusive to
-/// the task, `STACK_ALIGN`-aligned, and stays valid for as long as the
-/// stack value lives.
+/// [`Self::region`] must name the usable stack — excluding any guard —
+/// upholding [`KernelStackRegion::new`]'s contract, with a
+/// `STACK_ALIGN`-aligned top. [`Self::top`] and [`Self::usable_bytes`] are
+/// derived from it, so a source states its geometry once and the two can
+/// never disagree; the syscall-entry path dereferences [`Self::top`].
 pub unsafe trait KernelStack {
+    /// The usable stack: the region a first frame is seeded in
+    /// ([`tairix_arch_api::ContextSwitch::prepare`]).
+    fn region(&self) -> KernelStackRegion;
+
     /// Exclusive upper bound of the stack (one past its last byte),
     /// aligned to `STACK_ALIGN`.
-    fn top(&self) -> u64;
+    fn top(&self) -> u64 {
+        self.region().top_addr()
+    }
 
     /// Bytes of usable stack below [`Self::top`], so a caller can decide
     /// whether an address lies on *this* task's stack ([`Self::carries`]).
     ///
     /// Excludes any guard region: an address in the guard is an overrun
     /// ([`Self::check_guard`]), not a legitimate frame.
-    fn usable_bytes(&self) -> u64;
+    fn usable_bytes(&self) -> u64 {
+        self.region().len() as u64
+    }
 
     /// Whether `addr` lies inside this stack's usable region — the test that
     /// tells the dispatcher whether a task's recorded suspension point is on
@@ -230,64 +240,95 @@ pub unsafe trait KernelStack {
 /// region. A kernel stack grows *downward* from `top`, so an overrun runs
 /// off the bottom of the usable region into the guard — which is
 /// poison-filled and verified ([`Self::check_guard`]) —
-/// before it can reach the lower-addressed heap neighbour. The backing
-/// `Box<[u8]>` has a stable address for the box's lifetime and is freed on
-/// drop, reclaiming the stack.
-pub struct BoxStack(Box<[u8]>);
+/// before it can reach the lower-addressed heap neighbour. The allocation
+/// has a stable address for the value's lifetime and is freed on drop,
+/// reclaiming the stack.
+pub struct BoxStack {
+    /// Base of the owned `[guard | usable]` allocation.
+    ///
+    /// A raw pointer rather than a `Box<[u8]>`: the task writes its frames
+    /// through this while its owner is only borrowed shared, and a `Box`
+    /// re-asserts uniqueness of its payload every time the value moves —
+    /// which is once per admission, as the stack is boxed into the control
+    /// block — invalidating the very pointer the task is running on.
+    base: NonNull<u8>,
+}
 
-/// The widest ABI stack alignment any target requires; [`ContextSwitch::prepare`] rejects a misaligned `stack_top`.
-const STACK_ALIGN: usize = 16;
+/// The whole allocation: the guard region below the usable stack.
+const BOX_STACK_BYTES: usize = STACK_GUARD_BYTES + KTHREAD_STACK_BYTES;
 
 /// The canary window must fit inside the guard region, and the guard is a
 /// whole number of 4 KiB pages so the staged deployment form (unmapping it,
-/// `plans/PI.md`) lands on a clean page boundary.
+/// `plans/PI.md`) lands on a clean page boundary. Allocating the whole
+/// extent `STACK_ALIGN`-aligned is what lets the usable top be the
+/// allocation's end rather than a rounded-down approximation of it.
 const _STACK_LAYOUT_OK: () = {
     assert!(STACK_GUARD_CANARY_BYTES <= STACK_GUARD_BYTES);
     assert!(STACK_GUARD_BYTES.is_multiple_of(4096));
+    assert!(BOX_STACK_BYTES.is_multiple_of(STACK_ALIGN));
+};
+
+/// The allocation's layout: `STACK_ALIGN`-aligned, so the usable top is the
+/// allocation's end and `prepare` cannot refuse it as misaligned.
+///
+/// A `const` so the invalid case is a build failure rather than a runtime
+/// arm: substituting some other layout there would hand `new` a smaller
+/// allocation than it then fills, and `dealloc` a layout that does not
+/// match the one it was allocated with.
+const BOX_STACK_LAYOUT: Layout = match Layout::from_size_align(BOX_STACK_BYTES, STACK_ALIGN) {
+    Ok(layout) => layout,
+    Err(_) => panic!("the kernel-stack layout is not representable"),
 };
 
 impl BoxStack {
     /// Allocate a fresh kernel stack on the heap: a poison-filled guard
     /// region below a zeroed usable stack.
     ///
-    /// The backing slice is heap-allocated directly (`vec!` →
-    /// `into_boxed_slice`), never built through a `[0u8; _]` stack temporary:
-    /// a ~68 KiB array literal would itself risk the very stack overflow this
-    /// type guards against. [`Self::top`] rounds the
-    /// exclusive upper bound down to `STACK_ALIGN`, so the heap allocator's
-    /// own (byte) alignment is sufficient.
+    /// `None` when the heap cannot supply the ~68 KiB — the caller fails
+    /// the spawn closed rather than the allocator aborting the kernel.
     #[must_use]
-    pub fn new() -> Self {
-        let mut bytes =
-            alloc::vec![0u8; STACK_GUARD_BYTES + KTHREAD_STACK_BYTES].into_boxed_slice();
-        bytes[..STACK_GUARD_BYTES].fill(STACK_GUARD_BYTE);
-        Self(bytes)
+    pub fn new() -> Option<Self> {
+        // SAFETY: the layout has a non-zero size.
+        let raw = unsafe { alloc::alloc::alloc_zeroed(BOX_STACK_LAYOUT) };
+        let base = NonNull::new(raw)?;
+        // SAFETY: `alloc_zeroed` returned `BOX_STACK_BYTES` writable bytes
+        // we now own exclusively; the guard is its lowest region.
+        unsafe { base.write_bytes(STACK_GUARD_BYTE, STACK_GUARD_BYTES) };
+        Some(Self { base })
     }
 }
 
-impl Default for BoxStack {
-    fn default() -> Self {
-        Self::new()
+#[cfg(test)]
+impl BoxStack {
+    /// The whole `[guard | usable]` allocation, for the tests that inspect
+    /// or corrupt the guard region directly.
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: the live allocation this value owns, borrowed uniquely.
+        unsafe { core::slice::from_raw_parts_mut(self.base.as_ptr(), BOX_STACK_BYTES) }
     }
 }
 
-// SAFETY: `top` returns the heap slice's base plus its full length, rounded
-// down to `STACK_ALIGN` — the 16-aligned exclusive upper bound of the usable
-// region above the guard. The box owns the storage and frees it on drop, and
-// the region is exclusive to its owner.
+impl Drop for BoxStack {
+    fn drop(&mut self) {
+        // SAFETY: `base` came from `alloc_zeroed` with this exact layout and
+        // is freed once, here, when its sole owner is dropped.
+        unsafe { alloc::alloc::dealloc(self.base.as_ptr(), BOX_STACK_LAYOUT) };
+    }
+}
+
+// SAFETY: the allocation is owned exclusively by this value and reached
+// only through it, so moving it across CPUs moves the sole owner.
+unsafe impl Send for BoxStack {}
+
+// SAFETY: `region` names the usable stack above the guard — writable,
+// exclusive to this value, and live until the `Drop` above frees it. Its
+// top is the allocation's end, which `BOX_STACK_LAYOUT` aligns to
+// `STACK_ALIGN`.
 unsafe impl KernelStack for BoxStack {
-    fn top(&self) -> u64 {
-        let base = self.0.as_ptr() as u64;
-        let top = base + (STACK_GUARD_BYTES + KTHREAD_STACK_BYTES) as u64;
-        // Round down to `STACK_ALIGN` so the seed `stack_top`
-        // [`ContextSwitch::prepare`] requires is aligned regardless of the
-        // allocator's base alignment (it wastes at most `STACK_ALIGN - 1`
-        // bytes off the top of the usable region).
-        top & !(STACK_ALIGN as u64 - 1)
-    }
-
-    fn usable_bytes(&self) -> u64 {
-        KTHREAD_STACK_BYTES as u64
+    fn region(&self) -> KernelStackRegion {
+        // SAFETY: `[base + STACK_GUARD_BYTES, base + BOX_STACK_BYTES)` is
+        // the usable part of the live allocation this value owns.
+        unsafe { KernelStackRegion::new(self.base.add(STACK_GUARD_BYTES), KTHREAD_STACK_BYTES) }
     }
 
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
@@ -296,7 +337,19 @@ unsafe impl KernelStack for BoxStack {
         // overrun crosses first. Checking just this O(1) window keeps the
         // scheduler switch-back path cheap while still
         // catching a stack overflow; the full guard page provides absorption.
-        let canary = &self.0[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES..STACK_GUARD_BYTES];
+        //
+        // SAFETY: the window lies inside the guard region of the live
+        // allocation this value owns, and is disjoint from the usable
+        // region a task's frames occupy.
+        let canary = unsafe {
+            core::slice::from_raw_parts(
+                self.base
+                    .add(STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES)
+                    .as_ptr()
+                    .cast_const(),
+                STACK_GUARD_CANARY_BYTES,
+            )
+        };
         if canary.iter().all(|&b| b == STACK_GUARD_BYTE) {
             Ok(())
         } else {
@@ -314,12 +367,8 @@ unsafe impl KernelStack for BoxStack {
 // kind without the concrete type leaking into the admission generics. The box owns its payload and is `Send`, so the
 // admitted task may run on any CPU.
 unsafe impl KernelStack for Box<dyn KernelStack + Send> {
-    fn top(&self) -> u64 {
-        (**self).top()
-    }
-
-    fn usable_bytes(&self) -> u64 {
-        (**self).usable_bytes()
+    fn region(&self) -> KernelStackRegion {
+        (**self).region()
     }
 
     fn check_guard(&self) -> Result<(), StackGuardViolation> {
@@ -801,9 +850,10 @@ where
 ///
 /// # Errors
 ///
-/// Propagates [`SchedulerPolicy::spawn`]'s error (e.g.
-/// [`tairix_kernel_sched_api::SchedError::NoSuchCpu`] for an out-of-range
-/// `home_cpu`).
+/// [`tairix_kernel_sched_api::SchedError::OutOfMemory`] if the heap cannot
+/// supply the stack; otherwise propagates [`SchedulerPolicy::spawn`]'s
+/// error (e.g. [`tairix_kernel_sched_api::SchedError::NoSuchCpu`] for an
+/// out-of-range `home_cpu`).
 pub fn spawn_kthread<C, A, P, W>(
     scheduler: &P,
     cs: C,
@@ -817,7 +867,8 @@ where
     P: SchedulerPolicy<A>,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
-    spawn_kthread_with_stack(scheduler, cs, BoxStack::new(), home_cpu, priority, work)
+    let stack = BoxStack::new().ok_or(SchedError::OutOfMemory)?;
+    spawn_kthread_with_stack(scheduler, cs, stack, home_cpu, priority, work)
 }
 
 /// Admit a resumable kthread onto `scheduler` over a caller-supplied
@@ -937,10 +988,11 @@ where
     R: FnMut(u64) + Send + 'static,
     W: FnMut(&mut Yielder<C>) + Send + 'static,
 {
+    let stack = BoxStack::new().ok_or(SchedError::OutOfMemory)?;
     spawn_user_kthread_with_stack(
         scheduler,
         cs,
-        BoxStack::new(),
+        stack,
         home_cpu,
         priority,
         pre_resume,
@@ -1189,12 +1241,12 @@ where
         RunState::Finished => return TaskAction::Exit,
         RunState::NotStarted => {
             let cs = unsafe { (*ctl).cs };
-            let top = unsafe { (*ctl).stack.top() };
+            let stack = unsafe { (*ctl).stack.region() };
             // Seed the first frame at `trampoline`, passing the control
             // block address as the entry argument.
             let prepared = cs.prepare(
                 unsafe { &mut *addr_of_mut!((*ctl).task_ctx) },
-                top,
+                stack,
                 trampoline::<C, S>,
                 ctl as usize,
             );
@@ -1599,34 +1651,28 @@ mod tests {
     #[derive(Copy, Clone)]
     struct RecordingCs(&'static Recorder);
 
-    /// Frame the double reserves below `stack_top`; below the 512-byte
-    /// conformance stack, above the 16-byte too-small probe.
-    const DOUBLE_FRAME: u64 = 64;
+    /// Frame the double reserves below the region's top; below the kthread
+    /// stacks, above the 16-byte too-small probe.
+    const DOUBLE_FRAME: usize = 64;
 
     impl ContextSwitch for RecordingCs {
         fn prepare(
             &self,
             ctx: &mut TaskContext,
-            stack_top: u64,
+            stack: KernelStackRegion,
             entry: TaskEntry,
             arg: usize,
         ) -> Result<(), PrepareError> {
-            if stack_top == 0 {
-                return Err(PrepareError::NullStack);
-            }
-            if !stack_top.is_multiple_of(16) {
-                return Err(PrepareError::Misaligned);
-            }
-            if stack_top < DOUBLE_FRAME {
-                return Err(PrepareError::TooSmall);
-            }
+            let frame = stack.seed_frame(DOUBLE_FRAME)?;
             self.0.prepares.fetch_add(1, Ordering::SeqCst);
-            self.0.last_stack_top.store(stack_top, Ordering::SeqCst);
+            self.0
+                .last_stack_top
+                .store(stack.top_addr(), Ordering::SeqCst);
             self.0.last_arg.store(arg as u64, Ordering::SeqCst);
             self.0
                 .last_entry
                 .store(entry as usize as u64, Ordering::SeqCst);
-            ctx.stack_pointer = stack_top - DOUBLE_FRAME;
+            ctx.stack_pointer = frame.addr().get() as u64;
             Ok(())
         }
 
@@ -1672,7 +1718,7 @@ mod tests {
         fn prepare(
             &self,
             _ctx: &mut TaskContext,
-            _stack_top: u64,
+            _stack: KernelStackRegion,
             _entry: TaskEntry,
             _arg: usize,
         ) -> Result<(), PrepareError> {
@@ -1742,7 +1788,7 @@ mod tests {
     fn first_dispatch_step_prepares_then_switches_in() {
         let rec = recorder();
         let cs = RecordingCs(rec);
-        let stack = BoxStack::new();
+        let stack = BoxStack::new().expect("stack allocates");
         let top = stack.top();
         let mut control = control_with(cs, stack);
         let ctl_addr = addr_of_mut!(*control) as u64;
@@ -1779,7 +1825,7 @@ mod tests {
         // so parallel test threads never observe each other through it.
         const CPU: CpuId = 47;
         let rec = recorder();
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // Model the timer firing in EL1 after the policy arm and before the
         // context switch into user mode.
@@ -1809,7 +1855,11 @@ mod tests {
         let hits = leak_counter();
         // A *user* kthread: a kernel one never leaves EL1 and is crumbed
         // `kernel_body` instead.
-        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        let mut control = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            hits,
+        );
 
         let _ = dispatch_step(&mut control, CPU);
 
@@ -1830,7 +1880,7 @@ mod tests {
     #[test]
     fn second_dispatch_step_skips_prepare() {
         let rec = recorder();
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         let _ = dispatch_step(&mut control, 41);
         let _ = dispatch_step(&mut control, 41);
@@ -1843,7 +1893,7 @@ mod tests {
 
     #[test]
     fn failed_prepare_exits_without_switching() {
-        let mut control = control_with(FailingCs, BoxStack::new());
+        let mut control = control_with(FailingCs, BoxStack::new().expect("stack allocates"));
 
         let action = dispatch_step(&mut control, 42);
 
@@ -1856,7 +1906,7 @@ mod tests {
     #[test]
     fn finished_task_reports_exit_without_touching_the_port() {
         let rec = recorder();
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         control.state = RunState::Finished;
 
         let action = dispatch_step(&mut control, 43);
@@ -1871,7 +1921,7 @@ mod tests {
     fn yielder_yield_now_records_action_and_switches_back() {
         let rec = recorder();
         let cs = RecordingCs(rec);
-        let mut control = control_with(cs, BoxStack::new());
+        let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
 
         let mut yielder = Yielder {
@@ -1926,7 +1976,9 @@ mod tests {
     struct SlabStack {
         slab: Rc<RefCell<Slab>>,
         handle: SlabHandle,
-        top: u64,
+        /// Usable base inside the slot, carrying the slot's own write
+        /// provenance rather than an address re-derived from an integer.
+        base: NonNull<u8>,
     }
 
     impl SlabStack {
@@ -1935,34 +1987,33 @@ mod tests {
             let handle = slab.borrow_mut().alloc().expect("slab slot");
             let mut guard = slab.borrow_mut();
             let slot = guard.slot_mut(handle).expect("live slot");
-            let base = slot.as_mut_ptr() as u64;
+            let start = slot.as_mut_ptr();
             // Align the usable base up to STACK_ALIGN within the slot; the
             // slot is oversized by STACK_ALIGN so the aligned stack fits.
-            let aligned = (base + (STACK_ALIGN as u64 - 1)) & !(STACK_ALIGN as u64 - 1);
-            let top = aligned + KTHREAD_STACK_BYTES as u64;
+            let pad = start.align_offset(STACK_ALIGN);
+            // SAFETY: the slot is oversized by STACK_ALIGN, so the aligned
+            // base and the whole stack above it stay inside it.
+            let base = NonNull::new(unsafe { start.add(pad) }).expect("live slot base");
             drop(guard);
             (
                 Self {
                     slab: Rc::clone(slab),
                     handle,
-                    top,
+                    base,
                 },
                 handle,
             )
         }
     }
 
-    // SAFETY: `top` is `aligned + KTHREAD_STACK_BYTES`, the exclusive upper
-    // bound of a 16-aligned region inside the slab slot (oversized by
-    // STACK_ALIGN so it fits). The slot stays valid until `Drop` frees it,
-    // which is when the stack value itself is dropped.
+    // SAFETY: `region` is a STACK_ALIGN-aligned `KTHREAD_STACK_BYTES` run
+    // inside the slab slot (oversized by STACK_ALIGN so it fits), reached
+    // through the slot's own pointer. The slot stays valid until `Drop`
+    // frees it, which is when the stack value itself is dropped.
     unsafe impl KernelStack for SlabStack {
-        fn top(&self) -> u64 {
-            self.top
-        }
-
-        fn usable_bytes(&self) -> u64 {
-            KTHREAD_STACK_BYTES as u64
+        fn region(&self) -> KernelStackRegion {
+            // SAFETY: the aligned run lies wholly inside the live slot.
+            unsafe { KernelStackRegion::new(self.base, KTHREAD_STACK_BYTES) }
         }
     }
 
@@ -2033,7 +2084,7 @@ mod tests {
     fn reschedule_current_suspends_a_published_user_task() {
         let rec = recorder();
         let cs = RecordingCs(rec);
-        let mut control = control_with(cs, BoxStack::new());
+        let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
         let cpu: CpuId = 54;
 
@@ -2072,7 +2123,7 @@ mod tests {
         // root, so the step fails the task closed instead.
         let rec = recorder();
         let cpu: CpuId = 34;
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // One ordinary step seeds a real, in-bounds suspension point.
         assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Yield);
@@ -2081,7 +2132,7 @@ mod tests {
 
         // Now poke a pointer into a *different* stack, exactly as a park
         // against a foreign control block would have left behind.
-        let foreign = BoxStack::new();
+        let foreign = BoxStack::new().expect("stack allocates");
         control.task_ctx.stack_pointer = foreign.top() - 64;
         assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
         assert_eq!(
@@ -2109,7 +2160,11 @@ mod tests {
         let rec = recorder();
         let hits = leak_counter();
         let cpu: CpuId = 35;
-        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        let mut control = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            hits,
+        );
         control.live = Some(Arc::new(crate::procspace::ProcessSpace::for_test(
             crate::procspace::host_test_space(),
         )));
@@ -2121,7 +2176,7 @@ mod tests {
 
         // Poke in a foreign suspension point, as a park against another task's
         // control block would have left behind.
-        let foreign = BoxStack::new();
+        let foreign = BoxStack::new().expect("stack allocates");
         control.task_ctx.stack_pointer = foreign.top() - 64;
         assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
         assert_eq!(
@@ -2142,7 +2197,7 @@ mod tests {
 
     #[test]
     fn a_kernel_stack_carries_only_its_own_usable_region() {
-        let stack = BoxStack::new();
+        let stack = BoxStack::new().expect("stack allocates");
         let top = stack.top();
         assert!(stack.carries(top - 8), "one word below the top is on-stack");
         assert!(
@@ -2172,7 +2227,11 @@ mod tests {
         let rec = recorder();
         let hits = leak_counter();
         let cpu: CpuId = 61;
-        let mut control = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        let mut control = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            hits,
+        );
 
         // The host switch is a no-op that returns immediately, so a step
         // publishes the handle, runs `pre_resume`, switches in, and clears
@@ -2198,7 +2257,7 @@ mod tests {
         let rec = recorder();
         let hits = leak_counter();
         let cpu: CpuId = 44;
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // Before the upgrade the task is a plain kernel kthread.
         assert!(control.pre_resume.is_none());
@@ -2236,7 +2295,7 @@ mod tests {
         // through a blocking primitive (`reschedule_current`) exactly like
         // a user task's syscall trap — and retired the instant it switches
         // back.
-        let mut control = control_with(RecordingCs(rec), BoxStack::new());
+        let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         let published = &PUBLISHED_DURING_SWITCH;
         published.store(false, Ordering::SeqCst);
         let _ = dispatch_step(&mut control, cpu);
@@ -2268,7 +2327,7 @@ mod tests {
         // the bracket; the body thunk does not.
         let rec = recorder();
         let cs = RecordingCs(rec);
-        let mut control = control_with(cs, BoxStack::new());
+        let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = addr_of_mut!(*control);
         let cpu: CpuId = 53;
 
@@ -2321,7 +2380,11 @@ mod tests {
 
         let rec = recorder();
         let hits = leak_counter();
-        let mut user = user_control_with(RecordingCs(rec), BoxStack::new(), hits);
+        let mut user = user_control_with(
+            RecordingCs(rec),
+            BoxStack::new().expect("stack allocates"),
+            hits,
+        );
         let before = PARKS.with(core::cell::Cell::get);
         let _ = dispatch_step(&mut user, 63);
         assert_eq!(
@@ -2331,7 +2394,7 @@ mod tests {
         );
 
         let rec = recorder();
-        let mut kernel = control_with(RecordingCs(rec), BoxStack::new());
+        let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         let before = PARKS.with(core::cell::Cell::get);
         let _ = dispatch_step(&mut kernel, 63);
         assert_eq!(
@@ -2344,21 +2407,15 @@ mod tests {
     // --- Stack guard page -----------------------
 
     /// A guardless [`KernelStack`] host double, to prove the default
-    /// [`KernelStack::check_guard`] is vacuously `Ok`. The host `switch` is a
-    /// no-op, so its `top` is never dereferenced.
-    #[derive(Copy, Clone)]
-    struct GuardlessStack;
+    /// [`KernelStack::check_guard`] is vacuously `Ok`. It owns a real
+    /// [`BoxStack`] region and simply declines to override the check, which
+    /// is the property under test.
+    struct GuardlessStack(BoxStack);
 
-    // SAFETY: a host test double whose `top` is a plausible 16-aligned value;
-    // the host `ContextSwitch::switch` never transfers control, so nothing
-    // executes on this stack.
+    // SAFETY: `region` delegates to a real, owned, aligned `BoxStack`.
     unsafe impl KernelStack for GuardlessStack {
-        fn top(&self) -> u64 {
-            0x1_0000
-        }
-
-        fn usable_bytes(&self) -> u64 {
-            0x1_0000
+        fn region(&self) -> KernelStackRegion {
+            self.0.region()
         }
     }
 
@@ -2370,16 +2427,12 @@ mod tests {
         violated: bool,
     }
 
-    // SAFETY: `top` delegates to a real, owned, aligned `BoxStack` region;
+    // SAFETY: `region` delegates to a real, owned, aligned `BoxStack`;
     // `check_guard` reports a violation on demand. The host `switch` is a
     // no-op, so nothing executes on the stack.
     unsafe impl KernelStack for GuardDouble {
-        fn top(&self) -> u64 {
-            self.inner.top()
-        }
-
-        fn usable_bytes(&self) -> u64 {
-            self.inner.usable_bytes()
+        fn region(&self) -> KernelStackRegion {
+            self.inner.region()
         }
 
         fn check_guard(&self) -> Result<(), StackGuardViolation> {
@@ -2393,22 +2446,22 @@ mod tests {
 
     #[test]
     fn box_stack_guard_is_poisoned_and_usable_top_sits_above_it() {
-        let stack = BoxStack::new();
-        let base = stack.0.as_ptr() as u64;
+        let mut stack = BoxStack::new().expect("stack allocates");
+        let base = stack.base.addr().get() as u64;
 
         // The guard region (low) is poison-filled and the usable region
         // (high) is zeroed; `top` is the exclusive upper bound of the usable
         // region, above the guard.
-        assert!(stack.0[..STACK_GUARD_BYTES]
+        assert!(stack.bytes()[..STACK_GUARD_BYTES]
             .iter()
             .all(|&b| b == STACK_GUARD_BYTE));
-        assert!(stack.0[STACK_GUARD_BYTES..].iter().all(|&b| b == 0));
-        // The allocator's base is byte-aligned, so the usable top is the
-        // (16-aligned) round-down of base + total.
-        assert_eq!(
-            stack.top(),
-            (base + (STACK_GUARD_BYTES + KTHREAD_STACK_BYTES) as u64) & !(STACK_ALIGN as u64 - 1)
-        );
+        assert!(stack.bytes()[STACK_GUARD_BYTES..].iter().all(|&b| b == 0));
+        // The allocation is `STACK_ALIGN`-aligned and a whole multiple of it,
+        // so the usable top is the allocation's end exactly — no rounding,
+        // and nothing for `prepare` to refuse.
+        assert_eq!(stack.top(), base + BOX_STACK_BYTES as u64);
+        assert!(stack.top().is_multiple_of(STACK_ALIGN as u64));
+        assert_eq!(stack.usable_bytes(), KTHREAD_STACK_BYTES as u64);
         assert!(stack.check_guard().is_ok());
     }
 
@@ -2416,29 +2469,30 @@ mod tests {
     fn box_stack_check_guard_detects_an_overrun_at_the_usable_base() {
         // The topmost guard byte sits immediately below the usable base — the
         // first byte a contiguous downward overrun crosses.
-        let mut stack = BoxStack::new();
-        stack.0[STACK_GUARD_BYTES - 1] = 0;
+        let mut stack = BoxStack::new().expect("stack allocates");
+        stack.bytes()[STACK_GUARD_BYTES - 1] = 0;
         assert_eq!(stack.check_guard(), Err(StackGuardViolation));
     }
 
     #[test]
     fn box_stack_check_guard_detects_an_overrun_at_the_canary_floor() {
         // The deepest byte the canary covers is still detected.
-        let mut stack = BoxStack::new();
-        stack.0[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES] = 0;
+        let mut stack = BoxStack::new().expect("stack allocates");
+        stack.bytes()[STACK_GUARD_BYTES - STACK_GUARD_CANARY_BYTES] = 0;
         assert_eq!(stack.check_guard(), Err(StackGuardViolation));
     }
 
     #[test]
     fn default_check_guard_is_ok_for_a_guardless_stack() {
-        assert!(GuardlessStack.check_guard().is_ok());
+        let guardless = GuardlessStack(BoxStack::new().expect("stack allocates"));
+        assert!(guardless.check_guard().is_ok());
     }
 
     #[test]
     fn dispatch_step_fails_closed_on_a_guard_violation() {
         let rec = recorder();
         let stack = GuardDouble {
-            inner: BoxStack::new(),
+            inner: BoxStack::new().expect("stack allocates"),
             violated: true,
         };
         let mut control = control_with(RecordingCs(rec), stack);
@@ -2459,7 +2513,7 @@ mod tests {
     fn dispatch_step_reports_the_action_when_the_guard_is_intact() {
         let rec = recorder();
         let stack = GuardDouble {
-            inner: BoxStack::new(),
+            inner: BoxStack::new().expect("stack allocates"),
             violated: false,
         };
         let mut control = control_with(RecordingCs(rec), stack);

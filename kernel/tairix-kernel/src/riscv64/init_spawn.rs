@@ -105,7 +105,9 @@ impl InitSpawn for RiscvInitSpawn {
         // PID 1's kernel stack: a run of the shared kernel remap window whose
         // guard slot is unmapped in every root at once, so the stack stays
         // mapped and guarded across the switch below without touching `arch`.
-        let kernel_stack = tairix_kernel_core::kstack::alloc_kernel_stack();
+        let Some(kernel_stack) = tairix_kernel_core::kstack::alloc_kernel_stack() else {
+            return;
+        };
 
         // SAFETY: the process-root identity window covers the kernel's
         // current `pc`, `sp`, the leaked kernel state, the boot heap, and the

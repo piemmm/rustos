@@ -28,18 +28,15 @@
 //! memory.
 
 use alloc::boxed::Box;
+use core::ptr::NonNull;
 
+use tairix_arch_api::{KernelStackRegion, STACK_ALIGN};
 use tairix_kernel_mem::{
     back_run, release_run, FrameAllocator, KernelVirtMap, PhysMap, SlotWindow, PAGE_SIZE,
 };
 use tairix_sync::{Once, SpinLock};
 
 use crate::kthread::{KernelStack, KTHREAD_STACK_BYTES};
-
-/// The widest ABI stack alignment any target requires;
-/// [`tairix_arch_api::ContextSwitch::prepare`] rejects a misaligned seed
-/// `stack_top`.
-const STACK_ALIGN: u64 = 16;
 
 /// Mapped pages one stack occupies, above its guard slot.
 const STACK_PAGES: usize = KTHREAD_STACK_BYTES / PAGE_SIZE;
@@ -49,10 +46,13 @@ const RESERVE_PAGES: usize = STACK_PAGES + 1;
 
 /// The usable stack is a whole number of pages, so the guard slot below it
 /// lands on a page boundary and no mapped page of one stack ever abuts the
-/// mapped page of another.
+/// mapped page of another. A page-aligned run over a page-aligned window
+/// also makes the usable top `STACK_ALIGN`-aligned outright, so `prepare`
+/// can never refuse one of these stacks as misaligned.
 const _STACK_PAGE_ALIGNED: () = {
     assert!(KTHREAD_STACK_BYTES.is_multiple_of(PAGE_SIZE));
     assert!(STACK_PAGES > 0);
+    assert!(PAGE_SIZE.is_multiple_of(STACK_ALIGN));
 };
 
 /// The installed stack tier. Set once from the boot path; absent on a port
@@ -78,11 +78,11 @@ struct StackTier {
 
 impl StackTier {
     /// Reserve and back one stack, returning the window address of its guard
-    /// slot.
+    /// slot and a pointer to the usable run above it.
     ///
     /// Nothing is left reserved or mapped when the frame pool or the port
     /// refuses part of the run.
-    fn alloc(&self) -> Option<u64> {
+    fn alloc(&self) -> Option<(u64, NonNull<u8>)> {
         let window = self.kvmap.window();
         let mut slots = self.slots.lock();
         let slot = slots.allocate(RESERVE_PAGES).ok()?;
@@ -90,16 +90,31 @@ impl StackTier {
         // inside it always has a representable address.
         let guard = window.base() + ((self.base_slot + slot) as u64) * PAGE_SIZE as u64;
         let usable = guard + PAGE_SIZE as u64;
+        // The one place the window address becomes a pointer, before
+        // anything is mapped, so an address no pointer could hold is
+        // refused while only the reservation has to be undone. These pages
+        // are not a Rust allocation — they exist because the kernel wrote
+        // page tables for them — so `with_exposed_provenance` states the
+        // int-to-pointer step deliberately where a bare cast hid it.
+        let Some(base) = usize::try_from(usable)
+            .ok()
+            .map(core::ptr::with_exposed_provenance_mut::<u8>)
+            .and_then(NonNull::new)
+        else {
+            let _ = slots.release(slot, RESERVE_PAGES);
+            return None;
+        };
         if !back_run(self.kvmap, self.frames, usable, STACK_PAGES) {
             release_run(self.kvmap, self.frames, usable, STACK_PAGES);
             let _ = slots.release(slot, RESERVE_PAGES);
             return None;
         }
-        Some(guard)
+        Some((guard, base))
     }
 
-    /// Zero, unmap, and release the stack whose guard slot is at `guard`.
-    fn free(&self, guard: u64) {
+    /// Zero, unmap, and release the stack whose guard slot is at `guard`
+    /// and whose usable run starts at `base`.
+    fn free(&self, guard: u64, base: NonNull<u8>) {
         let Some(index) = self.kvmap.window().page_index(guard) else {
             // Not an address this tier ever handed out: fail closed rather
             // than tear down a run belonging to something else.
@@ -126,10 +141,7 @@ impl StackTier {
         // installed by `back_run` above and is writable kernel memory until
         // the teardown below removes it.
         unsafe {
-            let bytes = core::slice::from_raw_parts_mut(
-                usable as *mut u8,
-                STACK_PAGES.saturating_mul(PAGE_SIZE),
-            );
+            let bytes = core::slice::from_raw_parts_mut(base.as_ptr(), KTHREAD_STACK_BYTES);
             tairix_pagezero::zero(bytes);
         }
         release_run(self.kvmap, self.frames, usable, STACK_PAGES);
@@ -146,31 +158,37 @@ struct WindowStack {
     /// Window address of the unmapped guard slot: the run's low edge, one
     /// page below the usable stack.
     guard: u64,
+    /// The usable run's low edge, as the pointer the tier formed once when
+    /// it handed the run out.
+    base: NonNull<u8>,
 }
+
+// SAFETY: the run is owned exclusively by this value — the slots leave the
+// tier's free list when they are handed out and rejoin it only from the
+// `Drop` below — so moving it to another CPU moves the sole owner. The
+// pages are mapped in the window's shared sub-hierarchy, which every
+// translation root installs, so the pointer is valid under whichever root
+// the task runs.
+unsafe impl Send for WindowStack {}
 
 impl Drop for WindowStack {
     fn drop(&mut self) {
-        self.tier.free(self.guard);
+        self.tier.free(self.guard, self.base);
     }
 }
 
-// SAFETY: `top` is the run's usable extent rounded down to `STACK_ALIGN`.
-// Every page of that extent was installed by `back_run` in the window's
-// shared sub-hierarchy, which every translation root maps, so it stays
-// readable and writable under whichever root the task runs — and it is
-// exclusive to this value, because the slots leave the tier's free list when
-// they are handed out and rejoin it only from the `Drop` above. The guard
-// slot below `usable` is deliberately never mapped, so an overrun faults.
+// SAFETY: `region` names the run's usable extent. Every page of it was
+// installed by `back_run` in the window's shared sub-hierarchy, which every
+// translation root maps, so it stays readable and writable under whichever
+// root the task runs — and it is exclusive to this value, because the slots
+// leave the tier's free list when they are handed out and rejoin it only
+// from the `Drop` above. The guard slot below `usable` is deliberately never
+// mapped, so an overrun faults.
 unsafe impl KernelStack for WindowStack {
-    fn top(&self) -> u64 {
-        let top = self.guard + PAGE_SIZE as u64 + KTHREAD_STACK_BYTES as u64;
-        // Round down to `STACK_ALIGN`; the run is page-aligned so this wastes
-        // nothing, but keeps the contract explicit.
-        top & !(STACK_ALIGN - 1)
-    }
-
-    fn usable_bytes(&self) -> u64 {
-        KTHREAD_STACK_BYTES as u64
+    fn region(&self) -> KernelStackRegion {
+        // SAFETY: `base` addresses the `KTHREAD_STACK_BYTES` this run has
+        // mapped, held until the `Drop` above returns them.
+        unsafe { KernelStackRegion::new(self.base, KTHREAD_STACK_BYTES) }
     }
     // `check_guard` keeps the default: the guard slot is unmapped in every
     // root, so an overrun faults in hardware and there is no canary to read.
@@ -227,15 +245,17 @@ fn stack_window_pages(window_pages: usize, usable_frames: usize) -> usize {
 /// installed or the window and frame pool cannot supply a run.
 ///
 /// Never hands back an unguarded stack: the fallback carries a poison canary
-/// the dispatcher checks on every switch-back.
+/// the dispatcher checks on every switch-back. `None` when neither tier can
+/// supply one, so the caller refuses the spawn rather than the allocator
+/// aborting the kernel.
 #[must_use]
-pub fn alloc_kernel_stack() -> Box<dyn KernelStack + Send> {
+pub fn alloc_kernel_stack() -> Option<Box<dyn KernelStack + Send>> {
     if let Ok(Some(tier)) = STACKS.get() {
-        if let Some(guard) = tier.alloc() {
-            return Box::new(WindowStack { tier, guard });
+        if let Some((guard, base)) = tier.alloc() {
+            return Some(Box::new(WindowStack { tier, guard, base }));
         }
     }
-    Box::new(crate::kthread::BoxStack::new())
+    Some(Box::new(crate::kthread::BoxStack::new()?))
 }
 
 #[cfg(test)]
@@ -265,10 +285,11 @@ mod tests {
         // The verticals — and any overrun diagnosis — locate a stack's guard
         // from its public geometry alone, so `top - usable_bytes` must land
         // exactly on the usable base with the guard one page below it. The
-        // `STACK_ALIGN` round-down in `top` must not shift that, which holds
-        // only while the usable size is a whole number of pages.
+        // A page-aligned run needs no `STACK_ALIGN` round-down to shift it,
+        // which is what the const-assert above pins.
         let guard = 0x8000_0000u64;
-        let top = (guard + PAGE_SIZE as u64 + KTHREAD_STACK_BYTES as u64) & !(STACK_ALIGN - 1);
+        let top = guard + PAGE_SIZE as u64 + KTHREAD_STACK_BYTES as u64;
+        assert!(top.is_multiple_of(STACK_ALIGN as u64));
         let usable_base = top - KTHREAD_STACK_BYTES as u64;
         assert_eq!(usable_base, guard + PAGE_SIZE as u64);
         assert_eq!(usable_base - PAGE_SIZE as u64, guard);

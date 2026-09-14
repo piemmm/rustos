@@ -49,6 +49,14 @@ pub enum SchedError {
     /// ([`crate::SchedulerPolicy::spawn_parked_as`]); a second admission at
     /// the same one is refused rather than displacing the first.
     TaskIdInUse,
+    /// The task's kernel stack could not be allocated.
+    ///
+    /// The stack is tens of kilobytes and is the admission allocation that
+    /// actually fails under pressure, so it is reported as a value and the
+    /// spawn is refused. Smaller admission allocations still abort through
+    /// the global allocator's own handler; making the whole path fallible
+    /// is tracked separately (`plans/OPEN-DEFECTS.md` D122).
+    OutOfMemory,
 }
 
 impl fmt::Display for SchedError {
@@ -60,6 +68,7 @@ impl fmt::Display for SchedError {
             Self::NoSuchCpu => "no such cpu",
             Self::NoTaskIdAvailable => "no free task id could be drawn",
             Self::TaskIdInUse => "task id is already held by a live task",
+            Self::OutOfMemory => "no memory for the task's kernel stack",
         };
         f.write_str(s)
     }
@@ -86,6 +95,7 @@ mod tests {
             SchedError::NoSuchCpu,
             SchedError::NoTaskIdAvailable,
             SchedError::TaskIdInUse,
+            SchedError::OutOfMemory,
         ] {
             let s = format!("{v}");
             assert!(!s.is_empty(), "Display for {v:?} must not be empty");

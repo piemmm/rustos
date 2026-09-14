@@ -630,10 +630,13 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         // installed, so the program's `svc`s are handled.
         unsafe { user_mode.enter_user(entry) }
     };
+    let Some(stack) = BoxStack::new() else {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    };
     if spawn_user_kthread_with_stack_live(
         &sched,
         cs,
-        BoxStack::new(),
+        stack,
         BOOT_CPU,
         Priority::Normal,
         pre_resume,

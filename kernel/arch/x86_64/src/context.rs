@@ -41,6 +41,8 @@
 
 use core::mem::size_of;
 
+use tairix_arch_api::{KernelStackRegion, PrepareError, STACK_ALIGN};
+
 /// Per-task register-save area.
 ///
 /// One [`TaskCtx`] per scheduler task. The only field is the kernel
@@ -71,9 +73,8 @@ impl TaskCtx {
     /// will land at `entry`, with the System V AMD64 ABI's first
     /// argument register `rdi` set to `arg`.
     ///
-    /// `stack_top` is the *exclusive* upper bound of the task's kernel
-    /// stack: i.e. one byte past the last addressable byte. It must be
-    /// 16-byte aligned (System V AMD64 §3.2.2) and non-zero.
+    /// `stack` is the task's usable kernel stack; the frame occupies its
+    /// topmost `FRAME_BYTES`.
     ///
     /// On success returns `()` and `self.rsp` points at the bottom of
     /// the synthesised frame; the layout matches the resume epilogue
@@ -82,22 +83,15 @@ impl TaskCtx {
     ///
     /// # Errors
     ///
-    /// [`PrepareError::NullStack`] if `stack_top == 0`;
-    /// [`PrepareError::Misaligned`] if `stack_top % 16 != 0`;
-    /// [`PrepareError::TooSmall`] if `stack_top` does not have room for
-    /// the synthesised frame (9 × 8 bytes).
+    /// [`PrepareError::Misaligned`] if the region's top is not 16-byte
+    /// aligned (System V AMD64 §3.2.2); [`PrepareError::TooSmall`] if it
+    /// does not have room for the synthesised frame (9 × 8 bytes).
     pub fn prepare(
         &mut self,
-        stack_top: u64,
+        stack: KernelStackRegion,
         entry: unsafe extern "C" fn(usize) -> !,
         arg: usize,
     ) -> Result<(), PrepareError> {
-        if stack_top == 0 {
-            return Err(PrepareError::NullStack);
-        }
-        if !stack_top.is_multiple_of(16) {
-            return Err(PrepareError::Misaligned);
-        }
         // Frame layout the resume half of `switch` expects to pop, in
         // ascending address order from `rsp`. This must match the actual
         // `popq` order in `context.s` (rdi first, then r15..rbp, then
@@ -125,43 +119,28 @@ impl TaskCtx {
         // is 16-byte aligned, the entry then observes the System V
         // AMD64 §3.2.2 alignment a `call` would have produced. Without
         // the pad, `entry` would run on a stack misaligned by 8.
-        if stack_top < FRAME_BYTES {
-            return Err(PrepareError::TooSmall);
-        }
-        let rsp = stack_top - FRAME_BYTES;
-        // SAFETY: `stack_top` is non-zero, 16-byte aligned, and at
-        // least `FRAME_BYTES` above zero by the checks above. The
-        // caller's documented contract is that the byte range
-        // `[stack_top - stack_size .. stack_top)` is mapped, exclusive
-        // to this CPU, and writable. The frame we write fits entirely
-        // in the topmost `FRAME_BYTES` of that range.
+        let frame = stack.seed_frame(FRAME_BYTES)?;
+        let p = frame.cast::<u64>();
+        // SAFETY: `seed_frame` returned `FRAME_BYTES` of the region, which
+        // its constructor vouches is mapped, writable, and exclusive to
+        // this CPU; the region's top is 16-byte aligned and `FRAME_BYTES`
+        // is a multiple of 8, so `p` is aligned for the `u64` writes below
+        // and every index stays inside the frame.
         unsafe {
-            let p = rsp as *mut u64;
             // rdi <- arg (popped first by the resume half).
-            core::ptr::write(p.add(0), arg as u64);
+            p.write(arg as u64);
             // r15, r14, r13, r12, rbx, rbp <- zero (popped next).
             for i in 1..7 {
-                core::ptr::write(p.add(i), 0);
+                p.add(i).write(0);
             }
             // return address <- entry (consumed by `ret`).
-            core::ptr::write(p.add(7), entry as usize as u64);
+            p.add(7).write(entry as usize as u64);
             // p.add(8) is the alignment pad — never read by the resume
             // half, so it is left at the stack's existing contents.
         }
-        self.rsp = rsp;
+        self.rsp = frame.addr().get() as u64;
         Ok(())
     }
-}
-
-/// Errors returned by [`TaskCtx::prepare`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrepareError {
-    /// `stack_top` was zero.
-    NullStack,
-    /// `stack_top` was not 16-byte aligned (System V AMD64 §3.2.2).
-    Misaligned,
-    /// `stack_top` had no room for the initial frame.
-    TooSmall,
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes.
@@ -170,7 +149,7 @@ pub enum PrepareError {
 /// trampoline is entered with the System V AMD64 `(%rsp + 8) % 16 == 0`
 /// invariant. The const-asserts below keep this in step with the
 /// `popq` sequence in `context.s`.
-const FRAME_BYTES: u64 = 9 * 8;
+const FRAME_BYTES: usize = 9 * 8;
 
 /// Compile-time pinning of the [`TaskCtx`] layout. The `switch`
 /// inline assembly addresses `TaskCtx::rsp` by the constant offset
@@ -178,6 +157,13 @@ const FRAME_BYTES: u64 = 9 * 8;
 #[allow(dead_code)] // const-assert; never referenced at runtime.
 const TASK_CTX_LAYOUT_PINNED: () = {
     assert!(size_of::<TaskCtx>() == 8);
+    // The frame is written as `u64` slots through a pointer whose base is
+    // `STACK_ALIGN`-aligned minus this, so it must keep that base aligned
+    // for `u64`. It is deliberately *not* a multiple of `STACK_ALIGN`: the
+    // trailing pad is what lands `entry` on the System V alignment a `call`
+    // would have produced.
+    assert!(FRAME_BYTES.is_multiple_of(size_of::<u64>()));
+    assert!(!FRAME_BYTES.is_multiple_of(STACK_ALIGN));
 };
 
 // --- Context switch primitive ---------------------------------------
@@ -236,6 +222,7 @@ pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
 mod tests {
     use super::*;
     use core::mem::{align_of, offset_of};
+    use core::ptr::NonNull;
 
     #[test]
     fn task_ctx_layout_is_fixed() {
@@ -258,53 +245,77 @@ mod tests {
         panic!("host_entry is address-only; never invoked")
     }
 
-    #[test]
-    fn prepare_rejects_null_stack() {
-        let mut c = TaskCtx::new();
-        assert_eq!(
-            c.prepare(0, host_entry, 0).unwrap_err(),
-            PrepareError::NullStack
-        );
+    /// A real, 16-byte-aligned stack buffer. The frame is asserted by
+    /// reading *this* buffer back, so the test proves the write landed in
+    /// the region rather than trusting the address `prepare` reported.
+    #[repr(C, align(16))]
+    struct Stack([u64; STACK_WORDS]);
+
+    const STACK_WORDS: usize = 32;
+    const STACK_BYTES: usize = STACK_WORDS * 8;
+
+    impl Stack {
+        fn new() -> Self {
+            Self([0xDEAD_BEEF_DEAD_BEEF; STACK_WORDS])
+        }
+
+        /// The lowest `len` bytes of the buffer, as a region.
+        fn region(&mut self, len: usize) -> KernelStackRegion {
+            assert!(len <= STACK_BYTES);
+            let ptr = NonNull::from(&mut self.0).cast::<u8>();
+            // SAFETY: `ptr` addresses `len <= STACK_BYTES` bytes of this
+            // live, uniquely borrowed buffer, which outlives the region.
+            unsafe { KernelStackRegion::new(ptr, len) }
+        }
     }
 
+    /// Big enough for the frame, so only the unaligned top can refuse it.
     #[test]
     fn prepare_rejects_misaligned_stack() {
+        let mut stack = Stack::new();
         let mut c = TaskCtx::new();
         assert_eq!(
-            c.prepare(0x1_0001, host_entry, 0).unwrap_err(),
+            c.prepare(stack.region(STACK_BYTES - 8), host_entry, 0)
+                .unwrap_err(),
             PrepareError::Misaligned
+        );
+        assert_eq!(
+            c.rsp, 0,
+            "a refused prepare must leave the context unseeded"
         );
     }
 
+    /// 16-byte aligned, but well below the 72-byte frame.
     #[test]
     fn prepare_rejects_too_small_stack() {
+        let mut stack = Stack::new();
         let mut c = TaskCtx::new();
-        // 16-byte aligned, but well below the 64-byte frame.
         assert_eq!(
-            c.prepare(0x10, host_entry, 0).unwrap_err(),
+            c.prepare(stack.region(16), host_entry, 0).unwrap_err(),
             PrepareError::TooSmall
+        );
+        assert_eq!(
+            c.rsp, 0,
+            "a refused prepare must leave the context unseeded"
         );
     }
 
     #[test]
     fn prepare_writes_initial_frame() {
-        // Use a real, suitably-aligned heap buffer so the writes the
-        // function performs land somewhere safe to inspect on the host.
-        #[repr(C, align(16))]
-        struct Stack([u64; 16]);
-        let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 16]);
-        let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(16) } as u64;
+        let mut stack = Stack::new();
+        let region = stack.region(STACK_BYTES);
+        let top = region.top_addr();
         let mut c = TaskCtx::new();
         // Coerce once: the frame word is compared against *this* pointer
         // value, because two coercions of one `fn` item are not
         // guaranteed to share an address.
         let entry: unsafe extern "C" fn(usize) -> ! = host_entry;
-        c.prepare(top, entry, 0xCAFE).unwrap();
+        c.prepare(region, entry, 0xCAFE).unwrap();
         // rsp should be `top - 72` (8 frame words + the alignment pad).
         assert_eq!(c.rsp, top - 72);
         // Verify the frame layout the resume epilogue will pop, in the
         // `context.s` `popq` order: rdi, then r15..rbp, then `ret`.
-        let frame = unsafe { core::slice::from_raw_parts(c.rsp as *const u64, 8) };
+        let frame = &stack.0[STACK_WORDS - FRAME_BYTES / size_of::<u64>()..];
         // rdi <- arg (popped first).
         assert_eq!(frame[0], 0xCAFE);
         // r15, r14, r13, r12, rbx, rbp <- zero.

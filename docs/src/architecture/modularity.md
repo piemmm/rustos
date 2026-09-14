@@ -203,8 +203,12 @@ stack in a fixed frame the switch assembly owns — so the
 architecture-neutral save area `TaskContext` is a single `#[repr(C)]`
 `u64`, layout-identical to each port's native `TaskCtx` (one definition,
 `AGENTS.md` §2.2; a const-assert in each port pins the equality).
-`ContextSwitch::prepare` seeds a never-run task's first frame (rejecting
-a null/misaligned/too-small stack fail-closed, `AGENTS.md` §2.9) and
+`ContextSwitch::prepare` seeds a never-run task's first frame — into a
+`KernelStackRegion`, the pointer the frame is written through plus its
+length, so the write carries provenance and the port's two refusals
+(misaligned top, frame does not fit) are checked once in
+`KernelStackRegion::seed_frame` rather than restated per port; building a
+region is the `unsafe` step, which is what lets `prepare` be safe — and
 `ContextSwitch::switch` performs the bare-metal switch. Each bare-metal
 port exposes a `ContextSwitchHal` handle that reinterprets `TaskContext`
 as its `TaskCtx` and forwards to the existing `context` primitive, so the
@@ -213,7 +217,7 @@ each Web Worker is its own sandboxed module instance and the kernel never
 swaps register state under it, so the slice is **n/a** there (`AGENTS.md`
 §2.1 — no fake primitive). `context::conformance::run_all` asserts the
 `prepare` contract on the host (an empty context is not runnable; a
-null/misaligned/too-small stack is rejected; a good stack yields a
+misaligned or too-small region is rejected; a good region yields a
 runnable, in-bounds frame); like `EnterUser`, the switch itself is
 proven only on the bare-metal target (the scheduler-drive QEMU vertical),
 so it carries no host check. The vertical is driven per-port (it seeds a

@@ -130,7 +130,9 @@ impl InitSpawn for X86_64InitSpawn {
         // PID 1's kernel stack: a run of the shared kernel remap window whose
         // guard slot is unmapped in every root at once, so the stack stays
         // mapped and guarded across the switch below without touching `arch`.
-        let kernel_stack = tairix_kernel_core::kstack::alloc_kernel_stack();
+        let Some(kernel_stack) = tairix_kernel_core::kstack::alloc_kernel_stack() else {
+            return;
+        };
 
         // SAFETY: the new space maps the higher-half kernel window and the
         // direct physical map, so the executing RIP, the current kernel

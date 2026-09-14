@@ -18,9 +18,9 @@
 //! kernel `rsp` at suspension), so the forward is a layout-identical
 //! reinterpretation, not a copy; the const-assert below pins that equality.
 
-use tairix_arch_api::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::{ContextSwitch, KernelStackRegion, PrepareError, TaskContext, TaskEntry};
 
-use crate::context::{self, TaskCtx};
+use crate::context::TaskCtx;
 
 /// x86_64 implementation of the Arch HAL context-switch surface.
 ///
@@ -46,27 +46,16 @@ const _CONTEXT_LAYOUT_MATCHES: () = {
     assert!(core::mem::align_of::<TaskContext>() == core::mem::align_of::<TaskCtx>());
 };
 
-/// Map the port primitive's prepare error onto the neutral HAL error.
-const fn map_prepare_error(err: context::PrepareError) -> PrepareError {
-    match err {
-        context::PrepareError::NullStack => PrepareError::NullStack,
-        context::PrepareError::Misaligned => PrepareError::Misaligned,
-        context::PrepareError::TooSmall => PrepareError::TooSmall,
-    }
-}
-
 impl ContextSwitch for ContextSwitchHal {
     fn prepare(
         &self,
         ctx: &mut TaskContext,
-        stack_top: u64,
+        stack: KernelStackRegion,
         entry: TaskEntry,
         arg: usize,
     ) -> Result<(), PrepareError> {
         let mut native = TaskCtx::new();
-        native
-            .prepare(stack_top, entry, arg)
-            .map_err(map_prepare_error)?;
+        native.prepare(stack, entry, arg)?;
         ctx.stack_pointer = native.rsp;
         Ok(())
     }
@@ -81,7 +70,7 @@ impl ContextSwitch for ContextSwitchHal {
             // (non-null, aligned, runnable `next`, exclusive `prev`),
             // which is exactly `crate::context::switch`'s contract.
             unsafe {
-                context::switch(prev.cast::<TaskCtx>(), next.cast::<TaskCtx>());
+                crate::context::switch(prev.cast::<TaskCtx>(), next.cast::<TaskCtx>());
             }
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]

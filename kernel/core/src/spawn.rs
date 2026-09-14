@@ -714,6 +714,7 @@ pub fn admit_errno(err: AdmitError) -> Errno {
     match err {
         AdmitError::SchedulerFull => Errno::NoSpace,
         AdmitError::AspaceConflict => Errno::AlreadyExists,
+        AdmitError::OutOfMemory => Errno::OutOfMemory,
     }
 }
 
@@ -902,6 +903,8 @@ pub enum AdmitError {
     /// fresh id is never already present, so this signals a kernel
     /// invariant violation and is refused rather than papered over.
     AspaceConflict,
+    /// The new task's kernel stack could not be allocated.
+    OutOfMemory,
 }
 
 /// A freshly built, not-yet-admitted user image an [`ArchImageBuilder`]
@@ -1601,6 +1604,7 @@ mod tests {
     #[test]
     fn admit_errno_maps_stable_codes() {
         assert_eq!(admit_errno(AdmitError::SchedulerFull), Errno::NoSpace);
+        assert_eq!(admit_errno(AdmitError::OutOfMemory), Errno::OutOfMemory);
         assert_eq!(
             admit_errno(AdmitError::AspaceConflict),
             Errno::AlreadyExists

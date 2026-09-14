@@ -194,7 +194,8 @@ pub use irq::{conformance as irq_conformance, InterruptEntry, IrqControlError, I
 pub use timer::{conformance as timer_conformance, TickFn, Timer};
 
 pub use context::{
-    conformance as context_conformance, ContextSwitch, PrepareError, TaskContext, TaskEntry,
+    conformance as context_conformance, ContextSwitch, KernelStackRegion, PrepareError,
+    TaskContext, TaskEntry, STACK_ALIGN,
 };
 
 pub use mmu::{conformance as mmu_conformance, AddressSpace, KernelWindow, MapError, PageFlags};

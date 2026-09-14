@@ -192,14 +192,23 @@ mod kernel {
 
     static mut WORKER_STACK: WorkerStack = WorkerStack([0; 16 * 1024]);
 
-    /// Exclusive upper bound (one past the last byte) of [`WORKER_STACK`].
-    ///
-    /// Forms a one-past-the-end address of the static stack; it is never
-    /// dereferenced. The `align(16)` struct keeps the top 16-byte aligned,
-    /// as [`TaskCtx::prepare`] requires.
-    fn worker_stack_top() -> u64 {
-        let base = addr_of_mut!(WORKER_STACK) as u64;
-        base + core::mem::size_of::<WorkerStack>() as u64
+    use core::ptr::NonNull;
+    use tairix_arch_api::KernelStackRegion;
+
+    /// [`WORKER_STACK`] as the region [`TaskCtx::prepare`] seeds a frame
+    /// in. The `align(16)` struct keeps the top 16-byte aligned, which is
+    /// what `prepare` requires of it.
+    fn worker_stack_region() -> KernelStackRegion {
+        let base = addr_of_mut!(WORKER_STACK).cast::<u8>();
+        // SAFETY: the static is this image's own, is never reached from
+        // anywhere but the one worker task below, and lives for the whole
+        // run; the pointer carries provenance for all of it.
+        unsafe {
+            KernelStackRegion::new(
+                NonNull::new_unchecked(base),
+                core::mem::size_of::<WorkerStack>(),
+            )
+        }
     }
 
     /// Inbound task of the [`context::switch`] round-trip. Records that it
@@ -323,7 +332,7 @@ mod kernel {
         // 1. Real bidirectional context switch, before interrupts are
         //    enabled (no IRQ can fire mid-switch onto the inbound stack).
         if (unsafe { &mut *addr_of_mut!(WORKER_CTX) })
-            .prepare(worker_stack_top(), worker_entry, 0xC0FF_EE00)
+            .prepare(worker_stack_region(), worker_entry, 0xC0FF_EE00)
             .is_err()
         {
             qemu_exit::exit_failure(FAIL_CTX_SWITCH);

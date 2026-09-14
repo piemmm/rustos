@@ -290,7 +290,12 @@ mod kernel {
         ));
         install_kernel_stacks(frames, physmap, kvmap);
 
-        let stack = alloc_kernel_stack();
+        let Some(stack) = alloc_kernel_stack() else {
+            fail(
+                "no kernel stack: neither the window tier nor the fallback could supply one",
+                FAIL_SETUP,
+            );
+        };
         // The tier lays a stack out as `[guard slot | usable run]`, so the
         // guard is the page below the usable base. A `BoxStack` fallback
         // would have handed back heap memory outside the window, which is

@@ -30,19 +30,19 @@
 //!
 //! # `unsafe` discipline
 //!
-//! Every `unsafe` block has a `// SAFETY:` justification. The two
-//! non-trivial ones are the byte-exact `copy_nonoverlapping` of the
-//! assembled trampoline payload into the low-memory frame
-//! ([`TrampolineFrame::install`]) and the volatile boot-slot writes
-//! ([`TrampolineFrame::write_slot`]). Both are encapsulated behind safe
-//! APIs; nothing about the trampoline page leaks across the crate
-//! boundary as a raw pointer.
+//! Every `unsafe` block has a `// SAFETY:` justification. The only
+//! non-trivial one is the acquire load of the in-frame rendezvous flag
+//! ([`TrampolineFrame::load_ready`]). The payload install and the
+//! boot-slot write are plain slice copies; ordering against the SIPI
+//! comes from the caller's release fence. Nothing about the trampoline
+//! page leaks across the crate boundary as a raw pointer.
 
 // `AtomicU32` is referenced by `TrampolineFrame::load_ready` for the
 // acquire-load against the in-frame `ready` flag the AP `xchg`s into;
 // the `ApBootSlot` struct itself only uses a plain `u32` so it can stay
 // `Copy + Eq` (the asm-side `xchg` atomicity is what the wire protocol
 // requires; the Rust-side struct never receives an AP write directly).
+use core::mem::offset_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // The caller-provided `ApStackPool` payload is held in an `UnsafeCell`
@@ -108,6 +108,23 @@ const SIPI_VECTOR_IN_RANGE: () = assert!((AP_TRAMPOLINE_PHYS >> 12) < 256);
 
 // --- ApBootSlot ------------------------------------------------------
 
+/// Bytes of [`ApBootSlot`] the trampoline actually reads: through `ready`
+/// at [`AP_BOOT_SLOT_READY_OFFSET`].
+///
+/// Deliberately not `size_of::<ApBootSlot>()`, which is larger: the struct
+/// carries tail padding up to its 8-byte alignment. That padding is not
+/// part of the contract with `ap_trampoline.s` and is uninitialised, so
+/// copying it out of the struct would be a read of uninitialised memory.
+const AP_BOOT_SLOT_WIRE_LEN: usize = AP_BOOT_SLOT_READY_OFFSET + core::mem::size_of::<u32>();
+
+/// The wire image must fit inside the struct it is taken from, and inside
+/// the frame region reserved for it.
+#[allow(dead_code)] // const-assert; never referenced at runtime.
+const AP_BOOT_SLOT_WIRE_FITS: () = {
+    assert!(AP_BOOT_SLOT_WIRE_LEN <= core::mem::size_of::<ApBootSlot>());
+    assert!(AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_WIRE_LEN <= 4096);
+};
+
 /// Per-AP record the trampoline reads at offset [`AP_BOOT_SLOT_OFFSET`]
 /// inside the 4 KiB trampoline frame.
 ///
@@ -134,13 +151,14 @@ pub struct ApBootSlot {
     pub entry: u64,
     /// Scheduler-visible CPU identifier passed to `entry`.
     pub cpu_id: u32,
-    /// Reserved padding so `ready` lands at the assembly-side
+    /// Reserved span so `ready` lands at the assembly-side
     /// `AP_BOOT_SLOT_READY` offset (`0x40`). Public because the struct
     /// is `#[repr(C)]` and its byte layout is part of the wire contract
     /// with `ap_trampoline.s` (invariant audited by
-    /// the `ap_boot_slot_layout_is_locked` host test below).
-    #[allow(clippy::pub_underscore_fields)]
-    pub _reserved: [u8; 36],
+    /// the `ap_boot_slot_layout_is_locked` host test below), and written
+    /// out with the rest of that contract by
+    /// [`TrampolineFrame::write_slot`].
+    pub reserved: [u8; 36],
     /// Initial value of the rendezvous flag. Always written as `0`;
     /// the AP `xchg`s a `1` here once long mode is up. The BSP reads
     /// the live flag through [`TrampolineFrame::load_ready`] (an
@@ -167,7 +185,7 @@ impl ApBootSlot {
             stack_top,
             entry,
             cpu_id,
-            _reserved: [0; 36],
+            reserved: [0; 36],
             ready: 0,
         })
     }
@@ -185,8 +203,13 @@ pub enum SlotError {
 /// Errors raised by [`TrampolineFrame`] operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallError {
-    /// `frame_base` was not 4 KiB aligned.
+    /// The slice's base was not 4 KiB aligned. The whole module reads the
+    /// frame at fixed sub-offsets — including the 4-byte-aligned `ready`
+    /// cell `load_ready` reaches as an `AtomicU32` — so an unaligned base
+    /// is refused here rather than assumed downstream.
     FrameMisaligned,
+    /// The slice was not exactly 4 KiB.
+    FrameWrongSize,
     /// `frame_base` did not satisfy `frame_base >> 12 < 256` (the SIPI
     /// vector field is only 8 bits wide).
     FrameOutOfSipiRange,
@@ -213,12 +236,19 @@ impl<'a> TrampolineFrame<'a> {
     ///
     /// # Errors
     ///
-    /// [`InstallError::FrameMisaligned`] if the slice is not exactly
-    /// 4 KiB; [`InstallError::FrameOutOfSipiRange`] if the SIPI vector
+    /// [`InstallError::FrameWrongSize`] if the slice is not exactly
+    /// 4 KiB; [`InstallError::FrameMisaligned`] if its base is not 4 KiB
+    /// aligned; [`InstallError::FrameOutOfSipiRange`] if the SIPI vector
     /// would not fit in 8 bits at the linked
     /// [`AP_TRAMPOLINE_PHYS`].
     pub fn new(frame: &'a mut [u8]) -> Result<Self, InstallError> {
         if frame.len() != 4096 {
+            return Err(InstallError::FrameWrongSize);
+        }
+        // Checked, not assumed: `load_ready` reaches the in-frame `ready`
+        // cell as an `AtomicU32`, whose reference would be invalid at an
+        // unaligned address.
+        if !frame.as_ptr().addr().is_multiple_of(4096) {
             return Err(InstallError::FrameMisaligned);
         }
         if (AP_TRAMPOLINE_PHYS >> 12) >= 256 {
@@ -258,20 +288,33 @@ impl<'a> TrampolineFrame<'a> {
     /// Write the per-AP [`ApBootSlot`] record into the frame at offset
     /// [`AP_BOOT_SLOT_OFFSET`].
     ///
-    /// Performed field-by-field through a volatile-aware path so the
-    /// compiler may not reorder these writes past the subsequent
-    /// `init_sipi_sipi` call.
+    /// Field by field, at the offsets the struct itself reports, so only
+    /// the `AP_BOOT_SLOT_WIRE_LEN` bytes of the contract are written and
+    /// the struct's tail padding — which is not part of it, and which
+    /// reading would be a read of uninitialised memory — is never touched.
+    /// Ordering against the SIPI is the caller's release fence, not a
+    /// property of these stores.
     pub fn write_slot(&mut self, slot: &ApBootSlot) {
-        let slot_bytes: [u8; core::mem::size_of::<ApBootSlot>()] =
-            // SAFETY: `ApBootSlot` is `#[repr(C)]` and contains no
-            // padding pointers; transmuting to bytes is sound. The
-            // destination range is 4 KiB-bounded by construction.
-            unsafe { core::mem::transmute_copy(slot) };
-        let off = AP_BOOT_SLOT_OFFSET;
-        self.frame[off..off + slot_bytes.len()].copy_from_slice(&slot_bytes);
+        let wire =
+            &mut self.frame[AP_BOOT_SLOT_OFFSET..AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_WIRE_LEN];
+        wire[offset_of!(ApBootSlot, cr3)..][..8].copy_from_slice(&slot.cr3.to_ne_bytes());
+        wire[offset_of!(ApBootSlot, stack_top)..][..8]
+            .copy_from_slice(&slot.stack_top.to_ne_bytes());
+        wire[offset_of!(ApBootSlot, entry)..][..8].copy_from_slice(&slot.entry.to_ne_bytes());
+        wire[offset_of!(ApBootSlot, cpu_id)..][..4].copy_from_slice(&slot.cpu_id.to_ne_bytes());
+        wire[offset_of!(ApBootSlot, reserved)..][..slot.reserved.len()]
+            .copy_from_slice(&slot.reserved);
+        wire[offset_of!(ApBootSlot, ready)..][..4].copy_from_slice(&slot.ready.to_ne_bytes());
     }
 
     /// Acquire-load the `ready` flag from the in-frame [`ApBootSlot`].
+    ///
+    /// Takes `&mut self` although it only reads: the AP writes this
+    /// location from another core while the BSP polls it, so the pointer
+    /// must carry write provenance. Derived from a shared borrow it would
+    /// instead tell the compiler the bytes cannot change for the life of
+    /// the borrow, which licenses hoisting the load out of the caller's
+    /// spin loop — the BSP would then wait for a value it never re-reads.
     ///
     /// # Panics
     /// Never panics in production: `AP_BOOT_SLOT_OFFSET` is `0xF00`,
@@ -281,19 +324,20 @@ impl<'a> TrampolineFrame<'a> {
     /// [`Self::install`] and overwritten by [`Self::write_slot`] with a
     /// 4-byte-aligned `u32`.
     #[must_use]
-    pub fn load_ready(&self) -> u32 {
+    pub fn load_ready(&mut self) -> u32 {
         let off = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET;
         // SAFETY: `off + 4 <= 4096`; `off` is 4-byte aligned because
         // `AP_BOOT_SLOT_OFFSET = 0xF00` and `AP_BOOT_SLOT_READY_OFFSET
         // = 0x40` are both multiples of 4 and the caller guarantees a
         // 4 KiB-aligned `frame` base (by passing the bare 4 KiB low
         // physical frame at `AP_TRAMPOLINE_PHYS = 0x8000`; on the host
-        // the test buffer is a `[u8; 4096]` which Rust aligns to at
-        // least 1 — the slot bytes were placed via `copy_from_slice` of
-        // a `transmute_copy`'d `ApBootSlot`, so the 4-byte alignment
-        // tracks the data, not the slice). `AtomicU32` has the same
-        // layout and alignment as `u32`. `Acquire` ordering pairs with
-        // the AP's `xchg`-released store in `ap_trampoline.s`.
+        // the test buffer is a `[u8; 4096]`, and both the slot offset and
+        // that buffer's own alignment keep the field 4-byte aligned).
+        // `AtomicU32` has the same layout and alignment as `u32`, and the
+        // pointer is derived from the exclusive borrow of the frame, so the
+        // shared reference below is the only live reference to the cell.
+        // `Acquire` pairs with the AP's `xchg`-released store in
+        // `ap_trampoline.s`.
         //
         // The clippy `cast_ptr_alignment` lint is suppressed here
         // because the alignment proof above lives in the comments —
@@ -302,7 +346,7 @@ impl<'a> TrampolineFrame<'a> {
         // restatement of a compile-time fact (both constants are
         // statically multiples of 4).
         #[allow(clippy::cast_ptr_alignment)] // alignment proven above.
-        let p = self.frame[off..off + 4].as_ptr().cast::<AtomicU32>();
+        let p = self.frame[off..off + 4].as_mut_ptr().cast::<AtomicU32>();
         unsafe { (*p).load(Ordering::Acquire) }
     }
 }
@@ -840,31 +884,68 @@ mod tests {
         assert_eq!(slot.ready, 0);
     }
 
+    /// A 4 KiB-aligned stand-in for the real low physical frame at
+    /// `AP_TRAMPOLINE_PHYS`. The alignment is load-bearing, not cosmetic:
+    /// `load_ready` reaches the in-frame `ready` cell as an `AtomicU32`.
+    #[repr(C, align(4096))]
+    struct FrameBuf([u8; 4096]);
+
+    impl FrameBuf {
+        fn new(fill: u8) -> Self {
+            Self([fill; 4096])
+        }
+    }
+
     #[test]
     fn frame_new_rejects_wrong_size() {
         let mut buf = [0u8; 2048];
         assert_eq!(
             TrampolineFrame::new(&mut buf[..]).unwrap_err(),
+            InstallError::FrameWrongSize
+        );
+    }
+
+    /// The module reads the frame at fixed sub-offsets and reaches the
+    /// `ready` cell as an `AtomicU32`, so an unaligned base is refused at
+    /// construction rather than assumed by every later access.
+    #[test]
+    fn frame_new_rejects_a_misaligned_base() {
+        // One 4 KiB window inside a larger aligned buffer, started one
+        // byte in, so the length is right and only the base is wrong.
+        let mut buf = FrameBuf::new(0);
+        let mut spill = [0u8; 1];
+        let _ = &mut spill;
+        assert_eq!(
+            TrampolineFrame::new(&mut buf.0[1..]).unwrap_err(),
+            InstallError::FrameWrongSize,
+            "a 4095-byte tail is the wrong size before it is misaligned"
+        );
+        let mut wide = [0u8; 8192];
+        let base = wide.as_ptr().addr();
+        // Start at the first 4 KiB boundary, then step one byte past it.
+        let off = base.next_multiple_of(4096) - base + 1;
+        assert_eq!(
+            TrampolineFrame::new(&mut wide[off..off + 4096]).unwrap_err(),
             InstallError::FrameMisaligned
         );
     }
 
     #[test]
     fn install_zeroes_frame_then_writes_payload() {
-        let mut buf = [0xAAu8; 4096];
+        let mut buf = FrameBuf::new(0xAA);
         let payload = [0x90u8; AP_TRAMPOLINE_LEN]; // 0x90 = NOP
-        let mut frame = TrampolineFrame::new(&mut buf[..]).unwrap();
+        let mut frame = TrampolineFrame::new(&mut buf.0[..]).unwrap();
         frame.install(&payload).unwrap();
         // The first AP_TRAMPOLINE_LEN bytes are the payload.
-        assert!(buf[..AP_TRAMPOLINE_LEN].iter().all(|&b| b == 0x90));
+        assert!(buf.0[..AP_TRAMPOLINE_LEN].iter().all(|&b| b == 0x90));
         // The trailing region (slot area) is zero before `write_slot`.
-        assert!(buf[AP_TRAMPOLINE_LEN..].iter().all(|&b| b == 0));
+        assert!(buf.0[AP_TRAMPOLINE_LEN..].iter().all(|&b| b == 0));
     }
 
     #[test]
     fn install_rejects_payload_length_mismatch() {
-        let mut buf = [0u8; 4096];
-        let mut frame = TrampolineFrame::new(&mut buf[..]).unwrap();
+        let mut buf = FrameBuf::new(0);
+        let mut frame = TrampolineFrame::new(&mut buf.0[..]).unwrap();
         let too_short = [0u8; 16];
         assert_eq!(
             frame.install(&too_short).unwrap_err(),
@@ -874,19 +955,54 @@ mod tests {
 
     #[test]
     fn write_slot_persists_into_frame_at_correct_offset() {
-        let mut buf = [0u8; 4096];
+        let mut buf = FrameBuf::new(0);
         let payload = [0u8; AP_TRAMPOLINE_LEN];
         let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 0x5678_0000, 7).unwrap();
         {
-            let mut frame = TrampolineFrame::new(&mut buf[..]).unwrap();
+            let mut frame = TrampolineFrame::new(&mut buf.0[..]).unwrap();
             frame.install(&payload).unwrap();
             frame.write_slot(&slot);
             assert_eq!(frame.load_ready(), 0);
         }
-        let cr3_le = &buf[AP_BOOT_SLOT_OFFSET..AP_BOOT_SLOT_OFFSET + 8];
+        let cr3_le = &buf.0[AP_BOOT_SLOT_OFFSET..AP_BOOT_SLOT_OFFSET + 8];
         assert_eq!(u64::from_le_bytes(cr3_le.try_into().unwrap()), 0xCAFE_F000);
-        let cpu_le = &buf[AP_BOOT_SLOT_OFFSET + 0x18..AP_BOOT_SLOT_OFFSET + 0x1C];
+        let cpu_le = &buf.0[AP_BOOT_SLOT_OFFSET + 0x18..AP_BOOT_SLOT_OFFSET + 0x1C];
         assert_eq!(u32::from_le_bytes(cpu_le.try_into().unwrap()), 7);
+    }
+
+    /// The slot's byte image is the wire contract, not the struct's
+    /// padded size: copying `size_of::<ApBootSlot>()` bytes out of the
+    /// struct reads its uninitialised tail padding (undefined behaviour
+    /// the miri stage rejects) and writes those bytes into the frame.
+    /// Anything past the contract must be left exactly as installed.
+    #[test]
+    fn write_slot_leaves_the_frame_past_the_wire_contract_untouched() {
+        assert!(
+            AP_BOOT_SLOT_WIRE_LEN < core::mem::size_of::<ApBootSlot>(),
+            "the struct must have tail padding for this test to mean anything"
+        );
+        let mut buf = FrameBuf::new(0);
+        let payload = [0u8; AP_TRAMPOLINE_LEN];
+        let slot = ApBootSlot::new(0xCAFE_F000, 0x1234_0000, 0x5678_0000, 7).unwrap();
+        let tail = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_WIRE_LEN;
+        let tail_end = AP_BOOT_SLOT_OFFSET + core::mem::size_of::<ApBootSlot>();
+        {
+            let mut frame = TrampolineFrame::new(&mut buf.0[..]).unwrap();
+            frame.install(&payload).unwrap();
+            frame.write_slot(&slot);
+        }
+        // `install` zeroed the whole frame; `write_slot` owns only the
+        // wire bytes, so the padding window is still zero.
+        assert!(
+            buf.0[tail..tail_end].iter().all(|&b| b == 0),
+            "write_slot wrote past the wire contract into {tail:#x}..{tail_end:#x}"
+        );
+        // And the last contract byte *was* written.
+        let ready_at = AP_BOOT_SLOT_OFFSET + AP_BOOT_SLOT_READY_OFFSET;
+        assert_eq!(
+            u32::from_le_bytes(buf.0[ready_at..ready_at + 4].try_into().unwrap()),
+            0
+        );
     }
 
     #[test]

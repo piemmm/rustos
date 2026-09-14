@@ -28,6 +28,11 @@
 //!   reached via the port's resume assembly, which has no Rust frame to
 //!   drop a captured environment in, and a task body never returns to
 //!   its synthesised frame.
+//! * [`KernelStackRegion`] — the task's kernel stack, as a pointer and a
+//!   length rather than an address, because a port writes the initial
+//!   frame through it and an address carries no provenance to write with.
+//!   Building one is the `unsafe` step, which is what lets
+//!   [`ContextSwitch::prepare`] be safe.
 //! * [`PrepareError`] — the fail-closed result of seeding a task's
 //!   initial frame ([`ContextSwitch::prepare`]). A bad stack is rejected,
 //!   never silently truncated.
@@ -52,6 +57,8 @@
 //! conformance check; it is proven end-to-end by each port's QEMU
 //! scheduler-drive vertical (a real task switch round-trips). Inventing
 //! a host stub that "switches" would be a fake primitive.
+
+use core::ptr::NonNull;
 
 /// The entry point a freshly prepared [`TaskContext`] first runs.
 ///
@@ -103,21 +110,100 @@ impl TaskContext {
     }
 }
 
+/// The widest ABI stack alignment any Tier-1 port requires, and therefore
+/// the alignment [`KernelStackRegion::seed_frame`] demands of a region's
+/// top. Every stack source aligns to this, so it has one definition rather
+/// than one per port and one per source.
+pub const STACK_ALIGN: usize = 16;
+
 /// The fail-closed result of seeding a task's first frame
 /// ([`ContextSwitch::prepare`]).
 ///
 /// A stack that cannot hold a valid initial frame is rejected, never
-/// silently truncated or wrapped. The variants
-/// are the architecture-neutral union every port reports; a port maps
-/// its primitive's error onto them at the HAL boundary.
+/// silently truncated or wrapped. There is no "null stack" variant:
+/// [`KernelStackRegion`] cannot name one.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PrepareError {
-    /// `stack_top` was zero — there is no stack to seed a frame in.
-    NullStack,
-    /// `stack_top` was not aligned to the port's ABI stack alignment.
+    /// The region's top was not [`STACK_ALIGN`]-aligned.
     Misaligned,
-    /// `stack_top` had no room for the port's initial frame.
+    /// The region was smaller than the port's initial frame.
     TooSmall,
+}
+
+/// A task's kernel stack, as [`ContextSwitch::prepare`] receives it.
+///
+/// Carries the pointer the initial frame is written *through*, not merely
+/// its address: a port handed a bare integer would have to invent a pointer
+/// from it, and writing through one carries no provenance. The length is
+/// the other half — it makes [`PrepareError::TooSmall`] a question about
+/// the stack rather than about address zero.
+#[derive(Copy, Clone, Debug)]
+pub struct KernelStackRegion {
+    /// Lowest byte of the usable stack.
+    base: NonNull<u8>,
+    /// Usable bytes above [`Self::base`].
+    len: usize,
+}
+
+impl KernelStackRegion {
+    /// Name the usable stack `[base, base + len)`.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the lowest byte of a region of `len` bytes that is
+    /// mapped, writable, exclusive to the task, and stays valid for as long
+    /// as the region is used. Discharging this here is what lets
+    /// [`ContextSwitch::prepare`] be a safe function: the proof travels with
+    /// the value instead of living in prose at every call site.
+    #[must_use]
+    pub const unsafe fn new(base: NonNull<u8>, len: usize) -> Self {
+        Self { base, len }
+    }
+
+    /// Exclusive upper bound of the region (one past its last byte).
+    #[must_use]
+    pub fn top_addr(self) -> u64 {
+        self.base.addr().get() as u64 + self.len as u64
+    }
+
+    /// Usable bytes the region spans.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Whether the region spans no bytes at all.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// The port's initial frame: the topmost `frame_bytes` of the region,
+    /// as a pointer to its lowest byte — the stack pointer the first switch
+    /// into the task resumes from.
+    ///
+    /// The two refusals below are the same on every port, so they are
+    /// checked once here rather than restated in each one.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::Misaligned`] if the region's top does not meet
+    /// [`STACK_ALIGN`]; [`PrepareError::TooSmall`] if the frame does not
+    /// fit in the region.
+    pub fn seed_frame(self, frame_bytes: usize) -> Result<NonNull<u8>, PrepareError> {
+        // The top's own address: alignment is a question about the address,
+        // so it is asked in the width an address has.
+        if !(self.base.addr().get() + self.len).is_multiple_of(STACK_ALIGN) {
+            return Err(PrepareError::Misaligned);
+        }
+        let Some(offset) = self.len.checked_sub(frame_bytes) else {
+            return Err(PrepareError::TooSmall);
+        };
+        // SAFETY: `offset <= self.len`, so the result is within the region
+        // the constructor's contract vouches for (one-past-the-end at worst,
+        // when the frame is empty).
+        Ok(unsafe { self.base.add(offset) })
+    }
 }
 
 /// The context-switch handle an architecture port exposes.
@@ -138,21 +224,21 @@ pub trait ContextSwitch: Send + Sync {
     /// Seed `ctx`'s initial frame so the first [`Self::switch`] *into* it
     /// lands at `entry` with the first-argument register set to `arg`.
     ///
-    /// `stack_top` is the *exclusive* upper bound of the task's kernel
-    /// stack (one byte past the last addressable byte). On success
-    /// `ctx.stack_pointer` points at the bottom of the synthesised frame
-    /// and [`TaskContext::is_runnable`] becomes `true`.
+    /// `stack` is the task's usable kernel stack; the frame is written in
+    /// its topmost bytes. On success `ctx.stack_pointer` points at the
+    /// bottom of the synthesised frame and [`TaskContext::is_runnable`]
+    /// becomes `true`.
     ///
     /// # Errors
     ///
-    /// Returns a [`PrepareError`] (and leaves `ctx` unchanged) if
-    /// `stack_top` is zero, misaligned for the port's ABI, or too small
-    /// to hold the port's initial frame. The port fails closed rather
-    /// than seed a corrupt frame.
+    /// Returns a [`PrepareError`] (and leaves `ctx` unchanged) if the
+    /// region's top is misaligned for the port's ABI or the region is too
+    /// small to hold the port's initial frame. The port fails closed
+    /// rather than seed a corrupt frame.
     fn prepare(
         &self,
         ctx: &mut TaskContext,
-        stack_top: u64,
+        stack: KernelStackRegion,
         entry: TaskEntry,
         arg: usize,
     ) -> Result<(), PrepareError>;
@@ -243,7 +329,8 @@ pub trait ContextSwitch: Send + Sync {
 /// over the port's real handle in that port's crate, the same precedent
 /// as [`crate::irq::conformance`] and [`crate::timer::conformance`].
 pub mod conformance {
-    use super::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+    use super::{ContextSwitch, KernelStackRegion, PrepareError, TaskContext, TaskEntry};
+    use core::ptr::NonNull;
 
     /// A divergent host entry used only for its address. The conformance
     /// suite never switches into a prepared frame on the host (that is
@@ -259,19 +346,41 @@ pub mod conformance {
     /// to the widest ABI stack alignment the targets require (16 bytes).
     /// Sized at 512 bytes — comfortably above every port's frame — so the
     /// success case has a valid, in-bounds top to seed.
+    ///
+    /// A real buffer rather than a literal address: the suite hands its
+    /// top to a port that genuinely writes a frame there, so the bytes
+    /// have to exist and the pointer has to carry provenance for them.
     #[repr(C, align(16))]
     struct ConformanceStack([u8; 512]);
+
+    impl ConformanceStack {
+        /// The whole buffer as a region.
+        fn region(&mut self) -> KernelStackRegion {
+            self.sub_region(0, self.0.len())
+        }
+
+        /// `len` bytes of the buffer starting `offset` in, so the suite can
+        /// present a misaligned top or an undersized stack without naming an
+        /// address it does not own.
+        fn sub_region(&mut self, offset: usize, len: usize) -> KernelStackRegion {
+            let base = &mut self.0[offset..offset + len];
+            let ptr = NonNull::from(base).cast::<u8>();
+            // SAFETY: `ptr` addresses `len` bytes of this live, uniquely
+            // borrowed buffer, which outlives the region's use inside the
+            // one check that consumes it.
+            unsafe { KernelStackRegion::new(ptr, len) }
+        }
+    }
 
     /// Run the entire [`ContextSwitch`] conformance suite against `cs`.
     ///
     /// # Panics
     ///
     /// Panics (failing the test) if an empty context reports runnable, if
-    /// a null/misaligned/too-small stack is *not* rejected fail-closed,
-    /// or if a good stack does not yield a runnable, in-bounds frame.
+    /// a misaligned/too-small stack is *not* rejected fail-closed, or if a
+    /// good stack does not yield a runnable, in-bounds frame.
     pub fn run_all<C: ContextSwitch + ?Sized>(cs: &C) {
         empty_context_is_not_runnable();
-        rejects_null_stack(cs);
         rejects_misaligned_stack(cs);
         rejects_too_small_stack(cs);
         prepares_a_runnable_in_bounds_frame(cs);
@@ -293,14 +402,18 @@ pub mod conformance {
         );
     }
 
-    /// A zero `stack_top` is rejected, and the context is left untouched.
-    fn rejects_null_stack<C: ContextSwitch + ?Sized>(cs: &C) {
+    /// A region whose top is not 16-byte aligned is rejected. Every
+    /// target's ABI requires at least 16-byte stack alignment, so a region
+    /// one byte short of the aligned buffer's end is misaligned on all of
+    /// them.
+    fn rejects_misaligned_stack<C: ContextSwitch + ?Sized>(cs: &C) {
+        let mut stack = ConformanceStack([0; 512]);
         let mut ctx = TaskContext::empty();
         let entry: TaskEntry = probe_entry;
         assert_eq!(
-            cs.prepare(&mut ctx, 0, entry, 0),
-            Err(PrepareError::NullStack),
-            "a null stack_top must be rejected"
+            cs.prepare(&mut ctx, stack.sub_region(0, 511), entry, 0),
+            Err(PrepareError::Misaligned),
+            "a misaligned stack top must be rejected"
         );
         assert!(
             !ctx.is_runnable(),
@@ -308,46 +421,31 @@ pub mod conformance {
         );
     }
 
-    /// A `stack_top` that is not 16-byte aligned is rejected. Every
-    /// target's ABI requires at least 16-byte stack alignment, so an odd
-    /// value is misaligned on all of them.
-    fn rejects_misaligned_stack<C: ContextSwitch + ?Sized>(cs: &C) {
-        let mut ctx = TaskContext::empty();
-        let entry: TaskEntry = probe_entry;
-        assert_eq!(
-            cs.prepare(&mut ctx, 0x1_0001, entry, 0),
-            Err(PrepareError::Misaligned),
-            "a misaligned stack_top must be rejected"
-        );
-        assert!(!ctx.is_runnable());
-    }
-
-    /// A `stack_top` that is aligned and non-zero but far too small to
-    /// hold any port's initial frame is rejected. Sixteen bytes is below
-    /// every port's frame size yet 16-byte aligned and non-zero.
+    /// An aligned region far too small to hold any port's initial frame is
+    /// rejected. Sixteen bytes is below every port's frame size yet keeps
+    /// the top 16-byte aligned, so only the size can be what refuses it.
     fn rejects_too_small_stack<C: ContextSwitch + ?Sized>(cs: &C) {
+        let mut stack = ConformanceStack([0; 512]);
         let mut ctx = TaskContext::empty();
         let entry: TaskEntry = probe_entry;
         assert_eq!(
-            cs.prepare(&mut ctx, 0x10, entry, 0),
+            cs.prepare(&mut ctx, stack.sub_region(0, 16), entry, 0),
             Err(PrepareError::TooSmall),
-            "a too-small stack_top must be rejected"
+            "a too-small stack must be rejected"
         );
         assert!(!ctx.is_runnable());
     }
 
-    /// A good `stack_top` yields a runnable context whose seeded stack
-    /// pointer lies strictly inside the supplied stack (below the top,
-    /// at or above the base).
+    /// A good region yields a runnable context whose seeded stack pointer
+    /// lies strictly inside the supplied stack (below the top, at or above
+    /// the base).
     fn prepares_a_runnable_in_bounds_frame<C: ContextSwitch + ?Sized>(cs: &C) {
         let mut stack = ConformanceStack([0; 512]);
-        let base = core::ptr::addr_of_mut!(stack.0) as u64;
-        // The buffer is 16-byte aligned and 512 bytes long, so `top` is
-        // 16-byte aligned and there is room for any port's frame.
-        let top = base + 512;
+        let region = stack.region();
+        let (base, top) = (region.top_addr() - region.len() as u64, region.top_addr());
         let mut ctx = TaskContext::empty();
         let entry: TaskEntry = probe_entry;
-        cs.prepare(&mut ctx, top, entry, 0x00C0_FFEE)
+        cs.prepare(&mut ctx, region, entry, 0x00C0_FFEE)
             .expect("a 512-byte aligned stack must seed a frame");
         assert!(ctx.is_runnable(), "a prepared context must be runnable");
         assert!(
@@ -362,37 +460,31 @@ pub mod conformance {
 
     #[cfg(test)]
     mod tests {
-        use super::super::{ContextSwitch, PrepareError, TaskContext, TaskEntry};
+        use super::super::{
+            ContextSwitch, KernelStackRegion, PrepareError, TaskContext, TaskEntry,
+        };
         use super::run_all;
 
-        /// A faithful host double: it implements `prepare` with the same
-        /// fail-closed contract a real port owes and seeds a plausible
-        /// frame. `switch` is never exercised on the host, so its body is
-        /// empty (the suite calls only `prepare`).
+        /// A faithful host double: it seeds a plausible frame through the
+        /// shared region check, exactly as a real port does. `switch` is
+        /// never exercised on the host, so its body is empty (the suite
+        /// calls only `prepare`).
         struct CellContextSwitch;
 
         /// A frame size below the 512-byte conformance stack but above the
         /// 16-byte too-small probe.
-        const DOUBLE_FRAME: u64 = 64;
+        const DOUBLE_FRAME: usize = 64;
 
         impl ContextSwitch for CellContextSwitch {
             fn prepare(
                 &self,
                 ctx: &mut TaskContext,
-                stack_top: u64,
+                stack: KernelStackRegion,
                 _entry: TaskEntry,
                 _arg: usize,
             ) -> Result<(), PrepareError> {
-                if stack_top == 0 {
-                    return Err(PrepareError::NullStack);
-                }
-                if !stack_top.is_multiple_of(16) {
-                    return Err(PrepareError::Misaligned);
-                }
-                if stack_top < DOUBLE_FRAME {
-                    return Err(PrepareError::TooSmall);
-                }
-                ctx.stack_pointer = stack_top - DOUBLE_FRAME;
+                let frame = stack.seed_frame(DOUBLE_FRAME)?;
+                ctx.stack_pointer = frame.addr().get() as u64;
                 Ok(())
             }
 
@@ -407,20 +499,20 @@ pub mod conformance {
             run_all(dynamic);
         }
 
-        /// A broken `prepare` that accepts a null stack must be rejected
-        /// by the fail-closed check.
+        /// A broken `prepare` that seeds whatever it is handed must be
+        /// rejected by the fail-closed check, so the suite is not vacuous.
         struct LenientContextSwitch;
 
         impl ContextSwitch for LenientContextSwitch {
             fn prepare(
                 &self,
                 ctx: &mut TaskContext,
-                stack_top: u64,
+                stack: KernelStackRegion,
                 _entry: TaskEntry,
                 _arg: usize,
             ) -> Result<(), PrepareError> {
-                // Bug: never validates the stack.
-                ctx.stack_pointer = stack_top.wrapping_sub(DOUBLE_FRAME);
+                // Bug: bypasses the region's alignment and size checks.
+                ctx.stack_pointer = stack.top_addr().wrapping_sub(DOUBLE_FRAME as u64);
                 Ok(())
             }
 
@@ -428,8 +520,8 @@ pub mod conformance {
         }
 
         #[test]
-        #[should_panic(expected = "a null stack_top must be rejected")]
-        fn suite_rejects_a_context_switch_that_accepts_a_null_stack() {
+        #[should_panic(expected = "a misaligned stack top must be rejected")]
+        fn suite_rejects_a_context_switch_that_seeds_an_unchecked_stack() {
             run_all(&LenientContextSwitch);
         }
     }
@@ -438,6 +530,60 @@ pub mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16-byte-aligned buffer to carve regions out of.
+    #[repr(C, align(16))]
+    struct Buf([u8; 256]);
+
+    fn region(buf: &mut Buf, offset: usize, len: usize) -> KernelStackRegion {
+        let ptr = NonNull::from(&mut buf.0[offset..offset + len]).cast::<u8>();
+        // SAFETY: `ptr` addresses `len` bytes of the live, uniquely borrowed
+        // buffer, which outlives the region.
+        unsafe { KernelStackRegion::new(ptr, len) }
+    }
+
+    #[test]
+    fn a_region_reports_its_extent() {
+        let mut buf = Buf([0; 256]);
+        let r = region(&mut buf, 0, 256);
+        assert_eq!(r.len(), 256);
+        assert!(!r.is_empty());
+        assert_eq!(
+            r.top_addr() - 256,
+            r.seed_frame(256).expect("exact fit").addr().get() as u64
+        );
+    }
+
+    #[test]
+    fn seed_frame_refuses_a_misaligned_top() {
+        let mut buf = Buf([0; 256]);
+        // Room to spare, so only the unaligned top can refuse it.
+        assert_eq!(
+            region(&mut buf, 0, 248).seed_frame(64),
+            Err(PrepareError::Misaligned)
+        );
+    }
+
+    #[test]
+    fn seed_frame_refuses_a_frame_that_does_not_fit() {
+        let mut buf = Buf([0; 256]);
+        assert_eq!(
+            region(&mut buf, 0, 64).seed_frame(65),
+            Err(PrepareError::TooSmall)
+        );
+        // The exact fit is the boundary and is accepted.
+        assert!(region(&mut buf, 0, 64).seed_frame(64).is_ok());
+    }
+
+    /// An empty region names no bytes, so every frame is too small — the
+    /// fail-closed replacement for the deleted null-stack refusal.
+    #[test]
+    fn an_empty_region_refuses_every_frame() {
+        let mut buf = Buf([0; 256]);
+        let r = region(&mut buf, 0, 0);
+        assert!(r.is_empty());
+        assert_eq!(r.seed_frame(8), Err(PrepareError::TooSmall));
+    }
 
     #[test]
     fn task_context_layout_is_one_word() {

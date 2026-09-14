@@ -138,6 +138,15 @@ error) fails the task closed: the shim marks it terminal and returns
 (`AGENTS.md` §2.9 / §5.4). There is no `unwrap`/`expect`/`panic!` on the
 spawn or switch path.
 
+A stack that cannot be *allocated* fails the spawn closed the same way:
+`kstack::alloc_kernel_stack` answers `None` when neither the window tier
+nor the `BoxStack` fallback can supply one, and admission reports
+`SchedError::OutOfMemory` (`AdmitError::OutOfMemory` / `Errno::OutOfMemory`
+at the syscall boundary) rather than letting the allocator abort the
+kernel. The tens-of-kilobytes stack is the admission allocation that
+actually fails under pressure; the smaller ones around it still abort
+through the global allocator's handler, tracked as D122.
+
 ## Bringing EL0 into the model
 
 A user task is an SP1 kthread whose work diverges into EL0 via

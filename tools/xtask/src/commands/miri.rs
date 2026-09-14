@@ -25,6 +25,22 @@ use crate::commands::parallel::{self, Job};
 use crate::commands::seed;
 use crate::Context;
 
+/// Which of a crate's test targets the oracle interprets.
+///
+/// Isolation stays on for the whole stage (see [`MIRIFLAGS`]), so a test
+/// that opens a file or reads the clock is not *failed* by the
+/// interpreter — it is refused as an unsupported operation, taking the
+/// whole crate's run down with it. A crate with such a test is scoped to
+/// its own `--lib`, which is where its `unsafe` core lives anyway, rather
+/// than weakening isolation for every other crate here.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Scope {
+    /// Every test target the crate builds.
+    AllTargets,
+    /// The crate's `--lib` tests only, for the reason carried here.
+    LibOnly(&'static str),
+}
+
 /// One crate the oracle is pointed at.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Target {
@@ -35,6 +51,8 @@ pub struct Target {
     /// Cargo features to enable, for a crate whose `unsafe` is behind one.
     /// Empty means the default build.
     pub features: &'static [&'static str],
+    /// Which test targets to interpret.
+    pub scope: Scope,
 }
 
 /// The crates whose soundness rests on a hand-written `unsafe` core.
@@ -43,28 +61,33 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-collections",
         description: "the open-addressed hash table's control array and iterators",
         features: &[],
+        scope: Scope::AllTargets,
     },
     Target {
         package: "tairix-inline",
         description: "the allocation-free tier's inline slot arrays, and the volatile scrub a secret ring leaves behind",
         features: &[],
+        scope: Scope::AllTargets,
     },
     Target {
         package: "tairix-hash",
         description: "the one-shot key-publication cell the containers are keyed through",
         features: &[],
+        scope: Scope::AllTargets,
     },
     Target {
         package: "tairix-sync",
         description: "the MCS queue's intrusive node chain, the set-once cell's MaybeUninit, \
                       and every guard's aliasing claim",
         features: &[],
+        scope: Scope::AllTargets,
     },
     Target {
         package: "tairix-sync",
         description: "the same, plus the lock-diagnostics observer seam, whose function \
                       pointers and site records live only under that feature",
         features: &["lock-diagnostics"],
+        scope: Scope::AllTargets,
     },
     Target {
         package: "tairix-arch-api",
@@ -72,6 +95,32 @@ pub const TARGETS: &[Target] = &[
                       hostile stack, the page-table reclaim walk, and the per-CPU and quiesce \
                       table publications",
         features: &[],
+        scope: Scope::AllTargets,
+    },
+    Target {
+        package: "tairix-arch-aarch64",
+        description: "the page-table walk's recovery of each level through its frame source, \
+                      and the initial-frame write into a task's kernel stack",
+        features: &[],
+        scope: Scope::LibOnly(
+            "its `real_dtb_probe` integration test reads the downloaded Pi 4 firmware blob \
+             from disk, which the interpreter refuses under isolation before the test's own \
+             absent-file skip can run",
+        ),
+    },
+    Target {
+        package: "tairix-arch-riscv64",
+        description: "the same walk and initial-frame write for Sv39, plus the direct physical \
+                      map's gigapage leaves",
+        features: &[],
+        scope: Scope::AllTargets,
+    },
+    Target {
+        package: "tairix-arch-x86_64",
+        description: "the same walk and initial-frame write for 4-level paging, whose pool and \
+                      reclaim verticals run over the real page-table allocator",
+        features: &[],
+        scope: Scope::AllTargets,
     },
 ];
 
@@ -189,6 +238,9 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> Job {
     let mut cmd: Command = ctx.cargo();
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
+    if matches!(target.scope, Scope::LibOnly(_)) {
+        cmd.arg("--lib");
+    }
     if !target.features.is_empty() {
         cmd.args(["--features", &target.features.join(",")]);
     }
@@ -201,11 +253,15 @@ fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> J
         "MIRIFLAGS",
         format!("{MIRIFLAGS} -Zmiri-env-forward={}", seed::FUZZ_SEED_ENV),
     );
+    let scope = match target.scope {
+        Scope::AllTargets => "",
+        Scope::LibOnly(_) => " --lib",
+    };
     let label = if target.features.is_empty() {
-        format!("miri {} (seed {job_seed})", target.package)
+        format!("miri {}{scope} (seed {job_seed})", target.package)
     } else {
         format!(
-            "miri {} +{} (seed {job_seed})",
+            "miri {}{scope} +{} (seed {job_seed})",
             target.package,
             target.features.join(",")
         )
@@ -215,7 +271,7 @@ fn job_for(ctx: &Context, target: &Target, seed: Option<u64>, index: usize) -> J
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, selected, TARGETS};
+    use super::{parse, selected, Scope, TARGETS};
     use std::ffi::OsString;
 
     fn args(items: &[&str]) -> Vec<OsString> {
@@ -274,6 +330,21 @@ mod tests {
     /// A package may appear more than once — one entry per feature set, where
     /// its `unsafe` is split across features — so the identity a duplicate
     /// would waste the interpreter on is the pair, not the name alone.
+    /// A narrowed scope must say why, so a future reader can tell a
+    /// considered exclusion from one added to make a run go green.
+    #[test]
+    fn a_narrowed_scope_carries_its_reason() {
+        for target in TARGETS {
+            if let Scope::LibOnly(reason) = target.scope {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{} is scoped to --lib with no reason",
+                    target.package
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_registry_is_distinct() {
         for (index, target) in TARGETS.iter().enumerate() {

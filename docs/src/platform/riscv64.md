@@ -468,8 +468,10 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   `tairix_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
   onto the outgoing kernel stack, swaps `sp` through `TaskCtx`, and
   restores symmetrically. `TaskCtx::prepare` seeds a first-run frame
-  (`ra = entry`, `a0 = arg`); a `const _` assert pins the 112-byte frame
-  to a 16-byte multiple and `TaskCtx` to a single `sp` field at offset 0.
+  (`ra = entry`, `a0 = arg`) into the `KernelStackRegion` it is handed, so
+  the write carries provenance for the bytes it lands in; a `const _`
+  assert pins the 112-byte frame to a 16-byte multiple and `TaskCtx` to a
+  single `sp` field at offset 0.
 - **Supervisor-timer preemption (`preempt.rs`).** A set-once tick
   callback (`set_timer_callback`), the `sie.STIE` enable and the
   supervisor-timer `scause` decode, `interval_for_hz` (timebase →

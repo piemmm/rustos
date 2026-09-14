@@ -16,7 +16,9 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use tairix_arch_api::conformance;
-use tairix_arch_api::context::{self, ContextSwitch, PrepareError, TaskContext, TaskEntry};
+use tairix_arch_api::context::{
+    self, ContextSwitch, KernelStackRegion, PrepareError, TaskContext, TaskEntry,
+};
 use tairix_arch_api::cpufeatures::{CpuFeatures, FeatureProfile, FeatureSupport};
 use tairix_arch_api::memtag::{MemoryTagging, Tagging, TaggingProfile, TAG_COUNT};
 use tairix_arch_api::percpu;
@@ -174,26 +176,18 @@ fn timer_vertical_runs_over_a_handle() {
 struct DoubleContextSwitch;
 
 /// A frame size below the conformance stack but above the too-small probe.
-const DOUBLE_FRAME_BYTES: u64 = 64;
+const DOUBLE_FRAME_BYTES: usize = 64;
 
 impl ContextSwitch for DoubleContextSwitch {
     fn prepare(
         &self,
         ctx: &mut TaskContext,
-        stack_top: u64,
+        stack: KernelStackRegion,
         _entry: TaskEntry,
         _arg: usize,
     ) -> Result<(), PrepareError> {
-        if stack_top == 0 {
-            return Err(PrepareError::NullStack);
-        }
-        if !stack_top.is_multiple_of(16) {
-            return Err(PrepareError::Misaligned);
-        }
-        if stack_top < DOUBLE_FRAME_BYTES {
-            return Err(PrepareError::TooSmall);
-        }
-        ctx.stack_pointer = stack_top - DOUBLE_FRAME_BYTES;
+        let frame = stack.seed_frame(DOUBLE_FRAME_BYTES)?;
+        ctx.stack_pointer = frame.addr().get() as u64;
         Ok(())
     }
 

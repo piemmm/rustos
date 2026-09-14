@@ -8,13 +8,6 @@
 
 use super::*;
 
-/// Allocate a fresh `'static` pool per test. `Box::leak` keeps the
-/// 64 KiB off the test stack and gives the `&'static` the pool API
-/// requires; the leak is intentional and bounded (one per test).
-fn fresh_pool() -> &'static PageTablePool {
-    std::boxed::Box::leak(std::boxed::Box::new(PageTablePool::new()))
-}
-
 #[test]
 fn constants_match_privileged_spec() {
     assert_eq!(PAGE_SIZE, 4096);
@@ -71,7 +64,8 @@ fn leaf_detection_distinguishes_pointer_from_leaf() {
 
 #[test]
 fn pool_hands_out_distinct_zeroed_pages_then_fails_closed() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let a = pool.alloc().expect("first");
     let b = pool.alloc().expect("second");
     assert_ne!(a.as_ptr(), b.as_ptr());
@@ -87,7 +81,8 @@ fn pool_hands_out_distinct_zeroed_pages_then_fails_closed() {
 
 #[test]
 fn identity_gigapages_install_leaf_entries() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
     let root_table = pool
         .table_at(space.root_phys())
@@ -105,7 +100,8 @@ fn identity_gigapages_install_leaf_entries() {
 
 #[test]
 fn identity_gigapages_rejects_out_of_range() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     assert!(AddressSpace::new_identity_gigapages(pool, 0).is_none());
     assert!(AddressSpace::new_identity_gigapages(pool, ENTRIES_PER_TABLE + 1).is_none());
     // The canonical lower half is the widest honest identity extent: a slot
@@ -137,7 +133,8 @@ fn translate(frames: &dyn PageTableFrames, space: &AddressSpace, vaddr: u64) -> 
 
 #[test]
 fn map_4k_builds_three_level_walk() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // A VA in gigapage slot 100 — outside the single identity gigapage,
     // so the walk allocates fresh L1/L0 tables.
@@ -153,7 +150,8 @@ fn map_4k_builds_three_level_walk() {
 
 #[test]
 fn map_4k_rejects_misaligned() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     assert!(space
         .map_4k(pool, 0x1000_0001, 0x8000_0000, flags::READ)
@@ -165,7 +163,8 @@ fn map_4k_rejects_misaligned() {
 
 #[test]
 fn map_4k_refuses_to_shatter_a_gigapage() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // VA 0 lives under the identity gigapage at root slot 0 — a leaf.
     assert!(space.map_4k(pool, 0x0, 0x8000_0000, flags::READ).is_none());
@@ -173,7 +172,8 @@ fn map_4k_refuses_to_shatter_a_gigapage() {
 
 #[test]
 fn map_gigapage_aliases_a_whole_gigabyte_at_a_high_va() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
     // Alias the kernel's gigabyte (phys 0x8000_0000) at a high VA with the
     // USER bit — the BIAS-alias trick the crt0 QEMU vertical uses.
@@ -207,7 +207,8 @@ fn map_gigapage_aliases_a_whole_gigabyte_at_a_high_va() {
 
 #[test]
 fn map_gigapage_rejects_misaligned_and_occupied() {
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 4).expect("root");
     // Misaligned virtual / physical addresses are refused.
     assert!(space
@@ -223,7 +224,10 @@ fn map_gigapage_rejects_misaligned_and_occupied() {
 #[test]
 fn passes_mmu_conformance() {
     use tairix_arch_api::mmu;
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    // A second, independent pool for the object-safe erasure below.
+    static ERASED_POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // A VA in gigapage slot 100 — outside the single identity gigapage, so
     // the conformance map allocates fresh L1/L0 tables and never shatters a
@@ -232,7 +236,7 @@ fn passes_mmu_conformance() {
     let pa = 0x8200_0000;
     mmu::conformance::run_all(&mut space, va, pa);
     // And over the object-safe erasure the kernel registry stores.
-    let mut dynamic = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    let mut dynamic = AddressSpace::new_identity_gigapages(&ERASED_POOL, 1).expect("root");
     let erased: &mut dyn mmu::AddressSpace = &mut dynamic;
     mmu::conformance::run_all(erased, va, pa);
 }
@@ -267,12 +271,15 @@ fn leaf_pte(
 #[test]
 fn passes_tlb_conformance() {
     use tairix_arch_api::tlb;
-    let mut space = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    static POOL: PageTablePool = PageTablePool::new();
+    // A second, independent pool for the object-safe erasure below.
+    static ERASED_POOL: PageTablePool = PageTablePool::new();
+    let mut space = AddressSpace::new_identity_gigapages(&POOL, 1).expect("root");
     // The host has no TLB, so `flush_page` is a vacuous no-op here; the
     // suite proves it is object-safe and panic-free for any address (the
     // real `sfence.vma` is exercised by the spawn QEMU vertical).
     tlb::conformance::run_all(&mut space, 100u64 << 30);
-    let mut dynamic = AddressSpace::new_identity_gigapages(fresh_pool(), 1).expect("root");
+    let mut dynamic = AddressSpace::new_identity_gigapages(&ERASED_POOL, 1).expect("root");
     let erased: &mut dyn tlb::TlbShootdown = &mut dynamic;
     tlb::conformance::run_all(erased, 100u64 << 30);
 }
@@ -283,10 +290,13 @@ fn passes_frames_conformance() {
     // The static pool is the boot/bootstrap `PageTableFrames` source; its
     // Sv39 `phys_of` is the identity map, so the suite runs on the host.
     // A fresh pool hands out `POOL_SIZE` frames before failing closed.
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    // A second, independent pool for the object-safe erasure below.
+    static ERASED_POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     frames::conformance::run_all(pool, super::POOL_SIZE);
     // And over the object-safe erasure the per-process façade holds.
-    let erased: &dyn PageTableFrames = fresh_pool();
+    let erased: &dyn PageTableFrames = &ERASED_POOL;
     assert!(erased.alloc_table().is_some());
 }
 
@@ -315,13 +325,13 @@ unsafe impl Sync for RecordingFrames {}
 impl RecordingFrames {
     const CAPACITY: usize = 8;
 
-    fn new() -> Self {
+    const fn new() -> Self {
         // The array initialiser needs a `const`, and copying it per slot is
         // the point: each element must be its own independent table.
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO: UnsafeCell<Table> = UnsafeCell::new(Table::new());
-        // The array is materialised straight into the leaked `Box` the
-        // caller holds, despite the `large_stack_arrays` heuristic.
+        // `const`, so the pool lives in `.bss` and never on a test's stack
+        // frame — the same discipline as `PageTablePool::new`.
         #[allow(clippy::large_stack_arrays)]
         Self {
             storage: [ZERO; Self::CAPACITY],
@@ -358,8 +368,8 @@ impl PageTableFrames for RecordingFrames {
 
 #[test]
 fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
-    let pool: &'static RecordingFrames =
-        std::boxed::Box::leak(std::boxed::Box::new(RecordingFrames::new()));
+    static POOL: RecordingFrames = RecordingFrames::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 2).expect("identity map");
     let root_phys = space.root_phys();
 
@@ -396,7 +406,8 @@ fn reclaim_table_frames_returns_every_drawn_table_exactly_once() {
 #[test]
 fn map_page_translates_neutral_flags_and_walks() {
     use tairix_arch_api::mmu::{self, PageFlags};
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     let vaddr = (100u64 << 30) | (7u64 << 21) | (9u64 << 12);
     let paddr = 0x8200_0000;
@@ -471,7 +482,8 @@ fn a_pte_the_source_cannot_reach_fails_the_walk_closed() {
 #[test]
 fn declares_access_tracking_supported() {
     use tairix_arch_api::mmu::{self, AccessTracking};
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
     // riscv64 manages the Accessed bit through clear + the Svade fault
     // path (or hardware update on Svadu), so the referenced bit is
@@ -485,7 +497,8 @@ fn declares_access_tracking_supported() {
 #[test]
 fn test_and_clear_accessed_drives_the_clock_round_trip() {
     use tairix_arch_api::mmu::{self, MapError, PageFlags};
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
 
     // A page in gigapage slot 100 (fresh L1/L0 tables). `map_page` sets A
@@ -541,7 +554,8 @@ fn test_and_clear_accessed_drives_the_clock_round_trip() {
 #[test]
 fn set_accessed_flag_in_root_respects_permission_and_clears() {
     use tairix_arch_api::mmu::{self, PageFlags};
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 1).expect("root");
 
     // A read-only (no WRITE, no EXEC) user page.
@@ -716,7 +730,8 @@ fn kernel_slots_are_everything_from_the_map_upward() {
 #[test]
 fn a_user_mapping_is_refused_in_a_kernel_slot() {
     use tairix_arch_api::mmu::{self, PageFlags};
-    let pool = fresh_pool();
+    static POOL: PageTablePool = PageTablePool::new();
+    let pool = &POOL;
     let mut space = AddressSpace::new_identity_gigapages(pool, 2).expect("identity map");
     let pa = 0x8123_4000;
     for slot in [

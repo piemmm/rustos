@@ -38,6 +38,8 @@
 
 use core::mem::size_of;
 
+use tairix_arch_api::{KernelStackRegion, PrepareError, STACK_ALIGN};
+
 /// Per-task register-save area.
 ///
 /// One [`TaskCtx`] per scheduler task. The only field is the kernel
@@ -66,9 +68,8 @@ impl TaskCtx {
     /// Seed an initial frame so the first `switch` *into* this task lands
     /// at `entry` with the first argument register `x0` set to `arg`.
     ///
-    /// `stack_top` is the *exclusive* upper bound of the task's kernel
-    /// stack (one byte past the last addressable byte). It must be
-    /// 16-byte aligned (AAPCS64 stack alignment) and non-zero.
+    /// `stack` is the task's usable kernel stack; the frame occupies its
+    /// topmost `FRAME_BYTES`.
     ///
     /// On success `self.sp` points at the bottom of the synthesised
     /// frame, whose layout matches the suspend epilogue of `switch`
@@ -77,25 +78,15 @@ impl TaskCtx {
     ///
     /// # Errors
     ///
-    /// [`PrepareError::NullStack`] if `stack_top == 0`;
-    /// [`PrepareError::Misaligned`] if `stack_top % 16 != 0`;
-    /// [`PrepareError::TooSmall`] if `stack_top` has no room for the
-    /// synthesised frame.
+    /// [`PrepareError::Misaligned`] if the region's top is not 16-byte
+    /// aligned (AAPCS64 stack alignment); [`PrepareError::TooSmall`] if
+    /// it has no room for the synthesised frame.
     pub fn prepare(
         &mut self,
-        stack_top: u64,
+        stack: KernelStackRegion,
         entry: unsafe extern "C" fn(usize) -> !,
         arg: usize,
     ) -> Result<(), PrepareError> {
-        if stack_top == 0 {
-            return Err(PrepareError::NullStack);
-        }
-        if !stack_top.is_multiple_of(16) {
-            return Err(PrepareError::Misaligned);
-        }
-        if stack_top < FRAME_BYTES {
-            return Err(PrepareError::TooSmall);
-        }
         // Frame layout the resume half of `switch` expects to restore,
         // in ascending address order from `sp` (8-byte slots):
         //
@@ -107,41 +98,30 @@ impl TaskCtx {
         //   [sp + 0x70] d8    (callee-saved FP/SIMD, seeded to 0)
         //   ...               (d9..d15, seeded to 0)
         //   [sp + 0xb0] DAIF  (`u64::MAX` means inherit on first entry)
-        let sp = stack_top - FRAME_BYTES;
-        // SAFETY: `stack_top` is non-zero, 16-byte aligned, and at least
-        // `FRAME_BYTES` above zero by the checks above. The caller's
-        // documented contract is that `[stack_top - stack_size, stack_top)`
-        // is mapped, exclusive to this CPU, and writable; the frame fits
-        // entirely in the topmost `FRAME_BYTES` of that range.
+        let frame = stack.seed_frame(FRAME_BYTES)?;
+        let p = frame.cast::<u64>();
+        // SAFETY: `seed_frame` returned `FRAME_BYTES` of the region, which
+        // its constructor vouches is mapped, writable, and exclusive to
+        // this task; the region's top is 16-byte aligned and `FRAME_BYTES`
+        // is a multiple of 8, so `p` is aligned for the `u64` writes below
+        // and every index stays inside the frame.
         unsafe {
-            let p = sp as *mut u64;
             // Zero every slot, including padding and d8..d15.
-            for offset in (0..FRAME_BYTES).step_by(size_of::<u64>()) {
-                core::ptr::write((sp + offset) as *mut u64, 0);
+            for i in 0..FRAME_BYTES / size_of::<u64>() {
+                p.add(i).write(0);
             }
             // x30 <- entry (index 11, offset 0x58)
-            core::ptr::write(p.add(11), entry as usize as u64);
+            p.add(11).write(entry as usize as u64);
             // x0 <- arg (index 12, offset 0x60)
-            core::ptr::write(p.add(12), arg as u64);
+            p.add(12).write(arg as u64);
             // A never-run task has no suspended processor state. Inherit the
             // dispatcher's current DAIF on first entry; every later suspend
             // overwrites this slot with the task continuation's exact value.
-            core::ptr::write(p.add(22), INITIAL_DAIF_INHERIT);
+            p.add(22).write(INITIAL_DAIF_INHERIT);
         }
-        self.sp = sp;
+        self.sp = frame.addr().get() as u64;
         Ok(())
     }
-}
-
-/// Errors returned by [`TaskCtx::prepare`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrepareError {
-    /// `stack_top` was zero.
-    NullStack,
-    /// `stack_top` was not 16-byte aligned (AAPCS64).
-    Misaligned,
-    /// `stack_top` had no room for the initial frame.
-    TooSmall,
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes:
@@ -149,7 +129,7 @@ pub enum PrepareError {
 /// eight callee-saved FP/SIMD halves (`d8`–`d15`), and `DAIF`, padded to
 /// the AAPCS64 16-byte stack alignment. Kept in step with `context.s` by
 /// the const-asserts below.
-const FRAME_BYTES: u64 = 192;
+const FRAME_BYTES: usize = 192;
 
 /// Initial-frame marker telling the switch primitive to preserve the
 /// dispatcher's current DAIF on a task's first entry.
@@ -160,7 +140,7 @@ const INITIAL_DAIF_INHERIT: u64 = u64::MAX;
 #[allow(dead_code)] // const-assert; never referenced at runtime.
 const TASK_CTX_LAYOUT_PINNED: () = {
     assert!(size_of::<TaskCtx>() == 8);
-    assert!(FRAME_BYTES.is_multiple_of(16));
+    assert!(FRAME_BYTES.is_multiple_of(STACK_ALIGN));
 };
 
 // --- Context switch primitive ---------------------------------------
@@ -205,6 +185,7 @@ pub unsafe fn switch(prev: *mut TaskCtx, next: *mut TaskCtx) {
 mod tests {
     use super::*;
     use core::mem::{align_of, offset_of};
+    use core::ptr::NonNull;
 
     #[test]
     fn task_ctx_layout_is_fixed() {
@@ -225,49 +206,68 @@ mod tests {
         panic!("host_entry is address-only; never invoked")
     }
 
-    #[test]
-    fn prepare_rejects_null_stack() {
-        let mut c = TaskCtx::new();
-        assert_eq!(
-            c.prepare(0, host_entry, 0).unwrap_err(),
-            PrepareError::NullStack
-        );
+    /// A real, 16-byte-aligned stack buffer. The frame is asserted by
+    /// reading *this* buffer back, so the test proves the write landed in
+    /// the region rather than trusting the address `prepare` reported.
+    #[repr(C, align(16))]
+    struct Stack([u64; STACK_WORDS]);
+
+    const STACK_WORDS: usize = 32;
+    const STACK_BYTES: usize = STACK_WORDS * 8;
+
+    impl Stack {
+        fn new() -> Self {
+            Self([0xDEAD_BEEF_DEAD_BEEF; STACK_WORDS])
+        }
+
+        /// The lowest `len` bytes of the buffer, as a region.
+        fn region(&mut self, len: usize) -> KernelStackRegion {
+            assert!(len <= STACK_BYTES);
+            let ptr = NonNull::from(&mut self.0).cast::<u8>();
+            // SAFETY: `ptr` addresses `len <= STACK_BYTES` bytes of this
+            // live, uniquely borrowed buffer, which outlives the region.
+            unsafe { KernelStackRegion::new(ptr, len) }
+        }
     }
 
+    /// Big enough for the frame, so only the unaligned top can refuse it.
     #[test]
     fn prepare_rejects_misaligned_stack() {
+        let mut stack = Stack::new();
         let mut c = TaskCtx::new();
         assert_eq!(
-            c.prepare(0x1_0001, host_entry, 0).unwrap_err(),
+            c.prepare(stack.region(STACK_BYTES - 8), host_entry, 0)
+                .unwrap_err(),
             PrepareError::Misaligned
         );
+        assert_eq!(c.sp, 0, "a refused prepare must leave the context unseeded");
     }
 
+    /// 16-byte aligned, but below the complete resume frame.
     #[test]
     fn prepare_rejects_too_small_stack() {
+        let mut stack = Stack::new();
         let mut c = TaskCtx::new();
-        // 16-byte aligned, but below the complete resume frame.
         assert_eq!(
-            c.prepare(0x10, host_entry, 0).unwrap_err(),
+            c.prepare(stack.region(16), host_entry, 0).unwrap_err(),
             PrepareError::TooSmall
         );
+        assert_eq!(c.sp, 0, "a refused prepare must leave the context unseeded");
     }
 
     #[test]
     fn prepare_writes_initial_frame() {
-        #[repr(C, align(16))]
-        struct Stack([u64; 24]);
-        let mut stack = Stack([0xDEAD_BEEF_DEAD_BEEFu64; 24]);
-        let top = unsafe { core::ptr::addr_of_mut!(stack.0).cast::<u64>().add(24) } as u64;
+        let mut stack = Stack::new();
+        let region = stack.region(STACK_BYTES);
+        let top = region.top_addr();
         let mut c = TaskCtx::new();
         // Coerce once: the frame word is compared against *this* pointer
         // value, because two coercions of one `fn` item are not
         // guaranteed to share an address.
         let entry: unsafe extern "C" fn(usize) -> ! = host_entry;
-        c.prepare(top, entry, 0xCAFE).unwrap();
-        assert_eq!(c.sp, top - FRAME_BYTES);
-        let frame_words = usize::try_from(FRAME_BYTES).unwrap() / size_of::<u64>();
-        let frame = unsafe { core::slice::from_raw_parts(c.sp as *const u64, frame_words) };
+        c.prepare(region, entry, 0xCAFE).unwrap();
+        assert_eq!(c.sp, top - FRAME_BYTES as u64);
+        let frame = &stack.0[STACK_WORDS - FRAME_BYTES / size_of::<u64>()..];
         // x19..x29 <- 0 (indices 0..=10)
         for slot in &frame[0..=10] {
             assert_eq!(*slot, 0);

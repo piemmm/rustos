@@ -28,16 +28,13 @@ pub fn offset_within(base: *mut u8, region_len: usize, offset: usize) -> Option<
     if offset >= region_len {
         return None;
     }
-    // `base as usize + offset` cannot overflow because both fit in `usize`
-    // *and* `offset < region_len <= isize::MAX as usize` (enforced by
-    // every safe allocator that produced `base`). We still check it.
-    let addr = (base as usize).checked_add(offset)?;
-    // SAFETY: `offset < region_len` is the contract supplied by every
-    // caller (the region is owned by the allocator). The checked
-    // `as usize` arithmetic above rules out overflow, and the result is
-    // therefore inside the `[base, base + region_len)` allocation, which
-    // is the only place pointer arithmetic on `base` is defined.
-    Some(addr as *mut u8)
+    // The overflow guard is asked of the address; the answer is applied to
+    // the *pointer*. Building the result from `base as usize` instead
+    // would strip `base`'s provenance, leaving callers a pointer the
+    // compiler believes aliases nothing — so a write through it could be
+    // reordered against, or elided beside, an access through `base`.
+    base.addr().checked_add(offset)?;
+    Some(base.wrapping_add(offset))
 }
 
 /// Compute `base + region_len` — the one-past-the-end pointer for an
@@ -48,8 +45,11 @@ pub fn offset_within(base: *mut u8, region_len: usize, offset: usize) -> Option<
 /// for constructing exclusive end markers.
 #[must_use]
 pub fn end_within(base: *mut u8, region_len: usize) -> Option<*mut u8> {
-    let addr = (base as usize).checked_add(region_len)?;
-    Some(addr as *mut u8)
+    // Provenance-preserving for the same reason as `offset_within`, even
+    // though this one is never dereferenced: a marker derived from an
+    // integer does not compare meaningfully against pointers into `base`.
+    base.addr().checked_add(region_len)?;
+    Some(base.wrapping_add(region_len))
 }
 
 /// Construct a `&mut [u8]` of `len` bytes starting at `base + offset`,
@@ -115,11 +115,26 @@ mod tests {
         assert!(offset_within(base, 16, 17).is_none());
     }
 
+    /// The derived pointer must carry `base`'s provenance rather than a
+    /// fresh one minted from an integer, so a write through it lands in
+    /// the same allocation. Reconstructing from `base as usize` still
+    /// passes this at runtime; the UB oracle is what rejects it.
+    #[test]
+    fn offset_within_keeps_the_base_allocations_provenance() {
+        let mut buf = vec![0u8; 16];
+        let base = buf.as_mut_ptr();
+        let p = offset_within(base, 16, 7).expect("in bounds");
+        // SAFETY: `p` is in bounds of the live `buf`, which is not
+        // otherwise borrowed across the write.
+        unsafe { p.write(0xA5) };
+        assert_eq!(buf[7], 0xA5);
+    }
+
     #[test]
     fn offset_within_rejects_overflow() {
-        // Use a synthetic `base` near usize::MAX. We never dereference it,
-        // we only check that arithmetic refuses to wrap.
-        let base = (usize::MAX - 4) as *mut u8;
+        // A synthetic `base` near usize::MAX, never dereferenced: only the
+        // refusal to wrap is under test, so it carries no provenance.
+        let base = core::ptr::without_provenance_mut::<u8>(usize::MAX - 4);
         assert!(offset_within(base, 16, 8).is_none());
     }
 
@@ -133,7 +148,7 @@ mod tests {
 
     #[test]
     fn end_within_rejects_overflow() {
-        let base = (usize::MAX - 4) as *mut u8;
+        let base = core::ptr::without_provenance_mut::<u8>(usize::MAX - 4);
         assert!(end_within(base, 8).is_none());
     }
 

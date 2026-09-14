@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 23 open, 97 closed, 120 total.
+table normalises all three to **closed**. 26 open, 98 closed, 124 total.
 
-### Open (23)
+### Open (26)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -50,8 +50,11 @@ table normalises all three to **closed**. 23 open, 97 closed, 120 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
+| D123 | `kernel/core` and `kernel/mem` are not under the UB oracle | each aborts strict provenance on a pre-existing integer round-trip (D124 for `kernel/core`); `kernel/mem`'s `ptr` helpers are fixed but its 330-test allocator suite has not been costed against the gate's budget |
+| D124 | the kthread resume handle round-trips a control-block pointer through a `usize` | `ResumeHandle { data: usize }` and its thunks; the sibling `LiveSpacePtr` in the same module already carries a real pointer for exactly this reason |
+| D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 
-### Closed (97)
+### Closed (98)
 
 | ID | Subject |
 |---|---|
@@ -151,6 +154,7 @@ table normalises all three to **closed**. 23 open, 97 closed, 120 total.
 | D117 | a wait-queue test asserted a clear reading of process-global deferred-wake flags its siblings set |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard |
 | D120 | a per-CPU guarded-copy republish was refused, halting every aarch64 secondary |
+| D121 | `ContextSwitch::prepare` took the task's stack as a bare integer, so no UB oracle could interpret the three paging ports |
 | D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS`, breaking the inherited-document hand-off |
 
 ## Scope
@@ -4381,15 +4385,201 @@ things fell out of it:
   `frames::conformance`, and a `reclaim_table_frames` test run over its real
   pool for the first time.
 
-**Miri stage enrolment is blocked by a different defect, not by this one.**
-With the paging walks clean, `cargo miri test -p tairix-arch-aarch64 --lib`
-aborts next in `context.rs`'s `TaskCtx::prepare`, which materialises the
-initial stack frame from the `stack_top: u64` the Arch HAL hands it
-(`let p = sp as *mut u64`). That is the HAL's own signature, shared by the
-scheduler and kthread spawn on all four ports, so it is its own defect
-class rather than a residue of this one; riscv64 additionally reports only
-intentional-`Box::leak` fixtures. The three ports therefore stay out of
-`tools/xtask/src/commands/miri.rs`'s `TARGETS` until that is fixed.
+**Miri stage enrolment was blocked by a different defect, now closed as
+D121.** With the paging walks clean, the interpreter aborted next in
+`context.rs`'s `TaskCtx::prepare`, which materialised a task's initial
+stack frame from the `stack_top: u64` the Arch HAL handed it. That was the
+HAL's own signature rather than a residue of this entry, so it is tracked
+and fixed there; all three ports are now enrolled in
+`tools/xtask/src/commands/miri.rs`'s `TARGETS`, so the gate interprets
+these walks on every run instead of relying on a reviewer to remember.
+
+## D122 — kthread admission aborts the kernel on an allocation failure
+instead of failing closed (PARTIAL)
+
+**Mechanism.** The charter requires allocation failure to be a `Result`,
+never a panic. The kthread admission path did the opposite at every step:
+`BoxStack::new` built its ~68 KiB stack with `alloc::vec!`, whose failure
+path is `handle_alloc_error`, and `alloc_kernel_stack` then wrapped the
+result in an infallible `Box::new`. A machine under real memory pressure
+— exactly when the window-backed tier falls through to the `BoxStack`
+fallback, because the frame pool is exhausted — therefore aborted the
+kernel rather than refusing one spawn.
+
+**Closed so far.** The stack itself, which is the allocation that actually
+fails: `BoxStack::new` answers `None`, `alloc_kernel_stack` answers
+`Option`, and the refusal is reported as `SchedError::OutOfMemory` →
+`AdmitError::OutOfMemory` → `Errno::OutOfMemory`. Both call sites
+(`threads.rs` thread creation, `syscalls.rs` loading-child admission)
+already had an adjacent out-of-memory arm to return through.
+
+**Still open.** The smaller allocations either side of it — the
+`Box<dyn KernelStack + Send>` around the stack, the `ThreadControl` block,
+the `Arc`s the admission path builds — still abort through the global
+allocator's handler. Closing those needs a fallible boxing primitive and a
+sweep of the admission path, which is its own change; a 16-byte `Box`
+failing means the kernel is already dead, so the ordering here is
+deliberate rather than an oversight.
+
+**Done when:** no allocation on the admission path can abort — every one
+is a value the caller fails closed on — with a test that drives each
+failure point.
+
+## D121 — `ContextSwitch::prepare` took the stack as a bare integer, so no
+UB oracle could look at the paging ports (FIXED)
+
+**Mechanism.** The Arch HAL's `ContextSwitch::prepare(ctx, stack_top: u64,
+…)` handed each port the task's kernel stack as an address, so every port
+synthesised a pointer from it (`let p = sp as *mut u64`) to write the
+initial frame. Under `-Zmiri-strict-provenance` that is an int-to-pointer
+cast with no provenance: the interpreter aborts on the first one and can
+check nothing else in the crate. The three bare-metal ports were therefore
+excluded from `cargo xtask ci`'s miri stage, and *any* change to
+`kernel/arch/{aarch64,riscv64,x86_64}/src/paging.rs` — the recently
+provenance-cleaned walks of D56 — passed a green gate with no oracle
+looking at it. The only thing standing between a new aliasing or
+provenance bug and `main` was a reviewer remembering to run miri by hand.
+
+Two further defects rode on the same signature:
+
+* **`prepare` was a safe function that dereferenced a caller-supplied
+  integer.** Anyone holding a `&dyn ContextSwitch` could corrupt arbitrary
+  memory through entirely safe code.
+* **`TooSmall` did not check what it claimed.** `if stack_top <
+  FRAME_BYTES` tests the stack's *address* against the frame size — i.e.
+  that the subtraction does not wrap below zero — not that the stack has
+  room. A 32-byte stack at `0x1_0000` passed, and the port then wrote its
+  frame straight through the bytes beneath it.
+
+**Fix.** `prepare` takes a `KernelStackRegion` (`kernel/arch/api`): a
+`NonNull<u8>` base plus a length. The pointer carries provenance for the
+bytes the frame is written through, and the length makes `TooSmall` a
+question about the stack. Constructing a region is the `unsafe` step — its
+contract *is* the old `unsafe trait KernelStack` obligation — which is what
+lets `prepare` stay safe: the proof travels with the value instead of
+living in prose at each call site. `PrepareError::NullStack` is deleted
+rather than re-checked: `NonNull` cannot name a null stack.
+
+The two refusals every port owed were identical, so they are checked once
+in `KernelStackRegion::seed_frame` and each port keeps only its own
+`FRAME_BYTES` and frame layout. Three private `context::PrepareError`
+enums and their three 1:1 `map_prepare_error` functions are gone with
+them; the ports return the HAL's enum directly. `STACK_ALIGN` had five
+copies (three ports, `kthread.rs`, `kstack.rs`) and now has one.
+
+**What each stack source does with it.** `BoxStack` holds its allocation as
+a raw pointer rather than a `Box<[u8]>`: a task writes its frames through
+that pointer while the owner is only borrowed shared, and a `Box`
+re-asserts uniqueness of its payload on every move — which happens once per
+admission, when the stack is boxed into the control block — invalidating
+the pointer the task is running on. The allocation is now taken with an
+explicit `STACK_ALIGN` layout, so the usable top is the allocation's end
+rather than a rounded-down approximation; that removed a second, smaller
+defect, where `carries()` accepted up to 15 bytes *of the guard region* as
+being on the task's stack, because `top` was rounded down while
+`usable_bytes` was not. `WindowStack`'s pages are genuinely not a Rust
+allocation — they exist because the kernel wrote page tables — so its
+pointer is minted with `core::ptr::with_exposed_provenance_mut`, which
+states that deliberately where a bare cast hid it. That path never runs
+under miri (it needs a live remap window), so it weakens no oracle.
+
+**What enrolling the ports then found — three real bugs in x86_64 AP
+bring-up.** With `prepare` clean, the oracle reached `smp.rs` and stopped
+three times.
+
+*Uninitialised memory into the trampoline frame.*
+`TrampolineFrame::write_slot` built the per-AP boot record's byte image
+with `transmute_copy::<ApBootSlot, [u8; size_of::<ApBootSlot>()]>`. The
+struct's fields end at `0x44` (68 bytes) but its size is 72 — it carries
+four bytes of tail padding to its 8-byte alignment — so the copy read four
+uninitialised bytes and wrote them into the frame every secondary CPU
+boots from. It is now written field by field at `offset_of!`-derived
+offsets, bounded by `AP_BOOT_SLOT_WIRE_LEN`, so only the contract with
+`ap_trampoline.s` is written. Two stale claims in that module's docs went
+with it: the write was documented as "field-by-field through a
+volatile-aware path" when it was neither, and the ordering it claimed to
+provide actually comes from the caller's explicit `fence(Release)` before
+the SIPI.
+
+*A rendezvous flag polled through a shared borrow.* `load_ready` took
+`&self` and derived its `AtomicU32` from `self.frame[..].as_ptr()` —
+read-only provenance for a location **another core writes** with an
+`xchg`. Stacked Borrows rejects the retag, and the reason it matters in
+the field is worse than the formalism: a pointer derived from a shared
+borrow tells the compiler those bytes cannot change for the life of the
+borrow, which licenses hoisting the load straight out of the BSP's
+`while frame.load_ready() == 0` spin loop. The `Acquire` does not help if
+the value is never re-read; the BSP would spin to its budget and report
+`StartTimedOut` on a CPU that had in fact come up. `load_ready` now takes
+`&mut self` and derives through `as_mut_ptr`, so the pointer carries the
+write provenance the location's concurrent mutation demands. It survived
+until now only because no optimiser had yet taken the licence.
+
+*An alignment precondition that was documented, relied on, and never
+checked.* With the provenance right, the oracle then rejected the
+`AtomicU32` reference outright: unaligned. `TrampolineFrame::new` is a
+safe constructor taking any `&mut [u8]`, and its `InstallError::
+FrameMisaligned` variant is documented "`frame_base` was not 4 KiB
+aligned" — but the check under that name tested the *length*, so the
+alignment the whole module reads the frame at fixed sub-offsets on was
+never verified. The long SAFETY comment on `load_ready` argued the point
+away with reasoning that does not hold ("the alignment tracks the data,
+not the slice"): an `AtomicU32` reference needs its *address* aligned, and
+a `[u8; 4096]` has alignment 1. Production was safe by luck of the real
+frame sitting at `0x8000`; the host fixtures were not. `new` now checks
+size and alignment separately — `FrameWrongSize` and `FrameMisaligned`,
+each doing what its name says — so the precondition is enforced at the one
+place a caller can get it wrong, and the test fixtures use a
+`#[repr(align(4096))]` frame as the hardware always did.
+
+**And one more, a crate further out.** Pointing the same oracle at
+`kernel/core`'s kthread suite — to check the new `BoxStack` really does
+hand `prepare` write provenance — got twelve tests in and then stopped in
+`kernel/mem`'s `ptr::offset_within`, the helper every `Slab` slot is
+reached through. It computed `(base as usize).checked_add(offset)` and
+returned `addr as *mut u8`: a round trip that **strips `base`'s
+provenance**, so callers got a pointer the compiler believes aliases
+nothing and may reorder or elide accesses through. Its own SAFETY comment
+described pointer arithmetic ("the only place pointer arithmetic on `base`
+is defined") that the code was not doing. `offset_within` and its sibling
+`end_within` now keep the overflow guard on the address and apply it to
+the *pointer* (`wrapping_add`), and the two synthetic near-`usize::MAX`
+probes use `without_provenance_mut`, which is what that idiom is for.
+`kernel/mem` is **not** enrolled in the miri stage — its 330-test
+allocator suite is a runtime-budget question of its own — so this fix's
+oracle is a targeted `cargo miri test -p tairix-kernel-mem --lib ptr::`
+run (10 passed, strict provenance) rather than the gate. Enrolling that
+crate is left open rather than done quietly (D123).
+
+With that fixed the kthread suite ran three tests further and stopped at a
+*third* pre-existing round-trip, `suspend_with`'s `data as *mut
+ThreadControl`, where the per-CPU `ResumeHandle` publishes a control block
+as a `usize` and its thunk casts it back. That is the resume seam's own
+type erasure rather than anything this entry touches — and notably the
+sibling `LiveSpacePtr`, in the same module, already carries a real pointer
+with a doc explaining why. It is escalated as D124 rather than chased
+here: two distinct pre-existing sites in as many runs is an open-ended
+sweep, and fixing one more would still not make `kernel/core` gate-covered
+while the crate stays unenrolled. What the fifteen tests that *did* pass
+establish is the part this entry owns — `dispatch_step` driving the new
+`BoxStack` region through `prepare`, interpreted clean under strict
+provenance.
+
+The riscv64 tests additionally reported 22 deliberate `Box::leak` pool
+fixtures. Both sibling ports already build their test pools as a
+function-local `static POOL: PageTablePool = PageTablePool::new()`, which
+needs no allocation at all; riscv64 was the only port leaking, and now
+uses the sibling pattern. No leak-tolerance flag was added to the miri
+stage: a suite that leaks cannot tell a deliberate leak from a real one.
+
+**Proved by.** `tairix-arch-{aarch64,riscv64,x86_64}` are enrolled in
+`tools/xtask/src/commands/miri.rs`'s `TARGETS`, so the gate now interprets
+all three. Host tests cover `seed_frame`'s two refusals and its exact-fit
+boundary, an empty region refusing every frame (the fail-closed
+replacement for the deleted null-stack arm), each port's frame layout read
+back *through its own buffer* rather than through the address `prepare`
+reported, and `write_slot` leaving the frame past the wire contract
+untouched.
 
 ## D63 — an ARXFS commit published its superblock slot with no barrier (FIXED)
 

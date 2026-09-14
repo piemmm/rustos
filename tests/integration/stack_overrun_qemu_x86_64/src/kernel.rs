@@ -179,7 +179,9 @@ fn run_overrun_test() -> ! {
     // Draw a stack from the tier the production boot installed. The active
     // CR3 already carries the window's shared sub-hierarchy, so the run
     // resolves without this test touching a page table.
-    let stack = alloc_kernel_stack();
+    let Some(stack) = alloc_kernel_stack() else {
+        fail("no kernel stack: neither the window tier nor the fallback could supply one");
+    };
     // The tier lays a stack out as `[guard slot | usable run]`, so the guard
     // is the page below the usable base.
     let usable_base = stack.top() - stack.usable_bytes();

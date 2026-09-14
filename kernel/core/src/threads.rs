@@ -191,7 +191,7 @@ where
     // The thread's kernel stack: a run of the shared kernel remap window whose
     // guard slot is unmapped in every root at once, so an overrun of it faults
     // rather than corrupting the lower-addressed neighbour.
-    let kernel_stack = crate::kstack::alloc_kernel_stack();
+    let kernel_stack = crate::kstack::alloc_kernel_stack().ok_or(Errno::OutOfMemory)?;
 
     // Reserve `[guard | stack]` in the process's own anonymous window — address
     // space only. A stack is a span whose depth is unknown and mostly untouched,
