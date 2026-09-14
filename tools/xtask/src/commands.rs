@@ -1116,9 +1116,34 @@ fn run_charter_cite(ctx: &Context) -> Result<(), String> {
     charter_cite::run(&ctx.workspace_root)
 }
 
+/// Time one pipeline stage, reporting its wall clock in the shape
+/// [`Context::run_with_timeout`] uses for a single command.
+///
+/// A stage that fans out into concurrent jobs reports only per-job lines, so
+/// its own cost never reaches the log — and a stage whose cost cannot be
+/// grepped cannot be ordered against the others on evidence. The `stage:`
+/// prefix keeps these totals distinguishable from the per-command lines they
+/// contain.
+fn stage(label: &str, run: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let started = Instant::now();
+    let outcome = run();
+    eprintln!(
+        "xtask: [stage: {label}] {} in {:?}",
+        if outcome.is_ok() { "done" } else { "FAILED" },
+        started.elapsed()
+    );
+    outcome
+}
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
-    // The pipeline order is deliberate: cheap and deterministic checks run
-    // first so a failing PR fails fast. The test phase opts in to `--qemu`
+    // The pipeline order is deliberate and evidence-based: every stage is
+    // cheaper than the one after it, so a failing PR fails as early as its
+    // cost allows. Ordering is against measured wall clock (`grep 'stage:'`
+    // over a run's log), never a guess about which gate "usually" trips —
+    // when a cheap stage sits behind an expensive one, every failure of it
+    // pays the expensive one first for nothing.
+    //
+    // The test phase opts in to `--qemu`
     // so the Stage-2 QEMU integration tests run as part of every PR; CI hosts
     // therefore need QEMU for every Tier-1 target, documented under
     // `docs/src/platform/x86_64.md`. The closing image gate additionally
@@ -1128,71 +1153,64 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // `fmt --check` is the very first, cheapest gate and streams `cargo fmt`
     // output live, so it stays a sequential fail-fast step rather than joining
     // the concurrent group below.
-    run_fmt(ctx, &[])?;
-    // The deterministic, non-compiling gates run concurrently as one group
-    // before any compile-heavy stage: they still gate the expensive phases
-    // (fail-fast preserved), and their wall-clock costs now overlap instead of
-    // summing. See [`run_static_gates`].
-    run_static_gates(ctx)?;
-    // docs-check (rustdoc with warnings denied, mdBook, link check) is the
-    // gate a PR most often trips first, and a broken intra-doc link or a
-    // denied rustdoc warning is cheap to surface: it needs only a doc build,
-    // never the multi-target QEMU test matrix. Run it ahead of clippy and the
-    // test phase so a documentation failure fails the pipeline in minutes
-    // instead of after the whole test matrix has run.
-    run_docs_check(ctx, &[])?;
-    run_clippy(ctx, &[])?;
-    // run the whole test matrix exactly once. `ci` runs each test a
-    // single time, on a developer machine and on a CI runner alike; the
-    // flake-hunting repetition lives in the time-limited GitHub soaks
-    // (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`. The
-    // fuzz and proptest gates below likewise run a single iteration here.
+    stage("fmt --check", || run_fmt(ctx, &[]))?;
+    // The deterministic, non-compiling gates run concurrently as one group:
+    // they still gate every compile-heavy stage below (fail-fast preserved),
+    // and their wall-clock costs overlap instead of summing.
+    stage("static gates", || run_static_gates(ctx))?;
+    // `cargo deny check` reads `Cargo.lock` and the advisory database and
+    // compiles nothing, so it is a static gate in all but its streaming
+    // output — which is why it runs sequentially rather than joining the
+    // concurrent group above. At a measured second it belongs beside them.
+    stage("deny", || run_deny(ctx))?;
+    // Bronze: the per-PR stateful-model gate, one iteration with a fresh
+    // logged seed. Seconds, and fails closed on a counterexample, hang, or
+    // invariant failure; the wall-clock coverage is `cargo xtask proptest
+    // --soak`, outside `ci`. (Silver's exhaustive model check is already in
+    // the concurrent static-gate group above.)
+    stage("proptest --once", || {
+        run_proptest(ctx, &[OsString::from("--once")])
+    })?;
+    // `lib/crypto`'s unit tests re-run under release optimisation: the
+    // constant-time guarantee is one the optimiser can break, so the debug
+    // profile the main test phase uses does not cover it.
+    stage("crypto-constant-time", || run_crypto_constant_time(ctx))?;
+    // The per-PR fuzz gate: each in-tree harness for one iteration with a
+    // fresh logged seed. The wall-clock coverage is `cargo xtask fuzz
+    // --soak`, run outside `ci`.
+    stage("fuzz --once", || run_fuzz(ctx, &[OsString::from("--once")]))?;
+    // The interleaving oracle over the synchronisation primitives. The test
+    // matrix runs whichever ordering the host scheduler happened to pick;
+    // only the model checker covers the ones it did not.
+    stage("loom", || loom::run(ctx, &[]))?;
+    // docs-check needs only a doc build, never the multi-target test matrix,
+    // and a broken intra-doc link or a denied rustdoc warning is cheap to
+    // surface.
+    stage("docs-check", || run_docs_check(ctx, &[]))?;
+    stage("clippy", || run_clippy(ctx, &[]))?;
+    // The undefined-behaviour oracle over the crates with a hand-written
+    // `unsafe` core. A green test suite says what the code computes; only an
+    // interpreter says whether a raw pointer stayed in bounds. Ahead of the
+    // test matrix because it is the cheaper of the two and finds the class of
+    // defect the matrix structurally cannot.
+    stage("miri", || miri::run(ctx, &[]))?;
+    // The whole test matrix, exactly once — on a developer machine and a CI
+    // runner alike. The flake-hunting repetition lives in the time-limited
+    // soaks (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`.
     // The host pass runs in a freshly-seeded order (`--shuffle`) so an
     // order-dependent suite fails the gate rather than passing on the
     // harness's alphabetical accident; the seed is in the step's label.
-    run_test(
-        ctx,
-        &[OsString::from("--qemu"), OsString::from("--shuffle")],
-    )?;
-    // `cargo deny check` streams its own summary, so it stays sequential among
-    // the compile-heavy phases rather than joining the concurrent group.
-    run_deny(ctx)?;
-    // the per-PR fuzz gate. Runs each in-tree harness for a single
-    // iteration with a fresh, logged seed (a crash, hang, or invariant
-    // failure fails the gate, fail-closed). `ci` does not budget the
-    // harnesses — the wall-clock soak coverage is the time-limited GitHub
-    // soak (`cargo xtask fuzz --soak`, run outside `ci`).
-    run_fuzz(ctx, &[OsString::from("--once")])?;
-    // Bronze: the per-PR stateful-model gate. Runs each capability
-    // model for a single iteration with a fresh, logged seed; a
-    // counterexample, hang, or invariant failure fails the gate
-    // (fail-closed). The wall-clock soak is `cargo xtask proptest --soak`,
-    // run outside `ci`.
-    run_proptest(ctx, &[OsString::from("--once")])?;
-    // The undefined-behaviour oracle over the crates with a hand-written
-    // `unsafe` core. A green test suite says what the code computes; only an
-    // interpreter says whether a raw pointer stayed in bounds. Deterministic
-    // given its logged seed, and fails closed.
-    miri::run(ctx, &[])?;
-    // The interleaving oracle over the synchronisation primitives. The test
-    // matrix runs whichever ordering the host scheduler picked; only the model
-    // checker covers the ones it did not. Cheap — the models are seconds — and
-    // it is here because the harness had rotted into not compiling while
-    // nothing ran it.
-    loom::run(ctx, &[])?;
-    // re-run `lib/crypto`'s unit tests under release optimisation
-    // (`[profile.release]` is `opt-level = 3`). The constant-time
-    // comparison guarantee can be broken by the optimiser, so the charter
-    // requires the secret-handling tests to pass under `-C opt-level=3`,
-    // not only the debug profile the main test phase uses.
-    run_crypto_constant_time(ctx)?;
-    // every shippable image profile is built on every PR, so an
+    stage("test --qemu", || {
+        run_test(
+            ctx,
+            &[OsString::from("--qemu"), OsString::from("--shuffle")],
+        )
+    })?;
+    // Every shippable image profile is built on every PR, so an
     // image-breaking change (kernel link, firmware manifest, root-volume
-    // layout, profile seeding) can never land green. Both profiles of every
-    // delivered image platform are assembled end-to-end and written under
-    // `images/`; the pinned firmware blobs come from the operator-staged
-    // directory or the checksummed `target/pi-firmware` cache.
-    run_image_gate(ctx)?;
+    // layout, profile seeding) can never land green. Last because it is the
+    // terminal assembly: it is only meaningful once what it packages holds.
+    stage("image", || run_image_gate(ctx))?;
     Ok(())
 }
 

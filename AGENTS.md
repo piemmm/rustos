@@ -886,7 +886,8 @@ an update to this section.
   1. `cargo fmt --all` (and verify with `cargo fmt --all --check`).
   2. `cargo xtask ci` — the full pull-request pipeline (clippy, deps-check,
      cfg-check, the test matrix, docs-check, `cargo deny`, supply-chain,
-     the per-PR `--quick` fuzz and proptest gates, model-check, spec-review,
+     the per-PR `--quick` fuzz and proptest gates, the `miri` and `loom`
+     oracles over their enrolled sets (§19.11), model-check, spec-review,
      crypto constant-time, and abi-check). Run this **exactly once**: the
      pipeline is internally idempotent and runs each check a single time, so a
      second consecutive `cargo xtask ci` is pure waste and is forbidden.
@@ -1553,6 +1554,22 @@ You are not exempt from any rule above. In addition:
     The sheet is maintained like any other doc (§2.8, §2.14): a new
     `plans/*.md` enters this table in the change that creates it, and a
     deleted or superseded plan leaves it in the change that removes it.
+
+19. **Run the oracles where they apply, and say which ones looked (§19.11).**
+    A green `cargo xtask ci` proves only that the crates *enrolled* in the
+    `miri` and `loom` stages were interpreted — not that anything looked at
+    your `unsafe`. If your change adds or alters `unsafe` in a crate outside
+    `miri`'s `TARGETS`, enrol it (preferred) or run
+    `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p <crate>` and quote
+    it in the completion report (§23.5). If it touches a synchronisation
+    primitive, a lock-free protocol, or an `Acquire`/`Release` pairing whose
+    correctness depends on ordering, write the loom model and run
+    `cargo xtask loom`. State the reasoning either way: "loom N/A because X"
+    is an answer, silence is not. These oracles routinely find what the whole
+    test matrix structurally cannot — a pointer carrying no provenance, a
+    padding byte read as data, a cross-CPU flag loaded through a shared borrow
+    the compiler may hoist out of its spin loop. Never narrow an enrolment to
+    make a finding go away (§2.18).
 
 ---
 
@@ -2689,6 +2706,62 @@ prevents false claims:
   carries its slot's tag, the slot's tag is rotated on every allocation, and a
   handle that outlives its allocation mismatches and is rejected — never
   weakening to "trust the caller" (§5.4), never panicking (§2.9).
+
+### 19.11 The undefined-behaviour and interleaving oracles (miri, loom)
+
+A test suite states what a program *computed*. It cannot state that a raw
+pointer carried provenance for the bytes it wrote, that a slot was
+initialised before it was read, that two `&mut` never aliased, or that no
+thread interleaving loses a wake-up. Those are the defects that survive a
+green matrix for years and then fail on a different optimiser, a different
+core count, or real silicon. Two oracles answer them and both are binding.
+
+- **`cargo xtask miri` — the UB oracle.** Its enrolment is
+  `tools/xtask/src/commands/miri.rs`'s `TARGETS`, and `ci` runs exactly
+  that set. Enrolment is the **default** for any crate whose soundness
+  rests on a hand-written `unsafe` core.
+- **`cargo xtask loom` — the interleaving oracle.** Its enrolment is
+  `tools/xtask/src/commands/loom.rs`'s `TARGETS`. The matrix runs whichever
+  ordering the host scheduler happened to pick; only the model checker
+  covers the ones it did not.
+
+Binding rules:
+
+1. **A green gate is not evidence an oracle looked.** Know the enrolment
+   before citing the gate. Claiming coverage a stage did not perform is the
+   §2.1 hack in reporting form.
+2. **`unsafe` in an enrolled crate is covered — say so.** `unsafe` added or
+   altered in a crate that is **not** enrolled obliges you to either enrol it
+   (preferred) or run the targeted invocation and **quote it in the
+   completion report** (§23.5):
+   `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p <crate>`.
+3. **Interleaving-dependent correctness obliges loom.** Adding or changing a
+   synchronisation primitive, a lock-free protocol, or an `Acquire`/`Release`
+   pairing whose correctness depends on ordering means writing the loom model
+   and running it. Plain atomics in an arch crate — a set-once publication,
+   say — are not automatically loom's business; **state the reasoning either
+   way** in the report. "loom N/A because X" is an answer; silence is not.
+4. **Narrowing an enrolment requires a recorded reason, and may never dodge a
+   finding.** A target scoped to less than the crate carries that reason in
+   the registry. Excluding a test because the interpreter *refuses* it (the
+   stage runs isolated, so a test that opens a file is unsupported, not
+   failed) is legitimate; excluding one because it *reports* undefined
+   behaviour is forbidden — that is a real find, to be fixed or escalated
+   (§2.18).
+5. **What an oracle finds is a defect like any other.** It is fixed in the
+   change that surfaced it, with a regression test, or escalated explicitly
+   (§2.18, §7). A UB finding is never "theoretical": the compiler is entitled
+   to act on it, and the failure it produces later will not resemble its
+   cause.
+6. **Deliberate leaks belong nowhere near the oracle.** A test that leaks
+   cannot be told apart from one that leaked by mistake, so build test
+   fixtures the interpreter can account for rather than teaching the stage to
+   ignore leaks.
+
+The stage is narrow by cost, not by principle: miri interprets every
+operation, so pointing it at the whole workspace would cost hours and say
+nothing about crates carrying no `unsafe`. Widening the enrolment toward
+every such crate is the standing direction of travel.
 
 ---
 

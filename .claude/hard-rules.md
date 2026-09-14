@@ -34,6 +34,13 @@ PROCESS
 - Never silence a test, warning, or lint; no `#[allow(...)]` without a
   justification comment. The test is right; the code is wrong. (§15.3, §15.10)
 - Full test suite over the entire project before reporting done. (§15.6)
+- Run the oracles and say which ones looked. A green `ci` proves only that
+  *enrolled* crates were interpreted. `unsafe` outside miri's `TARGETS` ->
+  enrol it or run `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p
+  <crate>` and quote it. Sync primitive / lock-free protocol / ordering
+  pairing -> write the loom model and run `cargo xtask loom`. "loom N/A
+  because X" is an answer; silence is not. Never narrow an enrolment to
+  make a finding go away. (§19.11, §15.19)
 - Check the `plans/` jump-sheet before touching a covered area. (§15.18)
 - Adversarial self-review against §23, then the §23.5 completion report.
 

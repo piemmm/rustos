@@ -23,19 +23,31 @@ Budget **about 15 minutes** on a warm `target/` and a 24-core host, and
 substantially longer on a cold one, where `-Z build-std` recompiles
 `core`/`alloc` per target and every image profile links from scratch.
 
-Every stage reports its own wall clock, so `grep 'done in' ci.log` profiles a
-run rather than leaving you to guess which phase to blame. A measured warm run:
+Every stage reports its own wall clock. `grep 'stage:' ci.log` gives the
+per-stage totals the pipeline is ordered by; `grep 'done in' ci.log` gives the
+finer per-command lines inside them. A measured warm run:
 
-| Phase | Cost | Shape |
+| Stage | Cost | Shape |
 | --- | --- | --- |
-| QEMU guest runs | 658 s over 151 guests | concurrent, `nproc/3` weighted budget; ~285 s makespan |
-| image gate | 193 s over 319 spawns | sequential |
-| QEMU fixture cross-compiles | 148 s over 3 spawns | sequential (one per target) |
-| host test matrix | 77 s | one cargo invocation |
-| `clippy` host + 11 target passes | 73 s | sequential |
-| `miri` (the UB oracle over the hand-written `unsafe` cores and the three paging ports) | 175 s | one process per crate, concurrent; the aarch64 port sets the makespan |
+| `fmt --check` | 4 s | sequential, streams live |
+| static gates (`deps-check`, `cfg-check`, `charter-cite`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
+| `proptest --once` | 3 s | one iteration, logged seed |
+| `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
+| `fuzz --once` | 10 s | one iteration per harness, logged seed |
 | `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
-| `docs-check`, and all 11 static gates | 22 s | static gates concurrent |
+| `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
+| `clippy` host + 11 target passes | 330 s | sequential |
+| `miri` (the UB oracle over the hand-written `unsafe` cores and the three paging ports) | 287 s | one process per crate, concurrent; the aarch64 port sets the makespan |
+| `test --qemu` (host matrix + 167 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
+| image gate | 193 s over 319 spawns | sequential |
+
+The order is that table, cheapest first, and it is maintained against
+*measured* cost rather than a guess about which gate usually trips. A cheap
+stage placed behind an expensive one makes every one of its failures pay the
+expensive stage first for nothing: `deny` at one second once sat behind the
+417-second test phase. Re-measure before reordering; that is what the
+`stage:` lines are for.
 
 The pipeline **cannot** be squeezed under ten minutes: the QEMU phase's
 theoretical floor alone is around five minutes, and the stages above it are
