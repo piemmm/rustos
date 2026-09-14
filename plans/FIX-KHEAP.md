@@ -185,14 +185,15 @@ so the remap handle can reach nothing else and its intermediate tables come
 from the allocator-backed page-table source rather than a fixed `.bss` pool.
 
 Placement is derived from each port's VA layout, not a byte constant: the
-top eighth of the `TTBR0_EL1` / Sv39 root table (64 GiB), and the highest
-free canonical PML4 slot on x86_64 (512 GiB). On aarch64 the reservation
-refuses a slot the discovered RAM or Device mask claims (fail closed) and
-`ensure_identity_gigapage` refuses to widen into one; on riscv64 the window
-is the top eighth and the direct physical map
-(`paging::PHYSMAP_SLOTS`) takes the upper half below it, both derived from
-the same figure, so no two of the window, the map, and the identity extent
-(`paging::IDENTITY_GIGAPAGES`, the canonical lower half) can overlap.
+top eighth of the Sv39 root table (64 GiB), the top eighth of aarch64's
+`TTBR1_EL1` regime, and the highest free canonical PML4 slot on x86_64
+(512 GiB). On aarch64 the window needs no refusal against a discovered
+mask at all — it lives in a regime no board resource is mapped into — and
+the direct physical map takes the slots below it; on riscv64 the window is
+the top eighth and the map (`paging::PHYSMAP_SLOTS`) takes the upper half
+below it, both derived from the same figure, so no two of the window, the
+map, and the identity extent (`paging::IDENTITY_GIGAPAGES`, the canonical
+lower half) can overlap.
 
 **The heap reaches the kernel core as a handover value.** `#[global_allocator]`
 can only be declared by the final binary, so every kernel bin hands its

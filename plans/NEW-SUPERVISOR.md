@@ -597,18 +597,23 @@ only if a (future, finite) sweep ever returned. Precise per-port design:
 - **aarch64 (done).** `kernel/arch/aarch64/src/takeover.rs` + `takeover.s`: every
   other core is already parked by the arch-neutral quiesce (the caller's
   `quiesce_others`; each core halts in `preempt::on_ipi_interrupt`), so the body
-  masks `DAIF` (all of debug/SError/IRQ/FIQ) and stops the watchdog cadence
-  (`CNTV_CTL_EL0 = 0`); switches `sp` to a reserved 64 KiB `.bss` stack
-  (`_takeover_switch_stack`); and runs the arch-neutral `sweep` over usable RAM
-  (never returns; otherwise parks on `wfi`). **The MMU stays on.** aarch64 does
+  installs the reserved boot kernel root (`paging::park_kernel_root`, refusing
+  `PrepareFailed` if none is published) and only then masks `DAIF` (all of
+  debug/SError/IRQ/FIQ) and stops the watchdog cadence (`CNTV_CTL_EL0 = 0`);
+  switches `sp` to a reserved 64 KiB `.bss` stack (`_takeover_switch_stack`);
+  and runs the arch-neutral `sweep` over usable RAM (never returns; otherwise
+  parks on `wfi`). The park root goes first because it is the one step that can
+  refuse, so a refusal leaves the machine exactly as it was and the caller keeps
+  its REPL. **The MMU stays on.** aarch64 does
   **not** flatten paging: with `SCTLR_EL1.M = 0` an EL1 data access is
   Device-nGnRnE, where an unaligned access faults unconditionally, so an MMU-off
   sweep (the framebuffer console, `memcpy`/`memset`, the sweep's own
   bookkeeping all issue unaligned accesses) takes an alignment fault with
   interrupts masked and wedges the board — the defect that locked a real
   Raspberry Pi 4 while QEMU/TCG, which ignores Device-memory alignment, passed.
-  The kernel's identity map is already `virtual == physical` and Normal
-  cacheable, so the sweep reaches every frame through it directly; the
+  The sweep reaches RAM through the direct physical map in the `TTBR1_EL1`
+  regime, whose root is a `.bss` static of the paging module on every core, so
+  no page-table frame the sweep destroys is on its own translation path; the
   arch-neutral engine still tests DRAM because it flushes each tested word to
   the point of coherency (`PhysMap::clean_invalidate`, backed by real
   `dc civac`) around the read-back. Needs **no** PSCI conduit — it never resets
@@ -1065,9 +1070,9 @@ through `machine_takeover_handle()` and wired into that port's
 `KernelArch::machine_takeover` behind the supervisor-only `TakeoverGrant`. Every
 other CPU is already parked by the arch-neutral `quiesce_others` before the body
 runs; the body then masks interrupts, stops the watchdog where wired, brings RAM
-into direct reach on a regime the sweep cannot destroy — riscv64 installs the
-reserved boot kernel root (`paging::park_kernel_root`), aarch64 keeps its MMU
-on under its identity map (an MMU-off EL1 would make every access
+into direct reach on a regime the sweep cannot destroy — riscv64 and aarch64
+install the reserved boot kernel root (`paging::park_kernel_root`; aarch64
+additionally keeps its MMU on, because an MMU-off EL1 would make every access
 Device-nGnRnE, see above), and x86_64 (which cannot drop long-mode paging)
 installs the reserved boot page tables (`%cr3 = boot_pml4` in `.boot.bss`) —
 switches onto a reserved

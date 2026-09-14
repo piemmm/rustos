@@ -113,8 +113,8 @@ fn dcache_line_bytes_decodes_dminline() {
 }
 
 #[test]
-fn identity_ram_mask_marks_every_overlapped_gigapage() {
-    let mask = identity_ram_mask(&[
+fn gigapage_mask_from_extents_marks_every_overlapped_gigapage() {
+    let mask = gigapage_mask_from_extents(&[
         // The Pi 4 kernel image: inside gigapage 0.
         (0x8_0000, 0x10_0000),
         // An extent straddling the gigapage 3 / 4 boundary marks both.
@@ -127,22 +127,23 @@ fn identity_ram_mask_marks_every_overlapped_gigapage() {
 }
 
 #[test]
-fn identity_ram_mask_clamps_at_the_identity_window() {
+fn gigapage_mask_from_extents_clamps_at_the_last_slot() {
     // The last representable gigapage is marked; the overhang is not.
-    let mask = identity_ram_mask(&[(511u64 << 30, 4 << 30)]);
+    let mask = gigapage_mask_from_extents(&[(511u64 << 30, 4 << 30)]);
     assert_eq!(mask[7], 1 << 63);
-    // An extent entirely beyond the window contributes nothing.
+    // An extent entirely beyond an L1 table's span contributes nothing.
     assert_eq!(
-        identity_ram_mask(&[(512u64 << 30, 1 << 30)]),
+        gigapage_mask_from_extents(&[(512u64 << 30, 1 << 30)]),
         [0u64; GIGAPAGE_MASK_WORDS]
     );
 }
 
 #[test]
 fn identity_gigapage_leaf_leaves_unbacked_slots_invalid() {
-    // Device wins over RAM; RAM maps Normal; neither maps nothing — the
-    // unbacked-space policy that keeps real-silicon speculation from
-    // wandering onto a bus window no device answers.
+    // Device wins over a kernel extent; a kernel extent maps Normal;
+    // neither maps nothing — the unbacked-space policy that keeps
+    // real-silicon speculation from wandering onto a bus window no device
+    // answers.
     assert_eq!(
         identity_gigapage_leaf(true, false),
         Some(device_leaf_attrs(true))
@@ -159,19 +160,15 @@ fn identity_gigapage_leaf_leaves_unbacked_slots_invalid() {
 }
 
 #[test]
-fn ensure_identity_gigapage_installs_an_invalid_slot() {
+fn an_identity_window_stops_at_the_span_it_was_built_for() {
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
-    // Gigapage 3 lies beyond the built span: invalid until ensured.
+    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    // The window is fixed at construction from the discovered facts: a
+    // gigapage beyond its span resolves to nothing, and nothing widens it
+    // later — RAM above it is reached through the direct physical map, not
+    // by growing a mapping into the half user code addresses.
     assert_eq!(space.translate(3 << 30), None);
-    assert!(space.ensure_identity_gigapage((3 << 30) | 0x1234));
-    let (pa, _) = space.translate((3 << 30) | 0x4_5000).expect("now mapped");
-    assert_eq!(pa, (3 << 30) | 0x4_5000);
-    // An already-valid slot is left untouched and reported installed.
-    assert!(space.ensure_identity_gigapage(3 << 30));
-    // A physical address beyond the identity window fails closed.
-    assert!(!space.ensure_identity_gigapage(512u64 << 30));
-    assert_eq!(space.translate(2 << 30), None);
+    assert_eq!(space.translate(511u64 << 30), None);
 }
 
 #[test]
@@ -312,11 +309,33 @@ fn map_4k_with_attrs_uses_the_supplied_leaf_attrs() {
 }
 
 #[test]
-fn tcr_value_encodes_a_39_bit_region() {
-    // T0SZ field (bits [5:0]) is 25 → 64 - 25 = 39-bit VA.
+fn tcr_value_encodes_two_39_bit_regimes() {
+    // T0SZ [5:0] and T1SZ [21:16] are both 25 → 64 - 25 = 39-bit VA, so
+    // user space keeps the whole low regime and the kernel gets its own.
     assert_eq!(TCR_VALUE & 0x3F, 25);
-    // TTBR1 walks disabled (EPD1, bit 23).
-    assert_ne!(TCR_VALUE & (1 << 23), 0);
+    assert_eq!((TCR_VALUE >> 16) & 0x3F, 25);
+    // TTBR1 walks *enabled*: EPD1 (bit 23) clear. A set EPD1 would make
+    // every kernel-regime address fault, taking the direct physical map
+    // and the remap window with it.
+    assert_eq!(TCR_VALUE & (1 << 23), 0);
+    // 4 KiB granule in both regimes — deliberately different encodings:
+    // TG0 [15:14] = 0b00, TG1 [31:30] = 0b10 (ARM ARM D13.2.120). Getting
+    // TG1 wrong would walk the kernel root at the wrong level.
+    assert_eq!((TCR_VALUE >> 14) & 0b11, 0b00);
+    assert_eq!((TCR_VALUE >> 30) & 0b11, 0b10);
+    // `TTBR0_EL1` defines the ASID (A1, bit 22, clear), so a user-space
+    // switch carries the address-space tag and the kernel regime does not.
+    assert_eq!(TCR_VALUE & (1 << 22), 0);
+    // Both regimes walk inner-shareable write-back cacheable, so the
+    // walker is coherent with a table store the kernel makes with caches
+    // on — which is what lets the kernel root be published without a
+    // point-of-coherency sweep.
+    assert_eq!((TCR_VALUE >> 8) & 0b11, 0b01);
+    assert_eq!((TCR_VALUE >> 10) & 0b11, 0b01);
+    assert_eq!((TCR_VALUE >> 12) & 0b11, 0b11);
+    assert_eq!((TCR_VALUE >> 24) & 0b11, 0b01);
+    assert_eq!((TCR_VALUE >> 26) & 0b11, 0b01);
+    assert_eq!((TCR_VALUE >> 28) & 0b11, 0b11);
 }
 
 #[test]
@@ -879,66 +898,105 @@ fn set_accessed_flag_in_root_only_touches_a_valid_cleared_leaf() {
 }
 
 #[test]
-fn the_kernel_remap_window_sits_at_the_top_of_the_addressable_range() {
-    // `TCR_VALUE` sets `T0SZ = 25`, so `TTBR0_EL1` covers a 39-bit range
-    // with bits 63:39 clear — the window's base is spelled directly, with
-    // no sign extension, and must lie wholly inside it.
-    const VA_TOP: u64 = 1 << 39;
+fn the_kernel_regime_holds_the_map_below_the_remap_window() {
+    // Both regimes are 39-bit, so the kernel's is the top `2^39` bytes and
+    // no user address can name any of it — the property that replaced the
+    // old slot-range refusal inside `TTBR0`.
+    const USER_VA_TOP: u64 = 1 << 39;
+    // Both sides are constants, so this holds at compile time or not at all.
+    const _: () = assert!(USER_VA_TOP <= KERNEL_VA_BASE);
+    assert_eq!(KERNEL_VA_BASE, !0u64 << 39);
+
+    // The map starts at the regime's base and runs up to the window.
+    assert_eq!(PHYSMAP_VMA_BASE, KERNEL_VA_BASE);
+    assert_eq!(PHYSMAP_SLOTS, KERNEL_WINDOW_FIRST_SLOT);
+    assert_eq!(MAX_PHYSMAP_GIB, PHYSMAP_SLOTS);
+
     let base = kernel_window_base();
     let window =
         KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
-
-    assert!(
-        base < VA_TOP,
-        "the window base is addressable through TTBR0"
-    );
+    assert!(base >= KERNEL_VA_BASE, "the window is in the kernel regime");
+    assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
+    assert_eq!(table_index(base, 1), KERNEL_WINDOW_FIRST_SLOT);
+    // One gigapage short of the very top, so the extent's exclusive end is
+    // representable and no consumer needs wrap arithmetic.
     assert_eq!(
         base + window.len_bytes(),
-        VA_TOP,
-        "the window runs to the top of the translation regime"
+        KERNEL_VA_BASE + ((ENTRIES_PER_TABLE as u64 - 1) << 30)
     );
-    assert_eq!(table_index(base, 1), KERNEL_WINDOW_FIRST_SLOT);
+    assert!(
+        base >= physmap_virt((MAX_PHYSMAP_GIB as u64) << 30),
+        "the window begins at or above the map's ceiling"
+    );
+}
+
+#[test]
+fn a_root_refuses_every_address_outside_its_own_regime() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    static POOL: PageTablePool = PageTablePool::new();
+
+    // The L1 index of a window address and of a user address 447 GiB up are
+    // the same nine bits, so without the regime check a kernel mapping
+    // walked through a process root would land at a *user* address.
+    let window_va = kernel_window_base();
+    let aliasing_user_va = (KERNEL_WINDOW_FIRST_SLOT as u64) << 30;
     assert_eq!(
-        KERNEL_WINDOW_FIRST_SLOT + KERNEL_WINDOW_SLOTS,
-        ENTRIES_PER_TABLE,
-        "the window's slots are the top of the L1 table"
+        table_index(window_va, 1),
+        table_index(aliasing_user_va, 1),
+        "the two addresses share an L1 slot, which is the hazard"
     );
-    assert_eq!(base % (1 << 30), 0, "the base is gigapage-aligned");
+
+    let mut user = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut user, window_va, 0x4123_4000, PageFlags::READ),
+        Err(MapError::InvalidFlags)
+    );
+    assert_eq!(mmu::AddressSpace::translate(&user, window_va), None);
+    assert_eq!(
+        mmu::AddressSpace::unmap(&mut user, window_va),
+        Err(MapError::NotMapped)
+    );
+    assert_eq!(
+        mmu::AddressSpace::test_and_clear_accessed(&mut user, window_va),
+        Err(MapError::NotMapped)
+    );
+    // The direct map's own addresses are refused the same way.
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut user, physmap_virt(0x1000), 0x1000, PageFlags::READ),
+        Err(MapError::InvalidFlags)
+    );
+
+    // And the window handle refuses everything outside the window: a user
+    // address, and the first address past the window's extent.
+    let mut kernel = AddressSpace::new_kernel_window(&POOL).expect("kernel window root");
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut kernel, aliasing_user_va, 0x4123_4000, PageFlags::READ),
+        Err(MapError::InvalidFlags)
+    );
+    let past = kernel_window_base() + (KERNEL_WINDOW_PAGES as u64) * PAGE_SIZE as u64;
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut kernel, past, 0x4123_4000, PageFlags::READ),
+        Err(MapError::InvalidFlags)
+    );
 }
 
 #[test]
-fn ensure_identity_gigapage_refuses_a_kernel_window_slot() {
+fn tearing_down_a_kernel_window_handle_frees_nothing() {
+    // Every table the handle can reach is the live regime's shared
+    // sub-hierarchy, so a teardown walk that treated them as its own would
+    // free the kernel heap's page tables. Plant a descriptor in a window
+    // slot by hand and prove the reclaim never names it.
     static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
-
-    // Widening RAM into the window would shadow the remapped kernel heap
-    // with an identity block, so both ends of the window are refused.
-    let base = kernel_window_base();
-    let last = base + ((KERNEL_WINDOW_SLOTS as u64 - 1) << 30);
-    assert!(!space.ensure_identity_gigapage(base));
-    assert!(!space.ensure_identity_gigapage(last));
-    // A gigapage below the window is still widened normally.
-    assert!(space.ensure_identity_gigapage(64 << 30));
-}
-
-#[test]
-fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
-    // The window's L1 descriptors point at tables *every* root shares, so a
-    // teardown walk that treats them as this hierarchy's own would free the
-    // live kernel heap's page tables. Plant a descriptor in the window slots
-    // by hand — the reservation itself needs a live root — and prove the
-    // walk never reaches it.
-    static POOL: PageTablePool = PageTablePool::new();
-    let mut space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("identity map");
+    let mut space = AddressSpace::new_kernel_window(&POOL).expect("kernel window root");
     let shared = POOL.alloc().expect("a stand-in shared window table");
     let shared_phys = shared.as_ptr() as u64;
 
     let root_table = POOL
         .table_at(space.root_phys())
         .expect("the pool's own root");
-    // SAFETY: `root_table` is this space's live L1 table from the
-    // process-static pool; writing its own window slot is what every root
-    // constructor does once a window is reserved.
+    // SAFETY: `root_table` is this handle's live L1 table from the
+    // process-static pool; writing its own window slot is what the
+    // reservation does into the kernel root.
     unsafe {
         (*root_table)[KERNEL_WINDOW_FIRST_SLOT] = table_descriptor(shared_phys);
     }
@@ -948,15 +1006,144 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     unsafe {
         MmuAddressSpace::reclaim_table_frames(&mut space);
     }
-    // The static pool never reuses a retired frame, so the shared table's
-    // survival is proven by the walk never having named it: the window slot
-    // is cleared before the descent.
     // SAFETY: as above — reading the root's own window slot.
     let slot = unsafe { (*root_table)[KERNEL_WINDOW_FIRST_SLOT] };
     assert_eq!(
-        slot, 0,
-        "the shared window descriptor was dropped, not walked"
+        slot,
+        table_descriptor(shared_phys),
+        "a window handle must retire without walking the shared hierarchy"
     );
+}
+
+/// The pre-discovery default is every gigapage, so a build that configures
+/// nothing still reaches whatever it addresses physically. The static and
+/// the named default are one definition, so they cannot drift.
+#[test]
+fn the_kernel_extent_mask_defaults_to_every_gigapage() {
+    assert_eq!(DEFAULT_KERNEL_GIGAPAGES, [u64::MAX; GIGAPAGE_MASK_WORDS]);
+    for gigapage in [0usize, 1, 63, 64, ENTRIES_PER_TABLE - 1] {
+        assert!(configured_gigapage_is_kernel(gigapage));
+    }
+    assert!(!configured_gigapage_is_kernel(ENTRIES_PER_TABLE));
+}
+
+#[test]
+fn the_tlbi_operand_carries_the_va_field_and_nothing_above_it() {
+    // A low address: `VA[63:56]` is zero, so the naive shift and the masked
+    // one agree — which is why the missing mask went unnoticed while the
+    // remap window lived in the low regime.
+    let low = 0x4123_4000u64;
+    assert_eq!(tlbi_page_operand(low), low >> 12);
+
+    // A kernel-regime address: the mask is what keeps `VA[63:56]` out of
+    // `TTL` (bits 47:44) and `ASID` (bits 63:48). Left in, `TTL` would read
+    // `0b1111` — a 64 KiB-granule level-3 hint that permits the
+    // implementation to leave this port's 4 KiB entry cached.
+    let window = kernel_window_base();
+    let operand = tlbi_page_operand(window);
+    assert_eq!(operand >> 44, 0, "TTL and ASID must be clear");
+    assert_eq!(operand, (window >> 12) & ((1u64 << 44) - 1));
+    assert_ne!(operand, window >> 12, "the mask must actually drop bits");
+    // And the field still names the right page: VA[55:12].
+    assert_eq!(operand, (window << 8) >> 20);
+
+    // Consecutive pages produce consecutive operands, so a range walk
+    // invalidates each page exactly once.
+    assert_eq!(
+        tlbi_page_operand(window + PAGE_SIZE as u64),
+        tlbi_page_operand(window) + 1
+    );
+}
+
+#[test]
+fn physmap_virt_offsets_by_the_map_base() {
+    assert_eq!(physmap_virt(0), PHYSMAP_VMA_BASE);
+    assert_eq!(physmap_virt(0x8123_4000), PHYSMAP_VMA_BASE + 0x8123_4000);
+    // A gigabyte in is one L1 slot along.
+    assert_eq!(
+        table_index(physmap_virt(1 << 30), 1),
+        PHYSMAP_FIRST_SLOT + 1
+    );
+}
+
+/// The one test that drives the set-once publication, because the map's
+/// state and the kernel root are process-global: a second caller is refused
+/// by design. Every other test here is insensitive to it — the map lives in
+/// a table no `AddressSpace` root is, so no other walk can reach it.
+///
+/// The gigapages it claims deliberately avoid GiB 0 (Device by default) and
+/// GiB 3 (which `configured_device_gigapages_select_the_leaf_attributes`
+/// transiently types Device), so the harness may run them in any order.
+#[test]
+fn the_direct_map_covers_exactly_the_ram_it_was_given() {
+    let mut covered = [0u64; GIGAPAGE_MASK_WORDS];
+    for gigapage in [1usize, 2, 5] {
+        covered[gigapage / 64] |= 1 << (gigapage % 64);
+    }
+    // Gigapage 0 is Device under the default mask, so asking for it changes
+    // nothing: a Normal-cacheable alias of MMIO would be mismatched memory
+    // attributes for one physical address.
+    covered[0] |= 1;
+
+    assert!(install_boot_physmap(&covered), "the first publication");
+    assert_eq!(physmap_gigapages(), 3, "the Device gigapage was dropped");
+    assert!(
+        !install_boot_physmap(&covered),
+        "the map is installed once per boot"
+    );
+
+    // Coverage is per gigapage, not an extent: the hole at GiB 3 and 4 is
+    // absent even though GiB 5 is present.
+    assert!(physmap_covers(1 << 30, PAGE_SIZE as u64));
+    assert!(physmap_covers(5 << 30, PAGE_SIZE as u64));
+    assert!(!physmap_covers(0, PAGE_SIZE as u64), "Device stays out");
+    assert!(!physmap_covers(3 << 30, PAGE_SIZE as u64));
+    assert!(!physmap_covers(4 << 30, PAGE_SIZE as u64));
+    // A run that straddles into an uncovered gigapage fails closed whole.
+    assert!(physmap_covers(
+        (3 << 30) - PAGE_SIZE as u64,
+        PAGE_SIZE as u64
+    ));
+    assert!(!physmap_covers(
+        (3 << 30) - PAGE_SIZE as u64,
+        2 * PAGE_SIZE as u64
+    ));
+    // Zero length reaches no byte, and the architectural ceiling refuses.
+    assert!(!physmap_covers(1 << 30, 0));
+    assert!(!physmap_covers(
+        (MAX_PHYSMAP_GIB as u64) << 30,
+        PAGE_SIZE as u64
+    ));
+
+    // The leaves are 1 GiB blocks, kernel-only, readable and writable, and
+    // never executable: nothing is fetched through the map.
+    // SAFETY: reading one entry of this module's own kernel root, which no
+    // other host test writes once the publication above has run.
+    let leaf = unsafe { (*kernel_root_table())[PHYSMAP_FIRST_SLOT + 1] };
+    assert!(is_block(leaf), "a root leaf is a gigapage block");
+    assert_eq!(phys_from_descriptor(leaf), 1 << 30);
+    assert_eq!(leaf & (0b11 << 6), attrs::AP_RW_EL1);
+    assert_eq!(leaf & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
+    assert_ne!(leaf & attrs::PXN, 0);
+    assert_ne!(leaf & attrs::UXN, 0);
+}
+
+/// The refusal runs before the set-once gate, so this holds whether or not
+/// the publication test has already run — the state is process-global and
+/// the harness fixes no order.
+#[test]
+fn the_direct_map_refuses_a_mask_it_cannot_represent() {
+    assert!(
+        !install_boot_physmap(&[0u64; GIGAPAGE_MASK_WORDS]),
+        "an empty mask covers nothing"
+    );
+    // Every bit at or above the architectural ceiling: RAM there is
+    // reported unreachable rather than claimed-but-absent.
+    let mut over = [0u64; GIGAPAGE_MASK_WORDS];
+    for gigapage in MAX_PHYSMAP_GIB..ENTRIES_PER_TABLE {
+        over[gigapage / 64] |= 1 << (gigapage % 64);
+    }
+    assert!(!install_boot_physmap(&over));
 }
 
 /// A parent descriptor whose output address the frame source never handed

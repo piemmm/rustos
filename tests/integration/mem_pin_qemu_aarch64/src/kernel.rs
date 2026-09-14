@@ -47,8 +47,8 @@ use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 #[cfg(migration_smp)]
 use tairix_arch_aarch64::kernel_arch::SecondaryStart;
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_ram_gigapages, AddressSpace as ArchAddressSpace,
-    PageTablePool, GIGAPAGE_MASK_WORDS,
+    configure_device_gigapages, configure_kernel_gigapages, install_boot_physmap,
+    AddressSpace as ArchAddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
@@ -194,6 +194,8 @@ const FAIL_IPC_CONTROL: NonZeroU16 = fail_point!(17);
 const FAIL_SECONDARY: NonZeroU16 = fail_point!(18);
 #[cfg(migration_smp)]
 const FAIL_NO_MIGRATION: NonZeroU16 = fail_point!(19);
+/// The direct physical map could not be installed over the board's RAM.
+const FAIL_PHYSMAP: NonZeroU16 = fail_point!(20);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -371,18 +373,25 @@ fn bring_up_board() -> u64 {
         qemu_exit::exit_failure(FAIL_GIC);
     }
 
-    // Configure the identity gigapage masks from the `virt` board facts
-    // (Device GiB 0 — the MMIO window — and RAM GiB 1), exactly as the
-    // production boot path derives them from discovery: the production
-    // spawn producer sizes every child's identity window from these masks,
-    // so driving it under the unconfigured defaults would request a window
-    // reaching the user bias and the spawn would fail closed.
+    // Configure the board's gigapage facts, exactly as the production boot
+    // path derives them from discovery: Device GiB 0 is the `virt` MMIO
+    // window, and GiB 1 holds both this kernel's image and its RAM. The
+    // production spawn producer sizes every child's identity window from
+    // these masks, so driving it under the unconfigured defaults would
+    // request a window reaching the user bias and the spawn would fail
+    // closed.
     let mut device_mask = [0u64; GIGAPAGE_MASK_WORDS];
     device_mask[0] = 0b01;
     configure_device_gigapages(device_mask);
     let mut ram_mask = [0u64; GIGAPAGE_MASK_WORDS];
     ram_mask[0] = 0b10;
-    configure_ram_gigapages(ram_mask);
+    configure_kernel_gigapages(ram_mask);
+    // The production spawn producer reaches a child's page tables through
+    // the direct physical map in the kernel translation regime, so the
+    // chassis stands it up over the same RAM before driving the producer.
+    if !install_boot_physmap(&ram_mask) {
+        qemu_exit::exit_failure(FAIL_PHYSMAP);
+    }
 
     // Enable the identity MMU + EL1 vectors before any atomic
     // read-modify-write runs: the frame allocator, the scheduler, and every

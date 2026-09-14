@@ -1285,6 +1285,39 @@ static TESTS: &[QemuTest] = &[
     // the 120-second silence budget matches the x86_64 sibling: boot plus the
     // self-test's sweep over that RAM, which prints progress throughout and
     // so keeps resetting the heartbeat.
+    // `plans/OPEN-DEFECTS.md` D56 aarch64 half: the same shape again, one
+    // regime up. The `virt` board puts RAM at `0x4000_0000`, so 3 GiB spans
+    // the two gigapages above the one holding the kernel image — enough that a
+    // process root carrying a full-RAM identity map, or a map sized from a
+    // build-time constant rather than the discovered tree, is visible as a
+    // failure. The vertical's build script dumps its `virt` tree for this same
+    // figure, because the boot path sizes the map from the tree's `/memory`
+    // window; the two must agree. The observer grades the same two records
+    // plus a structural probe of the live two-regime layout. Single CPU
+    // suffices (the install is a boot-CPU-only step) and the 120-second
+    // silence budget matches the siblings: boot plus the self-test's sweep
+    // over that RAM, which prints progress throughout and so keeps resetting
+    // the heartbeat.
+    QemuTest {
+        package: "tairix-test-physmap-qemu-aarch64",
+        binary: "tairix-test-physmap-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        ram_mib: Some(3072),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     QemuTest {
         package: "tairix-test-physmap-qemu-riscv64",
         binary: "tairix-test-physmap-qemu-riscv64",

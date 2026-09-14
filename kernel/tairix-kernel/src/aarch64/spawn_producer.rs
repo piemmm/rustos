@@ -35,7 +35,7 @@ use core::ptr::NonNull;
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
 use tairix_arch_aarch64::paging::{
-    activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
+    self, activate_user_root, configured_identity_gigapages, AddressSpace as ArchAddressSpace,
 };
 use tairix_arch_aarch64::userentry::USER_MODE;
 use tairix_kernel_core::{
@@ -43,8 +43,8 @@ use tairix_kernel_core::{
     ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
-    UserAddressSpace, UserStack, VirtAddr,
+    AddressSpace, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap, UserAddressSpace,
+    UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 use tairix_sync::Once;
@@ -66,38 +66,43 @@ pub const USER_IMAGE_BIAS: u64 = CHILD_USER_BIAS;
 /// [`LiveSpace`]'s window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
-/// Identity direct map the page-table frame source translates a freshly
-/// allocated frame's physical address through to a CPU-dereferenceable
-/// pointer (`plans/WIRING.md` W5b-3).
+/// The kernel's direct physical map: the `TTBR1_EL1`-regime window at
+/// [`paging::PHYSMAP_VMA_BASE`] the boot path sized from the discovered
+/// memory map, where a covered physical `p` is reachable at
+/// `PHYSMAP_VMA_BASE + p` (`plans/WIRING.md` W5b-3).
 ///
-/// It is the **identity** map (`offset == 0`) covering the same window
-/// each child space identity-maps, because the aarch64 page-table walk
-/// recovers an existing child table by dereferencing its physical address
-/// directly (`paging::ensure_child`: `phys as *mut`, identity), so the
-/// frame view the source hands the port must satisfy
-/// `virtual == physical`. The limit is re-derived from the configured
-/// Device/RAM gigapage masks on every translate
-/// ([`configured_identity_gigapages`]), so the bound is the *live*
-/// identity window — board-discovered, and tracking the post-MMU
-/// `/memory` widening — never a board constant a real machine outgrows
-/// (the former hard-coded 2 GiB `virt` window left
-/// the Pi 4's gigapage-3 MMIO out of every child map). A frame the
-/// allocator draws from outside the window fails the translate and the
-/// spawn fails closed rather than building tables the
-/// walk cannot reach.
-pub struct ConfiguredIdentityPhysMap;
+/// Every frame the kernel reaches by pointer goes through here — the
+/// page-table walk's own table recovery, the process-image write, the
+/// shared-region zero-on-free scrub, the slab page supply, the root-unlock
+/// DMA pool. It lies in the kernel translation regime, so no user address
+/// can name it and a process root pays no page and no slot for it.
+///
+/// Coverage is re-read from the live map on every translate
+/// ([`paging::physmap_covers`]) rather than held as an extent, so no caller
+/// can keep a stale one; and the map is deliberately sparse, because a
+/// gigapage the board types Device gets no Normal-cacheable alias. A frame
+/// the allocator draws from outside it fails the translate and the spawn
+/// fails closed rather than building tables the walk cannot reach.
+pub struct ConfiguredPhysMap;
 
-impl PhysMap for ConfiguredIdentityPhysMap {
+impl PhysMap for ConfiguredPhysMap {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<NonNull<u8>> {
-        DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).translate(phys, len)
+        let len_u64 = u64::try_from(len).ok()?;
+        if !paging::physmap_covers(phys.as_u64(), len_u64) {
+            return None;
+        }
+        let addr = usize::try_from(paging::physmap_virt(phys.as_u64())).ok()?;
+        NonNull::new(addr as *mut u8)
     }
 
     fn reverse(&self, virt: usize) -> Option<PhysAddr> {
-        // Identity map: recover the physical address of a direct-map virtual
-        // address (the growable kernel heap hands a drained region back to
-        // the frame allocator by its virtual base). Bound by the *live*
-        // identity window, exactly as `translate` is.
-        DirectPhysMap::identity((configured_identity_gigapages() as u64) << 30).reverse(virt)
+        // Recover the physical address of a direct-map virtual address (the
+        // growable kernel heap hands a drained region back to the frame
+        // allocator by its virtual base). Bound by the live map's coverage,
+        // exactly as `translate` is, so a window or identity address
+        // inverts to nothing rather than to a bogus frame.
+        let phys = (virt as u64).checked_sub(paging::PHYSMAP_VMA_BASE)?;
+        paging::physmap_covers(phys, 1).then(|| PhysAddr::new(phys))
     }
 
     fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
@@ -110,8 +115,8 @@ impl PhysMap for ConfiguredIdentityPhysMap {
     }
 
     fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
-        // The loader fills a program's code pages through this identity
-        // direct map (cacheable). The Cortex-A72's instruction cache is not
+        // The loader fills a program's code pages through this direct map
+        // (cacheable). The Cortex-A72's instruction cache is not
         // coherent with those data writes, so clean the written range to the
         // point of unification and invalidate the instruction cache before
         // the process fetches it — otherwise the PE executes stale bytes and
@@ -127,14 +132,14 @@ impl PhysMap for ConfiguredIdentityPhysMap {
     }
 }
 
-/// The single, `'static` [`ConfiguredIdentityPhysMap`] the page-table
-/// frame source borrows.
+/// The single, `'static` [`ConfiguredPhysMap`] the page-table frame source
+/// borrows.
 ///
 /// Also handed to the kernel core as the arch direct physical map the
 /// shared-memory facility scrubs region frames through (`plans/USB.md`): it
 /// covers the same RAM the allocator draws from, so any region frame is
 /// reachable for the zero-on-free scrub.
-pub static SPAWN_TABLE_PHYSMAP: ConfiguredIdentityPhysMap = ConfiguredIdentityPhysMap;
+pub static SPAWN_TABLE_PHYSMAP: ConfiguredPhysMap = ConfiguredPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's stage-1 hierarchy is built from.
@@ -175,9 +180,10 @@ pub(crate) fn page_table_source(
         .map_err(|_| Errno::NotImplemented)?;
     // The fault-time access-flag fix-up walks whichever root is active
     // with no `AddressSpace` in hand, so it needs a source that reaches
-    // any table in RAM. This one does — its direct map covers the whole
-    // window — and publishing it here, where it is created, means no
-    // consumer ordering can leave the fault path without one.
+    // any table in RAM. This one does — the direct map covers every
+    // gigapage the allocator draws from — and publishing it here, where it
+    // is created, means no consumer ordering can leave the fault path
+    // without one.
     tairix_arch_api::frames::publish_active_frames(source);
     Ok(source)
 }
@@ -209,21 +215,24 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
             .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
 
-        // Build a stage-1 address space identity-mapping the kernel + MMIO,
-        // and capture its root *without* switching to it: the loading child
-        // runs on its own kernel stack under the kernel's identity regime,
-        // so the running task is never moved out from under itself. The
-        // child's mappings below are written through the identity `physmap`.
-        // The child's own root is reactivated by its `pre_resume` hook
-        // before the scheduler first resumes it as a user task
-        // (`plans/SPAWN.md` SP2).
+        // Build a stage-1 address space identity-mapping the kernel's own
+        // extents + MMIO, and capture its root *without* switching to it:
+        // the loading child runs on its own kernel stack under the kernel's
+        // regime, so the running task is never moved out from under itself.
+        // The child's mappings below are written through the direct
+        // `physmap`. The child's own root is reactivated by its
+        // `pre_resume` hook before the scheduler first resumes it as a user
+        // task (`plans/SPAWN.md` SP2).
         //
-        // The window length is derived from the Device/RAM gigapage masks
-        // boot discovery installed (never a board constant): a window
-        // truncated short of the MMIO gigapage would drop the console and
-        // interrupt controller from the active map the moment the scheduler
-        // resumes the child. An empty window or one reaching the user region
-        // at `CHILD_USER_BIAS` fails closed.
+        // The window length is derived from the Device/kernel-extent
+        // gigapage masks boot discovery installed (never a board constant):
+        // a window truncated short of the MMIO gigapage would drop the
+        // console and interrupt controller from the active map the moment
+        // the scheduler resumes the child. It carries no mapping of
+        // allocator RAM — that is reached through the direct map in the
+        // kernel regime — so it does not grow with installed memory. An
+        // empty window or one reaching the user region at
+        // `CHILD_USER_BIAS` fails closed.
         let identity_gib = configured_identity_gigapages();
         if identity_gib == 0 || ((identity_gib as u64) << 30) > CHILD_USER_BIAS {
             return Err(refuse_build(ctx, "identity_window_invalid"));
@@ -238,16 +247,14 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // through its `sync_instruction_cache`. On the Cortex-A72 the I-cache
         // is not coherent with those cacheable data-side writes, so this must
         // be the physmap whose cache maintenance is *real*
-        // (`ConfiguredIdentityPhysMap`: clean-to-PoU + I-cache invalidate), not
+        // (`ConfiguredPhysMap`: clean-to-PoU + I-cache invalidate), not
         // a plain `DirectPhysMap` whose `sync_instruction_cache` /
         // `clean_invalidate` are no-ops for I/O-coherent targets — otherwise a
         // freshly-loaded driver fetches stale bytes and dies on a wild fault.
-        // Its identity translation is the same live window
-        // `DirectPhysMap::identity((identity_gib) << 30)` gave (both re-derive
-        // the configured gigapages), so only the maintenance changes. It also
-        // backs the stored `BuiltImage.physmap` below, whose `clean_invalidate`
-        // the shared-memory zero-on-free scrub relies on being real here too.
-        let physmap = ConfiguredIdentityPhysMap;
+        // It also backs the stored `BuiltImage.physmap` below, whose
+        // `clean_invalidate` the shared-memory zero-on-free scrub relies on
+        // being real here too.
+        let physmap = ConfiguredPhysMap;
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag. A mismatch fails closed.
@@ -285,8 +292,9 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // SAFETY: building the image is itself safe; the returned `UserEntry`
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
-        // contract). The frame source draws identity-mapped RAM frames from
-        // the kernel's live allocator; the retained live space below owns
+        // contract). The frame source draws RAM frames from
+        // the kernel's live allocator, reached through the direct map; the
+        // retained live space below owns
         // the whole footprint and returns it when the task exits. A
         // returning `Err` maps to a stable errno; the cause is already
         // audited by `spawn_image`.
@@ -318,9 +326,9 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // `Send`. aarch64 reuses `SP_EL1` and ignores the stack-top argument.
         let pre_resume: ProcessResume = Arc::new(move |_stack_top: u64, _tls_base: u64| {
             // SAFETY: the MMU is already enabled and `child_root_phys` is the
-            // L1 root of the child's space, which identity-maps the low
-            // kernel window the running kernel executes from — exactly
-            // `activate_user_root`'s contract.
+            // L1 root of the child's space, which identity-maps the
+            // kernel's own extents and the board MMIO the running kernel
+            // executes from — exactly `activate_user_root`'s contract.
             unsafe { activate_user_root(child_root_phys) };
         });
 
@@ -330,7 +338,7 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
         // mutate exactly the mappings the snapshot describes. No `'static`
         // allocator, or a window the allocator rejects, retains none and
         // those syscalls fail closed. The `PhysMap` must be
-        // [`ConfiguredIdentityPhysMap`] so the child's `dma_alloc` post-zero
+        // [`ConfiguredPhysMap`] so the child's `dma_alloc` post-zero
         // `clean_invalidate` is the real dcache clean+invalidate.
         let frozen: Box<dyn UserAddressSpace + Send + Sync> = Box::new(space.freeze());
         let live: Option<Arc<ProcessSpace>> = match ctx.page_table_allocator() {
@@ -342,7 +350,7 @@ impl ArchImageBuilder for Aarch64ProcessSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    ConfiguredIdentityPhysMap,
+                    ConfiguredPhysMap,
                     static_frames,
                     VirtAddr::new(WINDOWS.mmio),
                     spawn_layout::MMIO_WINDOW_PAGES,

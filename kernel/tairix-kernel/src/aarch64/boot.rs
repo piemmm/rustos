@@ -54,13 +54,13 @@ use core::sync::atomic::{AtomicU64, AtomicU8};
 use tairix_abi::HwNode;
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_ram_gigapages, identity_device_mask, identity_ram_mask,
-    ram_gigapages, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
+    configure_device_gigapages, configure_kernel_gigapages, gigapage_mask_from_extents,
+    identity_device_mask, install_boot_physmap, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
-    console, enable_fp_el1, exceptions, fdt, firmware, gic, halt_current_cpu, platform, serial,
-    smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
+    console, enable_fp_el1, exceptions, fdt, firmware, gic, halt_current_cpu, paging, platform,
+    serial, smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
 use tairix_arch_api::{PlatformDiscovery, SchedulerArch};
 use tairix_fdt::Fdt;
@@ -208,10 +208,10 @@ fn enable_mmu_and_vectors() -> Option<AddressSpace> {
     // cannot hit stale firmware-era lines on real silicon.
     BOOT_PAGE_TABLES.clean_invalidate_to_poc();
     // SAFETY: `new_identity_gigapages` identity-maps every gigapage in
-    // the configured Device and RAM masks — the caller installed both
-    // before this runs, and the RAM mask is built over the kernel
-    // image's own extent, the firmware DTB, and the scan-out surface
-    // (`identity_ram_mask`) — so the currently-executing `pc`, the boot
+    // the configured Device and kernel-extent masks — the caller installed
+    // both before this runs, and the kernel-extent mask is built over the
+    // kernel image's own extent, the firmware DTB, and the scan-out
+    // surface — so the currently-executing `pc`, the boot
     // stack, the firmware DTB, and the board MMIO window all keep their
     // physical addresses: enabling the MMU does not move the ground
     // under the running code, exactly as `AddressSpace::switch`'s
@@ -343,7 +343,7 @@ pub fn boot(
     // This is the boot's sharpest cliff: enabling translation against a
     // mis-typed identity map wedged the metal Pi 4B the instant the MMU
     // came on.
-    let mut boot_space = enable_mmu_and_vectors();
+    let boot_space = enable_mmu_and_vectors();
     let mmu_on = boot_space.is_some();
 
     // Route a fatal EL1 (kernel-mode) exception into the one fatal-report
@@ -391,15 +391,9 @@ pub fn boot(
     // P5) — full-tree walks that need the MMU on. A null, unreadable, or
     // incomplete tree leaves the `virt` defaults in place (fail closed).
     let discovered = configure_from_dtb(dtb);
-    // The installed-RAM total is taken from the *raw* discovered windows,
-    // before the Device clip below drops the bytes the identity map cannot
-    // use — the figure the ungated `boot_facts_get` syscall reports.
-    let installed_memory_bytes = discovered
-        .ram_windows
-        .iter()
-        .fold(0u64, |sum, &(_, size)| sum.saturating_add(size));
-    let ram_windows =
-        widen_ram_gigapages(&discovered.ram_windows, &device_mask, boot_space.as_mut());
+    let installed_memory_bytes = crate::mem_map::window_byte_total(&discovered.ram_windows);
+    let (ram_windows, direct_map) =
+        install_direct_physical_map(&discovered.ram_windows, &device_mask, log_sink);
 
     let (arch, cpu_mpidrs) = build_cpu_topology_and_arch(&discovered, dtb, mmu_on);
     let (arch, smp_start_method) = select_secondary_start(arch, &discovered, &cpu_mpidrs);
@@ -431,7 +425,7 @@ pub fn boot(
     };
     let mem_map_built = layout_result.is_ok();
 
-    let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on;
+    let ready = boot_cpu_ok && timer_present && mem_map_built && mmu_on && direct_map;
 
     log_boot_line(
         log_sink,
@@ -449,6 +443,7 @@ pub fn boot(
             device_gigapages: device_mask[0],
             ram_discovered: yes_no(!ram_windows.is_empty()),
             mem_map_built: yes_no(mem_map_built),
+            direct_map: yes_no(direct_map),
             mem_status,
             usable_bytes,
             reserved_bytes,
@@ -495,8 +490,9 @@ pub fn boot(
 }
 
 /// Point the console and the GICv2 driver at the bases the firmware tree
-/// describes, then install the identity map's Device and RAM gigapage
-/// typing derived from them; returns the discovery and the Device mask.
+/// describes, then install the identity window's Device and kernel-extent
+/// gigapage typing derived from them; returns the discovery and the Device
+/// mask.
 ///
 /// Runs entirely pre-MMU, and must: the discovered bases decide which
 /// gigapages the map types Device, and on the Pi 4 the PL011/GIC-400 live
@@ -537,7 +533,12 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
     );
     configure_device_gigapages(device_mask);
     let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
-    configure_ram_gigapages(identity_ram_mask(&[
+    // Exactly what the kernel addresses *physically* — its own image and
+    // boot heap, the firmware tree, the scan-out surface. Allocator RAM is
+    // deliberately absent: it is reached through the direct physical map in
+    // the kernel regime, so a process root carries no mapping of RAM in the
+    // half user code addresses.
+    configure_kernel_gigapages(gigapage_mask_from_extents(&[
         (
             kernel_start_addr(),
             kernel_end_addr().saturating_sub(kernel_start_addr()),
@@ -652,48 +653,48 @@ fn log_pcie_discovery(log_sink: &'static (dyn Sink + Sync), pcie: &platform::Pci
     );
 }
 
-/// Widen the RAM gigapage mask with the post-MMU-discovered `/memory`
-/// windows and install the widened typing into the live `boot_space`,
-/// returning the windows the allocator may use.
+/// Size the direct physical map from the post-MMU-discovered `/memory`
+/// windows, install it into the kernel translation regime, and return the
+/// windows the allocator may use.
 ///
-/// The windows are first clipped out of Device-typed gigapages: the
-/// identity map types memory at 1 GiB granularity and Device wins for a
-/// shared gigapage (the Pi 4's below-4 GiB window ends inside the gigapage
-/// holding its UART/GIC/PCIe), so RAM there would be mapped Device —
-/// atomics on it are unpredictable — and must never reach the mask or the
-/// allocator. Reclaiming those bytes needs 2 MiB-granular identity typing
-/// (`plans/APPS.md` I4 follow-up). Installing into the live space is an
-/// invalid→valid L1 update, so it needs no TLB shootdown, and it happens
-/// before the allocator touches the windows.
-fn widen_ram_gigapages(
+/// The windows are first clipped out of Device-typed gigapages: memory is
+/// typed at 1 GiB granularity and Device wins for a shared gigapage (the
+/// Pi 4's below-4 GiB window ends inside the gigapage holding its
+/// UART/GIC/PCIe), so RAM there would be mapped Device — atomics on it are
+/// unpredictable — and must never reach the map or the allocator.
+/// Reclaiming those bytes needs 2 MiB-granular typing (`plans/APPS.md` I4
+/// follow-up).
+///
+/// The map has to be live before anything reaches a *frame* by pointer:
+/// every later frame view — the RAM self-test, the page-table frame
+/// source, the slab page supply, the spawn image write, the root-unlock
+/// DMA pool — resolves through it. It costs no page tables (each covered
+/// gigabyte is one block descriptor) and no slot of any process root,
+/// because it lives in the kernel regime every CPU carries permanently.
+/// A zero-length window list, or a machine whose whole RAM lies in Device
+/// gigapages, installs nothing and is reported to the caller, which refuses
+/// the hand-off.
+///
+/// The boot record is written here rather than by the caller, so the one
+/// place that sizes the map is the one place that states how wide it ended
+/// up — a machine whose RAM outruns the architectural ceiling is visible in
+/// the transcript rather than found later as a fail-closed allocation.
+fn install_direct_physical_map(
     discovered_windows: &[(u64, u64)],
     device_mask: &[u64; GIGAPAGE_MASK_WORDS],
-    boot_space: Option<&mut AddressSpace>,
-) -> Vec<(u64, u64)> {
+    log_sink: &'static (dyn Sink + Sync),
+) -> (Vec<(u64, u64)>, bool) {
     let ram_windows = crate::mem_map::clip_windows_to_normal_ram(discovered_windows, device_mask);
     if ram_windows.is_empty() {
-        return ram_windows;
+        return (ram_windows, false);
     }
-    let window_mask = identity_ram_mask(&ram_windows);
-    let mut merged = ram_gigapages();
-    for (word, add) in merged.iter_mut().zip(window_mask) {
-        *word |= add;
+    if !install_boot_physmap(&gigapage_mask_from_extents(&ram_windows)) {
+        return (ram_windows, false);
     }
-    configure_ram_gigapages(merged);
-    if let Some(space) = boot_space {
-        for &(ram_base, ram_size) in &ram_windows {
-            let Some(last_byte) = (ram_size > 0).then(|| ram_base.saturating_add(ram_size - 1))
-            else {
-                continue;
-            };
-            let mut gigapage = ram_base >> 30;
-            while gigapage <= (last_byte >> 30) {
-                space.ensure_identity_gigapage(gigapage << 30);
-                gigapage += 1;
-            }
-        }
-    }
-    ram_windows
+    // Every covered gigabyte is one L1 block descriptor, so the map costs
+    // no page tables at all.
+    crate::mem_map::log_direct_map(log_sink, paging::physmap_gigapages(), true);
+    (ram_windows, true)
 }
 
 /// Build the [`Aarch64Arch`] handle — the single concrete-arch selection
@@ -831,6 +832,10 @@ struct BootStatus {
     timer_present: &'static str,
     /// Firmware handed over a device-tree pointer.
     dtb_present: &'static str,
+    /// The direct physical map was sized from the discovered RAM and
+    /// installed. Without it the kernel can reach no frame by pointer, so
+    /// the hand-off is refused.
+    direct_map: &'static str,
     /// A console UART was found in the tree.
     console_discovered: &'static str,
     /// A GICv2-class interrupt controller was found in the tree.
@@ -947,6 +952,7 @@ fn log_boot_line(log_sink: &'static (dyn Sink + Sync), status: &BootStatus) {
         ),
         ("smp_prepared", status.smp_prepared),
         ("mmu_enabled", status.mmu_enabled),
+        ("direct_map", status.direct_map),
         ("next_stage", "pi_p6c3_spawn_init_el0"),
         ("build_id", KERNEL_BUILD_ID),
     ];

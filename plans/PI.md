@@ -228,18 +228,21 @@ unit-test-pinned hand-off values in `tairix_arch_aarch64::el2`
 traps EL1's first `MAIR/TCR/TTBR/SCTLR` write into vector-less EL2,
 hanging the metal Pi 4B silently at the MMU switch while QEMU stayed
 green.
-The boot identity map is bounded to backed memory: gigapages are mapped
-only when named by the configured Device mask or the configured RAM mask
-(`paging::configure_ram_gigapages` / `identity_ram_mask`, default all —
-the historic map — for host tests and the QEMU integration kernels), and
+The boot identity window is bounded to backed memory: gigapages are mapped
+only when named by the configured Device mask or the configured
+kernel-extent mask (`paging::configure_kernel_gigapages` /
+`gigapage_mask_from_extents`, default all — for host tests and the QEMU
+integration kernels), and
 every other L1 slot is left *invalid* so speculation cannot reach
 unbacked bus windows (the metal Pi 4B wedged at the MMU switch exactly
-there while QEMU stayed green). The boot path derives the RAM mask
-pre-MMU from the kernel image extent, the firmware DTB blob, and the
-scan-out surface, then widens it with the post-MMU-discovered `/memory`
-window — re-installing the mask for later process spaces and extending
-the live boot space via `AddressSpace::ensure_identity_gigapage`
-(invalid→valid, store barrier only). The switch itself is
+there while QEMU stayed green). The boot path derives the kernel-extent
+mask once, pre-MMU, from the kernel image extent, the firmware DTB blob,
+and the scan-out surface — the things the kernel addresses *physically*.
+It is not widened over discovered RAM: an allocator frame is reached
+through the direct physical map in the `TTBR1_EL1` regime
+(`plans/OPEN-DEFECTS.md` D56), so a process root carries no mapping of RAM
+in the half user code addresses and the window does not grow with the
+machine. The switch itself is
 real-silicon-honest: the just-written tables are swept to PoC
 (`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
 `CTR_EL0`-decoded line — MMU-off stores bypass the cache but the walker
@@ -260,7 +263,7 @@ end to end **through user space**: the
 stage-p1 boot line, the kernel-core phase log, PID 1 `init`'s EL0 entry
 and banner, and the spawn/wait/exit supervision cycle all render on
 both UART0 and the HDMI console (every spawned space's identity window
-is derived from the configured Device/RAM gigapage masks,
+is derived from the configured Device/kernel-extent gigapage masks,
 `paging::configured_identity_gigapages` — P6c-3/P6d — since the former
 hard-coded 2 GiB `virt` window dropped the Pi's gigapage-3 UART/GIC
 from PID 1's root). The session formerly read end-of-input at its first

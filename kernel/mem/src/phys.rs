@@ -153,7 +153,7 @@ impl PhysMap for DirectPhysMap {
         // copy-out). A port whose DMA masters are not I/O-coherent (the
         // Pi 4's BCM2711 PCIe) must wire a `PhysMap` that wraps its cache
         // maintenance primitive instead — the aarch64
-        // `ConfiguredIdentityPhysMap` — anywhere DMA buffers are zeroed
+        // `ConfiguredPhysMap` — anywhere DMA buffers are zeroed
         // through the direct map.
     }
 
@@ -165,7 +165,7 @@ impl PhysMap for DirectPhysMap {
         // I-cache is not coherent with the loader's cacheable writes (the
         // Pi 4's Cortex-A72) wires a `PhysMap` that performs the real
         // clean-to-PoU + I-cache-invalidate instead — the aarch64
-        // `ConfiguredIdentityPhysMap`.
+        // `ConfiguredPhysMap`.
     }
 }
 

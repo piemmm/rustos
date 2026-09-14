@@ -119,11 +119,11 @@ allocator must not assume the `virt` `0x4000_0000` base. The boot path reads
 every `/memory` node — an 8 GiB Pi 4 declares windows below the MMIO hole,
 between 1 GiB and 4 GiB, and above 4 GiB; reading only the first
 under-reported it as ~1 GiB), clips the windows out of Device-typed
-gigapages (the identity map types memory at 1 GiB granularity and Device
+gigapages (memory is typed at 1 GiB granularity and Device
 wins for a shared gigapage, so RAM sharing the UART/GIC/PCIe gigapage would
 be mapped Device — those bytes are dropped fail-closed until 2 MiB-granular
-identity typing lands, `plans/APPS.md` I4), widens the RAM gigapage mask
-and the live identity map to cover them, and translates them (plus the
+identity typing lands, `plans/APPS.md` I4), sizes the direct physical map
+from them, and translates them (plus the
 linker `__kernel_end`) into the canonical multi-region `BootMemoryMap` the
 live allocator hand-off consumes — `[window base, __kernel_end)` reserved
 in the kernel's window, every other window wholly usable — and logs the
@@ -322,8 +322,8 @@ last tag shown.
 | `2/6: mmio discovered` | console/GIC/video/PCIe FDT walk done | the pre-MMU FDT discovery walk (`configure_mmio_from_dtb`) |
 | `2a/6: console/gic bases read` | `console::current` + `gic::current` returned | reading the discovered console/GIC bases |
 | `2b/6: device gigapage mask configured` | `identity_device_mask` built + `configure_device_gigapages` stored it | device-mask construction / the atomic mask store |
-| `2c/6: ram gigapage mask configured` | `identity_ram_mask` built + `configure_ram_gigapages` stored it | RAM-mask construction / the atomic mask store |
-| `3/6: identity map built, enabling mmu` | Device + RAM gigapage masks built | identity-map mask construction |
+| `2c/6: kernel gigapage mask configured` | `gigapage_mask_from_extents` built + `configure_kernel_gigapages` stored it | kernel-extent mask construction / the atomic mask store |
+| `3/6: identity map built, enabling mmu` | Device + kernel-extent gigapage masks built | identity-map mask construction |
 | `4/6: mmu on` (or `mmu enable FAILED`) | translation is live | **the MMU enable itself** — a mis-typed identity map (the metal Pi 4B hang) |
 | `4a/6: pcie discovery logged (post-mmu)` | the discovered `brcm,bcm2711-pcie` windows were logged | a metal diagnostic of the PCIe root-complex windows; the windows themselves reach the user-space `pcie_brcm` driver as grants on the discovered node, not a kernel stash |
 | `5/6: post-mmu …discovered` | post-MMU `/memory`/timer/PSCI walk done | the full-tree FDT walk that needs the MMU |
@@ -997,15 +997,18 @@ Each keeps its pure math host-testable and gates only the
 system-register/assembly/MMIO operations to the freestanding target.
 
 - **MMU / page tables** (`paging`). Stage-1, 4 KiB granule, three levels
-  (start at L1) covering a 39-bit VA region (`TCR_EL1.T0SZ = 25`) — the
-  aarch64 mirror of riscv64's Sv39. `AddressSpace::new_identity_gigapages`
-  identity-maps the low GiBs with 1 GiB L1 block descriptors under two
-  configured masks: the gigapages named by the Device mask
-  (`paging::configure_device_gigapages`) are Device for the board's
-  UART/GIC MMIO, the gigapages named by the RAM mask
-  (`paging::configure_ram_gigapages`) are privileged-executable Normal
-  for the kernel image and stack, and a gigapage in **neither** mask is
-  left *invalid* — on real silicon a Normal write-back executable
+  (start at L1), in **two** 39-bit regimes the architecture keeps disjoint:
+  `TCR_EL1.T0SZ = 25` gives `TTBR0_EL1` the low `[0, 2^39)` for user space,
+  and `TCR_EL1.T1SZ = 25` gives `TTBR1_EL1` the top `2^39` bytes
+  (`paging::KERNEL_VA_BASE`) to the kernel — the direct physical map and the
+  remap window, described under **The two translation regimes** below.
+  `AddressSpace::new_identity_gigapages` identity-maps the low GiBs with
+  1 GiB L1 block descriptors under two configured masks: the gigapages
+  named by the Device mask (`paging::configure_device_gigapages`) are Device
+  for the board's UART/GIC MMIO, the gigapages named by the kernel-extent
+  mask (`paging::configure_kernel_gigapages`) are privileged-executable
+  Normal for the kernel image and stack, and a gigapage in **neither** mask
+  is left *invalid* — on real silicon a Normal write-back executable
   mapping of unbacked address space invites the core's speculative
   fetches onto bus windows nothing answers, which wedged the metal
   Pi 4B the instant translation enabled while QEMU (which answers every
@@ -1014,27 +1017,28 @@ system-register/assembly/MMIO operations to the freestanding target.
   bases minus the kernel image's own gigapages
   (`paging::identity_device_mask`) — on the Pi 4 that types gigapage 3
   (the BCM2711 high-peripheral window) Device and keeps gigapage 0,
-  which holds the kernel at `0x8_0000`, Normal and executable. The RAM
-  mask defaults to *all* slots (host tests and the QEMU integration
-  kernels keep the historic everything-Normal map) and is derived at
-  boot in two phases (`paging::identity_ram_mask`): pre-MMU from the
-  facts in hand — the kernel image's extent, the firmware DTB blob, and
-  the firmware scan-out surface — then widened with the `/memory`
-  window once the post-MMU walk discovers it, both re-installing the
-  mask for later-built process spaces and installing the new gigapages
-  into the live boot space (`AddressSpace::ensure_identity_gigapage`,
-  an invalid→valid L1 update that needs only a store barrier, no TLB
-  invalidation). Every later identity window is *derived from those
-  masks*, never a board constant: PID 1's spawn space (`init_spawn`)
-  and each runtime-spawned child's (`spawn_producer`) size their
-  identity map, their physmap bound, and their stack-arena grow bound
-  with `paging::configured_identity_gigapages` (highest Device or RAM
-  gigapage + 1 — 2 GiB on `virt`, 4 GiB on the Pi 4). The former
-  hard-coded 2 GiB `virt` window left the Pi 4's gigapage-3 UART/GIC
-  out of PID 1's root, silencing the metal console the instant
-  `spawn_init` switched to it; an empty window or one reaching the
-  64 GiB user bias fails the spawn closed. `map_4k` adds finer
-  mappings. Before `switch` runs, the
+  which holds the kernel at `0x8_0000`, Normal and executable. The
+  kernel-extent mask defaults to *all* slots (a host test or a QEMU chassis
+  that discovers no board still reaches whatever it addresses physically)
+  and is derived once, pre-MMU, from the facts in hand
+  (`paging::gigapage_mask_from_extents`): the kernel image's extent, the
+  firmware DTB blob, and the firmware scan-out surface. It is deliberately
+  **not** widened over discovered RAM — an allocator frame is reached
+  through the direct physical map, so a root carries an identity leaf only
+  where something is addressed by its physical address. Every later identity
+  window is *derived from those masks*, never a board constant: PID 1's
+  spawn space (`init_spawn`) and each runtime-spawned child's
+  (`spawn_producer`) size their window with
+  `paging::configured_identity_gigapages` (highest Device or kernel-extent
+  gigapage + 1 — 2 GiB on `virt`). The former hard-coded 2 GiB `virt` window
+  left the Pi 4's gigapage-3 UART/GIC out of PID 1's root, silencing the
+  metal console the instant `spawn_init` switched to it; an empty window or
+  one reaching the 64 GiB user bias fails the spawn closed. Because the
+  window no longer tracks installed RAM, it does not grow with the machine.
+  `map_4k` adds finer mappings, and every mapping operation first checks the
+  address against its root's own regime (`Regime`), so a kernel-window
+  address can never be walked into a process root's identically-indexed
+  user slot. Before `switch` runs, the
   boot path sweeps the just-written tables to the point of coherency
   (`PageTablePool::clean_invalidate_to_poc`, `dc civac` per
   `CTR_EL0`-decoded line): the tables were written with the data cache
@@ -1058,8 +1062,8 @@ system-register/assembly/MMIO operations to the freestanding target.
   `SCTLR_EL1` write and trailing `isb`, and only that witness can issue
   the set-once atomic publication. No LDXR/STXR retry loop can therefore
   run in the MMU-off activation prefix. `switch`
-  programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`, orders the pre-MMU table
-  stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
+  programs `MAIR_EL1`/`TCR_EL1`/`TTBR0_EL1`/`TTBR1_EL1`, orders the pre-MMU
+  table stores with a full-system `dsb sy` (MMU-off stores are Device-nGnRnE,
   outside the inner-shareable domain an `ish` barrier covers), and
   installs the **whole**
   known `SCTLR_EL1` value (`paging::SCTLR_MMU_ON`: RES1 + translation +
@@ -1637,11 +1641,11 @@ same frames. The production `PhysMap` therefore **requires** a
 `clean_invalidate(phys, len)` implementation (there is deliberately no
 default — a silently inherited no-op is exactly how the regression below
 shipped); `DmaPool` calls it after zeroing on allocation and free, and the
-aarch64 `ConfiguredIdentityPhysMap` routes it to
+aarch64 `ConfiguredPhysMap` routes it to
 `clean_invalidate_dcache_range` (`dc civac` + `dsb`). Coherent ports and
 host tests carry explicit, documented no-ops (`DirectPhysMap`,
 `SimPhysMap`). The per-task `LiveSpace` behind the user-space `dma_alloc`
-syscall must be built over `ConfiguredIdentityPhysMap` too: when the
+syscall must be built over `ConfiguredPhysMap` too: when the
 user-space driver move first wired it over the no-op `DirectPhysMap`, the
 dirty zero lines from a fresh carve's direct-map zeroing were written back
 at an arbitrary later time over the NC-written xHCI rings — on the Pi 4 a
@@ -2611,7 +2615,7 @@ EL0-XN (`normal_leaf_attrs`), and a `DEVICE` page `device_leaf_attrs` —
 then walks the table (reusing `map_4k_with_attrs`, one walk, §2.2), failing
 closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/`InvalidFlags`).
 `root_phys` returns the L1 root and `activate` forwards to the gated
-`switch` (the `TTBR0_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
+`switch` (the `TTBR0_EL1`/`TTBR1_EL1`/`SCTLR_EL1.M` enable). Because the walk recovers
 each intermediate table from the frame source that drew it
 (`PageTableFrames::table_at`) rather than by dereferencing its physical
 address, the whole `map_page` path is host-runnable: `passes_mmu_conformance` drives
@@ -2619,6 +2623,77 @@ address, the whole `map_page` path is host-runnable: `passes_mmu_conformance` dr
 host test asserts the W^X leaf-attribute translation. The `activate`
 register write itself is proven by `memory_isolation_qemu_aarch64`, which
 now builds its victim/attacker spaces through this trait.
+
+### The two translation regimes
+
+`TCR_EL1` programs both halves of the EL1&0 stage-1 surface, each 39 bits:
+`TTBR0_EL1` translates `[0, 2^39)` and `TTBR1_EL1` the top `2^39` bytes
+from `paging::KERNEL_VA_BASE` (`0xFFFF_FF80_0000_0000`). User space keeps
+the whole of the low regime; the kernel owns the high one.
+
+**One global kernel root.** `TTBR1_EL1` points at `paging::KERNEL_L1` — a
+single `.bss` static of the paging module — on every CPU, for the image's
+lifetime, and `program_stage1_translation` is the only writer of the
+register. Three things follow. A process root pays no page and no slot for
+anything of the kernel's, so its whole content is the user regime's. A
+switch between user spaces (`activate_user_root`) reprograms `TTBR0_EL1`
+alone, which is also what makes a `TTBR0`-only unmap of the kernel (KPTI) a
+change to that one function rather than to the layout. And because the
+kernel root's tables live inside the kernel image rather than in
+allocator-backed frames, the Supervisor's destructive whole-RAM sweep keeps
+running under the translation it is testing.
+
+**What the high regime carries.** L1 slots `0..=446` are the direct physical
+map at `paging::PHYSMAP_VMA_BASE` (which *is* `KERNEL_VA_BASE`); slots
+`447..=510` are the kernel remap window (`kernel_window_base()`), which the
+growable kernel heap and the kthread stack tier are backed into. An L1 leaf
+is a 1 GiB block, so 447 slots give **447 GiB** of reach for no page tables
+at all, and the window stops one gigapage short of the top of the 64-bit
+space so its exclusive end is representable. RAM above
+`paging::MAX_PHYSMAP_GIB` is unreachable by pointer: the RAM self-test
+reports it as `unreachable_bytes` and every consumer of such a frame fails
+closed.
+
+**Every kernel path that reaches a frame by *pointer*** — the process-image
+write, the shared-region zero-on-free scrub, the kernel heap's slab page
+supply, the root-unlock DMA pool, a page-table walk's own table recovery,
+and the fatal report's `table_path` probe — resolves through the map,
+published as the one `spawn_producer::SPAWN_TABLE_PHYSMAP`
+(`ConfiguredPhysMap`). Coverage is re-read from the live map on every
+translate (`paging::physmap_covers`) rather than held as an extent, so no
+caller can keep a stale one.
+
+**The map is deliberately sparse.** It carries a leaf only for a gigapage
+the discovered, Device-clipped `/memory` windows actually name. Mapping a
+gigapage the board types Device as Normal-cacheable here, while the
+identity window maps it Device, would be *mismatched memory attributes for
+one physical address* — which permits a speculative read of a device
+register, and on this architecture the page tables are the only authority
+on memory type (there is no x86 MTRR to override them). The allocator never
+sees a frame in a Device gigapage either: `mem_map::clip_windows_to_normal_ram`
+drops those bytes from the usable map. So a hole in the map and a hole in
+the allocator's supply are the same hole, and `physmap_covers` fails closed
+on a range that straddles one.
+
+**Installing it.** `boot::install_direct_physical_map` clips the discovered
+windows, derives their gigapage mask, and calls
+`paging::install_boot_physmap`, which publishes the coverage and writes the
+leaves into the kernel root set-once. It needs no frame source and draws no
+table. The step sits immediately after the post-MMU `/memory` walk and
+before anything reaches a frame, and the boot CPU runs alone there, so the
+`dsb ishst`/`isb` publication is the whole of it; the walker reads
+inner-shareable cacheable in both regimes, so a secondary adopting the
+regime observes the boot CPU's stores through coherency with no
+point-of-coherency sweep. It fails closed: `direct_map=false` on the boot
+line and the hand-off to `kernel_main` is refused, because a kernel that
+cannot address its own RAM must not proceed.
+
+Proved end to end by `physmap_qemu_aarch64` (`plans/OPEN-DEFECTS.md` D56)
+on a 3 GiB guest: the boot record reports a map sized from the tree rather
+than a constant, the RAM self-test leaves `unreachable_bytes == 0`, and a
+structural probe reads a known frame back through the map, finds the map's
+address unreachable and unmappable under a process root, and finds a RAM
+frame above the kernel's own gigapage reachable *only* through the map.
 
 ### Kthread kernel stacks and their guard page
 

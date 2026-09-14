@@ -271,6 +271,20 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
     (usable, reserved)
 }
 
+/// Total bytes the *raw* discovered `/memory` windows describe — the
+/// installed-RAM figure, before any Device-gigapage clip drops the bytes the
+/// kernel cannot type Normal.
+///
+/// Deliberately separate from [`region_byte_totals`], which reports what the
+/// allocator actually receives: this is what the machine has, and it is what
+/// the ungated `boot_facts_get` syscall answers.
+#[cfg(any(all(freestanding, kernel_isa = "aarch64"), test))]
+pub(crate) fn window_byte_total(windows: &[(u64, u64)]) -> u64 {
+    windows
+        .iter()
+        .fold(0u64, |sum, &(_, size)| sum.saturating_add(size))
+}
+
 /// One gigabyte, the granularity a port's direct physical map is sized in.
 #[cfg(any(
     all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
@@ -375,8 +389,12 @@ pub(crate) fn carve_frames_from_map(
 ///
 /// `gigapages` says whether the part backs the map with 1 GiB leaves, which
 /// is what decides whether it cost intermediate page tables: on x86_64 it is
-/// a CPUID answer, on riscv64 a root-level Sv39 leaf always is one.
-#[cfg(all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")))]
+/// a CPUID answer, on riscv64 a root-level Sv39 leaf always is one, and on
+/// aarch64 an L1 block always is one.
+#[cfg(all(
+    freestanding,
+    any(kernel_isa = "x86_64", kernel_isa = "riscv64", kernel_isa = "aarch64")
+))]
 pub(crate) fn log_direct_map(sink: &(dyn tairix_log::Sink + Sync), gib: usize, gigapages: bool) {
     use tairix_log::{Event, Field, FieldValue, Level};
 
@@ -403,7 +421,8 @@ pub(crate) fn log_direct_map(sink: &(dyn tairix_log::Sink + Sync), gib: usize, g
 #[cfg(test)]
 mod tests {
     use super::{
-        build_memory_map, carve_frames_from_map, direct_map_gib, region_byte_totals, MemoryMapError,
+        build_memory_map, carve_frames_from_map, direct_map_gib, region_byte_totals,
+        window_byte_total, MemoryMapError,
     };
     use tairix_kernel_mem::{RegionKind, PAGE_SIZE};
 
@@ -411,6 +430,24 @@ mod tests {
     const VIRT_RAM_BASE: u64 = 0x4000_0000;
     /// 2 MiB block alignment, mirrored from the module.
     const TWO_MIB: u64 = 0x20_0000;
+
+    #[test]
+    fn window_byte_total_sums_every_window_and_saturates() {
+        // An 8 GiB Pi 4 declares three windows; the installed figure is all
+        // of them, not the first.
+        assert_eq!(
+            window_byte_total(&[
+                (0, 0x3C00_0000),
+                (0x4000_0000, 0xC000_0000),
+                (1 << 32, 1 << 32)
+            ]),
+            0x3C00_0000 + 0xC000_0000 + (1u64 << 32)
+        );
+        assert_eq!(window_byte_total(&[]), 0);
+        // A malformed tree claiming absurd extents saturates rather than
+        // wrapping to a small total the boot record would then report.
+        assert_eq!(window_byte_total(&[(0, u64::MAX), (0, u64::MAX)]), u64::MAX);
+    }
 
     #[test]
     fn unaligned_kernel_end_rounds_up_to_a_whole_frame() {

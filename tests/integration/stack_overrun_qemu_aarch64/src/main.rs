@@ -66,8 +66,7 @@ mod kernel {
     use tairix_arch_aarch64::irqmask::PortIrqControl;
     use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
     use tairix_arch_aarch64::paging::{
-        configure_ram_gigapages, identity_ram_mask, reserve_kernel_window, AddressSpace,
-        PageTablePool, PAGE_SIZE,
+        reserve_kernel_window, AddressSpace, PageTablePool, PAGE_SIZE,
     };
     use tairix_arch_aarch64::{
         exceptions, fault, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
@@ -98,11 +97,6 @@ mod kernel {
     /// kernel image, boot stack, heap, and the frame pool all live in the
     /// Normal RAM gigapage (GiB 1).
     const IDENTITY_GIB: usize = 2;
-
-    /// The `virt` board's RAM window, which the RAM gigapage mask is narrowed
-    /// to before the remap window is reserved.
-    const RAM_BASE: u64 = 0x4000_0000;
-    const RAM_BYTES: u64 = 1 << 30;
 
     /// Width of a kthread stack's guard region: one 4 KiB page, the slot the
     /// tier reserves and never maps immediately *below* the usable stack.
@@ -248,16 +242,10 @@ mod kernel {
         let tables: &'static FrameTableSource =
             Box::leak(Box::new(FrameTableSource::new(frames, physmap)));
 
-        // Narrow the RAM gigapage mask to the board's own window first: the
-        // pre-discovery default claims every gigapage, and the reservation
-        // refuses a slot RAM claims (fail closed), so an unconfigured mask
-        // leaves no window at all. This is what the boot path does with the
-        // facts in hand.
-        configure_ram_gigapages(identity_ram_mask(&[(RAM_BASE, RAM_BYTES)]));
-
-        // Reserve the window *before* the identity space is built, so the
-        // space installs its shared sub-hierarchy slots and every stack the
-        // tier hands out resolves under the root the kthread runs on.
+        // Reserve the window before the identity space is built. The window
+        // lives in the kernel translation regime, whose root every CPU
+        // carries permanently, so every stack the tier hands out resolves
+        // under whichever root the kthread runs on.
         let Some(window) = reserve_kernel_window(tables) else {
             fail("reserve kernel window");
         };

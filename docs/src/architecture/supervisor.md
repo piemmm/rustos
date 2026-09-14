@@ -231,8 +231,8 @@ not in use; it can never test the frames the kernel image, heap, page tables,
 stacks, drivers, or devices hold. Testing all **free** RAM still requires owning
 the whole machine — stopping every other CPU (so no peer allocates a frame the
 sweep decided was free), masking interrupts, and stopping the lockup watchdog,
-then sweeping physical RAM through the kernel's identity map — which is a
-one-way trip whose only exits are reset or power-off.
+then sweeping physical RAM through the kernel's direct physical map — which
+is a one-way trip whose only exits are reset or power-off.
 
 **Stopping the other CPUs is architecture-neutral** and lives once in
 `tairix_arch_api::quiesce` (a stop request + boot-published liveness/ack
@@ -245,7 +245,9 @@ That per-architecture tear-down lives behind an Arch HAL slice,
 `MachineTakeover` (`kernel/arch/api/src/takeover.rs`). It is a **single**
 operation, `take_over(&self, sweep: &mut dyn FnMut())`, entered only once this
 CPU is the sole one running; it owns the rest of the irreversible sequence and
-never returns on success: mask interrupts, stop the watchdog,
+never returns on success: bring RAM into direct reach on a translation the
+sweep cannot destroy (each port's reserved boot kernel root, whose tables
+live inside the kernel image), mask interrupts, stop the watchdog,
 **switch onto a reserved stack the sweep cannot overwrite**, and run the
 caller's `sweep` (the arch-neutral test of every **free** frame — every pattern
 over all free RAM, looping forever until the operator resets the board). Before

@@ -145,25 +145,31 @@ pub fn emit_target_cfg() {
     }
 }
 
+/// Guest RAM the dumped tree describes when a caller does not say, in
+/// mebibytes — `tools/qemu`'s own aarch64 default, so the tree's `/memory`
+/// window and the RAM the runner actually gives the guest agree by
+/// construction. A vertical that overrides one must override both.
+pub const DEFAULT_DTB_RAM_MIB: u32 = tairix_qemu::aarch64::DEFAULT_RAM_MIB;
+
 /// Build the `qemu-system-aarch64` argument vector that dumps the
 /// canonical `virt`-board flattened device tree to `dtb_path` for `cpus`
-/// CPUs.
+/// CPUs and `ram_mib` mebibytes of guest RAM.
 ///
 /// Split out from [`dump_aarch64_virt_dtb`] so the argument shape is
 /// unit-testable without invoking QEMU. The machine matches `tools/qemu`'s
-/// aarch64 `virt` definition (`cortex-a72`, 256 MiB); the DTB layout the
-/// verticals read from the blob (virtio-MMIO transport bases, GICv2 SPIs,
-/// the `/psci` conduit) is the stable `virt`-board layout, independent of
-/// the CPU count.
+/// aarch64 `virt` definition (`cortex-a72`); the DTB layout the verticals
+/// read from the blob (virtio-MMIO transport bases, GICv2 SPIs, the
+/// `/psci` conduit) is the stable `virt`-board layout, independent of the
+/// CPU count and the memory size.
 #[must_use]
-pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32) -> Vec<String> {
+pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32, ram_mib: u32) -> Vec<String> {
     vec![
         "-M".to_string(),
         format!("virt,dumpdtb={dtb_path}"),
         "-cpu".to_string(),
         "cortex-a72".to_string(),
         "-m".to_string(),
-        "256M".to_string(),
+        format!("{ram_mib}M"),
         "-smp".to_string(),
         cpus.to_string(),
         "-display".to_string(),
@@ -195,10 +201,26 @@ pub fn dump_virt_dtb_args(dtb_path: &str, cpus: u32) -> Vec<String> {
 /// the blob, so failing loudly is correct.
 #[must_use]
 pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
+    dump_aarch64_virt_dtb_with_ram(out_dir, cpus, DEFAULT_DTB_RAM_MIB)
+}
+
+/// [`dump_aarch64_virt_dtb`] for a guest whose RAM the vertical overrides.
+///
+/// The boot path sizes the direct physical map from the tree's `/memory`
+/// window, so a vertical that runs with more RAM than the default must dump
+/// a tree that says so — otherwise the kernel maps the default and the
+/// extra RAM is simply invisible, which is not the thing under test.
+/// `ram_mib` must match the `ram_mib` its QEMU enrolment declares.
+#[must_use]
+pub fn dump_aarch64_virt_dtb_with_ram(
+    out_dir: &std::ffi::OsStr,
+    cpus: u32,
+    ram_mib: u32,
+) -> Vec<u8> {
     let dtb_path = std::path::PathBuf::from(out_dir).join("virt.dtb");
     let dtb_str = dtb_path.display().to_string();
     let status = std::process::Command::new("qemu-system-aarch64")
-        .args(dump_virt_dtb_args(&dtb_str, cpus))
+        .args(dump_virt_dtb_args(&dtb_str, cpus, ram_mib))
         .status()
         .expect("run qemu-system-aarch64 to dump the virt DTB");
     assert!(status.success(), "qemu dumpdtb failed: {status}");
@@ -304,7 +326,7 @@ mod tests {
 
     #[test]
     fn dump_virt_dtb_args_match_the_runner_machine() {
-        let args = dump_virt_dtb_args("/tmp/out/virt.dtb", 2);
+        let args = dump_virt_dtb_args("/tmp/out/virt.dtb", 2, DEFAULT_DTB_RAM_MIB);
         assert_eq!(
             args,
             [
@@ -325,11 +347,24 @@ mod tests {
 
     #[test]
     fn dump_virt_dtb_args_render_the_cpu_count() {
-        let one = dump_virt_dtb_args("d", 1);
-        let four = dump_virt_dtb_args("d", 4);
+        let one = dump_virt_dtb_args("d", 1, DEFAULT_DTB_RAM_MIB);
+        let four = dump_virt_dtb_args("d", 4, DEFAULT_DTB_RAM_MIB);
         let smp = |a: &[String]| a[a.iter().position(|s| s == "-smp").unwrap() + 1].clone();
         assert_eq!(smp(&one), "1");
         assert_eq!(smp(&four), "4");
+    }
+
+    /// The direct-map vertical runs with more RAM than the default, so the
+    /// tree it embeds has to describe that RAM or the kernel maps the
+    /// default and the extra memory is invisible.
+    #[test]
+    fn dump_virt_dtb_args_render_the_declared_memory() {
+        let args = dump_virt_dtb_args("d", 1, 3072);
+        let mem = args[args.iter().position(|a| a == "-m").unwrap() + 1].clone();
+        assert_eq!(mem, "3072M");
+        // The default tracks the runner's own figure, so the two cannot
+        // drift into a tree that describes RAM the guest does not have.
+        assert_eq!(DEFAULT_DTB_RAM_MIB, tairix_qemu::aarch64::DEFAULT_RAM_MIB);
     }
 
     #[test]

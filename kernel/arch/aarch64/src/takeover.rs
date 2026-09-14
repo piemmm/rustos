@@ -25,10 +25,18 @@
 //! [`Aarch64MachineTakeover::take_over`] performs, in order and without ever
 //! returning on success (every other CPU already quiesced):
 //!
-//! 1. **Mask interrupts** (`DAIFSet` — all of debug/SError/IRQ/FIQ) so
+//! 1. **Install the reserved boot kernel root** (the permanent root the
+//!    dispatcher parks every core on). It is the only `TTBR0_EL1` root whose
+//!    tables live wholly in the kernel image's `.bss` rather than in
+//!    allocator-backed frames, so the sweep cannot destroy the translation
+//!    it is running under; with no root published this refuses
+//!    [`TakeoverError::PrepareFailed`] before anything is torn down. The
+//!    kernel regime needs no equivalent step: `TTBR1_EL1` points at a
+//!    static of the paging module on every core, for the image's lifetime.
+//! 2. **Mask interrupts** (`DAIFSet` — all of debug/SError/IRQ/FIQ) so
 //!    nothing preempts the solitary core, and **stop the lockup watchdog**
 //!    by disabling its `CNTV` virtual-timer cadence (`CNTV_CTL_EL0 = 0`).
-//! 2. **Switch onto a reserved stack** the sweep will not overwrite and run
+//! 3. **Switch onto a reserved stack** the sweep will not overwrite and run
 //!    the caller's `sweep` (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console). The Supervisor's
 //!    `memtest` sweep tests all of RAM continuously and never returns; the
@@ -38,11 +46,14 @@
 //!
 //! # Why the MMU stays on
 //!
-//! The takeover deliberately does **not** disable the stage-1 MMU. The kernel
-//! runs under an *identity* map (`virtual == physical` over the discovered
-//! RAM gigapages), and the sweep reaches every physical frame through that
-//! same identity map (`KernelArch::direct_phys_map`), so no flattening is
-//! needed to address RAM directly. Disabling the MMU would be actively wrong
+//! The takeover deliberately does **not** disable the stage-1 MMU. The sweep
+//! reaches every physical frame through the direct physical map
+//! (`KernelArch::direct_phys_map`), which lives in the `TTBR1_EL1` regime, so
+//! flattening paging would resolve the addresses it writes to nowhere. What
+//! the sweep actually requires is not that paging be off but that it never
+//! depend on a page-table frame in the usable RAM it is about to destroy,
+//! which the reserved boot root plus a `.bss`-resident kernel root satisfy
+//! directly. Disabling the MMU would additionally be actively wrong
 //! on real ARMv8-A silicon: with `SCTLR_EL1.M == 0` every data access is
 //! **Device-nGnRnE**, where an unaligned access faults unconditionally — the
 //! framebuffer console, `memcpy`/`memset`, and the sweep's own bookkeeping
@@ -50,7 +61,7 @@
 //! with interrupts masked and wedges the board. (A permissive emulator that
 //! ignores Device-memory alignment rules hides this, which is exactly how the
 //! MMU-off form passed under QEMU while locking a Raspberry Pi 4.) Keeping the
-//! MMU on leaves the identity mappings Normal cacheable and alignment-safe;
+//! MMU on leaves the mappings Normal cacheable and alignment-safe;
 //! the arch-neutral engine still tests genuine DRAM cells because it flushes
 //! each tested word to the point of coherency between the write and the
 //! read-back through [`PhysMap::clean_invalidate`](tairix_kernel_mem::PhysMap),
@@ -65,6 +76,9 @@
 //! (the operator power-cycles or resets the board), so it is available on
 //! every aarch64 board regardless of whether the firmware tree declared a
 //! `/psci` node.
+//!
+//! The quiesce refusal is the caller's and is fail-closed there; the only
+//! refusal this body owns is an unpublished boot root, above.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
@@ -133,7 +147,18 @@ impl MachineTakeover for Aarch64MachineTakeover {
         // handshake before this is ever reached), so this core is the only one
         // running. This body owns only the single-CPU tear-down that follows.
 
-        // 1. Mask every interrupt (DAIF: debug, SError, IRQ, FIQ) so nothing
+        // 1. Install the reserved boot kernel root, so the translation the
+        //    sweep runs under is one whose tables the sweep cannot destroy.
+        //    Done first, and before any interrupt masking, because it is the
+        //    one step that may refuse: it is the routine park every task
+        //    suspend performs, so a refusal leaves the machine exactly as it
+        //    was and the caller keeps its REPL.
+        if !crate::paging::park_kernel_root() {
+            // The mechanism reports only failure, so the audit payload is 0.
+            return TakeoverError::PrepareFailed(0);
+        }
+
+        // 2. Mask every interrupt (DAIF: debug, SError, IRQ, FIQ) so nothing
         //    preempts the solitary core, and stop the lockup watchdog by
         //    disabling its virtual-timer cadence — masking `DAIF.F` already
         //    prevents its (Group-0/FIQ) sample from being taken, and
@@ -149,15 +174,15 @@ impl MachineTakeover for Aarch64MachineTakeover {
             );
         }
 
-        // The MMU stays on: the kernel's identity map already resolves every
-        // physical frame `virtual == physical` and is Normal cacheable and
-        // alignment-safe, whereas an MMU-off EL1 would make every access
-        // Device-nGnRnE and fault the sweep's unaligned accesses (see the
-        // module docs). The arch-neutral engine still tests real DRAM: it
-        // flushes each tested word to the point of coherency around the
-        // read-back through the direct map's `dc civac` maintenance.
+        // The MMU stays on: the direct physical map resolves every frame the
+        // sweep writes and is Normal cacheable and alignment-safe, whereas
+        // an MMU-off EL1 would make every access Device-nGnRnE and fault the
+        // sweep's unaligned accesses (see the module docs). The arch-neutral
+        // engine still tests real DRAM: it flushes each tested word to the
+        // point of coherency around the read-back through the direct map's
+        // `dc civac` maintenance.
 
-        // 2. Switch onto the reserved stack and run the sweep, which never
+        // 3. Switch onto the reserved stack and run the sweep, which never
         //    returns. The sweep handle is reached through a thin pointer to
         //    the caller's `&mut dyn FnMut()`, which lives on the caller's
         //    stack and is read once at entry (before the sweep destroys
@@ -179,8 +204,8 @@ impl MachineTakeover for Aarch64MachineTakeover {
 ///
 /// # Safety
 ///
-/// Reached only from [`Aarch64MachineTakeover::take_over`] after interrupts
-/// are masked (the MMU stays on under the identity map). `thin` is a live
+/// Reached only from [`Aarch64MachineTakeover::take_over`] after the reserved
+/// boot root is installed and interrupts are masked. `thin` is a live
 /// pointer to the caller's `&mut dyn FnMut()` sweep handle, whose environment
 /// resides in reserved memory the sweep does not destroy.
 #[no_mangle]

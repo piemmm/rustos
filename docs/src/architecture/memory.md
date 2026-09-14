@@ -84,9 +84,9 @@ handed out; usable regions are rounded *inward* to whole-frame
 boundaries.
 
 **The zero page is never enrolled**, even when firmware reports it
-usable (the PC low-BIOS region starts at physical 0): under an *identity*
-direct map — what the identity-linked `aarch64` and `riscv64` ports carry
-— its translation is the null pointer, which no `NonNull`-based consumer
+usable (the PC low-BIOS region starts at physical 0): under a direct map
+based at physical zero its translation is the map's own base, and under an
+*identity* window it is the null pointer, which no `NonNull`-based consumer
 ([`FrameTableSource`], the DMA pool, an MMIO window) can represent. The
 reservation is unconditional rather than per-port, because a frame the
 allocator must never hand out is cheaper to exclude once than to reason
@@ -540,9 +540,9 @@ composing the layers above:
   map (`PhysMap`): `bytes` / `bytes_mut` / `slot_base` translate the buffer's
   `phys` into a pointer. The CPU therefore sees exactly the frames the device
   DMAs to — there is no disconnected copy. Production wires the port's own
-  direct map (`x86_64` and `riscv64`: a window above the user region at
-  `PHYSMAP_VMA_BASE`, sized from the discovered RAM; `aarch64`: an identity
-  window over low physical memory); host
+  direct map — a window at `PHYSMAP_VMA_BASE` outside the port's user
+  region, sized from the discovered RAM, on all three (`aarch64`'s lies in
+  its `TTBR1_EL1` regime); host
   tests wire a `SimPhysMap` standing in for physical RAM.
 - **Zero-on-free** — every byte of the data region is wiped with
   [`zeroize`](https://crates.io/crates/zeroize) before the frames return to
@@ -2435,13 +2435,13 @@ into one run of a kernel **remap window**.
 - **The window is shared by every root.** Kernel code runs with the current
   task's translation root active, so a kernel address must resolve
   identically under all of them. Each port therefore points the covering
-  top-level entry of every root it builds at one shared sub-hierarchy
-  (`reserve_kernel_window`, installed by every root constructor and patched
-  into the live boot root), and installs leaves through a root that maps
-  *only* the window. A leaf added once is visible everywhere; the handle
-  can reach nothing outside the window. Placement comes from each port's VA
-  layout — the top eighth of the `TTBR0_EL1` / Sv39 range, the highest free
-  canonical PML4 slot on x86_64 — and costs no RAM until something is
+  top-level entry at one shared sub-hierarchy (`reserve_kernel_window`), and
+  installs leaves through a root that maps *only* the window. A leaf added
+  once is visible everywhere; the handle can reach nothing outside the
+  window. Placement comes from each port's VA layout — the top eighth of
+  Sv39's range, the highest free canonical PML4 slot on x86_64, and the top
+  of `aarch64`'s `TTBR1_EL1` regime, where one global kernel root carries it
+  and no process root needs a copy — and costs no RAM until something is
   backed into it.
 - **Leaves are `RW`, never executable** (`AGENTS.md` §19.2), kernel-only,
   and their intermediate tables come from the allocator-backed page-table

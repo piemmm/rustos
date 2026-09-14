@@ -1853,6 +1853,7 @@ dependencies = [
  "tairix-abi",
  "tairix-crypto",
  "tairix-fdt",
+ "tairix-qemu",
 ]
 
 [[package]]
@@ -4252,6 +4253,19 @@ dependencies = [
  "tairix-net",
  "tairix-netconfig",
  "tairix-sysconfig",
+]
+
+[[package]]
+name = "tairix-test-physmap-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
 ]
 
 [[package]]

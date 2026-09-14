@@ -106,14 +106,14 @@ startup-block pages — never fetched as code — pay nothing.
 
 For this to hold, the spawn path must hand the builder the `PhysMap`
 whose cache maintenance is *real* for the target. On the Pi 4 that is the
-aarch64 `ConfiguredIdentityPhysMap`, not the arch-neutral `DirectPhysMap`
+aarch64 `ConfiguredPhysMap`, not the arch-neutral `DirectPhysMap`
 (whose `sync_instruction_cache` is the documented I/O-coherent no-op): a
 loader threaded the no-op map would fill and "sync" the code page while
 its bytes stayed unseen by instruction fetch, and a freshly-loaded driver
 would execute stale bytes and take a wild fault. Both aarch64 spawn
 producers (PID 1 and the runtime `spawn`) therefore load through
-`ConfiguredIdentityPhysMap`; the identity translation is identical, only
-the maintenance differs.
+`ConfiguredPhysMap`; both reach the frame through the same direct map,
+only the maintenance differs.
 
 ## Building a runnable process image
 

@@ -35,6 +35,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = [
     "zeroize",
 ], optional = true }
+# The QEMU runner's own per-arch defaults, so the `virt` tree a build script
+# dumps describes the same machine the runner starts (one definition of the
+# default guest RAM, not a copy in each).
+tairix-qemu = { path = "../../../tools/qemu", version = "=0.0.0" }
 # The audited `lib/crypto` SHA-256 the canonical bundle content hash is
 # computed with (`app-image` only), so the composer and every store-side
 # verifier hash through the same wrapped primitive.

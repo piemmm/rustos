@@ -37,10 +37,10 @@ finer per-command lines inside them. A measured warm run:
 | `fuzz --once` | 10 s | one iteration per harness, logged seed |
 | `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
-| `clippy` host + 11 target passes | 330 s | sequential |
+| `image` gate | 193 s over 319 spawns | sequential |
 | `miri` (the UB oracle over the hand-written `unsafe` cores and the three paging ports) | 287 s | one process per crate, concurrent; the aarch64 port sets the makespan |
-| `test --qemu` (host matrix + 167 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
-| image gate | 193 s over 319 spawns | sequential |
+| `clippy` host + 11 target passes | 330 s | sequential |
+| `test --qemu` (host matrix + 168 guests + 3 fixture cross-compiles) | 417 s | guests concurrent, `nproc/3` weighted budget |
 
 The order is that table, cheapest first, and it is maintained against
 *measured* cost rather than a guess about which gate usually trips. A cheap
@@ -48,6 +48,12 @@ stage placed behind an expensive one makes every one of its failures pay the
 expensive stage first for nothing: `deny` at one second once sat behind the
 417-second test phase. Re-measure before reordering; that is what the
 `stage:` lines are for.
+
+The `image` gate's position is the one that looks like an exception and is
+not. It reads like terminal assembly — the thing you do once what it packages
+holds — but the gate only proves the image *builds*; it ships nothing, so
+there is no untested-artefact risk to weigh against making every
+image-breaking change pay 28 minutes of QEMU first.
 
 The pipeline **cannot** be squeezed under ten minutes: the QEMU phase's
 theoretical floor alone is around five minutes, and the stages above it are
@@ -67,8 +73,8 @@ the process is tracked to exit and its status is recorded:
 Then read `CI-RC=` from the log. That value is written only after the process
 exits, so it is the real status — a wrapper's or a shell's exit code may be the
 `echo`'s, and partial log output is not evidence of anything. Confirm the run
-reached the end (the stage list finishes at `[image]`, and the enrolled and
-completed QEMU counts match) rather than judging by elapsed time.
+reached the end (the stage list finishes at `[test --qemu]`, and the enrolled
+and completed QEMU counts match) rather than judging by elapsed time.
 
 This is the case [§7][test] names in "watch the gate to completion and report
 only its real exit status". It is not licence to start the gate and move on:

@@ -56,7 +56,7 @@ rediscovering this.
 
 Read `CI-RC=` back from the log; it is written only after the process exits, so
 it is the real status, where the harness's own exit code is the `echo`'s. Check
-the run reached the end — stage list finishing at `[image]`, enrolled and
+the run reached the end — stage list finishing at `[test --qemu]`, enrolled and
 completed QEMU counts matching — rather than judging by elapsed time. Every
 stage prints `done in <elapsed>`, so one grep profiles a run.
 

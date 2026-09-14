@@ -1187,30 +1187,32 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
     // and a broken intra-doc link or a denied rustdoc warning is cheap to
     // surface.
     stage("docs-check", || run_docs_check(ctx, &[]))?;
-    stage("clippy", || run_clippy(ctx, &[]))?;
+    // Every shippable image profile is built on every PR, so an
+    // image-breaking change (kernel link, firmware manifest, root-volume
+    // layout, profile seeding) can never land green. The gate only proves the
+    // image *builds* — it ships nothing — so there is no untested-artefact
+    // risk to weigh against its cost, and at a quarter of the test matrix's
+    // wall clock it belongs ahead of it rather than behind.
+    stage("image", || run_image_gate(ctx))?;
     // The undefined-behaviour oracle over the crates with a hand-written
     // `unsafe` core. A green test suite says what the code computes; only an
-    // interpreter says whether a raw pointer stayed in bounds. Ahead of the
-    // test matrix because it is the cheaper of the two and finds the class of
-    // defect the matrix structurally cannot.
+    // interpreter says whether a raw pointer stayed in bounds. It finds the
+    // class of defect the matrix structurally cannot.
     stage("miri", || miri::run(ctx, &[]))?;
+    stage("clippy", || run_clippy(ctx, &[]))?;
     // The whole test matrix, exactly once — on a developer machine and a CI
     // runner alike. The flake-hunting repetition lives in the time-limited
     // soaks (`tools/ci/soak.sh`, `cargo xtask test --soak`), never in `ci`.
     // The host pass runs in a freshly-seeded order (`--shuffle`) so an
     // order-dependent suite fails the gate rather than passing on the
-    // harness's alphabetical accident; the seed is in the step's label.
+    // harness's alphabetical accident; the seed is in the step's label. Last
+    // because it is by far the most expensive stage.
     stage("test --qemu", || {
         run_test(
             ctx,
             &[OsString::from("--qemu"), OsString::from("--shuffle")],
         )
     })?;
-    // Every shippable image profile is built on every PR, so an
-    // image-breaking change (kernel link, firmware manifest, root-volume
-    // layout, profile seeding) can never land green. Last because it is the
-    // terminal assembly: it is only meaningful once what it packages holds.
-    stage("image", || run_image_gate(ctx))?;
     Ok(())
 }
 

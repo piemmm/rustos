@@ -37,3 +37,29 @@ pub mod spawn_producer;
 /// in the architecture-neutral layout module.
 #[cfg(freestanding)]
 pub const USER_VA_TOP: u64 = 1 << 39;
+
+/// The user regime and the kernel's direct physical map must share no
+/// address, and the map must reach past the user image bias.
+///
+/// Those two are what let the kernel reach the whole of RAM without
+/// carrying it where a user program can address it: the map used to be an
+/// identity window in `TTBR0_EL1`, so it had to stop at the image bias and
+/// a machine with more RAM than that had frames the kernel could not reach.
+/// Here `TTBR1_EL1` holds it and the architecture keeps the two regimes
+/// apart, so the first assertion is a statement about the `TCR_EL1` sizes
+/// the port programs rather than about a slot convention. Pinned at build
+/// time rather than discovered as a fail-closed allocation on a large
+/// machine.
+#[cfg(all(freestanding, kernel_isa = "aarch64"))]
+const _: () = {
+    use tairix_arch_aarch64::paging::{KERNEL_VA_BASE, MAX_PHYSMAP_GIB};
+
+    assert!(
+        USER_VA_TOP <= KERNEL_VA_BASE,
+        "user space must end at or below the kernel translation regime"
+    );
+    assert!(
+        ((MAX_PHYSMAP_GIB as u64) << 30) > crate::spawn_layout::CHILD_USER_BIAS,
+        "the direct map must reach past the user image bias"
+    );
+};
