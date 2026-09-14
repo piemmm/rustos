@@ -1275,6 +1275,36 @@ static TESTS: &[QemuTest] = &[
     // BSP-only boot step — and the 120-second silence budget is the
     // boot-then-fixed-work budget plus the sweep over that RAM, which prints
     // progress throughout and so keeps resetting the heartbeat.
+    // `plans/OPEN-DEFECTS.md` D56 riscv64 half: the same shape one regime
+    // down. The `virt` board puts RAM at `0x8000_0000`, so 3 GiB tops out at
+    // 5 GiB and clears the four-gigabyte window the spawn path used to reach
+    // frames through — enough that a map sized from a build-time constant
+    // rather than the discovered tree is visible as a failure. The observer
+    // grades the same two records plus a structural probe of the live Sv39
+    // root. Single CPU suffices (the install is a boot-hart-only step) and
+    // the 120-second silence budget matches the x86_64 sibling: boot plus the
+    // self-test's sweep over that RAM, which prints progress throughout and
+    // so keeps resetting the heartbeat.
+    QemuTest {
+        package: "tairix-test-physmap-qemu-riscv64",
+        binary: "tairix-test-physmap-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        ram_mib: Some(3072),
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        serial: &[],
+    },
     QemuTest {
         package: "tairix-test-physmap-qemu-x86_64",
         binary: "tairix-test-physmap-qemu-x86_64",

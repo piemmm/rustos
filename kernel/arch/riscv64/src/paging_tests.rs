@@ -108,6 +108,10 @@ fn identity_gigapages_rejects_out_of_range() {
     let pool = fresh_pool();
     assert!(AddressSpace::new_identity_gigapages(pool, 0).is_none());
     assert!(AddressSpace::new_identity_gigapages(pool, ENTRIES_PER_TABLE + 1).is_none());
+    // The canonical lower half is the widest honest identity extent: a slot
+    // above it names an upper-half address, identity in neither direction.
+    assert!(AddressSpace::new_identity_gigapages(pool, IDENTITY_GIGAPAGES).is_some());
+    assert!(AddressSpace::new_identity_gigapages(pool, IDENTITY_GIGAPAGES + 1).is_none());
 }
 
 /// Host-side Sv39 walk mirroring the hardware MMU: returns the physical
@@ -597,9 +601,11 @@ fn the_kernel_remap_window_is_canonical_and_clear_of_the_identity_map() {
 
     let window =
         KernelWindow::new(base, KERNEL_WINDOW_PAGES).expect("the window extent is representable");
-    // The identity map stops exactly where the window begins, so the two
-    // can never claim the same root slot.
-    assert_eq!(IDENTITY_GIGAPAGES, KERNEL_WINDOW_FIRST_SLOT);
+    // The identity map stops exactly where the direct physical map begins,
+    // and the map stops exactly where the window begins, so no two of the
+    // three can claim the same root slot.
+    assert_eq!(IDENTITY_GIGAPAGES, PHYSMAP_FIRST_SLOT);
+    assert_eq!(PHYSMAP_FIRST_SLOT + PHYSMAP_SLOTS, KERNEL_WINDOW_FIRST_SLOT);
     // And the window stops one gigapage below the top of the address space,
     // so its exclusive top is representable.
     assert_eq!(
@@ -664,4 +670,136 @@ fn tearing_a_space_down_never_frees_the_shared_kernel_window_tables() {
     // SAFETY: as above — reading the root's own window slot.
     let slot = unsafe { (*root_table)[KERNEL_WINDOW_FIRST_SLOT] };
     assert_eq!(slot, 0, "the shared window entry was dropped, not walked");
+}
+
+#[test]
+fn the_direct_map_claims_the_upper_half_below_the_window() {
+    // The port's user region is exactly the canonical lower half, so the
+    // map's first slot is the first slot no user address can name.
+    assert_eq!((1u64 << 38) >> 30, PHYSMAP_FIRST_SLOT as u64);
+    assert_eq!(PHYSMAP_FIRST_SLOT, 256);
+    assert_eq!(PHYSMAP_SLOTS, 191);
+    assert_eq!(PHYSMAP_VMA_BASE, 0xFFFF_FFC0_0000_0000);
+    // Sv39 sign-extends from bit 38, so the base is canonical and lands in
+    // its own slot.
+    assert_eq!(PHYSMAP_VMA_BASE >> 39, u64::MAX >> 39);
+    assert_eq!(vpn_index(PHYSMAP_VMA_BASE, 2), PHYSMAP_FIRST_SLOT);
+    // A root-level leaf is a gigapage, so a slot is a gigabyte of reach and
+    // the map's top lands exactly on the remap window's first slot.
+    assert_eq!(MAX_PHYSMAP_GIB, PHYSMAP_SLOTS);
+    assert_eq!(
+        physmap_virt((MAX_PHYSMAP_GIB as u64) << 30),
+        kernel_window_base()
+    );
+}
+
+#[test]
+fn physmap_virt_offsets_by_the_map_base() {
+    assert_eq!(physmap_virt(0), PHYSMAP_VMA_BASE);
+    assert_eq!(physmap_virt(0x8123_4000), PHYSMAP_VMA_BASE + 0x8123_4000);
+    // A gigabyte in is one root slot along.
+    assert_eq!(vpn_index(physmap_virt(1 << 30), 2), PHYSMAP_FIRST_SLOT + 1);
+}
+
+#[test]
+fn kernel_slots_are_everything_from_the_map_upward() {
+    assert!(!is_kernel_slot(PHYSMAP_FIRST_SLOT - 1));
+    assert!(is_kernel_slot(PHYSMAP_FIRST_SLOT));
+    assert!(is_kernel_slot(KERNEL_WINDOW_FIRST_SLOT));
+    assert!(is_kernel_slot(ENTRIES_PER_TABLE - 1));
+}
+
+/// A user leaf in a kernel root slot would hand U-mode the direct physical
+/// map or the shared remap window. Both entry points refuse it whatever the
+/// caller computed, and the HAL names the cause rather than reporting
+/// exhaustion.
+#[test]
+fn a_user_mapping_is_refused_in_a_kernel_slot() {
+    use tairix_arch_api::mmu::{self, PageFlags};
+    let pool = fresh_pool();
+    let mut space = AddressSpace::new_identity_gigapages(pool, 2).expect("identity map");
+    let pa = 0x8123_4000;
+    for slot in [
+        PHYSMAP_FIRST_SLOT,
+        KERNEL_WINDOW_FIRST_SLOT,
+        ENTRIES_PER_TABLE - 1,
+    ] {
+        let va = upper_half_slot_base(slot);
+        assert_eq!(
+            mmu::AddressSpace::map_page(&mut space, va, pa, PageFlags::READ | PageFlags::USER),
+            Err(MapError::InvalidFlags),
+            "slot {slot} is the kernel's"
+        );
+        assert!(
+            space
+                .map_4k(pool, va, pa, flags::USER | flags::READ)
+                .is_none(),
+            "slot {slot} is the kernel's"
+        );
+    }
+    // Not a blanket refusal: a user address below the map still maps.
+    let user_va = 100u64 << 30;
+    assert_eq!(
+        mmu::AddressSpace::map_page(&mut space, user_va, pa, PageFlags::READ | PageFlags::USER),
+        Ok(())
+    );
+}
+
+/// Both refusals are extent checks that run before the set-once gate, so
+/// this holds whether or not the publication test has already run — the
+/// state is process-global and the harness fixes no order.
+#[test]
+fn publish_physmap_refuses_an_extent_the_slots_cannot_express() {
+    assert!(!publish_physmap(0), "an empty map covers nothing");
+    assert!(
+        !publish_physmap(MAX_PHYSMAP_GIB + 1),
+        "wider than the claimed slots can express"
+    );
+}
+
+/// The one test that drives the set-once publication, because it is
+/// process-global: a second caller is refused by design. Every other test
+/// here is insensitive to it — the map's slots are gigapage leaves the
+/// reclaim walk drops before it descends, and every other walk stays in the
+/// lower half.
+#[test]
+fn every_root_installs_the_published_direct_map() {
+    use tairix_arch_api::mmu;
+    static POOL: PageTablePool = PageTablePool::new();
+    const GIB: usize = 5;
+
+    assert!(publish_physmap(GIB), "the first publication");
+    assert_eq!(physmap_gigapages(), GIB);
+    assert_eq!(physmap_bytes(), (GIB as u64) << 30);
+    assert!(!publish_physmap(GIB), "the map is installed once per boot");
+
+    let probe = 0x1_2345_6000u64;
+    for space in [
+        AddressSpace::new_identity_gigapages(&POOL, 2).expect("an identity root"),
+        AddressSpace::new_kernel_window(&POOL).expect("a kernel-window root"),
+    ] {
+        assert_eq!(
+            mmu::AddressSpace::translate(&space, physmap_virt(probe)).map(|(phys, _)| phys),
+            Some(probe),
+            "every root reaches a frame through the direct map"
+        );
+    }
+    // The map is never executable and never user-accessible: nothing is
+    // fetched through it and no user address can name it.
+    let space = AddressSpace::new_identity_gigapages(&POOL, 2).expect("an identity root");
+    let leaf = leaf_pte(&POOL, &space, physmap_virt(probe)).expect("a gigapage leaf");
+    assert_eq!(leaf.1, 2, "a root-level leaf is a gigapage");
+    assert_ne!(leaf.0 & flags::READ, 0);
+    assert_ne!(leaf.0 & flags::WRITE, 0);
+    assert_eq!(leaf.0 & flags::EXEC, 0);
+    assert_eq!(leaf.0 & flags::USER, 0);
+    // Past the published extent nothing is mapped, so a frame the map does
+    // not cover faults rather than reading a neighbour's.
+    assert!(
+        mmu::AddressSpace::translate(&space, physmap_virt(physmap_bytes())).is_none(),
+        "the map stops at its published extent"
+    );
+    // The host has no live root, so the boot install finds none to patch
+    // and refuses rather than publishing a map nothing carries.
+    assert!(!install_boot_physmap(&POOL, GIB));
 }

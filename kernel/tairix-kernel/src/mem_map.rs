@@ -21,16 +21,21 @@
 //! the bare-metal production builds (where `aarch64::boot` / `x86_64::boot` /
 //! `riscv64::boot` consume it) and on any host `cargo test` build (where the
 //! tests below consume it), and on no other configuration, so it is never
-//! dead code. The single-window [`build_memory_map`] (aarch64) and the
-//! identity-window sizing and page-directory carve [`direct_map_gib`] /
-//! [`carve_frames_from_map`] (x86_64) are each gated to the port(s) that use
-//! them.
+//! dead code. The single-window [`build_memory_map`] (aarch64), the direct
+//! physical map's sizing and boot record [`direct_map_gib`] /
+//! [`log_direct_map`] (x86_64 and riscv64), and the page-table carve
+//! [`carve_frames_from_map`] (x86_64, whose four-level map needs tables
+//! where an Sv39 root leaf needs none) are each gated to the port(s) that
+//! use them.
 
 use tairix_kernel_mem::{BootMemoryMap, PhysAddr};
-// Only the aarch64 map builder and the x86_64 window sizing/carve classify
-// regions; the riscv64 build reaches neither.
+// Every consumer but the bare `PhysAddr`/`BootMemoryMap` plumbing classifies
+// regions: the aarch64 map builder, and the direct-map sizing and carve.
 #[cfg(any(
-    all(freestanding, any(kernel_isa = "aarch64", kernel_isa = "x86_64")),
+    all(
+        freestanding,
+        any(kernel_isa = "aarch64", kernel_isa = "x86_64", kernel_isa = "riscv64")
+    ),
     test
 ))]
 use tairix_kernel_mem::RegionKind;
@@ -266,8 +271,11 @@ pub(crate) fn region_byte_totals(map: &BootMemoryMap) -> (u64, u64) {
     (usable, reserved)
 }
 
-/// One gigabyte, the granularity the x86_64 identity window is sized in.
-#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+/// One gigabyte, the granularity a port's direct physical map is sized in.
+#[cfg(any(
+    all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
+    test
+))]
 const GIB: u64 = 1 << 30;
 
 /// Size the direct physical map, in whole gigabytes, from the RAM `map`
@@ -281,12 +289,16 @@ const GIB: u64 = 1 << 30;
 /// well past the installed RAM, and sizing from that would map gigabytes of
 /// holes.
 ///
-/// `floor_gib` keeps the architectural MMIO frames and firmware tables the
-/// boot trampoline already covers inside the map on a machine with less RAM
-/// than that. `cap_gib` is the widest map the port's virtual layout can
-/// express; RAM above it is unreachable by pointer and every consumer of it
-/// fails closed.
-#[cfg(any(all(freestanding, kernel_isa = "x86_64"), test))]
+/// `floor_gib` keeps a floor the port's boot path has already laid down
+/// inside the map on a machine with less RAM than that — x86_64's boot
+/// trampoline lays one, covering the architectural MMIO frames and firmware
+/// tables, where riscv64 builds its whole map from Rust and passes zero.
+/// `cap_gib` is the widest map the port's virtual layout can express; RAM
+/// above it is unreachable by pointer and every consumer of it fails closed.
+#[cfg(any(
+    all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")),
+    test
+))]
 pub(crate) fn direct_map_gib(map: &BootMemoryMap, floor_gib: usize, cap_gib: usize) -> usize {
     let top = map
         .regions()
@@ -355,6 +367,37 @@ pub(crate) fn carve_frames_from_map(
     let base = chosen?;
     map.reserve_range(PhysAddr::new(base), PhysAddr::new(base + bytes));
     Some(base)
+}
+
+/// Record how wide the direct physical map ended up, so a machine whose RAM
+/// outruns it is visible in the boot record rather than found later as a
+/// fail-closed allocation.
+///
+/// `gigapages` says whether the part backs the map with 1 GiB leaves, which
+/// is what decides whether it cost intermediate page tables: on x86_64 it is
+/// a CPUID answer, on riscv64 a root-level Sv39 leaf always is one.
+#[cfg(all(freestanding, any(kernel_isa = "x86_64", kernel_isa = "riscv64")))]
+pub(crate) fn log_direct_map(sink: &(dyn tairix_log::Sink + Sync), gib: usize, gigapages: bool) {
+    use tairix_log::{Event, Field, FieldValue, Level};
+
+    tairix_log::log(
+        sink,
+        &Event {
+            level: Level::Info,
+            id: crate::KERNEL_BOOT_DIRECT_MAP,
+            message: "direct physical map sized from the discovered map",
+            fields: &[
+                Field {
+                    key: "gigabytes",
+                    value: FieldValue::UnsignedInt(gib as u64),
+                },
+                Field {
+                    key: "gigapages",
+                    value: FieldValue::Str(if gigapages { "true" } else { "false" }),
+                },
+            ],
+        },
+    );
 }
 
 #[cfg(test)]

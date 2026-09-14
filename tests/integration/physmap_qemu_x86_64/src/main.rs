@@ -65,7 +65,7 @@ mod kernel {
     };
     use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
-    use tairix_kernel::x86_64::boot::KERNEL_BOOT_DIRECT_MAP;
+    use tairix_kernel::KERNEL_BOOT_DIRECT_MAP;
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink};
     use tairix_log::{Event, EventId, FieldValue, Sink};
 

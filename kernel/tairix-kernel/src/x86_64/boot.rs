@@ -328,15 +328,6 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// and may not be renumbered.
 const KERNEL_BOOT_TSC_INVARIANCE: EventId = EventId(4098);
 
-/// Security-relevant boot decision: how wide the direct physical map the
-/// kernel reaches every RAM frame through ended up, and whether the part's
-/// 1 GiB pages backed it. Logged on every boot so a machine whose RAM
-/// outruns the map is visible in the record rather than discovered as a
-/// fail-closed allocation later. Sits in the `kernel/core`-owned
-/// `4000..5000` range; the id is part of the audit contract and may not be
-/// renumbered.
-pub const KERNEL_BOOT_DIRECT_MAP: EventId = EventId(4096);
-
 // --- Retained boot audit log ----------------------------------------
 
 /// The retained, tail-able in-memory boot audit ring for this port.
@@ -603,7 +594,11 @@ pub fn bring_up_bsp(
         paging::MAX_PHYSMAP_GIB,
     );
     install_direct_physical_map(&mut memory_map, direct_map_gib)?;
-    log_direct_map(log_sink, paging::physmap_gigapages());
+    crate::mem_map::log_direct_map(
+        log_sink,
+        paging::physmap_gigapages(),
+        paging::gigapages_supported(),
+    );
 
     // 2. Software-enable the BSP LAPIC and read its ID.
     let mut lapic = make_bsp_lapic();
@@ -1389,36 +1384,6 @@ fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<()
     } else {
         Err(BootError::DirectMapInstall)
     }
-}
-
-/// Record how wide the direct physical map ended up, so a machine whose
-/// RAM outruns it is visible in the boot record rather than found later as
-/// a fail-closed allocation.
-fn log_direct_map(sink: &(dyn tairix_log::Sink + Sync), gib: usize) {
-    use tairix_log::{Event, Field, FieldValue, Level};
-
-    tairix_log::log(
-        sink,
-        &Event {
-            level: Level::Info,
-            id: KERNEL_BOOT_DIRECT_MAP,
-            message: "direct physical map sized from the discovered map",
-            fields: &[
-                Field {
-                    key: "gigabytes",
-                    value: FieldValue::UnsignedInt(gib as u64),
-                },
-                Field {
-                    key: "gigapages",
-                    value: FieldValue::Str(if paging::gigapages_supported() {
-                        "true"
-                    } else {
-                        "false"
-                    }),
-                },
-            ],
-        },
-    );
 }
 
 /// Build the canonical memory map from the firmware description, returning

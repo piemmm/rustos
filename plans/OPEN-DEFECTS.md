@@ -39,7 +39,7 @@ table normalises all three to **closed**. 23 open, 97 closed, 120 total.
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
 | D54 | a desktop worker issues ~2500 file opens at session start | starves every concurrent reader; the loop is not yet identified |
-| D56 | every port's page tables are reachable only through an identity map, capping RAM at the user bias | x86_64 closed — kernel-half direct map, 127 TiB, no identity map in a process root; aarch64 and riscv64 open on a different shape (39-bit VA) |
+| D56 | every port's page tables are reachable only through an identity map, capping RAM at the user bias | x86_64 and riscv64 closed — each has a direct map above its user region (127 TiB / 191 GiB), sized from discovered RAM; aarch64 open, design settled (bring up `TTBR1`) |
 | D60 | the window-content release has no end-to-end vertical | — |
 | D74 | EEVDF charges every dispatch a fixed service quantum regardless of runtime | — |
 | D75 | EEVDF's ready set is a `Vec` scanned linearly on the dispatch path | — |
@@ -451,10 +451,11 @@ The open items, in priority order:
   every page table, and the direct map that shares the window with them,
   must live below the user virtual base. Surfaced by D55, which removed the
   smaller of the two bounds; not introduced by it. The walk half is closed on
-  every port — each recovers a table through its frame source — and x86_64's
-  map is closed with it: a kernel-half direct map reaching 127 TiB, and a
-  process root with no identity map. The two 39-bit ports are open on a
-  different shape, since their whole address space is 512 GiB.
+  every port — each recovers a table through its frame source. x86_64 is
+  closed (a kernel-half direct map reaching 127 TiB, and a process root with
+  no identity map) and riscv64 with it (191 GiB in Sv39's upper half, above
+  the user region). aarch64 is the only half left: its design is settled —
+  bring up `TTBR1` — but not implemented.
 - **D55 — the x86_64 direct physical map covered only the first gigabyte —
   DONE.** Every kernel path that reaches a frame by pointer — the spawn image
   write, the shared-memory scrub, the remap window's own record store, the
@@ -4131,11 +4132,11 @@ accounting.
 
 The bound this left — RAM above the user virtual base, because the map was
 an identity window sharing each process root's low half with the child
-image — is gone on x86_64 (D56): the map moved to the kernel half. The two
-39-bit ports still carry it.
+image — is gone on x86_64 and riscv64 (D56): each map moved above its port's
+user region. aarch64 still carries it.
 
 ## D56 — the page tables are reachable only through an identity map
-(x86_64 CLOSED; aarch64 and riscv64 OPEN)
+(x86_64 and riscv64 CLOSED; aarch64 OPEN, design settled)
 
 **Mechanism.** Every port's page-table walk *used to* recover a child table
 by dereferencing the physical address its parent entry holds
@@ -4233,50 +4234,122 @@ kernel-half refusal of a user leaf, and every root installing the published
 map. KPTI is no longer blocked by the map; it remains
 `Mitigation::Pending` on its own terms (`kernel/arch/x86_64/src/sidechannel.rs`).
 
-### aarch64 and riscv64 — open, and a different shape
+### riscv64 — closed
 
-Not a port of the above. Both run a **39-bit** translation regime, so the
-whole address space is 512 GiB and the room the x86_64 map found does not
-exist:
+Sv39 is a **39-bit** regime, so the whole address space is 512 GiB and the
+room the x86_64 map found does not exist — but the upper half below the
+kernel remap window does, and that is exactly where the two sub-defects
+below lived. Root slots `256..=446` at `0xFFFF_FFC0_0000_0000`
+(`paging::PHYSMAP_VMA_BASE`) are the map: slot 256 *is* where the user region
+ends (`USER_VA_TOP == 1 << 38`), slot 447 is where the remap window begins,
+and because a root-level Sv39 leaf already **is** a 1 GiB page, 191 slots
+give **191 GiB** of reach for no page tables at all. Two riscv64
+simplifications over x86_64 fall out of that: there is no
+`physmap_table_frames`/carve, and no boot trampoline laying a floor (the boot
+root is built in Rust), so the map is installed once from the discovered map
+with no floor/widen split.
 
-* **aarch64** is `TCR_EL1.T0SZ = 25` with `TTBR1` disabled (`EPD1`), three
-  levels from L1, root slots of 1 GiB. `aarch64::USER_VA_TOP` is `1 << 39` —
-  the *entire* space — so there is no free range to claim: a map there needs
-  the user ceiling lowered (slots 128..447 would give ~320 GiB below the
-  kernel remap window at 448) or `TTBR1` brought up for a real kernel half.
-  That is a design decision for the port, not a mechanical change. Its
-  process root also still carries the full-RAM identity window, derived from
-  the Device/RAM gigapage masks, and fails closed once that reaches
-  `CHILD_USER_BIAS`.
-* **riscv64** Sv39 has its upper half free below the kernel remap window at
-  root slot 447: slots 256..446 at `0xFFFF_FFC0_0000_0000` give ~191 GiB,
-  and its process root already identity-maps only 4 GiB, so the work is
-  adding the map rather than narrowing a root.
+The three properties the x86_64 half lists hold here too, with one honest
+difference:
 
-Two riscv64 defects noticed while establishing that, recorded here because
-they share the root cause rather than because they were introduced:
+* **Its extent is bounded by the architecture, not by the child image.** The
+  ceiling is the Sv39 layout; RAM above `MAX_PHYSMAP_GIB` is reported by the
+  RAM self-test as `unreachable_bytes` and every consumer fails closed.
+* **No user address can name it.** The user region *is* the canonical lower
+  half, pinned at build time in `riscv64.rs` exactly as x86_64 pins its slot
+  256. The walk additionally refuses a user leaf in any kernel slot
+  (`is_kernel_slot`), reporting `InvalidFlags` — the floor the port lacked
+  entirely, where before a user leaf in a map slot was refused only
+  incidentally, by `AlreadyMapped`.
+* **A process pays no pages for it.** `install_physmap_slots` copies the
+  published gigapage leaves into every root both constructors build, so no
+  space exists without the map and none draws a table for it.
+* **MMIO stays on the identity window, unlike x86_64.** This kernel is
+  identity-linked, so every root it can execute under carries a low identity
+  window anyway; the map therefore needs no MMIO floor and
+  `direct_map_gib` is called with zero. `identity_gigapages()` is the one
+  definition of that 4 GiB window — a bound on where the hardware puts the
+  kernel image, stack, leaked state and board MMIO, not a capacity, and no
+  longer a bound on how much RAM the kernel can reach. A board whose kernel
+  image ends above it is refused at boot
+  (`BootError::KernelAboveIdentityWindow`) rather than faulting on the first
+  `activate`: that fail-open hole is closed with the map.
 
-* Its **spawn** direct map is `DirectPhysMap::identity(4 GiB)`
-  (`IDENTITY_GIB` in `riscv64/spawn_producer.rs`), a worse ceiling than the
-  64 GiB x86_64 carried: a board with more than 4 GiB of RAM fails spawn
-  closed for every frame above it.
-* Its boot space is built `new_identity_gigapages(&BOOT_PAGE_TABLES, 447)`,
-  and Sv39 sign-extends from bit 38 — so root slots 256..446 map *upper-half*
-  virtual addresses to physical 256..446 GiB. `identity_limit()`'s claim of
-  447 GiB is therefore only honest for the low 256 GiB; above it the "identity"
-  translation names a non-canonical address. Latent on every guest the matrix
-  runs (none has that much RAM), and it disappears when the map moves to the
-  upper half properly.
+The two sub-defects this entry used to list are closed by the same move,
+because the slots the false claim occupied are where the map belongs:
 
-**The aarch64 residue this entry used to list stands**: `paging::table_path`,
-the watchdog's fault-proof `AT S1E1R` probe of the *active* root, still reads
-the boot trampoline's own tables through the trampoline's identity window
-rather than a frame source's view. It needs that port's physmap base once it
-exists.
+* The spawn path's frame view was `DirectPhysMap::identity(4 GiB)`, a worse
+  ceiling than the 64 GiB x86_64 carried, and the same view served
+  `direct_phys_map()` — so the RAM self-test, the shared-region scrub, the
+  kernel slab supply and the root-unlock DMA pool were all capped there. All
+  of them now go through one `ConfiguredPhysMap` that re-derives its limit
+  from the live map per call, so no caller can hold a stale extent.
+* The boot space was built `new_identity_gigapages(&BOOT_PAGE_TABLES, 447)`,
+  and Sv39 sign-extends from bit 38 — so slots 256..446 mapped *upper-half*
+  virtual addresses to physical 256..446 GiB, identity in neither direction.
+  `IDENTITY_GIGAPAGES` is now `PHYSMAP_FIRST_SLOT` (256) and the constructor
+  **refuses** a wider extent, so the dishonest mapping is unrepresentable
+  rather than merely unused.
 
-**Done when:** both 39-bit ports carry a direct map outside their user
-region and a process root with no full-RAM identity map, each documenting
-its own architectural ceiling and failing closed above it.
+**Two consumers the move forced, both of them latent defects it exposed.**
+The Supervisor's `memtest` takeover flattened paging to bare mode, on the
+reasoning that an identity-mapped kernel keeps every address under it; the
+sweep reaches RAM through the direct map, which bare mode resolves to nowhere.
+It now installs the reserved boot kernel root (`paging::park_kernel_root`) —
+the only root whose tables live wholly in the kernel image, which is the
+requirement the sibling ports already satisfy their own way, and it fails
+closed with `PrepareFailed` if none is published. And three self-chassis
+fixtures (`threads`, `stack_grow`, `file_map`) drove the *production* spawn
+producer with the kernel at `satp = 0`, a configuration production never has;
+they now bring paging up through the one shared sequence
+(`boot_riscv64::enable_paging_and_direct_map`), which is what the producer has
+always needed and what production does.
+
+**Proved by.** `tests/integration/physmap_qemu_riscv64` on a 3072 MiB guest
+(the `virt` board bases RAM at `0x8000_0000`, so it tops out at 5 GiB and
+clears the old 4 GiB window): the observer grades that the map was sized past
+that window, that the self-test left `unreachable_bytes == 0`, and a
+structural probe of the live root — a known frame read back through the map by
+the hardware, the map's slot disjoint from every user address, a user leaf
+refused in it, and a high physical address resolving to nothing under a
+process root. Host tests cover the slot layout and base, the `physmap_virt`
+arithmetic, the `is_kernel_slot` boundaries, the user-leaf refusal at both
+entry points, every root carrying the published map, and the set-once
+publication rejecting an over-cap extent.
+
+### aarch64 — open; the design is settled
+
+Also a 39-bit regime, but with no free range at all: `TCR_EL1.T0SZ = 25`
+with `TTBR1` disabled (`EPD1`), three levels from L1, root slots of 1 GiB,
+and `aarch64::USER_VA_TOP` is `1 << 39` — the *entire* space. Its process
+root still carries the full-RAM identity window derived from the Device/RAM
+gigapage masks, and fails closed once that reaches `CHILD_USER_BIAS`.
+
+**The answer is to bring up `TTBR1`**: clear `EPD1`, set `T1SZ = 25`, and
+give the kernel its own 512 GiB regime carrying the direct physical map *and*
+the kernel remap window. User space keeps the whole of `TTBR0`, a process
+root pays nothing for the map (`TTBR1` is one shared global root, not a
+per-process one), the remap window stops occupying slots inside the user
+range, and the port becomes KPTI-ready. The alternative — lowering the user
+ceiling to free slots 128..447 for a ~320 GiB map — buys less and costs user
+address space, so it is not the plan.
+
+The enable path is already a single shared sequence
+(`paging::program_stage1_translation`), so the regime change is localised. Its
+`memtest` takeover will need the riscv64 answer too: it keeps the MMU on under
+`TTBR0`'s identity map today, which stops covering the RAM the sweep writes
+once that goes through a `TTBR1` map.
+The work is still substantial: ~20 aarch64 self-chassis fixtures assume the
+current regime, `kernel_window_base()` moves, and it needs its own
+`physmap_qemu_aarch64` vertical. **A residue rides on it**:
+`paging::table_path`, the watchdog's fault-proof `AT S1E1R` probe of the
+*active* root, still reads the boot trampoline's own tables through the
+trampoline's identity window rather than a frame source's view; it needs
+that port's physmap base once it exists.
+
+**Done when:** aarch64 carries a direct map outside its user region and a
+process root with no full-RAM identity map, documenting its own
+architectural ceiling and failing closed above it.
 
 ### What the seam change closed
 

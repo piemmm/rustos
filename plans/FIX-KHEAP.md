@@ -188,10 +188,11 @@ Placement is derived from each port's VA layout, not a byte constant: the
 top eighth of the `TTBR0_EL1` / Sv39 root table (64 GiB), and the highest
 free canonical PML4 slot on x86_64 (512 GiB). On aarch64 the reservation
 refuses a slot the discovered RAM or Device mask claims (fail closed) and
-`ensure_identity_gigapage` refuses to widen into one; on riscv64 the
-identity extent (`paging::IDENTITY_GIGAPAGES`) is derived from the same
-figure, so the window and the identity map cannot overlap and the direct
-physical map is sized from what the MMU actually maps.
+`ensure_identity_gigapage` refuses to widen into one; on riscv64 the window
+is the top eighth and the direct physical map
+(`paging::PHYSMAP_SLOTS`) takes the upper half below it, both derived from
+the same figure, so no two of the window, the map, and the identity extent
+(`paging::IDENTITY_GIGAPAGES`, the canonical lower half) can overlap.
 
 **The heap reaches the kernel core as a handover value.** `#[global_allocator]`
 can only be declared by the final binary, so every kernel bin hands its

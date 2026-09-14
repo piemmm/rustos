@@ -233,9 +233,12 @@ impl AddressSpace {
     /// Build a new address space identity-mapping `[0, gigabytes GiB)`
     /// with 1 GiB leaf pages.
     ///
-    /// `gigabytes` must be `1..=512` (the number of root-table slots in
-    /// Sv39). On the QEMU `virt` board four gigapages cover the MMIO
-    /// window and the 2 GiB RAM base at `0x8000_0000`.
+    /// `gigabytes` must be `1..=`[`IDENTITY_GIGAPAGES`] — the canonical
+    /// lower half, the only range where a root slot's virtual address *is*
+    /// the physical address it maps. A wider extent is refused rather than
+    /// installing an upper-half leaf that is identity in neither direction.
+    /// On the QEMU `virt` board four gigapages cover the MMIO window and the
+    /// 2 GiB RAM base at `0x8000_0000`.
     ///
     /// # Errors
     ///
@@ -245,7 +248,7 @@ impl AddressSpace {
         frames: &'static dyn PageTableFrames,
         gigabytes: usize,
     ) -> Option<Self> {
-        if gigabytes == 0 || gigabytes > ENTRIES_PER_TABLE {
+        if gigabytes == 0 || gigabytes > IDENTITY_GIGAPAGES {
             return None;
         }
         let TableFrame {
@@ -262,10 +265,12 @@ impl AddressSpace {
             let paddr = (i as u64) << 30;
             *slot = pte_from_phys(paddr, leaf);
         }
-        // Every root reaches the kernel remap window, so a kernel address
-        // in it resolves whichever root is active. Done here rather than at
-        // each call site so no future space can be built without it.
+        // Every root reaches the kernel remap window and the direct
+        // physical map, so a kernel address in either resolves whichever
+        // root is active. Done here rather than at each call site so no
+        // future space can be built without them.
         install_kernel_window_slots(root);
+        install_physmap_slots(root);
         Some(Self { root_phys, frames })
     }
 
@@ -277,8 +282,10 @@ impl AddressSpace {
     /// at tables every other root shares, a leaf installed through this
     /// space is immediately visible under all of them. Keeping it separate
     /// means the remap layer draws its intermediate tables from the frame
-    /// allocator rather than from the fixed boot pool, and cannot reach any
-    /// address outside the window.
+    /// allocator rather than from the fixed boot pool, and installs no leaf
+    /// outside the window: the only other slots the root carries are the
+    /// direct physical map's gigapage leaves, which a walk refuses to
+    /// shatter.
     ///
     /// # Errors
     ///
@@ -289,6 +296,7 @@ impl AddressSpace {
             entries: root,
         } = frames.alloc_table()?;
         install_kernel_window_slots(root);
+        install_physmap_slots(root);
         Some(Self { root_phys, frames })
     }
 
@@ -347,10 +355,10 @@ impl AddressSpace {
     /// Map `paddr` at `vaddr` with 4 KiB granularity.
     ///
     /// `vaddr` and `paddr` must be page-aligned. Returns `None` on
-    /// page-table-pool exhaustion or if the walk meets an existing leaf
+    /// page-table-pool exhaustion, if the walk meets an existing leaf
     /// (gigapage / megapage) it would have to shatter — the isolation
     /// test maps outside the identity-mapped gigapages so that path is
-    /// not exercised.
+    /// not exercised — or for a user leaf in a kernel root slot.
     pub fn map_4k(
         &mut self,
         frames: &'static dyn PageTableFrames,
@@ -364,6 +372,15 @@ impl AddressSpace {
         let i2 = vpn_index(vaddr, 2);
         let i1 = vpn_index(vaddr, 1);
         let i0 = vpn_index(vaddr, 0);
+
+        // A user leaf in a kernel slot would hand U-mode the direct
+        // physical map or the kernel heap's remap window, both shared by
+        // every root. The window allocators already bound every user
+        // address below the half, so this is the fail-closed floor under
+        // them rather than the only check.
+        if flags & flags::USER != 0 && is_kernel_slot(i2) {
+            return None;
+        }
 
         // SAFETY: `root_phys` names this space's live root table, drawn
         // from `self.frames`; `&mut self` makes the exclusive borrow sound.
@@ -402,12 +419,13 @@ impl AddressSpace {
             return None;
         }
         let i2 = vpn_index(vaddr, 2);
-        // A window slot is not identity address space; aliasing into it
-        // would clobber the shared remap hierarchy every root points at.
+        // A kernel slot is not identity address space; aliasing into one
+        // would clobber the direct physical map or the shared remap
+        // hierarchy every root points at.
         // SAFETY: `root_phys` names this space's live root table, drawn
         // from `self.frames`; `&mut self` makes the exclusive borrow sound.
         let root = unsafe { &mut *self.root_table()? };
-        if (root[i2] & flags::VALID) != 0 || i2 >= KERNEL_WINDOW_FIRST_SLOT {
+        if (root[i2] & flags::VALID) != 0 || is_kernel_slot(i2) {
             return None;
         }
         root[i2] = pte_from_phys(paddr, flags | flags::VALID | flags::ACCESSED | flags::DIRTY);
@@ -518,12 +536,19 @@ impl MmuAddressSpace for AddressSpace {
         if flags.contains(PageFlags::WRITE_COMBINE) {
             return Err(MapError::Unsupported);
         }
+        // Checked ahead of `leaf_present` so the refusal names the reason
+        // the address is unusable rather than whatever the kernel's own
+        // shared windows happen to have mapped there.
+        if flags.contains(PageFlags::USER) && is_kernel_slot(vpn_index(vaddr, 2)) {
+            return Err(MapError::InvalidFlags);
+        }
         if self.leaf_present(vaddr) {
             return Err(MapError::AlreadyMapped);
         }
         let frames = self.frames;
-        // Alignment and prior-mapping are already ruled out, so the only
-        // remaining failure from the walk is frame-source exhaustion.
+        // Alignment, prior mapping, and the kernel-slot floor are already
+        // ruled out, so the only remaining failure from the walk is
+        // frame-source exhaustion.
         self.map_4k(frames, vaddr, paddr, sv39_flags(flags))
             .ok_or(MapError::PoolExhausted)
     }
@@ -706,11 +731,12 @@ impl MmuAddressSpace for AddressSpace {
         if active_root_phys() == self.root_phys && !park_kernel_root() {
             return;
         }
-        // The kernel remap window's root entries point at tables *every*
-        // root shares, not at tables this hierarchy owns, and the walk below
-        // cannot tell the two apart — it would free the live kernel heap's
-        // page tables. Drop them from this root first; the window itself is
-        // permanent and is reached through every other root unchanged.
+        // The kernel's own root slots — the direct physical map and the
+        // remap window — describe state *every* root shares, not state this
+        // hierarchy owns, and the walk below cannot tell the two apart: it
+        // would free the live kernel heap's page tables. Drop them from this
+        // root first; both are permanent and are reached through every other
+        // root unchanged.
         let Some(root_table) = self.root_table() else {
             return;
         };
@@ -718,7 +744,7 @@ impl MmuAddressSpace for AddressSpace {
         // from `self.frames`; `&mut self` makes the exclusive borrow sound,
         // and the borrow ends before the reclaim walk below re-reads it.
         unsafe {
-            for slot in (*root_table).iter_mut().skip(KERNEL_WINDOW_FIRST_SLOT) {
+            for slot in (*root_table).iter_mut().skip(PHYSMAP_FIRST_SLOT) {
                 *slot = 0;
             }
         }
@@ -795,8 +821,8 @@ pub(crate) fn invalidate_page_local(vaddr: u64) {
 /// and on any machine this port runs on installed RAM binds long before
 /// 64 GiB of kernel heap does.
 ///
-/// The identity map is sized to stop below the window
-/// (`crate::paging::IDENTITY_GIGAPAGES`), so the two never overlap.
+/// The direct physical map ([`PHYSMAP_SLOTS`]) is sized to stop below the
+/// window, so the two never overlap.
 pub const KERNEL_WINDOW_SLOTS: usize = ENTRIES_PER_TABLE / 8;
 
 /// First root-table slot of the kernel remap window.
@@ -810,11 +836,184 @@ const KERNEL_WINDOW_FIRST_SLOT: usize = ENTRIES_PER_TABLE - 1 - KERNEL_WINDOW_SL
 /// Pages the kernel remap window spans.
 const KERNEL_WINDOW_PAGES: usize = KERNEL_WINDOW_SLOTS * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
 
-/// Identity gigapages the boot space maps: everything below the kernel
-/// remap window. Derived here so the window and the identity extent cannot
-/// drift apart, and so the direct physical map is sized from the same
-/// figure the live MMU uses.
-pub const IDENTITY_GIGAPAGES: usize = KERNEL_WINDOW_FIRST_SLOT;
+/// Widest identity map an Sv39 root can honestly carry, in gigapages: the
+/// whole canonical lower half, and no more.
+///
+/// Sv39 sign-extends from bit 38, so only a lower-half root slot names a
+/// virtual address *equal* to the physical address it maps. A leaf in a
+/// slot above that names an upper-half address, which is identity in
+/// neither direction — so the extent stops exactly where the kernel's own
+/// upper-half windows begin. RAM above it is reached through the direct
+/// physical map, not by widening this.
+pub const IDENTITY_GIGAPAGES: usize = PHYSMAP_FIRST_SLOT;
+
+/// First root-table slot the direct physical map claims — the first slot of
+/// Sv39's canonical upper half.
+///
+/// The port's user virtual region is exactly the lower half
+/// (`USER_VA_TOP == 1 << 38`), so no user address can name this slot or any
+/// above it. The map runs from here up to the kernel remap window: the
+/// kernel half and the user half share no slot, which is what lets a
+/// process root carry the map without carrying a mapping of RAM in the half
+/// user code addresses.
+pub const PHYSMAP_FIRST_SLOT: usize = ENTRIES_PER_TABLE / 2;
+
+/// Root-table slots the direct physical map spans — everything from its
+/// first slot up to the kernel remap window. Derived, so moving either
+/// boundary cannot leave the two overlapping.
+pub const PHYSMAP_SLOTS: usize = KERNEL_WINDOW_FIRST_SLOT - PHYSMAP_FIRST_SLOT;
+
+/// Base virtual address of the direct physical map: physical `p` is
+/// reachable at `PHYSMAP_VMA_BASE + p` under every root.
+pub const PHYSMAP_VMA_BASE: u64 = upper_half_slot_base(PHYSMAP_FIRST_SLOT);
+
+/// Widest direct physical map the claimed slots can express, in gigabytes.
+///
+/// A root-level Sv39 leaf *is* a 1 GiB page, so one slot is one gigabyte
+/// and the map costs no page tables at all — unlike a four-level port,
+/// which needs one intermediate table per span.
+pub const MAX_PHYSMAP_GIB: usize = PHYSMAP_SLOTS;
+
+/// The map must stay in the upper half (or its base would need no sign
+/// extension and [`upper_half_slot_base`] would be the wrong spelling) and
+/// start below the kernel remap window (or its slot count would be a
+/// negative span). Pinned so moving either boundary fails the build rather
+/// than producing an address nothing maps.
+const _: () = assert!(
+    PHYSMAP_FIRST_SLOT >= ENTRIES_PER_TABLE / 2 && PHYSMAP_FIRST_SLOT < KERNEL_WINDOW_FIRST_SLOT,
+    "the direct physical map must sit in the upper half, below the kernel remap window"
+);
+
+/// The map's shared root-table entries — one 1 GiB leaf per covered
+/// gigabyte, or `0` for a slot the published extent does not reach.
+///
+/// Every root this port builds installs them, so a root's whole share of
+/// the map is its own root entries: a root-level leaf is already a
+/// gigapage, so there is nothing beneath them to draw or share.
+static PHYSMAP_ROOT: [AtomicU64; PHYSMAP_SLOTS] = [const { AtomicU64::new(0) }; PHYSMAP_SLOTS];
+
+/// Gigabytes of physical memory the live direct map covers. Zero until the
+/// boot path sizes it from the discovered memory map, so a consumer on a
+/// build with no boot path reaches nothing and fails closed.
+static PHYSMAP_GIGAPAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Gigabytes of physical memory the live direct physical map covers.
+#[must_use]
+pub fn physmap_gigapages() -> usize {
+    PHYSMAP_GIGAPAGES.load(Ordering::Acquire)
+}
+
+/// Exclusive top of the live direct physical map, in bytes — the highest
+/// physical address the kernel can reach by pointer.
+#[must_use]
+pub fn physmap_bytes() -> u64 {
+    (physmap_gigapages() as u64) << 30
+}
+
+/// The direct-map virtual address of physical `phys`.
+///
+/// `const`, so a fixed address names its direct-map spelling without a
+/// run-time load. The address resolves only for a `phys` below
+/// [`physmap_bytes`]; a caller with a discovered address checks that first.
+#[must_use]
+pub const fn physmap_virt(phys: u64) -> u64 {
+    PHYSMAP_VMA_BASE.wrapping_add(phys)
+}
+
+/// The map's root entry for the gigabyte at `gib`: a 1 GiB leaf, readable
+/// and writable but never executable or user-accessible. The kernel
+/// executes from its identity window, so nothing is ever fetched through
+/// the map.
+const fn physmap_leaf(gib: usize) -> u64 {
+    pte_from_phys(
+        (gib as u64) << 30,
+        flags::VALID | flags::READ | flags::WRITE | flags::ACCESSED | flags::DIRTY,
+    )
+}
+
+/// Record `gib` gigabytes as the direct map's extent and fill the shared
+/// root entries every later root installs, set-once.
+///
+/// Split out from [`install_boot_physmap`] because this half is pure
+/// bookkeeping: it is what the host tests drive to observe that every root
+/// constructor installs the published map, with no live `satp` to patch.
+///
+/// Returns `false`, having published nothing, for an extent of zero or one
+/// wider than the claimed slots can express, or for a second call.
+fn publish_physmap(gib: usize) -> bool {
+    if gib == 0 || gib > MAX_PHYSMAP_GIB {
+        return false;
+    }
+    if PHYSMAP_GIGAPAGES
+        .compare_exchange(0, gib, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    for (gigabyte, slot) in PHYSMAP_ROOT.iter().enumerate().take(gib) {
+        slot.store(physmap_leaf(gigabyte), Ordering::Release);
+    }
+    true
+}
+
+/// Size the direct physical map to `[0, gib GiB)`, publish it as the map
+/// every later root installs, and patch it into the live root so the
+/// running hart reaches a frame by pointer immediately.
+///
+/// Called once from the boot path, on the boot hart after the MMU is on and
+/// before anything reaches a frame by pointer. The live root is reached
+/// through `frames` — the source that drew it — so this dereferences no
+/// physical address of its own, and the map itself needs no page tables:
+/// each covered gigabyte is one root-level leaf.
+///
+/// Returns `false`, having changed nothing, for a `gib` of zero or wider
+/// than [`MAX_PHYSMAP_GIB`], for a second call, or when `frames` cannot
+/// reach the live root; the caller then fails the boot rather than running
+/// on RAM it cannot address.
+#[must_use]
+pub fn install_boot_physmap(frames: &dyn PageTableFrames, gib: usize) -> bool {
+    // Reached before publishing, so a root the source cannot vouch for
+    // leaves the map unpublished rather than claimed-but-absent.
+    let Some(table) = frames.table_at(active_root_phys()) else {
+        return false;
+    };
+    if !publish_physmap(gib) {
+        return false;
+    }
+    // SAFETY: `active_root_phys` names this hart's live root table and
+    // `frames` is the source that drew it, so its view is dereferenceable.
+    // The boot root's constructing `AddressSpace` handle is dropped before
+    // the boot path reaches here and no other hart is started yet, so this
+    // `&mut` is unique; the only entries written are the map's own slots,
+    // which the identity fill never reaches and no other writer touches.
+    let root = unsafe { &mut *table };
+    install_physmap_slots(root);
+    publish_table_update();
+    true
+}
+
+/// Copy the published direct-map leaves into `root`'s claimed slots.
+///
+/// Every root constructor calls this, so no space can be built without the
+/// map. An invalid-to-valid leaf needs no invalidation, only the fence the
+/// callers issue.
+fn install_physmap_slots(root: &mut [u64; ENTRIES_PER_TABLE]) {
+    for (offset, slot) in PHYSMAP_ROOT.iter().enumerate() {
+        let entry = slot.load(Ordering::Acquire);
+        if entry != 0 {
+            root[PHYSMAP_FIRST_SLOT + offset] = entry;
+        }
+    }
+}
+
+/// `true` when root-table slot `index` is the kernel's — the direct
+/// physical map, or the remap window above it.
+///
+/// The port's user region stops exactly at the first of them, so this is
+/// also "not addressable by a user program".
+const fn is_kernel_slot(index: usize) -> bool {
+    index >= PHYSMAP_FIRST_SLOT
+}
 
 /// The window's shared root-table entries, one per claimed slot, or `0`
 /// before [`reserve_kernel_window`] runs.
@@ -835,16 +1034,21 @@ const _: () = assert!(
     "the kernel remap window must stay in the upper half of the Sv39 range"
 );
 
-/// Base virtual address of the kernel remap window.
+/// Canonical virtual address of upper-half root slot `slot`.
 ///
 /// Sv39 addresses are sign-extended from bit 38, so a root slot in the
 /// upper half of the table names an *upper-half* virtual address: bits
-/// 63:39 must all be set. Spelling the base as the bare `slot << 30` would
-/// be non-canonical and fault on every access.
+/// 63:39 must all be set. Spelling a base as the bare `slot << 30` would be
+/// non-canonical and fault on every access, so both upper-half windows —
+/// the remap window and the direct physical map — derive theirs here.
+const fn upper_half_slot_base(slot: usize) -> u64 {
+    (u64::MAX << 39) | ((slot as u64) << 30)
+}
+
+/// Base virtual address of the kernel remap window.
 #[must_use]
 pub const fn kernel_window_base() -> u64 {
-    const UPPER_HALF: u64 = u64::MAX << 39;
-    UPPER_HALF | ((KERNEL_WINDOW_FIRST_SLOT as u64) << 30)
+    upper_half_slot_base(KERNEL_WINDOW_FIRST_SLOT)
 }
 
 /// A window whose extent is not representable is refused at run time, which

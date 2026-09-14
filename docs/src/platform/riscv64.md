@@ -40,8 +40,10 @@ Boot sequence:
    `/cpus` `timebase-frequency`. It is host-tested against a hand-built
    DTB fixture.
 3. **Sv39 MMU + trap vector + dispatch (RV-P2,
-   `boot_riscv64::enable_mmu_and_vectors`).** Identity-maps the whole low
-   Sv39 window (`[0, 512 GiB)`, 1 GiB leaves) over a `.bss`-resident
+   `boot_riscv64::enable_mmu_and_vectors`).** Identity-maps Sv39's whole
+   canonical lower half (`[0, 256 GiB)`, 1 GiB leaves — the widest extent
+   where a root slot's virtual address *is* the physical address it maps)
+   over a `.bss`-resident
    `PageTablePool`, writes `satp`, and points `stvec` at the S-mode trap
    vector (`trap::install_trap_vector`, no asynchronous interrupts
    enabled yet) so the `kernel_core` allocator/scheduler atomics run on
@@ -53,7 +55,9 @@ Boot sequence:
 4. **Boot pipeline (`tairix_kernel::boot_riscv64::boot`).** Builds a
    `BootMemoryMap` reserving `[ram_base, __kernel_end)` (firmware +
    kernel image + boot heap) and marking `[__kernel_end, ram_end)`
-   usable, constructs `RiscvArch` (`kernel_arch.rs`, the arch port's
+   usable, installs the direct physical map over the discovered RAM
+   before anything reaches a frame by pointer (see **The direct physical
+   map** below), constructs `RiscvArch` (`kernel_arch.rs`, the arch port's
    `tairix_arch_api::SchedulerArch` impl whose monotonic clock reads the
    `time` CSR via `rdtime`) wrapped in the downstream `RiscvBinArch`
    `kernel_core::KernelArch` adapter (orphan rules), assembles a
@@ -65,10 +69,13 @@ Boot sequence:
 RV-P2 runs the production path **paged**. The board enters S-mode with
 paging off; step 3 turns the Sv39 identity MMU on before any
 allocator/scheduler work. Because the map is identity (physical ==
-virtual) and covers the whole low window, every physical address the
-board uses — the kernel image, the firmware DTB, the PLIC, the `virt`
-MMIO window, and the per-device DMA regions the device-bring-up
-verticals carve — keeps its address under translation. The boot heap is
+virtual) and covers the whole canonical lower half, every physical
+address the board uses — the kernel image, the firmware DTB, the PLIC,
+the `virt` MMIO window, and the per-device DMA regions the
+device-bring-up verticals carve — keeps its address under translation.
+RAM above that half is reached through the direct physical map instead,
+which lives in the upper half and is what every kernel path that touches
+a *frame* resolves through. The boot heap is
 a 64 MiB `.heap` (NOLOAD) section the linker places *after*
 `__kernel_end`, so the trampoline does not zero it and the usable
 physical-memory map excludes it.
@@ -111,7 +118,8 @@ three things on the `BootInfo` hand-off:
   input backing is a later increment).
 - **PID 1 spawn seam (`with_init`).** `riscv64::init_spawn::RiscvInitSpawn`
   builds the embedded `init` (`Run`) program's image in its own Sv39
-  address space (`IDENTITY_GIB = 4`, user bias 64 GiB), switches to it,
+  address space (the shared 4 GiB `identity_gigapages()` window plus the
+  direct physical map, user bias 64 GiB), switches to it,
   and dispatches it into U-mode through the capability-checked, audited
   `kernel_core::spawn_image` + `admit_init` (gated on `CAP_PROC_SPAWN`).
   Its `pre_resume` hook reactivates PID 1's `satp` root before every
@@ -957,13 +965,98 @@ the same R/W/X), then walks the table (reusing `map_4k`, one walk, §2.2)
 and fails closed (`Misaligned`/`AlreadyMapped`/`PoolExhausted`/
 `InvalidFlags`). `root_phys` returns the root table's address and
 `activate` forwards to the gated `switch` (the `satp` write +
-`sfence.vma`). Because the walk recovers intermediate tables through the
-identity map (phys == virt), the whole `map_page` path is host-runnable:
+`sfence.vma`). Because the walk recovers each intermediate table through
+the `PageTableFrames` source that drew it — never by dereferencing the
+physical address a parent entry holds — the whole `map_page` path is
+host-runnable:
 `passes_mmu_conformance` drives `mmu::conformance::run_all` over a real
 `AddressSpace`, and a companion host test asserts the flag translation and
 the resulting leaf bits. The `satp` write itself is proven by
 `memory_isolation_qemu_riscv64`, which now builds its victim/attacker
 spaces through this trait.
+
+A user leaf is refused outright in any kernel root slot
+(`is_kernel_slot` — the direct physical map and the remap window above
+it), with `MapError::InvalidFlags` rather than whatever the kernel's own
+shared windows happen to have mapped there. The window allocators already
+bound every user address below the half, so this is the fail-closed floor
+under them rather than the only check.
+
+### The direct physical map
+
+Every kernel path that reaches a frame by *pointer* — the process-image
+write, the shared-region zero-on-free scrub, the kernel heap's slab page
+supply, the root-unlock DMA pool, a page-table walk's own table recovery —
+resolves through the port's direct physical map, published as the one
+`spawn_producer::SPAWN_TABLE_PHYSMAP`. Physical `p` is reachable at
+`PHYSMAP_VMA_BASE + p`.
+
+**Where it lives, and why not the lower half.** The map claims root slots
+`256..=446`: slot 256 is exactly where the port's user virtual region ends
+(`USER_VA_TOP == 1 << 38`), and slots 447 upward are the kernel remap
+window. Sv39 sign-extends from bit 38, so `PHYSMAP_VMA_BASE` is
+`0xFFFF_FFC0_0000_0000`, and — because a root-level Sv39 leaf *is* a 1 GiB
+page — 191 slots give **191 GiB** of reach for no page tables at all. Three
+properties fall out of that placement, and all three were defects while the
+map was a 4 GiB identity window (`plans/OPEN-DEFECTS.md` D56):
+
+* **Its extent is bounded by the architecture, not by the child image.** A
+  lower-half map had to stop short of the user image bias
+  (`spawn_layout::CHILD_USER_BIAS`, 64 GiB) or it would have mapped RAM over
+  a child's own pages; this port stopped at 4 GiB, so every frame a board
+  had above that failed its translate and its consumer failed closed.
+* **No user address can name it.** The user region *is* the canonical lower
+  half, so the map's slots are unreachable from U-mode by construction — a
+  build-time pin in `riscv64.rs`, not a run-time check — and a user leaf in
+  one is refused by the walk regardless.
+* **A process pays no pages for it.** A root's whole share of the map is its
+  own root entries: `install_physmap_slots` copies the published gigapage
+  leaves into every root both constructors build, so no space can exist
+  without the map and none draws a table for it.
+
+**Installing it.** There is no boot trampoline laying a floor here — the
+boot root is built in Rust (step 3) — so the map is installed once, from the
+discovered map, with no floor/widen split:
+
+* `mem_map::direct_map_gib` takes the top of the highest **usable** region
+  rounded up to a gigabyte, floored at zero and capped at
+  `paging::MAX_PHYSMAP_GIB`. The floor is zero rather than an MMIO window
+  because this kernel is identity-linked: the board MMIO and firmware
+  tables the boot path has already read stay on the identity window, which
+  every root it can execute under carries anyway, so the map owes them
+  nothing.
+* `paging::install_boot_physmap` publishes the extent and its leaves
+  set-once and patches them into the live root, reached through the frame
+  source that drew it (`table_at`) rather than by dereferencing a physical
+  address. It fails closed (`BootError::DirectMapInstall`): a kernel that
+  cannot address its own RAM refuses to boot rather than discovering it as
+  an allocation failure later.
+* The step sits immediately after the memory map is built and before
+  anything reaches a frame, and the boot hart runs alone there, so the local
+  `sfence.vma` is the whole publication.
+
+`identity_gigapages()` is the one definition of the 4 GiB window every
+*process* root carries, for the kernel's own identity-linked image, stack,
+leaked state, and board MMIO. That is a bound on where the hardware puts
+those things, not a capacity — and a board whose kernel image ends above it
+is refused at boot (`BootError::KernelAboveIdentityWindow`) rather than
+faulting on the first switch into a task's root.
+
+RAM above `MAX_PHYSMAP_GIB` (191 GiB) is unreachable by pointer, the
+early-boot RAM self-test reports it as `unreachable_bytes`, and every
+consumer of such a frame fails closed. That ceiling is the Sv39 layout, not
+a policy.
+
+`tests/integration/physmap_qemu_riscv64` proves it end to end: a 3072 MiB
+guest (the `virt` board bases RAM at `0x8000_0000`, so its RAM tops out at
+5 GiB and clears the old four-gigabyte window) boots the production
+pipeline, and the observer requires that the map was sized past that window,
+that the RAM self-test left **no** usable byte unreachable, and that the
+live structure holds — the hardware reading a known frame back through the
+map, the map's slot disjoint from every user address, a user leaf refused in
+it, and a high physical address resolving to nothing under a process root. A
+failing structural check names itself on the serial, so a regression reports
+its cause rather than a bare non-zero exit.
 
 ### Kthread kernel stacks and their guard page
 

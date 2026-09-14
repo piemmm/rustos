@@ -45,7 +45,7 @@ use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
-use tairix_kernel::riscv64::boot::{RiscvBinArch, RISCV_UART_CONSOLES};
+use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UART_CONSOLES};
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
 use tairix_kernel::spawn_layout::{USER_STACK_COMMIT_PAGES, USER_STACK_RESERVE_PAGES};
 use tairix_kernel_core::{
@@ -146,6 +146,7 @@ const FAIL_BIAS: NonZeroU16 = fail_point!(11);
 const FAIL_POLL: NonZeroU16 = fail_point!(12);
 const FAIL_DRAINED: NonZeroU16 = fail_point!(13);
 const FAIL_PARENT_STOPPED: NonZeroU16 = fail_point!(14);
+const FAIL_PAGING: NonZeroU16 = fail_point!(15);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -291,9 +292,11 @@ static PROGRAMS: ProgramRegistry = ProgramRegistry::new(&CHILD_PROGRAMS);
 /// Bring the board up: parse the live `virt` device tree OpenSBI passed in
 /// `a1` for the timebase, install the S-mode trap vector, and install the
 /// dispatch callback + user-fault resolver. The kernel itself runs with
-/// translation off (`satp = 0`), so no boot identity space is built — the
-/// spawn producer walks each child's Sv39 tables through the fixed
-/// `[0, 4 GiB)` identity window. Returns the discovered timebase.
+/// bring paging up through the one production sequence
+/// (`boot_riscv64::enable_paging_and_direct_map`) — the boot identity space
+/// plus the direct physical map — because the production spawn producer
+/// reaches each child's Sv39 tables *through* that map. Returns the
+/// discovered timebase.
 fn bring_up_board(dtb: u64) -> u64 {
     // SAFETY: `dtb` is the verbatim `a1` pointer from OpenSBI; it addresses
     // a valid flattened device tree that lives for the life of the guest.
@@ -305,6 +308,16 @@ fn bring_up_board(dtb: u64) -> u64 {
     };
     if timebase_hz == 0 {
         qemu_exit::exit_failure(FAIL_ZERO_FREQ);
+    }
+
+    // Bring paging up before the trap vector, so the handler address the
+    // vector names resolves under the regime that will be in force. A
+    // refusal is fatal: the producer cannot reach a child's tables without
+    // the map.
+    // SAFETY: `dtb` is the verbatim `a1` pointer (as above), and this is the
+    // boot hart's single call.
+    if boot_riscv64::enable_paging_and_direct_map(dtb).is_err() {
+        qemu_exit::exit_failure(FAIL_PAGING);
     }
 
     // Install the trap vector + the callbacks before any user task runs.

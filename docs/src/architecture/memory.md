@@ -540,8 +540,9 @@ composing the layers above:
   map (`PhysMap`): `bytes` / `bytes_mut` / `slot_base` translate the buffer's
   `phys` into a pointer. The CPU therefore sees exactly the frames the device
   DMAs to — there is no disconnected copy. Production wires the port's own
-  direct map (`x86_64`: the kernel-half window at `PHYSMAP_VMA_BASE`;
-  `aarch64`/`riscv64`: an identity window over low physical memory); host
+  direct map (`x86_64` and `riscv64`: a window above the user region at
+  `PHYSMAP_VMA_BASE`, sized from the discovered RAM; `aarch64`: an identity
+  window over low physical memory); host
   tests wire a `SimPhysMap` standing in for physical RAM.
 - **Zero-on-free** — every byte of the data region is wiped with
   [`zeroize`](https://crates.io/crates/zeroize) before the frames return to

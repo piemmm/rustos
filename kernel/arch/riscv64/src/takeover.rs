@@ -26,13 +26,17 @@
 //! [`RiscvMachineTakeover::take_over`] performs, in order and without ever
 //! returning on success (every other hart already quiesced):
 //!
-//! 1. **Mask S-mode interrupts** (`sstatus.SIE = 0`, `sie = 0`) so nothing
+//! 1. **Install the reserved boot kernel root** (the permanent root the
+//!    dispatcher parks every hart on). It is the only root whose tables
+//!    live wholly in the kernel image's `.bss` rather than in
+//!    allocator-backed frames, so the sweep cannot destroy the translation
+//!    it is running under; it carries both the lower-half identity window
+//!    and the direct physical map, so the `pc`, the console, and the RAM the
+//!    sweep writes all keep resolving. With no root published this refuses
+//!    [`TakeoverError::PrepareFailed`] before anything is torn down.
+//! 2. **Mask S-mode interrupts** (`sstatus.SIE = 0`, `sie = 0`) so nothing
 //!    preempts the solitary hart. There is no lockup watchdog wired on this
 //!    port, so there is none to stop.
-//! 2. **Flatten paging** to bare mode (`satp = 0`). The kernel runs under an
-//!    Sv39 *identity* map (`virtual == physical`), so dropping to bare mode
-//!    leaves every address — the running `pc`, the boot page tables, the
-//!    console MMIO — resolving to the same physical byte; nothing moves.
 //! 3. **Switch onto a reserved stack** the sweep will not overwrite and run
 //!    the caller's `sweep` (the arch-neutral whole-RAM test of every *usable*
 //!    frame, which renders progress to the console). The Supervisor's
@@ -41,13 +45,26 @@
 //!    return, the hart parks in a masked `wfi` halt rather than resume kernel
 //!    code — the machine has been torn down.
 //!
+//! # Why paging stays on
+//!
+//! Bare mode (`satp = 0`) was the earlier step 1, on the reasoning that an
+//! identity-mapped kernel keeps every address under it. That stopped being
+//! true when the direct physical map moved above the user region: the sweep
+//! reaches RAM through the map, whose addresses bare mode resolves to
+//! nowhere. Keeping paging on is also what the sibling ports do and for the
+//! same reason — the requirement is not that paging be *off* but that the
+//! sweep never depend on a page-table frame in the usable RAM it is about to
+//! destroy, which installing the reserved boot root satisfies directly.
+//! Bare mode additionally makes every access Device-typed on real silicon,
+//! exactly the hazard the aarch64 port documents.
+//!
 //! The one region the sweep cannot test is the memory it executes from — the
 //! kernel image and its reserved stack — because a continuous run must keep
 //! that resident image intact to go on running, exactly as a running memtest86
 //! cannot test its own resident code.
 //!
-//! This body owns no pre-teardown refusal of its own; the quiesce refusal is
-//! the caller's and is fail-closed there.
+//! The quiesce refusal is the caller's and is fail-closed there; the only
+//! refusal this body owns is an unpublished boot root, above.
 
 use tairix_arch_api::{MachineTakeover, TakeoverError};
 
@@ -118,25 +135,27 @@ impl MachineTakeover for RiscvMachineTakeover {
         // hart is the only one running. This body owns only the single-hart
         // tear-down that follows.
 
-        // 1. Mask S-mode interrupts so nothing preempts the solitary hart:
+        // 1. Install the reserved boot kernel root, so the translation the
+        //    sweep runs under is one whose tables the sweep cannot destroy.
+        //    Done first, and before any interrupt masking, because it is the
+        //    one step that may refuse: it is the routine park every task
+        //    suspend performs, so a refusal leaves the machine exactly as it
+        //    was and the caller keeps its REPL.
+        if !crate::paging::park_kernel_root() {
+            // The mechanism reports only failure, so the audit payload is 0.
+            return TakeoverError::PrepareFailed(0);
+        }
+
+        // 2. Mask S-mode interrupts so nothing preempts the solitary hart:
         //    clear `sstatus.SIE`, then disable every S-mode interrupt
-        //    source (`sie = 0`). There is no lockup watchdog wired on this
-        //    port, so there is none to stop.
-        // 2. Flatten paging to bare mode (`satp = 0`) and flush the TLB.
-        //    The kernel runs identity-mapped (virtual == physical), so
-        //    every address keeps resolving to the same physical byte.
-        // SAFETY: all four are well-defined S-mode CSR operations. Masking
-        // interrupts and flattening paging are the deliberate, confirmed
-        // tear-down the caller's `TakeoverGrant` authorises. `sfence.vma`
-        // (both operands `x0`) discards the stale Sv39 translations so the
-        // bare-mode regime is in force before the next fetch; because the
-        // map was identity, `pc`/`sp`/MMIO all keep their addresses.
+        //    source (`sie = 0`).
+        // SAFETY: both are well-defined S-mode CSR writes, and masking is the
+        // deliberate, confirmed tear-down the caller's `TakeoverGrant`
+        // authorises. Neither touches memory nor moves any translation.
         unsafe {
             core::arch::asm!(
                 "csrci sstatus, 2",
                 "csrw sie, zero",
-                "csrw satp, zero",
-                "sfence.vma",
                 options(nostack, preserves_flags),
             );
         }
@@ -162,8 +181,8 @@ impl MachineTakeover for RiscvMachineTakeover {
 ///
 /// # Safety
 ///
-/// Reached only from [`RiscvMachineTakeover::take_over`] after interrupts
-/// are masked and paging is flattened. `thin` is a live pointer to the
+/// Reached only from [`RiscvMachineTakeover::take_over`] after the reserved
+/// boot root is installed and interrupts are masked. `thin` is a live pointer to the
 /// caller's `&mut dyn FnMut()` sweep handle, whose environment resides in
 /// reserved memory the sweep does not destroy.
 #[no_mangle]
@@ -175,11 +194,11 @@ unsafe extern "C" fn tairix_arch_riscv64_takeover_continue(thin: usize) -> ! {
     sweep();
     // The Supervisor's `memtest` sweep loops until the operator resets the
     // board, so control never reaches here. If a future finite sweep ever
-    // returned, the machine has been torn down (paging flattened, usable RAM
-    // overwritten) and must not resume kernel code, so park the sole hart.
+    // returned, the machine has been torn down (usable RAM overwritten) and
+    // must not resume kernel code, so park the sole hart.
     loop {
-        // SAFETY: interrupts are masked and paging is flattened; `wfi` merely
-        // idles the parked hart until the operator resets the machine.
+        // SAFETY: interrupts are masked; `wfi` merely idles the parked hart
+        // until the operator resets the machine.
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
         }

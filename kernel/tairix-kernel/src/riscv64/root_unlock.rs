@@ -31,7 +31,7 @@ use tairix_kernel_core::{
     NULL_CONSOLE_READ,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
-use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
@@ -40,8 +40,8 @@ use tairix_reclaim::MemoryPressure;
 
 use crate::driver_catalog::VIRTIO_BLK_PATH;
 use crate::driver_loader::KernelDriverLoader;
-use crate::riscv64::boot::IDENTITY_GIGABYTES;
 use crate::riscv64::irq::{plic_controller, published_irq_table};
+use crate::riscv64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use crate::root_storage::RootBlockBinding;
 use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
@@ -58,14 +58,14 @@ const MMIO_CAP_PAGES: usize = 64;
 /// Identity extent, in GiB, the throwaway bookkeeping MMIO/DMA Sv39 spaces
 /// map. Their identity coverage is irrelevant to reachability — their tables
 /// are written through the live boot MMU, and device access is via the
-/// identity [`DirectPhysMap`] — so this need only leave the window bases
+/// kernel's direct physical map — so this need only leave the window bases
 /// (below) above it; 4 GiB comfortably covers the kernel image + low RAM.
 const BOOKKEEPING_GIB: usize = 4;
 
 /// Bookkeeping virtual base of the MMIO register-window map. Above
 /// [`BOOKKEEPING_GIB`] and inside the Sv39 canonical lower half (`< 256 GiB`)
 /// so it never collides with an identity gigapage. Pure bookkeeping — the
-/// driver reaches the window through the identity map.
+/// driver reaches the window through the direct physical map.
 const MMIO_VBASE: u64 = 64 << 30;
 
 /// Bookkeeping virtual base of the minted per-driver DMA window (see
@@ -78,14 +78,6 @@ const POOL_VBASE: u64 = 128 << 30;
 /// pools. The spaces are never made live; the pool only backs the
 /// guard-bracketed window accounting `kernel/mem` performs.
 static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
-
-/// The production riscv64 identity-map extent the device physical map reaches
-/// frames and register windows through — the same `[0, IDENTITY_GIGABYTES GiB)`
-/// window the live boot MMU maps, so the map matches the boot identity extent
-/// rather than a fresh guess.
-fn identity_limit() -> u64 {
-    (IDENTITY_GIGABYTES as u64) << 30
-}
 
 /// Race-free hart park for a device wait whose context cannot be
 /// scheduler-parked — the boot kthreads bringing the disk up and serving the
@@ -344,18 +336,15 @@ fn virtio_blk_unlock<'a>(
     // enabled it before `try_boot`).
     let bus =
         unsafe { virtio_mmio_bus_from_dtb(dtb_bytes) }.map_err(|_| "root-unlock: virtio bus")?;
-    // The device backing is boot-leaked to `'static`: the brought-up disk is
-    // shared for the life of the system by two independent preemptive tasks
-    // (the driver-store serve task and the encrypted-root unlock task), so its
-    // backing must outlive both frames. Safe `Box::leak`, never an `unsafe`
-    // lifetime cast.
-    let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        DirectPhysMap::identity(identity_limit()),
-    ));
-    // Two throwaway bookkeeping Sv39 spaces (device access is via the boot
-    // identity map through `phys`): one for the MMIO window map, one for the
-    // DMA pool. Each identity-maps a small low extent; the window VAs sit above
-    // it so they never collide with an identity gigapage.
+    // Device registers and DMA frames are reached through the kernel's one
+    // direct physical map, whose extent the boot path sized from the
+    // discovered RAM: the DMA pool's frames come from the allocator and may
+    // sit anywhere in it, well above the process-root identity window.
+    let phys = &SPAWN_TABLE_PHYSMAP;
+    // Two throwaway bookkeeping Sv39 spaces (device access is via `phys`):
+    // one for the MMIO window map, one for the DMA pool. Each identity-maps a
+    // small low extent; the window VAs sit above it so they never collide
+    // with an identity gigapage.
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, BOOKKEEPING_GIB)
         .ok_or("root-unlock: mmio bookkeeping space")?;
     let mmio: &'static mut MmioMap<'static, _> = alloc::boxed::Box::leak(alloc::boxed::Box::new(

@@ -345,9 +345,17 @@ operator resets the board (if a sweep ever returned, the sole CPU parks in a
 masked halt rather than resume kernel code). Each port parks a stopped CPU from
 its own IPI-receive path
 (`on_ipi_interrupt` / the timer dispatch / `on_software_interrupt`).
-**riscv64** flattens paging (bare mode `satp = 0` — it is identity-mapped, so
-`virt==phys` survives with no page-table walk), so the sweep addresses physical
-RAM directly. **aarch64 keeps its MMU on**: it is already identity-mapped
+**riscv64 installs the reserved boot kernel root** (`park_kernel_root`, the
+permanent root the dispatcher parks every hart on): it is the only root whose
+tables live wholly in the kernel image's `.bss`, so the sweep cannot destroy
+the translation it runs under, and it carries both the lower-half identity
+window and the direct physical map the sweep writes RAM through. No root
+published refuses `PrepareFailed` before anything is torn down. It used to
+flatten to bare mode instead, on the reasoning that an identity-mapped kernel
+keeps every address — which stopped holding when the direct physical map moved
+above the user region (`plans/OPEN-DEFECTS.md` D56); bare mode would also make
+every access Device-typed on real silicon, exactly the aarch64 hazard below.
+**aarch64 keeps its MMU on**: it is already identity-mapped
 (`virt==phys`, Normal cacheable), and dropping the MMU would be *wrong* on real
 silicon — an MMU-off EL1 makes every access Device-nGnRnE, where an unaligned
 access faults, so an MMU-off sweep wedges the board (the defect that locked a

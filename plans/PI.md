@@ -1565,8 +1565,9 @@ riscv64, mirroring the aarch64 P-stage arc.
   `BootInfo::with_init`/`with_spawn`, alongside the SBI-console
   `with_console` backing (`RiscvUartConsole` over the new verbatim
   `serial::write_console_bytes`). After `BootCompleted`, `kernel_main`
-  drops PID 1 `init` into U-mode (its own Sv39 root, `IDENTITY_GIB = 4`,
-  a window-backed hardware-guarded kernel stack), `init`
+  drops PID 1 `init` into U-mode (its own Sv39 root, the shared 4 GiB
+  `spawn_producer::identity_gigapages()` window plus the direct physical
+  map, a window-backed hardware-guarded kernel stack), `init`
   writes its banner through `stream_write` and
   issues the `CAP_PROC_SPAWN`-gated `spawn` for `/System/Commands/elsh.app/Run`; the
   producer builds the session a fresh, hardware-isolated space from the

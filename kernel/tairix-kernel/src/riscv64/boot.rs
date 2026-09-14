@@ -23,14 +23,20 @@
 //!    firmware + kernel-image + boot-heap span `[ram_base,
 //!    __kernel_end)` and marks `[__kernel_end, ram_end)` usable
 //!    ([`build_boot_memory_map`]).
-//! 4. Construct the [`RiscvBinArch`] handle (boot hart + timebase) and
+//! 4. Install the direct physical map over that RAM
+//!    ([`tairix_arch_riscv64::paging::install_boot_physmap`]), before
+//!    anything reaches a frame by pointer, and refuse a board whose
+//!    kernel image ends above the process-root identity window.
+//! 5. Construct the [`RiscvBinArch`] handle (boot hart + timebase) and
 //!    assemble the `BootInfo`.
 //!
-//! RV-P2 runs the production path **paged**: the boot identity-maps the
-//! whole low Sv39 window with 1 GiB leaves, so every physical address
-//! the board uses (the kernel image, the firmware DTB, the PLIC, the
-//! `virt` MMIO window, and the carved DMA regions the device-bring-up
-//! verticals read) keeps its address under translation. Enabling
+//! RV-P2 runs the production path **paged**: the boot identity-maps
+//! Sv39's whole canonical lower half with 1 GiB leaves, so every physical
+//! address the board uses (the kernel image, the firmware DTB, the PLIC,
+//! the `virt` MMIO window, and the carved DMA regions the
+//! device-bring-up verticals read) keeps its address under translation,
+//! and RAM is additionally reached above the user region through the
+//! direct physical map (step 4). Enabling
 //! asynchronous interrupts (the timer/PLIC) and dropping PID 1 into
 //! user mode are staged follow-ups (`plans/PI.md` RV-P3), exactly as the
 //! aarch64 port reached this point before P6c-3 wired user mode.
@@ -62,7 +68,7 @@ use tairix_arch_api::{CpuId, SchedulerArch};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::irqmask::{SstatusIrqControl, SstatusState};
-use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
+use tairix_arch_riscv64::paging::{self, AddressSpace, PageTablePool};
 use tairix_arch_riscv64::{
     halt_current_hart, serial, syscall_entry, trap, RiscvArch, RiscvArchStorage, SERIAL_SINK,
 };
@@ -96,24 +102,7 @@ const KERNEL_BOOT_INIT_FAILED: EventId = EventId(4099);
 /// boot module compiles per image, so the id never collides at runtime.
 const KERNEL_BOOT_RISCV64_REACHED: EventId = EventId(4097);
 
-/// Number of 1 GiB identity gigapages the boot address space maps.
-///
-/// This covers the Sv39 low VA range below the growable kernel heap's remap
-/// window, so the kernel image, stack, the firmware DTB, the PLIC, and the
-/// `virt`-board MMIO window all keep their physical addresses once the MMU
-/// is on — whatever their addresses, with no `cfg(board)` fork. Identity
-/// mapping makes physical == virtual, so the device-bring-up verticals that
-/// read MMIO/DMA at physical addresses keep working under the paged regime.
-/// The figure comes from the port, which owns both the window's placement
-/// and the identity extent below it, so the two cannot drift into overlap.
-///
-/// `pub(crate)` so the root-unlock bring-up ([`crate::riscv64::root_unlock`])
-/// sizes its device physical map ([`tairix_kernel_mem::DirectPhysMap`]) to the
-/// same identity extent the live boot MMU maps, rather than repeating the
-/// figure (one definition).
-pub(crate) const IDENTITY_GIGABYTES: usize = tairix_arch_riscv64::paging::IDENTITY_GIGAPAGES;
-
-/// Boot-time page-table frame source for the Sv39 identity map.
+/// Boot-time page-table frame source for the boot root.
 ///
 /// A single root table holds every gigapage leaf, so the pool only
 /// ever hands out one frame here. It lives in `.bss` for the lifetime of
@@ -428,8 +417,8 @@ impl KernelArch for RiscvBinArch {
         // invalidation.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
         {
-            // The frame source carries the identity physical map itself;
-            // `physmap` backs the *caller's* own bookkeeping.
+            // The frame source carries the kernel's direct physical map
+            // itself; `physmap` backs the *caller's* own bookkeeping.
             let _ = physmap;
             let tables = crate::riscv64::spawn_producer::page_table_source(frames).ok()?;
             let window = tairix_arch_riscv64::paging::reserve_kernel_window(tables)?;
@@ -451,10 +440,10 @@ impl KernelArch for RiscvBinArch {
     }
 
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
-        // The identity direct map (`virtual == physical` over the configured
-        // `[0, IDENTITY_GIB GiB)` window, covering RAM) the shared-memory
-        // facility scrubs region frames through. On a host build there is no
-        // S-mode RAM to map, so none is offered and `shm_*` stays fail-closed.
+        // The one direct physical map, sized from the discovered RAM, that
+        // the shared-memory facility scrubs region frames through. On a host
+        // build there is no S-mode RAM to map, so none is offered and `shm_*`
+        // stays fail-closed.
         #[cfg(all(freestanding, kernel_isa = "riscv64"))]
         {
             Some(&crate::riscv64::spawn_producer::SPAWN_TABLE_PHYSMAP)
@@ -632,6 +621,18 @@ pub enum BootError {
     /// The boot page-table pool could not satisfy the Sv39 identity
     /// map, so the MMU could not be enabled (`plans/PI.md` RV-P2).
     MmuEnableFailed,
+    /// The direct physical map could not be installed over the discovered
+    /// RAM: the sized extent was outside what the claimed root slots can
+    /// express, or the live root could not be reached through the source
+    /// that drew it. Every kernel path that reaches a frame by pointer
+    /// would then fail closed while the allocator kept handing out frames,
+    /// so the boot refuses rather than running on RAM it cannot reach.
+    DirectMapInstall,
+    /// The kernel image ends above the identity window every process root
+    /// carries, so the kernel would lose its own `pc` the moment a task's
+    /// root became active. Such a board can never spawn a process; the boot
+    /// says so here rather than faulting on the first `activate`.
+    KernelAboveIdentityWindow,
     /// `BootInfo::validate` rejected the assembled hand-off.
     BootInfoInvalid,
 }
@@ -647,6 +648,8 @@ impl BootError {
             Self::NoTimebase => "no_timebase_frequency",
             Self::UsableRegionEmpty => "usable_region_empty",
             Self::MmuEnableFailed => "mmu_enable_failed",
+            Self::DirectMapInstall => "direct_map_install_failed",
+            Self::KernelAboveIdentityWindow => "kernel_above_identity_window",
             Self::BootInfoInvalid => "bootinfo_invalid",
         }
     }
@@ -733,26 +736,96 @@ fn memory_map_from_fdt(fdt: &Fdt<'_>, dtb_base: u64) -> Result<BootMemoryMap, Bo
 /// keeps pointing at [`BOOT_PAGE_TABLES`]' root table, which lives for
 /// the kernel's lifetime.
 fn enable_mmu_and_vectors() -> bool {
-    let Some(space) = AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, IDENTITY_GIGABYTES)
+    if !enable_boot_mmu() {
+        return false;
+    }
+    // SAFETY: `install_trap_vector` points `stvec` at the handler (without
+    // enabling any interrupt source) so a synchronous fault during the
+    // remaining bring-up is taken to a handler. Run once, here, on the boot
+    // hart, after the MMU above made the handler's address resolve.
+    unsafe { trap::install_trap_vector() };
+    true
+}
+
+/// Build the Sv39 boot identity space over [`BOOT_PAGE_TABLES`] and make it
+/// this hart's active translation regime, or return `false` leaving `satp`
+/// untouched when the pool cannot supply the root table.
+fn enable_boot_mmu() -> bool {
+    let Some(space) =
+        AddressSpace::new_identity_gigapages(&BOOT_PAGE_TABLES, paging::IDENTITY_GIGAPAGES)
     else {
         return false;
     };
-    // SAFETY: `new_identity_gigapages` identity-maps
-    // `[0, IDENTITY_GIGABYTES GiB)` — everything below the kernel remap
-    // window — so
-    // the executing `pc`, the boot stack, the firmware DTB, the PLIC,
-    // and the `virt` MMIO window all keep their physical addresses —
-    // enabling the MMU does not move the ground under the running code,
-    // exactly as `AddressSpace::switch`'s contract requires.
-    // `install_trap_vector` then points `stvec` at the handler (without
-    // enabling any interrupt source) so a synchronous fault during the
-    // remaining bring-up is taken to a handler. Both run once, here, on
-    // the boot hart.
-    unsafe {
-        space.switch();
-        trap::install_trap_vector();
-    }
+    // SAFETY: `new_identity_gigapages` identity-maps the whole canonical
+    // lower half — everything below the kernel's own upper-half windows — so
+    // the executing `pc`, the boot stack, the firmware DTB, the PLIC, and the
+    // `virt` MMIO window all keep their physical addresses; enabling the MMU
+    // does not move the ground under the running code, exactly as
+    // `AddressSpace::switch`'s contract requires. Run once on the boot hart.
+    unsafe { space.switch() };
     true
+}
+
+/// Size the direct physical map from `map`, install it, and refuse a board
+/// whose kernel image ends above the identity window every process root
+/// carries.
+///
+/// The map has to be live before anything reaches a *frame* by pointer:
+/// every later frame view — the RAM self-test, the page-table frame source,
+/// the slab page supply, the spawn image write, the root-unlock DMA pool —
+/// resolves through it, so a machine with more RAM than the identity window
+/// covers is reachable rather than fail-closed above it. No floor is passed:
+/// unlike a higher-half-linked port this kernel is identity-linked, so the
+/// board MMIO the boot path has already read stays on the identity window
+/// and the map owes it nothing. It costs no page tables — each covered
+/// gigabyte is one root-level Sv39 leaf.
+///
+/// The image check is here because a process root identity-maps only that
+/// low window while the kernel keeps executing under whichever root a task
+/// installs: a board whose image ends above it could never have a process
+/// root activated under it, so the boot says so rather than faulting on the
+/// first switch into user mode.
+fn install_direct_physical_map(map: &BootMemoryMap) -> Result<(), BootError> {
+    let gib = crate::mem_map::direct_map_gib(map, 0, paging::MAX_PHYSMAP_GIB);
+    if !paging::install_boot_physmap(&BOOT_PAGE_TABLES, gib) {
+        return Err(BootError::DirectMapInstall);
+    }
+    if kernel_end_addr() > (crate::riscv64::spawn_producer::identity_gigapages() as u64) << 30 {
+        return Err(BootError::KernelAboveIdentityWindow);
+    }
+    Ok(())
+}
+
+/// Bring this hart's paging up exactly as the production boot does: the Sv39
+/// boot identity space over the reserved boot pool, then the direct physical
+/// map sized from the RAM the tree at `dtb` describes.
+///
+/// Exposed because this port's spawn producer reaches a child's page tables
+/// *through* that map, so an integration chassis that drives the production
+/// producer must stand it up first — and through this one definition rather
+/// than re-deriving the sequence. Production reaches the same state through
+/// [`boot`], which additionally installs the trap vector, the dispatch
+/// callback, and the boot audit record.
+///
+/// # Errors
+///
+/// [`BootError::MmuEnableFailed`] when the boot pool cannot supply the root
+/// table; [`BootError::Fdt`] / [`BootError::NoMemoryMap`] /
+/// [`BootError::UsableRegionEmpty`] when the tree yields no memory map;
+/// [`BootError::DirectMapInstall`] when the map cannot be installed; and
+/// [`BootError::KernelAboveIdentityWindow`] on a board whose kernel image
+/// ends above the window every process root carries. On any of them the
+/// caller fails closed rather than spawning through a map it does not have.
+///
+/// # SAFETY-INVARIANT
+///
+/// `dtb` is the verbatim `a1` device-tree pointer OpenSBI handed the boot
+/// hart, and this runs once on that hart before any secondary is started.
+pub fn enable_paging_and_direct_map(dtb: u64) -> Result<(), BootError> {
+    if !enable_boot_mmu() {
+        return Err(BootError::MmuEnableFailed);
+    }
+    install_direct_physical_map(&build_boot_memory_map(dtb)?)
 }
 
 /// Boot the kernel on the boot hart and forward to
@@ -1027,6 +1100,12 @@ pub fn try_boot(
     //    the figure the ungated `boot_facts_get` syscall reports.
     let installed_memory_bytes = fdt.first_memory_region().map_or(0, |(_base, size)| size);
     let memory_map = memory_map_from_fdt(&fdt, dtb)?;
+
+    // 2a. Install the direct physical map over the discovered RAM, before
+    //     anything reaches a *frame* by pointer.
+    install_direct_physical_map(&memory_map)?;
+    // Sv39 root leaves are always gigapages, so the map never costs tables.
+    crate::mem_map::log_direct_map(log_sink, paging::physmap_gigapages(), true);
 
     // 3. Assemble the hand-off and validate it before handing control
     //    to the architecture-neutral kernel core.

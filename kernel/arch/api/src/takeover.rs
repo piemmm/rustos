@@ -10,7 +10,7 @@
 //! corrupting the live map would destroy the running kernel. Testing *all*
 //! of RAM therefore requires owning the whole machine: stopping every other
 //! CPU, masking interrupts, stopping the lockup watchdog
-//! (`plans/WATCHDOG.md`), and relocating/flattening paging so a small
+//! (`plans/WATCHDOG.md`), and reprogramming paging onto reserved tables so a small
 //! self-contained test routine can address physical RAM directly — exactly
 //! what memtest86 does. Every one of those steps is architecture-specific
 //! silicon work (the SMP quiesce channel, the interrupt controller, the
@@ -95,7 +95,7 @@
 //!
 //! Unlike [`crate::smp`], a takeover has **no harmless input**: there is no
 //! argument that makes [`MachineTakeover::take_over`] a no-op, so it cannot be
-//! run against a *supported* real port (or the host) without flattening paging
+//! run against a *supported* real port (or the host) without tearing the machine down
 //! and destroying execution. The host [`conformance`] vertical therefore
 //! proves the observable, side-effect-free half of the contract against an
 //! **unsupported** double — the call is object-safe, total (never panics), and
@@ -130,8 +130,9 @@ pub enum TakeoverError {
     /// fail-safe: the caller reports "not supported" and stays in the REPL.
     NotSupported,
     /// The port could not complete the pre-sweep preparation inside
-    /// [`MachineTakeover::take_over`] (it could not flatten/identity-map
-    /// paging, stop the watchdog, or perform the required cache maintenance).
+    /// [`MachineTakeover::take_over`] (it could not install a translation
+    /// regime the sweep cannot destroy, stop the watchdog, or perform the
+    /// required cache maintenance).
     /// Carries the port's raw status for the audit log (`0` where the
     /// mechanism reports only failure). The caller fails closed rather than
     /// running the test on a half-prepared machine.
@@ -168,7 +169,8 @@ impl TakeoverError {
 /// * On any refusal the machine must be left **running and recoverable** — no
 ///   irreversible step taken, no half-torn-down state that wedges the caller,
 ///   and `sweep` must **not** have been called. A port must not begin
-///   flattening paging until it can complete the whole sequence.
+///   reprogramming the translation regime until it can complete the whole
+///   sequence.
 /// * The quiesce is a *bounded* handshake, never an unbounded spin: it
 ///   succeeds only once every other CPU is halted (or there are none), and
 ///   otherwise times out fail-closed within a bounded budget.
@@ -178,10 +180,13 @@ pub trait MachineTakeover {
     ///
     /// The port drives, in order and without handing control back to normal
     /// kernel code: quiesce every other CPU (bounded, fail-closed), mask
-    /// interrupts, stop the lockup watchdog, flatten paging so physical RAM
-    /// is addressed directly, switch onto a reserved stack the sweep cannot
-    /// overwrite, and call `sweep` (the architecture-neutral phase that tests
-    /// every *usable* frame and renders progress). The Supervisor's `memtest`
+    /// interrupts, stop the lockup watchdog, install a translation regime the
+    /// sweep cannot destroy — one whose page tables lie in the reserved
+    /// kernel image rather than in the usable RAM about to be overwritten,
+    /// and through which the direct physical map the sweep writes RAM through
+    /// still resolves — switch onto a reserved stack the sweep cannot overwrite, and
+    /// call `sweep` (the architecture-neutral phase that tests every *usable*
+    /// frame and renders progress). The Supervisor's `memtest`
     /// sweep tests all of RAM continuously and never returns — the operator
     /// ends the run by resetting the machine — so on a supported port this
     /// call runs the sweep and never comes back. Should a `sweep` ever return,
@@ -203,8 +208,8 @@ pub trait MachineTakeover {
     ///
     /// The caller must guarantee this is the confirmed, audited `memtest`
     /// path — the operator has decided to tear the machine down, so
-    /// stopping every other CPU, flattening paging, and overwriting all of
-    /// RAM are the intended, deliberate actions.
+    /// stopping every other CPU, reprogramming the translation regime, and
+    /// overwriting all of RAM are the intended, deliberate actions.
     ///
     /// The caller must further guarantee that `sweep` — its code, the closure
     /// environment behind the `&mut dyn FnMut()`, and every datum it reads or

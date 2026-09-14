@@ -587,6 +587,17 @@ mod test_support;
 #[cfg(test)]
 mod discovery_test_bus;
 
+/// Security-relevant boot decision: how wide the direct physical map the
+/// kernel reaches every RAM frame through ended up.
+///
+/// Logged on every boot that installs one, so a machine whose RAM outruns
+/// the map is visible in the record rather than discovered later as a
+/// fail-closed allocation. Both ports that carry a map emit it, so the id
+/// lives here rather than in either of them. It sits in the
+/// `kernel/core`-owned `4000..5000` range; the id is part of the audit
+/// contract with external consumers and may not be renumbered.
+pub const KERNEL_BOOT_DIRECT_MAP: tairix_log::EventId = tairix_log::EventId(4096);
+
 pub use kalloc::FreeListAllocator;
 
 #[cfg(kernel_isa = "aarch64")]

@@ -189,8 +189,9 @@ losing the screen copy of a report is a far smaller failure than losing the
 report.
 
 `MachineTakeover` is deliberately *not* reused for this. That slice is the
-Supervisor's irreversible tear-down: it flattens paging, which would pull the
-ground out from under the very dump being written. The stop half was already
+Supervisor's irreversible tear-down: it reprograms the translation regime and
+overwrites all of usable RAM, which would pull the ground out from under the
+very dump being written. The stop half was already
 factored out of it, which is what makes it reusable here.
 
 Per port: aarch64, riscv64, and x86_64 all latch, poke, and park through the

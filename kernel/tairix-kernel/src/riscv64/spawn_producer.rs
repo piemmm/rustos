@@ -41,14 +41,14 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::Errno;
-use tairix_arch_riscv64::paging::{activate_user_root, AddressSpace as ArchAddressSpace};
+use tairix_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
 use tairix_arch_riscv64::userentry::USER_MODE;
 use tairix_kernel_core::{
     refuse_build, spawn_caller_errno, spawn_image, ArchImageBuilder, BuiltImage, ImageBuildCtx,
     ProcessResume, ProcessSpace, SpawnMode, SpawnRequest, UserThreadEntry,
 };
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysMap,
+    AddressSpace, DirectPhysMap, FrameAllocator, FrameTableSource, LiveSpace, PhysAddr, PhysMap,
     UserAddressSpace, UserStack, VirtAddr,
 };
 use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
@@ -61,40 +61,91 @@ use crate::spawn_layout;
 // `USER_IMAGE_BIAS` export, mirrored (one definition, no copied constant).
 pub use crate::spawn_layout::CHILD_USER_BIAS;
 
-/// Gigabytes of identity map each spawned child address space provides.
+/// Gigabytes of identity map every process root on this port carries — the
+/// one definition PID 1 and every spawned child are built from.
 ///
-/// `[0, 4 GiB)` covers the QEMU `virt` board's low device MMIO and the RAM
-/// base at `0x8000_0000` (GiB 2), where the kernel image, its boot heap,
-/// the leaked `KernelState`, and the live frame allocator all live. The
-/// producer never switches to this space (the spawning caller keeps its own
-/// `satp` active), so the identity map exists only so the child itself
-/// executes under a translation regime that maps the low kernel window when
-/// the scheduler later resumes it through `activate_user_root`.
-/// [`CHILD_USER_BIAS`] (64 GiB) sits far above it, so the program's pages
-/// land on freshly walked Sv39 tables rather than colliding with an identity
-/// gigapage leaf — the same window PID 1 uses.
-const IDENTITY_GIB: usize = 4;
+/// The kernel is identity-linked, so a root the kernel may be executing
+/// under has to map the kernel's own image, boot heap, stack, leaked
+/// `KernelState`, and the board's low device MMIO *at their physical
+/// addresses*. `[0, 4 GiB)` covers all of it on the boards this port runs
+/// on: it is a bound on where the hardware puts those things, not a
+/// capacity, and it no longer bounds how much RAM the kernel can reach —
+/// RAM is reached through the direct physical map
+/// ([`ConfiguredPhysMap`]), which lies above the user region entirely. A
+/// board whose kernel image ends above this window is refused at boot
+/// rather than faulting on the first `activate`.
+///
+/// [`CHILD_USER_BIAS`] (64 GiB) sits far above the window, so a program's
+/// pages land on freshly walked Sv39 tables rather than colliding with an
+/// identity gigapage leaf.
+#[must_use]
+pub fn identity_gigapages() -> usize {
+    4
+}
 
 /// A spawned child's four fixed guarded-window bases (`plans/PI.md`
 /// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
 /// [`LiveSpace`]'s window allocators are configured with.
 const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(CHILD_USER_BIAS);
 
-/// Identity direct map the page-table frame source translates a freshly
-/// allocated frame's physical address through to a CPU-dereferenceable
-/// pointer (`plans/WIRING.md` W5b-3).
+/// The kernel's direct physical map: the upper-half window at
+/// [`paging::PHYSMAP_VMA_BASE`] the boot path sized from the discovered
+/// memory map, where physical `p` is reachable at `PHYSMAP_VMA_BASE + p`.
 ///
-/// It is the **identity** map (`offset == 0`) covering the same
-/// `[0, IDENTITY_GIB GiB)` window each child space identity-maps, because
-/// the Sv39 page-table walk recovers an existing child table by
-/// dereferencing its physical address directly (`paging`: identity), so the
-/// frame view the source hands the port must satisfy `virtual == physical`.
-/// A frame the allocator draws from outside this window fails the translate
-/// and the spawn fails closed rather than building tables
-/// the walk cannot reach — the same window the child's image data frames
-/// already use.
-pub static SPAWN_TABLE_PHYSMAP: DirectPhysMap =
-    DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+/// It is the view every kernel path that reaches a frame by pointer uses —
+/// the child image write, the shared-region zero-on-free scrub, the kernel
+/// slab page supply, the root-unlock DMA pool, and the page-table walk's own
+/// table recovery — so there is one map, not a second that could cover
+/// different RAM. Being above the user region is what lets every process
+/// root carry it: its extent is bounded by Sv39's own layout rather than by
+/// where the child image sits, and a root-level leaf is already a gigapage,
+/// so a process pays no page tables for it.
+///
+/// The limit is re-derived from the live map on every call
+/// ([`paging::physmap_bytes`]) rather than frozen at a build-time gigabyte
+/// count a real machine outgrows. A frame outside it still fails the
+/// translate and its consumer fails closed rather than fabricating a
+/// pointer.
+///
+/// Board MMIO stays on the identity window ([`identity_gigapages`]) rather
+/// than moving here, unlike a higher-half-linked port: this kernel is
+/// identity-linked, so every root it can execute under carries that window
+/// anyway.
+pub struct ConfiguredPhysMap;
+
+impl ConfiguredPhysMap {
+    /// The live map as a linear window, re-read so a caller can never hold
+    /// a stale extent.
+    fn window() -> DirectPhysMap {
+        DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes())
+    }
+}
+
+impl PhysMap for ConfiguredPhysMap {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        Self::window().translate(phys, len)
+    }
+
+    fn reverse(&self, virt: usize) -> Option<PhysAddr> {
+        Self::window().reverse(virt)
+    }
+
+    fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
+        Self::window().clean_invalidate(phys, len);
+    }
+
+    fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {
+        Self::window().sync_instruction_cache(phys, len);
+    }
+}
+
+/// The single, `'static` [`ConfiguredPhysMap`] the page-table frame source
+/// borrows.
+///
+/// Also handed to the kernel core as the arch direct physical map: it covers
+/// the same RAM the allocator draws from, so any frame the kernel must reach
+/// by pointer is reachable.
+pub static SPAWN_TABLE_PHYSMAP: ConfiguredPhysMap = ConfiguredPhysMap;
 
 /// The single, `'static` allocator-backed page-table frame source every
 /// spawned child's Sv39 hierarchy is built from.
@@ -130,9 +181,9 @@ pub(crate) fn page_table_source(
         .map_err(|_| Errno::NotImplemented)?;
     // The fault-time access-flag fix-up walks whichever root is active
     // with no `AddressSpace` in hand, so it needs a source that reaches
-    // any table in RAM. This one does — its direct map covers the whole
-    // window — and publishing it here, where it is created, means no
-    // consumer ordering can leave the fault path without one.
+    // any table in RAM. This one does — its direct map covers the
+    // discovered RAM — and publishing it here, where it is created, means
+    // no consumer ordering can leave the fault path without one.
     tairix_arch_api::frames::publish_active_frames(source);
     Ok(source)
 }
@@ -162,19 +213,20 @@ impl ArchImageBuilder for RiscvProcessSpawn {
             .ok_or_else(|| refuse_build(ctx, "page_table_allocator_unwired"))?;
         let table_frames = page_table_source(pt_frames)?;
 
-        // Build an Sv39 address space identity-mapping the kernel + MMIO, and
-        // capture its root *without* switching to it: the loading child runs
-        // on its own kernel stack under the kernel's identity regime, so the
-        // running task is never moved out from under itself. The child's own
-        // root is reactivated by its `pre_resume` hook before the scheduler
-        // first resumes it as a user task (`plans/SPAWN.md` SP2). An
-        // allocator exhausted of even the root table fails closed.
-        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, IDENTITY_GIB)
+        // Build an Sv39 address space identity-mapping the kernel + MMIO and
+        // carrying the direct physical map, and capture its root *without*
+        // switching to it: the loading child runs on its own kernel stack
+        // under the kernel's boot regime, so the running task is never moved
+        // out from under itself. The child's own root is reactivated by its
+        // `pre_resume` hook before the scheduler first resumes it as a user
+        // task (`plans/SPAWN.md` SP2). An allocator exhausted of even the
+        // root table fails closed.
+        let arch = ArchAddressSpace::new_identity_gigapages(table_frames, identity_gigapages())
             .ok_or_else(|| refuse_build(ctx, "page_table_frames_exhausted"))?;
         let child_root_phys = arch.root_phys();
 
         let mut space = AddressSpace::new(arch);
-        let physmap = DirectPhysMap::identity((IDENTITY_GIB as u64) << 30);
+        let physmap = ConfiguredPhysMap;
 
         // Parse the build-time `rxe` blob against the kernel's own compiled-in
         // syscall CFI tag. A mismatch fails closed.
@@ -212,9 +264,10 @@ impl ArchImageBuilder for RiscvProcessSpawn {
         // SAFETY: building the image is itself safe; the returned `UserEntry`
         // is only entered later, once the child is dispatched and its
         // `pre_resume` hook has made `space` active (the `spawn_image`
-        // contract). The frame source draws identity-mapped RAM frames from
-        // the kernel's live allocator; the retained live space below owns the
-        // whole footprint and returns it when the task exits. A returning
+        // contract). The frame source draws RAM frames from the kernel's live
+        // allocator and reaches them through the direct physical map; the
+        // retained live space below owns the whole footprint and returns it
+        // when the task exits. A returning
         // `Err` maps to a stable errno; the cause is already audited by
         // `spawn_image`.
         //
@@ -268,7 +321,7 @@ impl ArchImageBuilder for RiscvProcessSpawn {
                 );
                 LiveSpace::new(
                     space,
-                    DirectPhysMap::identity((IDENTITY_GIB as u64) << 30),
+                    ConfiguredPhysMap,
                     static_frames,
                     VirtAddr::new(WINDOWS.mmio),
                     spawn_layout::MMIO_WINDOW_PAGES,

@@ -483,8 +483,9 @@ to "fall back" to — running the one memory test there is *is* the intent.
   `SchedulerArch::send_ipi`; only *parking* a stopped CPU is per-silicon
   (each port's IPI-receive path calls `quiesce::stop_requested` →
   `acknowledge` → its masked halt). The remaining *takeover mechanism* (mask
-  interrupts + watchdog, relocate/flatten paging so the test can address
-  physical RAM, cache maintenance, reset) is irreducibly target-divergent and
+  interrupts + watchdog, installing a translation regime whose tables the
+  sweep cannot destroy and through which it can address physical RAM, cache
+  maintenance, reset) is irreducibly target-divergent and
   lives behind the **Arch HAL `MachineTakeover` slice**, implemented per
   `kernel/arch/<target>/`. Do **not** `cfg(target_arch)` this into shared
   code (`cargo xtask cfg-check` forbids it).
@@ -534,8 +535,9 @@ to "fall back" to — running the one memory test there is *is* the intent.
 The object-safe `MachineTakeover` trait is **one** operation,
 `unsafe fn take_over(&self, sweep: &mut dyn FnMut()) -> TakeoverError`, that
 owns the *entire* irreversible sequence and never returns on success: mask
-interrupts → stop the watchdog → flatten paging → **switch onto a reserved
-stack the sweep cannot overwrite** →
+interrupts → stop the watchdog → install a translation regime the sweep
+cannot destroy → **switch onto a reserved stack the sweep cannot overwrite**
+→
 run the caller's `sweep` (the arch-neutral phase that tests all
 *usable* RAM) → test the region the sweep executed from (kernel image + its
 stack, never the firmware) with a relocated per-port stub → reset. `take_over`
@@ -583,8 +585,11 @@ only if a (future, finite) sweep ever returned. Precise per-port design:
   + `takeover.s`: every other hart is already parked by the arch-neutral
   quiesce (the caller's `quiesce_others`; each hart halts in
   `preempt::on_software_interrupt`), so the body masks `sstatus.SIE`+`sie` (the
-  watchdog is unwired); flattens paging with `satp = 0` (bare mode — the
-  identity map still resolves `virt==phys` with no page-table walk); switches
+  watchdog is unwired); installs the reserved boot kernel root
+  (`paging::park_kernel_root` — the only root whose tables live in the kernel
+  image's `.bss`, carrying both the identity window and the direct physical
+  map the sweep writes RAM through, refusing `PrepareFailed` if none is
+  published); switches
   `sp` to a reserved 64 KiB `.bss` stack (`_takeover_switch_stack`); and runs
   `sweep` over usable RAM (never returns; otherwise parks on `wfi`). Proven by
   `tests/integration/supervisor_memtest_takeover_qemu_riscv64` (guest reports a
@@ -934,8 +939,8 @@ zero total and a narrow geometry never panic.
   does it build the `sweep` closure (the Stage-A `sweep_pattern` sweep + the
   Stage-D `MemtestUi`, all `'static`/reserved per the `take_over` contract) and
   drive the **single** `MachineTakeover::take_over(&mut sweep)` operation, which
-  on a supported port never returns (mask, flatten paging, sweep on a reserved
-  stack, test the kernel-image region, reset).
+  on a supported port never returns (mask, install a sweep-proof translation
+  regime, sweep on a reserved stack, test the kernel-image region, reset).
   `KernelSupervisorHost::takeover_memtest` wires it in and audits id
   `4157 SUPERVISOR_MEMTEST_TAKEOVER` (`Warn`) synchronously before the attempt.
   The wired riscv64/aarch64/x86_64 ports return `Some` from `machine_takeover`
@@ -1060,11 +1065,12 @@ through `machine_takeover_handle()` and wired into that port's
 `KernelArch::machine_takeover` behind the supervisor-only `TakeoverGrant`. Every
 other CPU is already parked by the arch-neutral `quiesce_others` before the body
 runs; the body then masks interrupts, stops the watchdog where wired, brings RAM
-into direct reach — riscv64 flattens to bare mode (`satp = 0`), aarch64
-clean+invalidates the kernel image to PoC then writes the MMU-off `SCTLR_EL1`
-(`paging::SCTLR_MMU_OFF`; both are identity-mapped so `virt==phys` survives),
-and x86_64 (which cannot drop long-mode paging) instead installs the reserved
-boot page tables (`%cr3 = boot_pml4` in `.boot.bss`) — switches onto a reserved
+into direct reach on a regime the sweep cannot destroy — riscv64 installs the
+reserved boot kernel root (`paging::park_kernel_root`), aarch64 keeps its MMU
+on under its identity map (an MMU-off EL1 would make every access
+Device-nGnRnE, see above), and x86_64 (which cannot drop long-mode paging)
+installs the reserved boot page tables (`%cr3 = boot_pml4` in `.boot.bss`) —
+switches onto a reserved
 64 KiB `.bss` stack (`_takeover_switch_stack`) the sweep cannot overwrite, and
 runs the caller's arch-neutral `sweep` (Stage-A `sweep_pattern` + Stage-D
 `MemtestUi`). The sweep tests all of RAM continuously and never returns; the
