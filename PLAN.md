@@ -2232,7 +2232,7 @@ order (one fully-gated increment each):
                    emits a register snapshot and a frame-pointer backtrace, not
                    one line. A new closed Arch HAL slice
                    `tairix_arch_api::backtrace` (`CpuStateCapture`:
-                   `capture` + a pure `FrameLayout` + `stack_bounds` + honest
+                   `capture` + a pure `FrameLayout` + `boot_stack` + honest
                    `BacktraceProfile`, plus its `conformance` vertical) is
                    implemented honestly on x86_64/aarch64/riscv64 and an honest
                    `Unsupported` on wasm32. The single bounds-checked, monotonic,

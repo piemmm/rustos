@@ -16,7 +16,7 @@
 //! it cannot read.
 
 use tairix_arch_api::{
-    Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
+    Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, KernelStackRegion, RegisterSnapshot,
 };
 
 /// wasm32 implementation of the Arch HAL post-mortem-capture surface.
@@ -62,7 +62,7 @@ impl CpuStateCapture for Backtracer {
         RegisterSnapshot::new(0, 0, 0)
     }
 
-    fn stack_bounds(&self) -> Option<StackBounds> {
+    fn boot_stack(&self) -> Option<KernelStackRegion> {
         None
     }
 }

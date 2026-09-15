@@ -4,14 +4,13 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 // `AtomicU32` backs only the debug-diagnostics pre-silence-backtrace length,
-// and `AtomicPtr` the debug-diagnostics per-CPU lock-site stack, so both
-// are imported only when that facility is compiled in.
+// so it is imported only when that facility is compiled in.
 #[cfg(feature = "watchdog-diagnostics")]
 use core::panic::Location;
 #[cfg(feature = "watchdog-diagnostics")]
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
+use core::sync::atomic::AtomicU32;
 
 use tairix_kernel_sched_api::TaskAction;
 use tairix_sync::{OnceCell, SpinLock};
@@ -384,6 +383,30 @@ pub(crate) struct CpuState {
     /// publishes none is not read as one reporting a zeroed frame.
     #[cfg(feature = "watchdog-diagnostics")]
     pub(crate) ue_present: AtomicBool,
+    /// Root of the kernel stack the task currently switched in here is
+    /// running on, or null when this CPU is in its dispatcher (whose stack
+    /// is the port's boot stack, which the port itself vouches for).
+    ///
+    /// The panic backtrace is what reads it: a fatal fault almost always
+    /// happens on a kthread stack, which no port can identify, so without
+    /// this the walk would have no vouched region and the report would carry
+    /// registers and no frame chain at all — exactly when it is needed most.
+    ///
+    /// Stored as the pointer itself rather than an address: a stack word read
+    /// through a pointer rebuilt from an integer carries no provenance, so
+    /// the compiler is free to reorder or elide the read.
+    ///
+    /// Per-CPU rather than per-thread because the publish and the read are
+    /// the two ends of one dispatch on one CPU, and only that CPU's own
+    /// dispatcher writes the slot. A stale value cannot mislead the reader:
+    /// it is used only when the captured `sp` is inside it, and an `sp`
+    /// inside a region proves the CPU is running on it, hence that it is
+    /// still mapped.
+    pub(crate) running_stack: AtomicPtr<u8>,
+    /// Usable bytes of [`Self::running_stack`]; meaningless when that is
+    /// null. Written before the root is published and after it is cleared,
+    /// so a reader that finds a non-null root finds this set.
+    pub(crate) running_stack_len: AtomicUsize,
     /// The frame-budget watch of the thread currently running here, replaced
     /// at every user switch-in.
     ///
@@ -445,6 +468,8 @@ impl CpuState {
             ue_fp_valid: AtomicBool::new(false),
             #[cfg(feature = "watchdog-diagnostics")]
             ue_present: AtomicBool::new(false),
+            running_stack: AtomicPtr::new(core::ptr::null_mut()),
+            running_stack_len: AtomicUsize::new(0),
             #[cfg(feature = "watchdog-diagnostics")]
             latency_watch: SpinLock::new(None),
         }

@@ -28,11 +28,11 @@
 //!   reached via the port's resume assembly, which has no Rust frame to
 //!   drop a captured environment in, and a task body never returns to
 //!   its synthesised frame.
-//! * [`KernelStackRegion`] — the task's kernel stack, as a pointer and a
-//!   length rather than an address, because a port writes the initial
-//!   frame through it and an address carries no provenance to write with.
-//!   Building one is the `unsafe` step, which is what lets
-//!   [`ContextSwitch::prepare`] be safe.
+//! * [`KernelStackRegion`] — a kernel stack, as a pointer and a length
+//!   rather than an address, because a port writes the initial frame
+//!   through it and the panic unwinder reads words through it, and an
+//!   address carries no provenance to do either with. Building one is the
+//!   `unsafe` step, which is what lets [`ContextSwitch::prepare`] be safe.
 //! * [`PrepareError`] — the fail-closed result of seeding a task's
 //!   initial frame ([`ContextSwitch::prepare`]). A bad stack is rejected,
 //!   never silently truncated.
@@ -130,13 +130,21 @@ pub enum PrepareError {
     TooSmall,
 }
 
-/// A task's kernel stack, as [`ContextSwitch::prepare`] receives it.
+/// A kernel stack, as [`ContextSwitch::prepare`] receives it and as the
+/// panic unwinder reads it.
 ///
-/// Carries the pointer the initial frame is written *through*, not merely
-/// its address: a port handed a bare integer would have to invent a pointer
-/// from it, and writing through one carries no provenance. The length is
-/// the other half — it makes [`PrepareError::TooSmall`] a question about
-/// the stack rather than about address zero.
+/// Carries the pointer its bytes are touched *through*, not merely their
+/// address: a consumer handed a bare integer would have to invent a pointer
+/// from it, and one invented that way carries no provenance for what it
+/// addresses, so the compiler may reorder or elide accesses through it. The
+/// length is the other half — it makes [`PrepareError::TooSmall`] a question
+/// about the stack rather than about address zero, and it bounds
+/// [`Self::word_ptr`]'s derivation.
+///
+/// The two consumers differ only in which end they use: `prepare` writes the
+/// initial frame at [`Self::seed_frame`], the unwinder reads words through
+/// [`Self::word_ptr`]. Both derive from the one root whoever established the
+/// stack minted.
 #[derive(Copy, Clone, Debug)]
 pub struct KernelStackRegion {
     /// Lowest byte of the usable stack.
@@ -144,6 +152,16 @@ pub struct KernelStackRegion {
     /// Usable bytes above [`Self::base`].
     len: usize,
 }
+
+// SAFETY: the descriptor is immutable and hands out no exclusive access of
+// its own — `seed_frame` and `word_ptr` return raw pointers, so the
+// exclusivity the constructor's contract demands travels with the pointer
+// and is the minter's obligation, not a property sharing the descriptor
+// could violate. Sharing one therefore grants nothing the bare
+// `(address, length)` pair it replaced did not.
+unsafe impl Send for KernelStackRegion {}
+// SAFETY: as `Send` above.
+unsafe impl Sync for KernelStackRegion {}
 
 impl KernelStackRegion {
     /// Name the usable stack `[base, base + len)`.
@@ -160,10 +178,97 @@ impl KernelStackRegion {
         Self { base, len }
     }
 
+    /// Name the stack `[low, high)` a port vouches for, but only when `sp`
+    /// is actually on it — otherwise `None`.
+    ///
+    /// The one shared definition a port turns its boot-stack linker symbols
+    /// into a walkable region with: the region exists because the linker
+    /// reserved it, which is a fact only the port holds, so the pointer is
+    /// minted here rather than rebuilt by every consumer that wants to read
+    /// a word of it. A `sp` outside the range means the CPU is on a stack
+    /// this region cannot vouch for, and the caller degrades rather than
+    /// guessing. An unrepresentable or inverted range is refused.
+    ///
+    /// # Safety
+    ///
+    /// `[low, high)` must be a mapped, writable stack region that stays
+    /// valid for as long as the returned value is used.
+    #[must_use]
+    pub unsafe fn enclosing(sp: u64, low: u64, high: u64) -> Option<Self> {
+        let (addr, len) = Self::enclosing_span(sp, low, high)?;
+        // The one int-to-pointer step, stated where the fact that these
+        // bytes exist is known rather than re-derived per read.
+        let base = NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(addr))?;
+        Some(Self { base, len })
+    }
+
+    /// The base address and length [`Self::enclosing`] resolves `[low, high)`
+    /// to, or `None` on the refusals it makes.
+    ///
+    /// Split out so the rule can be tested: minting a pointer from an address
+    /// is an operation no interpreter can follow, so a host test that called
+    /// [`Self::enclosing`] for a range it accepts would take the whole crate's
+    /// undefined-behaviour stage down with it. The mint is exercised by the
+    /// ports, on target.
+    fn enclosing_span(sp: u64, low: u64, high: u64) -> Option<(usize, usize)> {
+        // A region holding address zero would make a null pointer one of its
+        // bytes, which its `NonNull` root cannot name; refusing it is part of
+        // the rule rather than a by-product of building the pointer.
+        if low == 0 || low >= high || sp < low || sp >= high {
+            return None;
+        }
+        let addr = usize::try_from(low).ok()?;
+        let len = usize::try_from(high - low).ok()?;
+        Some((addr, len))
+    }
+
+    /// Lowest address in the region.
+    #[must_use]
+    pub fn base_addr(self) -> u64 {
+        self.base.addr().get() as u64
+    }
+
+    /// The region's root, so a consumer can republish the pointer rather
+    /// than an address it would have to rebuild one from.
+    #[must_use]
+    pub const fn base_ptr(self) -> NonNull<u8> {
+        self.base
+    }
+
     /// Exclusive upper bound of the region (one past its last byte).
     #[must_use]
     pub fn top_addr(self) -> u64 {
         self.base.addr().get() as u64 + self.len as u64
+    }
+
+    /// `true` if `addr` is one of this region's bytes.
+    #[must_use]
+    pub fn contains_addr(self, addr: u64) -> bool {
+        addr >= self.base_addr() && addr < self.top_addr()
+    }
+
+    /// A pointer to the 64-bit word at `addr`, derived from the region's own
+    /// root, or `None` when the word is not wholly inside it or is
+    /// misaligned.
+    ///
+    /// The only way to read a word of the region: an address that survives
+    /// the range check is expressed as an offset from the root the
+    /// constructor vouched for, so the read carries provenance for the
+    /// bytes it touches instead of aliasing nothing.
+    #[must_use]
+    pub fn word_ptr(self, addr: u64) -> Option<NonNull<u64>> {
+        if !addr.is_multiple_of(8) {
+            return None;
+        }
+        let end = addr.checked_add(8)?;
+        if addr < self.base_addr() || end > self.top_addr() {
+            return None;
+        }
+        let offset = usize::try_from(addr - self.base_addr()).ok()?;
+        // SAFETY: `offset < len`, so the step stays inside the region the
+        // constructor's contract vouches for, and the whole word above it
+        // was proved in-bounds.
+        Some(unsafe { self.base.add(offset) }.cast::<u64>())
     }
 
     /// Usable bytes the region spans.
@@ -534,6 +639,89 @@ mod tests {
     /// A 16-byte-aligned buffer to carve regions out of.
     #[repr(C, align(16))]
     struct Buf([u8; 256]);
+
+    /// The word derivation stays inside the region and refuses anything it
+    /// cannot prove is in it — the check that lets the unwinder dereference
+    /// a walked address at all.
+    #[test]
+    fn word_ptr_derives_only_inside_the_region() {
+        let mut buf = Buf([0u8; 256]);
+        let r = region(&mut buf, 0, 64);
+        let base = r.base_addr();
+
+        let first = r.word_ptr(base).expect("first word is in the region");
+        // SAFETY: `word_ptr` vouched for the word, and `buf` is live.
+        unsafe { first.write_volatile(0xfeed_face) };
+        assert_eq!(unsafe { first.read_volatile() }, 0xfeed_face);
+        assert_eq!(first.addr().get() as u64, base);
+
+        // Last whole word in, one past it out.
+        assert!(r.word_ptr(base + 56).is_some());
+        assert!(r.word_ptr(base + 64).is_none(), "past the top");
+        assert!(r.word_ptr(base + 60).is_none(), "word straddles the top");
+        assert!(r.word_ptr(base - 8).is_none(), "below the base");
+        assert!(r.word_ptr(base + 4).is_none(), "misaligned");
+        assert!(r.word_ptr(u64::MAX - 3).is_none(), "wrapping end");
+    }
+
+    /// A port resolves a region only when the captured `sp` is on the stack
+    /// it named, and never from a range no pointer could describe.
+    ///
+    /// Asserted against the rule rather than the constructor: `enclosing`
+    /// mints a pointer from an address for a range it accepts, which no
+    /// interpreter can follow, so only the ports execute that — on target.
+    #[test]
+    fn enclosing_vouches_only_for_the_stack_the_cpu_is_on() {
+        const LOW: u64 = 0x8000_1000;
+        const HIGH: u64 = 0x8000_2000;
+
+        let base = usize::try_from(LOW).expect("the fixture base fits a pointer");
+        assert_eq!(
+            KernelStackRegion::enclosing_span(LOW + 8, LOW, HIGH),
+            Some((base, 0x1000)),
+            "an sp on the named stack resolves to its whole span"
+        );
+        assert!(KernelStackRegion::enclosing_span(LOW, LOW, HIGH).is_some());
+        assert!(
+            KernelStackRegion::enclosing_span(HIGH - 1, LOW, HIGH).is_some(),
+            "the last byte is on it"
+        );
+
+        assert!(
+            KernelStackRegion::enclosing_span(LOW - 1, LOW, HIGH).is_none(),
+            "below the stack"
+        );
+        assert!(
+            KernelStackRegion::enclosing_span(HIGH, LOW, HIGH).is_none(),
+            "the top is exclusive"
+        );
+        assert!(
+            KernelStackRegion::enclosing_span(LOW, HIGH, LOW).is_none(),
+            "inverted range"
+        );
+        assert!(
+            KernelStackRegion::enclosing_span(LOW, LOW, LOW).is_none(),
+            "empty range"
+        );
+        assert!(
+            KernelStackRegion::enclosing_span(0, 0, HIGH).is_none(),
+            "a null base is never a stack"
+        );
+    }
+
+    /// The walk window is read back off the region's own pointer, so the
+    /// range the walk validates against cannot drift from the root its
+    /// reads are derived from.
+    #[test]
+    fn walk_bounds_come_from_the_region_itself() {
+        use crate::backtrace::StackBounds;
+        let mut buf = Buf([0u8; 256]);
+        let r = region(&mut buf, 16, 32);
+        let bounds: StackBounds = r.into();
+        assert_eq!(bounds, StackBounds::new(r.base_addr(), r.top_addr()));
+        assert!(bounds.contains_word(r.base_addr()));
+        assert!(!bounds.contains_word(r.top_addr()));
+    }
 
     fn region(buf: &mut Buf, offset: usize, len: usize) -> KernelStackRegion {
         let ptr = NonNull::from(&mut buf.0[offset..offset + len]).cast::<u8>();

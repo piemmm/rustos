@@ -62,6 +62,7 @@ use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ptr::{addr_of_mut, NonNull};
+use core::sync::atomic::Ordering;
 
 use tairix_arch_api::{ContextSwitch, KernelStackRegion, TaskContext, STACK_ALIGN};
 use tairix_kernel_mem::LiveUserSpace;
@@ -1364,6 +1365,11 @@ where
     };
     crate::watchdog::note_kernel_breadcrumb(cpu, entered, 0);
 
+    // Publish the stack we are about to run on, so a panic taken in the task
+    // can be unwound: no port can identify a kthread stack, so without this
+    // the report would carry no frame chain.
+    publish_running_stack(cpu, unsafe { (*ctl).stack.region() });
+
     // SAFETY: switch into the task. `dispatch_ctx` saves our (the
     // dispatcher's) context; `task_ctx` was made runnable by `prepare`
     // (first step) or a prior `Yielder` suspension (later steps), so it
@@ -1396,8 +1402,10 @@ where
     // The task switched back to us. Retire the resume handle immediately:
     // the task is no longer the one running on `cpu` (it yielded, parked,
     // or exited), so its trap/body path must no longer reach this control
-    // block.
+    // block. Its stack publication goes with it — we are back on the
+    // dispatcher's own stack.
     clear_resume(cpu);
+    clear_running_stack(cpu);
     if is_user {
         clear_live_space(cpu);
         // Park this CPU's translation off the task's user root before the
@@ -1474,6 +1482,67 @@ fn clear_resume(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         *state.resume.lock() = None;
     }
+}
+
+/// Publish the kernel stack of the task about to be switched in on `cpu`,
+/// so a panic taken on it has a vouched region to unwind.
+///
+/// Out-of-range or unconfigured `cpu` is a silent no-op, exactly as
+/// [`publish_resume`].
+fn publish_running_stack(cpu: CpuId, region: KernelStackRegion) {
+    if let Some(state) = cpu_state::get(cpu) {
+        // Length first, root last: a reader that finds a non-null root
+        // therefore finds the length that goes with it.
+        state
+            .running_stack_len
+            .store(region.len(), Ordering::Relaxed);
+        state
+            .running_stack
+            .store(region.base_ptr().as_ptr(), Ordering::Release);
+    }
+}
+
+/// Retract the publication once the task has switched back (the counterpart
+/// of [`publish_running_stack`]): the dispatcher runs on the port's own boot
+/// stack, which the port vouches for itself.
+fn clear_running_stack(cpu: CpuId) {
+    if let Some(state) = cpu_state::get(cpu) {
+        state
+            .running_stack
+            .store(core::ptr::null_mut(), Ordering::Release);
+        state.running_stack_len.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The kernel stack `cpu` is running on, when `sp` is on the stack published
+/// for the task currently switched in there.
+///
+/// The `sp` test is what makes the publication safe to read from a fault
+/// path: an `sp` inside the region proves this CPU is executing on it, hence
+/// that its pages are still mapped and that the publication is this task's
+/// and not a stale predecessor's. Anything else is `None`, and the caller
+/// falls back to the port's boot stack (fail closed — never a region nothing
+/// vouches for).
+#[must_use]
+pub(crate) fn running_stack(cpu: CpuId, sp: u64) -> Option<KernelStackRegion> {
+    let state = cpu_state::get(cpu)?;
+    // A null root is the gate: the dispatcher nulls it before it lowers the
+    // length and raises it after it sets one, so a publication caught
+    // half-written reads as absent rather than as a mismatched pair.
+    let base = NonNull::new(state.running_stack.load(Ordering::Acquire))?;
+    let len = state.running_stack_len.load(Ordering::Relaxed);
+    let low = base.addr().get() as u64;
+    let high = low.checked_add(len as u64)?;
+    if sp < low || sp >= high {
+        return None;
+    }
+    // SAFETY: the `sp` test above proves this CPU is executing on the
+    // published stack, so it is the live one its own dispatcher named from
+    // the running `ThreadControl` — mapped, writable, and exclusive to that
+    // task for as long as it runs, which is the constructor's contract. A
+    // stack a retired task left published cannot pass the test, because this
+    // CPU would not be running on it.
+    Some(unsafe { KernelStackRegion::new(base, len) })
 }
 
 /// Publish the per-CPU address-space handle for the user kthread `ctl`,
@@ -1618,6 +1687,35 @@ pub(crate) fn publish_live_space_for_test(
         *state.live_space.lock() = Some(LiveSpacePtr::borrowed(&space));
     }
     LiveSpacePublishGuard { cpu, _owner: space }
+}
+
+/// Test-only: publish `region` as the stack the task running on `cpu` is
+/// using, returning a guard that retracts it when dropped.
+///
+/// Lets a sibling in-crate test module (notably `panic`) exercise the
+/// kthread-stack unwind path without driving a full context switch. The
+/// guard mirrors production's publish/clear pairing, so no publication
+/// leaks into a sibling test.
+#[cfg(test)]
+pub(crate) fn publish_running_stack_for_test(
+    cpu: CpuId,
+    region: KernelStackRegion,
+) -> RunningStackPublishGuard {
+    publish_running_stack(cpu, region);
+    RunningStackPublishGuard { cpu }
+}
+
+/// Retracts a [`publish_running_stack_for_test`] publication on drop.
+#[cfg(test)]
+pub(crate) struct RunningStackPublishGuard {
+    cpu: CpuId,
+}
+
+#[cfg(test)]
+impl Drop for RunningStackPublishGuard {
+    fn drop(&mut self) {
+        clear_running_stack(self.cpu);
+    }
 }
 
 #[cfg(test)]
@@ -2246,6 +2344,44 @@ mod tests {
         assert!(
             !stack.carries(0),
             "a null suspension point is never on-stack"
+        );
+    }
+
+    /// The published running stack is believed only for a stack pointer
+    /// actually on it, so a publication a later task left behind can never
+    /// aim the panic unwinder at a retired stack.
+    #[test]
+    fn the_published_running_stack_answers_only_for_an_sp_on_it() {
+        const CPU: CpuId = 7;
+        let stack = BoxStack::new().expect("stack allocates");
+        let region = stack.region();
+        let base = region.base_addr();
+        let top = region.top_addr();
+
+        assert!(
+            running_stack(CPU, base).is_none(),
+            "nothing published, nothing vouched for"
+        );
+
+        let published = publish_running_stack_for_test(CPU, region);
+        let found = running_stack(CPU, base).expect("sp on the published stack");
+        assert_eq!(found.base_addr(), base);
+        assert_eq!(found.top_addr(), top);
+        assert!(running_stack(CPU, top - 8).is_some(), "last word is on it");
+        assert!(running_stack(CPU, top).is_none(), "the top is exclusive");
+        assert!(running_stack(CPU, base - 8).is_none(), "below the base");
+        assert!(running_stack(CPU, 0).is_none(), "a null sp is never on it");
+
+        // A different CPU's slot is untouched by this one's publication.
+        assert!(
+            running_stack(CPU + 1, base).is_none(),
+            "the publication is this CPU's alone"
+        );
+
+        drop(published);
+        assert!(
+            running_stack(CPU, base).is_none(),
+            "the publication is retracted when the task switches out"
         );
     }
 

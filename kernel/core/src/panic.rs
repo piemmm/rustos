@@ -48,6 +48,7 @@ use tairix_arch_api::backtrace::{
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
 use tairix_arch_api::quiesce_stop_others_best_effort;
+use tairix_arch_api::{CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 
 use crate::audit::AuditEvent;
@@ -69,20 +70,28 @@ fn reset_panic_guard() {
     PANICKING.store(false, Ordering::Release);
 }
 
-/// Production [`StackReader`]: reads one kernel-stack word by raw address.
-struct RawStackReader;
+/// Production [`StackReader`] over the kernel stack the faulting CPU is
+/// running on.
+///
+/// Holds the region rather than just its bounds, so every read is *derived*
+/// from the root whoever vouched for the stack minted — the port for its
+/// boot stack, the dispatcher's publication for a kthread stack. A reader
+/// that rebuilt a pointer from the walk's address instead would carry no
+/// provenance for the bytes it touches, leaving the compiler free to reorder
+/// or elide the reads the unwinder depends on, and would be unverifiable by
+/// the undefined-behaviour oracle.
+struct RawStackReader {
+    region: KernelStackRegion,
+}
 
 impl StackReader for RawStackReader {
     fn read_word(&self, addr: u64) -> Option<u64> {
-        // SAFETY: the neutral `walk` validated `addr` is 8-byte aligned and
-        // that its whole word lies within the current CPU's kernel-stack
-        // bounds before calling. Such an address is live, mapped kernel
-        // stack, so the read cannot fault. The read is volatile so the
-        // compiler cannot elide or reorder it on the panic path. This
-        // reader is over the kernel's own trusted stack, so it always
-        // yields a value — the fallible return exists for the user-stack
-        // reader, which reads an untrusted address space.
-        Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
+        let word = self.region.word_ptr(addr)?;
+        // SAFETY: `word_ptr` proved the whole word lies inside the region
+        // its own root vouches for and is 8-byte aligned, so the read is of
+        // live, mapped kernel stack and cannot fault. Volatile so the
+        // compiler cannot elide or reorder it on the panic path.
+        Some(unsafe { word.read_volatile() })
     }
 }
 
@@ -290,12 +299,26 @@ impl CaptureBufs {
     }
 }
 
+/// The kernel stack the faulting CPU is running on: the stack of the task
+/// currently switched in there, else the port's own boot stack.
+///
+/// The task publication is consulted first because a fatal fault almost
+/// always lands on a kthread stack, which no port can identify; the
+/// dispatcher and the pre-scheduler boot path run on the port's stack, which
+/// it vouches for itself. Neither source is believed blind — each answers
+/// only when the captured `sp` is inside the region it names, so a walk is
+/// never pointed at memory nothing vouches for (fail closed).
+fn walk_region(bt: &dyn CpuStateCapture, cpu: CpuId, sp: u64) -> Option<KernelStackRegion> {
+    crate::kthread::running_stack(cpu, sp).or_else(|| bt.boot_stack())
+}
+
 /// Capture the register snapshot and walk the backtrace into `bufs`,
 /// returning `(n_regs, n_frames)`.
 ///
-/// Allocation-free, and reads stack memory only through the bounds-checked
-/// [`RawStackReader`], so the walk never faults on a corrupt chain.
-fn capture_into(bt: &dyn CpuStateCapture, bufs: &mut CaptureBufs) -> (usize, usize) {
+/// Allocation-free, and reads stack memory only through the rooted,
+/// bounds-checked [`RawStackReader`], so the walk never faults on a corrupt
+/// chain.
+fn capture_into(bt: &dyn CpuStateCapture, cpu: CpuId, bufs: &mut CaptureBufs) -> (usize, usize) {
     let snap = bt.capture();
 
     // Explicit unwinder-critical registers first, then the named GP
@@ -317,16 +340,17 @@ fn capture_into(bt: &dyn CpuStateCapture, bufs: &mut CaptureBufs) -> (usize, usi
 
     // Frame 0 is the captured program counter (the fault site's frame);
     // the frame-pointer walk appends the caller return addresses. The walk
-    // reads memory only within the port's vouched stack bounds and is
-    // depth-capped, so a corrupt chain terminates without faulting.
+    // reads only within the region whoever vouched for the stack rooted, and
+    // is depth-capped, so a corrupt chain terminates without faulting.
     let mut frame_addrs = [0u64; FRAME_CAP];
     let mut n_frames = 0usize;
     if snap.pc != 0 {
         frame_addrs[0] = snap.pc;
         n_frames = 1;
     }
-    if let (Some(layout), Some(bounds)) = (bt.frame_layout(), bt.stack_bounds()) {
-        walk(&RawStackReader, snap.fp, layout, bounds, |ra| {
+    if let (Some(layout), Some(region)) = (bt.frame_layout(), walk_region(bt, cpu, snap.sp)) {
+        let reader = RawStackReader { region };
+        walk(&reader, snap.fp, layout, region.into(), |ra| {
             if n_frames < FRAME_CAP {
                 frame_addrs[n_frames] = ra;
                 n_frames += 1;
@@ -794,7 +818,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // rather than a faked backtrace.
     let mut capture = CaptureBufs::new();
     let (n_regs, n_frames) = match ctx.backtrace {
-        Some(bt) => capture_into(bt, &mut capture),
+        Some(bt) => capture_into(bt, cpu, &mut capture),
         None => (0, 0),
     };
 
@@ -921,15 +945,22 @@ fn format_desc_key(index: usize, buf: &mut [u8; 16]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::ptr::NonNull;
+
+    /// The process-wide quiesce liveness tables the stop-request tests
+    /// publish. Set-once per process, so one shared pair — not a per-test
+    /// allocation, which the undefined-behaviour oracle cannot tell from a
+    /// real leak.
+    static QUIESCE_ONLINE: [AtomicBool; 1] = [AtomicBool::new(false)];
+    static QUIESCE_ACK: [AtomicBool; 1] = [AtomicBool::new(false)];
     use crate::test_arch::{TestArch, HALT_SENTINEL};
     use crate::test_sink::TestSink;
-    use alloc::boxed::Box;
     use alloc::string::String;
     use core::panic::Location;
     use core::sync::atomic::AtomicU64;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tairix_arch_api::backtrace::{
-        Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot, StackBounds,
+        Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot,
     };
 
     /// Serialises the tests that drive [`panic_dump`]. The re-entrancy
@@ -952,7 +983,9 @@ mod tests {
         assert_eq!(format_u32(42, &mut buf), "42");
     }
 
-    fn drive_panic_dump<F>(make_location: F) -> (TestArch, &'static TestSink)
+    fn drive_panic_dump<F>(
+        make_location: F,
+    ) -> (TestArch, alloc::vec::Vec<crate::test_sink::CapturedEvent>)
     where
         F: FnOnce() -> &'static Location<'static>,
     {
@@ -962,7 +995,7 @@ mod tests {
         reset_panic_guard();
         let arch = TestArch::with_cpus(2);
         arch.set_current_cpu(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let loc = make_location();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
@@ -975,7 +1008,8 @@ mod tests {
             .or_else(|| err.downcast_ref::<&'static str>().copied())
             .unwrap_or("");
         assert!(msg.contains(HALT_SENTINEL), "halt sentinel missing: {msg}");
-        (arch, sink)
+        let records = sink.snapshot();
+        (arch, records)
     }
 
     #[track_caller]
@@ -985,9 +1019,8 @@ mod tests {
 
     #[test]
     fn panic_dump_emits_one_record_with_documented_fields() {
-        let (arch, sink) = drive_panic_dump(caller_location);
+        let (arch, events) = drive_panic_dump(caller_location);
 
-        let events = sink.snapshot();
         assert_eq!(events.len(), 1, "expected exactly one panic record");
         let ev = &events[0];
         assert_eq!(ev.id, AuditEvent::Panic.id());
@@ -1019,7 +1052,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             panic_dump(None, &ctx);
@@ -1028,7 +1061,7 @@ mod tests {
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
-        let ev = &events[0];
+        let ev = &sink.snapshot()[0];
         let field = |key: &str| {
             ev.fields
                 .iter()
@@ -1066,14 +1099,45 @@ mod tests {
         assert_eq!(&buf[..n], b"frame_63");
     }
 
-    /// A host [`CpuStateCapture`] that points the walker at a real, safe
-    /// stack image built in a `Vec`, so `panic_dump`'s production
-    /// `RawStackReader` reads genuine mapped host memory (not a fault).
+    /// A host [`CpuStateCapture`] that points the walker at a real stack
+    /// image the test owns, so `panic_dump`'s production `RawStackReader`
+    /// derives its reads from a root over live host memory.
+    ///
+    /// The region is built from the backing store's own pointer rather than
+    /// from its address: an address round-tripped through an integer and
+    /// synthesised back reads the same bytes natively while telling the test
+    /// nothing about whether the reader stayed inside the region it was
+    /// given, and is refused outright by the undefined-behaviour oracle.
     struct HostCapture {
         pc: u64,
         sp: u64,
         fp: u64,
-        bounds: StackBounds,
+        /// What the port vouches for, so a test can also make it honestly
+        /// decline and prove the walk came from elsewhere.
+        boot_stack: Option<KernelStackRegion>,
+    }
+
+    /// Root a region in a word slice the caller owns and keeps alive.
+    ///
+    /// The slice must not be touched through its own handle afterwards:
+    /// reborrowing it would retire the region's root, so the image is
+    /// planted with [`plant`] — through the very pointer the reader derives
+    /// from, which is the discipline under test.
+    fn region_of(words: &mut [u64]) -> KernelStackRegion {
+        let len = core::mem::size_of_val(words);
+        let base = NonNull::from(words).cast::<u8>();
+        // SAFETY: `words` is a live, writable host allocation of exactly
+        // `len` bytes, and the caller holds it for as long as the region is
+        // used.
+        unsafe { KernelStackRegion::new(base, len) }
+    }
+
+    /// Write one word of a fixture stack through the region's own root.
+    fn plant(region: KernelStackRegion, addr: u64, value: u64) {
+        let word = region.word_ptr(addr).expect("word inside the fixture");
+        // SAFETY: `word_ptr` proved the word lies inside the region, whose
+        // backing store the caller holds live.
+        unsafe { word.write_volatile(value) };
     }
 
     impl CpuStateCapture for HostCapture {
@@ -1095,8 +1159,8 @@ mod tests {
                 return_addr_offset: 8,
             })
         }
-        fn stack_bounds(&self) -> Option<StackBounds> {
-            Some(self.bounds)
+        fn boot_stack(&self) -> Option<KernelStackRegion> {
+            self.boot_stack
         }
     }
 
@@ -1113,23 +1177,23 @@ mod tests {
 
         // Build a two-frame chain in a real Vec the walker can read safely.
         let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 4];
-        let base = stack.as_ptr() as u64;
+        let region = region_of(&mut stack);
+        let base = region.base_addr();
         let fp0 = base;
         let fp1 = base + 16;
-        stack[0] = fp1; // caller fp of frame 0
-        stack[1] = RET1; // return address of frame 0
-        stack[2] = 0; // caller fp of frame 1 (terminates the walk)
-        stack[3] = RET2; // return address of frame 1
-        let bounds = StackBounds::new(base, base + 32);
+        plant(region, base, fp1); // caller fp of frame 0
+        plant(region, base + 8, RET1); // return address of frame 0
+        plant(region, base + 16, 0); // caller fp of frame 1 (terminates)
+        plant(region, base + 24, RET2); // return address of frame 1
         let cap = HostCapture {
             pc: 0xffff_8000_0000_0000,
             sp: base,
             fp: fp0,
-            bounds,
+            boot_stack: Some(region),
         };
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let cap_ref: &dyn CpuStateCapture = &cap;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
@@ -1139,7 +1203,7 @@ mod tests {
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 1, "one panic record");
-        let ev = &events[0];
+        let ev = &sink.snapshot()[0];
         let field = |key: &str| {
             ev.fields
                 .iter()
@@ -1161,6 +1225,111 @@ mod tests {
         assert_eq!(arch.halt_count(), 1);
     }
 
+    /// A panic on a kthread stack is unwound from the stack the dispatcher
+    /// published, not from the boot stack the port vouches for.
+    ///
+    /// This is the case that matters: almost every fatal fault after boot
+    /// lands on a kthread stack, which no port can identify, so a walk that
+    /// consulted only the port would emit registers and no chain at all
+    /// exactly when a chain is most needed. The port here honestly reports
+    /// no boot stack — the CPU is not on it — so any frame beyond `frame_0`
+    /// can only have come from the publication.
+    #[test]
+    fn panic_dump_unwinds_a_kthread_stack_the_dispatcher_published() {
+        const RET1: u64 = 0xffff_8000_0000_3333;
+        const CPU: CpuId = 0;
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 2];
+        let region = region_of(&mut stack);
+        let base = region.base_addr();
+        plant(region, base, 0); // caller fp terminates the walk
+        plant(region, base + 8, RET1);
+
+        // The port declines: this CPU is not on its boot stack.
+        let cap = HostCapture {
+            pc: 0xffff_8000_0000_0000,
+            sp: base,
+            fp: base,
+            boot_stack: None,
+        };
+        let _published = crate::kthread::publish_running_stack_for_test(CPU, region);
+
+        let arch = TestArch::with_cpus(1);
+        arch.set_current_cpu(CPU);
+        let sink = &TestSink::new();
+        let cap_ref: &dyn CpuStateCapture = &cap;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
+            panic_dump(None, &ctx);
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        let ev = &events[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("frame_0"), Some("0xffff800000000000"));
+        assert_eq!(
+            field("frame_1"),
+            Some("0xffff800000003333"),
+            "the published kthread stack was walked"
+        );
+    }
+
+    /// With nothing published and the port declining, the report carries
+    /// registers and no chain rather than a walk over memory nothing
+    /// vouches for.
+    #[test]
+    fn panic_dump_emits_no_chain_when_no_stack_is_vouched_for() {
+        const CPU: CpuId = 1;
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 2];
+        let region = region_of(&mut stack);
+        let base = region.base_addr();
+        plant(region, base, 0);
+        plant(region, base + 8, 0xffff_8000_0000_4444);
+        let cap = HostCapture {
+            pc: 0xffff_8000_0000_0000,
+            sp: base,
+            fp: base,
+            boot_stack: None,
+        };
+
+        let arch = TestArch::with_cpus(2);
+        arch.set_current_cpu(CPU);
+        let sink = &TestSink::new();
+        let cap_ref: &dyn CpuStateCapture = &cap;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
+            panic_dump(None, &ctx);
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        let ev = &events[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("pc"), Some("0xffff800000000000"));
+        assert_eq!(field("frame_0"), Some("0xffff800000000000"));
+        assert_eq!(field("frame_1"), None, "no region, no walk");
+    }
+
     /// A hidden console is shown again before the report is written, and a
     /// nested panic reclaims too: on a port whose log sink renders to the
     /// framebuffer, an oops raised under a graphical session would otherwise
@@ -1174,6 +1343,26 @@ mod tests {
             reclaimed: AtomicBool,
             reported: AtomicBool,
             reclaimed_before_report: AtomicBool,
+        }
+
+        impl Surface {
+            const fn new() -> Self {
+                Self {
+                    reclaimed: AtomicBool::new(false),
+                    reported: AtomicBool::new(false),
+                    reclaimed_before_report: AtomicBool::new(false),
+                }
+            }
+
+            /// Start a fresh round. An installed console is process-lifetime
+            /// (`ConsoleDevice::new` takes `&'static`), so the fixture is a
+            /// static the oracle can account for, cleared per round rather
+            /// than reallocated.
+            fn reset(&self) {
+                self.reclaimed.store(false, Ordering::SeqCst);
+                self.reported.store(false, Ordering::SeqCst);
+                self.reclaimed_before_report.store(false, Ordering::SeqCst);
+            }
         }
 
         struct SurfaceConsole(&'static Surface);
@@ -1203,6 +1392,13 @@ mod tests {
             }
         }
 
+        static SURFACE: Surface = Surface::new();
+        static CONSOLE: SurfaceConsole = SurfaceConsole(&SURFACE);
+        static CONSOLES: [crate::console::ConsoleDevice; 1] = [crate::console::ConsoleDevice::new(
+            &CONSOLE,
+            &crate::console::NULL_CONSOLE_READ,
+        )];
+
         for nested in [false, true] {
             let _serial = TEST_SERIAL
                 .lock()
@@ -1210,17 +1406,12 @@ mod tests {
             reset_panic_guard();
             PANICKING.store(nested, Ordering::Release);
 
-            let surface: &'static Surface = Box::leak(Box::new(Surface::default()));
-            let console: &'static SurfaceConsole = Box::leak(Box::new(SurfaceConsole(surface)));
-            let consoles: &'static [crate::console::ConsoleDevice] =
-                Box::leak(Box::new([crate::console::ConsoleDevice::new(
-                    console,
-                    &crate::console::NULL_CONSOLE_READ,
-                )]));
-            let sink: &'static SurfaceSink = Box::leak(Box::new(SurfaceSink(surface)));
+            let surface = &SURFACE;
+            surface.reset();
+            let sink = &SurfaceSink(surface);
             let arch = TestArch::with_cpus(1);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let ctx = PanicContext::new(&arch, sink).with_consoles(consoles);
+                let ctx = PanicContext::new(&arch, sink).with_consoles(&CONSOLES);
                 panic_dump(None, &ctx);
             }));
             assert!(result.is_err());
@@ -1247,7 +1438,7 @@ mod tests {
         PANICKING.store(true, Ordering::Release);
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             panic_dump(None, &ctx);
@@ -1276,7 +1467,7 @@ mod tests {
 
         let arch = TestArch::with_cpus(4);
         arch.set_current_cpu(3);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
@@ -1292,7 +1483,7 @@ mod tests {
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 1, "expected exactly one fault record");
-        let ev = &events[0];
+        let ev = &sink.snapshot()[0];
         assert_eq!(ev.id, AuditEvent::KernelFault.id());
         assert_eq!(ev.level, Level::Error);
         assert_eq!(ev.message, AuditEvent::KernelFault.message());
@@ -1327,18 +1518,19 @@ mod tests {
         reset_panic_guard();
 
         let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 2];
-        let base = stack.as_ptr() as u64;
-        stack[0] = 0; // caller fp terminates the walk
-        stack[1] = RET1;
+        let region = region_of(&mut stack);
+        let base = region.base_addr();
+        plant(region, base, 0); // caller fp terminates the walk
+        plant(region, base + 8, RET1);
         let cap = HostCapture {
             pc: 0xffff_8000_0000_0000,
             sp: base,
             fp: base,
-            bounds: StackBounds::new(base, base + 16),
+            boot_stack: Some(region),
         };
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let cap_ref: &dyn CpuStateCapture = &cap;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
@@ -1355,7 +1547,7 @@ mod tests {
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
-        let ev = &events[0];
+        let ev = &sink.snapshot()[0];
         let field = |key: &str| {
             ev.fields
                 .iter()
@@ -1383,7 +1575,7 @@ mod tests {
         PANICKING.store(true, Ordering::Release);
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
@@ -1469,17 +1661,15 @@ mod tests {
 
         // A one-entry liveness table with nothing online: publishing it is what
         // lets the stop latch its request at all, while leaving no peer to
-        // poke or wait for.
-        let online: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
-        let ack: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
-        // Set-once per process; this is its only publisher in this crate.
-        let _ = tairix_arch_api::quiesce_publish_tables(online, ack);
+        // poke or wait for. Set-once per process, so the pair is a static the
+        // whole crate's tests share rather than a per-test allocation.
+        let _ = tairix_arch_api::quiesce_publish_tables(&QUIESCE_ONLINE, &QUIESCE_ACK);
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static OrderSink = Box::leak(Box::new(OrderSink {
+        let sink = &OrderSink {
             stopped_before_report: AtomicBool::new(false),
             reported: AtomicBool::new(false),
-        }));
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
@@ -1562,7 +1752,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn active_root(&self) -> Option<u64> {
@@ -1589,17 +1779,15 @@ mod tests {
         // Publishing is what lets the stop latch a requester at all. The slot
         // is set-once per process, so this is idempotent with the other
         // publisher here and leaves no peer online to poke or wait for.
-        let online: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
-        let ack: &'static [AtomicBool] = Box::leak(Box::new([AtomicBool::new(false)]));
-        let _ = tairix_arch_api::quiesce_publish_tables(online, ack);
+        let _ = tairix_arch_api::quiesce_publish_tables(&QUIESCE_ONLINE, &QUIESCE_ACK);
 
         let arch = TestArch::with_cpus(4);
         arch.set_current_cpu(REPORTER);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let read: &'static WhenRead = Box::leak(Box::new(WhenRead {
+        let sink = &TestSink::new();
+        let read = &WhenRead {
             probe_after_stop: AtomicBool::new(false),
             walk_after_stop: AtomicBool::new(false),
-        }));
+        };
         let handle: &dyn CpuStateCapture = read;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
@@ -1640,8 +1828,8 @@ mod tests {
     /// a reader guessing whether the machine was stopped.
     #[test]
     fn a_report_states_the_stop_outcome_even_with_no_peers() {
-        let (_arch, sink) = drive_panic_dump(caller_location);
-        let ev = &sink.snapshot()[0];
+        let (_arch, events) = drive_panic_dump(caller_location);
+        let ev = &events[0];
         let field = |key: &str| {
             ev.fields
                 .iter()
@@ -1675,7 +1863,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn active_root(&self) -> Option<u64> {
@@ -1692,7 +1880,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let probe: &dyn CpuStateCapture = &Probing;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
@@ -1746,7 +1934,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn active_root(&self) -> Option<u64> {
@@ -1772,7 +1960,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let probe: &dyn CpuStateCapture = &StaleTlb;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
@@ -1811,7 +1999,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
@@ -1850,7 +2038,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn active_root(&self) -> Option<u64> {
@@ -1864,7 +2052,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let probe: &dyn CpuStateCapture = &RootOnly;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
@@ -1896,13 +2084,13 @@ mod tests {
     /// ordering is asserted, not just the call.
     #[test]
     fn the_record_is_flushed_to_the_device_after_it_is_written() {
-        struct FlushOrderSink {
-            arch: &'static TestArch,
+        struct FlushOrderSink<'a> {
+            arch: &'a TestArch,
             flushes_at_write: AtomicU64,
             reported: AtomicBool,
         }
 
-        impl Sink for FlushOrderSink {
+        impl Sink for FlushOrderSink<'_> {
             fn write_event(&self, _event: &Event<'_>) {
                 self.flushes_at_write
                     .store(self.arch.console_flush_count(), Ordering::SeqCst);
@@ -1915,12 +2103,12 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
 
-        let arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
-        let sink: &'static FlushOrderSink = Box::leak(Box::new(FlushOrderSink {
+        let arch = &TestArch::with_cpus(1);
+        let sink = &FlushOrderSink {
             arch,
             flushes_at_write: AtomicU64::new(u64::MAX),
             reported: AtomicBool::new(false),
-        }));
+        };
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(arch, sink);
             fault_dump(
@@ -1974,7 +2162,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn translation(&self, addr: u64, _write: bool) -> Translation {
@@ -1991,8 +2179,8 @@ mod tests {
         fn hole_field(addr: u64, hole: u64, span: u64) -> alloc::string::String {
             reset_panic_guard();
             let arch = TestArch::with_cpus(1);
-            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-            let probe: &dyn CpuStateCapture = Box::leak(Box::new(Holed { hole, span }));
+            let sink = &TestSink::new();
+            let probe: &dyn CpuStateCapture = &Holed { hole, span };
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
                 fault_dump(
@@ -2045,7 +2233,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn translation(&self, _addr: u64, _write: bool) -> Translation {
@@ -2066,7 +2254,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let probe: &dyn CpuStateCapture = &Walked;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
@@ -2114,7 +2302,7 @@ mod tests {
             fn frame_layout(&self) -> Option<FrameLayout> {
                 None
             }
-            fn stack_bounds(&self) -> Option<StackBounds> {
+            fn boot_stack(&self) -> Option<KernelStackRegion> {
                 None
             }
             fn translation(&self, addr: u64, _write: bool) -> Translation {
@@ -2132,7 +2320,7 @@ mod tests {
         reset_panic_guard();
 
         let arch = TestArch::with_cpus(1);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink = &TestSink::new();
         let probe: &dyn CpuStateCapture = &Mapped;
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);

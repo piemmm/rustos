@@ -21,9 +21,9 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 27 open, 104 closed, 131 total.
+table normalises all three to **closed**. 26 open, 105 closed, 131 total.
 
-### Open (27)
+### Open (26)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -49,10 +49,9 @@ table normalises all three to **closed**. 27 open, 104 closed, 131 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D123 | `kernel/core` and `kernel/mem` are not under the UB oracle | the `kheap` window-address question is **answered**: the remap window carries a provenance root, so `kheap::`/`kstack::` interpret clean in 41 s with the leak checker on. A whole-crate run now reaches 831 tests (was 708) and aborts on D128's stack reader. What is left for `kernel/core` is D128 plus the 1097 s-vs-287 s budget; `kernel/mem` still needs the same treatment for `DirectPhysMap` plus per-test extent scaling — see the section |
+| D123 | `kernel/core` and `kernel/mem` are not under the UB oracle | the window-address (D123) and stack-reader (D128) questions are both **answered**: `kheap::`/`kstack::` and `panic::` interpret clean with the leak checker on. What is left for `kernel/core` is the 1097 s-vs-287 s budget alone (`groups::`, `fs::fscache`, `appspawn::` — no `unsafe` between them), re-measured against `4dbe8d79e`; `kernel/mem` still needs the same root treatment for `DirectPhysMap` plus per-test extent scaling — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
-| D128 | the panic backtrace's stack reader rebuilds a pointer from the frame-pointer chain's integer addresses | `StackBounds` is an integer pair, so `RawStackReader` can only cast; the walk is bounds-checked and volatile, but the reads carry no provenance and the unwinder cannot be interpreted. Blocks D123's `kernel/core` enrolment |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
 
 ### Closed (104)
@@ -161,6 +160,7 @@ table normalises all three to **closed**. 27 open, 104 closed, 131 total.
 | D124 | the kthread resume handle round-tripped a control-block pointer through a `usize`, stripping its provenance |
 | D125 | a host test identified a function by its address, which the language leaves unspecified |
 | D126 | the kernel heap allocator threaded its free list and slab pages through integers, so no UB oracle could look at it |
+| D128 | the panic backtrace's stack reader rebuilt a pointer from an integer address, so the unwinder could not be interpreted — and only ever vouched for the boot stack, so a kthread panic carried no frame chain |
 | D129 | the `SleepLock` releaser deleted a live waiter's re-registered row, stranding it on a free lock |
 | D130 | a thread killed while parked left its row in every wait queue, where a counted wake spent itself on it |
 
@@ -7659,14 +7659,19 @@ derivation at a fraction of the pages, because a 32 MiB pool and a 64 MiB
 window per test is beyond the interpreter's budget and neither path varies
 with the chunk count.
 
-**Still blocking `kernel/core`.** Two things, both measured on a whole-crate
-run (`--lib`, `appspawn::` excluded):
+**D128 is closed too — the stack reader now derives.** The whole-crate run's
+next abort after `kheap` was `panic.rs`'s `RawStackReader`, the same defect
+class one subsystem over. Its section carries the fix, including why the root
+belongs to the reader rather than to `StackBounds` (the shared `walk` serves
+a second reader whose addresses are in a *foreign* address space and are
+never host pointers at all).
 
-* **D128 — the panic backtrace's stack reader.** The run now reaches **831
-  tests** (was 708) and aborts in `panic.rs`'s `RawStackReader`, which is the
-  same defect class one subsystem over: `StackBounds` is an integer pair, so
-  the reader can only cast the walk's addresses back into pointers. Its own
-  section carries the design answer.
+**Still blocking `kernel/core`: the budget, alone.** Measured on a
+whole-crate run (`--lib`, `appspawn::` excluded) **before `4dbe8d79e`**,
+which grew `waitq.rs` by 507 lines and `sleeplock.rs` by 187 — so both the
+831-test count and the figure below have moved and need re-measuring before
+they are relied on.
+
 * **1097 s against a 287 s stage makespan.** The stage runs one process per
   crate concurrently, so its cost is its slowest job; enrolling this crate as
   it stands would quadruple the stage. What dominates is *not* the `unsafe`
@@ -7756,55 +7761,80 @@ oracle interprets each of them. The earlier claim that those 28 tests never
 reached these paths was wrong — they always did; nothing had ever interpreted
 them.
 
-## D128 — the panic backtrace's stack reader rebuilds a pointer from an integer address (OPEN)
+## D128 — the panic backtrace's stack reader rebuilt a pointer from an integer address (FIXED)
 
-**Mechanism.** `tairix_arch_api::backtrace::StackBounds` is a pair of `u64`
+**Mechanism.** `tairix_arch_api::backtrace::StackBounds` was a pair of `u64`
 addresses and `StackReader::read_word` takes a `u64`, so the production
-reader has nothing to derive from and can only cast:
-`kernel/core::panic`'s `RawStackReader` does
-`core::ptr::read_volatile(addr as *const u64)`. The walk is careful in every
-*other* respect — both words are proved to lie inside the port's vouched
-bounds, the frame pointer must be aligned and strictly increasing, and the
-depth is hard-capped, so a corrupt chain terminates instead of faulting
-inside the fault handler — but each read still goes through a pointer the
-compiler believes aliases nothing.
+reader had nothing to derive from and could only cast: `kernel/core::panic`'s
+`RawStackReader` did `read_volatile(addr as *const u64)`. The walk was
+careful in every *other* respect — both words proved inside the port's
+vouched bounds, the frame pointer aligned and strictly increasing, the depth
+hard-capped — but each read went through a pointer the compiler believes
+aliases nothing, so the unwinder could not be *checked*: under
+`-Zmiri-strict-provenance` the cast is refused outright.
 
-Nothing is mis-read today: a bare int-to-pointer cast carries wildcard
-provenance, which obliges the compiler to stay conservative. The cost is that
-the unwinder cannot be *checked*. Under `-Zmiri-strict-provenance` the cast is
-refused outright, which is what blocks D123's `kernel/core` enrolment: the
-whole-crate run reaches 831 tests and aborts here.
+**The root now travels with the region, and the reader holds it.** The
+ledger's earlier sketch put the root inside `StackBounds`. That is wrong, and
+the reason is worth keeping: `walk` is **one** unwinder over **two** kinds of
+address. `RawStackReader`'s are host-dereferenceable kernel addresses;
+`crash::UserStackReader`'s are *foreign-address-space* user addresses it
+resolves through `copy_in`/`PhysMap` and never casts at all. A root in
+`StackBounds` would be a field the user walk has nothing to put in. So
+`StackBounds` stays the pure validation window both share, and the root lives
+in the thing that dereferences:
 
-It is also the reason a host test of the panic path is weaker than it looks.
-`panic::tests::fault_dump_carries_the_shared_register_and_backtrace_block`
-builds a two-word `Vec` as its stack and passes `stack.as_ptr() as u64` in as
-both the frame pointer and the bounds — a real pointer round-tripped through
-an integer and synthesised back. It reads its own live memory, so it passes
-natively; nothing about the arrangement would tell the test if the reader
-started reading somewhere else.
+* `KernelStackRegion` (already the `ContextSwitch::prepare` stack descriptor,
+  so no sibling type) gained `enclosing` — the one int-to-pointer mint, the
+  containment rule shared by all ports — plus `word_ptr`, the only
+  derivation, and `base_addr`/`contains_addr`/`base_ptr`. `StackBounds` is
+  reached only as `From<KernelStackRegion>`, read back off the very pointer
+  the reads derive from, so window and root cannot drift.
+* `CpuStateCapture::stack_bounds` became `boot_stack() -> Option<KernelStackRegion>`;
+  the three bare-metal ports mint their linker-reserved boot stack there, where
+  the reservation is a fact only the port holds. wasm32 stays `None`.
+* `RawStackReader` holds the region and derives each read. Nothing casts.
 
-**The design answer, the same one the window took (D123) and the free list
-took (D126).** The region a reader may touch is established outside Rust, so
-one root is minted where that fact is known and every read is derived from it.
-`StackBounds` should carry the root for the stack region it bounds, and
-`walk` should hand the reader a pointer derived from that root at the
-validated offset rather than a bare address — the bounds check `walk` already
-performs is exactly the proof the derivation is in range. Both production
-roots exist to be minted: a port's boot stack is a linker-placed symbol
-(`addr_of_mut!` has real provenance) and a kthread stack is already a
-`NonNull<u8>` inside `KernelStackRegion`.
+**The kthread-stack gap this exposed, closed with it.** `stack_bounds` only
+ever vouched for the *boot* stack, so a panic on a kthread stack failed the
+containment check, returned `None`, and dropped the walk entirely — almost
+every post-boot fatal fault printed registers and **no frame chain**, exactly
+when a chain is most needed. The dispatcher now publishes the stack it is
+switching into (`CpuState::running_stack`, an `AtomicPtr` because an address
+would discard the provenance again — the reason `lock_sites` stores a
+pointer), retracts it on switch-back, and `panic` resolves the running task's
+stack before the port's boot stack.
 
-**Why it is not in the change that found it.** It is a second Arch HAL slice
-(`backtrace`) plus the three ports' `stack_bounds`, and it lands in the
-fault-diagnostics path those plans own (`plans/FIX-PANICS.md`,
-`plans/FIX-WILD.md`) rather than the memory path. The user-stack reader needs
-deciding with it and is the harder half: it reads *another* address space, for
-which no host pointer can exist, so it may be the one genuine
-`with_exposed_provenance_mut` in the tree — the fallible `Option` return
-`StackReader` already has is there for exactly that reader.
+Neither source is believed blind, and the same test does two jobs: a region
+answers only when the captured `sp` is inside it, which is *also* the
+liveness proof — an `sp` inside a region means the CPU is executing on it,
+hence its pages are mapped and a publication a retired task left behind
+cannot be mistaken for the current one. No lock is taken on the fault path,
+and the slot is written and read only by its own CPU.
 
-**Done when:** `StackBounds` carries its root, the three ports mint it where
-they vouch for the stack, `RawStackReader` derives rather than casts, the
-host test roots its fake stack in the pointer it actually owns, and
-`MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p tairix-kernel-core
---lib -- panic::` passes — with a regression test that fails before.
+**Proved by.** `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p
+tairix-kernel-core --lib -- panic::` — 25 tests, 16.84 s, leak checking on.
+Reinstating the cast in place aborts it at `panic.rs`'s `read_volatile`
+("integer-to-pointer casts ... are not supported"); the file was restored by
+copy and its hash confirmed. Three regression tests carry the behaviour:
+`panic_dump_unwinds_a_kthread_stack_the_dispatcher_published` (the port
+honestly declines, so any frame past `frame_0` can only have come from the
+publication), `panic_dump_emits_no_chain_when_no_stack_is_vouched_for`, and
+`the_published_running_stack_answers_only_for_an_sp_on_it`; `word_ptr` and
+`enclosing` have their own containment tests in `kernel/arch/api`.
+
+**The fixtures had to become accountable too.** `panic::`'s tests leaked 493
+allocations through `Box::leak`, which the earlier abort had masked and which
+the oracle cannot tell from a real leak. Seventeen sinks became plain locals,
+`drive_panic_dump` returns its records rather than a borrow of a sink it
+owns, the process-wide quiesce liveness tables became one shared `static`
+pair, and the installed-console fixture (`ConsoleDevice::new` genuinely takes
+`&'static`) became a `static` cleared per round. A fixture that planted its
+stack image by indexing its own `Vec` after taking the region also had to
+plant *through* the region instead — reborrowing the slice retires the root,
+which Stacked Borrows caught and which is the discipline under test.
+
+**Still not enrolled.** `kernel/core` remains outside `miri`'s `TARGETS`:
+D123's budget half (1097 s against a 287 s stage makespan, dominated by
+`groups::` and `fs::fscache`, neither carrying `unsafe`) is untouched by this
+change. The baseline also moved under `4dbe8d79e`, so it needs re-measuring
+before it is relied on.

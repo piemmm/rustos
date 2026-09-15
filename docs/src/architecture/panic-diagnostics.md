@@ -250,18 +250,39 @@ shared by every port) therefore:
 - validates every candidate frame pointer before dereferencing it —
   non-null, 8-byte aligned, strictly greater than the previous one
   (monotonic, which kills cycles), and with both read words wholly inside
-  the current CPU's kernel-stack bounds;
+  the vouched-for region of the stack the CPU is running on;
 - reads memory only through a bounds-checked reader, so the single unsafe
   dereference site lives in one audited place, never one per architecture;
 - is hard-capped at 64 frames, so even a corrupt-but-plausible chain
   terminates.
 
-The kernel-stack bounds come from the port
-(`CpuStateCapture::stack_bounds`): it returns real bounds when the captured
-stack pointer is on a stack it can vouch for (the boot stack), and `None`
-otherwise — in which case the dump degrades to the registers plus the
-captured program counter (`frame_0`) rather than reading memory it cannot
-guarantee is mapped. The walker is fuzzed
+### Which stack is walked, and what it is read through
+
+A walked address is never rebuilt into a pointer. The stack is named by a
+`KernelStackRegion`, which carries the *root* whoever established the stack
+minted, and every word the unwinder reads is derived from that root at the
+validated offset — so the read carries provenance for the bytes it touches
+instead of aliasing nothing, and the unwinder can be checked by the
+undefined-behaviour oracle rather than merely reasoned about.
+
+Two sources supply the region, in this order:
+
+1. **The running task's stack**, published per-CPU by the dispatcher as it
+   switches in (`kthread::running_stack`). This is the case that matters:
+   almost every fatal fault after boot lands on a kthread stack, which no
+   port can identify, so without it the report would carry registers and no
+   frame chain exactly when a chain is most needed.
+2. **The port's boot stack** (`CpuStateCapture::boot_stack`), for the
+   dispatcher itself and the pre-scheduler boot path.
+
+Neither is believed blind: each answers only when the captured stack
+pointer is inside the region it names. That test is also the liveness
+proof — a stack pointer inside a region means the CPU is executing on it,
+hence that its pages are mapped and that a publication a retired task left
+behind cannot be mistaken for the current one. With neither source
+vouching, the dump degrades to the registers plus the captured program
+counter (`frame_0`) rather than reading memory it cannot guarantee is
+mapped. The walker is fuzzed
 (`kernel/arch/api/tests/fuzz_backtrace.rs`): it must always terminate and
 never read outside the bounds it was given, for any adversarial input.
 

@@ -42,10 +42,13 @@ for why `MachineTakeover` is not the mechanism.
 
 Design note (divergence from the original sketch below, per the "redo it
 correctly" mandate): the arch slice exposes register `capture()` plus a
-pure `FrameLayout` (saved-fp / return-addr offsets) and `stack_bounds()`,
+pure `FrameLayout` (saved-fp / return-addr offsets) and `boot_stack()`,
 while the single audited, bounds-checked, monotonic, depth-capped
 frame-pointer walk lives once in `kernel/core` and reads memory only
-through a `StackReader`. This is stronger than the sketched per-arch
+through a `StackReader`. The stack is named by a `KernelStackRegion`
+carrying its own root, and the walked stack is the running task's published
+one before the port's boot stack — a kthread stack is what a post-boot
+fault lands on, and no port can identify one. This is stronger than the sketched per-arch
 `unwind_one`: the one dangerous dereference site is shared and fuzzed, not
 copied three times. wasm32 is an honest `Unsupported`. The arch-crate
 `handle_panic_via_serial` is retained as the QEMU integration-test
