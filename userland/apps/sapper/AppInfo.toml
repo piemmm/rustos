@@ -1,0 +1,28 @@
+# Signed-AppInfo manifest source for `sapper`, the desktop mine-clearing game.
+# Discovered by the build's app-bundle composer, which cross-compiles Run, signs
+# the manifest, and plants the bundle on the read-only /System/Applications
+# store; the desktop session's program library spawns it (and the shell resolves
+# it by name, like any program in either system store).
+#
+# The capability list is the minimum the game needs: CAP_CONSOLE_WRITE for its
+# fail-loud stderr diagnostics, and CAP_SHM to create and grant the zero-copy
+# window frame region the desktop session maps. It reads no filesystem and
+# spawns no process. Its best times live in the app-data store, which is
+# reached through the settings service over an ordinary unprivileged call and
+# gated on this bundle's kernel-attested identity rather than on any authority
+# the bundle asks for. The launched process receives this set intersected with
+# the launching user's grants, never more.
+id = "os.tairix.sapper"
+name = "sapper"
+version = "0.1.0"
+kind = "application"
+# The identity the desktop's icon-bar information panel states, drawn from this
+# *signed* manifest rather than from anything the running process says about
+# itself.
+purpose = "Clear the minefield without striking a mine"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]
+library = "Games"
+# This bundle's own icon in its Resources/, authored as a vector so one file
+# serves every slot and every UI scale exactly.
+library-icon = "sapper.svg"

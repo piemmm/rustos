@@ -173,19 +173,25 @@ pub fn park(set: u64) -> Result<Wake, Errno> {
     Err(Errno::from_syscall(rc))
 }
 
-/// Park on `set` until a member is ready or `timeout_ns` elapses, answering
-/// `None` on the deadline.
+/// Park on `set` until a member is ready or `budget_ns` **elapses from now**,
+/// answering `None` when the budget ran out.
 ///
-/// One-shot by construction: the deadline is the caller's next due event, so a
-/// loop that has nothing pending passes no timeout at all and the CPU is given
-/// up entirely.
+/// The budget is a duration, not an instant: `u64::MAX` is the way to say "no
+/// deadline at all". A caller holding the *instant* its next event is due wants
+/// [`park_until`] instead, which is the same park with the arithmetic done for
+/// it — handing an absolute clock reading to this one parks for the machine's
+/// whole uptime.
+///
+/// One-shot by construction: the budget is the caller's next due event, so a
+/// loop that has nothing pending passes `u64::MAX` and the CPU is given up
+/// entirely.
 ///
 /// # Errors
 ///
-/// The kernel's refusal. A reached deadline is `Ok(None)`, not an error.
-pub fn park_until(set: u64, timeout_ns: u64) -> Result<Option<Wake>, Errno> {
+/// The kernel's refusal. An exhausted budget is `Ok(None)`, not an error.
+pub fn park_for(set: u64, budget_ns: u64) -> Result<Option<Wake>, Errno> {
     let mut token = 0u64;
-    let rc = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
+    let rc = tairix_rt::waitset_wait(set, budget_ns, &mut token);
     if rc == 0 {
         return Ok(Some(classify(token)));
     }
@@ -193,6 +199,24 @@ pub fn park_until(set: u64, timeout_ns: u64) -> Result<Option<Wake>, Errno> {
         Errno::TimedOut => Ok(None),
         err => Err(err),
     }
+}
+
+/// Park on `set` until a member is ready or the monotonic clock reaches
+/// `deadline_ns`, answering `None` on the deadline.
+///
+/// The absolute-deadline half of [`park_for`], for the common loop that knows
+/// *when* its next frame or tick is due rather than how long away it is. The
+/// clock read and the subtraction live here so no caller repeats them, and so
+/// none can hand an instant to a call that wanted a duration.
+///
+/// # Errors
+///
+/// As [`park_for`].
+pub fn park_until(set: u64, deadline_ns: u64) -> Result<Option<Wake>, Errno> {
+    park_for(
+        set,
+        crate::park::remaining_ns(deadline_ns, tairix_rt::clock_get()),
+    )
 }
 
 /// The app's bound event mailbox endpoint and the wait-set it parks on.

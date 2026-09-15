@@ -1020,6 +1020,7 @@ mod tests {
                 "reset",
                 "rm",
                 "rmdir",
+                "sapper",
                 "seatmgr",
                 "seq",
                 "servicectl",

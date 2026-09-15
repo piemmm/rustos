@@ -2574,6 +2574,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-sapper"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-seat"
 version = "0.0.0"
 

@@ -52,6 +52,7 @@ pub mod desktop;
 pub mod frames;
 #[cfg(feature = "rt")]
 pub mod mailbox;
+pub mod park;
 pub mod server;
 
 pub use appbar::{declaration, info_and_quit, is_quit, DESKTOP_ROLE_SWITCH, QUIT_ROW};

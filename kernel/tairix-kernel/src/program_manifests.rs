@@ -1351,14 +1351,15 @@ mod tests {
         CapabilityId::NET,
     ];
 
-    // The `widgets` gallery (plans/GUI-CONTROLS-DESIGN.md): console write for
-    // its fail-loud stderr diagnostics, and `CAP_SHM` for the zero-copy window
-    // frame region it creates and grants to the desktop session. It reads no
-    // filesystem and spawns nothing (every widget commits its action back into
-    // the demo itself, never a privileged service). Not an embedded spawn-floor
-    // program, so the list lives only in this pin.
-    const WIDGETS_GALLERY_REQUEST: &[CapabilityId] =
-        &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
+    // A self-contained windowed application's expected request: console write
+    // for its fail-loud stderr diagnostics, and `CAP_SHM` for the zero-copy
+    // window frame region it creates and grants to the desktop session. It
+    // reads no filesystem and spawns nothing, so it asks for nothing else — the
+    // graphical counterpart of `PURE_TOOL_REQUEST`. An application that grows a
+    // need beyond this earns a request of its own rather than widening this
+    // one. They ship purely as discovered on-disk bundles, so no `spawn_layout`
+    // row or manifest constant exists for them.
+    const WINDOWED_APP_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
 
     // The Switchboard monitor service (plans/NEW-TASKBAR.md T10/T11): console
     // write for its fail-loud stderr diagnostics, and the three sysinfo reads
@@ -1489,6 +1490,7 @@ mod tests {
             ("reset", ProgramKind::Command, RESET_MANIFEST),
             ("rm", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+            ("sapper", ProgramKind::Application, WINDOWED_APP_REQUEST),
             ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
             ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
             ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
@@ -1524,7 +1526,7 @@ mod tests {
             ),
             ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
             ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("widgets", ProgramKind::Application, WIDGETS_GALLERY_REQUEST),
+            ("widgets", ProgramKind::Application, WINDOWED_APP_REQUEST),
             ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
         ];
 

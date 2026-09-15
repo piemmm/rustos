@@ -1730,7 +1730,7 @@ mod program {
             // to the moment it may be sent; with nothing pending the park
             // stays indefinite.
             let timeout_ns = tairix_rt::cachereport::fold_wait_deadline_ns(u64::MAX);
-            let Some(wake) = app::park_until(self.set, timeout_ns)? else {
+            let Some(wake) = app::park_for(self.set, timeout_ns)? else {
                 // No member woke. The held-back report is the only bounded
                 // wait here, so the deadline means exactly that it is due.
                 tairix_rt::cachereport::publish_if_due();

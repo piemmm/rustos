@@ -1073,7 +1073,7 @@ mod program {
             } else {
                 u64::MAX
             };
-            let woke = match app::park_until(set, timeout) {
+            let woke = match app::park_for(set, timeout) {
                 Ok(Some(wake)) => wake,
                 Ok(None) => {
                     // The frame deadline elapsed: advance every window's

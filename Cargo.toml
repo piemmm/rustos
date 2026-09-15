@@ -235,6 +235,7 @@ members = [
     "userland/apps/reset",
     "userland/apps/rm",
     "userland/apps/rmdir",
+    "userland/apps/sapper",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/sleep",

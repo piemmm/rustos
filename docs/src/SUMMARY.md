@@ -173,6 +173,7 @@
 - [Variable DPI and UI scale](./desktop/dpi.md)
 - [Default desktop apps](./desktop/apps.md)
 - [Widget gallery](./desktop/widgets.md)
+- [Sapper](./desktop/sapper.md)
 - [Design artwork and storyboards](./desktop/artwork.md)
 
 # ABI

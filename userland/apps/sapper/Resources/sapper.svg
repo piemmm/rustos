@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>sapper</title>
+  <!-- A red pennant planted on a minefield, with one mine uncovered beside it.
+       Every shape is a filled polygon or circle and every curve is cut as
+       integer line segments, because the desktop's SVG subset draws fills
+       rather than strokes — an outline is an inner cut in the colour beneath.
+       Two shapes carry the whole picture, so it still reads at a taskbar's
+       twenty-odd pixels. -->
+
+  <!-- Tile: rounded square, corners cut as integer line segments -->
+  <polygon fill="#22304E" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,196 234,213 226,226 213,234 196,236 60,236 43,234 30,226 22,213 20,196"/>
+  <polygon fill="#334263" points="20,60 22,44 30,31 43,22 60,20 196,20 213,22 226,31 234,44 236,60 236,84 20,84"/>
+
+  <!-- The field, as the grid a covered board reads by: four gutters cut in the
+       darker colour beneath, never drawn as strokes -->
+  <polygon fill="#1A2439" points="20,124 236,124 236,132 20,132"/>
+  <polygon fill="#1A2439" points="124,84 132,84 132,236 124,236"/>
+
+  <!-- One cell already uncovered, drawn lighter exactly as the game draws an
+       opened cell, so the mine on it has something to read against -->
+  <polygon fill="#3E507A" points="20,132 124,132 124,236 60,236 43,234 30,226 22,213 20,196"/>
+
+  <!-- The mine: a disc with eight thin spikes and a gleam, so it reads as a
+       sphere rather than a cog -->
+  <polygon fill="#0E1524" points="67,138 77,138 77,222 67,222"/>
+  <polygon fill="#0E1524" points="30,175 114,175 114,185 30,185"/>
+  <polygon fill="#0E1524" points="38,154 46,146 106,206 98,214"/>
+  <polygon fill="#0E1524" points="98,146 106,154 46,214 38,206"/>
+  <circle cx="72" cy="180" r="26" fill="#0E1524"/>
+  <circle cx="63" cy="171" r="7" fill="#93A6C6"/>
+
+  <!-- The pennant, planted across the two right-hand cells -->
+  <polygon fill="#0E1524" points="134,208 210,208 202,226 142,226"/>
+  <polygon fill="#0E1524" points="164,36 178,36 178,214 164,214"/>
+  <polygon fill="#E5484D" points="164,42 72,78 164,114"/>
+</svg>

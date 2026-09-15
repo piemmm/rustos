@@ -1,0 +1,71 @@
+[package]
+name = "tairix-sapper"
+description = "TAIRiX Sapper: an animated desktop mine-clearing game. The host-tested board rules, layout arithmetic, animation model, painter and best-times store are the crate's [lib]; the freestanding `Run` binary is the on-disk sapper.app bundle's entry point composing it over lib/window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The host-testable game. Everything with behaviour worth testing lives here —
+# the board rules, the reveal wave the animation is timed from, the layout
+# arithmetic, the painter, and the best-times store — so the `Run` binary only
+# composes it, exactly as the widget gallery and the file manager do. `no_std` +
+# `alloc`, so it links unchanged into the freestanding binary and runs under the
+# host test harness.
+[lib]
+name = "tairix_sapper"
+path = "src/lib.rs"
+
+# The `Run` entry-point binary of the on-disk `sapper.app` bundle: a
+# freestanding pure-Rust program on the native Tier-1 targets and an inert host
+# stub elsewhere (see `src/run.rs` / `build.rs`).
+[[bin]]
+name = "tairix-sapper-run"
+path = "src/run.rs"
+
+# The shared control behaviour, coordinate/scale types, theme tokens, text
+# rasteriser, desktop input vocabulary, software raster surface, the unbiased
+# bounded draw the mine layout uses, and the app-data client the best times are
+# kept in. All are `no_std` `lib/*` crates that build for the host harness and
+# the bare-metal targets alike.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0" }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+
+# The freestanding `Run` binary additionally drives the window channel's client
+# half, the deferral desk the best-times write is handed to, and the pure-Rust
+# userland runtime (`_start`, the allocator, the syscall wrappers). Bare-metal
+# only; on the host the binary is an inert stub.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The app-data client's runtime transport, so the best-times store reaches the
+# real service; the base dependency stays host-neutral for the tests below.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# On the real target the `Run` binary reaches the sandboxed font service over
+# the runtime `ipc_call` transport; the base dependency stays host-neutral so
+# host tests inject the mock transport instead.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+
+# The painter's host tests draw text, so they inject the shared solid test
+# transport (never a running `fontd`), and the best-times tests speak the real
+# `appdata-v1` codec against the shared fake service.
+[dev-dependencies]
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true
