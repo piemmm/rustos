@@ -39,6 +39,14 @@ every block records its physical predecessor so coalescing reaches each
 neighbour directly. `alloc`, `dealloc`, and returning a drained region are
 therefore **O(1)** — no list is ever walked.
 
+Every address the tags carry is a **pointer**, never an integer an address is
+rebuilt from: a round trip through `usize` strips provenance, after which the
+compiler may reorder or elide the header writes the free-list algebra depends
+on. The crate denies `implicit_provenance_casts` so a relapse fails the build,
+and it is enrolled in `cargo xtask miri`, which interprets the back-link a
+coalesce dereferences, the block a split carves off, the descriptor an
+object's page is found through, and a returned region's header.
+
 Steady allocate/free traffic runs in bounded memory and exhaustion is a
 `null` return, never a panic (`AGENTS.md` §4). Before it refuses, the heap
 reclaims the one page each slab class keeps back as hysteresis. See the

@@ -21,7 +21,7 @@ Read first (§15.18): `plans/FIX-SYSCALL.md`, `plans/WATCHDOG.md`,
 Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below — is authoritative if the two ever disagree.
 The record spells closure as DONE, FIXED, and CLOSED interchangeably; this
-table normalises all three to **closed**. 25 open, 101 closed, 126 total.
+table normalises all three to **closed**. 25 open, 102 closed, 127 total.
 
 ### Open (25)
 
@@ -49,11 +49,11 @@ table normalises all three to **closed**. 25 open, 101 closed, 126 total.
 | D103 | the fork-join pool has no true-SMP vertical | coverage gap, not a known defect; needs secondary bring-up in a user-program chassis |
 | D111 | `rng_soak`'s `approximate-entropy` reference distribution runs 0.8 high | the only statistic whose null is genuinely wrong; a higher-order overlapping-window bias. Four others have no derived null but measure correct |
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
-| D123 | `kernel/core`, `kernel/mem` and `lib/kalloc` are not under the UB oracle | both halves are now **costed**, and each is blocked on something bigger than an enrolment line. `kernel/core`: D124/D125 and its leak fixtures are cleared, but a whole-crate run is 680 s against the stage's 287 s makespan and still exits 1 on D126. `kernel/mem`: ~2.7 h interpreted whole. Neither is a filter problem — see the section |
+| D123 | `kernel/core` and `kernel/mem` are not under the UB oracle | `lib/kalloc` is enrolled and green (D126), which clears the abort `init::` used to take — 708 tests now pass before the run stops. `kernel/core` still has three blockers: `kheap`'s window address is external rather than laundered, so strict provenance cannot express it at all; that harness leaks by construction; and 680 s against the stage's 287 s makespan. `kernel/mem`: ~2.7 h interpreted whole. Neither is a filter problem — see the section |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
-| D126 | the kernel heap allocator threads its free list and slab pages through integers, so no UB oracle can look at it | `lib/kalloc`'s in-band `Block.prev_phys: usize` back-link, `split_front`'s `tail_addr as *mut Block`, `page_of`'s mask-down-to-page-base, and the region header rebuilt from a stored address. The crate is unenrolled, and its 28 tests never reach the paths `kernel/core`'s `init::` tests do |
+| D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
 
-### Closed (101)
+### Closed (102)
 
 | ID | Subject |
 |---|---|
@@ -158,6 +158,7 @@ table normalises all three to **closed**. 25 open, 101 closed, 126 total.
 | D119 | a wired path-backed descriptor was refused to a child holding no `CAP_FS_ACCESS`, breaking the inherited-document hand-off |
 | D124 | the kthread resume handle round-tripped a control-block pointer through a `usize`, stripping its provenance |
 | D125 | a host test identified a function by its address, which the language leaves unspecified |
+| D126 | the kernel heap allocator threaded its free list and slab pages through integers, so no UB oracle could look at it |
 
 ## Scope
 
@@ -7578,15 +7579,18 @@ assertion used to be, so a reader does not mistake the gap for an oversight.
 run above covers it). Only the D123 enrolment would keep it that way
 automatically; until then it is a developer's obligation.
 
-## D123 — `kernel/core`, `kernel/mem` and `lib/kalloc` are not under the UB oracle (OPEN, now costed)
+## D123 — `kernel/core` and `kernel/mem` are not under the UB oracle (OPEN, now costed)
 
 **Why it matters.** `cargo xtask ci`'s miri stage interprets only the crates in
 `tools/xtask/src/commands/miri.rs`'s `TARGETS`. Three crates carrying
-load-bearing `unsafe` are outside it: the kthread raw-pointer protocol
+load-bearing `unsafe` were outside it: the kthread raw-pointer protocol
 (`kernel/core`), the slab and page-table allocators (`kernel/mem`), and the
 kernel heap allocator itself (`lib/kalloc`). A green gate says nothing about
-any of them, so every fix to their `unsafe` — D124's included — rests on a
-developer remembering to run the oracle by hand.
+an unenrolled crate, so every fix to its `unsafe` rests on a developer
+remembering to run the oracle by hand.
+
+**`lib/kalloc` is done (D126)** — enrolled, and green in 62 s. The two that
+remain are below.
 
 **Cleared for `kernel/core`.** Three things that would each have blocked an
 enrolment are fixed: the resume-seam round-trip (D124), a test resting on
@@ -7599,13 +7603,34 @@ checks scale their 600/800 steps to 24 under `cfg!(miri)`, the pattern
 `lib/collections` established; without that they do not terminate in any
 useful time.
 
-**Still blocking `kernel/core`, measured.** A whole-crate run
-(`--lib`, `appspawn::` excluded) is **680 s** and exits **1**:
+**Still blocking `kernel/core`, measured.** With D126 fixed, a whole-crate run
+(`--lib`, `appspawn::` excluded) gets **708 tests in** — `init::`, which used
+to abort on the heap allocator, is clean — and then exits **1** on
+`kheap::tests`. Two distinct blockers remain:
 
-* **It exits 1 on D126** — `lib/kalloc`'s `split_front` synthesises a pointer
-  from an integer, reached through `init::tests`' real kernel-heap domain. An
-  exclusion list must not be the answer: skipping `init::` to get a green
-  enrolment is dodging a finding, which the charter forbids outright.
+* **`kheap.rs:135` is not a laundered pointer, and cannot simply be fixed.**
+  `FrameHeapSource::grow` computes a kernel remap-window address
+  (`window.base() + slot * PAGE_SIZE`) and casts it with `addr as *mut u8`.
+  Unlike D126 nothing lost provenance here: the address never *was* a pointer,
+  and the host harness says so outright — its window addresses are
+  deliberately not dereferenceable, because no hardware maps them, so the
+  tests drive the source's contract while the metal proves the dereference.
+  Strict provenance has no way to express "an address the MMU will map",
+  `with_exposed_provenance_mut` being the documented spelling that Miri
+  nonetheless refuses under `-Zmiri-strict-provenance` (the D121 trampoline
+  precedent). So the choice is a design one, and it is this defect's first
+  question: back the harness's window with a real host allocation so the
+  address genuinely is a pointer, or accept that `kheap`'s host tests cannot
+  be interpreted. Scoping the enrolment past `kheap::` is **not** available —
+  it carries `unsafe`, so excluding it is dodging a finding.
+  Switching to `with_exposed_provenance_mut` is worth doing either way, as the
+  honest spelling and as what would let this crate adopt kalloc's
+  `implicit_provenance_casts` deny, but it does not move the oracle.
+* **`kheap`'s harness leaks by construction.** It boxes and leaks the frame
+  allocator, the simulated physical map, the remap and the source, "all leaked
+  `'static` as they are in production", so the leak checker objects on top of
+  the cast. This is the fixture work D124's session did for the kthread
+  fixtures, not yet done here.
 * **680 s against a 287 s stage makespan.** The stage runs one process per
   crate concurrently, so its cost is its slowest job; enrolling this crate as
   it stands would more than double the stage. What dominates is *not* the
@@ -7621,43 +7646,64 @@ module, because the expensive tests *are* the `unsafe` ones — `dma`, `anon` an
 `dma::…a_full_span_window_serves_a_multi_device_enclosure_lazily` alone does not
 finish in minutes. It needs per-test `cfg!(miri)` extent scaling, test by test.
 
-**Done when:** all three crates are in `TARGETS`, the stage still fits its
-makespan, and the run is green. The order is forced: D126 first (it is what
-makes the `kernel/core` run exit 1), then the extent scaling each crate needs,
-then the enrolments. An exclusion list is legitimate only for a module that
-carries no `unsafe` and passes when run — budget, never a dodged finding.
+**Done when:** both remaining crates are in `TARGETS`, the stage still fits
+its makespan, and the run is green. D126 is cleared, so what is left is the
+`kheap` window-address decision above, the leak-accountable fixtures, and the
+per-test extent scaling each crate needs. An exclusion list is legitimate only
+for a module that carries no `unsafe` and passes when run — budget, never a
+dodged finding.
 
-## D126 — the kernel heap allocator threads its free list and slab pages through integers (OPEN)
+## D126 — the kernel heap allocator threaded its free list and slab pages through integers (FIXED)
 
-**Mechanism.** `lib/kalloc`'s `FreeListAllocator` moves block addresses through
-`usize` and synthesises pointers back out of them, which strips provenance: the
+**Mechanism.** `lib/kalloc`'s `FreeListAllocator` moved block addresses through
+`usize` and synthesised pointers back out of them, which strips provenance: the
 compiler then believes those pointers alias nothing, and is free to reorder or
-elide the header writes the free-list algebra depends on. Four distinct shapes:
+elide the in-band header writes the free-list algebra depends on. Four shapes
+carried it — the `Block.prev_phys` physical back-link a coalesce dereferences,
+`split_front`'s `block.as_ptr() as usize + front`, `page_of`'s mask of an
+object address down to its granule base, and a returned region's header rebuilt
+from a stored address.
 
-* `Block.prev_phys: usize` — the in-band physical-neighbour back-link, written
-  as `block.as_ptr() as usize` at four sites and read back as
-  `b.prev_phys as *mut Block` when coalescing.
-* `split_front` — `block.as_ptr() as usize + front`, then
-  `(tail_addr as *mut Block).write(…)`: the arithmetic leaves the pointer and
-  comes back as a fresh one, where `byte_add` would have carried provenance.
-* `page_of` — masks an object address down to its granule base and mints a
-  `NonNull<SlabPage>` from it. The hardest of the four: strict provenance wants
-  a pointer with provenance for the whole page, and the object pointer has it
-  only for the object.
-* the grown-region header, rebuilt as `base as *mut RegionHeader` from a stored
-  address.
+**Fix.** Every address now travels as a pointer.
 
-`tairix-kalloc` is not in the miri stage's `TARGETS`, and its own 28 tests do
-not reach these paths — this surfaced only when `kernel/core`'s `init::` tests
-drove the real heap domain under the interpreter (D123).
+* `Block.prev_phys` is `Option<NonNull<Block>>`. The null-pointer niche keeps
+  the header two words, which `assert!(size_of::<Block>() == HEADER)` pins
+  because a payload sits `HEADER` bytes into its block.
+* **`FLAG_REGION_START` is gone.** "No predecessor" and "first in its region"
+  are one fact, and holding it twice is a divergence waiting to happen, so
+  `prev_phys.is_none()` is the only spelling. Two flags remain.
+* `split_front` and the region header step with `byte_add` / `byte_sub`, which
+  carry provenance where the integer arithmetic destroyed it.
+* `page_of` steps the object's *own* pointer back by its offset within the
+  page rather than rebuilding a masked address. The object was derived from
+  the page, so walking the same distance back reaches the descriptor the page
+  really owns — which is what the earlier note doubted was reachable without
+  routing the provenance in from the region. It is `unsafe` now, because an
+  out-of-bounds step is UB where a synthesised dangling pointer merely was not
+  yet; the sole caller already holds the contract that discharges it.
 
-**Not folded into D124.** D124's seam was a Rust store and a Rust load with an
-`as` cast between them, so it simply stopped round-tripping. This is the
-allocator's *representation*: closing it means changing the in-band header
-every subsystem's allocations thread through, and `page_of` may need the page
-provenance to come from the region rather than the object. That is its own
-change, with its own oracle enrolment and its own re-measurement.
+**The structural control.** The crate denies `implicit_provenance_casts`
+(behind `strict_provenance_lints`, which the lint genuinely needs — without
+the gate it degrades to an unknown-lint warning and silently checks nothing),
+so a relapse is a build failure rather than something only an interpreted run
+would notice. That lint is what found the fixture half: the test `HeapSource`
+kept its arena as a `usize` base and rebuilt every carve from it, and eleven
+test bodies took addresses with `as usize`.
 
-**Done when:** `lib/kalloc` carries pointers rather than addresses across these
-four shapes, the crate is in `TARGETS`, and it interprets clean under
-`-Zmiri-strict-provenance`.
+**The fixtures are accountable to the interpreter.** A deliberate leak cannot
+be told from a real one, so the bootstrap arena is now owned by a `Fixture`
+that frees it on drop (`Deref`ing to the allocator, so no test body changed),
+and the `MockSource` — which must be `&'static` to install, so nothing could
+ever free a heap arena it owned — sits in a `static` per macro expansion over
+a `static` arena. One pair per expansion, so two concurrently-running tests
+never share a source. `MockState` lost its `base` and `len` fields: the base
+is a pointer outside the lock and the length was `MOCK_ARENA` copied.
+
+**Proved by.** `MIRIFLAGS=-Zmiri-strict-provenance cargo miri test -p
+tairix-kalloc` fails before (unsupported int-to-pointer cast) and passes after
+— 28 tests in 62 s, inside the stage's 287 s makespan — and the crate is in
+`TARGETS`, so `ci` keeps it that way. The enrolment is not vacuous:
+instrumenting all four shapes with a panic trips 22 of the 28 tests, so the
+oracle interprets each of them. The earlier claim that those 28 tests never
+reached these paths was wrong — they always did; nothing had ever interpreted
+them.

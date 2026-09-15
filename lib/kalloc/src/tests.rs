@@ -1,6 +1,6 @@
 //! Host unit tests for [`FreeListAllocator`].
 //!
-//! The tests drive the [`GlobalAlloc`] surface directly over a leaked
+//! The tests drive the [`GlobalAlloc`] surface directly over a fixture's own
 //! page-aligned arena — every allocation under test is served by the
 //! allocator itself, never by the process heap — and assert the freeing
 //! contract the kernel relies on: disjoint live blocks, reclamation on
@@ -23,22 +23,51 @@ use tairix_abi::PAGE_SIZE;
 /// The smallest allocation the byte-granular tier serves.
 const BYTE_TIER: usize = PAGE_SIZE + 1;
 
-/// Build an allocator over a fresh, page-aligned, zeroed bootstrap region of
-/// `bytes`.
+/// An allocator over a fresh, page-aligned, zeroed bootstrap region, which
+/// the fixture releases when it goes out of scope.
 ///
-/// The region is leaked rather than held on the test stack: the slab carves
-/// whole pages out of it, so a realistic fixture is tens of kilobytes. Page
-/// alignment matches the production `.bss` arena, so an over-aligned request
-/// is not wasted on a half-aligned tail.
-fn fixture(bytes: usize) -> FreeListAllocator {
+/// The region is heap-allocated rather than held on the test stack: the slab
+/// carves whole pages out of it, so a realistic fixture is tens of kilobytes.
+/// Page alignment matches the production `.bss` arena, so an over-aligned
+/// request is not wasted on a half-aligned tail.
+///
+/// Released rather than leaked because an interpreted run cannot tell a
+/// deliberate leak from a real one.
+struct Fixture {
+    alloc: FreeListAllocator,
+    arena: NonNull<u8>,
+    layout: Layout,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // SAFETY: the arena came from `alloc_zeroed` under this layout, and
+        // the allocator holding pointers into it dies with this value without
+        // reading them again.
+        unsafe { std::alloc::dealloc(self.arena.as_ptr(), self.layout) };
+    }
+}
+
+impl core::ops::Deref for Fixture {
+    type Target = FreeListAllocator;
+
+    fn deref(&self) -> &FreeListAllocator {
+        &self.alloc
+    }
+}
+
+fn fixture(bytes: usize) -> Fixture {
     let layout = Layout::from_size_align(bytes, PAGE_SIZE).expect("valid arena layout");
     // SAFETY: `bytes` is non-zero in every fixture, so the layout has a
     // non-zero size.
-    let base = unsafe { std::alloc::alloc_zeroed(layout) };
-    assert!(!base.is_null(), "test arena");
-    // SAFETY: the arena is never freed, so it outlives the allocator, and it
-    // is page-aligned as `FreeListAllocator::new` requires.
-    unsafe { FreeListAllocator::new(base, bytes) }
+    let arena = NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) }).expect("test arena");
+    Fixture {
+        // SAFETY: the arena outlives the allocator — this value drops it —
+        // and is page-aligned as `FreeListAllocator::new` requires.
+        alloc: unsafe { FreeListAllocator::new(arena.as_ptr(), bytes) },
+        arena,
+        layout,
+    }
 }
 
 #[test]
@@ -49,15 +78,11 @@ fn alloc_hands_out_aligned_disjoint_blocks() {
     let a = unsafe { alloc.alloc(layout) };
     let b = unsafe { alloc.alloc(layout) };
     assert!(!a.is_null() && !b.is_null());
-    assert_eq!(a as usize % 16, 0);
-    assert_eq!(b as usize % 16, 0);
+    assert_eq!(a.addr() % 16, 0);
+    assert_eq!(b.addr() % 16, 0);
     // Disjoint: the two live blocks do not overlap.
-    let (lo, hi) = if (a as usize) < (b as usize) {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    assert!(hi as usize >= lo as usize + 48);
+    let (lo, hi) = if a.addr() < b.addr() { (a, b) } else { (b, a) };
+    assert!(hi.addr() >= lo.addr() + 48);
 }
 
 #[test]
@@ -267,7 +292,7 @@ fn honours_alignment_above_the_header() {
     // SAFETY: non-zero layout.
     let p = unsafe { alloc.alloc(aligned) };
     assert!(!p.is_null());
-    assert_eq!(p as usize % 512, 0, "alloc must honour the requested align");
+    assert_eq!(p.addr() % 512, 0, "alloc must honour the requested align");
 }
 
 #[test]
@@ -444,11 +469,10 @@ fn over_aligned_request_is_served_whatever_the_free_block_offset() {
             !p.is_null(),
             "lead {lead}: over-aligned request must be served, not skipped"
         );
-        assert_eq!(p as usize % 64, 0, "lead {lead}: alignment honoured");
+        assert_eq!(p.addr() % 64, 0, "lead {lead}: alignment honoured");
         // Disjoint from the live filler block.
         assert!(
-            p as usize >= head as usize + filler.size()
-                || p as usize + over.size() <= head as usize,
+            p.addr() >= head.addr() + filler.size() || p.addr() + over.size() <= head.addr(),
             "lead {lead}: blocks must not overlap"
         );
         // Freeing both strands nothing: the heap returns fully to empty.
@@ -477,15 +501,18 @@ use core::ptr::NonNull;
 /// and records what it handed out, recycling what comes back so a
 /// grow-then-shrink or page cycle can reuse space.
 struct MockSource {
+    /// Base of the arena every carve is derived from. Outside the lock
+    /// because it never changes; the bookkeeping that does is inside.
+    arena: NonNull<u8>,
     state: std::sync::Mutex<MockState>,
 }
 
+// SAFETY: `arena` is only ever read to derive a carve's pointer, and which
+// bytes each carve covers is decided under `state`'s mutex, so no two
+// threads are handed the same ones.
+unsafe impl Sync for MockSource {}
+
 struct MockState {
-    /// Arena base as an integer address (keeps the state `Send`/`Sync`
-    /// without unsafe marker impls; the arena is leaked so the address
-    /// stays valid for the test).
-    base: usize,
-    len: usize,
     cursor: usize,
     grow_calls: usize,
     shrink_calls: usize,
@@ -505,21 +532,68 @@ struct MockState {
 
 const GROW_QUANTUM: usize = 8 * 1024;
 
-/// Bytes of the leaked, page-aligned arena a [`MockSource`] hands regions and
-/// pages out of. Ample for the growth tests, and being leaked it satisfies
-/// [`FreeListAllocator::install_source`]'s `'static` bound.
+/// Bytes of the arena a [`MockSource`] hands regions and pages out of. Ample
+/// for the growth tests.
 const MOCK_ARENA: usize = 1 << 20;
 
+/// A [`MockSource`]'s arena.
+///
+/// `static` storage rather than a heap allocation because a source must be
+/// `&'static` to install, so nothing could ever free an arena it owned — and
+/// a leaked one is what an interpreted run cannot distinguish from a bug.
+#[repr(C, align(4096))]
+struct MockArena(core::cell::UnsafeCell<[u8; MOCK_ARENA]>);
+
+// The alignment attribute needs a literal, so this pins it to the granule the
+// source actually hands pages out at.
+const _: () = assert!(align_of::<MockArena>() == PAGE_SIZE);
+
+// SAFETY: the bytes are reached only through raw pointers — by the allocator
+// that owns each carve — never as a shared reference, and the source hands no
+// two callers the same carve.
+unsafe impl Sync for MockArena {}
+
+impl MockArena {
+    /// Zeroed arena storage for a `static`.
+    ///
+    /// A function rather than a `const`, because a `const` holding an
+    /// `UnsafeCell` is copied afresh at each use — harmless in a `static`'s
+    /// initialiser and a trap anywhere else, so it is not offered as a value.
+    // The array is a static's initialiser and so lands in `.bss`; no
+    // `MockArena` ever materialises as a local, which is what the stack-array
+    // lint is guarding against.
+    #[allow(clippy::large_stack_arrays)]
+    const fn zeroed() -> Self {
+        Self(core::cell::UnsafeCell::new([0; MOCK_ARENA]))
+    }
+
+    const fn base(&self) -> NonNull<u8> {
+        // SAFETY: a reference is never null, so neither is its cell's pointer.
+        unsafe { NonNull::new_unchecked(self.0.get().cast::<u8>()) }
+    }
+}
+
+/// A [`MockSource`] over its own `static` arena, with `grow` failing after
+/// `$fail_after` calls and `alloc_page` after `$page_fail_after`.
+///
+/// One static pair per expansion, so two concurrently-running tests never
+/// share a source.
+macro_rules! mock_source {
+    () => {
+        mock_source!(usize::MAX, usize::MAX)
+    };
+    ($fail_after:expr, $page_fail_after:expr) => {{
+        static ARENA: MockArena = MockArena::zeroed();
+        static SOURCE: MockSource = MockSource::over(&ARENA, $fail_after, $page_fail_after);
+        &SOURCE
+    }};
+}
+
 impl MockSource {
-    fn with_limits(fail_after: usize, page_fail_after: usize) -> Self {
-        let layout = Layout::from_size_align(MOCK_ARENA, PAGE_SIZE).expect("valid arena layout");
-        // SAFETY: `MOCK_ARENA` is non-zero, so the layout has a non-zero size.
-        let arena = unsafe { std::alloc::alloc_zeroed(layout) };
-        assert!(!arena.is_null(), "mock source arena");
+    const fn over(arena: &'static MockArena, fail_after: usize, page_fail_after: usize) -> Self {
         Self {
+            arena: arena.base(),
             state: std::sync::Mutex::new(MockState {
-                base: arena as usize,
-                len: MOCK_ARENA,
                 cursor: 0,
                 grow_calls: 0,
                 shrink_calls: 0,
@@ -533,8 +607,15 @@ impl MockSource {
         }
     }
 
-    fn new(fail_after: usize) -> Self {
-        Self::with_limits(fail_after, usize::MAX)
+    /// The offset of `ptr` within the arena.
+    fn offset_of(&self, ptr: *mut u8) -> usize {
+        ptr.addr() - self.arena.addr().get()
+    }
+
+    /// The carve `offset` bytes into the arena.
+    fn carve(&self, offset: usize) -> NonNull<u8> {
+        // SAFETY: every carve lies within the arena, which is one allocation.
+        unsafe { self.arena.byte_add(offset) }
     }
 
     fn grow_calls(&self) -> usize {
@@ -555,10 +636,11 @@ impl MockSource {
         self.state.lock().unwrap().page_allocs
     }
 
-    /// Whether `addr` names a page this source handed out.
-    fn owns_page(&self, addr: usize) -> bool {
-        let s = self.state.lock().unwrap();
-        addr >= s.base && addr - s.base < s.len
+    /// Whether `ptr` names a page this source handed out.
+    fn owns_page(&self, ptr: *mut u8) -> bool {
+        let base = self.arena.addr().get();
+        let addr = ptr.addr();
+        addr >= base && addr - base < MOCK_ARENA
     }
 }
 
@@ -573,20 +655,20 @@ impl HeapSource for MockSource {
         // Reuse a returned chunk that is big enough, else bump.
         if let Some(pos) = s.freelist.iter().position(|&(_, len)| len >= want) {
             let (off, len) = s.freelist.swap_remove(pos);
-            return Some(((s.base + off) as *mut u8, len));
+            return Some((self.carve(off).as_ptr(), len));
         }
-        if s.cursor + want > s.len {
+        if s.cursor + want > MOCK_ARENA {
             return None;
         }
         let off = s.cursor;
         s.cursor += want;
-        Some(((s.base + off) as *mut u8, want))
+        Some((self.carve(off).as_ptr(), want))
     }
 
     fn shrink(&self, base: *mut u8, len: usize) {
+        let off = self.offset_of(base);
         let mut s = self.state.lock().unwrap();
         s.shrink_calls += 1;
-        let off = base as usize - s.base;
         s.freelist.push((off, len));
     }
 
@@ -598,7 +680,7 @@ impl HeapSource for MockSource {
         let off = if let Some(off) = s.page_freelist.pop() {
             off
         } else {
-            if s.cursor + PAGE_SIZE > s.len {
+            if s.cursor + PAGE_SIZE > MOCK_ARENA {
                 return None;
             }
             let off = s.cursor;
@@ -608,13 +690,13 @@ impl HeapSource for MockSource {
         s.page_allocs += 1;
         // The arena is page-aligned and every carve is a whole number of
         // pages, so the offset keeps that alignment.
-        NonNull::new((s.base + off) as *mut u8)
+        Some(self.carve(off))
     }
 
     fn free_page(&self, page: NonNull<u8>) {
+        let off = self.offset_of(page.as_ptr());
         let mut s = self.state.lock().unwrap();
         s.page_frees += 1;
-        let off = page.as_ptr() as usize - s.base;
         s.page_freelist.push(off);
     }
 }
@@ -624,7 +706,7 @@ fn grows_from_the_source_when_the_bootstrap_is_exhausted() {
     // A tiny bootstrap that cannot satisfy a single 4 KiB request forces
     // the allocator to grow from the source.
     let alloc = fixture(64);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
@@ -650,7 +732,7 @@ fn capacity_tracks_the_bootstrap_then_every_grown_region() {
     // kernel heap size, so it must be the live total and not the bootstrap
     // constant the allocator was built over.
     let alloc = fixture(64);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     assert_eq!(alloc.capacity(), 0, "nothing is planted before first use");
@@ -682,7 +764,7 @@ fn draining_a_grown_region_returns_it_to_the_source() {
     // Bootstrap too small for the request, so the block lands in a grown
     // region; freeing it drains that region, which must be handed back.
     let alloc = fixture(64);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
@@ -704,7 +786,7 @@ fn grow_shrink_cycles_are_stable_and_reuse_space() {
     // Repeated grow/shrink cycles must neither leak regions nor exhaust the
     // arena: the source recycles returned chunks, so many rounds succeed.
     let alloc = fixture(64);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
@@ -728,7 +810,7 @@ fn deterministic_oom_when_the_source_is_exhausted() {
     // (never a panic), and the heap recovers once the request shrinks to
     // fit the bootstrap.
     let alloc = fixture(1 << 15);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::with_limits(0, 0)));
+    let source = mock_source!(0, 0);
     alloc.install_source(source);
 
     // Larger than the whole bootstrap region, so only a grown region could
@@ -756,7 +838,7 @@ fn grown_region_does_not_coalesce_into_the_bootstrap() {
     // the boundary guard keeps them distinct so the grown region can still
     // be recognised as wholly free and returned.
     let alloc = fixture(8192);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     // Hold a small bootstrap allocation so the bootstrap region is partly in
@@ -802,7 +884,7 @@ fn per_operation_node_reach_does_not_grow_with_the_heap() {
     // list is entered by bit-scan and coalescing reaches one block each way.
     const BOUND: usize = 8;
     let alloc = fixture(4096);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(2 * PAGE_SIZE, 8).unwrap();
@@ -952,7 +1034,7 @@ fn every_class_round_trips_and_hands_the_object_back() {
         // SAFETY: non-zero layout.
         let a = unsafe { alloc.alloc(layout) };
         assert!(!a.is_null(), "class {size} must be served");
-        assert_eq!(a as usize % size, 0, "class {size} object is size-aligned");
+        assert_eq!(a.addr() % size, 0, "class {size} object is size-aligned");
         // The whole object is writable and disjoint from the descriptor.
         // SAFETY: `a` owns `size` writable bytes per the alloc contract.
         unsafe { core::ptr::write_bytes(a, 0x5A, size) };
@@ -981,15 +1063,15 @@ fn a_page_full_of_objects_is_disjoint_and_never_overlaps_the_descriptor() {
         assert!(!p.is_null());
         // SAFETY: `p` owns `size` writable bytes.
         unsafe { core::ptr::write_bytes(p, 0xC3, size) };
-        live.push(p as usize);
+        live.push(p);
     }
-    let page = live[0] & !(PAGE_SIZE - 1);
+    let page = live[0].addr() & !(PAGE_SIZE - 1);
     assert!(
-        live.iter().all(|&p| p & !(PAGE_SIZE - 1) == page),
+        live.iter().all(|p| p.addr() & !(PAGE_SIZE - 1) == page),
         "one page serves its whole object count before another is drawn"
     );
     assert!(
-        live.iter().all(|&p| p >= page + size),
+        live.iter().all(|p| p.addr() >= page + size),
         "no object may overlap the page's own descriptor slot"
     );
     live.sort_unstable();
@@ -998,14 +1080,14 @@ fn a_page_full_of_objects_is_disjoint_and_never_overlaps_the_descriptor() {
 
     for p in live {
         // SAFETY: each came from this allocator with `layout`.
-        unsafe { alloc.dealloc(p as *mut u8, layout) };
+        unsafe { alloc.dealloc(p, layout) };
     }
 }
 
 #[test]
 fn a_page_sized_allocation_takes_exactly_one_page_and_no_header() {
     let alloc = fixture(1 << 16);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     // One byte-tier round trip first, so the bootstrap region is accounted
@@ -1033,7 +1115,7 @@ fn a_page_sized_allocation_takes_exactly_one_page_and_no_header() {
         "no byte-tier region is grown for it"
     );
     assert_eq!(
-        p as usize % PAGE_SIZE,
+        p.addr() % PAGE_SIZE,
         0,
         "the object starts at the page base, so it carries no header"
     );
@@ -1052,7 +1134,7 @@ fn a_page_sized_allocation_takes_exactly_one_page_and_no_header() {
 #[test]
 fn a_drained_page_goes_back_and_exactly_one_is_kept() {
     let alloc = fixture(64);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(PAGE_SIZE, 8).unwrap();
@@ -1112,7 +1194,7 @@ fn routing_and_provenance_survive_the_source_install() {
         live.push((p, layout));
     }
 
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     for (p, layout) in live.drain(..) {
@@ -1136,11 +1218,11 @@ fn routing_and_provenance_survive_the_source_install() {
     let drawn = unsafe { alloc.alloc(layout) };
     assert!(!kept.is_null() && !drawn.is_null());
     assert!(
-        !source.owns_page(kept as usize),
+        !source.owns_page(kept),
         "the page kept back before the install serves first"
     );
     assert!(
-        source.owns_page(drawn as usize),
+        source.owns_page(drawn),
         "a page drawn after the install comes from the source"
     );
     // SAFETY: each came from this allocator with `layout`.
@@ -1163,8 +1245,7 @@ fn a_page_the_source_cannot_supply_is_never_carved_from_a_grown_region() {
     // the region it briefly touched wholly drained and handed back.
     let alloc = fixture(64);
     // Regions yes, pages no.
-    let source =
-        std::boxed::Box::leak(std::boxed::Box::new(MockSource::with_limits(usize::MAX, 0)));
+    let source = mock_source!(usize::MAX, 0);
     alloc.install_source(source);
 
     let layout = Layout::from_size_align(64, 8).unwrap();
@@ -1184,8 +1265,8 @@ fn a_page_the_source_cannot_supply_is_never_carved_from_a_grown_region() {
 #[test]
 fn the_source_is_set_once() {
     let alloc = fixture(64);
-    let first = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
-    let second = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let first = mock_source!();
+    let second = mock_source!();
     alloc.install_source(first);
     alloc.install_source(second);
 
@@ -1239,7 +1320,7 @@ fn slab_per_operation_node_reach_stays_constant_as_pages_accumulate() {
     // page list.
     const BOUND: usize = 4;
     let alloc = fixture(1 << 17);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let size = MIN_CLASS * 2;
@@ -1293,7 +1374,7 @@ fn slab_per_operation_node_reach_stays_constant_as_pages_accumulate() {
 #[test]
 fn freeing_from_a_filled_page_puts_it_back_on_the_partial_list() {
     let alloc = fixture(1 << 17);
-    let source = std::boxed::Box::leak(std::boxed::Box::new(MockSource::new(usize::MAX)));
+    let source = mock_source!();
     alloc.install_source(source);
 
     let size = MIN_CLASS * 2;

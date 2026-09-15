@@ -2512,8 +2512,8 @@ rather than attributed to whichever outer lock it was holding.
 - **Up to the page granule: a slab.** Per-size-class pages, the free list
   threaded through the free objects themselves, and each page's own
   bookkeeping (free head, live count, virgin-slot cursor, partial-list links)
-  in its first object slot — so an object finds its page by masking its
-  address to the granule and no side table is ever searched. There is no
+  in its first object slot — so an object finds its page by stepping its own
+  pointer back to the granule boundary and no side table is ever searched. There is no
   per-object header and no rounding to a block boundary, so a page-sized
   allocation — the kernel's dominant traffic, the filesystem cache's chunk
   being exactly `PAGE_SIZE` — occupies **exactly one frame** where a

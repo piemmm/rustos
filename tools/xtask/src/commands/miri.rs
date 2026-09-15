@@ -91,6 +91,14 @@ pub const TARGETS: &[Target] = &[
         scope: Scope::AllTargets,
     },
     Target {
+        package: "tairix-kalloc",
+        description: "the kernel heap's in-band boundary tags: the physical back-link a \
+                      coalesce dereferences, the block a split carves off, the descriptor an \
+                      object's page is found through, and a returned region's header",
+        features: &[],
+        scope: Scope::AllTargets,
+    },
+    Target {
         package: "tairix-sync",
         description: "the same, plus the lock-diagnostics observer seam, whose function \
                       pointers and site records live only under that feature",

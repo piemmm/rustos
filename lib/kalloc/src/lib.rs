@@ -105,6 +105,13 @@
 //! learned of silently unprotected.
 
 #![no_std]
+#![feature(strict_provenance_lints)]
+// A pointer that passes through an integer loses its provenance, and the
+// compiler then treats what comes back as aliasing nothing — free to reorder
+// or elide the in-band header writes the free-list algebra depends on. Every
+// address here travels as a pointer, and this makes a relapse a build failure
+// rather than something only an interpreted test run would notice.
+#![deny(implicit_provenance_casts)]
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
@@ -128,6 +135,10 @@ pub const HEAP_BYTES: usize = 64 * 1024 * 1024;
 /// it out of a half-aligned tail.
 #[repr(C, align(4096))]
 pub struct Heap([u8; HEAP_BYTES]);
+
+// The alignment attribute needs a literal, so this pins it to the granule
+// `FreeListAllocator::new` requires its arena to carry.
+const _: () = assert!(align_of::<Heap>() == PAGE_SIZE);
 
 impl Heap {
     /// Zero-initialised heap. `const` so the binary's arena is constructed
@@ -161,16 +172,14 @@ pub(crate) const MIN_BLOCK: usize = HEADER + 2 * WORD;
 
 /// The block is free (on a segregated list).
 const FLAG_FREE: usize = 0b001;
-/// The block is the first in its region, so it has no physical predecessor.
-const FLAG_REGION_START: usize = 0b010;
 /// The block is the last in its region, so it has no physical successor.
-const FLAG_LAST: usize = 0b100;
+const FLAG_LAST: usize = 0b010;
 /// Low bits of `size_and_flags` that carry flags rather than size.
 const FLAG_MASK: usize = ALIGN - 1;
 
 // A size is `ALIGN`-aligned, so its low bits are always free for flags, and
-// there must be at least three of them.
-const _: () = assert!(FLAG_MASK >= 0b111);
+// there must be at least two of them.
+const _: () = assert!(FLAG_MASK >= 0b11);
 const _: () = assert!(ALIGN.is_power_of_two() && HEADER == ALIGN);
 
 /// Second-level bits: each octave is subdivided into `1 << SL_BITS` classes.
@@ -251,10 +260,15 @@ struct Block {
     /// Total block bytes (header included) in the bits above [`FLAG_MASK`],
     /// flags below.
     size_and_flags: usize,
-    /// Address of the physical predecessor, meaningless when
-    /// [`FLAG_REGION_START`] is set.
-    prev_phys: usize,
+    /// The physical predecessor, or [`None`] when the block begins its
+    /// region — which is what makes it the region's first, so no separate
+    /// flag records the same fact.
+    prev_phys: Option<NonNull<Block>>,
 }
+
+// A payload sits `HEADER` bytes into its block, so the header must occupy
+// exactly that; the null-pointer niche is what keeps the back-link one word.
+const _: () = assert!(size_of::<Block>() == HEADER);
 
 /// The two free-list links a free block parks in its own payload.
 #[repr(C)]
@@ -458,12 +472,21 @@ fn slab_class(layout: Layout) -> Option<usize> {
     Some((want.trailing_zeros() - MIN_CLASS_SHIFT) as usize)
 }
 
-/// The page holding `obj`: its address masked down to the granule.
-fn page_of(obj: NonNull<u8>) -> NonNull<SlabPage> {
-    let base = (obj.as_ptr() as usize) & !(PAGE_SIZE - 1);
-    // SAFETY: `obj` is non-null and lies inside a granule-aligned page, so the
-    // masked address is that page's non-null base.
-    unsafe { NonNull::new_unchecked(base as *mut SlabPage) }
+/// The page holding `obj`: its own pointer stepped back to the granule base.
+///
+/// Stepping back rather than rebuilding from a masked address is what keeps
+/// the page's provenance: the object was derived from the page, so walking the
+/// same distance back reaches the descriptor the page really owns.
+///
+/// # Safety
+///
+/// `obj` is a live slab object of a sub-granule class, so the page it was
+/// carved from spans the whole granule its offset is measured against.
+unsafe fn page_of(obj: NonNull<u8>) -> NonNull<SlabPage> {
+    let offset = obj.addr().get() & (PAGE_SIZE - 1);
+    // SAFETY: the page owns every byte from its base to `obj`, so stepping
+    // back over `obj`'s offset within it stays inside that one allocation.
+    unsafe { obj.byte_sub(offset).cast::<SlabPage>() }
 }
 
 /// Where a *free* object parks its free-list link: its own first word, which
@@ -900,8 +923,8 @@ impl FreeListAllocator {
         // SAFETY: `base` owns `span >= MIN_BLOCK > HEADER` aligned bytes.
         unsafe {
             block.write(Block {
-                size_and_flags: span | FLAG_FREE | FLAG_REGION_START | FLAG_LAST,
-                prev_phys: 0,
+                size_and_flags: span | FLAG_FREE | FLAG_LAST,
+                prev_phys: None,
             });
         }
         // SAFETY: just written, so non-null and live.
@@ -982,7 +1005,7 @@ impl FreeListAllocator {
             unsafe {
                 rest.write(Block {
                     size_and_flags: tail | FLAG_FREE | if was_last { FLAG_LAST } else { 0 },
-                    prev_phys: block.as_ptr() as usize,
+                    prev_phys: Some(block),
                 });
             }
             // SAFETY: `block` is live; it is no longer the region's last.
@@ -994,7 +1017,7 @@ impl FreeListAllocator {
             // SAFETY: `rest` was just written, so it is a live header.
             if let Some(after) = unsafe { Self::next_phys(rest) } {
                 // SAFETY: `after` is a live header in this region.
-                unsafe { (*after.as_ptr()).prev_phys = rest.as_ptr() as usize };
+                unsafe { (*after.as_ptr()).prev_phys = Some(rest) };
             }
             // SAFETY: `rest` is off every list and marked free.
             unsafe { inner.push_free(rest) };
@@ -1074,18 +1097,17 @@ impl FreeListAllocator {
         };
         // SAFETY: `block` is a live free header.
         let b = unsafe { block.as_ref() };
-        if !(b.has(FLAG_REGION_START) && b.has(FLAG_LAST)) {
+        if !(b.prev_phys.is_none() && b.has(FLAG_LAST)) {
             return;
         }
-        let addr = block.as_ptr() as usize;
-        if addr == heap_base as usize {
+        if block.addr().get() == heap_base.addr() {
             // The bootstrap arena: not the source's, never handed back.
             return;
         }
-        let base = addr - REGION_HDR;
         // SAFETY: a grown region's usable area starts exactly `REGION_HDR`
-        // after its header, so this is that live header.
-        let header = unsafe { NonNull::new_unchecked(base as *mut RegionHeader) };
+        // after its header, and the two were one chunk from the source, so
+        // stepping back reaches that live header inside the same allocation.
+        let header = unsafe { block.byte_sub(REGION_HDR).cast::<RegionHeader>() };
         // SAFETY: `header` is live.
         let RegionHeader {
             total_len,
@@ -1118,7 +1140,7 @@ impl FreeListAllocator {
             unsafe { (*n.as_ptr()).prev = prev };
         }
         inner.capacity = inner.capacity.saturating_sub(b.size());
-        source.shrink(base as *mut u8, total_len);
+        source.shrink(header.as_ptr().cast::<u8>(), total_len);
     }
 }
 
@@ -1201,8 +1223,8 @@ impl FreeListAllocator {
         // Push the payload up to the requested alignment, keeping the skipped
         // front as its own free block. `need` reserved the worst case, so a
         // stride bump always leaves a whole block.
-        let start = block.as_ptr() as usize;
-        let Some(mut payload) = align_up(start + HEADER, align) else {
+        let start = block.addr().get();
+        let Some(mut payload) = start.checked_add(HEADER).and_then(|p| align_up(p, align)) else {
             // SAFETY: still a valid free block; put it back.
             unsafe { inner.push_free(block) };
             return core::ptr::null_mut();
@@ -1275,13 +1297,14 @@ impl FreeListAllocator {
     ) -> NonNull<Block> {
         // SAFETY: `block` is live.
         let (total, flags) = unsafe { (block.as_ref().size(), block.as_ref().flags()) };
-        let tail_addr = block.as_ptr() as usize + front;
-        // SAFETY: `tail_addr` is `ALIGN`-aligned inside the same region and
-        // owns `total - front >= MIN_BLOCK` bytes.
+        // SAFETY: `front` is inside the block, so this is a header slot
+        // `ALIGN`-aligned within the same region.
+        let tail = unsafe { block.byte_add(front) };
+        // SAFETY: `tail` owns `total - front >= MIN_BLOCK` bytes.
         unsafe {
-            (tail_addr as *mut Block).write(Block {
+            tail.write(Block {
                 size_and_flags: (total - front) | (flags & FLAG_LAST),
-                prev_phys: block.as_ptr() as usize,
+                prev_phys: Some(block),
             });
         }
         // SAFETY: `block` keeps the front; it is no longer the region's last.
@@ -1291,11 +1314,10 @@ impl FreeListAllocator {
             b.set(FLAG_LAST, false);
             b.set(FLAG_FREE, true);
         }
-        // SAFETY: just written, so non-null and live.
-        let tail = unsafe { NonNull::new_unchecked(tail_addr as *mut Block) };
+        // SAFETY: `tail` was just written, so it is a live header.
         if let Some(after) = unsafe { Self::next_phys(tail) } {
             // SAFETY: `after` is a live header in this region.
-            unsafe { (*after.as_ptr()).prev_phys = tail_addr };
+            unsafe { (*after.as_ptr()).prev_phys = Some(tail) };
         }
         // SAFETY: `block` is off every list and marked free.
         unsafe { inner.push_free(block) };
@@ -1306,9 +1328,10 @@ impl FreeListAllocator {
     /// also free, returning the surviving block (now on its free list).
     ///
     /// Constant time: the successor is `block + size` and the predecessor is
-    /// recorded in the header, so neither is searched for. Region ends carry
-    /// [`FLAG_REGION_START`] / [`FLAG_LAST`], so a merge can never cross into
-    /// a neighbouring region and a drained region stays exactly one block.
+    /// recorded in the header, so neither is searched for. A region's first
+    /// block records no predecessor and its last carries [`FLAG_LAST`], so a
+    /// merge can never cross into a neighbouring region and a drained region
+    /// stays exactly one block.
     ///
     /// # Safety
     ///
@@ -1339,14 +1362,7 @@ impl FreeListAllocator {
         }
         // Backward: extend a free predecessor over this block instead.
         // SAFETY: `block` is live.
-        let prev = unsafe {
-            let b = block.as_ref();
-            if b.has(FLAG_REGION_START) {
-                None
-            } else {
-                NonNull::new(b.prev_phys as *mut Block)
-            }
-        };
+        let prev = unsafe { block.as_ref().prev_phys };
         if let Some(prev) = prev {
             // SAFETY: `prev` is a live header in this region.
             if unsafe { prev.as_ref().has(FLAG_FREE) } {
@@ -1374,7 +1390,7 @@ impl FreeListAllocator {
         // SAFETY: `block` is live.
         if let Some(after) = unsafe { Self::next_phys(block) } {
             // SAFETY: `after` is a live header in this region.
-            unsafe { (*after.as_ptr()).prev_phys = block.as_ptr() as usize };
+            unsafe { (*after.as_ptr()).prev_phys = Some(block) };
         }
         // SAFETY: `block` is off every list (both merge sources were popped)
         // and marked free.
@@ -1564,7 +1580,9 @@ impl FreeListAllocator {
             unsafe { self.retain_or_release(inner, class, ptr) };
             return;
         }
-        let page = page_of(ptr);
+        // SAFETY: `ptr` is a live object of a sub-granule class, so its page
+        // spans the granule its offset is measured against.
+        let page = unsafe { page_of(ptr) };
         let p = page.as_ptr();
         let total = objects_per_page(size);
         // SAFETY: `page` is the live descriptor of `ptr`'s page.
@@ -1692,8 +1710,8 @@ impl FreeListAllocator {
     /// falls outside this range, and a frame can never alias the kernel image
     /// the bootstrap region lives in.
     fn in_bootstrap(&self, ptr: NonNull<u8>) -> bool {
-        let base = self.heap_base as usize;
-        let addr = ptr.as_ptr() as usize;
+        let base = self.heap_base.addr();
+        let addr = ptr.addr().get();
         addr >= base && addr - base < self.heap_len
     }
 }
